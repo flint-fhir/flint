@@ -1,0 +1,81 @@
+// Minimal proto that mimics google/fhir's primitive wrapping pattern.
+// Used for Spike 1 to validate protojson.Marshal() output format
+// without needing the full google/fhir module.
+
+syntax = "proto3";
+
+package flint.spike;
+
+option go_package = "github.com/flint-fhir/flint/spike/spike1_proto";
+
+// Mimics google/fhir String wrapper
+message FHIRString {
+  string value = 1;
+  string id = 2;
+  repeated Extension extension = 3;
+}
+
+// Mimics google/fhir Boolean wrapper
+message FHIRBoolean {
+  bool value = 1;
+  string id = 2;
+  repeated Extension extension = 3;
+}
+
+// Mimics google/fhir Date wrapper
+message FHIRDate {
+  string value = 1;
+  string id = 2;
+  repeated Extension extension = 3;
+}
+
+// Mimics Extension
+message Extension {
+  string url = 1;
+  oneof value {
+    FHIRString value_string = 2;
+    FHIRBoolean value_boolean = 3;
+    FHIRDate value_date = 4;
+    string value_date_time = 5;
+  }
+}
+
+// Mimics google/fhir Coding
+message Coding {
+  FHIRString system = 1;
+  FHIRString code = 2;
+  FHIRString display = 3;
+}
+
+// Mimics google/fhir Identifier
+message Identifier {
+  FHIRString system = 1;
+  FHIRString value = 2;
+}
+
+// Mimics google/fhir HumanName
+message HumanName {
+  FHIRString family = 1;
+  repeated FHIRString given = 2;
+  repeated FHIRString prefix = 3;
+}
+
+enum GenderCode {
+  GENDER_CODE_UNSPECIFIED = 0;
+  MALE = 1;
+  FEMALE = 2;
+  OTHER = 3;
+  UNKNOWN = 4;
+}
+
+// Mimics google/fhir Patient (Big 5 fields only)
+message MiniPatient {
+  FHIRString id = 1;
+  repeated Identifier identifier = 2;
+  FHIRBoolean active = 3;
+  repeated HumanName name = 4;
+  GenderCode gender = 5;
+  FHIRDate birth_date = 6;
+  FHIRBoolean deceased_boolean = 7;
+  FHIRBoolean multiple_birth_boolean = 8;
+}
