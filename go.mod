@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/google/fhir/go v0.7.4
+	github.com/lib/pq v1.12.3
 	github.com/twmb/franz-go v1.22.1
 	google.golang.org/protobuf v1.36.11
 )

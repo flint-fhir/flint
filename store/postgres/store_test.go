@@ -1,0 +1,208 @@
+package postgres_test
+
+import (
+	"context"
+	"database/sql"
+	"os"
+	"testing"
+	"time"
+
+	_ "github.com/lib/pq"
+
+	"github.com/flint-fhir/flint/store/postgres"
+)
+
+// TestStore_Integration runs against a real Postgres instance.
+// Set FLINT_TEST_POSTGRES_DSN to enable. Example:
+//
+//	FLINT_TEST_POSTGRES_DSN="postgres://flint:flint@localhost:5432/flint?sslmode=disable" go test ./store/postgres/ -v
+func TestStore_Integration(t *testing.T) {
+	dsn := os.Getenv("FLINT_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("FLINT_TEST_POSTGRES_DSN not set; skipping integration test")
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// Run migrations
+	migration, err := os.ReadFile("migrations/001_core_schema.sql")
+	if err != nil {
+		t.Fatalf("read migration: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, string(migration)); err != nil {
+		t.Fatalf("run migration: %v", err)
+	}
+
+	store := postgres.New(db)
+
+	t.Run("WriteAndReadResource", func(t *testing.T) {
+		input := postgres.ResourceInput{
+			TenantID:       "test-tenant",
+			ResType:        "Patient",
+			ResID:          "pat-001",
+			ResourceProto:  []byte{0x0a, 0x07, 0x70, 0x61, 0x74, 0x2d, 0x30, 0x30, 0x31}, // mock proto bytes
+			IdempotencyKey: "bundle-123",
+			SearchIndexes: &postgres.SearchIndexes{
+				Strings: []postgres.SpidxString{
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "pat-001", SpName: "family", SpValue: "smith"},
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "pat-001", SpName: "given", SpValue: "john"},
+				},
+				Tokens: []postgres.SpidxToken{
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "pat-001", SpName: "identifier", SpSystem: "http://mrn", SpValue: "MRN-456"},
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "pat-001", SpName: "active", SpValue: "true"},
+				},
+				Dates: []postgres.SpidxDate{
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "pat-001", SpName: "birthdate",
+						SpLow: time.Date(1990, 1, 1, 0, 0, 0, 0, time.UTC), SpHigh: time.Date(1990, 1, 1, 0, 0, 0, 0, time.UTC)},
+				},
+				References: []postgres.SpidxReference{
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "pat-001", SpName: "organization", TargetType: "Organization", TargetID: "org-789"},
+				},
+			},
+		}
+
+		// Write
+		if err := store.WriteResource(ctx, input); err != nil {
+			t.Fatalf("WriteResource: %v", err)
+		}
+
+		// Read
+		proto, err := store.ReadResource(ctx, "test-tenant", "Patient", "pat-001")
+		if err != nil {
+			t.Fatalf("ReadResource: %v", err)
+		}
+		if len(proto) == 0 {
+			t.Fatal("empty proto")
+		}
+		t.Logf("Read %d bytes of proto", len(proto))
+
+		// Verify search indexes
+		var count int
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_string WHERE tenant_id = $1 AND res_id = $2",
+			"test-tenant", "pat-001").Scan(&count)
+		if count != 2 {
+			t.Errorf("expected 2 string indexes, got %d", count)
+		}
+
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_token WHERE tenant_id = $1 AND res_id = $2",
+			"test-tenant", "pat-001").Scan(&count)
+		if count != 2 {
+			t.Errorf("expected 2 token indexes, got %d", count)
+		}
+
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_date WHERE tenant_id = $1 AND res_id = $2",
+			"test-tenant", "pat-001").Scan(&count)
+		if count != 1 {
+			t.Errorf("expected 1 date index, got %d", count)
+		}
+
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_reference WHERE tenant_id = $1 AND res_id = $2",
+			"test-tenant", "pat-001").Scan(&count)
+		if count != 1 {
+			t.Errorf("expected 1 reference index, got %d", count)
+		}
+	})
+
+	t.Run("UpdateReplacesIndexes", func(t *testing.T) {
+		// Update patient with new name
+		input := postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Patient",
+			ResID:         "pat-001",
+			ResourceProto: []byte{0x0a, 0x07, 0x75, 0x70, 0x64, 0x61, 0x74, 0x65, 0x64},
+			SearchIndexes: &postgres.SearchIndexes{
+				Strings: []postgres.SpidxString{
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "pat-001", SpName: "family", SpValue: "smith-jones"},
+				},
+			},
+		}
+		if err := store.WriteResource(ctx, input); err != nil {
+			t.Fatalf("WriteResource (update): %v", err)
+		}
+
+		// Old "smith" should be gone, only "smith-jones" now
+		var count int
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_string WHERE tenant_id = $1 AND res_id = $2",
+			"test-tenant", "pat-001").Scan(&count)
+		if count != 1 {
+			t.Errorf("expected 1 string index after update, got %d", count)
+		}
+
+		// Old tokens should also be gone
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_token WHERE tenant_id = $1 AND res_id = $2",
+			"test-tenant", "pat-001").Scan(&count)
+		if count != 0 {
+			t.Errorf("expected 0 token indexes after update, got %d", count)
+		}
+	})
+
+	t.Run("DeleteResource", func(t *testing.T) {
+		if err := store.DeleteResource(ctx, "test-tenant", "Patient", "pat-001"); err != nil {
+			t.Fatalf("DeleteResource: %v", err)
+		}
+
+		// Read should return not found
+		_, err := store.ReadResource(ctx, "test-tenant", "Patient", "pat-001")
+		if err != sql.ErrNoRows {
+			t.Errorf("expected ErrNoRows, got %v", err)
+		}
+
+		// Search indexes should be gone
+		var count int
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_string WHERE tenant_id = $1 AND res_id = $2",
+			"test-tenant", "pat-001").Scan(&count)
+		if count != 0 {
+			t.Errorf("expected 0 string indexes after delete, got %d", count)
+		}
+	})
+
+	t.Run("WriteBatch", func(t *testing.T) {
+		inputs := []postgres.ResourceInput{
+			{
+				TenantID:      "test-tenant",
+				ResType:       "Patient",
+				ResID:         "pat-100",
+				ResourceProto: []byte{1, 2, 3},
+				SearchIndexes: &postgres.SearchIndexes{
+					Strings: []postgres.SpidxString{
+						{TenantID: "test-tenant", ResType: "Patient", ResID: "pat-100", SpName: "family", SpValue: "doe"},
+					},
+				},
+			},
+			{
+				TenantID:      "test-tenant",
+				ResType:       "Patient",
+				ResID:         "pat-101",
+				ResourceProto: []byte{4, 5, 6},
+				SearchIndexes: &postgres.SearchIndexes{
+					Strings: []postgres.SpidxString{
+						{TenantID: "test-tenant", ResType: "Patient", ResID: "pat-101", SpName: "family", SpValue: "roe"},
+					},
+				},
+			},
+		}
+
+		if err := store.WriteBatch(ctx, inputs); err != nil {
+			t.Fatalf("WriteBatch: %v", err)
+		}
+
+		// Verify both written
+		for _, id := range []string{"pat-100", "pat-101"} {
+			_, err := store.ReadResource(ctx, "test-tenant", "Patient", id)
+			if err != nil {
+				t.Errorf("ReadResource(%s): %v", id, err)
+			}
+		}
+	})
+
+	// Clean up
+	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_resource"} {
+		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-tenant'")
+	}
+}
