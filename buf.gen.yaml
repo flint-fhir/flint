@@ -19,7 +19,8 @@ plugins:
       - lang=go
       - backend=postgres
       - postgres_mode=search_index
-      - search_params=fhir/r4/search-parameters.json
+      - postgres_search_params=fhir/r4/search-parameters.json
+      - go_package=github.com/flint-fhir/flint/gen/go/store/postgres;postgres
 
   # proto2type: Parquet structs (nested, with resource_proto)
   - local: protoc-gen-proto2type

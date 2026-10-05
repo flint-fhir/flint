@@ -1,0 +1,17 @@
+version: v2
+
+plugins:
+  - local: protoc-gen-proto2type
+    out: gen/go/store/postgres
+    opt:
+      - lang=go
+      - backend=postgres
+      - postgres_mode=search_index
+      - postgres_search_params=fhir/r4/search-parameters.json
+      - go_package=github.com/flint-fhir/flint/gen/go/store/postgres;postgres
+      - domain=false
+
+inputs:
+  - directory: proto
+    paths:
+      - proto/google/fhir/r4/core/resources/patient.proto
