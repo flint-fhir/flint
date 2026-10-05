@@ -1,0 +1,62 @@
+version: v2
+
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/flint-fhir/flint/gen/go
+
+plugins:
+  # Standard Go protobuf generation
+  - remote: buf.build/protocolbuffers/go
+    out: gen/go
+    opt: paths=source_relative
+
+  # proto2type: Postgres search index extraction functions
+  - local: protoc-gen-proto2type
+    out: gen/go/store/postgres
+    opt:
+      - lang=go
+      - backend=postgres
+      - postgres_mode=search_index
+      - search_params=fhir/r4/search-parameters.json
+
+  # proto2type: Parquet structs (nested, with resource_proto)
+  - local: protoc-gen-proto2type
+    out: gen/go/store/parquet
+    opt:
+      - lang=go
+      - backend=parquet
+      - parquet_nested=true
+      - parquet_include_proto=true
+
+  # proto2type: Iceberg schema JSON
+  - local: protoc-gen-proto2type
+    out: gen/iceberg
+    opt:
+      - lang=json
+      - backend=iceberg
+      - iceberg_include_proto=true
+      - iceberg_partition=identity(tenant_id)
+      - iceberg_sort=tenant_id,res_type,res_id
+
+  # proto2type: Flink DataStream job
+  - local: protoc-gen-proto2type
+    out: gen/java/flink
+    opt:
+      - lang=java
+      - backend=flink
+      - flink_mode=datastream
+      - flink_source=automq
+      - flink_sink=iceberg
+      - flink_format=json
+
+inputs:
+  # Big 5 only — add resources incrementally
+  - directory: proto
+    paths:
+      - proto/google/fhir/r4/core/resources/patient.proto
+      - proto/google/fhir/r4/core/resources/encounter.proto
+      - proto/google/fhir/r4/core/resources/observation.proto
+      - proto/google/fhir/r4/core/resources/condition.proto
+      - proto/google/fhir/r4/core/resources/practitioner.proto
