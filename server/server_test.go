@@ -3,9 +3,11 @@ package server_test
 import (
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -222,6 +224,48 @@ func TestServer_Integration(t *testing.T) {
 		total := int(bundle["total"].(float64))
 		if total != 0 {
 			t.Errorf("expected total 0, got %d", total)
+		}
+	})
+
+	t.Run("POST Patient creates resource", func(t *testing.T) {
+		patJSON := `{"resourceType":"Patient","id":{"value":"post-pat-1"},"name":[{"family":{"value":"Created"}}]}`
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api/Patient", "application/fhir+json", strings.NewReader(patJSON))
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 201 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 201, got %d: %s", resp.StatusCode, body)
+		}
+		loc := resp.Header.Get("Location")
+		if loc == "" {
+			t.Error("expected Location header")
+		}
+		t.Logf("Created: Location=%s", loc)
+	})
+
+	t.Run("POST then GET round-trip", func(t *testing.T) {
+		// Read back the posted resource
+		resp, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient/post-pat-1")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("expected 200, got %d", resp.StatusCode)
+		}
+		t.Log("POST→GET round-trip successful")
+	})
+
+	t.Run("POST invalid JSON returns 400", func(t *testing.T) {
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api/Patient", "application/fhir+json", strings.NewReader("{not valid json"))
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Errorf("expected 400, got %d", resp.StatusCode)
 		}
 	})
 

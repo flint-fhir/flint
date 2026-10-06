@@ -8,10 +8,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -30,6 +32,7 @@ type Server struct {
 	// protoRegistry maps FHIR resource type names to proto message descriptors.
 	// Used to unmarshal proto bytes back to proto messages for JSON conversion.
 	protoRegistry map[string]protoreflect.MessageDescriptor
+	smartConfig   *SMARTConfig
 }
 
 // New creates a new FHIR server.
@@ -54,7 +57,9 @@ func (s *Server) Handler() http.Handler {
 	// FHIR REST endpoints
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}", s.handleRead)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}", s.handleSearch)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}", s.handleCreate)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/metadata", s.handleMetadata)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/smart-configuration", s.handleSMARTConfig)
 
 	return mux
 }
@@ -88,6 +93,86 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	w.Write(jsonBytes)
+}
+
+// handleCreate handles POST /{resourceType} — create a FHIR resource.
+// Accepts FHIR JSON, converts to proto, stores in Postgres.
+func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resType := r.PathValue("resourceType")
+
+	md, ok := s.protoRegistry[resType]
+	if !ok {
+		writeOperationOutcome(w, http.StatusBadRequest, "not-supported",
+			fmt.Sprintf("resource type %s not registered", resType))
+		return
+	}
+
+	// Read request body
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // 10MB max
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read body")
+		return
+	}
+
+	// Unmarshal JSON → proto
+	msg := dynamicpb.NewMessage(md)
+	unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+	if err := unmarshaler.Unmarshal(body, msg); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "structure",
+			fmt.Sprintf("invalid FHIR JSON: %v", err))
+		return
+	}
+
+	// Extract resource ID from the proto
+	idField := msg.Descriptor().Fields().ByName("id")
+	resID := ""
+	if idField != nil {
+		idMsg := msg.Get(idField).Message()
+		if idMsg.IsValid() {
+			valField := idMsg.Descriptor().Fields().ByName("value")
+			if valField != nil {
+				resID = idMsg.Get(valField).String()
+			}
+		}
+	}
+	if resID == "" {
+		// Generate a UUID if no ID provided
+		resID = generateID()
+	}
+
+	// Marshal proto → bytes for storage
+	protoBytes, err := proto.Marshal(msg)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception",
+			"failed to encode resource")
+		return
+	}
+
+	// Store in Postgres
+	err = s.store.WriteResource(r.Context(), postgres.ResourceInput{
+		TenantID:      tenant,
+		ResType:       resType,
+		ResID:         resID,
+		ResourceProto: protoBytes,
+		// TODO: extract search indexes using proto2type-generated functions
+	})
+	if err != nil {
+		s.logger.Error("create resource", "error", err, "type", resType, "id", resID)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to store resource")
+		return
+	}
+
+	// Return the resource as JSON with 201 Created
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, resID))
+	w.WriteHeader(http.StatusCreated)
+	w.Write(body) // echo back the input JSON
+}
+
+// generateID creates a simple unique ID for resources without one.
+func generateID() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
 }
 
 // handleSearch handles GET /{resourceType}?{params} — search resources.
