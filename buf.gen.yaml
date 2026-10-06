@@ -41,17 +41,6 @@ plugins:
       - iceberg_partition=identity(tenant_id)
       - iceberg_sort=tenant_id,res_type,res_id
 
-  # proto2type: Flink DataStream job
-  - local: protoc-gen-proto2type
-    out: gen/java/flink
-    opt:
-      - lang=java
-      - backend=flink
-      - flink_mode=datastream
-      - flink_source=automq
-      - flink_sink=iceberg
-      - flink_format=json
-
 inputs:
   # Big 5 only — add resources incrementally
   - directory: proto
