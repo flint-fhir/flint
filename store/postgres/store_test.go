@@ -3,6 +3,7 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -199,6 +200,85 @@ func TestStore_Integration(t *testing.T) {
 				t.Errorf("ReadResource(%s): %v", id, err)
 			}
 		}
+	})
+
+	t.Run("SearchWithPagination", func(t *testing.T) {
+		// Seed 5 patients with family=pagination
+		for i := range 5 {
+			id := fmt.Sprintf("pag-%d", i)
+			err := store.WriteResource(ctx, postgres.ResourceInput{
+				TenantID:      "test-tenant",
+				ResType:       "Patient",
+				ResID:         id,
+				ResourceProto: []byte{0x0a, byte(i)},
+				SearchIndexes: &postgres.SearchIndexes{
+					Strings: []postgres.SpidxString{
+						{TenantID: "test-tenant", ResType: "Patient", ResID: id, SpName: "family", SpValue: "pagination"},
+					},
+				},
+			})
+			if err != nil {
+				t.Fatalf("seed pag-%d: %v", i, err)
+			}
+		}
+
+		// Page 1: count=2, offset=0
+		results, total, err := store.Search(ctx, postgres.SearchParams{
+			TenantID: "test-tenant",
+			ResType:  "Patient",
+			Strings:  map[string]string{"family": "pagination"},
+			Count:    2,
+			Offset:   0,
+		})
+		if err != nil {
+			t.Fatalf("search page 1: %v", err)
+		}
+		if total != 5 {
+			t.Errorf("expected total 5, got %d", total)
+		}
+		if len(results) != 2 {
+			t.Errorf("expected 2 results, got %d", len(results))
+		}
+		t.Logf("Page 1: total=%d, results=%d, first=%s", total, len(results), results[0].ResID)
+
+		// Page 2: count=2, offset=2
+		results2, total2, err := store.Search(ctx, postgres.SearchParams{
+			TenantID: "test-tenant",
+			ResType:  "Patient",
+			Strings:  map[string]string{"family": "pagination"},
+			Count:    2,
+			Offset:   2,
+		})
+		if err != nil {
+			t.Fatalf("search page 2: %v", err)
+		}
+		if total2 != 5 {
+			t.Errorf("page 2 total should still be 5, got %d", total2)
+		}
+		if len(results2) != 2 {
+			t.Errorf("expected 2 results, got %d", len(results2))
+		}
+		// Verify pages don't overlap
+		if results[0].ResID == results2[0].ResID {
+			t.Errorf("pages overlap: both start with %s", results[0].ResID)
+		}
+		t.Logf("Page 2: total=%d, results=%d, first=%s", total2, len(results2), results2[0].ResID)
+
+		// Page 3: count=2, offset=4 — should get 1 result
+		results3, _, err := store.Search(ctx, postgres.SearchParams{
+			TenantID: "test-tenant",
+			ResType:  "Patient",
+			Strings:  map[string]string{"family": "pagination"},
+			Count:    2,
+			Offset:   4,
+		})
+		if err != nil {
+			t.Fatalf("search page 3: %v", err)
+		}
+		if len(results3) != 1 {
+			t.Errorf("last page expected 1 result, got %d", len(results3))
+		}
+		t.Logf("Page 3: results=%d (last page)", len(results3))
 	})
 
 	// Clean up
