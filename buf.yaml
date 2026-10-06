@@ -1,0 +1,9 @@
+version: v2
+modules:
+  - path: deploy/schemas
+    lint:
+      use:
+        - MINIMAL
+      except:
+        - PACKAGE_DIRECTORY_MATCH
+        - PACKAGE_VERSION_SUFFIX

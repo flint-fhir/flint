@@ -91,13 +91,7 @@ func IngestFHIRBundle(ctx workflow.Context, input IngestInput) error {
 
 	// 2. Write to Postgres (source of truth for FHIR server)
 	// Single transaction: upsert blobs + delete old indexes + bulk insert new indexes
-	postgresInput := writePostgresBatchInput{
-		TenantID:       input.TenantID,
-		BundleID:       input.BundleID,
-		ResourceProtos: input.ResourceProtos,
-		ResourceTypes:  input.ResourceTypes,
-		ResourceIDs:    input.ResourceIDs,
-	}
+	postgresInput := writePostgresBatchInput(input)
 	err = workflow.ExecuteActivity(ctx, "WritePostgresBatch", postgresInput).Get(ctx, nil)
 	if err != nil {
 		return err // Postgres failure is fatal — retry the whole workflow

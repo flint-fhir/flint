@@ -4,12 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"os"
 
 	"github.com/flint-fhir/flint/automq"
 )
 
-func main() {
+func runDelete() {
 	ctx := context.Background()
 	brokers := []string{envOrDefault("AUTOMQ_BROKERS", "localhost:9092")}
 
@@ -36,11 +35,4 @@ func main() {
 		log.Fatalf("publish: %v", err)
 	}
 	fmt.Println("✅ Delete CDC event published successfully!")
-}
-
-func envOrDefault(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }
