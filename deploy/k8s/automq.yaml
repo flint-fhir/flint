@@ -10,7 +10,8 @@ data:
   server.properties: |
     # AutoMQ Core - S3 shared storage via Garage
     s3.data.buckets=0@s3://automq-data?region=us-east-1&endpoint=http://garage:3900&pathStyle=true
-    s3.ops.buckets=0@s3://automq-ops?region=us-east-1&endpoint=http://garage:3900&pathStyle=true
+    s3.ops.buckets=1@s3://automq-ops?region=us-east-1&endpoint=http://garage:3900&pathStyle=true
+    s3.wal.path=0@s3://automq-data?region=us-east-1&endpoint=http://garage:3900&pathStyle=true
 
     # Broker settings
     node.id=1
@@ -52,6 +53,15 @@ spec:
       containers:
         - name: automq
           image: automqinc/automq:latest
+          command:
+            - /bin/bash
+            - -c
+            - |
+              /opt/kafka/kafka/bin/kafka-storage.sh format \
+                -t "$CLUSTER_ID" \
+                -c /opt/kafka/kafka/config/server.properties \
+                --ignore-formatted
+              exec /opt/kafka/kafka/bin/kafka-server-start.sh /opt/kafka/kafka/config/server.properties
           ports:
             - containerPort: 9092
             - containerPort: 9093
@@ -66,7 +76,7 @@ spec:
               value: "flint-dev-automq-001"
           volumeMounts:
             - name: config
-              mountPath: /opt/automq/config/server.properties
+              mountPath: /opt/kafka/kafka/config/server.properties
               subPath: server.properties
           readinessProbe:
             tcpSocket:
@@ -116,7 +126,7 @@ spec:
             - -c
             - |
               for topic in fhir.Patient fhir.Encounter fhir.Observation fhir.Condition fhir.MedicationRequest; do
-                /opt/automq/bin/kafka-topics.sh \
+                /opt/kafka/kafka/bin/kafka-topics.sh \
                   --bootstrap-server automq:9092 \
                   --create \
                   --if-not-exists \
@@ -124,8 +134,6 @@ spec:
                   --partitions 6 \
                   --replication-factor 1 \
                   --config cleanup.policy=compact \
-                  --config automq.table.topic.enable=true \
-                  --config automq.table.topic.iceberg.upsert.mode=equality_delete \
-                  --config automq.table.topic.iceberg.upsert.key=res_id
-                echo "Created Table Topic: $topic"
+                  --config min.compaction.lag.ms=3600000
+                echo "Created topic: $topic"
               done
