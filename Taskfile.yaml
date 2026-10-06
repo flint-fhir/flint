@@ -18,10 +18,12 @@ tasks:
       - task: cluster-create
       - task: deploy-postgres
       - task: deploy-temporal
+      - task: deploy-automq
       - echo "✅ Flint dev environment ready"
-      - echo "  Postgres  → localhost:5432"
-      - echo "  Temporal  → localhost:7233"
+      - echo "  Postgres   → localhost:5432"
+      - echo "  Temporal   → localhost:7233"
       - echo "  Temporal UI → http://localhost:8088"
+      - echo "  AutoMQ     → localhost:9092"
 
   cluster-create:
     desc: Create k3d cluster (idempotent)
@@ -48,6 +50,13 @@ tasks:
       - kubectl apply -f deploy/k8s/temporal.yaml
       - echo "Waiting for Temporal (this takes ~60s)..."
       - kubectl wait --for=condition=ready pod -l app=temporal -n {{.NAMESPACE}} --timeout=180s
+
+  deploy-automq:
+    desc: Deploy AutoMQ/Kafka with topic initialization
+    cmds:
+      - kubectl apply -f deploy/k8s/automq.yaml
+      - echo "Waiting for AutoMQ..."
+      - kubectl wait --for=condition=ready pod -l app=automq -n {{.NAMESPACE}} --timeout=120s
 
   test:
     desc: Run all Go tests (Postgres integration tests need FLINT_TEST_POSTGRES_DSN)

@@ -23,6 +23,10 @@ ports:
   - port: 8080:30080
     nodeFilters:
       - loadbalancer
+  # AutoMQ/Kafka (via NodePort)
+  - port: 9092:30092
+    nodeFilters:
+      - loadbalancer
 options:
   k3d:
     wait: true
