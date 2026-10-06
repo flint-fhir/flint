@@ -1,0 +1,96 @@
+# Flint Development Taskfile
+# Usage: task dev      — create k3d cluster + deploy services
+#        task test     — run all tests (needs Postgres)
+#        task down     — tear down k3d cluster
+#        task status   — show running pods
+
+version: '3'
+
+vars:
+  CLUSTER_NAME: flint-dev
+  NAMESPACE: flint
+  PG_DSN: "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
+
+tasks:
+  dev:
+    desc: Create k3d cluster and deploy all services
+    cmds:
+      - task: cluster-create
+      - task: deploy-postgres
+      - task: deploy-temporal
+      - echo "✅ Flint dev environment ready"
+      - echo "  Postgres  → localhost:5432"
+      - echo "  Temporal  → localhost:7233"
+      - echo "  Temporal UI → http://localhost:8088"
+
+  cluster-create:
+    desc: Create k3d cluster (idempotent)
+    cmds:
+      - k3d cluster list | grep -q {{.CLUSTER_NAME}} || k3d cluster create --config deploy/k3d/cluster.yaml
+    status:
+      - k3d cluster list | grep -q {{.CLUSTER_NAME}}
+
+  deploy-postgres:
+    desc: Deploy Postgres with schema migration
+    cmds:
+      # Copy real migration into ConfigMap
+      - kubectl create namespace {{.NAMESPACE}} --dry-run=client -o yaml | kubectl apply -f -
+      - kubectl create configmap postgres-init -n {{.NAMESPACE}}
+          --from-file=001_core_schema.sql=store/postgres/migrations/001_core_schema.sql
+          --dry-run=client -o yaml | kubectl apply -f -
+      - kubectl apply -f deploy/k8s/postgres.yaml
+      - echo "Waiting for Postgres..."
+      - kubectl wait --for=condition=ready pod -l app=postgres -n {{.NAMESPACE}} --timeout=120s
+
+  deploy-temporal:
+    desc: Deploy Temporal with auto-setup
+    cmds:
+      - kubectl apply -f deploy/k8s/temporal.yaml
+      - echo "Waiting for Temporal (this takes ~60s)..."
+      - kubectl wait --for=condition=ready pod -l app=temporal -n {{.NAMESPACE}} --timeout=180s
+
+  test:
+    desc: Run all Go tests (Postgres integration tests need FLINT_TEST_POSTGRES_DSN)
+    cmds:
+      - FLINT_TEST_POSTGRES_DSN="{{.PG_DSN}}" go test ./... -v -count=1
+
+  test-unit:
+    desc: Run unit tests only (no Postgres needed)
+    cmds:
+      - go test ./ingest/workflow/ -v -count=1
+
+  build:
+    desc: Build flintd server binary
+    cmds:
+      - go build -o bin/flintd ./cmd/flintd/
+
+  run:
+    desc: Run flintd locally (connect to k3d Postgres)
+    deps: [build]
+    cmds:
+      - FLINT_POSTGRES_DSN="{{.PG_DSN}}" bin/flintd
+
+  down:
+    desc: Tear down k3d cluster
+    cmds:
+      - k3d cluster delete {{.CLUSTER_NAME}}
+
+  status:
+    desc: Show pods in flint namespace
+    cmds:
+      - kubectl get pods -n {{.NAMESPACE}} -o wide
+
+  logs:
+    desc: Tail logs for a specific pod (usage: task logs -- postgres)
+    cmds:
+      - kubectl logs -f -n {{.NAMESPACE}} -l app={{.CLI_ARGS}} --tail=50
+
+  psql:
+    desc: Open psql shell to Flint Postgres
+    cmds:
+      - kubectl exec -it -n {{.NAMESPACE}} postgres-0 -- psql -U flint
+
+  migrate:
+    desc: Run schema migration against Postgres
+    cmds:
+      - psql "{{.PG_DSN}}" -f store/postgres/migrations/001_core_schema.sql

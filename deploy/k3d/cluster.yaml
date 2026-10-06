@@ -1,0 +1,34 @@
+# k3d cluster config for Flint local dev
+# Usage: k3d cluster create --config deploy/k3d/cluster.yaml
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: flint-dev
+servers: 1
+agents: 0
+ports:
+  # Postgres (via NodePort)
+  - port: 5432:30432
+    nodeFilters:
+      - loadbalancer
+  # Temporal (via NodePort)
+  - port: 7233:30733
+    nodeFilters:
+      - loadbalancer
+  # Temporal UI (via NodePort)
+  - port: 8088:30088
+    nodeFilters:
+      - loadbalancer
+  # Flint FHIR API (via NodePort)
+  - port: 8080:30080
+    nodeFilters:
+      - loadbalancer
+options:
+  k3d:
+    wait: true
+    timeout: "120s"
+  k3s:
+    extraArgs:
+      - arg: --disable=traefik
+        nodeFilters:
+          - server:*
