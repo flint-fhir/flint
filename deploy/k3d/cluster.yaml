@@ -27,6 +27,18 @@ ports:
   - port: 9092:30092
     nodeFilters:
       - loadbalancer
+  # MinIO API (via NodePort)
+  - port: 9000:30900
+    nodeFilters:
+      - loadbalancer
+  # MinIO Console (via NodePort)
+  - port: 9001:30901
+    nodeFilters:
+      - loadbalancer
+  # Iceberg REST catalog (via NodePort)
+  - port: 8181:30181
+    nodeFilters:
+      - loadbalancer
 options:
   k3d:
     wait: true

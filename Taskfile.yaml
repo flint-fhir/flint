@@ -1,5 +1,5 @@
 # Flint Development Taskfile
-# Usage: task dev      — create k3d cluster + deploy services
+# Usage: task dev      — create k3d cluster + deploy all services
 #        task test     — run all tests (needs Postgres)
 #        task down     — tear down k3d cluster
 #        task status   — show running pods
@@ -18,12 +18,16 @@ tasks:
       - task: cluster-create
       - task: deploy-postgres
       - task: deploy-temporal
+      - task: deploy-minio
+      - task: deploy-iceberg
       - task: deploy-automq
       - echo "✅ Flint dev environment ready"
-      - echo "  Postgres   → localhost:5432"
-      - echo "  Temporal   → localhost:7233"
-      - echo "  Temporal UI → http://localhost:8088"
-      - echo "  AutoMQ     → localhost:9092"
+      - echo "  Postgres      → localhost:5432"
+      - echo "  Temporal      → localhost:7233"
+      - echo "  Temporal UI   → http://localhost:8088"
+      - echo "  AutoMQ        → localhost:9092"
+      - echo "  MinIO Console → http://localhost:9001 (flintadmin/flintadmin123)"
+      - echo "  Iceberg REST  → http://localhost:8181"
 
   cluster-create:
     desc: Create k3d cluster (idempotent)
@@ -35,7 +39,6 @@ tasks:
   deploy-postgres:
     desc: Deploy Postgres with schema migration
     cmds:
-      # Copy real migration into ConfigMap
       - kubectl create namespace {{.NAMESPACE}} --dry-run=client -o yaml | kubectl apply -f -
       - kubectl create configmap postgres-init -n {{.NAMESPACE}}
           --from-file=001_core_schema.sql=store/postgres/migrations/001_core_schema.sql
@@ -51,8 +54,22 @@ tasks:
       - echo "Waiting for Temporal (this takes ~60s)..."
       - kubectl wait --for=condition=ready pod -l app=temporal -n {{.NAMESPACE}} --timeout=180s
 
+  deploy-minio:
+    desc: Deploy MinIO for S3-compatible storage (Iceberg + AutoMQ)
+    cmds:
+      - kubectl apply -f deploy/k8s/minio.yaml
+      - echo "Waiting for MinIO..."
+      - kubectl wait --for=condition=ready pod -l app=minio -n {{.NAMESPACE}} --timeout=120s
+
+  deploy-iceberg:
+    desc: Deploy Iceberg REST catalog
+    cmds:
+      - kubectl apply -f deploy/k8s/iceberg-rest.yaml
+      - echo "Waiting for Iceberg REST catalog..."
+      - kubectl wait --for=condition=ready pod -l app=iceberg-rest -n {{.NAMESPACE}} --timeout=120s
+
   deploy-automq:
-    desc: Deploy AutoMQ/Kafka with topic initialization
+    desc: Deploy AutoMQ with Table Topic → Iceberg
     cmds:
       - kubectl apply -f deploy/k8s/automq.yaml
       - echo "Waiting for AutoMQ..."
@@ -69,15 +86,22 @@ tasks:
       - go test ./ingest/workflow/ -v -count=1
 
   build:
-    desc: Build flintd server binary
+    desc: Build flintd server and worker binaries
     cmds:
       - go build -o bin/flintd ./cmd/flintd/
+      - go build -o bin/worker ./cmd/worker/
 
   run:
     desc: Run flintd locally (connect to k3d Postgres)
     deps: [build]
     cmds:
       - FLINT_POSTGRES_DSN="{{.PG_DSN}}" bin/flintd
+
+  run-worker:
+    desc: Run Temporal worker locally (connect to k3d services)
+    deps: [build]
+    cmds:
+      - FLINT_POSTGRES_DSN="{{.PG_DSN}}" TEMPORAL_ADDRESS=localhost:7233 AUTOMQ_BROKERS=localhost:9092 bin/worker
 
   down:
     desc: Tear down k3d cluster
