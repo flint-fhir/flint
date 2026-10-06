@@ -29,3 +29,6 @@ Thumbs.db
 dist/
 build/
 bin/
+
+# Graphify cache
+graphify-out/cache/
