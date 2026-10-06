@@ -44,4 +44,4 @@ jobs:
       - uses: bufbuild/buf-setup-action@v1
 
       - name: buf lint
-        run: buf lint proto/
+        run: buf lint

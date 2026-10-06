@@ -21,6 +21,20 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "delete":
+			runDelete()
+			return
+		case "update":
+			runUpdate()
+			return
+		}
+	}
+	runPipeline()
+}
+
+func runPipeline() {
 	ctx := context.Background()
 
 	// Connect to Temporal

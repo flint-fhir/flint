@@ -466,103 +466,125 @@
       "source_location": "L25"
     },
     {
-      "id": "spike_spike1_proto_spike_test",
-      "label": "spike_test.go",
+      "id": "spike_spike1_fhir_json_roundtrip",
+      "label": "roundtrip.go",
       "_origin": "ast",
       "community": 1,
       "community_name": "testing.T",
       "file_type": "code",
-      "norm_label": "spike_test.go",
-      "source_file": "spike/spike1_proto/spike_test.go",
+      "norm_label": "roundtrip.go",
+      "source_file": "spike/spike1_fhir_json/roundtrip.go",
       "source_location": "L1"
     },
     {
-      "id": "spike_spike1_proto_spike_test_protonametofhir",
-      "label": "protoNameToFHIR()",
+      "id": "spike_spike1_fhir_json_roundtrip_fhirtoprotojson",
+      "label": "FHIRToProtoJSON()",
       "_origin": "ast",
       "community": 1,
       "community_name": "testing.T",
       "file_type": "code",
-      "norm_label": "protonametofhir()",
-      "source_file": "spike/spike1_proto/spike_test.go",
-      "source_location": "L245"
+      "norm_label": "fhirtoprotojson()",
+      "source_file": "spike/spike1_fhir_json/roundtrip.go",
+      "source_location": "L81"
     },
     {
-      "id": "spike_spike1_proto_spike_test_prototofhirjson",
-      "label": "ProtoToFHIRJSON()",
+      "id": "spike_spike1_fhir_json_roundtrip_protojsontofhir",
+      "label": "ProtoJSONToFHIR()",
       "_origin": "ast",
       "community": 1,
       "community_name": "testing.T",
       "file_type": "code",
-      "norm_label": "prototofhirjson()",
-      "source_file": "spike/spike1_proto/spike_test.go",
-      "source_location": "L126"
+      "norm_label": "protojsontofhir()",
+      "source_file": "spike/spike1_fhir_json/roundtrip.go",
+      "source_location": "L124"
     },
     {
-      "id": "spike_spike1_proto_spike_test_testprotojsonmarshaloutput",
-      "label": "TestProtojsonMarshalOutput()",
+      "id": "spike_spike1_fhir_json_roundtrip_roundtrip",
+      "label": "RoundTrip()",
       "_origin": "ast",
       "community": 1,
       "community_name": "testing.T",
       "file_type": "code",
-      "norm_label": "testprotojsonmarshaloutput()",
-      "source_file": "spike/spike1_proto/spike_test.go",
-      "source_location": "L14"
+      "norm_label": "roundtrip()",
+      "source_file": "spike/spike1_fhir_json/roundtrip.go",
+      "source_location": "L164"
     },
     {
-      "id": "spike_spike1_proto_spike_test_testroundtripfidelity",
-      "label": "TestRoundTripFidelity()",
+      "id": "spike_spike1_fhir_json_roundtrip_test",
+      "label": "roundtrip_test.go",
       "_origin": "ast",
       "community": 1,
       "community_name": "testing.T",
       "file_type": "code",
-      "norm_label": "testroundtripfidelity()",
-      "source_file": "spike/spike1_proto/spike_test.go",
-      "source_location": "L259"
+      "norm_label": "roundtrip_test.go",
+      "source_file": "spike/spike1_fhir_json/roundtrip_test.go",
+      "source_location": "L1"
     },
     {
-      "id": "spike_spike1_proto_spike_test_unwrap",
-      "label": "unwrap()",
+      "id": "spike_spike1_fhir_json_roundtrip_test_testbirthdatewithextension",
+      "label": "TestBirthDateWithExtension()",
       "_origin": "ast",
       "community": 1,
       "community_name": "testing.T",
       "file_type": "code",
-      "norm_label": "unwrap()",
-      "source_file": "spike/spike1_proto/spike_test.go",
-      "source_location": "L162"
+      "norm_label": "testbirthdatewithextension()",
+      "source_file": "spike/spike1_fhir_json/roundtrip_test.go",
+      "source_location": "L57"
     },
     {
-      "id": "spike_spike1_proto_spike_test_unwraphumannames",
-      "label": "unwrapHumanNames()",
+      "id": "spike_spike1_fhir_json_roundtrip_test_testfullpatientroundtrip",
+      "label": "TestFullPatientRoundTrip()",
       "_origin": "ast",
       "community": 1,
       "community_name": "testing.T",
       "file_type": "code",
-      "norm_label": "unwraphumannames()",
-      "source_file": "spike/spike1_proto/spike_test.go",
-      "source_location": "L180"
+      "norm_label": "testfullpatientroundtrip()",
+      "source_file": "spike/spike1_fhir_json/roundtrip_test.go",
+      "source_location": "L91"
     },
     {
-      "id": "spike_spike1_proto_spike_test_unwrapidentifiers",
-      "label": "unwrapIdentifiers()",
+      "id": "spike_spike1_fhir_json_roundtrip_test_testgenderenummapping",
+      "label": "TestGenderEnumMapping()",
       "_origin": "ast",
       "community": 1,
       "community_name": "testing.T",
       "file_type": "code",
-      "norm_label": "unwrapidentifiers()",
-      "source_file": "spike/spike1_proto/spike_test.go",
-      "source_location": "L210"
+      "norm_label": "testgenderenummapping()",
+      "source_file": "spike/spike1_fhir_json/roundtrip_test.go",
+      "source_location": "L42"
     },
     {
-      "id": "spike_spike1_proto_spike_test_unwrapstringarray",
-      "label": "unwrapStringArray()",
+      "id": "spike_spike1_fhir_json_roundtrip_test_testwrapunwrapprimitive",
+      "label": "TestWrapUnwrapPrimitive()",
       "_origin": "ast",
       "community": 1,
       "community_name": "testing.T",
       "file_type": "code",
-      "norm_label": "unwrapstringarray()",
-      "source_file": "spike/spike1_proto/spike_test.go",
-      "source_location": "L232"
+      "norm_label": "testwrapunwrapprimitive()",
+      "source_file": "spike/spike1_fhir_json/roundtrip_test.go",
+      "source_location": "L9"
+    },
+    {
+      "id": "spike_spike1_fhir_json_roundtrip_unwrapprimitive",
+      "label": "UnwrapPrimitive()",
+      "_origin": "ast",
+      "community": 1,
+      "community_name": "testing.T",
+      "file_type": "code",
+      "norm_label": "unwrapprimitive()",
+      "source_file": "spike/spike1_fhir_json/roundtrip.go",
+      "source_location": "L51"
+    },
+    {
+      "id": "spike_spike1_fhir_json_roundtrip_wrapprimitive",
+      "label": "WrapPrimitive()",
+      "_origin": "ast",
+      "community": 1,
+      "community_name": "testing.T",
+      "file_type": "code",
+      "norm_label": "wrapprimitive()",
+      "source_file": "spike/spike1_fhir_json/roundtrip.go",
+      "source_location": "L41"
     },
     {
       "id": "spike_spike1_real_real_patient_test",
@@ -697,125 +719,103 @@
       "source_location": "L20"
     },
     {
-      "id": "spike_spike1_fhir_json_roundtrip",
-      "label": "roundtrip.go",
+      "id": "spike_spike1_proto_spike_test",
+      "label": "spike_test.go",
       "_origin": "ast",
       "community": 10,
-      "community_name": "roundtrip.go",
+      "community_name": "spike_test.go",
       "file_type": "code",
-      "norm_label": "roundtrip.go",
-      "source_file": "spike/spike1_fhir_json/roundtrip.go",
+      "norm_label": "spike_test.go",
+      "source_file": "spike/spike1_proto/spike_test.go",
       "source_location": "L1"
     },
     {
-      "id": "spike_spike1_fhir_json_roundtrip_fhirtoprotojson",
-      "label": "FHIRToProtoJSON()",
+      "id": "spike_spike1_proto_spike_test_protonametofhir",
+      "label": "protoNameToFHIR()",
       "_origin": "ast",
       "community": 10,
-      "community_name": "roundtrip.go",
+      "community_name": "spike_test.go",
       "file_type": "code",
-      "norm_label": "fhirtoprotojson()",
-      "source_file": "spike/spike1_fhir_json/roundtrip.go",
-      "source_location": "L81"
+      "norm_label": "protonametofhir()",
+      "source_file": "spike/spike1_proto/spike_test.go",
+      "source_location": "L245"
     },
     {
-      "id": "spike_spike1_fhir_json_roundtrip_protojsontofhir",
-      "label": "ProtoJSONToFHIR()",
+      "id": "spike_spike1_proto_spike_test_prototofhirjson",
+      "label": "ProtoToFHIRJSON()",
       "_origin": "ast",
       "community": 10,
-      "community_name": "roundtrip.go",
+      "community_name": "spike_test.go",
       "file_type": "code",
-      "norm_label": "protojsontofhir()",
-      "source_file": "spike/spike1_fhir_json/roundtrip.go",
-      "source_location": "L124"
+      "norm_label": "prototofhirjson()",
+      "source_file": "spike/spike1_proto/spike_test.go",
+      "source_location": "L126"
     },
     {
-      "id": "spike_spike1_fhir_json_roundtrip_roundtrip",
-      "label": "RoundTrip()",
+      "id": "spike_spike1_proto_spike_test_testprotojsonmarshaloutput",
+      "label": "TestProtojsonMarshalOutput()",
       "_origin": "ast",
       "community": 10,
-      "community_name": "roundtrip.go",
+      "community_name": "spike_test.go",
       "file_type": "code",
-      "norm_label": "roundtrip()",
-      "source_file": "spike/spike1_fhir_json/roundtrip.go",
-      "source_location": "L164"
+      "norm_label": "testprotojsonmarshaloutput()",
+      "source_file": "spike/spike1_proto/spike_test.go",
+      "source_location": "L14"
     },
     {
-      "id": "spike_spike1_fhir_json_roundtrip_test",
-      "label": "roundtrip_test.go",
+      "id": "spike_spike1_proto_spike_test_testroundtripfidelity",
+      "label": "TestRoundTripFidelity()",
       "_origin": "ast",
       "community": 10,
-      "community_name": "roundtrip.go",
+      "community_name": "spike_test.go",
       "file_type": "code",
-      "norm_label": "roundtrip_test.go",
-      "source_file": "spike/spike1_fhir_json/roundtrip_test.go",
-      "source_location": "L1"
+      "norm_label": "testroundtripfidelity()",
+      "source_file": "spike/spike1_proto/spike_test.go",
+      "source_location": "L259"
     },
     {
-      "id": "spike_spike1_fhir_json_roundtrip_test_testbirthdatewithextension",
-      "label": "TestBirthDateWithExtension()",
+      "id": "spike_spike1_proto_spike_test_unwrap",
+      "label": "unwrap()",
       "_origin": "ast",
       "community": 10,
-      "community_name": "roundtrip.go",
+      "community_name": "spike_test.go",
       "file_type": "code",
-      "norm_label": "testbirthdatewithextension()",
-      "source_file": "spike/spike1_fhir_json/roundtrip_test.go",
-      "source_location": "L57"
+      "norm_label": "unwrap()",
+      "source_file": "spike/spike1_proto/spike_test.go",
+      "source_location": "L162"
     },
     {
-      "id": "spike_spike1_fhir_json_roundtrip_test_testfullpatientroundtrip",
-      "label": "TestFullPatientRoundTrip()",
+      "id": "spike_spike1_proto_spike_test_unwraphumannames",
+      "label": "unwrapHumanNames()",
       "_origin": "ast",
       "community": 10,
-      "community_name": "roundtrip.go",
+      "community_name": "spike_test.go",
       "file_type": "code",
-      "norm_label": "testfullpatientroundtrip()",
-      "source_file": "spike/spike1_fhir_json/roundtrip_test.go",
-      "source_location": "L91"
+      "norm_label": "unwraphumannames()",
+      "source_file": "spike/spike1_proto/spike_test.go",
+      "source_location": "L180"
     },
     {
-      "id": "spike_spike1_fhir_json_roundtrip_test_testgenderenummapping",
-      "label": "TestGenderEnumMapping()",
+      "id": "spike_spike1_proto_spike_test_unwrapidentifiers",
+      "label": "unwrapIdentifiers()",
       "_origin": "ast",
       "community": 10,
-      "community_name": "roundtrip.go",
+      "community_name": "spike_test.go",
       "file_type": "code",
-      "norm_label": "testgenderenummapping()",
-      "source_file": "spike/spike1_fhir_json/roundtrip_test.go",
-      "source_location": "L42"
+      "norm_label": "unwrapidentifiers()",
+      "source_file": "spike/spike1_proto/spike_test.go",
+      "source_location": "L210"
     },
     {
-      "id": "spike_spike1_fhir_json_roundtrip_test_testwrapunwrapprimitive",
-      "label": "TestWrapUnwrapPrimitive()",
+      "id": "spike_spike1_proto_spike_test_unwrapstringarray",
+      "label": "unwrapStringArray()",
       "_origin": "ast",
       "community": 10,
-      "community_name": "roundtrip.go",
+      "community_name": "spike_test.go",
       "file_type": "code",
-      "norm_label": "testwrapunwrapprimitive()",
-      "source_file": "spike/spike1_fhir_json/roundtrip_test.go",
-      "source_location": "L9"
-    },
-    {
-      "id": "spike_spike1_fhir_json_roundtrip_unwrapprimitive",
-      "label": "UnwrapPrimitive()",
-      "_origin": "ast",
-      "community": 10,
-      "community_name": "roundtrip.go",
-      "file_type": "code",
-      "norm_label": "unwrapprimitive()",
-      "source_file": "spike/spike1_fhir_json/roundtrip.go",
-      "source_location": "L51"
-    },
-    {
-      "id": "spike_spike1_fhir_json_roundtrip_wrapprimitive",
-      "label": "WrapPrimitive()",
-      "_origin": "ast",
-      "community": 10,
-      "community_name": "roundtrip.go",
-      "file_type": "code",
-      "norm_label": "wrapprimitive()",
-      "source_file": "spike/spike1_fhir_json/roundtrip.go",
-      "source_location": "L41"
+      "norm_label": "unwrapstringarray()",
+      "source_file": "spike/spike1_proto/spike_test.go",
+      "source_location": "L232"
     },
     {
       "id": "spike1_proto_extension",
@@ -1126,13 +1126,13 @@
       "source_location": "L779"
     },
     {
-      "id": "go_type_google_golang_org_protobuf_runtime_protoimpl_unknownfields",
-      "label": "google.golang.org/protobuf/runtime/protoimpl.UnknownFields",
+      "id": "go_type_google_golang_org_protobuf_runtime_protoimpl_sizecache",
+      "label": "google.golang.org/protobuf/runtime/protoimpl.SizeCache",
       "_origin": "ast",
       "community": 14,
       "community_name": "Identifier",
       "file_type": "code",
-      "norm_label": "google.golang.org/protobuf/runtime/protoimpl.unknownfields",
+      "norm_label": "google.golang.org/protobuf/runtime/protoimpl.sizecache",
       "source_file": "",
       "source_location": ""
     },
@@ -1423,11 +1423,44 @@
       "source_location": "L36"
     },
     {
+      "id": "automq_producer_newproducer",
+      "label": "NewProducer()",
+      "_origin": "ast",
+      "community": 18,
+      "community_name": "NewProducer",
+      "file_type": "code",
+      "norm_label": "newproducer()",
+      "source_file": "automq/producer.go",
+      "source_location": "L34"
+    },
+    {
+      "id": "cmd_e2e_delete",
+      "label": "delete.go",
+      "_origin": "ast",
+      "community": 18,
+      "community_name": "NewProducer",
+      "file_type": "code",
+      "norm_label": "delete.go",
+      "source_file": "cmd/e2e/delete.go",
+      "source_location": "L1"
+    },
+    {
+      "id": "cmd_e2e_delete_rundelete",
+      "label": "runDelete()",
+      "_origin": "ast",
+      "community": 18,
+      "community_name": "NewProducer",
+      "file_type": "code",
+      "norm_label": "rundelete()",
+      "source_file": "cmd/e2e/delete.go",
+      "source_location": "L11"
+    },
+    {
       "id": "cmd_e2e_main",
       "label": "e2e/main.go",
       "_origin": "ast",
       "community": 18,
-      "community_name": "e2e/main.go",
+      "community_name": "NewProducer",
       "file_type": "code",
       "norm_label": "e2e/main.go",
       "source_file": "cmd/e2e/main.go",
@@ -1438,77 +1471,194 @@
       "label": "envOrDefault()",
       "_origin": "ast",
       "community": 18,
-      "community_name": "e2e/main.go",
+      "community_name": "NewProducer",
       "file_type": "code",
       "norm_label": "envordefault()",
       "source_file": "cmd/e2e/main.go",
-      "source_location": "L145"
+      "source_location": "L159"
     },
     {
       "id": "cmd_e2e_main_headermap",
       "label": "headerMap()",
       "_origin": "ast",
       "community": 18,
-      "community_name": "e2e/main.go",
+      "community_name": "NewProducer",
       "file_type": "code",
       "norm_label": "headermap()",
       "source_file": "cmd/e2e/main.go",
-      "source_location": "L137"
+      "source_location": "L151"
     },
     {
       "id": "cmd_e2e_main_main",
       "label": "main()",
       "_origin": "ast",
       "community": 18,
-      "community_name": "e2e/main.go",
+      "community_name": "NewProducer",
       "file_type": "code",
       "norm_label": "main()",
       "source_file": "cmd/e2e/main.go",
       "source_location": "L23"
     },
     {
+      "id": "cmd_e2e_main_runpipeline",
+      "label": "runPipeline()",
+      "_origin": "ast",
+      "community": 18,
+      "community_name": "NewProducer",
+      "file_type": "code",
+      "norm_label": "runpipeline()",
+      "source_file": "cmd/e2e/main.go",
+      "source_location": "L37"
+    },
+    {
+      "id": "cmd_e2e_update",
+      "label": "update.go",
+      "_origin": "ast",
+      "community": 18,
+      "community_name": "NewProducer",
+      "file_type": "code",
+      "norm_label": "update.go",
+      "source_file": "cmd/e2e/update.go",
+      "source_location": "L1"
+    },
+    {
+      "id": "cmd_e2e_update_runupdate",
+      "label": "runUpdate()",
+      "_origin": "ast",
+      "community": 18,
+      "community_name": "NewProducer",
+      "file_type": "code",
+      "norm_label": "runupdate()",
+      "source_file": "cmd/e2e/update.go",
+      "source_location": "L15"
+    },
+    {
+      "id": "cmd_worker_main",
+      "label": "worker/main.go",
+      "_origin": "ast",
+      "community": 18,
+      "community_name": "NewProducer",
+      "file_type": "code",
+      "norm_label": "worker/main.go",
+      "source_file": "cmd/worker/main.go",
+      "source_location": "L1"
+    },
+    {
+      "id": "cmd_worker_main_envordefault",
+      "label": "envOrDefault()",
+      "_origin": "ast",
+      "community": 18,
+      "community_name": "NewProducer",
+      "file_type": "code",
+      "norm_label": "envordefault()",
+      "source_file": "cmd/worker/main.go",
+      "source_location": "L82"
+    },
+    {
+      "id": "cmd_worker_main_main",
+      "label": "main()",
+      "_origin": "ast",
+      "community": 18,
+      "community_name": "NewProducer",
+      "file_type": "code",
+      "norm_label": "main()",
+      "source_file": "cmd/worker/main.go",
+      "source_location": "L22"
+    },
+    {
       "id": "go_type_github_com_twmb_franz_go_pkg_kgo_recordheader",
       "label": "github.com/twmb/franz-go/pkg/kgo.RecordHeader",
       "_origin": "ast",
       "community": 18,
-      "community_name": "e2e/main.go",
+      "community_name": "NewProducer",
       "file_type": "code",
       "norm_label": "github.com/twmb/franz-go/pkg/kgo.recordheader",
       "source_file": "",
       "source_location": ""
     },
     {
-      "id": "cmd_e2e_test_update",
-      "label": "test_update.go",
+      "id": "readme",
+      "label": "README.md",
       "_origin": "ast",
       "community": 19,
-      "community_name": "test_update.go",
-      "file_type": "code",
-      "norm_label": "test_update.go",
-      "source_file": "cmd/e2e/test_update.go",
+      "community_name": "Flint \u2014 Open Source FHIR Server on a Data Lake",
+      "file_type": "document",
+      "node_kind": "page",
+      "norm_label": "readme.md",
+      "source_file": "README.md",
       "source_location": "L1"
     },
     {
-      "id": "cmd_e2e_test_update_envordefault",
-      "label": "envOrDefault()",
+      "id": "readme_architecture",
+      "label": "Architecture",
       "_origin": "ast",
       "community": 19,
-      "community_name": "test_update.go",
-      "file_type": "code",
-      "norm_label": "envordefault()",
-      "source_file": "cmd/e2e/test_update.go",
-      "source_location": "L59"
+      "community_name": "Flint \u2014 Open Source FHIR Server on a Data Lake",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "architecture",
+      "source_file": "README.md",
+      "source_location": "L8"
     },
     {
-      "id": "cmd_e2e_test_update_main",
-      "label": "main()",
+      "id": "readme_flint_open_source_fhir_server_on_a_data_lake",
+      "label": "Flint \u2014 Open Source FHIR Server on a Data Lake",
       "_origin": "ast",
       "community": 19,
-      "community_name": "test_update.go",
-      "file_type": "code",
-      "norm_label": "main()",
-      "source_file": "cmd/e2e/test_update.go",
-      "source_location": "L16"
+      "community_name": "Flint \u2014 Open Source FHIR Server on a Data Lake",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "flint \u2014 open source fhir server on a data lake",
+      "source_file": "README.md",
+      "source_location": "L1"
+    },
+    {
+      "id": "readme_key_design_decisions",
+      "label": "Key Design Decisions",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 Open Source FHIR Server on a Data Lake",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "key design decisions",
+      "source_file": "README.md",
+      "source_location": "L30"
+    },
+    {
+      "id": "readme_license",
+      "label": "License",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 Open Source FHIR Server on a Data Lake",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "license",
+      "source_file": "README.md",
+      "source_location": "L71"
+    },
+    {
+      "id": "readme_project_structure",
+      "label": "Project Structure",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 Open Source FHIR Server on a Data Lake",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "project structure",
+      "source_file": "README.md",
+      "source_location": "L39"
+    },
+    {
+      "id": "readme_quick_start",
+      "label": "Quick Start",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 Open Source FHIR Server on a Data Lake",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "quick start",
+      "source_file": "README.md",
+      "source_location": "L58"
     },
     {
       "id": "activity_activities",
@@ -1643,17 +1793,6 @@
       "source_location": "L19"
     },
     {
-      "id": "automq_producer_newproducer",
-      "label": "NewProducer()",
-      "_origin": "ast",
-      "community": 2,
-      "community_name": "Producer",
-      "file_type": "code",
-      "norm_label": "newproducer()",
-      "source_file": "automq/producer.go",
-      "source_location": "L34"
-    },
-    {
       "id": "automq_producer_publish",
       "label": ".Publish()",
       "_origin": "ast",
@@ -1674,72 +1813,6 @@
       "norm_label": "topicset()",
       "source_file": "automq/producer.go",
       "source_location": "L105"
-    },
-    {
-      "id": "cmd_e2e_test_delete",
-      "label": "test_delete.go",
-      "_origin": "ast",
-      "community": 2,
-      "community_name": "Producer",
-      "file_type": "code",
-      "norm_label": "test_delete.go",
-      "source_file": "cmd/e2e/test_delete.go",
-      "source_location": "L1"
-    },
-    {
-      "id": "cmd_e2e_test_delete_envordefault",
-      "label": "envOrDefault()",
-      "_origin": "ast",
-      "community": 2,
-      "community_name": "Producer",
-      "file_type": "code",
-      "norm_label": "envordefault()",
-      "source_file": "cmd/e2e/test_delete.go",
-      "source_location": "L41"
-    },
-    {
-      "id": "cmd_e2e_test_delete_main",
-      "label": "main()",
-      "_origin": "ast",
-      "community": 2,
-      "community_name": "Producer",
-      "file_type": "code",
-      "norm_label": "main()",
-      "source_file": "cmd/e2e/test_delete.go",
-      "source_location": "L12"
-    },
-    {
-      "id": "cmd_worker_main",
-      "label": "worker/main.go",
-      "_origin": "ast",
-      "community": 2,
-      "community_name": "Producer",
-      "file_type": "code",
-      "norm_label": "worker/main.go",
-      "source_file": "cmd/worker/main.go",
-      "source_location": "L1"
-    },
-    {
-      "id": "cmd_worker_main_envordefault",
-      "label": "envOrDefault()",
-      "_origin": "ast",
-      "community": 2,
-      "community_name": "Producer",
-      "file_type": "code",
-      "norm_label": "envordefault()",
-      "source_file": "cmd/worker/main.go",
-      "source_location": "L82"
-    },
-    {
-      "id": "cmd_worker_main_main",
-      "label": "main()",
-      "_origin": "ast",
-      "community": 2,
-      "community_name": "Producer",
-      "file_type": "code",
-      "norm_label": "main()",
-      "source_file": "cmd/worker/main.go",
-      "source_location": "L22"
     },
     {
       "id": "go_type_github_com_twmb_franz_go_pkg_kgo_client",
@@ -1843,6 +1916,62 @@
       "type": "package"
     },
     {
+      "id": "agents_rules_graphify",
+      "label": "rules/graphify.md",
+      "_origin": "ast",
+      "community": 24,
+      "community_name": "rules/graphify.md",
+      "file_type": "document",
+      "frontmatter": {
+        "trigger": "always_on",
+        "description": "Consult the graphify knowledge graph at graphify-out/ for codebase and architecture questions."
+      },
+      "node_kind": "page",
+      "norm_label": "rules/graphify.md",
+      "source_file": ".agents/rules/graphify.md",
+      "source_location": "L1"
+    },
+    {
+      "id": "agents_rules_graphify_graphify",
+      "label": "graphify",
+      "_origin": "ast",
+      "community": 24,
+      "community_name": "rules/graphify.md",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "graphify",
+      "source_file": ".agents/rules/graphify.md",
+      "source_location": "L6"
+    },
+    {
+      "id": "agents_workflows_graphify",
+      "label": "workflows/graphify.md",
+      "_origin": "ast",
+      "community": 25,
+      "community_name": "workflows/graphify.md",
+      "file_type": "document",
+      "frontmatter": {
+        "name": "graphify",
+        "description": "Turn any folder of files into a navigable knowledge graph"
+      },
+      "node_kind": "page",
+      "norm_label": "workflows/graphify.md",
+      "source_file": ".agents/workflows/graphify.md",
+      "source_location": "L1"
+    },
+    {
+      "id": "agents_workflows_graphify_workflow_graphify",
+      "label": "Workflow: graphify",
+      "_origin": "ast",
+      "community": 25,
+      "community_name": "workflows/graphify.md",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "workflow: graphify",
+      "source_file": ".agents/workflows/graphify.md",
+      "source_location": "L6"
+    },
+    {
       "id": "go_type_google_golang_org_protobuf_runtime_protoimpl_messagestate",
       "label": "google.golang.org/protobuf/runtime/protoimpl.MessageState",
       "_origin": "ast",
@@ -1854,13 +1983,13 @@
       "source_location": ""
     },
     {
-      "id": "go_type_google_golang_org_protobuf_runtime_protoimpl_sizecache",
-      "label": "google.golang.org/protobuf/runtime/protoimpl.SizeCache",
+      "id": "go_type_google_golang_org_protobuf_runtime_protoimpl_unknownfields",
+      "label": "google.golang.org/protobuf/runtime/protoimpl.UnknownFields",
       "_origin": "ast",
       "community": 3,
       "community_name": "FHIRString",
       "file_type": "code",
-      "norm_label": "google.golang.org/protobuf/runtime/protoimpl.sizecache",
+      "norm_label": "google.golang.org/protobuf/runtime/protoimpl.unknownfields",
       "source_file": "",
       "source_location": ""
     },
@@ -1874,17 +2003,6 @@
       "norm_label": "coding",
       "source_file": "spike/spike1_proto/mini_fhir.pb.go",
       "source_location": "L390"
-    },
-    {
-      "id": "spike1_proto_coding_descriptor",
-      "label": ".Descriptor()",
-      "_origin": "ast",
-      "community": 3,
-      "community_name": "FHIRString",
-      "file_type": "code",
-      "norm_label": ".descriptor()",
-      "source_file": "spike/spike1_proto/mini_fhir.pb.go",
-      "source_location": "L425"
     },
     {
       "id": "spike1_proto_coding_getcode",
@@ -2371,6 +2489,17 @@
       "source_location": ""
     },
     {
+      "id": "spike1_proto_coding_descriptor",
+      "label": ".Descriptor()",
+      "_origin": "ast",
+      "community": 5,
+      "community_name": "file_spike_spike1_proto_mini_fhir_proto_rawDescGZIP",
+      "file_type": "code",
+      "norm_label": ".descriptor()",
+      "source_file": "spike/spike1_proto/mini_fhir.pb.go",
+      "source_location": "L425"
+    },
+    {
       "id": "spike1_proto_extension_descriptor",
       "label": ".Descriptor()",
       "_origin": "ast",
@@ -2632,7 +2761,7 @@
       "file_type": "code",
       "norm_label": "buildtestpatient()",
       "source_file": "spike/spike3b_live/live_test.go",
-      "source_location": "L24"
+      "source_location": "L27"
     },
     {
       "id": "spike_spike3b_live_live_test_testprotoproduceconsume",
@@ -2643,7 +2772,7 @@
       "file_type": "code",
       "norm_label": "testprotoproduceconsume()",
       "source_file": "spike/spike3b_live/live_test.go",
-      "source_location": "L53"
+      "source_location": "L56"
     },
     {
       "id": "spike_spike4_search_index_search_index_test",
@@ -3199,7 +3328,31 @@
       "weight": 1.0
     },
     {
+      "source": "cmd_e2e_delete_rundelete",
+      "target": "automq_producer_newproducer",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "cmd/e2e/delete.go",
+      "source_location": "L15",
+      "weight": 1.0
+    },
+    {
       "source": "cmd_e2e_main_main",
+      "target": "cmd_e2e_main_runpipeline",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "cmd/e2e/main.go",
+      "source_location": "L34",
+      "weight": 1.0
+    },
+    {
+      "source": "cmd_e2e_main_runpipeline",
       "target": "cmd_e2e_main_headermap",
       "relation": "calls",
       "_origin": "ast",
@@ -3207,11 +3360,11 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "cmd/e2e/main.go",
-      "source_location": "L119",
+      "source_location": "L133",
       "weight": 1.0
     },
     {
-      "source": "cmd_e2e_main_main",
+      "source": "cmd_e2e_main_runpipeline",
       "target": "cmd_e2e_main_envordefault",
       "relation": "calls",
       "_origin": "ast",
@@ -3219,43 +3372,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "cmd/e2e/main.go",
-      "source_location": "L27",
-      "weight": 1.0
-    },
-    {
-      "source": "cmd_e2e_test_delete_main",
-      "target": "cmd_e2e_test_delete_envordefault",
-      "relation": "calls",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "call",
-      "source_file": "cmd/e2e/test_delete.go",
-      "source_location": "L14",
-      "weight": 1.0
-    },
-    {
-      "source": "cmd_e2e_test_delete_main",
-      "target": "automq_producer_newproducer",
-      "relation": "calls",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "call",
-      "source_file": "cmd/e2e/test_delete.go",
-      "source_location": "L16",
-      "weight": 1.0
-    },
-    {
-      "source": "cmd_e2e_test_update_main",
-      "target": "cmd_e2e_test_update_envordefault",
-      "relation": "calls",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "call",
-      "source_file": "cmd/e2e/test_update.go",
-      "source_location": "L19",
+      "source_location": "L41",
       "weight": 1.0
     },
     {
@@ -3316,6 +3433,18 @@
       "context": "call",
       "source_file": "cmd/worker/main.go",
       "source_location": "L48",
+      "weight": 1.0
+    },
+    {
+      "source": "ingest_workflow_ingest_ingestfhirbundle",
+      "target": "workflow_writepostgresbatchinput",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "ingest/workflow/ingest.go",
+      "source_location": "L94",
       "weight": 1.0
     },
     {
@@ -3819,7 +3948,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "spike/spike3b_live/live_test.go",
-      "source_location": "L62",
+      "source_location": "L65",
       "weight": 1.0
     },
     {
@@ -4935,7 +5064,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "cmd/e2e/main.go",
-      "source_location": "L137",
+      "source_location": "L151",
       "weight": 1.0
     },
     {
@@ -5523,7 +5652,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "spike/spike3b_live/live_test.go",
-      "source_location": "L53",
+      "source_location": "L56",
       "weight": 1.0
     },
     {
@@ -6387,7 +6516,7 @@
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "spike/spike3b_live/live_test.go",
-      "source_location": "L24",
+      "source_location": "L27",
       "weight": 1.0
     },
     {
@@ -6463,6 +6592,28 @@
       "weight": 1.0
     },
     {
+      "source": "agents_rules_graphify",
+      "target": "agents_rules_graphify_graphify",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": ".agents/rules/graphify.md",
+      "source_location": "L6",
+      "weight": 1.0
+    },
+    {
+      "source": "agents_workflows_graphify",
+      "target": "agents_workflows_graphify_workflow_graphify",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": ".agents/workflows/graphify.md",
+      "source_location": "L6",
+      "weight": 1.0
+    },
+    {
       "source": "automq_producer_go_automq_producer",
       "target": "automq_producer_topicset",
       "relation": "contains",
@@ -6518,6 +6669,17 @@
       "weight": 1.0
     },
     {
+      "source": "cmd_e2e_delete",
+      "target": "cmd_e2e_delete_rundelete",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "cmd/e2e/delete.go",
+      "source_location": "L11",
+      "weight": 1.0
+    },
+    {
       "source": "cmd_e2e_main",
       "target": "cmd_e2e_main_headermap",
       "relation": "contains",
@@ -6525,7 +6687,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "cmd/e2e/main.go",
-      "source_location": "L137",
+      "source_location": "L151",
       "weight": 1.0
     },
     {
@@ -6536,7 +6698,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "cmd/e2e/main.go",
-      "source_location": "L145",
+      "source_location": "L159",
       "weight": 1.0
     },
     {
@@ -6551,47 +6713,25 @@
       "weight": 1.0
     },
     {
-      "source": "cmd_e2e_test_delete",
-      "target": "cmd_e2e_test_delete_main",
+      "source": "cmd_e2e_main",
+      "target": "cmd_e2e_main_runpipeline",
       "relation": "contains",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
-      "source_file": "cmd/e2e/test_delete.go",
-      "source_location": "L12",
+      "source_file": "cmd/e2e/main.go",
+      "source_location": "L37",
       "weight": 1.0
     },
     {
-      "source": "cmd_e2e_test_delete",
-      "target": "cmd_e2e_test_delete_envordefault",
+      "source": "cmd_e2e_update",
+      "target": "cmd_e2e_update_runupdate",
       "relation": "contains",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
-      "source_file": "cmd/e2e/test_delete.go",
-      "source_location": "L41",
-      "weight": 1.0
-    },
-    {
-      "source": "cmd_e2e_test_update",
-      "target": "cmd_e2e_test_update_main",
-      "relation": "contains",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "cmd/e2e/test_update.go",
-      "source_location": "L16",
-      "weight": 1.0
-    },
-    {
-      "source": "cmd_e2e_test_update",
-      "target": "cmd_e2e_test_update_envordefault",
-      "relation": "contains",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "cmd/e2e/test_update.go",
-      "source_location": "L59",
+      "source_file": "cmd/e2e/update.go",
+      "source_location": "L15",
       "weight": 1.0
     },
     {
@@ -6866,6 +7006,72 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "pkg/fhirutil/helpers_test.go",
+      "source_location": "L8",
+      "weight": 1.0
+    },
+    {
+      "source": "readme",
+      "target": "readme_flint_open_source_fhir_server_on_a_data_lake",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": "L1",
+      "weight": 1.0
+    },
+    {
+      "source": "readme_flint_open_source_fhir_server_on_a_data_lake",
+      "target": "readme_key_design_decisions",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": "L30",
+      "weight": 1.0
+    },
+    {
+      "source": "readme_flint_open_source_fhir_server_on_a_data_lake",
+      "target": "readme_project_structure",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": "L39",
+      "weight": 1.0
+    },
+    {
+      "source": "readme_flint_open_source_fhir_server_on_a_data_lake",
+      "target": "readme_quick_start",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": "L58",
+      "weight": 1.0
+    },
+    {
+      "source": "readme_flint_open_source_fhir_server_on_a_data_lake",
+      "target": "readme_license",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": "L71",
+      "weight": 1.0
+    },
+    {
+      "source": "readme_flint_open_source_fhir_server_on_a_data_lake",
+      "target": "readme_architecture",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
       "source_location": "L8",
       "weight": 1.0
     },
@@ -7449,7 +7655,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "spike/spike3b_live/live_test.go",
-      "source_location": "L24",
+      "source_location": "L27",
       "weight": 1.0
     },
     {
@@ -7460,7 +7666,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "spike/spike3b_live/live_test.go",
-      "source_location": "L53",
+      "source_location": "L56",
       "weight": 1.0
     },
     {
@@ -8982,6 +9188,54 @@
       "weight": 1.0
     },
     {
+      "source": "cmd_e2e_delete_rundelete",
+      "target": "cmd_e2e_main_envordefault",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "context": "call",
+      "source_file": "cmd/e2e/delete.go",
+      "source_location": "L13",
+      "weight": 1.0
+    },
+    {
+      "source": "cmd_e2e_main_main",
+      "target": "cmd_e2e_delete_rundelete",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "context": "call",
+      "source_file": "cmd/e2e/main.go",
+      "source_location": "L27",
+      "weight": 1.0
+    },
+    {
+      "source": "cmd_e2e_main_main",
+      "target": "cmd_e2e_update_runupdate",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "context": "call",
+      "source_file": "cmd/e2e/main.go",
+      "source_location": "L30",
+      "weight": 1.0
+    },
+    {
+      "source": "cmd_e2e_update_runupdate",
+      "target": "cmd_e2e_main_envordefault",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "INFERRED",
+      "confidence_score": 0.85,
+      "context": "call",
+      "source_file": "cmd/e2e/update.go",
+      "source_location": "L18",
+      "weight": 1.0
+    },
+    {
       "source": "pkg_fhirutil_helpers_test_testfhirdatetotime",
       "target": "pkg_fhirutil_helpers_fhirdatetotime",
       "relation": "calls",
@@ -9139,5 +9393,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "3d3d853ebba42663c3175fb3f11bc5749e1ccd4f"
+  "built_at_commit": "d6a8c4808d3313974366c74281fd23d6f20867a0"
 }

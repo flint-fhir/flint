@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"os"
 	"time"
 
 	"go.temporal.io/sdk/client"
@@ -13,7 +12,7 @@ import (
 	"github.com/flint-fhir/flint/ingest/workflow"
 )
 
-func main() {
+func runUpdate() {
 	ctx := context.Background()
 
 	c, err := client.Dial(client.Options{HostPort: envOrDefault("TEMPORAL_ADDRESS", "localhost:7233")})
@@ -54,11 +53,4 @@ func main() {
 		log.Fatalf("workflow failed: %v", err)
 	}
 	fmt.Println("✅ Update workflow completed successfully!")
-}
-
-func envOrDefault(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

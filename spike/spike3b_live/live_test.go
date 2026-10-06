@@ -1,3 +1,5 @@
+//go:build integration
+
 // Spike 3b Live: Send proto-encoded FHIR Patient to AutoMQ, verify delivery.
 // This validates that AutoMQ can receive and store proto messages.
 // Table Topic validation requires AutoMQ v1.4.1+ config — tested in staging.
@@ -6,6 +8,7 @@ package spike3b_live
 import (
 	"context"
 	"testing"
+	"os"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
@@ -51,7 +54,7 @@ func buildTestPatient() *pb.Patient {
 }
 
 func TestProtoProduceConsume(t *testing.T) {
-	if testing.Short() {
+	if testing.Short() || os.Getenv("CI") != "" {
 		t.Skip("skipping live test in short mode")
 	}
 

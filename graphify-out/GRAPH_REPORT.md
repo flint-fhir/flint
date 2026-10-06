@@ -1,15 +1,16 @@
 # Graph Report - flint  (2026-10-06)
 
 ## Corpus Check
-- cluster-only mode — file stats not available
+- 39 files · ~187,274 words
+- Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 289 nodes · 515 edges · 24 communities (14 shown, 9 thin omitted)
-- Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 13 edges (avg confidence: 0.85)
+- 299 nodes · 526 edges · 26 communities (15 shown, 10 thin omitted)
+- Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 17 edges (avg confidence: 0.85)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `3d3d853e`
+- Built from commit: `d6a8c480`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -24,7 +25,7 @@
 - MiniPatient
 - helpers.go
 - FHIRDate
-- roundtrip.go
+- spike_test.go
 - Extension
 - google.golang.org/protobuf/reflect/protoreflect.Message
 - mini_fhir.pb.go
@@ -32,11 +33,13 @@
 - ingest.go
 - bundle.go
 - .Search
-- e2e/main.go
-- test_update.go
+- NewProducer
+- Flint — Open Source FHIR Server on a Data Lake
 - query_duckdb.py
 - query_iceberg.py
 - github.com/flint-fhir/flint
+- rules/graphify.md
+- workflows/graphify.md
 
 ## God Nodes (most connected - your core abstractions)
 1. `FHIRString` - 28 edges
@@ -51,44 +54,44 @@
 10. `insertSearchIndexes()` - 12 edges
 
 ## Surprising Connections (you probably didn't know these)
+- `main()` --calls--> `New()`  [EXTRACTED]
+  cmd/worker/main.go → store/postgres/store.go
 - `Activities` --references--> `Store`  [EXTRACTED]
   ingest/activity/activities.go → store/postgres/store.go
 - `Server` --references--> `Store`  [EXTRACTED]
   server/server.go → store/postgres/store.go
-- `main()` --calls--> `New()`  [EXTRACTED]
-  cmd/worker/main.go → store/postgres/store.go
-- `main()` --calls--> `New()`  [EXTRACTED]
-  cmd/flintd/main.go → server/server.go
-- `main()` --calls--> `New()`  [EXTRACTED]
-  cmd/flintd/main.go → store/postgres/store.go
+- `Activities` --references--> `Producer`  [EXTRACTED]
+  ingest/activity/activities.go → automq/producer.go
+- `runDelete()` --calls--> `NewProducer()`  [EXTRACTED]
+  cmd/e2e/delete.go → automq/producer.go
 
 ## Import Cycles
 - None detected.
 
-## Communities (24 total, 9 thin omitted)
+## Communities (26 total, 10 thin omitted)
 
 ### Community 0 - "store.go"
 Cohesion: 0.13
 Nodes (28): main(), context.Context, database/sql.DB, database/sql.Tx, ResourceInput, SearchIndexes, SpidxDate, SpidxQuantity (+20 more)
 
 ### Community 1 - "testing.T"
-Cohesion: 0.12
-Nodes (22): testing.T, TestIngestFHIRBundle_AutoMQFailure_Fails(), TestIngestFHIRBundle_HappyPath(), TestIngestFHIRBundle_MedplumFailure_ContinuesAnyway(), TestIngestFHIRBundle_PostgresFailure_Fails(), IcebergColumn, protoNameToFHIR(), ProtoToFHIRJSON() (+14 more)
+Cohesion: 0.11
+Nodes (23): testing.T, TestIngestFHIRBundle_AutoMQFailure_Fails(), TestIngestFHIRBundle_HappyPath(), TestIngestFHIRBundle_MedplumFailure_ContinuesAnyway(), TestIngestFHIRBundle_PostgresFailure_Fails(), IcebergColumn, FHIRToProtoJSON(), ProtoJSONToFHIR() (+15 more)
 
 ### Community 2 - "Producer"
-Cohesion: 0.13
-Nodes (16): Activities, IndexExtractorFunc, PublishToAutoMQInput, WriteMedplumBatchInput, WritePostgresBatchInput, Config, Message, Producer (+8 more)
+Cohesion: 0.19
+Nodes (11): Activities, IndexExtractorFunc, PublishToAutoMQInput, WriteMedplumBatchInput, WritePostgresBatchInput, Config, Message, Producer (+3 more)
 
 ### Community 3 - "FHIRString"
 Cohesion: 0.13
-Nodes (5): google.golang.org/protobuf/runtime/protoimpl.MessageState, google.golang.org/protobuf/runtime/protoimpl.SizeCache, Coding, FHIRString, HumanName
+Nodes (5): google.golang.org/protobuf/runtime/protoimpl.MessageState, google.golang.org/protobuf/runtime/protoimpl.UnknownFields, Coding, FHIRString, HumanName
 
 ### Community 4 - "Server"
 Cohesion: 0.18
 Nodes (11): google.golang.org/protobuf/proto.Message, google.golang.org/protobuf/reflect/protoreflect.MessageDescriptor, net/http.Handler, net/http.Request, net/http.ResponseWriter, Server, generateID(), Server (+3 more)
 
 ### Community 5 - "file_spike_spike1_proto_mini_fhir_proto_rawDescGZIP"
-Cohesion: 0.12
+Cohesion: 0.11
 Nodes (5): google.golang.org/protobuf/reflect/protoreflect.EnumDescriptor, google.golang.org/protobuf/reflect/protoreflect.EnumNumber, google.golang.org/protobuf/reflect/protoreflect.EnumType, GenderCode, file_spike_spike1_proto_mini_fhir_proto_rawDescGZIP()
 
 ### Community 6 - "search_index_test.go"
@@ -99,16 +102,16 @@ Nodes (15): github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/
 Cohesion: 0.18
 Nodes (10): mockString, time.Time, FHIRDateToTime(), NormalizeString(), StringValue(), StringValues(), TestFHIRDateToTime(), TestNormalizeString() (+2 more)
 
-### Community 10 - "roundtrip.go"
-Cohesion: 0.36
-Nodes (9): FHIRToProtoJSON(), ProtoJSONToFHIR(), RoundTrip(), TestBirthDateWithExtension(), TestFullPatientRoundTrip(), TestGenderEnumMapping(), TestWrapUnwrapPrimitive(), UnwrapPrimitive() (+1 more)
+### Community 10 - "spike_test.go"
+Cohesion: 0.50
+Nodes (8): protoNameToFHIR(), ProtoToFHIRJSON(), TestProtojsonMarshalOutput(), TestRoundTripFidelity(), unwrap(), unwrapHumanNames(), unwrapIdentifiers(), unwrapStringArray()
 
 ### Community 13 - "mini_fhir.pb.go"
 Cohesion: 0.25
 Nodes (5): Extension_ValueBoolean, Extension_ValueDateTime, Extension_ValueString, file_spike_spike1_proto_mini_fhir_proto_init(), init()
 
 ### Community 15 - "ingest.go"
-Cohesion: 0.33
+Cohesion: 0.38
 Nodes (6): go.temporal.io/sdk/workflow.Context, IngestFHIRBundle(), IngestInput, publishToAutoMQInput, writeMedplumBatchInput, writePostgresBatchInput
 
 ### Community 16 - "bundle.go"
@@ -119,29 +122,33 @@ Nodes (5): encoding/json.RawMessage, bundleErrorResponse(), bundleEntry, bundleE
 Cohesion: 0.47
 Nodes (4): DateOp, SearchParams, SearchResult, Store
 
-### Community 18 - "e2e/main.go"
-Cohesion: 0.60
-Nodes (4): envOrDefault(), headerMap(), main(), github.com/twmb/franz-go/pkg/kgo.RecordHeader
+### Community 18 - "NewProducer"
+Cohesion: 0.21
+Nodes (10): NewProducer(), runDelete(), envOrDefault(), headerMap(), main(), runPipeline(), runUpdate(), envOrDefault() (+2 more)
+
+### Community 19 - "Flint — Open Source FHIR Server on a Data Lake"
+Cohesion: 0.29
+Nodes (6): Architecture, Flint — Open Source FHIR Server on a Data Lake, Key Design Decisions, License, Project Structure, Quick Start
 
 ## Knowledge Gaps
-- **6 isolated node(s):** `publishToAutoMQInput`, `writeMedplumBatchInput`, `writePostgresBatchInput`, `Store`, `github.com/flint-fhir/flint` (+1 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 71 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **9 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **12 isolated node(s):** `github.com/flint-fhir/flint`, `writeMedplumBatchInput`, `publishToAutoMQInput`, `Server`, `Store` (+7 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 82 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **10 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `TestServer_Integration()` connect `store.go` to `testing.T`?**
-  _High betweenness centrality (0.101) - this node is a cross-community bridge._
+  _High betweenness centrality (0.099) - this node is a cross-community bridge._
 - **Why does `Server` connect `Server` to `store.go`, `Producer`?**
-  _High betweenness centrality (0.092) - this node is a cross-community bridge._
-- **Why does `New()` connect `store.go` to `testing.T`, `Producer`?**
-  _High betweenness centrality (0.074) - this node is a cross-community bridge._
-- **What connects `publishToAutoMQInput`, `writeMedplumBatchInput`, `writePostgresBatchInput` to the rest of the system?**
-  _6 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _High betweenness centrality (0.090) - this node is a cross-community bridge._
+- **Why does `New()` connect `store.go` to `testing.T`, `NewProducer`?**
+  _High betweenness centrality (0.084) - this node is a cross-community bridge._
+- **What connects `github.com/flint-fhir/flint`, `writeMedplumBatchInput`, `publishToAutoMQInput` to the rest of the system?**
+  _12 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `store.go` be split into smaller, more focused modules?**
   _Cohesion score 0.13277310924369748 - nodes in this community are weakly interconnected._
 - **Should `testing.T` be split into smaller, more focused modules?**
-  _Cohesion score 0.12169312169312169 - nodes in this community are weakly interconnected._
-- **Should `Producer` be split into smaller, more focused modules?**
-  _Cohesion score 0.13043478260869565 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.11494252873563218 - nodes in this community are weakly interconnected._
+- **Should `FHIRString` be split into smaller, more focused modules?**
+  _Cohesion score 0.1341991341991342 - nodes in this community are weakly interconnected._
