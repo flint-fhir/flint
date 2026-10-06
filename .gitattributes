@@ -1,0 +1,3 @@
+# Linguist overrides to ignore vendor protos and Bazel BUILD files in language statistics
+proto/google/fhir/** linguist-vendored
+proto/**/BUILD linguist-vendored
