@@ -58,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}", s.handleRead)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}", s.handleSearch)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}", s.handleCreate)
+	mux.HandleFunc("POST /fhir/r4/{tenant}", s.handleBundle)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/metadata", s.handleMetadata)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/smart-configuration", s.handleSMARTConfig)
 

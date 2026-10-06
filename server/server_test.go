@@ -269,6 +269,69 @@ func TestServer_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("POST transaction Bundle creates multiple resources", func(t *testing.T) {
+		bundleJSON := `{
+			"resourceType": "Bundle",
+			"type": "transaction",
+			"entry": [
+				{
+					"resource": {"resourceType":"Patient","id":{"value":"bnd-pat-1"},"name":[{"family":{"value":"BundleSmith"}}]},
+					"request": {"method":"PUT","url":"Patient/bnd-pat-1"}
+				},
+				{
+					"resource": {"resourceType":"Patient","id":{"value":"bnd-pat-2"},"name":[{"family":{"value":"BundleJones"}}]},
+					"request": {"method":"PUT","url":"Patient/bnd-pat-2"}
+				}
+			]
+		}`
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api", "application/fhir+json", strings.NewReader(bundleJSON))
+		if err != nil {
+			t.Fatalf("POST Bundle: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+		}
+
+		var respBundle map[string]any
+		json.NewDecoder(resp.Body).Decode(&respBundle)
+		if respBundle["type"] != "transaction-response" {
+			t.Errorf("expected transaction-response, got %v", respBundle["type"])
+		}
+		entries := respBundle["entry"].([]any)
+		if len(entries) != 2 {
+			t.Errorf("expected 2 entries, got %d", len(entries))
+		}
+		t.Logf("Bundle response: %d entries", len(entries))
+	})
+
+	t.Run("Bundle resources are readable", func(t *testing.T) {
+		for _, id := range []string{"bnd-pat-1", "bnd-pat-2"} {
+			resp, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient/" + id)
+			if err != nil {
+				t.Fatalf("GET %s: %v", id, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != 200 {
+				t.Errorf("GET %s: expected 200, got %d", id, resp.StatusCode)
+			}
+		}
+		t.Log("Both Bundle resources readable via GET")
+	})
+
+	t.Run("POST invalid Bundle returns 400", func(t *testing.T) {
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api", "application/fhir+json",
+			strings.NewReader(`{"resourceType":"Patient"}`))
+		if err != nil {
+			t.Fatalf("POST: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 400 {
+			t.Errorf("expected 400, got %d", resp.StatusCode)
+		}
+	})
+
 	// Clean up
 	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_resource"} {
 		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-api'")
