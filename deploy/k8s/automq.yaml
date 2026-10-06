@@ -8,9 +8,9 @@ metadata:
   namespace: flint
 data:
   server.properties: |
-    # AutoMQ Core - S3 shared storage via MinIO
-    s3.data.buckets=0@s3://automq-data?region=us-east-1&endpoint=http://minio:9000
-    s3.ops.buckets=0@s3://automq-ops?region=us-east-1&endpoint=http://minio:9000
+    # AutoMQ Core - S3 shared storage via Garage
+    s3.data.buckets=0@s3://automq-data?region=us-east-1&endpoint=http://garage:3900&pathStyle=true
+    s3.ops.buckets=0@s3://automq-ops?region=us-east-1&endpoint=http://garage:3900&pathStyle=true
 
     # Broker settings
     node.id=1
@@ -25,9 +25,9 @@ data:
     automq.table.topic.catalog.type=rest
     automq.table.topic.catalog.uri=http://iceberg-rest:8181
     automq.table.topic.catalog.warehouse=s3://warehouse/
-    automq.table.topic.catalog.s3.endpoint=http://minio:9000
-    automq.table.topic.catalog.s3.access-key-id=flintadmin
-    automq.table.topic.catalog.s3.secret-access-key=flintadmin123
+    automq.table.topic.catalog.s3.endpoint=http://garage:3900
+    automq.table.topic.catalog.s3.access-key-id=GK1e8391735937d6afcd2dd84c
+    automq.table.topic.catalog.s3.secret-access-key=e9249c7fd2bbce0600a196bc6bc97f069b8948f20bf54fcaaefa924256b01e6c
     automq.table.topic.catalog.s3.path-style-access=true
 
     # Log config
@@ -57,9 +57,9 @@ spec:
             - containerPort: 9093
           env:
             - name: KAFKA_S3_ACCESS_KEY
-              value: flintadmin
+              value: GK1e8391735937d6afcd2dd84c
             - name: KAFKA_S3_SECRET_KEY
-              value: flintadmin123
+              value: e9249c7fd2bbce0600a196bc6bc97f069b8948f20bf54fcaaefa924256b01e6c
             - name: KAFKA_HEAP_OPTS
               value: "-Xms512m -Xmx2g -XX:MetaspaceSize=96m -XX:MaxDirectMemorySize=512M"
             - name: CLUSTER_ID

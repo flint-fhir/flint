@@ -28,13 +28,13 @@ spec:
             - name: CATALOG_IO__IMPL
               value: org.apache.iceberg.aws.s3.S3FileIO
             - name: CATALOG_S3_ENDPOINT
-              value: http://minio:9000
+              value: http://garage:3900
             - name: CATALOG_S3_PATH__STYLE__ACCESS
               value: "true"
             - name: AWS_ACCESS_KEY_ID
-              value: flintadmin
+              value: GK1e8391735937d6afcd2dd84c
             - name: AWS_SECRET_ACCESS_KEY
-              value: flintadmin123
+              value: e9249c7fd2bbce0600a196bc6bc97f069b8948f20bf54fcaaefa924256b01e6c
             - name: AWS_REGION
               value: us-east-1
           readinessProbe:

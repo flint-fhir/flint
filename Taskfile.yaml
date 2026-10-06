@@ -18,7 +18,7 @@ tasks:
       - task: cluster-create
       - task: deploy-postgres
       - task: deploy-temporal
-      - task: deploy-minio
+      - task: deploy-garage
       - task: deploy-iceberg
       - task: deploy-automq
       - echo "✅ Flint dev environment ready"
@@ -26,7 +26,7 @@ tasks:
       - echo "  Temporal      → localhost:7233"
       - echo "  Temporal UI   → http://localhost:8088"
       - echo "  AutoMQ        → localhost:9092"
-      - echo "  MinIO Console → http://localhost:9001 (flintadmin/flintadmin123)"
+      - echo "  Garage (S3)   → http://localhost:9000"
       - echo "  Iceberg REST  → http://localhost:8181"
 
   cluster-create:
@@ -54,12 +54,12 @@ tasks:
       - echo "Waiting for Temporal (this takes ~60s)..."
       - kubectl wait --for=condition=ready pod -l app=temporal -n {{.NAMESPACE}} --timeout=180s
 
-  deploy-minio:
-    desc: Deploy MinIO for S3-compatible storage (Iceberg + AutoMQ)
+  deploy-garage:
+    desc: Deploy Garage S3-compatible object storage
     cmds:
-      - kubectl apply -f deploy/k8s/minio.yaml
-      - echo "Waiting for MinIO..."
-      - kubectl wait --for=condition=ready pod -l app=minio -n {{.NAMESPACE}} --timeout=120s
+      - kubectl apply -f deploy/k8s/garage.yaml
+      - echo "Waiting for Garage..."
+      - kubectl wait --for=condition=ready pod -l app=garage -n {{.NAMESPACE}} --timeout=120s
 
   deploy-iceberg:
     desc: Deploy Iceberg REST catalog
