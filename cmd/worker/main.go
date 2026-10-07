@@ -61,11 +61,11 @@ func main() {
 
 	// Create activities with all dependencies
 	activities := &activity.Activities{
-		Store:    store,
-		Producer: producer,
-		Logger:   logger,
-		// IndexExtractors will be populated by proto2type-generated code
-		IndexExtractors: map[string]activity.IndexExtractorFunc{},
+		Store:           store,
+		Producer:        producer,
+		Logger:          logger,
+		// IndexExtractors populated with Big 5 proto2type extractors
+		IndexExtractors: postgres.DefaultIndexExtractors(),
 	}
 
 	// Create and start worker

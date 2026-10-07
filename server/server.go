@@ -32,6 +32,7 @@ type Server struct {
 	// protoRegistry maps FHIR resource type names to proto message descriptors.
 	// Used to unmarshal proto bytes back to proto messages for JSON conversion.
 	protoRegistry map[string]protoreflect.MessageDescriptor
+	extractors    map[string]postgres.IndexExtractorFunc
 	smartConfig   *SMARTConfig
 }
 
@@ -41,6 +42,7 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 		store:         store,
 		logger:        logger,
 		protoRegistry: make(map[string]protoreflect.MessageDescriptor),
+		extractors:    postgres.DefaultIndexExtractors(),
 	}
 }
 
@@ -48,6 +50,11 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 // This allows the server to unmarshal proto bytes and convert to JSON.
 func (s *Server) RegisterResourceType(resType string, msg proto.Message) {
 	s.protoRegistry[resType] = msg.ProtoReflect().Descriptor()
+}
+
+// RegisterIndexExtractor registers a search index extractor function for a resource type.
+func (s *Server) RegisterIndexExtractor(resType string, fn postgres.IndexExtractorFunc) {
+	s.extractors[resType] = fn
 }
 
 // Handler returns the HTTP handler for the FHIR API.
@@ -150,13 +157,24 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Extract search indexes if available
+	var idx *postgres.SearchIndexes
+	if extractor, ok := s.extractors[resType]; ok {
+		var extractErr error
+		idx, extractErr = extractor(tenant, resID, protoBytes)
+		if extractErr != nil {
+			s.logger.Warn("index extraction failed, storing without indexes",
+				"type", resType, "id", resID, "error", extractErr)
+		}
+	}
+
 	// Store in Postgres
 	err = s.store.WriteResource(r.Context(), postgres.ResourceInput{
 		TenantID:      tenant,
 		ResType:       resType,
 		ResID:         resID,
 		ResourceProto: protoBytes,
-		// TODO: extract search indexes using proto2type-generated functions
+		SearchIndexes: idx,
 	})
 	if err != nil {
 		s.logger.Error("create resource", "error", err, "type", resType, "id", resID)
@@ -214,12 +232,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		"email": true, "phone": true, "language": true,
 		"deceased": true, "status": true, "code": true,
 		"category": true, "type": true, "class": true,
+		"clinical-status": true, "verification-status": true,
 	}
 	// Known reference params
 	refParams := map[string]bool{
 		"organization": true, "general-practitioner": true,
 		"subject": true, "patient": true, "encounter": true,
 		"performer": true, "asserter": true, "recorder": true,
+		"participant": true,
 	}
 
 	for key, values := range r.URL.Query() {
@@ -304,6 +324,61 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 							{"name": "gender", "type": "token"},
 							{"name": "birthdate", "type": "date"},
 							{"name": "organization", "type": "reference"},
+						},
+					},
+					{
+						"type":        "Condition",
+						"interaction": []map[string]string{{"code": "read"}, {"code": "search-type"}},
+						"searchParam": []map[string]string{
+							{"name": "code", "type": "token"},
+							{"name": "clinical-status", "type": "token"},
+							{"name": "verification-status", "type": "token"},
+							{"name": "category", "type": "token"},
+							{"name": "patient", "type": "reference"},
+							{"name": "subject", "type": "reference"},
+							{"name": "encounter", "type": "reference"},
+							{"name": "onset-date", "type": "date"},
+						},
+					},
+					{
+						"type":        "Encounter",
+						"interaction": []map[string]string{{"code": "read"}, {"code": "search-type"}},
+						"searchParam": []map[string]string{
+							{"name": "class", "type": "token"},
+							{"name": "status", "type": "token"},
+							{"name": "type", "type": "token"},
+							{"name": "patient", "type": "reference"},
+							{"name": "subject", "type": "reference"},
+							{"name": "date", "type": "date"},
+							{"name": "participant", "type": "reference"},
+						},
+					},
+					{
+						"type":        "Observation",
+						"interaction": []map[string]string{{"code": "read"}, {"code": "search-type"}},
+						"searchParam": []map[string]string{
+							{"name": "code", "type": "token"},
+							{"name": "status", "type": "token"},
+							{"name": "category", "type": "token"},
+							{"name": "patient", "type": "reference"},
+							{"name": "subject", "type": "reference"},
+							{"name": "date", "type": "date"},
+							{"name": "performer", "type": "reference"},
+						},
+					},
+					{
+						"type":        "Practitioner",
+						"interaction": []map[string]string{{"code": "read"}, {"code": "search-type"}},
+						"searchParam": []map[string]string{
+							{"name": "family", "type": "string"},
+							{"name": "given", "type": "string"},
+							{"name": "name", "type": "string"},
+							{"name": "identifier", "type": "token"},
+							{"name": "active", "type": "token"},
+							{"name": "gender", "type": "token"},
+							{"name": "email", "type": "token"},
+							{"name": "phone", "type": "token"},
+							{"name": "address", "type": "string"},
 						},
 					},
 				},
