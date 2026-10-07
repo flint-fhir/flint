@@ -5,9 +5,9 @@
   "3": "FHIRString",
   "4": "Server",
   "5": "file_spike_spike1_proto_mini_fhir_proto_rawDescGZIP",
-  "6": "search_index_test.go",
+  "6": "spike4_search_index/search_index_test.go",
   "7": "MiniPatient",
-  "8": "helpers.go",
+  "8": "time.Time",
   "9": "FHIRDate",
   "10": "spike_test.go",
   "11": "Extension",
@@ -24,5 +24,7 @@
   "22": "doc.go",
   "23": "github.com/flint-fhir/flint",
   "24": "rules/graphify.md",
-  "25": "workflows/graphify.md"
+  "25": "workflows/graphify.md",
+  "26": "postgres/search_index_test.go",
+  "27": "condition_search_index.go"
 }

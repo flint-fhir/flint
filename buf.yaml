@@ -1,7 +1,9 @@
 version: v2
 modules:
-  - path: deploy/schemas
+  - path: .
     lint:
+      ignore:
+        - proto
       use:
         - MINIMAL
       except:
