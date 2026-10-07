@@ -12,6 +12,6 @@ plugins:
       - domain=false
 
 inputs:
-  - directory: proto
+  - directory: .
     paths:
-      - proto/google/fhir/r4/core/resources/patient.proto
+      - proto/google/fhir/proto/r4/core/resources/patient.proto

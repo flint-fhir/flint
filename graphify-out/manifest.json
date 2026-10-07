@@ -6,8 +6,8 @@
     "semantic_hash": "2d3598bdefa00529173bba880849d947"
   },
   "cmd/e2e/main.go": {
-    "mtime": 1791322239.0550544,
-    "seen": 1791322399.564513,
+    "mtime": 1791323258.6584504,
+    "seen": 1791394690.522041,
     "ast_hash": "14ce22c2156c3d365688c34425e92cf8",
     "semantic_hash": ""
   },
@@ -48,8 +48,8 @@
     "semantic_hash": "29c241ac477a9457a61b1cadde457be8"
   },
   "ingest/workflow/ingest.go": {
-    "mtime": 1791322273.5149593,
-    "seen": 1791322399.564639,
+    "mtime": 1791323258.6689525,
+    "seen": 1791394690.522478,
     "ast_hash": "6e50e5af6a670eca39d88f54dd8c3cc8",
     "semantic_hash": ""
   },
@@ -144,8 +144,8 @@
     "semantic_hash": "08ee6b443fc79a9085ac45044e069e13"
   },
   "spike/spike3b_live/live_test.go": {
-    "mtime": 1791322305.3195162,
-    "seen": 1791322399.5649228,
+    "mtime": 1791323258.6691523,
+    "seen": 1791394690.5233212,
     "ast_hash": "fd15a8a08a8d74e64df5221814eb82d8",
     "semantic_hash": ""
   },
@@ -180,38 +180,38 @@
     "semantic_hash": "b5555b12a78bb7c5c26771c0ea019187"
   },
   "cmd/e2e/delete.go": {
-    "mtime": 1791322185.267421,
-    "seen": 1791322399.564511,
+    "mtime": 1791323258.657649,
+    "seen": 1791394690.522037,
     "ast_hash": "9d72a63133ee55267bbbf33c4ae6dd27",
     "semantic_hash": ""
   },
   "cmd/e2e/update.go": {
-    "mtime": 1791322203.2376454,
-    "seen": 1791322399.56456,
+    "mtime": 1791323258.6586185,
+    "seen": 1791394690.5221481,
     "ast_hash": "4e025d833c3d8e93a257bef3c029ac5c",
     "semantic_hash": ""
   },
   ".agents/rules/graphify.md": {
-    "mtime": 1791315350.282701,
-    "seen": 1791322399.5650198,
+    "mtime": 1791323258.655973,
+    "seen": 1791394690.523554,
     "ast_hash": "f1e53ecc9194573d3c28fc116c743a2e",
     "semantic_hash": ""
   },
   ".agents/workflows/graphify.md": {
-    "mtime": 1791315350.2830539,
-    "seen": 1791322399.565021,
+    "mtime": 1791323258.656271,
+    "seen": 1791394690.523556,
     "ast_hash": "6d73634a678cf1e1c71930adf80bd1f0",
     "semantic_hash": ""
   },
   ".github/workflows/ci.yml": {
-    "mtime": 1791322382.1597564,
-    "seen": 1791322399.565021,
+    "mtime": 1791323258.6565273,
+    "seen": 1791394690.523558,
     "ast_hash": "2102e4c0c5e323d38862f4bb61d937c7",
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1791315222.140527,
-    "seen": 1791322399.565022,
+    "mtime": 1791323258.6569707,
+    "seen": 1791394690.5235589,
     "ast_hash": "0abe4254dd8f9da98463e93d7440c8cf",
     "semantic_hash": ""
   },
@@ -222,21 +222,21 @@
     "semantic_hash": ""
   },
   "buf.gen.search_index.yaml": {
-    "mtime": 1791242206.2658002,
-    "seen": 1791322399.565023,
-    "ast_hash": "5f52e490e2eb5f0b8a8f33585fa46712",
+    "mtime": 1791324108.341553,
+    "seen": 1791394690.5235999,
+    "ast_hash": "f7ffb41e04a0ebfe2d5d163a02a7cfc0",
     "semantic_hash": ""
   },
   "buf.gen.yaml": {
-    "mtime": 1791314353.3393238,
-    "seen": 1791322399.565024,
-    "ast_hash": "ff924ead2776be18300cf77ae38ee3d8",
+    "mtime": 1791325134.1557,
+    "seen": 1791394690.523602,
+    "ast_hash": "9d68cd53a01e2bbf5d1406e869fafaac",
     "semantic_hash": ""
   },
   "buf.yaml": {
-    "mtime": 1791322146.4249604,
-    "seen": 1791322399.565024,
-    "ast_hash": "e3a0750909e065c1a378c2113c09a711",
+    "mtime": 1791324244.5834782,
+    "seen": 1791394690.523604,
+    "ast_hash": "ce8553f8b77455033715fd633f6b1e8f",
     "semantic_hash": ""
   },
   "deploy/k3d/cluster.yaml": {
@@ -279,6 +279,42 @@
     "mtime": 1791248506.2141461,
     "seen": 1791322399.5650299,
     "ast_hash": "feb951c24eb2c1569d3bbc2f2777e602",
+    "semantic_hash": ""
+  },
+  "gen/go/store/postgres/condition_search_index.go": {
+    "mtime": 1791392403.7968235,
+    "seen": 1791394690.522243,
+    "ast_hash": "e11fa701729c6e3a1a5f56b2090085da",
+    "semantic_hash": ""
+  },
+  "gen/go/store/postgres/encounter_search_index.go": {
+    "mtime": 1791392403.7968006,
+    "seen": 1791394690.5222452,
+    "ast_hash": "4737adffb37d399a713e6c7b56ef888c",
+    "semantic_hash": ""
+  },
+  "gen/go/store/postgres/observation_search_index.go": {
+    "mtime": 1791392403.7968528,
+    "seen": 1791394690.5222468,
+    "ast_hash": "97cf78fabd2f3373af935a664a5b994a",
+    "semantic_hash": ""
+  },
+  "gen/go/store/postgres/patient_search_index.go": {
+    "mtime": 1791392403.7964835,
+    "seen": 1791394690.522248,
+    "ast_hash": "f3ae757bcd192090e50dd91d64c85762",
+    "semantic_hash": ""
+  },
+  "gen/go/store/postgres/practitioner_search_index.go": {
+    "mtime": 1791392403.7964888,
+    "seen": 1791394690.522249,
+    "ast_hash": "3f95777ac4bd4eddf8ecc59dc76dfcbd",
+    "semantic_hash": ""
+  },
+  "gen/go/store/postgres/search_index_test.go": {
+    "mtime": 1791392443.496628,
+    "seen": 1791394690.522251,
+    "ast_hash": "18f42d9a5554bcd43ac6ea8ab3ebc278",
     "semantic_hash": ""
   }
 }

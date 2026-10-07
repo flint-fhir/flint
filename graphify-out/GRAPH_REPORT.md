@@ -1,16 +1,16 @@
-# Graph Report - flint  (2026-10-06)
+# Graph Report - flint  (2026-10-07)
 
 ## Corpus Check
-- 39 files · ~187,274 words
+- 45 files · ~209,877 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 299 nodes · 526 edges · 26 communities (15 shown, 10 thin omitted)
+- 338 nodes · 570 edges · 28 communities (17 shown, 10 thin omitted)
 - Extraction: 97% EXTRACTED · 3% INFERRED · 0% AMBIGUOUS · INFERRED: 17 edges (avg confidence: 0.85)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `d6a8c480`
+- Built from commit: `53ee89ba`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -21,9 +21,9 @@
 - FHIRString
 - Server
 - file_spike_spike1_proto_mini_fhir_proto_rawDescGZIP
-- search_index_test.go
+- spike4_search_index/search_index_test.go
 - MiniPatient
-- helpers.go
+- time.Time
 - FHIRDate
 - spike_test.go
 - Extension
@@ -40,6 +40,8 @@
 - github.com/flint-fhir/flint
 - rules/graphify.md
 - workflows/graphify.md
+- postgres/search_index_test.go
+- condition_search_index.go
 
 ## God Nodes (most connected - your core abstractions)
 1. `FHIRString` - 28 edges
@@ -68,11 +70,11 @@
 ## Import Cycles
 - None detected.
 
-## Communities (26 total, 10 thin omitted)
+## Communities (28 total, 10 thin omitted)
 
 ### Community 0 - "store.go"
-Cohesion: 0.13
-Nodes (28): main(), context.Context, database/sql.DB, database/sql.Tx, ResourceInput, SearchIndexes, SpidxDate, SpidxQuantity (+20 more)
+Cohesion: 0.12
+Nodes (30): main(), context.Context, database/sql.DB, database/sql.Tx, ResourceInput, New(), TestServer_Integration(), bulkInsertDates() (+22 more)
 
 ### Community 1 - "testing.T"
 Cohesion: 0.11
@@ -94,13 +96,13 @@ Nodes (11): google.golang.org/protobuf/proto.Message, google.golang.org/protobuf
 Cohesion: 0.11
 Nodes (5): google.golang.org/protobuf/reflect/protoreflect.EnumDescriptor, google.golang.org/protobuf/reflect/protoreflect.EnumNumber, google.golang.org/protobuf/reflect/protoreflect.EnumType, GenderCode, file_spike_spike1_proto_mini_fhir_proto_rawDescGZIP()
 
-### Community 6 - "search_index_test.go"
-Cohesion: 0.27
-Nodes (15): github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto.Patient, SearchIndexes, SpidxDate, SpidxReference, SpidxString, SpidxToken, buildTestPatient(), TestProtoProduceConsume() (+7 more)
+### Community 6 - "spike4_search_index/search_index_test.go"
+Cohesion: 0.41
+Nodes (12): SearchIndexes, SpidxDate, SpidxReference, SpidxString, SpidxToken, assertStringValue(), ExtractPatientIndexes(), findDates() (+4 more)
 
-### Community 8 - "helpers.go"
-Cohesion: 0.18
-Nodes (10): mockString, time.Time, FHIRDateToTime(), NormalizeString(), StringValue(), StringValues(), TestFHIRDateToTime(), TestNormalizeString() (+2 more)
+### Community 8 - "time.Time"
+Cohesion: 0.16
+Nodes (11): mockString, SpidxDate, time.Time, FHIRDateToTime(), NormalizeString(), StringValue(), StringValues(), TestFHIRDateToTime() (+3 more)
 
 ### Community 10 - "spike_test.go"
 Cohesion: 0.50
@@ -130,24 +132,32 @@ Nodes (10): NewProducer(), runDelete(), envOrDefault(), headerMap(), main(), run
 Cohesion: 0.29
 Nodes (6): Architecture, Flint — Open Source FHIR Server on a Data Lake, Key Design Decisions, License, Project Structure, Quick Start
 
+### Community 26 - "postgres/search_index_test.go"
+Cohesion: 0.09
+Nodes (18): ExtractEncounterIndexes(), SearchIndexes, ExtractObservationIndexes(), SearchIndexes, ExtractPatientIndexes(), SearchIndexes, ExtractPractitionerIndexes(), SearchIndexes (+10 more)
+
+### Community 27 - "condition_search_index.go"
+Cohesion: 0.13
+Nodes (15): ExtractConditionIndexes(), SearchIndexes, SpidxQuantity, SpidxReference, SpidxString, SpidxToken, SpidxURI, SpidxDate (+7 more)
+
 ## Knowledge Gaps
-- **12 isolated node(s):** `github.com/flint-fhir/flint`, `writeMedplumBatchInput`, `publishToAutoMQInput`, `Server`, `Store` (+7 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 82 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **17 isolated node(s):** `SpidxToken`, `SpidxString`, `SpidxQuantity`, `SpidxReference`, `SpidxURI` (+12 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 107 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
 - **10 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `TestServer_Integration()` connect `store.go` to `testing.T`?**
-  _High betweenness centrality (0.099) - this node is a cross-community bridge._
-- **Why does `Server` connect `Server` to `store.go`, `Producer`?**
-  _High betweenness centrality (0.090) - this node is a cross-community bridge._
+  _High betweenness centrality (0.117) - this node is a cross-community bridge._
 - **Why does `New()` connect `store.go` to `testing.T`, `NewProducer`?**
-  _High betweenness centrality (0.084) - this node is a cross-community bridge._
-- **What connects `github.com/flint-fhir/flint`, `writeMedplumBatchInput`, `publishToAutoMQInput` to the rest of the system?**
-  _12 weakly-connected nodes found - possible documentation gaps or missing edges._
+  _High betweenness centrality (0.094) - this node is a cross-community bridge._
+- **Why does `Server` connect `Server` to `store.go`, `Producer`?**
+  _High betweenness centrality (0.089) - this node is a cross-community bridge._
+- **What connects `SpidxToken`, `SpidxString`, `SpidxQuantity` to the rest of the system?**
+  _17 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `store.go` be split into smaller, more focused modules?**
-  _Cohesion score 0.13277310924369748 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.11861861861861862 - nodes in this community are weakly interconnected._
 - **Should `testing.T` be split into smaller, more focused modules?**
   _Cohesion score 0.11494252873563218 - nodes in this community are weakly interconnected._
 - **Should `FHIRString` be split into smaller, more focused modules?**
