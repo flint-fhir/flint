@@ -158,11 +158,22 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		var idx *postgres.SearchIndexes
+		if extractor, ok := s.extractors[resType]; ok {
+			var extractErr error
+			idx, extractErr = extractor(tenant, resID, protoBytes)
+			if extractErr != nil {
+				s.logger.Warn("index extraction failed in bundle, storing without indexes",
+					"type", resType, "id", resID, "error", extractErr)
+			}
+		}
+
 		inputs = append(inputs, postgres.ResourceInput{
 			TenantID:      tenant,
 			ResType:       resType,
 			ResID:         resID,
 			ResourceProto: protoBytes,
+			SearchIndexes: idx,
 		})
 
 		status := "200 OK"

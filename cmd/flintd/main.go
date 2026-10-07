@@ -14,7 +14,11 @@ import (
 
 	_ "github.com/lib/pq"
 
+	condpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/condition_go_proto"
+	encpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/encounter_go_proto"
+	obspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto"
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
+	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
 
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store/postgres"
@@ -45,6 +49,10 @@ func main() {
 
 	// Register known FHIR resource types
 	srv.RegisterResourceType("Patient", &patpb.Patient{})
+	srv.RegisterResourceType("Condition", &condpb.Condition{})
+	srv.RegisterResourceType("Encounter", &encpb.Encounter{})
+	srv.RegisterResourceType("Observation", &obspb.Observation{})
+	srv.RegisterResourceType("Practitioner", &pracpb.Practitioner{})
 
 	addr := os.Getenv("FLINT_ADDR")
 	if addr == "" {

@@ -17,7 +17,11 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	dtpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto"
+	condpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/condition_go_proto"
+	encpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/encounter_go_proto"
+	obspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto"
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
+	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
 
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store/postgres"
@@ -48,6 +52,10 @@ func TestServer_Integration(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	srv := server.New(store, logger)
 	srv.RegisterResourceType("Patient", &patpb.Patient{})
+	srv.RegisterResourceType("Condition", &condpb.Condition{})
+	srv.RegisterResourceType("Encounter", &encpb.Encounter{})
+	srv.RegisterResourceType("Observation", &obspb.Observation{})
+	srv.RegisterResourceType("Practitioner", &pracpb.Practitioner{})
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 
@@ -329,6 +337,143 @@ func TestServer_Integration(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != 400 {
 			t.Errorf("expected 400, got %d", resp.StatusCode)
+		}
+	})
+
+	t.Run("POST Condition extracts index and is searchable by code", func(t *testing.T) {
+		condJSON := `{
+			"resourceType": "Condition",
+			"id": {"value": "post-cond-1"},
+			"code": {
+				"coding": [{
+					"system": {"value": "http://snomed.info/sct"},
+					"code": {"value": "44054006"}
+				}]
+			}
+		}`
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api/Condition", "application/fhir+json", strings.NewReader(condJSON))
+		if err != nil {
+			t.Fatalf("POST Condition: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 201 {
+			t.Fatalf("expected 201, got %d", resp.StatusCode)
+		}
+
+		// Search Condition by code
+		searchResp, err := http.Get(ts.URL + "/fhir/r4/test-api/Condition?code=44054006")
+		if err != nil {
+			t.Fatalf("search Condition: %v", err)
+		}
+		defer searchResp.Body.Close()
+		if searchResp.StatusCode != 200 {
+			t.Fatalf("search status: %d", searchResp.StatusCode)
+		}
+		var bundle map[string]any
+		json.NewDecoder(searchResp.Body).Decode(&bundle)
+		if bundle["total"].(float64) != 1 {
+			t.Errorf("expected total 1, got %v", bundle["total"])
+		}
+	})
+
+	t.Run("POST Encounter extracts index and is searchable by class", func(t *testing.T) {
+		encJSON := `{
+			"resourceType": "Encounter",
+			"id": {"value": "post-enc-1"},
+			"class": {
+				"system": {"value": "http://terminology.hl7.org/CodeSystem/v3-ActCode"},
+				"code": {"value": "AMB"}
+			}
+		}`
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api/Encounter", "application/fhir+json", strings.NewReader(encJSON))
+		if err != nil {
+			t.Fatalf("POST Encounter: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 201 {
+			t.Fatalf("expected 201, got %d", resp.StatusCode)
+		}
+
+		// Search Encounter by class
+		searchResp, err := http.Get(ts.URL + "/fhir/r4/test-api/Encounter?class=AMB")
+		if err != nil {
+			t.Fatalf("search Encounter: %v", err)
+		}
+		defer searchResp.Body.Close()
+		if searchResp.StatusCode != 200 {
+			t.Fatalf("search status: %d", searchResp.StatusCode)
+		}
+		var bundle map[string]any
+		json.NewDecoder(searchResp.Body).Decode(&bundle)
+		if bundle["total"].(float64) != 1 {
+			t.Errorf("expected total 1, got %v", bundle["total"])
+		}
+	})
+
+	t.Run("POST Observation extracts index and is searchable by code", func(t *testing.T) {
+		obsJSON := `{
+			"resourceType": "Observation",
+			"id": {"value": "post-obs-1"},
+			"code": {
+				"coding": [{
+					"system": {"value": "http://loinc.org"},
+					"code": {"value": "8867-4"}
+				}]
+			}
+		}`
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api/Observation", "application/fhir+json", strings.NewReader(obsJSON))
+		if err != nil {
+			t.Fatalf("POST Observation: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 201 {
+			t.Fatalf("expected 201, got %d", resp.StatusCode)
+		}
+
+		// Search Observation by code
+		searchResp, err := http.Get(ts.URL + "/fhir/r4/test-api/Observation?code=8867-4")
+		if err != nil {
+			t.Fatalf("search Observation: %v", err)
+		}
+		defer searchResp.Body.Close()
+		if searchResp.StatusCode != 200 {
+			t.Fatalf("search status: %d", searchResp.StatusCode)
+		}
+		var bundle map[string]any
+		json.NewDecoder(searchResp.Body).Decode(&bundle)
+		if bundle["total"].(float64) != 1 {
+			t.Errorf("expected total 1, got %v", bundle["total"])
+		}
+	})
+
+	t.Run("POST Practitioner extracts index and is searchable by family", func(t *testing.T) {
+		pracJSON := `{
+			"resourceType": "Practitioner",
+			"id": {"value": "post-prac-1"},
+			"name": [{"family": {"value": "House"}}]
+		}`
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api/Practitioner", "application/fhir+json", strings.NewReader(pracJSON))
+		if err != nil {
+			t.Fatalf("POST Practitioner: %v", err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 201 {
+			t.Fatalf("expected 201, got %d", resp.StatusCode)
+		}
+
+		// Search Practitioner by family
+		searchResp, err := http.Get(ts.URL + "/fhir/r4/test-api/Practitioner?family=house")
+		if err != nil {
+			t.Fatalf("search Practitioner: %v", err)
+		}
+		defer searchResp.Body.Close()
+		if searchResp.StatusCode != 200 {
+			t.Fatalf("search status: %d", searchResp.StatusCode)
+		}
+		var bundle map[string]any
+		json.NewDecoder(searchResp.Body).Decode(&bundle)
+		if bundle["total"].(float64) != 1 {
+			t.Errorf("expected total 1, got %v", bundle["total"])
 		}
 	})
 
