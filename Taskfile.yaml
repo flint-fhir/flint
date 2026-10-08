@@ -86,10 +86,28 @@ tasks:
       - go test ./ingest/workflow/ -v -count=1
 
   build:
-    desc: Build flintd server and worker binaries
+    desc: Build flintd server, worker, and loadtest binaries
     cmds:
       - go build -o bin/flintd ./cmd/flintd/
       - go build -o bin/worker ./cmd/worker/
+      - go build -o bin/loadtest ./cmd/loadtest/
+
+  bench-store:
+    desc: Run load test against Postgres operational store directly
+    deps: [build]
+    cmds:
+      - ./bin/loadtest -target=store -duration=30s -workers=40 -bundle-size=5
+
+  bench-http:
+    desc: Run load test against Flint FHIR HTTP server
+    deps: [build]
+    cmds:
+      - ./bin/loadtest -target=http -url=http://localhost:8082/fhir/r4/loadtest -duration=30s -workers=50 -bundle-size=5
+
+  test-recovery:
+    desc: Run AutoMQ Table Topic restart recovery E2E test
+    cmds:
+      - go run ./cmd/e2e recovery
 
   run:
     desc: Run flintd locally (connect to k3d Postgres)
