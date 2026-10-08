@@ -1,6 +1,6 @@
 module github.com/flint-fhir/flint
 
-go 1.26.0
+go 1.26.1
 
 require (
 	github.com/google/fhir/go v0.7.4
@@ -12,6 +12,7 @@ require (
 )
 
 require (
+	github.com/ebitengine/purego v0.11.0-alpha.6.0.20260707033313-5f49e7c49322 // indirect
 	github.com/facebookgo/clock v0.0.0-20150410010913-600d898af40a // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/mock v1.6.0 // indirect
@@ -36,4 +37,5 @@ require (
 	google.golang.org/genproto/googleapis/api v0.0.0-20261005182115-fad411399dd8 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261005182115-fad411399dd8 // indirect
 	google.golang.org/grpc v1.83.2 // indirect
+	hegel.dev/go/hegel v0.9.17 // indirect
 )
