@@ -62,24 +62,29 @@ type Message struct {
 	Op        string // "U" (upsert) or "D" (delete)
 }
 
+// BuildRecord creates a kafka Record from a Message, attaching CDC headers and partition key.
+func (p *Producer) BuildRecord(msg Message) *kgo.Record {
+	topic := p.TopicPrefix + msg.ResType
+	return &kgo.Record{
+		Topic: topic,
+		Key:   []byte(msg.ResID),
+		Value: msg.ProtoData,
+		Headers: []kgo.RecordHeader{
+			{Key: "tenant_id", Value: []byte(msg.TenantID)},
+			{Key: "res_type", Value: []byte(msg.ResType)},
+			{Key: "res_id", Value: []byte(msg.ResID)},
+			{Key: "op", Value: []byte(msg.Op)},
+		},
+	}
+}
+
 // Publish sends a batch of FHIR resource messages to their respective topics.
 // Each resource type maps to a separate topic (TopicPrefix + ResType).
 // Messages are keyed by ResID for partition locality.
 func (p *Producer) Publish(ctx context.Context, messages []Message) error {
 	records := make([]*kgo.Record, len(messages))
 	for i, msg := range messages {
-		topic := p.TopicPrefix + msg.ResType
-		records[i] = &kgo.Record{
-			Topic: topic,
-			Key:   []byte(msg.ResID),
-			Value: msg.ProtoData,
-			Headers: []kgo.RecordHeader{
-				{Key: "tenant_id", Value: []byte(msg.TenantID)},
-				{Key: "res_type", Value: []byte(msg.ResType)},
-				{Key: "res_id", Value: []byte(msg.ResID)},
-				{Key: "op", Value: []byte(msg.Op)},
-			},
-		}
+		records[i] = p.BuildRecord(msg)
 	}
 
 	results := p.client.ProduceSync(ctx, records...)

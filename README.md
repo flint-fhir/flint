@@ -197,7 +197,61 @@ Content-Type: application/fhir+json
 * **Create**: `POST /fhir/r4/{tenant}/{resourceType}`
 * **Search**: `GET /fhir/r4/{tenant}/{resourceType}?{searchParams}&_count=20&_offset=0`
 * **CapabilityStatement**: `GET /fhir/r4/{tenant}/metadata`
-* **SMART on FHIR 2.0**: `GET /.well-known/smart-configuration`
+* **SMART Discovery**: `GET /fhir/r4/{tenant}/.well-known/smart-configuration`
+
+---
+
+## SMART on FHIR v2 & Identity Architecture
+
+Flint functions strictly as a high-performance **FHIR Resource Server (RS)**, delegating user authentication, password hashing, and login UI to OpenID Connect (OIDC) Identity Providers.
+
+```mermaid
+flowchart LR
+    Client["SMART on FHIR App\n(EHR / Patient App)"]
+    IdP["Identity Provider / Auth Server\n(Zitadel / Keycloak / Okta / Azure AD)"]
+    Flint["Flint FHIR Server\n(Resource Server)"]
+
+    Client -->|1. Authenticate & Request Scopes| IdP
+    IdP -->|2. Issue Signed Bearer JWT| Client
+    Client -->|3. FHIR Request + Bearer Token| Flint
+    Flint -->|4. Verify JWKS & Scopes via TokenValidator| Flint
+    Flint -->|5. Authorized FHIR Bundle| Client
+```
+
+### Decoupled `TokenValidator` Interface (`pkg/auth`)
+Flint protects endpoints through a pluggable interface:
+* **`OIDCValidator`**: Standard OIDC and JWKS caching with RS256/ES256 verification (compatible with Okta, Azure AD, Keycloak, Auth0).
+* **`ZitadelValidator`**: Specialized decorator mapping Zitadel organization domains to Flint tenant schemas, user metadata to patient IDs, and project roles to clinical SMART scopes.
+* **`MockTokenValidator`**: In-memory RSA keypair signer and validator enabling sub-millisecond, zero-dependency unit tests.
+
+### Security Guarantees
+1. **SMART v1 & v2 Scopes**: Granular action enforcement (`c`, `r`, `u`, `d`, `s`) across patient, user, and system tiers.
+2. **Tenant Boundary Enforcement**: Rejects cross-tenant token access with HTTP 403.
+3. **Patient Compartment Isolation**: When a token carries a `patient_id` launch claim:
+   * Reading records of another patient returns `403 Forbidden`.
+   * Queries with mismatched `patient` or `subject` parameters return `403 Forbidden`.
+
+### Environment Configuration
+```bash
+# Enable SMART on FHIR with Zitadel
+FLINT_OIDC_ISSUER="https://auth.azra.dev"
+FLINT_OIDC_AUDIENCE="flint-api"
+FLINT_AUTH_PROVIDER="zitadel"
+FLINT_ZITADEL_TENANT_FROM_DOMAIN="true"
+FLINT_SMART_AUTH_URL="https://auth.azra.dev/oauth/v2/authorize"
+FLINT_SMART_TOKEN_URL="https://auth.azra.dev/oauth/v2/token"
+```
+
+---
+
+## Property-Based Testing (via Hegel)
+
+Flint leverages [Hegel](https://hegel.dev) (`hegel.dev/go/hegel`) for type-driven, generative property-based testing. Instead of checking only human-authored table cases, Hegel draws inputs across formal grammars and shrinks failures to minimal counterexamples:
+
+* **Scope Grammar Invariance**: Validates that all strings matching the formal SMART v1/v2 grammar parse deterministically.
+* **Query Filter Invariance**: Asserts that fine-grained query filters (`?category=vital-signs`) never alter base resource permissions.
+* **Wildcard Monotonicity**: Asserts that `*` resource scopes consistently match all randomly generated resource names.
+* **No-Panic Invariance**: Fuzzes the parser with arbitrary inputs and unicode sequences to guarantee zero crashes or hangs.
 
 ---
 
@@ -216,14 +270,19 @@ flint/
 │   ├── k3d/              # Local k3d cluster configuration
 │   └── k8s/              # Kubernetes manifests (Postgres, Temporal, AutoMQ StatefulSet, Iceberg)
 ├── fhir/r4/              # Machine-readable HL7 FHIR R4 SearchParameter definitions
-├── gen/go/store/postgres/# proto2type generated search index extractors
+├── gen/go/
+│   ├── flint/auth/v1/    # Protobuf-generated security context and discovery types
+│   └── store/postgres/   # proto2type generated search index extractors
 ├── ingest/
 │   ├── activity/         # Temporal activities (WritePostgresBatch, AutoMQ CDC)
 │   └── workflow/         # Temporal IngestFHIRBundle workflow
 ├── pkg/
+│   ├── auth/             # TokenValidator, OIDC/Zitadel, and Hegel property tests
 │   └── fhirutil/         # Protobuf nil-safe accessors & helpers
-├── proto/                # Vendored google/fhir R4 protocol buffers
-├── server/               # stdlib HTTP router, Bundle engine, SMART discovery
+├── proto/
+│   ├── flint/auth/v1/    # Canonical Protobuf schemas for auth & security context
+│   └── google/fhir/      # Vendored google/fhir R4 protocol buffers
+├── server/               # stdlib HTTP router, Bundle engine, SMART discovery, auth middleware
 ├── store/postgres/       # Operational store, DDL migrations, spidx_* tables
 ├── flake.nix             # Hermetic Nix development environment
 ├── lefthook.yml          # Git pre-commit & pre-push hooks
