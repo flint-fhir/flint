@@ -142,4 +142,3 @@ func (a *Activities) PublishToAutoMQ(ctx context.Context, input PublishToAutoMQI
 	)
 	return nil
 }
-

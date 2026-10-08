@@ -32,15 +32,15 @@ import (
 )
 
 type Config struct {
-	Target      string        // "http", "store", "temporal"
-	URL         string        // e.g. "http://localhost:8080/fhir/r4/loadtest"
-	Rate        int           // target bundles/sec (0 = unthrottled benchmark)
-	Duration    time.Duration // test duration
-	Workers     int           // number of concurrent workers
-	BundleSize  int           // number of entries per bundle (1-5)
-	Tenant      string        // tenant ID
-	PGDSN       string        // Postgres DSN (for store target)
-	TemporalAddr string       // Temporal host:port (for temporal target)
+	Target       string        // "http", "store", "temporal"
+	URL          string        // e.g. "http://localhost:8080/fhir/r4/loadtest"
+	Rate         int           // target bundles/sec (0 = unthrottled benchmark)
+	Duration     time.Duration // test duration
+	Workers      int           // number of concurrent workers
+	BundleSize   int           // number of entries per bundle (1-5)
+	Tenant       string        // tenant ID
+	PGDSN        string        // Postgres DSN (for store target)
+	TemporalAddr string        // Temporal host:port (for temporal target)
 }
 
 type Metrics struct {
@@ -51,8 +51,8 @@ type Metrics struct {
 	status5xx      atomic.Int64
 	totalErrors    atomic.Int64
 
-	mu         sync.Mutex
-	latencies  []time.Duration
+	mu        sync.Mutex
+	latencies []time.Duration
 }
 
 func (m *Metrics) recordLatency(d time.Duration) {

@@ -8,15 +8,15 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
-	pb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
-	dtpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto"
 	codepb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/codes_go_proto"
+	dtpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto"
+	pb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 )
 
 func TestRealGoogleFHIRPatientMarshal(t *testing.T) {
 	// Build a Patient using the REAL google/fhir proto types
 	patient := &pb.Patient{
-		Id: &dtpb.Id{Value: "synthea-abc123"},
+		Id:     &dtpb.Id{Value: "synthea-abc123"},
 		Active: &dtpb.Boolean{Value: true},
 		Name: []*dtpb.HumanName{
 			{

@@ -22,6 +22,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/known/anypb"
 
+	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -31,9 +32,10 @@ type Server struct {
 	logger *slog.Logger
 	// protoRegistry maps FHIR resource type names to proto message descriptors.
 	// Used to unmarshal proto bytes back to proto messages for JSON conversion.
-	protoRegistry map[string]protoreflect.MessageDescriptor
-	extractors    map[string]postgres.IndexExtractorFunc
-	smartConfig   *SMARTConfig
+	protoRegistry  map[string]protoreflect.MessageDescriptor
+	extractors     map[string]postgres.IndexExtractorFunc
+	smartConfig    *SMARTConfig
+	tokenValidator auth.TokenValidator
 }
 
 // New creates a new FHIR server.
@@ -44,6 +46,12 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 		protoRegistry: make(map[string]protoreflect.MessageDescriptor),
 		extractors:    postgres.DefaultIndexExtractors(),
 	}
+}
+
+// SetTokenValidator configures the SMART on FHIR bearer token validator.
+// When set, all non-public FHIR endpoints require valid tokens and matching scopes.
+func (s *Server) SetTokenValidator(v auth.TokenValidator) {
+	s.tokenValidator = v
 }
 
 // RegisterResourceType registers a proto message type for a FHIR resource type.
@@ -69,7 +77,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/metadata", s.handleMetadata)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/smart-configuration", s.handleSMARTConfig)
 
-	return mux
+	return s.authMiddleware(mux)
 }
 
 // handleRead handles GET /{resourceType}/{id} — read a single resource.

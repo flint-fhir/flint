@@ -34,15 +34,15 @@ func TestProtojsonMarshalOutput(t *testing.T) {
 				},
 			},
 		},
-		Gender:    GenderCode_MALE,
-		BirthDate: &FHIRDate{Value: "1990-01-15"},
+		Gender:          GenderCode_MALE,
+		BirthDate:       &FHIRDate{Value: "1990-01-15"},
 		DeceasedBoolean: &FHIRBoolean{Value: false},
 	}
 
 	// Marshal with protojson (what google/fhir would produce)
 	marshaler := protojson.MarshalOptions{
-		Indent:          "  ",
-		UseProtoNames:   true,
+		Indent:        "  ",
+		UseProtoNames: true,
 	}
 	protoJSON, err := marshaler.Marshal(patient)
 	if err != nil {
@@ -266,7 +266,7 @@ func TestRoundTripFidelity(t *testing.T) {
 				Given:  []*FHIRString{{Value: "Miles"}, {Value: "Edward"}},
 			},
 		},
-		Gender:    GenderCode_MALE,
+		Gender: GenderCode_MALE,
 		BirthDate: &FHIRDate{
 			Value: "1962-06-15",
 			Extension: []*Extension{

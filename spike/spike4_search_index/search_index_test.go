@@ -249,7 +249,7 @@ func TestExtractPatientIndexes_RealProto(t *testing.T) {
 		},
 		BirthDate: &dtpb.Date{
 			ValueUs:   631152000000000, // 1990-01-01 00:00:00 UTC in microseconds
-			Precision: 3,              // DAY
+			Precision: 3,               // DAY
 		},
 		Address: []*dtpb.Address{
 			{

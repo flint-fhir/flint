@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package flint.auth.v1;
+
+option go_package = "github.com/flint-fhir/flint/gen/go/flint/auth/v1;authv1";
+
+// Action represents clinical CRUD/Search permissions defined in SMART on FHIR v2.
+enum Action {
+  ACTION_UNSPECIFIED = 0;
+  ACTION_CREATE = 1; // 'c' (create)
+  ACTION_READ = 2;   // 'r' (read)
+  ACTION_UPDATE = 3; // 'u' (update)
+  ACTION_DELETE = 4; // 'd' (delete)
+  ACTION_SEARCH = 5; // 's' (search)
+}
+
+// ScopeContext identifies the authorization tier of a SMART on FHIR scope.
+enum ScopeContext {
+  SCOPE_CONTEXT_UNSPECIFIED = 0;
+  SCOPE_CONTEXT_PATIENT = 1; // patient/
+  SCOPE_CONTEXT_USER = 2;    // user/
+  SCOPE_CONTEXT_SYSTEM = 3;  // system/
+}
+
+// SmartScope represents a structured SMART on FHIR v1/v2 scope.
+message SmartScope {
+  string raw = 1;
+  ScopeContext context = 2;
+  string resource_type = 3; // e.g. "Observation", "Patient", or "*"
+  repeated Action actions = 4;
+}
+
+// SecurityContext contains the verified identity, tenant boundary,
+// and clinical authorization context extracted from an authenticated token.
+// Can be serialized across Temporal workflows and AutoMQ audit events.
+message SecurityContext {
+  string subject = 1;               // sub claim (user, client, or service account ID)
+  string tenant_id = 2;             // multi-tenant schema isolation boundary
+  string patient_id = 3;            // patient launch context claim (if restricted)
+  string encounter_id = 4;          // encounter launch context claim (if restricted)
+  repeated SmartScope scopes = 5;   // parsed SMART scopes
+  map<string, string> claims = 6;   // token claims
+  string raw_token = 7;             // original bearer token (optional/redactable)
+}
+
+// SmartConfiguration represents the SMART App Launch discovery document
+// served at /.well-known/smart-configuration.
+message SmartConfiguration {
+  string issuer = 1;
+  string authorization_endpoint = 2;
+  string token_endpoint = 3;
+  repeated string token_endpoint_auth_methods_supported = 4;
+  repeated string grant_types_supported = 5;
+  repeated string scopes_supported = 6;
+  repeated string response_types_supported = 7;
+  repeated string code_challenge_methods_supported = 8;
+  repeated string capabilities = 9;
+}

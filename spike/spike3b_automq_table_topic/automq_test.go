@@ -193,10 +193,10 @@ func TestFlattenVsNested(t *testing.T) {
 func TestAutoMQTableTopicConfig(t *testing.T) {
 	config := map[string]string{
 		// Topic-level configuration
-		"automq.table.topic.enable":                "true",
-		"automq.table.topic.convert.value.type":    "by_schema_id",
-		"automq.table.topic.iceberg.catalog.type":  "rest",
-		"automq.table.topic.iceberg.catalog.uri":   "http://iceberg-catalog:8181",
+		"automq.table.topic.enable":                    "true",
+		"automq.table.topic.convert.value.type":        "by_schema_id",
+		"automq.table.topic.iceberg.catalog.type":      "rest",
+		"automq.table.topic.iceberg.catalog.uri":       "http://iceberg-catalog:8181",
 		"automq.table.topic.iceberg.catalog.warehouse": "s3://flint-lake/warehouse",
 
 		// Schema Registry

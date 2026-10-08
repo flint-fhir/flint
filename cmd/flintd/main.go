@@ -20,6 +20,7 @@ import (
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
 
+	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store/postgres"
 )
@@ -53,6 +54,52 @@ func main() {
 	srv.RegisterResourceType("Encounter", &encpb.Encounter{})
 	srv.RegisterResourceType("Observation", &obspb.Observation{})
 	srv.RegisterResourceType("Practitioner", &pracpb.Practitioner{})
+
+	// Optional SMART on FHIR Auth & OIDC/Zitadel configuration
+	if oidcIssuer := os.Getenv("FLINT_OIDC_ISSUER"); oidcIssuer != "" {
+		oidcAudience := os.Getenv("FLINT_OIDC_AUDIENCE")
+		idpProvider := os.Getenv("FLINT_AUTH_PROVIDER") // "zitadel" or "oidc"
+
+		var validator auth.TokenValidator
+		if idpProvider == "zitadel" {
+			zitadelVal, err := auth.NewZitadelValidator(auth.ZitadelConfig{
+				OIDCConfig: auth.OIDCConfig{
+					Issuer:   oidcIssuer,
+					Audience: oidcAudience,
+				},
+				TenantFromOrgDomain: os.Getenv("FLINT_ZITADEL_TENANT_FROM_DOMAIN") == "true",
+			})
+			if err != nil {
+				logger.Error("init zitadel validator", "error", err)
+				os.Exit(1)
+			}
+			validator = zitadelVal
+			logger.Info("SMART on FHIR auth enabled (provider: zitadel)", "issuer", oidcIssuer)
+		} else {
+			oidcVal, err := auth.NewOIDCValidator(auth.OIDCConfig{
+				Issuer:   oidcIssuer,
+				Audience: oidcAudience,
+			})
+			if err != nil {
+				logger.Error("init oidc validator", "error", err)
+				os.Exit(1)
+			}
+			validator = oidcVal
+			logger.Info("SMART on FHIR auth enabled (provider: oidc)", "issuer", oidcIssuer)
+		}
+
+		srv.SetTokenValidator(validator)
+
+		authURL := os.Getenv("FLINT_SMART_AUTH_URL")
+		tokenURL := os.Getenv("FLINT_SMART_TOKEN_URL")
+		if authURL != "" && tokenURL != "" {
+			srv.SetSMARTConfig(server.SMARTConfig{
+				Issuer:                oidcIssuer,
+				AuthorizationEndpoint: authURL,
+				TokenEndpoint:         tokenURL,
+			})
+		}
+	}
 
 	addr := os.Getenv("FLINT_ADDR")
 	if addr == "" {

@@ -1,0 +1,12 @@
+version: v2
+
+plugins:
+  - local: protoc-gen-go
+    out: .
+    opt:
+      - module=github.com/flint-fhir/flint
+
+inputs:
+  - directory: .
+    paths:
+      - proto/flint/auth/v1/auth.proto
