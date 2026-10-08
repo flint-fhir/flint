@@ -1,0 +1,16 @@
+version: "2"
+
+run:
+  timeout: 5m
+  exclude-dirs:
+    - gen
+    - spike
+
+linters:
+  enable:
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+  disable:
+    - errcheck
