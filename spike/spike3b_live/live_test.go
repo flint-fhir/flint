@@ -7,16 +7,16 @@ package spike3b_live
 
 import (
 	"context"
-	"testing"
 	"os"
+	"testing"
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 	"google.golang.org/protobuf/proto"
 
-	pb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
-	dtpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto"
 	codepb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/codes_go_proto"
+	dtpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto"
+	pb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 )
 
 const (

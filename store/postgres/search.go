@@ -17,12 +17,12 @@ type SearchResult struct {
 type SearchParams struct {
 	TenantID   string
 	ResType    string
-	Strings    map[string]string   // sp_name → value (prefix match)
-	Tokens     map[string]string   // sp_name → value (exact or system|value)
-	Dates      map[string]DateOp   // sp_name → date operation
-	References map[string]string   // sp_name → targetType/targetId
-	Count      int                 // _count (default 20, max 1000)
-	Offset     int                 // _offset (default 0)
+	Strings    map[string]string // sp_name → value (prefix match)
+	Tokens     map[string]string // sp_name → value (exact or system|value)
+	Dates      map[string]DateOp // sp_name → date operation
+	References map[string]string // sp_name → targetType/targetId
+	Count      int               // _count (default 20, max 1000)
+	Offset     int               // _offset (default 0)
 }
 
 // DateOp represents a date search operation.

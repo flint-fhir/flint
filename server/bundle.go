@@ -23,8 +23,8 @@ type bundleRequest struct {
 
 // bundleEntry is a single entry in a FHIR Bundle.
 type bundleEntry struct {
-	FullURL  string          `json:"fullUrl,omitempty"`
-	Resource json.RawMessage `json:"resource"`
+	FullURL  string              `json:"fullUrl,omitempty"`
+	Resource json.RawMessage     `json:"resource"`
 	Request  *bundleEntryRequest `json:"request,omitempty"`
 }
 

@@ -61,9 +61,9 @@ func main() {
 
 	// Create activities with all dependencies
 	activities := &activity.Activities{
-		Store:           store,
-		Producer:        producer,
-		Logger:          logger,
+		Store:    store,
+		Producer: producer,
+		Logger:   logger,
 		// IndexExtractors populated with Big 5 proto2type extractors
 		IndexExtractors: postgres.DefaultIndexExtractors(),
 	}
