@@ -29,6 +29,9 @@ func main() {
 		case "update":
 			runUpdate()
 			return
+		case "recovery":
+			runRecovery()
+			return
 		}
 	}
 	runPipeline()
