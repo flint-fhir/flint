@@ -199,6 +199,26 @@ Content-Type: application/fhir+json
 * **CapabilityStatement**: `GET /fhir/r4/{tenant}/metadata`
 * **SMART Discovery**: `GET /fhir/r4/{tenant}/.well-known/smart-configuration`
 
+### Advanced FHIR Search Engine
+Flint implements high-performance relational search against the covering `spidx_*` index tables:
+* **Date Range Queries**: Supports FHIR prefix comparators (`eq`, `ne`, `lt`, `le`, `gt`, `ge`, `sa`, `eb`, `ap`) over `spidx_date` timestamps:
+  ```http
+  GET /fhir/r4/tenant-a/Patient?birthdate=ge1980-01-01
+  ```
+* **Quantity Queries**: Supports comparator prefixes (`gt`, `lt`, `ge`, `le`, `eq`), systems, and units over `spidx_quantity`:
+  ```http
+  GET /fhir/r4/tenant-a/Observation?value-quantity=gt70|http://unitsofmeasure.org|kg
+  ```
+* **Include & Reverse Include**: Resolves target/source references across tables with bundle `"search": {"mode": "match" | "include"}` annotations:
+  ```http
+  GET /fhir/r4/tenant-a/Observation?code=29463-7&_include=Observation:patient
+  GET /fhir/r4/tenant-a/Patient?family=smith&_revinclude=Observation:patient
+  ```
+* **Chained Searches**: Joins reference indexes with target parameter tables:
+  ```http
+  GET /fhir/r4/tenant-a/Observation?patient.name=smith
+  ```
+
 ---
 
 ## SMART on FHIR v2 & Identity Architecture
@@ -250,8 +270,8 @@ Flint leverages [Hegel](https://hegel.dev) (`hegel.dev/go/hegel`) for type-drive
 
 * **Scope Grammar Invariance**: Validates that all strings matching the formal SMART v1/v2 grammar parse deterministically.
 * **Query Filter Invariance**: Asserts that fine-grained query filters (`?category=vital-signs`) never alter base resource permissions.
-* **Wildcard Monotonicity**: Asserts that `*` resource scopes consistently match all randomly generated resource names.
-* **No-Panic Invariance**: Fuzzes the parser with arbitrary inputs and unicode sequences to guarantee zero crashes or hangs.
+* **Search Parameter Invariance**: Verifies parser prefix and grammar preservation across generated ISO date formats, decimal quantities, units, and `_include`/`_revinclude` strings.
+* **No-Panic Invariance**: Fuzzes parsers with arbitrary inputs and unicode sequences to guarantee zero crashes or hangs.
 
 ---
 

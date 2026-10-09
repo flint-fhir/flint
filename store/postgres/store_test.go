@@ -223,7 +223,7 @@ func TestStore_Integration(t *testing.T) {
 		}
 
 		// Page 1: count=2, offset=0
-		results, total, err := store.Search(ctx, postgres.SearchParams{
+		sr1, err := store.Search(ctx, postgres.SearchParams{
 			TenantID: "test-tenant",
 			ResType:  "Patient",
 			Strings:  map[string]string{"family": "pagination"},
@@ -233,16 +233,16 @@ func TestStore_Integration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("search page 1: %v", err)
 		}
-		if total != 5 {
-			t.Errorf("expected total 5, got %d", total)
+		if sr1.Total != 5 {
+			t.Errorf("expected total 5, got %d", sr1.Total)
 		}
-		if len(results) != 2 {
-			t.Errorf("expected 2 results, got %d", len(results))
+		if len(sr1.Matches) != 2 {
+			t.Errorf("expected 2 results, got %d", len(sr1.Matches))
 		}
-		t.Logf("Page 1: total=%d, results=%d, first=%s", total, len(results), results[0].ResID)
+		t.Logf("Page 1: total=%d, results=%d, first=%s", sr1.Total, len(sr1.Matches), sr1.Matches[0].ResID)
 
 		// Page 2: count=2, offset=2
-		results2, total2, err := store.Search(ctx, postgres.SearchParams{
+		sr2, err := store.Search(ctx, postgres.SearchParams{
 			TenantID: "test-tenant",
 			ResType:  "Patient",
 			Strings:  map[string]string{"family": "pagination"},
@@ -252,20 +252,20 @@ func TestStore_Integration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("search page 2: %v", err)
 		}
-		if total2 != 5 {
-			t.Errorf("page 2 total should still be 5, got %d", total2)
+		if sr2.Total != 5 {
+			t.Errorf("page 2 total should still be 5, got %d", sr2.Total)
 		}
-		if len(results2) != 2 {
-			t.Errorf("expected 2 results, got %d", len(results2))
+		if len(sr2.Matches) != 2 {
+			t.Errorf("expected 2 results, got %d", len(sr2.Matches))
 		}
 		// Verify pages don't overlap
-		if results[0].ResID == results2[0].ResID {
-			t.Errorf("pages overlap: both start with %s", results[0].ResID)
+		if sr1.Matches[0].ResID == sr2.Matches[0].ResID {
+			t.Errorf("pages overlap: both start with %s", sr1.Matches[0].ResID)
 		}
-		t.Logf("Page 2: total=%d, results=%d, first=%s", total2, len(results2), results2[0].ResID)
+		t.Logf("Page 2: total=%d, results=%d, first=%s", sr2.Total, len(sr2.Matches), sr2.Matches[0].ResID)
 
 		// Page 3: count=2, offset=4 — should get 1 result
-		results3, _, err := store.Search(ctx, postgres.SearchParams{
+		sr3, err := store.Search(ctx, postgres.SearchParams{
 			TenantID: "test-tenant",
 			ResType:  "Patient",
 			Strings:  map[string]string{"family": "pagination"},
@@ -275,10 +275,10 @@ func TestStore_Integration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("search page 3: %v", err)
 		}
-		if len(results3) != 1 {
-			t.Errorf("last page expected 1 result, got %d", len(results3))
+		if len(sr3.Matches) != 1 {
+			t.Errorf("last page expected 1 result, got %d", len(sr3.Matches))
 		}
-		t.Logf("Page 3: results=%d (last page)", len(results3))
+		t.Logf("Page 3: results=%d (last page)", len(sr3.Matches))
 	})
 
 	// Clean up
