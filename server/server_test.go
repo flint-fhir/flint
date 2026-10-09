@@ -85,6 +85,21 @@ func TestServer_Integration(t *testing.T) {
 	}
 	pat2Bytes, _ := proto.Marshal(pat2)
 
+	obs1 := &obspb.Observation{
+		Id: &dtpb.Id{Value: "api-obs-1"},
+		Subject: &dtpb.Reference{
+			Reference: &dtpb.Reference_PatientId{
+				PatientId: &dtpb.ReferenceId{Value: "api-pat-1"},
+			},
+		},
+		Code: &dtpb.CodeableConcept{
+			Coding: []*dtpb.Coding{
+				{System: &dtpb.Uri{Value: "http://loinc.org"}, Code: &dtpb.Code{Value: "29463-7"}},
+			},
+		},
+	}
+	obs1Bytes, _ := proto.Marshal(obs1)
+
 	inputs := []postgres.ResourceInput{
 		{
 			TenantID:      "test-api",
@@ -95,6 +110,7 @@ func TestServer_Integration(t *testing.T) {
 				Strings: []postgres.SpidxString{
 					{TenantID: "test-api", ResType: "Patient", ResID: "api-pat-1", SpName: "family", SpValue: "smith"},
 					{TenantID: "test-api", ResType: "Patient", ResID: "api-pat-1", SpName: "given", SpValue: "john"},
+					{TenantID: "test-api", ResType: "Patient", ResID: "api-pat-1", SpName: "name", SpValue: "smith"},
 				},
 				Tokens: []postgres.SpidxToken{
 					{TenantID: "test-api", ResType: "Patient", ResID: "api-pat-1", SpName: "identifier", SpSystem: "http://mrn", SpValue: "MRN-100"},
@@ -114,9 +130,28 @@ func TestServer_Integration(t *testing.T) {
 			SearchIndexes: &postgres.SearchIndexes{
 				Strings: []postgres.SpidxString{
 					{TenantID: "test-api", ResType: "Patient", ResID: "api-pat-2", SpName: "family", SpValue: "jones"},
+					{TenantID: "test-api", ResType: "Patient", ResID: "api-pat-2", SpName: "name", SpValue: "jones"},
 				},
 				Tokens: []postgres.SpidxToken{
 					{TenantID: "test-api", ResType: "Patient", ResID: "api-pat-2", SpName: "identifier", SpSystem: "http://mrn", SpValue: "MRN-200"},
+				},
+			},
+		},
+		{
+			TenantID:      "test-api",
+			ResType:       "Observation",
+			ResID:         "api-obs-1",
+			ResourceProto: obs1Bytes,
+			SearchIndexes: &postgres.SearchIndexes{
+				Tokens: []postgres.SpidxToken{
+					{TenantID: "test-api", ResType: "Observation", ResID: "api-obs-1", SpName: "code", SpSystem: "http://loinc.org", SpValue: "29463-7"},
+				},
+				References: []postgres.SpidxReference{
+					{TenantID: "test-api", ResType: "Observation", ResID: "api-obs-1", SpName: "patient", TargetType: "Patient", TargetID: "api-pat-1"},
+					{TenantID: "test-api", ResType: "Observation", ResID: "api-obs-1", SpName: "subject", TargetType: "Patient", TargetID: "api-pat-1"},
+				},
+				Quantities: []postgres.SpidxQuantity{
+					{TenantID: "test-api", ResType: "Observation", ResID: "api-obs-1", SpName: "value-quantity", SpValue: 72.5, SpSystem: "http://unitsofmeasure.org", SpCode: "kg"},
 				},
 			},
 		},
@@ -223,6 +258,154 @@ func TestServer_Integration(t *testing.T) {
 
 	t.Run("Search Patient no results", func(t *testing.T) {
 		resp, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient?family=zzzzzz")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		var bundle map[string]any
+		json.NewDecoder(resp.Body).Decode(&bundle)
+		total := int(bundle["total"].(float64))
+		if total != 0 {
+			t.Errorf("expected total 0, got %d", total)
+		}
+	})
+
+	t.Run("Search Patient by date birthdate=ge1980-01-01", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient?birthdate=ge1980-01-01")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		var bundle map[string]any
+		json.NewDecoder(resp.Body).Decode(&bundle)
+		total := int(bundle["total"].(float64))
+		if total != 1 {
+			t.Errorf("expected total 1, got %d", total)
+		}
+		entries := bundle["entry"].([]any)
+		entry0 := entries[0].(map[string]any)
+		searchMeta := entry0["search"].(map[string]any)
+		if searchMeta["mode"] != "match" {
+			t.Errorf("expected search mode match, got %v", searchMeta["mode"])
+		}
+	})
+
+	t.Run("Search Patient by date birthdate=lt1985-01-01 returns empty", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient?birthdate=lt1985-01-01")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		var bundle map[string]any
+		json.NewDecoder(resp.Body).Decode(&bundle)
+		total := int(bundle["total"].(float64))
+		if total != 0 {
+			t.Errorf("expected total 0, got %d", total)
+		}
+	})
+
+	t.Run("Search Observation with _include=Observation:patient", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/fhir/r4/test-api/Observation?code=29463-7&_include=Observation:patient")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		var bundle map[string]any
+		json.NewDecoder(resp.Body).Decode(&bundle)
+		total := int(bundle["total"].(float64))
+		if total != 1 {
+			t.Errorf("expected total matches 1, got %d", total)
+		}
+		entries := bundle["entry"].([]any)
+		if len(entries) != 2 {
+			t.Fatalf("expected 2 entries (1 match + 1 include), got %d", len(entries))
+		}
+		entry0 := entries[0].(map[string]any)
+		if entry0["search"].(map[string]any)["mode"] != "match" {
+			t.Errorf("expected entry 0 mode match, got %v", entry0["search"])
+		}
+		entry1 := entries[1].(map[string]any)
+		if entry1["search"].(map[string]any)["mode"] != "include" {
+			t.Errorf("expected entry 1 mode include, got %v", entry1["search"])
+		}
+		if entry1["fullUrl"] != "Patient/api-pat-1" {
+			t.Errorf("expected include fullUrl Patient/api-pat-1, got %v", entry1["fullUrl"])
+		}
+	})
+
+	t.Run("Search Patient with _revinclude=Observation:patient", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient?family=smith&_revinclude=Observation:patient")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		var bundle map[string]any
+		json.NewDecoder(resp.Body).Decode(&bundle)
+		total := int(bundle["total"].(float64))
+		if total != 1 {
+			t.Errorf("expected total matches 1, got %d", total)
+		}
+		entries := bundle["entry"].([]any)
+		if len(entries) != 2 {
+			t.Fatalf("expected 2 entries (1 match + 1 revinclude), got %d", len(entries))
+		}
+		entry0 := entries[0].(map[string]any)
+		if entry0["search"].(map[string]any)["mode"] != "match" {
+			t.Errorf("expected entry 0 mode match, got %v", entry0["search"])
+		}
+		entry1 := entries[1].(map[string]any)
+		if entry1["search"].(map[string]any)["mode"] != "include" {
+			t.Errorf("expected entry 1 mode include, got %v", entry1["search"])
+		}
+		if entry1["fullUrl"] != "Observation/api-obs-1" {
+			t.Errorf("expected revinclude fullUrl Observation/api-obs-1, got %v", entry1["fullUrl"])
+		}
+	})
+
+	t.Run("Search Observation with chained param patient.name=smith", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/fhir/r4/test-api/Observation?patient.name=smith")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		var bundle map[string]any
+		json.NewDecoder(resp.Body).Decode(&bundle)
+		total := int(bundle["total"].(float64))
+		if total != 1 {
+			t.Errorf("expected total 1, got %d", total)
+		}
+	})
+
+	t.Run("Search Observation with chained param patient.name=jones returns empty", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/fhir/r4/test-api/Observation?patient.name=jones")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		var bundle map[string]any
+		json.NewDecoder(resp.Body).Decode(&bundle)
+		total := int(bundle["total"].(float64))
+		if total != 0 {
+			t.Errorf("expected total 0, got %d", total)
+		}
+	})
+
+	t.Run("Search Observation by quantity value-quantity=gt70", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/fhir/r4/test-api/Observation?value-quantity=gt70")
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		var bundle map[string]any
+		json.NewDecoder(resp.Body).Decode(&bundle)
+		total := int(bundle["total"].(float64))
+		if total != 1 {
+			t.Errorf("expected total 1, got %d", total)
+		}
+	})
+
+	t.Run("Search Observation by quantity value-quantity=lt70 returns empty", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/fhir/r4/test-api/Observation?value-quantity=lt70")
 		if err != nil {
 			t.Fatalf("GET: %v", err)
 		}

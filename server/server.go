@@ -212,6 +212,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		ResType:    resType,
 		Strings:    make(map[string]string),
 		Tokens:     make(map[string]string),
+		Dates:      make(map[string]postgres.DateOp),
+		Quantities: make(map[string]postgres.QuantityOp),
 		References: make(map[string]string),
 	}
 
@@ -227,14 +229,24 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Parse _include and _revinclude
+	for _, incVal := range r.URL.Query()["_include"] {
+		if inc, err := postgres.ParseInclude(incVal); err == nil {
+			params.Includes = append(params.Includes, inc)
+		}
+	}
+	for _, revVal := range r.URL.Query()["_revinclude"] {
+		if rev, err := postgres.ParseInclude(revVal); err == nil {
+			params.RevIncludes = append(params.RevIncludes, rev)
+		}
+	}
+
 	// Classify search parameters by type
-	// Known string params
 	stringParams := map[string]bool{
 		"family": true, "given": true, "name": true,
 		"address": true, "address-city": true, "address-state": true,
 		"address-postalcode": true, "address-country": true,
 	}
-	// Known token params
 	tokenParams := map[string]bool{
 		"identifier": true, "gender": true, "active": true,
 		"email": true, "phone": true, "language": true,
@@ -242,19 +254,31 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		"category": true, "type": true, "class": true,
 		"clinical-status": true, "verification-status": true,
 	}
-	// Known reference params
 	refParams := map[string]bool{
 		"organization": true, "general-practitioner": true,
 		"subject": true, "patient": true, "encounter": true,
 		"performer": true, "asserter": true, "recorder": true,
 		"participant": true,
 	}
+	dateParams := map[string]bool{
+		"birthdate": true, "date": true, "onset-date": true,
+	}
+	quantityParams := map[string]bool{
+		"value-quantity": true,
+	}
 
 	for key, values := range r.URL.Query() {
 		if strings.HasPrefix(key, "_") {
-			continue // skip special params
+			continue // skip special params handled above
 		}
 		value := values[0]
+
+		// Check for chained parameters (e.g., patient.name=Smith)
+		if chained, ok := postgres.ParseChainedParam(key, value); ok {
+			params.Chained = append(params.Chained, *chained)
+			continue
+		}
+
 		switch {
 		case stringParams[key]:
 			params.Strings[key] = value
@@ -262,13 +286,21 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			params.Tokens[key] = value
 		case refParams[key]:
 			params.References[key] = value
+		case dateParams[key]:
+			if dOp, err := postgres.ParseDateOp(value); err == nil {
+				params.Dates[key] = dOp
+			}
+		case quantityParams[key]:
+			if qOp, err := postgres.ParseQuantityOp(value); err == nil {
+				params.Quantities[key] = qOp
+			}
 		default:
-			// Default to token for unknown params
+			// Default fallback for unknown params
 			params.Tokens[key] = value
 		}
 	}
 
-	results, total, err := s.store.Search(r.Context(), params)
+	sr, err := s.store.Search(r.Context(), params)
 	if err != nil {
 		s.logger.Error("search", "error", err, "type", resType)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "search error")
@@ -279,12 +311,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	bundle := map[string]any{
 		"resourceType": "Bundle",
 		"type":         "searchset",
-		"total":        total,
+		"total":        sr.Total,
 		"entry":        []any{},
 	}
 
-	entries := make([]any, 0, len(results))
-	for _, res := range results {
+	entries := make([]any, 0, len(sr.Matches)+len(sr.Includes))
+
+	// 1. Primary search matches
+	for _, res := range sr.Matches {
 		jsonBytes, err := s.protoToJSON(res.ResType, res.ResourceProto)
 		if err != nil {
 			s.logger.Error("proto to json in search", "error", err, "type", res.ResType, "id", res.ResID)
@@ -297,6 +331,29 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		entries = append(entries, map[string]any{
 			"fullUrl":  fmt.Sprintf("%s/%s", res.ResType, res.ResID),
 			"resource": resource,
+			"search": map[string]any{
+				"mode": "match",
+			},
+		})
+	}
+
+	// 2. Included resources (_include and _revinclude)
+	for _, inc := range sr.Includes {
+		jsonBytes, err := s.protoToJSON(inc.ResType, inc.ResourceProto)
+		if err != nil {
+			s.logger.Error("proto to json for included resource", "error", err, "type", inc.ResType, "id", inc.ResID)
+			continue
+		}
+
+		var resource any
+		json.Unmarshal(jsonBytes, &resource)
+
+		entries = append(entries, map[string]any{
+			"fullUrl":  fmt.Sprintf("%s/%s", inc.ResType, inc.ResID),
+			"resource": resource,
+			"search": map[string]any{
+				"mode": "include",
+			},
 		})
 	}
 	bundle["entry"] = entries

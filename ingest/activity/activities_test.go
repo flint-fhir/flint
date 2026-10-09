@@ -82,26 +82,26 @@ func TestWritePostgresBatch_WithExtractors(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify Patient is searchable by family name
-	patResults, patTotal, err := store.Search(ctx, postgres.SearchParams{
+	patRes, err := store.Search(ctx, postgres.SearchParams{
 		TenantID: "test-act",
 		ResType:  "Patient",
 		Strings:  map[string]string{"family": "curie"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 1, patTotal)
-	require.Len(t, patResults, 1)
-	assert.Equal(t, "act-pat-1", patResults[0].ResID)
+	assert.Equal(t, 1, patRes.Total)
+	require.Len(t, patRes.Matches, 1)
+	assert.Equal(t, "act-pat-1", patRes.Matches[0].ResID)
 
 	// Verify Condition is searchable by code
-	condResults, condTotal, err := store.Search(ctx, postgres.SearchParams{
+	condRes, err := store.Search(ctx, postgres.SearchParams{
 		TenantID: "test-act",
 		ResType:  "Condition",
 		Tokens:   map[string]string{"code": "44054006"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, 1, condTotal)
-	require.Len(t, condResults, 1)
-	assert.Equal(t, "act-cond-1", condResults[0].ResID)
+	assert.Equal(t, 1, condRes.Total)
+	require.Len(t, condRes.Matches, 1)
+	assert.Equal(t, "act-cond-1", condRes.Matches[0].ResID)
 
 	// Cleanup
 	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_resource"} {
