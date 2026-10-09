@@ -195,9 +195,21 @@ Content-Type: application/fhir+json
 ### Resource Interactions
 * **Point Read**: `GET /fhir/r4/{tenant}/{resourceType}/{id}`
 * **Create**: `POST /fhir/r4/{tenant}/{resourceType}`
+* **Validate**: `POST /fhir/r4/{tenant}/{resourceType}/$validate` and `POST /fhir/r4/{tenant}/$validate`
 * **Search**: `GET /fhir/r4/{tenant}/{resourceType}?{searchParams}&_count=20&_offset=0`
 * **CapabilityStatement**: `GET /fhir/r4/{tenant}/metadata`
 * **SMART Discovery**: `GET /fhir/r4/{tenant}/.well-known/smart-configuration`
+
+### FHIR Conformance & Validation Engine (`pkg/validation`)
+Flint validates incoming FHIR resources prior to persistence and exposes standard validation operations:
+* **StructureDefinition Enforcement**: Validates elements against official HL7 FHIR R4 StructureDefinitions. Undeclared elements are rejected in strict mode (`structure`).
+* **Cardinality Verification**: Mandatory 1..1 elements (e.g., `Observation.status`, `Observation.code`, `Condition.subject`, `Encounter.status`, `Encounter.class`) must be present and non-empty (`required`).
+* **Required ValueSets**: Bound code elements (e.g., `AdministrativeGender`, `ObservationStatus`, `ConditionClinicalStatus`, `EncounterStatus`) are strictly matched against canonical ValueSets (`code-invalid`).
+* **Primitive Format Constraints**: Primitive fields (`id`, `date`, `dateTime`, `instant`) are validated against FHIR regex patterns (`value`).
+* **OperationOutcome Diagnostics**: Detailed, structured responses with issue severities, diagnostic reasons, and FHIRPath element expressions (e.g. `Observation.status`).
+* **Standard `$validate` Operation**: Supports resource-level (`POST /fhir/r4/{tenant}/{resourceType}/$validate`) and system-level (`POST /fhir/r4/{tenant}/$validate`) operations, accepting raw JSON or FHIR `Parameters` payloads without persisting to storage.
+* **Bundle Validation**: Transaction bundles validate all resource entries before commit, guaranteeing transaction atomicity.
+* **Property-Based Testing**: Validated using generative property testing with [Hegel](https://hegel.dev) to ensure parser invariance and fuzzing safety.
 
 ### Advanced FHIR Search Engine
 Flint implements high-performance relational search against the covering `spidx_*` index tables:
