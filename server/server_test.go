@@ -527,6 +527,9 @@ func TestServer_Integration(t *testing.T) {
 		condJSON := `{
 			"resourceType": "Condition",
 			"id": {"value": "post-cond-1"},
+			"subject": {
+				"patientId": {"value": "api-pat-1"}
+			},
 			"code": {
 				"coding": [{
 					"system": {"value": "http://snomed.info/sct"},
@@ -563,6 +566,7 @@ func TestServer_Integration(t *testing.T) {
 		encJSON := `{
 			"resourceType": "Encounter",
 			"id": {"value": "post-enc-1"},
+			"status": {"value": "in-progress"},
 			"class": {
 				"system": {"value": "http://terminology.hl7.org/CodeSystem/v3-ActCode"},
 				"code": {"value": "AMB"}
@@ -597,6 +601,7 @@ func TestServer_Integration(t *testing.T) {
 		obsJSON := `{
 			"resourceType": "Observation",
 			"id": {"value": "post-obs-1"},
+			"status": {"value": "final"},
 			"code": {
 				"coding": [{
 					"system": {"value": "http://loinc.org"},
@@ -657,6 +662,195 @@ func TestServer_Integration(t *testing.T) {
 		json.NewDecoder(searchResp.Body).Decode(&bundle)
 		if bundle["total"].(float64) != 1 {
 			t.Errorf("expected total 1, got %v", bundle["total"])
+		}
+	})
+
+	t.Run("Validation rejects undeclared elements on POST /Patient", func(t *testing.T) {
+		invalidJSON := `{
+			"resourceType": "Patient",
+			"name": [{"family": "Smith"}],
+			"nonExistentField": "invalid_value"
+		}`
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api/Patient", "application/fhir+json", strings.NewReader(invalidJSON))
+		if err != nil {
+			t.Fatalf("POST Patient: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
+		}
+		var outcome map[string]any
+		json.NewDecoder(resp.Body).Decode(&outcome)
+		if outcome["resourceType"] != "OperationOutcome" {
+			t.Fatalf("expected OperationOutcome, got %v", outcome["resourceType"])
+		}
+		issues := outcome["issue"].([]any)
+		if len(issues) == 0 {
+			t.Fatalf("expected at least 1 issue in outcome")
+		}
+		iss0 := issues[0].(map[string]any)
+		if iss0["code"] != "structure" {
+			t.Errorf("expected issue code structure, got %v", iss0["code"])
+		}
+	})
+
+	t.Run("Validation rejects invalid ValueSet code on POST /Patient", func(t *testing.T) {
+		invalidJSON := `{
+			"resourceType": "Patient",
+			"gender": "non-standard-gender"
+		}`
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api/Patient", "application/fhir+json", strings.NewReader(invalidJSON))
+		if err != nil {
+			t.Fatalf("POST Patient: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
+		}
+		var outcome map[string]any
+		json.NewDecoder(resp.Body).Decode(&outcome)
+		issues := outcome["issue"].([]any)
+		iss0 := issues[0].(map[string]any)
+		if iss0["code"] != "code-invalid" {
+			t.Errorf("expected issue code code-invalid, got %v", iss0["code"])
+		}
+	})
+
+	t.Run("Validation rejects missing required fields in transaction Bundle", func(t *testing.T) {
+		bundleJSON := `{
+			"resourceType": "Bundle",
+			"type": "transaction",
+			"entry": [
+				{
+					"resource": {"resourceType":"Observation","id":"obs-invalid-1"},
+					"request": {"method":"POST","url":"Observation"}
+				}
+			]
+		}`
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api", "application/fhir+json", strings.NewReader(bundleJSON))
+		if err != nil {
+			t.Fatalf("POST Bundle: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
+		}
+		var outcome map[string]any
+		json.NewDecoder(resp.Body).Decode(&outcome)
+		if outcome["resourceType"] != "OperationOutcome" {
+			t.Errorf("expected OperationOutcome, got %v", outcome["resourceType"])
+		}
+	})
+
+	t.Run("POST /Patient/$validate with valid resource returns 200 OperationOutcome", func(t *testing.T) {
+		validJSON := `{
+			"resourceType": "Patient",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1995-06-15",
+			"name": [{"family": "Doe", "given": ["Jane"]}]
+		}`
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api/Patient/$validate", "application/fhir+json", strings.NewReader(validJSON))
+		if err != nil {
+			t.Fatalf("POST $validate: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+		}
+		var outcome map[string]any
+		json.NewDecoder(resp.Body).Decode(&outcome)
+		if outcome["resourceType"] != "OperationOutcome" {
+			t.Fatalf("expected OperationOutcome, got %v", outcome["resourceType"])
+		}
+		issues := outcome["issue"].([]any)
+		if len(issues) == 0 {
+			t.Fatalf("expected at least 1 issue")
+		}
+		iss0 := issues[0].(map[string]any)
+		if iss0["severity"] != "information" {
+			t.Errorf("expected severity information, got %v", iss0["severity"])
+		}
+	})
+
+	t.Run("POST /Patient/$validate with invalid resource returns 400 OperationOutcome", func(t *testing.T) {
+		invalidJSON := `{
+			"resourceType": "Patient",
+			"gender": "unknown-invalid-gender"
+		}`
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api/Patient/$validate", "application/fhir+json", strings.NewReader(invalidJSON))
+		if err != nil {
+			t.Fatalf("POST $validate: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request, got %d", resp.StatusCode)
+		}
+		var outcome map[string]any
+		json.NewDecoder(resp.Body).Decode(&outcome)
+		issues := outcome["issue"].([]any)
+		iss0 := issues[0].(map[string]any)
+		if iss0["severity"] != "error" || iss0["code"] != "code-invalid" {
+			t.Errorf("expected error severity and code-invalid, got %v / %v", iss0["severity"], iss0["code"])
+		}
+	})
+
+	t.Run("POST /$validate with Parameters resource wrapper returns 200 OperationOutcome", func(t *testing.T) {
+		paramsJSON := `{
+			"resourceType": "Parameters",
+			"parameter": [
+				{
+					"name": "resource",
+					"resource": {
+						"resourceType": "Observation",
+						"status": "final",
+						"code": {
+							"coding": [{
+								"system": "http://loinc.org",
+								"code": "8867-4"
+							}]
+						}
+					}
+				}
+			]
+		}`
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api/$validate", "application/fhir+json", strings.NewReader(paramsJSON))
+		if err != nil {
+			t.Fatalf("POST system $validate: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+		}
+		var outcome map[string]any
+		json.NewDecoder(resp.Body).Decode(&outcome)
+		if outcome["resourceType"] != "OperationOutcome" {
+			t.Fatalf("expected OperationOutcome, got %v", outcome["resourceType"])
+		}
+		issues := outcome["issue"].([]any)
+		iss0 := issues[0].(map[string]any)
+		if iss0["severity"] != "information" {
+			t.Errorf("expected severity information, got %v", iss0["severity"])
+		}
+	})
+
+	t.Run("CapabilityStatement declares $validate operation", func(t *testing.T) {
+		resp, err := http.Get(ts.URL + "/fhir/r4/test-api/metadata")
+		if err != nil {
+			t.Fatalf("GET metadata: %v", err)
+		}
+		defer resp.Body.Close()
+		var body map[string]any
+		json.NewDecoder(resp.Body).Decode(&body)
+		rest := body["rest"].([]any)
+		rest0 := rest[0].(map[string]any)
+		ops, ok := rest0["operation"].([]any)
+		if !ok || len(ops) == 0 {
+			t.Fatalf("expected operation array in CapabilityStatement rest")
+		}
+		op0 := ops[0].(map[string]any)
+		if op0["name"] != "validate" {
+			t.Errorf("expected operation name validate, got %v", op0["name"])
 		}
 	})
 

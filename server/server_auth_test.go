@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,5 +162,39 @@ func TestServer_AuthMiddleware(t *testing.T) {
 		defer resp.Body.Close()
 
 		assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+	})
+
+	t.Run("Validate Endpoint Enforces Scope Checks", func(t *testing.T) {
+		validPatient := `{"resourceType":"Patient","name":[{"family":"Doe"}]}`
+
+		// 1. Unauthenticated request to $validate is rejected with 401
+		reqNoAuth, _ := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/default/Patient/$validate", strings.NewReader(validPatient))
+		reqNoAuth.Header.Set("Content-Type", "application/fhir+json")
+		respNoAuth, err := http.DefaultClient.Do(reqNoAuth)
+		require.NoError(t, err)
+		defer respNoAuth.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, respNoAuth.StatusCode)
+
+		// 2. Token with patient/*.r allows $validate
+		readToken, err := mockVal.IssueToken("doc-1", "patient/*.r", "", time.Hour, nil)
+		require.NoError(t, err)
+		reqAuth, _ := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/default/Patient/$validate", strings.NewReader(validPatient))
+		reqAuth.Header.Set("Content-Type", "application/fhir+json")
+		reqAuth.Header.Set("Authorization", "Bearer "+readToken)
+		respAuth, err := http.DefaultClient.Do(reqAuth)
+		require.NoError(t, err)
+		defer respAuth.Body.Close()
+		assert.Equal(t, http.StatusOK, respAuth.StatusCode)
+
+		// 3. Token with scope only for Encounter (not Patient) is rejected with 403
+		encToken, err := mockVal.IssueToken("doc-2", "patient/Encounter.rs", "", time.Hour, nil)
+		require.NoError(t, err)
+		reqMismatched, _ := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/default/Patient/$validate", strings.NewReader(validPatient))
+		reqMismatched.Header.Set("Content-Type", "application/fhir+json")
+		reqMismatched.Header.Set("Authorization", "Bearer "+encToken)
+		respMismatched, err := http.DefaultClient.Do(reqMismatched)
+		require.NoError(t, err)
+		defer respMismatched.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respMismatched.StatusCode)
 	})
 }

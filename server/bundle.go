@@ -73,6 +73,11 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			ResourceType string `json:"resourceType"`
 		}
 		if err := json.Unmarshal(entry.Resource, &resourceMeta); err != nil {
+			if bundle.Type == "transaction" {
+				writeOperationOutcome(w, http.StatusBadRequest, "structure",
+					fmt.Sprintf("entry[%d]: invalid resource JSON", i))
+				return
+			}
 			responseEntries = append(responseEntries, bundleErrorResponse(
 				http.StatusBadRequest, fmt.Sprintf("entry[%d]: invalid resource JSON", i)))
 			continue
@@ -80,6 +85,11 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 
 		resType := resourceMeta.ResourceType
 		if resType == "" {
+			if bundle.Type == "transaction" {
+				writeOperationOutcome(w, http.StatusBadRequest, "required",
+					fmt.Sprintf("entry[%d]: missing resourceType", i))
+				return
+			}
 			responseEntries = append(responseEntries, bundleErrorResponse(
 				http.StatusBadRequest, fmt.Sprintf("entry[%d]: missing resourceType", i)))
 			continue
@@ -100,11 +110,21 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		// Handle DELETE
 		if method == "DELETE" {
 			if resID == "" {
+				if bundle.Type == "transaction" {
+					writeOperationOutcome(w, http.StatusBadRequest, "required",
+						fmt.Sprintf("entry[%d]: DELETE requires resource ID", i))
+					return
+				}
 				responseEntries = append(responseEntries, bundleErrorResponse(
 					http.StatusBadRequest, fmt.Sprintf("entry[%d]: DELETE requires resource ID", i)))
 				continue
 			}
 			if err := s.store.DeleteResource(r.Context(), tenant, resType, resID); err != nil {
+				if bundle.Type == "transaction" {
+					writeOperationOutcome(w, http.StatusInternalServerError, "exception",
+						fmt.Sprintf("entry[%d]: delete failed: %v", i, err))
+					return
+				}
 				responseEntries = append(responseEntries, bundleErrorResponse(
 					http.StatusInternalServerError, fmt.Sprintf("entry[%d]: delete failed: %v", i, err)))
 				continue
@@ -117,9 +137,32 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		// Validate resource entry against StructureDefinitions and ValueSets if validator configured
+		if s.validator != nil && (method == "POST" || method == "PUT") {
+			outcome := s.validator.ValidateJSON(resType, entry.Resource)
+			if !outcome.IsValid() {
+				if bundle.Type == "transaction" {
+					outcome.WriteHTTP(w, http.StatusBadRequest)
+					return
+				}
+				responseEntries = append(responseEntries, map[string]any{
+					"response": map[string]any{
+						"status":  "400 Bad Request",
+						"outcome": outcome.ToOperationOutcomeMap(),
+					},
+				})
+				continue
+			}
+		}
+
 		// For PUT/POST: convert JSON → proto → bytes
 		md, ok := s.protoRegistry[resType]
 		if !ok {
+			if bundle.Type == "transaction" {
+				writeOperationOutcome(w, http.StatusBadRequest, "not-supported",
+					fmt.Sprintf("entry[%d]: resource type %s not registered", i, resType))
+				return
+			}
 			// Resource type not registered — store raw JSON as proto bytes (passthrough)
 			responseEntries = append(responseEntries, bundleErrorResponse(
 				http.StatusBadRequest, fmt.Sprintf("entry[%d]: resource type %s not registered", i, resType)))
@@ -129,6 +172,11 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		msg := dynamicpb.NewMessage(md)
 		unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
 		if err := unmarshaler.Unmarshal(entry.Resource, msg); err != nil {
+			if bundle.Type == "transaction" {
+				writeOperationOutcome(w, http.StatusBadRequest, "structure",
+					fmt.Sprintf("entry[%d]: invalid %s JSON: %v", i, resType, err))
+				return
+			}
 			responseEntries = append(responseEntries, bundleErrorResponse(
 				http.StatusBadRequest, fmt.Sprintf("entry[%d]: invalid %s JSON: %v", i, resType, err)))
 			continue

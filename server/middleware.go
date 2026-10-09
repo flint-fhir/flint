@@ -119,11 +119,27 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				}
 
 			case http.MethodPost:
-				// Create: POST /{tenant}/{resourceType}
-				if !auth.Allows(secCtx, resType, auth.ActionCreate) {
-					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-						fmt.Sprintf("insufficient scope for create on %s", resType))
-					return
+				if len(parts) >= 5 && parts[4] == "$validate" {
+					// Validate operation: POST /{tenant}/{resourceType}/$validate
+					if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionCreate) {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							fmt.Sprintf("insufficient scope for validate on %s", resType))
+						return
+					}
+				} else if resType == "$validate" {
+					// System-level validate: POST /{tenant}/$validate
+					if !auth.Allows(secCtx, "*", auth.ActionRead) && !auth.Allows(secCtx, "*", auth.ActionCreate) {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							"insufficient scope for validate")
+						return
+					}
+				} else {
+					// Create: POST /{tenant}/{resourceType}
+					if !auth.Allows(secCtx, resType, auth.ActionCreate) {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							fmt.Sprintf("insufficient scope for create on %s", resType))
+						return
+					}
 				}
 			}
 		} else if r.Method == http.MethodPost && len(parts) == 3 {

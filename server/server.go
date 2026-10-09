@@ -23,6 +23,7 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -36,6 +37,7 @@ type Server struct {
 	extractors     map[string]postgres.IndexExtractorFunc
 	smartConfig    *SMARTConfig
 	tokenValidator auth.TokenValidator
+	validator      validation.Validator
 }
 
 // New creates a new FHIR server.
@@ -45,7 +47,14 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 		logger:        logger,
 		protoRegistry: make(map[string]protoreflect.MessageDescriptor),
 		extractors:    postgres.DefaultIndexExtractors(),
+		validator:     validation.NewEngine(validation.DefaultOptions()),
 	}
+}
+
+// SetValidator configures the FHIR StructureDefinition and ValueSet validator.
+// Passing nil disables validation.
+func (s *Server) SetValidator(v validation.Validator) {
+	s.validator = v
 }
 
 // SetTokenValidator configures the SMART on FHIR bearer token validator.
@@ -72,6 +81,8 @@ func (s *Server) Handler() http.Handler {
 	// FHIR REST endpoints
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}", s.handleRead)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}", s.handleSearch)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$validate", s.handleValidate)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$validate", s.handleValidate)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}", s.handleCreate)
 	mux.HandleFunc("POST /fhir/r4/{tenant}", s.handleBundle)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/metadata", s.handleMetadata)
@@ -129,6 +140,15 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read body")
 		return
+	}
+
+	// Validate against FHIR R4 StructureDefinitions and ValueSets if validator configured
+	if s.validator != nil {
+		outcome := s.validator.ValidateJSON(resType, body)
+		if !outcome.IsValid() {
+			outcome.WriteHTTP(w, http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Unmarshal JSON → proto
@@ -195,6 +215,59 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, resID))
 	w.WriteHeader(http.StatusCreated)
 	w.Write(body) // echo back the input JSON
+}
+
+// handleValidate handles POST /{tenant}/{resourceType}/$validate and POST /{tenant}/$validate.
+// Validates the incoming resource against FHIR R4 StructureDefinitions and ValueSets
+// without persisting to the database, returning an OperationOutcome.
+func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	_ = tenant
+	resType := r.PathValue("resourceType")
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // 10MB max
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read body")
+		return
+	}
+
+	if len(body) == 0 {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "empty request body for $validate")
+		return
+	}
+
+	targetJSON := body
+	var rootMap map[string]any
+	if err := json.Unmarshal(body, &rootMap); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed JSON: %v", err))
+		return
+	}
+
+	// Support FHIR Parameters resource wrapper (e.g. { resourceType: "Parameters", parameter: [{ name: "resource", resource: ... }] })
+	if rootType, _ := rootMap["resourceType"].(string); rootType == "Parameters" {
+		if params, ok := rootMap["parameter"].([]any); ok {
+			for _, p := range params {
+				if pMap, ok := p.(map[string]any); ok {
+					if pMap["name"] == "resource" {
+						if resObj, ok := pMap["resource"].(map[string]any); ok {
+							if marshaled, err := json.Marshal(resObj); err == nil {
+								targetJSON = marshaled
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if s.validator == nil {
+		outcome := validation.NewOutcome()
+		outcome.WriteHTTP(w, http.StatusOK)
+		return
+	}
+
+	outcome := s.validator.ValidateJSON(resType, targetJSON)
+	outcome.WriteHTTP(w, http.StatusOK)
 }
 
 // generateID creates a simple unique ID for resources without one.
@@ -445,6 +518,12 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 							{"name": "phone", "type": "token"},
 							{"name": "address", "type": "string"},
 						},
+					},
+				},
+				"operation": []map[string]any{
+					{
+						"name":       "validate",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Resource-validate",
 					},
 				},
 			},
