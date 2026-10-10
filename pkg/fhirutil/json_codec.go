@@ -1,12 +1,17 @@
 package fhirutil
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
 
 // NormalizeFHIRJSONToProtoJSON normalizes incoming FHIR JSON (supporting both standard
@@ -21,17 +26,99 @@ func NormalizeFHIRJSONToProtoJSON(md protoreflect.MessageDescriptor, rawJSON []b
 	return json.Marshal(root)
 }
 
-// InjectResourceTypeAndUnwrap ensures a protojson-marshaled FHIR resource includes
-// "resourceType".
-func InjectResourceType(resType string, protoJSONBytes []byte) ([]byte, error) {
+// DenormalizeProtoJSONToFHIRJSON converts google/fhir binary proto bytes or protojson output
+// into standard flat HL7 FHIR R4 JSON (unwrapping primitive wrappers, formatting temporal
+// fields as ISO-8601 strings, converting typed Reference fields to {"reference": "Type/id"},
+// flattening choice[x] containers like valueQuantity/effectiveDateTime, and injecting
+// resourceType and server meta.versionId / meta.lastUpdated).
+func DenormalizeProtoJSONToFHIRJSON(md protoreflect.MessageDescriptor, resType string, inputBytes []byte, version int, lastUpdated time.Time) ([]byte, error) {
+	protoJSONBytes := inputBytes
+	trimmed := bytes.TrimSpace(inputBytes)
+	if (len(trimmed) == 0 || trimmed[0] != '{') && md != nil {
+		msg := dynamicpb.NewMessage(md)
+		if err := proto.Unmarshal(inputBytes, msg); err != nil {
+			return nil, fmt.Errorf("unmarshal %s proto: %w", resType, err)
+		}
+		marshaler := protojson.MarshalOptions{
+			UseProtoNames:   false,
+			EmitUnpopulated: false,
+		}
+		var err error
+		protoJSONBytes, err = marshaler.Marshal(msg)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	var m map[string]any
 	if err := json.Unmarshal(protoJSONBytes, &m); err != nil {
 		return protoJSONBytes, err
 	}
-	if _, exists := m["resourceType"]; !exists && resType != "" {
+	if md != nil {
+		denormalizeMessageMap(md, m)
+	}
+	if resType != "" {
 		m["resourceType"] = resType
 	}
+	if version > 0 || !lastUpdated.IsZero() {
+		metaMap, ok := m["meta"].(map[string]any)
+		if !ok || metaMap == nil {
+			metaMap = make(map[string]any)
+		}
+		if version > 0 {
+			metaMap["versionId"] = strconv.Itoa(version)
+		}
+		if !lastUpdated.IsZero() {
+			metaMap["lastUpdated"] = lastUpdated.UTC().Format(time.RFC3339)
+		}
+		m["meta"] = metaMap
+	}
 	return json.Marshal(m)
+}
+
+// InjectResourceType ensures a protojson-marshaled FHIR resource includes "resourceType".
+func InjectResourceType(resType string, protoJSONBytes []byte) ([]byte, error) {
+	return DenormalizeProtoJSONToFHIRJSON(nil, resType, protoJSONBytes, 0, time.Time{})
+}
+
+// RewriteURNReferences recursively replaces intra-bundle urn:uuid:... reference strings
+// in a raw FHIR JSON resource using the provided urnToTarget map (e.g., "urn:uuid:..." -> "Patient/123").
+func RewriteURNReferences(rawJSON []byte, urnToTarget map[string]string) ([]byte, error) {
+	if len(urnToTarget) == 0 || len(rawJSON) == 0 {
+		return rawJSON, nil
+	}
+	var root any
+	if err := json.Unmarshal(rawJSON, &root); err != nil {
+		return rawJSON, err
+	}
+	if rewriteURNNode(root, urnToTarget) {
+		return json.Marshal(root)
+	}
+	return rawJSON, nil
+}
+
+func rewriteURNNode(node any, urnToTarget map[string]string) bool {
+	changed := false
+	switch v := node.(type) {
+	case map[string]any:
+		for k, child := range v {
+			if s, ok := child.(string); ok {
+				if resolved, exists := urnToTarget[s]; exists {
+					v[k] = resolved
+					changed = true
+				}
+			} else if rewriteURNNode(child, urnToTarget) {
+				changed = true
+			}
+		}
+	case []any:
+		for _, elem := range v {
+			if rewriteURNNode(elem, urnToTarget) {
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 func normalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) {
@@ -47,8 +134,15 @@ func normalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) {
 	}
 
 	fields := md.Fields()
-	for key, val := range m {
-		if strings.HasPrefix(key, "_") || key == "resourceType" || val == nil {
+	// Snapshot keys to safely mutate map during iteration
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+
+	for _, key := range keys {
+		val, exists := m[key]
+		if !exists || strings.HasPrefix(key, "_") || key == "resourceType" || val == nil {
 			continue
 		}
 
@@ -65,6 +159,7 @@ func normalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) {
 			continue
 		}
 
+		targetKey := fd.JSONName()
 		msgDesc := fd.Message()
 		if fd.IsList() {
 			arr, ok := val.([]any)
@@ -74,13 +169,16 @@ func normalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) {
 			for i, elem := range arr {
 				arr[i] = normalizeSingleValue(msgDesc, elem, nil)
 			}
-			m[key] = arr
+			delete(m, key)
+			m[targetKey] = arr
 		} else {
 			var extMap map[string]any
 			if rawExt, ok := m["_"+key].(map[string]any); ok {
 				extMap = rawExt
 			}
-			m[key] = normalizeSingleValue(msgDesc, val, extMap)
+			normalized := normalizeSingleValue(msgDesc, val, extMap)
+			delete(m, key)
+			m[targetKey] = normalized
 			if extMap != nil {
 				delete(m, "_"+key)
 			}
@@ -218,14 +316,9 @@ func normalizeChoiceField(fields protoreflect.FieldDescriptors, m map[string]any
 		choiceFieldJSON := strings.ToLower(suffix[:1]) + suffix[1:]
 		choiceMsgDesc := fd.Message()
 		subFD := findFieldDescriptor(choiceMsgDesc.Fields(), choiceFieldJSON)
-		if subFD == nil {
+		if subFD == nil && choiceFieldJSON == "string" {
 			// Also try "stringValue" for "String" choice in google/fhir
-			if choiceFieldJSON == "string" {
-				subFD = findFieldDescriptor(choiceMsgDesc.Fields(), "stringValue")
-				if subFD != nil {
-					choiceFieldJSON = "stringValue"
-				}
-			}
+			subFD = findFieldDescriptor(choiceMsgDesc.Fields(), "stringValue")
 		}
 		if subFD == nil || subFD.Kind() != protoreflect.MessageKind {
 			continue
@@ -234,11 +327,187 @@ func normalizeChoiceField(fields protoreflect.FieldDescriptors, m map[string]any
 		normalizedSub := normalizeSingleValue(subFD.Message(), val, nil)
 		delete(m, key)
 		m[prefix] = map[string]any{
-			choiceFieldJSON: normalizedSub,
+			subFD.JSONName(): normalizedSub,
 		}
 		return true
 	}
 	return false
+}
+
+func denormalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) {
+	if md == nil || m == nil {
+		return
+	}
+
+	if string(md.FullName()) == "google.fhir.r4.core.Reference" {
+		denormalizeReferenceMap(md, m)
+	}
+
+	fields := md.Fields()
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+
+	for _, key := range keys {
+		val, exists := m[key]
+		if !exists || key == "resourceType" || val == nil {
+			continue
+		}
+
+		fd := findFieldDescriptor(fields, key)
+		if fd == nil || fd.Kind() != protoreflect.MessageKind {
+			continue
+		}
+
+		msgDesc := fd.Message()
+		// Check if this field is a FHIR choice[x] wrapper message (has oneof "choice")
+		if msgDesc.Oneofs().ByName("choice") != nil {
+			if choiceMap, ok := val.(map[string]any); ok {
+				for subKey, subVal := range choiceMap {
+					subFD := findFieldDescriptor(msgDesc.Fields(), subKey)
+					if subFD != nil && subFD.Kind() == protoreflect.MessageKind {
+						denormSub := denormalizeSingleValue(subFD.Message(), subVal)
+						suffixName := subFD.JSONName()
+						if suffixName == "stringValue" {
+							suffixName = "string"
+						}
+						flatKey := fd.JSONName() + strings.ToUpper(suffixName[:1]) + suffixName[1:]
+						delete(m, key)
+						m[flatKey] = denormSub
+						break
+					}
+				}
+				continue
+			}
+		}
+
+		if fd.IsList() {
+			arr, ok := val.([]any)
+			if !ok {
+				continue
+			}
+			for i, elem := range arr {
+				arr[i] = denormalizeSingleValue(msgDesc, elem)
+			}
+			m[key] = arr
+		} else {
+			denormVal := denormalizeSingleValue(msgDesc, val)
+			outKey := key
+			if string(fd.Name()) == "class_value" {
+				outKey = "class"
+			}
+			delete(m, key)
+			m[outKey] = denormVal
+		}
+	}
+}
+
+func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any {
+	if val == nil || msgDesc == nil {
+		return val
+	}
+	vMap, ok := val.(map[string]any)
+	if !ok {
+		return val
+	}
+
+	fullName := string(msgDesc.FullName())
+	if isTemporalMessage(fullName) {
+		if formatted := formatProtoTemporalToISO(vMap); formatted != "" {
+			return formatted
+		}
+	}
+
+	if fullName == "google.fhir.r4.core.Decimal" {
+		if rawStr, ok := vMap["value"].(string); ok {
+			if num, err := strconv.ParseFloat(rawStr, 64); err == nil {
+				return num
+			}
+		}
+	}
+
+	valFD := msgDesc.Fields().ByName("value")
+	if valFD != nil && valFD.Kind() != protoreflect.MessageKind {
+		if rawVal, hasVal := vMap["value"]; hasVal && len(vMap) == 1 {
+			if valFD.Kind() == protoreflect.EnumKind {
+				if s, ok := rawVal.(string); ok {
+					return strings.ToLower(strings.ReplaceAll(s, "_", "-"))
+				}
+			}
+			return rawVal
+		}
+	}
+
+	denormalizeMessageMap(msgDesc, vMap)
+	return vMap
+}
+
+func denormalizeReferenceMap(md protoreflect.MessageDescriptor, m map[string]any) {
+	if rawURI, ok := m["uri"].(map[string]any); ok {
+		if s, ok := rawURI["value"].(string); ok && s != "" {
+			delete(m, "uri")
+			m["reference"] = s
+			return
+		}
+	}
+
+	refOneof := md.Oneofs().ByName("reference")
+	if refOneof == nil {
+		return
+	}
+	fields := refOneof.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		jsonName := fd.JSONName()
+		if !strings.HasSuffix(jsonName, "Id") {
+			continue
+		}
+		if subMap, ok := m[jsonName].(map[string]any); ok {
+			if idStr, ok := subMap["value"].(string); ok && idStr != "" {
+				typePrefix := strings.ToUpper(jsonName[:1]) + jsonName[1:len(jsonName)-2]
+				delete(m, jsonName)
+				m["reference"] = typePrefix + "/" + idStr
+				return
+			}
+		}
+	}
+}
+
+func formatProtoTemporalToISO(vMap map[string]any) string {
+	var us int64
+	switch raw := vMap["valueUs"].(type) {
+	case string:
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return ""
+		}
+		us = parsed
+	case float64:
+		us = int64(raw)
+	default:
+		return ""
+	}
+
+	t := time.UnixMicro(us).UTC()
+	precision, _ := vMap["precision"].(string)
+	switch precision {
+	case "YEAR":
+		return t.Format("2006")
+	case "MONTH":
+		return t.Format("2006-01")
+	case "DAY":
+		return t.Format("2006-01-02")
+	case "SECOND":
+		return t.Format("2006-01-02T15:04:05Z")
+	case "MILLISECOND", "MICROSECOND":
+		return t.Format(time.RFC3339Nano)
+	default:
+		if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0 {
+			return t.Format("2006-01-02")
+		}
+		return t.Format(time.RFC3339)
+	}
 }
 
 func findFieldDescriptor(fields protoreflect.FieldDescriptors, jsonKey string) protoreflect.FieldDescriptor {
@@ -246,6 +515,22 @@ func findFieldDescriptor(fields protoreflect.FieldDescriptors, jsonKey string) p
 		return fd
 	}
 	if fd := fields.ByName(protoreflect.Name(jsonKey)); fd != nil {
+		return fd
+	}
+	// Support google/fhir suffixed field names such as classValue <-> class_value ("class")
+	if strings.HasSuffix(jsonKey, "Value") {
+		base := jsonKey[:len(jsonKey)-5]
+		if fd := fields.ByJSONName(base); fd != nil {
+			return fd
+		}
+		if fd := fields.ByName(protoreflect.Name(base + "_value")); fd != nil {
+			return fd
+		}
+	}
+	if fd := fields.ByJSONName(jsonKey + "Value"); fd != nil {
+		return fd
+	}
+	if fd := fields.ByName(protoreflect.Name(jsonKey + "_value")); fd != nil {
 		return fd
 	}
 	return nil

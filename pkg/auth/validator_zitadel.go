@@ -2,9 +2,11 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	authv1 "github.com/flint-fhir/flint/gen/go/flint/auth/v1"
 )
@@ -49,6 +51,13 @@ func NewZitadelValidator(cfg ZitadelConfig) (*ZitadelValidator, error) {
 	}, nil
 }
 
+func decodeZitadelMetaString(s string) string {
+	if decoded, err := base64.StdEncoding.DecodeString(s); err == nil && len(decoded) > 0 && utf8.Valid(decoded) {
+		return string(decoded)
+	}
+	return s
+}
+
 // ValidateToken validates the Zitadel token and maps Zitadel orgs, roles, and metadata
 // into a normalized Flint SecurityContext.
 func (z *ZitadelValidator) ValidateToken(ctx context.Context, bearerToken string) (*authv1.SecurityContext, error) {
@@ -69,15 +78,15 @@ func (z *ZitadelValidator) ValidateToken(ctx context.Context, bearerToken string
 		secCtx.TenantId = orgID
 	}
 
-	// 2. Map Zitadel User Metadata (e.g. patient_id, encounter_id)
+	// 2. Map Zitadel User Metadata (e.g. patient_id, encounter_id — plain or base64-encoded)
 	if metaRaw, ok := secCtx.Claims[ZitadelClaimUserMeta]; ok && metaRaw != "" {
 		var meta map[string]any
 		if err := json.Unmarshal([]byte(metaRaw), &meta); err == nil {
 			if pat, ok := meta["patient_id"].(string); ok && pat != "" {
-				secCtx.PatientId = pat
+				secCtx.PatientId = decodeZitadelMetaString(pat)
 			}
 			if enc, ok := meta["encounter_id"].(string); ok && enc != "" {
-				secCtx.EncounterId = enc
+				secCtx.EncounterId = decodeZitadelMetaString(enc)
 			}
 		}
 	}

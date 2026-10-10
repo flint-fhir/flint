@@ -1505,6 +1505,206 @@ func TestServer_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("Standard Flat FHIR R4 JSON Round-Trip (POST -> GET -> $validate) and Quantity/Enum Search", func(t *testing.T) {
+		obsJSON := `{
+			"resourceType": "Observation",
+			"id": "flat-rt-obs-1",
+			"status": "final",
+			"code": {
+				"coding": [{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}]
+			},
+			"subject": {
+				"reference": "Patient/api-pat-1"
+			},
+			"effectiveDateTime": "2025-05-01T14:00:00Z",
+			"valueQuantity": {
+				"value": 92.5,
+				"unit": "beats/minute",
+				"system": "http://unitsofmeasure.org",
+				"code": "/min"
+			},
+			"component": [
+				{
+					"code": {"coding": [{"system": "http://loinc.org", "code": "8480-6"}]},
+					"valueQuantity": {"value": 128, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+				}
+			]
+		}`
+		respPost, err := http.Post(ts.URL+"/fhir/r4/test-api/Observation", "application/fhir+json", strings.NewReader(obsJSON))
+		if err != nil {
+			t.Fatalf("POST flat Observation: %v", err)
+		}
+		respPost.Body.Close()
+		if respPost.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 Created, got %d", respPost.StatusCode)
+		}
+
+		// GET back the Observation and verify standard flat HL7 FHIR R4 JSON + meta.versionId + meta.lastUpdated
+		respGet, err := http.Get(ts.URL + "/fhir/r4/test-api/Observation/flat-rt-obs-1")
+		if err != nil {
+			t.Fatalf("GET flat-rt-obs-1: %v", err)
+		}
+		getBytes, _ := io.ReadAll(respGet.Body)
+		respGet.Body.Close()
+		if respGet.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d: %s", respGet.StatusCode, getBytes)
+		}
+
+		var gotMap map[string]any
+		if err := json.Unmarshal(getBytes, &gotMap); err != nil {
+			t.Fatalf("unmarshal GET response: %v", err)
+		}
+		if gotMap["id"] != "flat-rt-obs-1" {
+			t.Errorf("expected flat string id 'flat-rt-obs-1', got %v", gotMap["id"])
+		}
+		if gotMap["status"] != "final" {
+			t.Errorf("expected lowercase status 'final', got %v", gotMap["status"])
+		}
+		if subRef := gotMap["subject"].(map[string]any)["reference"]; subRef != "Patient/api-pat-1" {
+			t.Errorf("expected subject.reference 'Patient/api-pat-1', got %v", subRef)
+		}
+		if vqVal := gotMap["valueQuantity"].(map[string]any)["value"]; vqVal != 92.5 {
+			t.Errorf("expected numeric valueQuantity.value 92.5, got %v", vqVal)
+		}
+		metaMap, ok := gotMap["meta"].(map[string]any)
+		if !ok || metaMap["versionId"] != "1" || metaMap["lastUpdated"] == "" {
+			t.Errorf("expected meta.versionId=1 and meta.lastUpdated populated, got %v", gotMap["meta"])
+		}
+
+		// Feed the exact GET response into POST /Observation/$validate and verify 0 errors!
+		respVal, err := http.Post(ts.URL+"/fhir/r4/test-api/Observation/$validate", "application/fhir+json", strings.NewReader(string(getBytes)))
+		if err != nil {
+			t.Fatalf("POST $validate on GET response: %v", err)
+		}
+		valBytes, _ := io.ReadAll(respVal.Body)
+		respVal.Body.Close()
+		var valOutcome map[string]any
+		json.Unmarshal(valBytes, &valOutcome)
+		for _, iss := range valOutcome["issue"].([]any) {
+			issMap := iss.(map[string]any)
+			if issMap["severity"] == "error" || issMap["severity"] == "fatal" {
+				t.Errorf("round-tripped Observation failed $validate: %s", valBytes)
+			}
+		}
+
+		// Search Observation by extracted value-quantity, component-value-quantity, and lowercase status=final
+		for _, query := range []string{
+			"value-quantity=gt90&_id=flat-rt-obs-1",
+			"component-value-quantity=gt120&_id=flat-rt-obs-1",
+			"status=final&_id=flat-rt-obs-1",
+		} {
+			sResp, err := http.Get(ts.URL + "/fhir/r4/test-api/Observation?" + query)
+			if err != nil {
+				t.Fatalf("GET /Observation?%s: %v", query, err)
+			}
+			var sb map[string]any
+			json.NewDecoder(sResp.Body).Decode(&sb)
+			sResp.Body.Close()
+			if int(sb["total"].(float64)) != 1 {
+				t.Errorf("expected 1 match for /Observation?%s, got %v", query, sb["total"])
+			}
+		}
+
+		// Also verify Encounter?status=in-progress matches post-enc-1
+		encResp, err := http.Get(ts.URL + "/fhir/r4/test-api/Encounter?status=in-progress&_id=post-enc-1")
+		if err != nil {
+			t.Fatalf("GET /Encounter?status=in-progress: %v", err)
+		}
+		var encBundle map[string]any
+		json.NewDecoder(encResp.Body).Decode(&encBundle)
+		encResp.Body.Close()
+		if int(encBundle["total"].(float64)) != 1 {
+			t.Errorf("expected 1 match for /Encounter?status=in-progress, got %v", encBundle["total"])
+		}
+	})
+
+	t.Run("Transaction Bundle Resolves Intra-Bundle urn:uuid References and Rejects Unsupported HTTP Methods", func(t *testing.T) {
+		// 1. Forward and backward urn:uuid: reference resolution
+		urnBundle := `{
+			"resourceType": "Bundle",
+			"type": "transaction",
+			"entry": [
+				{
+					"fullUrl": "urn:uuid:aaaa1111-2222-3333-4444-555555555555",
+					"resource": {
+						"resourceType": "Observation",
+						"status": "final",
+						"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+						"subject": {"reference": "urn:uuid:bbbb1111-2222-3333-4444-555555555555"}
+					},
+					"request": {"method": "POST", "url": "Observation"}
+				},
+				{
+					"fullUrl": "urn:uuid:bbbb1111-2222-3333-4444-555555555555",
+					"resource": {
+						"resourceType": "Patient",
+						"name": [{"family": "UrnResolvedPatient"}]
+					},
+					"request": {"method": "POST", "url": "Patient"}
+				}
+			]
+		}`
+		respUrn, err := http.Post(ts.URL+"/fhir/r4/test-api", "application/fhir+json", strings.NewReader(urnBundle))
+		if err != nil {
+			t.Fatalf("POST urn:uuid bundle: %v", err)
+		}
+		urnBytes, _ := io.ReadAll(respUrn.Body)
+		respUrn.Body.Close()
+		if respUrn.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK for urn:uuid bundle, got %d: %s", respUrn.StatusCode, urnBytes)
+		}
+
+		var urnResp map[string]any
+		json.Unmarshal(urnBytes, &urnResp)
+		entries := urnResp["entry"].([]any)
+		obsFullURL := entries[0].(map[string]any)["fullUrl"].(string) // "Observation/<id>"
+		patFullURL := entries[1].(map[string]any)["fullUrl"].(string) // "Patient/<id>"
+
+		// Read back the created Observation and verify its subject.reference was rewritten to patFullURL
+		respObs, err := http.Get(ts.URL + "/fhir/r4/test-api/" + obsFullURL)
+		if err != nil {
+			t.Fatalf("GET %s: %v", obsFullURL, err)
+		}
+		var obsMap map[string]any
+		json.NewDecoder(respObs.Body).Decode(&obsMap)
+		respObs.Body.Close()
+		if gotRef := obsMap["subject"].(map[string]any)["reference"]; gotRef != patFullURL {
+			t.Errorf("expected Observation subject.reference rewritten to %q, got %v", patFullURL, gotRef)
+		}
+
+		// Verify spidx_reference was indexed with the resolved Patient ID so GET /Observation?patient=Patient/<id> finds it
+		respSearch, err := http.Get(ts.URL + "/fhir/r4/test-api/Observation?patient=" + patFullURL)
+		if err != nil {
+			t.Fatalf("GET /Observation?patient=%s: %v", patFullURL, err)
+		}
+		var searchBundle map[string]any
+		json.NewDecoder(respSearch.Body).Decode(&searchBundle)
+		respSearch.Body.Close()
+		if int(searchBundle["total"].(float64)) != 1 {
+			t.Errorf("expected 1 Observation linked to %s, got %v", patFullURL, searchBundle["total"])
+		}
+
+		// 2. Unsupported HTTP method (PATCH) in transaction Bundle returns 400 Bad Request
+		badMethodBundle := `{
+			"resourceType": "Bundle",
+			"type": "transaction",
+			"entry": [
+				{
+					"resource": {"resourceType": "Patient", "id": "bad-method-1", "name": [{"family": "Patch"}]},
+					"request": {"method": "PATCH", "url": "Patient/bad-method-1"}
+				}
+			]
+		}`
+		respBad, err := http.Post(ts.URL+"/fhir/r4/test-api", "application/fhir+json", strings.NewReader(badMethodBundle))
+		if err != nil {
+			t.Fatalf("POST bad method bundle: %v", err)
+		}
+		respBad.Body.Close()
+		if respBad.StatusCode != http.StatusBadRequest {
+			t.Errorf("expected 400 Bad Request for unsupported PATCH method in Bundle, got %d", respBad.StatusCode)
+		}
+	})
+
 	// Clean up
 	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
 		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-api'")

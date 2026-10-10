@@ -2,6 +2,10 @@ package auth_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -207,6 +211,130 @@ func TestZitadelValidator(t *testing.T) {
 		// Verified project role mapped to SMART scopes
 		assert.True(t, auth.Allows(secCtx, "Patient", auth.ActionRead))
 		assert.True(t, auth.Allows(secCtx, "Observation", auth.ActionSearch))
+	})
+
+	t.Run("Zitadel Nested JSON Object Claims and Base64 Metadata", func(t *testing.T) {
+		token, err := mock.IssueToken("zitadel-user-2", "openid", "", time.Hour, map[string]any{
+			auth.ZitadelClaimOrgDomain: "mercy-health.azra.dev",
+			auth.ZitadelClaimUserMeta: map[string]any{
+				"patient_id": base64.StdEncoding.EncodeToString([]byte("pat-b64-777")),
+			},
+			auth.ZitadelClaimRoles: map[string]any{
+				"admin": map[string]any{"org-mercy": "mercy-health.azra.dev"},
+			},
+		})
+		require.NoError(t, err)
+
+		secCtx, err := zitadelVal.ValidateToken(ctx, token)
+		require.NoError(t, err)
+		assert.Equal(t, "mercy_health", secCtx.TenantId)
+		assert.Equal(t, "pat-b64-777", secCtx.PatientId)
+		assert.True(t, auth.Allows(secCtx, "Patient", auth.ActionCreate))
+		assert.True(t, auth.Allows(secCtx, "Observation", auth.ActionDelete))
+	})
+}
+
+func TestJWTVerifyClaims_Adversarial(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+
+	t.Run("Rejects Missing or Zero Expiration Claim", func(t *testing.T) {
+		tok := &auth.ParsedToken{
+			Payload: auth.JWTPayload{
+				Issuer:    "https://issuer.example",
+				Subject:   "user-1",
+				Audience:  auth.Audience{"flint-api"},
+				ExpiresAt: 0,
+			},
+		}
+		err := tok.VerifyClaims("https://issuer.example", "flint-api", now)
+		assert.ErrorIs(t, err, auth.ErrTokenExpired)
+	})
+
+	t.Run("Rejects Missing Audience When ExpectedAudience Is Configured", func(t *testing.T) {
+		tok := &auth.ParsedToken{
+			Payload: auth.JWTPayload{
+				Issuer:    "https://issuer.example",
+				Subject:   "user-1",
+				Audience:  nil,
+				ExpiresAt: now.Add(time.Hour).Unix(),
+			},
+		}
+		err := tok.VerifyClaims("https://issuer.example", "flint-api", now)
+		assert.ErrorIs(t, err, auth.ErrInvalidAudience)
+	})
+
+	t.Run("Rejects Wrong Audience and Accepts Array Audience", func(t *testing.T) {
+		tokWrong := &auth.ParsedToken{
+			Payload: auth.JWTPayload{
+				Issuer:    "https://issuer.example",
+				Subject:   "user-1",
+				Audience:  auth.Audience{"other-service", "billing-api"},
+				ExpiresAt: now.Add(time.Hour).Unix(),
+			},
+		}
+		assert.ErrorIs(t, tokWrong.VerifyClaims("https://issuer.example", "flint-api", now), auth.ErrInvalidAudience)
+
+		tokRight := &auth.ParsedToken{
+			Payload: auth.JWTPayload{
+				Issuer:    "https://issuer.example",
+				Subject:   "user-1",
+				Audience:  auth.Audience{"other-service", "flint-api"},
+				ExpiresAt: now.Add(time.Hour).Unix(),
+			},
+		}
+		assert.NoError(t, tokRight.VerifyClaims("https://issuer.example", "flint-api", now))
+	})
+}
+
+func TestJWKPublicKey_BoundsValidation(t *testing.T) {
+	t.Run("Oversized EC Coordinates Return Error Instead of Panicking", func(t *testing.T) {
+		oversized := base64.RawURLEncoding.EncodeToString(make([]byte, 64))
+		jwk := auth.JWK{
+			Kty: "EC",
+			Crv: "P-256",
+			X:   oversized,
+			Y:   oversized,
+		}
+		_, err := jwk.PublicKey()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid EC x coordinate length")
+	})
+
+	t.Run("Leading Zero 33-Byte P-256 Coordinate Succeeds", func(t *testing.T) {
+		priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		require.NoError(t, err)
+		uncompressed, err := priv.PublicKey.Bytes()
+		require.NoError(t, err)
+		require.Len(t, uncompressed, 65)
+		xBytes := append([]byte{0x00}, uncompressed[1:33]...)
+		yBytes := uncompressed[33:65]
+		jwk := auth.JWK{
+			Kty: "EC",
+			Crv: "P-256",
+			X:   base64.RawURLEncoding.EncodeToString(xBytes),
+			Y:   base64.RawURLEncoding.EncodeToString(yBytes),
+		}
+		pub, err := jwk.PublicKey()
+		require.NoError(t, err)
+		require.NotNil(t, pub)
+	})
+
+	t.Run("Oversized or Non-Positive RSA Exponent Rejected", func(t *testing.T) {
+		jwkHugeE := auth.JWK{
+			Kty: "RSA",
+			N:   base64.RawURLEncoding.EncodeToString([]byte{1, 2, 3, 4}),
+			E:   base64.RawURLEncoding.EncodeToString(make([]byte, 16)),
+		}
+		_, err := jwkHugeE.PublicKey()
+		require.Error(t, err)
+
+		jwkSmallE := auth.JWK{
+			Kty: "RSA",
+			N:   base64.RawURLEncoding.EncodeToString([]byte{1, 2, 3, 4}),
+			E:   base64.RawURLEncoding.EncodeToString([]byte{1}),
+		}
+		_, err = jwkSmallE.PublicKey()
+		require.Error(t, err)
 	})
 }
 

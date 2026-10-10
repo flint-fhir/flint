@@ -73,6 +73,69 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 	ops := make([]postgres.BundleOperation, 0, len(bundle.Entry))
 	responseEntries := make([]map[string]any, 0, len(bundle.Entry))
 
+	// Pre-pass: assign server IDs for urn:uuid: fullUrl entries so intra-bundle
+	// (including forward) urn:uuid: references can be rewritten before validation and indexing.
+	urnMap := make(map[string]string)
+	preAssignedIDs := make([]string, len(bundle.Entry))
+	for i, entry := range bundle.Entry {
+		if !strings.HasPrefix(entry.FullURL, "urn:uuid:") {
+			continue
+		}
+		method := "PUT"
+		resType := ""
+		resID := ""
+		if entry.Request != nil {
+			if entry.Request.Method != "" {
+				method = strings.ToUpper(strings.TrimSpace(entry.Request.Method))
+			}
+			cleanURL := strings.Trim(entry.Request.URL, "/")
+			if cleanURL != "" {
+				parts := strings.SplitN(cleanURL, "/", 2)
+				resType = parts[0]
+				if len(parts) == 2 {
+					resID = parts[1]
+				}
+			}
+		}
+		if method != "POST" && method != "PUT" {
+			continue
+		}
+		bodyID := ""
+		if len(entry.Resource) > 0 && string(entry.Resource) != "null" {
+			var rawMap map[string]any
+			if err := json.Unmarshal(entry.Resource, &rawMap); err == nil {
+				if rt, ok := rawMap["resourceType"].(string); ok && rt != "" {
+					resType = rt
+				}
+				switch idVal := rawMap["id"].(type) {
+				case string:
+					bodyID = idVal
+				case map[string]any:
+					if v, ok := idVal["value"].(string); ok {
+						bodyID = v
+					}
+				}
+			}
+		}
+		if resType == "" {
+			continue
+		}
+		if strings.HasPrefix(resID, "urn:uuid:") {
+			resID = ""
+		}
+		if strings.HasPrefix(bodyID, "urn:uuid:") {
+			bodyID = ""
+		}
+		if resID == "" {
+			resID = bodyID
+		}
+		if resID == "" {
+			resID = generateID()
+		}
+		preAssignedIDs[i] = resID
+		urnMap[entry.FullURL] = resType + "/" + resID
+	}
+
 	for i, entry := range bundle.Entry {
 		method := "PUT"
 		resTypeFromURL := ""
@@ -107,8 +170,23 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if method != "POST" && method != "PUT" && method != "DELETE" {
+			msg := fmt.Sprintf("entry[%d]: unsupported bundle request method %q (expected POST, PUT, or DELETE)", i, method)
+			if isTransaction {
+				writeOperationOutcome(w, http.StatusBadRequest, "not-supported", msg)
+				return
+			}
+			responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, msg))
+			continue
+		}
+
 		resType := resTypeFromURL
 		if len(entry.Resource) > 0 && string(entry.Resource) != "null" {
+			if len(urnMap) > 0 {
+				if rewritten, err := fhirutil.RewriteURNReferences(entry.Resource, urnMap); err == nil {
+					entry.Resource = rewritten
+				}
+			}
 			var resourceMeta struct {
 				ResourceType string `json:"resourceType"`
 			}
@@ -281,6 +359,9 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 
 		// Extract ID from proto if not in request URL
 		bodyID := extractProtoResourceID(msg)
+		if strings.HasPrefix(bodyID, "urn:uuid:") {
+			bodyID = ""
+		}
 		if method == "PUT" && resID != "" && bodyID != "" && bodyID != resID {
 			if isTransaction {
 				writeOperationOutcome(w, http.StatusBadRequest, "invariant",
@@ -290,6 +371,9 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			responseEntries = append(responseEntries, bundleErrorResponse(
 				http.StatusBadRequest, fmt.Sprintf("entry[%d]: resource id %q in body does not match URL id %q", i, bodyID, resID)))
 			continue
+		}
+		if resID == "" {
+			resID = preAssignedIDs[i]
 		}
 		if resID == "" {
 			resID = bodyID
