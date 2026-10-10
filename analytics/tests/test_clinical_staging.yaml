@@ -1,0 +1,149 @@
+test_fct_encounter_los_and_reference_normalization:
+  model: flint_marts.fct_encounter
+  inputs:
+    flint_stg.stg_encounter:
+      rows:
+        - tenant_id: "tenant-a"
+          encounter_id: "enc-100"
+          patient_id: "pat-001"
+          status: "finished"
+          class_code: "IMP"
+          period_start: "2026-10-01 08:00:00+00:00"
+          period_end: "2026-10-02 14:00:00+00:00"
+          updated_at: "2026-10-02 14:00:00+00:00"
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          encounter_id: "enc-100"
+          patient_id: "pat-001"
+          status: "finished"
+          class_code: "IMP"
+          period_start: "2026-10-01 08:00:00+00:00"
+          period_end: "2026-10-02 14:00:00+00:00"
+          los_hours: 30
+          updated_at: "2026-10-02 14:00:00+00:00"
+
+test_stg_observation_cdc_and_quantity:
+  model: flint_stg.stg_observation
+  inputs:
+    fhir_raw.observation:
+      rows:
+        - tenant_id: "tenant-a"
+          _kafka_key: "obs-100"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-05 09:00:00+00:00"
+          op: "I"
+          _kafka_value: '{"status":{"value":"preliminary"},"subject":{"reference":{"value":"Patient/pat-001"}},"code":{"coding":[{"system":{"value":"http://loinc.org"},"code":{"value":"8867-4"}}]},"valueQuantity":{"value":{"value":"68.5"},"unit":{"value":"/min"}},"effectiveDateTime":{"value":"2026-10-05T09:00:00Z"}}'
+        - tenant_id: "tenant-a"
+          _kafka_key: "obs-100"
+          _kafka_offset: 2
+          _kafka_timestamp: "2026-10-05 09:30:00+00:00"
+          op: "U"
+          _kafka_value: '{"status":{"value":"final"},"subject":{"reference":{"value":"Patient/pat-001"}},"code":{"coding":[{"system":{"value":"http://loinc.org"},"code":{"value":"8867-4"}}]},"valueQuantity":{"value":{"value":"72.0"},"unit":{"value":"/min"}},"effectiveDateTime":{"value":"2026-10-05T09:30:00Z"}}'
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          observation_id: "obs-100"
+          patient_id: "pat-001"
+          status: "final"
+          code_system: "http://loinc.org"
+          code: "8867-4"
+          value_quantity: 72.0
+          value_unit: "/min"
+          effective_datetime: "2026-10-05 09:30:00+00:00"
+          updated_at: "2026-10-05 09:30:00+00:00"
+
+test_stg_encounter_cdc_and_patient_ref:
+  model: flint_stg.stg_encounter
+  inputs:
+    fhir_raw.encounter:
+      rows:
+        - tenant_id: "tenant-a"
+          _kafka_key: "enc-100"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-01 08:00:00+00:00"
+          op: "I"
+          _kafka_value: '{"status":{"value":"in-progress"},"class":{"code":{"value":"IMP"}},"subject":{"reference":{"value":"Patient/pat-001"}},"period":{"start":{"value":"2026-10-01T08:00:00Z"}}}'
+        - tenant_id: "tenant-a"
+          _kafka_key: "enc-100"
+          _kafka_offset: 2
+          _kafka_timestamp: "2026-10-02 14:00:00+00:00"
+          op: "U"
+          _kafka_value: '{"status":{"value":"finished"},"class":{"code":{"value":"IMP"}},"subject":{"reference":{"value":"Patient/pat-001"}},"period":{"start":{"value":"2026-10-01T08:00:00Z"},"end":{"value":"2026-10-02T14:00:00Z"}}}'
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          encounter_id: "enc-100"
+          patient_id: "pat-001"
+          status: "finished"
+          class_code: "IMP"
+          period_start: "2026-10-01 08:00:00+00:00"
+          period_end: "2026-10-02 14:00:00+00:00"
+          updated_at: "2026-10-02 14:00:00+00:00"
+
+test_stg_condition_cdc_and_tombstone:
+  model: flint_stg.stg_condition
+  inputs:
+    fhir_raw.condition:
+      rows:
+        - tenant_id: "tenant-a"
+          _kafka_key: "cond-100"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-01 10:00:00+00:00"
+          op: "I"
+          _kafka_value: '{"subject":{"reference":{"value":"Patient/pat-001"}},"code":{"coding":[{"system":{"value":"http://snomed.info/sct"},"code":{"value":"44054006"}}]},"clinicalStatus":{"coding":[{"code":{"value":"active"}}]},"verificationStatus":{"coding":[{"code":{"value":"confirmed"}}]},"onsetDateTime":{"value":"2025-01-01"}}'
+        - tenant_id: "tenant-a"
+          _kafka_key: "cond-deleted"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-01 10:00:00+00:00"
+          op: "I"
+          _kafka_value: '{"subject":{"reference":"Patient/pat-001"}}'
+        - tenant_id: "tenant-a"
+          _kafka_key: "cond-deleted"
+          _kafka_offset: 2
+          _kafka_timestamp: "2026-10-01 11:00:00+00:00"
+          op: "D"
+          _kafka_value: "[tombstone]"
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          condition_id: "cond-100"
+          patient_id: "pat-001"
+          code_system: "http://snomed.info/sct"
+          code: "44054006"
+          clinical_status: "active"
+          verification_status: "confirmed"
+          onset_date: "2025-01-01"
+          updated_at: "2026-10-01 10:00:00+00:00"
+
+test_dim_patient_full_name_and_gender_default:
+  model: flint_marts.dim_patient
+  inputs:
+    flint_stg.stg_patient:
+      rows:
+        - tenant_id: "tenant-a"
+          patient_id: "pat-001"
+          family_name: "Wonderland"
+          given_name: "Alice"
+          gender: null
+          birth_date: "1990-05-15"
+          active: true
+          postal_code: "94105"
+          updated_at: "2026-10-01 11:00:00+00:00"
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          patient_id: "pat-001"
+          full_name: "Alice Wonderland"
+          family_name: "Wonderland"
+          given_name: "Alice"
+          gender: "unknown"
+          birth_date: "1990-05-15"
+          active: true
+          postal_code: "94105"
+          updated_at: "2026-10-01 11:00:00+00:00"

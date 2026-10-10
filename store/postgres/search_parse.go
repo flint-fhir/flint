@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -197,4 +198,135 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 		TargetParam: targetParam,
 		Value:       value,
 	}, true
+}
+
+var (
+	knownStringSearchParams = map[string]bool{
+		"family": true, "given": true, "name": true,
+		"address": true, "address-city": true, "address-state": true,
+		"address-postalcode": true, "address-country": true,
+	}
+	knownTokenSearchParams = map[string]bool{
+		"identifier": true, "gender": true, "active": true,
+		"email": true, "phone": true, "language": true,
+		"deceased": true, "status": true, "code": true,
+		"category": true, "type": true, "class": true,
+		"clinical-status": true, "verification-status": true,
+	}
+	knownRefSearchParams = map[string]bool{
+		"organization": true, "general-practitioner": true,
+		"subject": true, "patient": true, "encounter": true,
+		"performer": true, "asserter": true, "recorder": true,
+		"participant": true,
+	}
+	knownDateSearchParams = map[string]bool{
+		"birthdate": true, "date": true, "onset-date": true,
+	}
+	knownQuantitySearchParams = map[string]bool{
+		"value-quantity": true,
+	}
+)
+
+// BuildSearchParamsFromQuery converts URL query values into a typed SearchParams struct.
+func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchParams {
+	params := SearchParams{
+		TenantID:   tenant,
+		ResType:    resType,
+		Strings:    make(map[string]string),
+		Tokens:     make(map[string]string),
+		Dates:      make(map[string]DateOp),
+		Quantities: make(map[string]QuantityOp),
+		References: make(map[string]string),
+	}
+
+	if v := q.Get("_count"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			params.Count = n
+		}
+	}
+	if v := q.Get("_offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			params.Offset = n
+		}
+	}
+
+	for _, incVal := range q["_include"] {
+		if inc, err := ParseInclude(incVal); err == nil {
+			params.Includes = append(params.Includes, inc)
+		}
+	}
+	for _, revVal := range q["_revinclude"] {
+		if rev, err := ParseInclude(revVal); err == nil {
+			params.RevIncludes = append(params.RevIncludes, rev)
+		}
+	}
+
+	for key, values := range q {
+		if strings.HasPrefix(key, "_") || len(values) == 0 {
+			continue
+		}
+		value := values[0]
+
+		if chained, ok := ParseChainedParam(key, value); ok {
+			params.Chained = append(params.Chained, *chained)
+			continue
+		}
+
+		switch {
+		case knownStringSearchParams[key]:
+			params.Strings[key] = value
+		case knownTokenSearchParams[key]:
+			params.Tokens[key] = value
+		case knownRefSearchParams[key]:
+			params.References[key] = value
+		case knownDateSearchParams[key]:
+			if dOp, err := ParseDateOp(value); err == nil {
+				params.Dates[key] = dOp
+			}
+		case knownQuantitySearchParams[key]:
+			if qOp, err := ParseQuantityOp(value); err == nil {
+				params.Quantities[key] = qOp
+			}
+		default:
+			params.Tokens[key] = value
+		}
+	}
+
+	return params
+}
+
+// ParseIfNoneExist parses an HTTP If-None-Exist header (or Bundle entry request.ifNoneExist)
+// into a SearchParams query for conditional create evaluation.
+func ParseIfNoneExist(tenant, resType, rawHeader string) (SearchParams, error) {
+	s := strings.TrimSpace(rawHeader)
+	if s == "" {
+		return SearchParams{}, fmt.Errorf("empty If-None-Exist value")
+	}
+
+	// Support optional resource type prefix (e.g., "Patient?identifier=123" or "?identifier=123")
+	if qIdx := strings.IndexByte(s, '?'); qIdx != -1 {
+		prefix := strings.TrimSpace(s[:qIdx])
+		if prefix != "" && !strings.EqualFold(prefix, resType) {
+			return SearchParams{}, fmt.Errorf("If-None-Exist resource prefix %q does not match %q", prefix, resType)
+		}
+		s = s[qIdx+1:]
+	}
+
+	q, err := url.ParseQuery(s)
+	if err != nil {
+		return SearchParams{}, fmt.Errorf("invalid If-None-Exist query %q: %w", rawHeader, err)
+	}
+	if len(q) == 0 {
+		return SearchParams{}, fmt.Errorf("If-None-Exist query %q contains no search parameters", rawHeader)
+	}
+	for k, vals := range q {
+		if strings.TrimSpace(k) == "" || len(vals) == 0 || strings.TrimSpace(vals[0]) == "" {
+			return SearchParams{}, fmt.Errorf("If-None-Exist query %q contains empty parameter key or value", rawHeader)
+		}
+	}
+
+	params := BuildSearchParamsFromQuery(tenant, resType, q)
+	params.Count = 2
+	params.Offset = 0
+	return params, nil
 }

@@ -274,4 +274,30 @@ func TestServer_AuthMiddleware(t *testing.T) {
 		assert.Equal(t, "Bundle", bundle["resourceType"])
 		assert.GreaterOrEqual(t, int(bundle["total"].(float64)), 2) // PUT + DELETE 403s by user-ud
 	})
+
+	t.Run("Patient/$everything Enforces Patient Compartment and Records Audit Subtype everything", func(t *testing.T) {
+		patToken, err := mockVal.IssueToken("user-ev", "patient/Patient.r", "pat-100", time.Hour, nil)
+		require.NoError(t, err)
+
+		// Attempt to fetch $everything for pat-999 with token restricted to pat-100 -> 403 Forbidden
+		reqEv, _ := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/default/Patient/pat-999/$everything", nil)
+		reqEv.Header.Set("Authorization", "Bearer "+patToken)
+		respEv, err := http.DefaultClient.Do(reqEv)
+		require.NoError(t, err)
+		defer respEv.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respEv.StatusCode)
+
+		records, total, err := srv.AuditRecorder().Query(t.Context(), postgres.AuditQueryParams{
+			TenantID:     "default",
+			Action:       "E",
+			SubtypeCode:  "everything",
+			Outcome:      "4",
+			AgentSubject: "user-ev",
+			EntityType:   "Patient",
+			EntityID:     "pat-999",
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, total)
+		assert.Equal(t, "pat-100", records[0].AgentPatient)
+	})
 }

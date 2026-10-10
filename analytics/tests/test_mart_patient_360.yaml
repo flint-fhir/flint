@@ -1,0 +1,85 @@
+test_mart_patient_360_aggregation:
+  model: flint_marts.mart_patient_360
+  inputs:
+    flint_marts.dim_patient:
+      rows:
+        - tenant_id: "tenant-a"
+          patient_id: "pat-001"
+          full_name: "Alice Wonderland"
+          family_name: "Wonderland"
+          given_name: "Alice"
+          gender: "female"
+          birth_date: "1990-05-15"
+          active: true
+          postal_code: "94105"
+          updated_at: "2026-10-01 11:00:00+00:00"
+    flint_marts.fct_encounter:
+      rows:
+        - tenant_id: "tenant-a"
+          encounter_id: "enc-1"
+          patient_id: "pat-001"
+          status: "finished"
+          class_code: "AMB"
+          period_start: "2026-10-01 09:00:00+00:00"
+          period_end: "2026-10-01 10:00:00+00:00"
+          los_hours: 1
+          updated_at: "2026-10-01 10:00:00+00:00"
+        - tenant_id: "tenant-a"
+          encounter_id: "enc-2"
+          patient_id: "pat-001"
+          status: "finished"
+          class_code: "IMP"
+          period_start: "2026-10-05 08:00:00+00:00"
+          period_end: "2026-10-07 08:00:00+00:00"
+          los_hours: 48
+          updated_at: "2026-10-07 08:00:00+00:00"
+    flint_marts.fct_condition:
+      rows:
+        - tenant_id: "tenant-a"
+          condition_id: "cond-1"
+          patient_id: "pat-001"
+          code_system: "http://snomed.info/sct"
+          code: "44054006"
+          clinical_status: "active"
+          verification_status: "confirmed"
+          onset_date: "2025-01-01"
+          updated_at: "2026-10-01 10:00:00+00:00"
+        - tenant_id: "tenant-a"
+          condition_id: "cond-2"
+          patient_id: "pat-001"
+          code_system: "http://snomed.info/sct"
+          code: "38341003"
+          clinical_status: "resolved"
+          verification_status: "confirmed"
+          onset_date: "2024-06-01"
+          updated_at: "2026-10-01 10:00:00+00:00"
+    flint_marts.fct_observation:
+      rows:
+        - tenant_id: "tenant-a"
+          observation_id: "obs-1"
+          patient_id: "pat-001"
+          status: "final"
+          code_system: "http://loinc.org"
+          code: "8867-4"
+          value_quantity: 72.0
+          value_unit: "/min"
+          effective_datetime: "2026-10-05 09:30:00+00:00"
+          updated_at: "2026-10-05 09:30:00+00:00"
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          patient_id: "pat-001"
+          full_name: "Alice Wonderland"
+          family_name: "Wonderland"
+          given_name: "Alice"
+          gender: "female"
+          birth_date: "1990-05-15"
+          active: true
+          postal_code: "94105"
+          encounter_count: 2
+          last_encounter_start: "2026-10-05 08:00:00+00:00"
+          total_condition_count: 2
+          active_condition_count: 1
+          observation_count: 1
+          last_observation_datetime: "2026-10-05 09:30:00+00:00"

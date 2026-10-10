@@ -293,9 +293,9 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// On successful POST Create, extract newly assigned resource ID from Location header:
-		// Location: /fhir/r4/{tenant}/{resourceType}/{id}/_history/{vid}
-		if r.Method == http.MethodPost && entityID == "" && arw.statusCode == http.StatusCreated {
+		// On successful POST Create (201) or Conditional Create match (200), extract resource ID from Location header:
+		// Location: /fhir/r4/{tenant}/{resourceType}/{id}
+		if r.Method == http.MethodPost && entityID == "" && (arw.statusCode == http.StatusCreated || arw.statusCode == http.StatusOK) {
 			if loc := arw.Header().Get("Location"); loc != "" {
 				locParts := strings.Split(strings.Trim(loc, "/"), "/")
 				if len(locParts) >= 5 && locParts[0] == "fhir" && locParts[1] == "r4" {

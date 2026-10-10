@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/lib/pq"
 )
@@ -21,6 +22,16 @@ type SearchResults struct {
 	Matches  []SearchResult
 	Includes []SearchResult
 	Total    int
+}
+
+// PatientEverythingParams specifies parameters for the FHIR R4 Patient/$everything operation.
+type PatientEverythingParams struct {
+	TenantID      string
+	PatientID     string
+	ResourceTypes []string   // Optional _type filter (e.g. ["Observation", "Condition"])
+	Since         *time.Time // Optional _since filter on last_updated
+	Count         int
+	Offset        int
 }
 
 // SearchParams holds parsed FHIR search parameters for a query.
@@ -332,4 +343,133 @@ func buildQuantityCondition(alias string, op QuantityOp, startIdx int) (string, 
 	}
 
 	return strings.Join(conds, " AND "), args
+}
+
+// PatientEverything implements the HL7 FHIR R4 Patient/$everything operation,
+// returning the target Patient resource plus all compartment-linked resources
+// (Encounter, Condition, Observation, Practitioner, etc.) via spidx_reference.
+func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingParams) (*SearchResults, error) {
+	if params.Count <= 0 {
+		params.Count = 100
+	}
+	if params.Count > 1000 {
+		params.Count = 1000
+	}
+	offset := max(params.Offset, 0)
+
+	patRec, err := s.ReadResourceWithMeta(ctx, params.TenantID, "Patient", params.PatientID)
+	if err != nil {
+		return nil, err
+	}
+
+	includePatient := true
+	if len(params.ResourceTypes) > 0 {
+		includePatient = false
+		for _, rt := range params.ResourceTypes {
+			if strings.EqualFold(rt, "Patient") {
+				includePatient = true
+				break
+			}
+		}
+	}
+	if params.Since != nil && patRec.LastUpdated.Before(*params.Since) {
+		includePatient = false
+	}
+
+	var matches []SearchResult
+	if includePatient {
+		matches = append(matches, SearchResult{
+			ResType:       "Patient",
+			ResID:         params.PatientID,
+			ResourceProto: patRec.ResourceProto,
+		})
+	}
+
+	// Build compartment query against spidx_reference:
+	// 1. Resources referencing this Patient (e.g., Condition, Encounter, Observation)
+	// 2. Resources directly referenced by this Patient (e.g., generalPractitioner, managingOrganization)
+	// 3. Resources referenced by clinical resources in this Patient's compartment (e.g., Encounter participant Practitioner)
+	whereConds := []string{
+		"r.tenant_id = $1",
+		"r.is_deleted = FALSE",
+		"NOT (r.res_type = 'Patient' AND r.res_id = $2)",
+		`(
+			EXISTS (
+				SELECT 1 FROM spidx_reference rf
+				WHERE rf.tenant_id = r.tenant_id
+				  AND rf.res_type = r.res_type
+				  AND rf.res_id = r.res_id
+				  AND rf.target_id = $2
+				  AND (rf.target_type = 'Patient' OR rf.target_type = '')
+			)
+			OR EXISTS (
+				SELECT 1 FROM spidx_reference rf
+				WHERE rf.tenant_id = r.tenant_id
+				  AND rf.res_type = 'Patient'
+				  AND rf.res_id = $2
+				  AND rf.target_type = r.res_type
+				  AND rf.target_id = r.res_id
+			)
+			OR EXISTS (
+				SELECT 1 FROM spidx_reference rf_clin
+				JOIN spidx_reference rf_pat
+				  ON rf_pat.tenant_id = rf_clin.tenant_id
+				 AND rf_pat.res_type = rf_clin.res_type
+				 AND rf_pat.res_id = rf_clin.res_id
+				WHERE rf_clin.tenant_id = r.tenant_id
+				  AND rf_clin.target_type = r.res_type
+				  AND rf_clin.target_id = r.res_id
+				  AND rf_pat.target_id = $2
+				  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+			)
+		)`,
+	}
+	args := []any{params.TenantID, params.PatientID}
+
+	if len(params.ResourceTypes) > 0 {
+		whereConds = append(whereConds, fmt.Sprintf("r.res_type = ANY($%d)", len(args)+1))
+		args = append(args, pq.Array(params.ResourceTypes))
+	}
+	if params.Since != nil {
+		whereConds = append(whereConds, fmt.Sprintf("r.last_updated >= $%d", len(args)+1))
+		args = append(args, *params.Since)
+	}
+
+	whereClause := strings.Join(whereConds, " AND ")
+
+	var compTotal int
+	countSQL := "SELECT COUNT(*) FROM fhir_resource r WHERE " + whereClause
+	if err := s.db.QueryRowContext(ctx, countSQL, args...).Scan(&compTotal); err != nil {
+		return nil, fmt.Errorf("patient everything count: %w", err)
+	}
+
+	dataSQL := fmt.Sprintf(
+		"SELECT r.res_type, r.res_id, r.resource_proto FROM fhir_resource r WHERE %s ORDER BY r.res_type ASC, r.res_id ASC LIMIT $%d OFFSET $%d",
+		whereClause, len(args)+1, len(args)+2,
+	)
+	args = append(args, params.Count, offset)
+
+	rows, err := s.db.QueryContext(ctx, dataSQL, args...)
+	if err != nil {
+		return nil, fmt.Errorf("patient everything query: %w", err)
+	}
+	defer rows.Close()
+
+	var includes []SearchResult
+	for rows.Next() {
+		var r SearchResult
+		if err := rows.Scan(&r.ResType, &r.ResID, &r.ResourceProto); err != nil {
+			return nil, fmt.Errorf("scan patient everything row: %w", err)
+		}
+		includes = append(includes, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("patient everything rows: %w", err)
+	}
+
+	return &SearchResults{
+		Matches:  matches,
+		Includes: includes,
+		Total:    len(matches) + compTotal,
+	}, nil
 }

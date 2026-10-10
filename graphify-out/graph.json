@@ -202,6 +202,28 @@
       "source_location": "L1"
     },
     {
+      "id": "pkg_audit_audit",
+      "label": "audit/audit.go",
+      "_origin": "ast",
+      "community": 0,
+      "community_name": "context.Context",
+      "file_type": "code",
+      "norm_label": "audit/audit.go",
+      "source_file": "pkg/audit/audit.go",
+      "source_location": "L1"
+    },
+    {
+      "id": "pkg_audit_audit_newmemoryrecorder",
+      "label": "NewMemoryRecorder()",
+      "_origin": "ast",
+      "community": 0,
+      "community_name": "context.Context",
+      "file_type": "code",
+      "norm_label": "newmemoryrecorder()",
+      "source_file": "pkg/audit/audit.go",
+      "source_location": "L70"
+    },
+    {
       "id": "pkg_audit_audit_newstorerecorder",
       "label": "NewStoreRecorder()",
       "_origin": "ast",
@@ -211,6 +233,17 @@
       "norm_label": "newstorerecorder()",
       "source_file": "pkg/audit/audit.go",
       "source_location": "L46"
+    },
+    {
+      "id": "pkg_audit_audit_test_testmemoryrecorderandtofhirresource",
+      "label": "TestMemoryRecorderAndToFHIRResource()",
+      "_origin": "ast",
+      "community": 0,
+      "community_name": "context.Context",
+      "file_type": "code",
+      "norm_label": "testmemoryrecorderandtofhirresource()",
+      "source_file": "pkg/audit/audit_test.go",
+      "source_location": "L158"
     },
     {
       "id": "postgres_resourceinput",
@@ -598,17 +631,6 @@
       "source_location": "L1"
     },
     {
-      "id": "store_postgres_extract_defaultindexextractors",
-      "label": "DefaultIndexExtractors()",
-      "_origin": "ast",
-      "community": 1,
-      "community_name": "extract_test.go",
-      "file_type": "code",
-      "norm_label": "defaultindexextractors()",
-      "source_file": "store/postgres/extract.go",
-      "source_location": "L80"
-    },
-    {
       "id": "store_postgres_extract_extractcondition",
       "label": "ExtractCondition()",
       "_origin": "ast",
@@ -684,17 +706,6 @@
       "norm_label": "extract_test.go",
       "source_file": "store/postgres/extract_test.go",
       "source_location": "L1"
-    },
-    {
-      "id": "store_postgres_extract_test_testdefaultindexextractors",
-      "label": "TestDefaultIndexExtractors()",
-      "_origin": "ast",
-      "community": 1,
-      "community_name": "extract_test.go",
-      "file_type": "code",
-      "norm_label": "testdefaultindexextractors()",
-      "source_file": "store/postgres/extract_test.go",
-      "source_location": "L21"
     },
     {
       "id": "store_postgres_extract_test_testextractcondition",
@@ -2281,6 +2292,17 @@
       "source_location": "L228"
     },
     {
+      "id": "go_type_net_url_values",
+      "label": "net/url.Values",
+      "_origin": "ast",
+      "community": 17,
+      "community_name": "search_parse.go",
+      "file_type": "code",
+      "norm_label": "net/url.values",
+      "source_file": "",
+      "source_location": ""
+    },
+    {
       "id": "postgres_chainedparam",
       "label": "ChainedParam",
       "_origin": "ast",
@@ -2289,7 +2311,7 @@
       "file_type": "code",
       "norm_label": "chainedparam",
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L33"
+      "source_location": "L34"
     },
     {
       "id": "postgres_dateop",
@@ -2300,7 +2322,7 @@
       "file_type": "code",
       "norm_label": "dateop",
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L11"
+      "source_location": "L12"
     },
     {
       "id": "postgres_includeparam",
@@ -2311,7 +2333,18 @@
       "file_type": "code",
       "norm_label": "includeparam",
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L26"
+      "source_location": "L27"
+    },
+    {
+      "id": "postgres_patienteverythingparams",
+      "label": "PatientEverythingParams",
+      "_origin": "ast",
+      "community": 17,
+      "community_name": "search_parse.go",
+      "file_type": "code",
+      "norm_label": "patienteverythingparams",
+      "source_file": "store/postgres/search.go",
+      "source_location": "L28"
     },
     {
       "id": "postgres_quantityop",
@@ -2322,7 +2355,7 @@
       "file_type": "code",
       "norm_label": "quantityop",
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L17"
+      "source_location": "L18"
     },
     {
       "id": "postgres_searchparams",
@@ -2333,7 +2366,7 @@
       "file_type": "code",
       "norm_label": "searchparams",
       "source_file": "store/postgres/search.go",
-      "source_location": "L27"
+      "source_location": "L38"
     },
     {
       "id": "postgres_searchresult",
@@ -2344,18 +2377,18 @@
       "file_type": "code",
       "norm_label": "searchresult",
       "source_file": "store/postgres/search.go",
-      "source_location": "L12"
+      "source_location": "L13"
     },
     {
-      "id": "postgres_searchresults",
-      "label": "SearchResults",
+      "id": "postgres_store_patienteverything",
+      "label": ".PatientEverything()",
       "_origin": "ast",
       "community": 17,
       "community_name": "search_parse.go",
       "file_type": "code",
-      "norm_label": "searchresults",
+      "norm_label": ".patienteverything()",
       "source_file": "store/postgres/search.go",
-      "source_location": "L20"
+      "source_location": "L351"
     },
     {
       "id": "postgres_store_resolveincludes",
@@ -2366,7 +2399,7 @@
       "file_type": "code",
       "norm_label": ".resolveincludes()",
       "source_file": "store/postgres/search.go",
-      "source_location": "L203"
+      "source_location": "L214"
     },
     {
       "id": "postgres_store_search",
@@ -2377,7 +2410,7 @@
       "file_type": "code",
       "norm_label": ".search()",
       "source_file": "store/postgres/search.go",
-      "source_location": "L45"
+      "source_location": "L56"
     },
     {
       "id": "store_postgres_search",
@@ -2399,7 +2432,7 @@
       "file_type": "code",
       "norm_label": "builddatecondition()",
       "source_file": "store/postgres/search.go",
-      "source_location": "L281"
+      "source_location": "L292"
     },
     {
       "id": "store_postgres_search_buildquantitycondition",
@@ -2410,7 +2443,18 @@
       "file_type": "code",
       "norm_label": "buildquantitycondition()",
       "source_file": "store/postgres/search.go",
-      "source_location": "L301"
+      "source_location": "L312"
+    },
+    {
+      "id": "store_postgres_search_go_postgres_searchresults",
+      "label": "SearchResults",
+      "_origin": "ast",
+      "community": 17,
+      "community_name": "search_parse.go",
+      "file_type": "code",
+      "norm_label": "searchresults",
+      "source_file": "store/postgres/search.go",
+      "source_location": "L21"
     },
     {
       "id": "store_postgres_search_go_postgres_store",
@@ -2421,7 +2465,7 @@
       "file_type": "code",
       "norm_label": "store",
       "source_file": "store/postgres/search.go",
-      "source_location": "L45"
+      "source_location": "L56"
     },
     {
       "id": "store_postgres_search_parse",
@@ -2435,6 +2479,17 @@
       "source_location": "L1"
     },
     {
+      "id": "store_postgres_search_parse_buildsearchparamsfromquery",
+      "label": "BuildSearchParamsFromQuery()",
+      "_origin": "ast",
+      "community": 17,
+      "community_name": "search_parse.go",
+      "file_type": "code",
+      "norm_label": "buildsearchparamsfromquery()",
+      "source_file": "store/postgres/search_parse.go",
+      "source_location": "L231"
+    },
+    {
       "id": "store_postgres_search_parse_parsechainedparam",
       "label": "ParseChainedParam()",
       "_origin": "ast",
@@ -2443,7 +2498,7 @@
       "file_type": "code",
       "norm_label": "parsechainedparam()",
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L163"
+      "source_location": "L164"
     },
     {
       "id": "store_postgres_search_parse_parsedateop",
@@ -2454,7 +2509,18 @@
       "file_type": "code",
       "norm_label": "parsedateop()",
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L62"
+      "source_location": "L63"
+    },
+    {
+      "id": "store_postgres_search_parse_parseifnoneexist",
+      "label": "ParseIfNoneExist()",
+      "_origin": "ast",
+      "community": 17,
+      "community_name": "search_parse.go",
+      "file_type": "code",
+      "norm_label": "parseifnoneexist()",
+      "source_file": "store/postgres/search_parse.go",
+      "source_location": "L300"
     },
     {
       "id": "store_postgres_search_parse_parseinclude",
@@ -2465,7 +2531,7 @@
       "file_type": "code",
       "norm_label": "parseinclude()",
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L144"
+      "source_location": "L145"
     },
     {
       "id": "store_postgres_search_parse_parsequantityop",
@@ -2476,7 +2542,7 @@
       "file_type": "code",
       "norm_label": "parsequantityop()",
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L104"
+      "source_location": "L105"
     },
     {
       "id": "store_postgres_search_parse_test",
@@ -2556,6 +2622,17 @@
       "source_location": "L23"
     },
     {
+      "id": "store_postgres_search_property_test_testproperty_ifnoneexistparsinginvariance",
+      "label": "TestProperty_IfNoneExistParsingInvariance()",
+      "_origin": "ast",
+      "community": 17,
+      "community_name": "search_parse.go",
+      "file_type": "code",
+      "norm_label": "testproperty_ifnoneexistparsinginvariance()",
+      "source_file": "store/postgres/search_property_test.go",
+      "source_location": "L114"
+    },
+    {
       "id": "store_postgres_search_property_test_testproperty_includeparsinginvariance",
       "label": "TestProperty_IncludeParsingInvariance()",
       "_origin": "ast",
@@ -2575,7 +2652,7 @@
       "file_type": "code",
       "norm_label": "testproperty_parsersneverpaniconarbitraryfuzz()",
       "source_file": "store/postgres/search_property_test.go",
-      "source_location": "L114"
+      "source_location": "L139"
     },
     {
       "id": "store_postgres_search_property_test_testproperty_quantityparsinginvariance",
@@ -2820,39 +2897,6 @@
       "source_location": "L15"
     },
     {
-      "id": "cmd_worker_main",
-      "label": "worker/main.go",
-      "_origin": "ast",
-      "community": 18,
-      "community_name": "Producer",
-      "file_type": "code",
-      "norm_label": "worker/main.go",
-      "source_file": "cmd/worker/main.go",
-      "source_location": "L1"
-    },
-    {
-      "id": "cmd_worker_main_envordefault",
-      "label": "envOrDefault()",
-      "_origin": "ast",
-      "community": 18,
-      "community_name": "Producer",
-      "file_type": "code",
-      "norm_label": "envordefault()",
-      "source_file": "cmd/worker/main.go",
-      "source_location": "L82"
-    },
-    {
-      "id": "cmd_worker_main_main",
-      "label": "main()",
-      "_origin": "ast",
-      "community": 18,
-      "community_name": "Producer",
-      "file_type": "code",
-      "norm_label": "main()",
-      "source_file": "cmd/worker/main.go",
-      "source_location": "L22"
-    },
-    {
       "id": "go_type_github_com_twmb_franz_go_pkg_kgo_client",
       "label": "github.com/twmb/franz-go/pkg/kgo.Client",
       "_origin": "ast",
@@ -2897,6 +2941,90 @@
       "source_location": ""
     },
     {
+      "id": "readme_1_development_environment_hermetic_nix_shell",
+      "label": "1. Development Environment (Hermetic Nix Shell)",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "1. development environment (hermetic nix shell)",
+      "source_file": "README.md",
+      "source_location": "L91"
+    },
+    {
+      "id": "readme_2_launch_local_dev_stack_k3d",
+      "label": "2. Launch Local Dev Stack (k3d)",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "2. launch local dev stack (k3d)",
+      "source_file": "README.md",
+      "source_location": "L104"
+    },
+    {
+      "id": "readme_3_build_run_flint",
+      "label": "3. Build & Run Flint",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "3. build & run flint",
+      "source_file": "README.md",
+      "source_location": "L119"
+    },
+    {
+      "id": "readme_4_run_benchmarks_tests",
+      "label": "4. Run Benchmarks & Tests",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "4. run benchmarks & tests",
+      "source_file": "README.md",
+      "source_location": "L132"
+    },
+    {
+      "id": "readme_5_query_analytical_iceberg_table_with_duckdb",
+      "label": "5. Query Analytical Iceberg Table with DuckDB",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "5. query analytical iceberg table with duckdb",
+      "source_file": "README.md",
+      "source_location": "L151"
+    },
+    {
+      "id": "readme_advanced_fhir_search_engine",
+      "label": "Advanced FHIR Search Engine",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "advanced fhir search engine",
+      "source_file": "README.md",
+      "source_location": "L223"
+    },
+    {
+      "id": "readme_api_reference",
+      "label": "API Reference",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "api reference",
+      "source_file": "README.md",
+      "source_location": "L172"
+    },
+    {
       "id": "readme_architecture",
       "label": "Architecture",
       "_origin": "ast",
@@ -2909,6 +3037,30 @@
       "source_location": "L30"
     },
     {
+      "id": "readme_batch_transaction_bundles",
+      "label": "Batch / Transaction Bundles",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "batch / transaction bundles",
+      "source_file": "README.md",
+      "source_location": "L176"
+    },
+    {
+      "id": "readme_clinical_dimensional_lakehouse_analytics_sqlmesh_on_duckdb_iceberg",
+      "label": "Clinical Dimensional Lakehouse (`analytics/` \u2014 SQLMesh on DuckDB / Iceberg)",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "clinical dimensional lakehouse (`analytics/` \u2014 sqlmesh on duckdb / iceberg)",
+      "source_file": "README.md",
+      "source_location": "L302"
+    },
+    {
       "id": "readme_community_contributing",
       "label": "Community & Contributing",
       "_origin": "ast",
@@ -2918,7 +3070,43 @@
       "node_kind": "heading",
       "norm_label": "community & contributing",
       "source_file": "README.md",
-      "source_location": "L334"
+      "source_location": "L364"
+    },
+    {
+      "id": "readme_decoupled_tokenvalidator_interface_pkg_auth",
+      "label": "Decoupled `TokenValidator` Interface (`pkg/auth`)",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "decoupled `tokenvalidator` interface (`pkg/auth`)",
+      "source_file": "README.md",
+      "source_location": "L262"
+    },
+    {
+      "id": "readme_environment_configuration",
+      "label": "Environment Configuration",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "environment configuration",
+      "source_file": "README.md",
+      "source_location": "L276"
+    },
+    {
+      "id": "readme_fhir_conformance_validation_engine_pkg_validation",
+      "label": "FHIR Conformance & Validation Engine (`pkg/validation`)",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "fhir conformance & validation engine (`pkg/validation`)",
+      "source_file": "README.md",
+      "source_location": "L212"
     },
     {
       "id": "readme_flint_high_performance_fhir_r4_server_on_a_data_lakehouse",
@@ -2942,7 +3130,7 @@
       "node_kind": "heading",
       "norm_label": "license",
       "source_file": "README.md",
-      "source_location": "L343"
+      "source_location": "L373"
     },
     {
       "id": "readme_project_structure",
@@ -2954,7 +3142,7 @@
       "node_kind": "heading",
       "norm_label": "project structure",
       "source_file": "README.md",
-      "source_location": "L297"
+      "source_location": "L325"
     },
     {
       "id": "readme_property_based_testing_via_hegel",
@@ -2966,7 +3154,55 @@
       "node_kind": "heading",
       "norm_label": "property-based testing (via hegel)",
       "source_file": "README.md",
-      "source_location": "L285"
+      "source_location": "L289"
+    },
+    {
+      "id": "readme_quickstart",
+      "label": "Quickstart",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "quickstart",
+      "source_file": "README.md",
+      "source_location": "L89"
+    },
+    {
+      "id": "readme_resource_interactions",
+      "label": "Resource Interactions",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "resource interactions",
+      "source_file": "README.md",
+      "source_location": "L198"
+    },
+    {
+      "id": "readme_security_guarantees",
+      "label": "Security Guarantees",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "security guarantees",
+      "source_file": "README.md",
+      "source_location": "L268"
+    },
+    {
+      "id": "readme_smart_on_fhir_v2_identity_architecture",
+      "label": "SMART on FHIR v2 & Identity Architecture",
+      "_origin": "ast",
+      "community": 19,
+      "community_name": "Flint \u2014 High-Performance FHIR R4 Server on a Data Lakehouse",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "smart on fhir v2 & identity architecture",
+      "source_file": "README.md",
+      "source_location": "L245"
     },
     {
       "id": "readme_supported_fhir_resources_big_5",
@@ -3093,6 +3329,39 @@
       "source_location": "L366"
     },
     {
+      "id": "cmd_worker_main",
+      "label": "worker/main.go",
+      "_origin": "ast",
+      "community": 2,
+      "community_name": "loadtest/main.go",
+      "file_type": "code",
+      "norm_label": "worker/main.go",
+      "source_file": "cmd/worker/main.go",
+      "source_location": "L1"
+    },
+    {
+      "id": "cmd_worker_main_envordefault",
+      "label": "envOrDefault()",
+      "_origin": "ast",
+      "community": 2,
+      "community_name": "loadtest/main.go",
+      "file_type": "code",
+      "norm_label": "envordefault()",
+      "source_file": "cmd/worker/main.go",
+      "source_location": "L82"
+    },
+    {
+      "id": "cmd_worker_main_main",
+      "label": "main()",
+      "_origin": "ast",
+      "community": 2,
+      "community_name": "loadtest/main.go",
+      "file_type": "code",
+      "norm_label": "main()",
+      "source_file": "cmd/worker/main.go",
+      "source_location": "L22"
+    },
+    {
       "id": "go_type_database_sql_db",
       "label": "database/sql.DB",
       "_origin": "ast",
@@ -3137,6 +3406,39 @@
       "source_location": ""
     },
     {
+      "id": "ingest_activity_activities_test",
+      "label": "activities_test.go",
+      "_origin": "ast",
+      "community": 2,
+      "community_name": "loadtest/main.go",
+      "file_type": "code",
+      "norm_label": "activities_test.go",
+      "source_file": "ingest/activity/activities_test.go",
+      "source_location": "L1"
+    },
+    {
+      "id": "ingest_activity_activities_test_testpublishtoautomq_nilproducer",
+      "label": "TestPublishToAutoMQ_NilProducer()",
+      "_origin": "ast",
+      "community": 2,
+      "community_name": "loadtest/main.go",
+      "file_type": "code",
+      "norm_label": "testpublishtoautomq_nilproducer()",
+      "source_file": "ingest/activity/activities_test.go",
+      "source_location": "L110"
+    },
+    {
+      "id": "ingest_activity_activities_test_testwritepostgresbatch_withextractors",
+      "label": "TestWritePostgresBatch_WithExtractors()",
+      "_origin": "ast",
+      "community": 2,
+      "community_name": "loadtest/main.go",
+      "file_type": "code",
+      "norm_label": "testwritepostgresbatch_withextractors()",
+      "source_file": "ingest/activity/activities_test.go",
+      "source_location": "L23"
+    },
+    {
       "id": "loadtest_config",
       "label": "Config",
       "_origin": "ast",
@@ -3168,6 +3470,28 @@
       "norm_label": ".recordlatency()",
       "source_file": "cmd/loadtest/main.go",
       "source_location": "L58"
+    },
+    {
+      "id": "store_postgres_extract_defaultindexextractors",
+      "label": "DefaultIndexExtractors()",
+      "_origin": "ast",
+      "community": 2,
+      "community_name": "loadtest/main.go",
+      "file_type": "code",
+      "norm_label": "defaultindexextractors()",
+      "source_file": "store/postgres/extract.go",
+      "source_location": "L80"
+    },
+    {
+      "id": "store_postgres_extract_test_testdefaultindexextractors",
+      "label": "TestDefaultIndexExtractors()",
+      "_origin": "ast",
+      "community": 2,
+      "community_name": "loadtest/main.go",
+      "file_type": "code",
+      "norm_label": "testdefaultindexextractors()",
+      "source_file": "store/postgres/extract_test.go",
+      "source_location": "L21"
     },
     {
       "id": "store_postgres_schema",
@@ -3349,88 +3673,18 @@
       "source_location": "L6"
     },
     {
-      "id": "code_of_conduct_attribution",
-      "label": "Attribution",
+      "id": "pkg_flint_analytics",
+      "label": "flint-analytics",
       "_origin": "ast",
       "community": 26,
-      "community_name": "Contributor Covenant Code of Conduct",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "attribution",
-      "source_file": "CODE_OF_CONDUCT.md",
-      "source_location": "L114"
-    },
-    {
-      "id": "code_of_conduct_contributor_covenant_code_of_conduct",
-      "label": "Contributor Covenant Code of Conduct",
-      "_origin": "ast",
-      "community": 26,
-      "community_name": "Contributor Covenant Code of Conduct",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "contributor covenant code of conduct",
-      "source_file": "CODE_OF_CONDUCT.md",
-      "source_location": "L1"
-    },
-    {
-      "id": "code_of_conduct_enforcement",
-      "label": "Enforcement",
-      "_origin": "ast",
-      "community": 26,
-      "community_name": "Contributor Covenant Code of Conduct",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "enforcement",
-      "source_file": "CODE_OF_CONDUCT.md",
-      "source_location": "L59"
-    },
-    {
-      "id": "code_of_conduct_enforcement_responsibilities",
-      "label": "Enforcement Responsibilities",
-      "_origin": "ast",
-      "community": 26,
-      "community_name": "Contributor Covenant Code of Conduct",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "enforcement responsibilities",
-      "source_file": "CODE_OF_CONDUCT.md",
-      "source_location": "L39"
-    },
-    {
-      "id": "code_of_conduct_our_pledge",
-      "label": "Our Pledge",
-      "_origin": "ast",
-      "community": 26,
-      "community_name": "Contributor Covenant Code of Conduct",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "our pledge",
-      "source_file": "CODE_OF_CONDUCT.md",
-      "source_location": "L3"
-    },
-    {
-      "id": "code_of_conduct_our_standards",
-      "label": "Our Standards",
-      "_origin": "ast",
-      "community": 26,
-      "community_name": "Contributor Covenant Code of Conduct",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "our standards",
-      "source_file": "CODE_OF_CONDUCT.md",
-      "source_location": "L15"
-    },
-    {
-      "id": "code_of_conduct_scope",
-      "label": "Scope",
-      "_origin": "ast",
-      "community": 26,
-      "community_name": "Contributor Covenant Code of Conduct",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "scope",
-      "source_file": "CODE_OF_CONDUCT.md",
-      "source_location": "L51"
+      "community_name": "flint-analytics",
+      "ecosystem": "python",
+      "file_type": "code",
+      "norm_label": "flint-analytics",
+      "source_file": "analytics/pyproject.toml",
+      "source_location": "L1",
+      "type": "package",
+      "version": "0.1.0"
     },
     {
       "id": "spike_spike1_fhir_json_roundtrip",
@@ -3646,29 +3900,18 @@
       "label": "net/http.Handler",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "net/http.handler",
       "source_file": "",
       "source_location": ""
     },
     {
-      "id": "pkg_audit_audit",
-      "label": "audit/audit.go",
-      "_origin": "ast",
-      "community": 29,
-      "community_name": "audit/audit.go",
-      "file_type": "code",
-      "norm_label": "audit/audit.go",
-      "source_file": "pkg/audit/audit.go",
-      "source_location": "L1"
-    },
-    {
       "id": "pkg_audit_audit_classifyhttpinteraction",
       "label": "ClassifyHTTPInteraction()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "classifyhttpinteraction()",
       "source_file": "pkg/audit/audit.go",
@@ -3679,29 +3922,18 @@
       "label": "ClassifyHTTPOutcome()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "classifyhttpoutcome()",
       "source_file": "pkg/audit/audit.go",
-      "source_location": "L213"
-    },
-    {
-      "id": "pkg_audit_audit_newmemoryrecorder",
-      "label": "NewMemoryRecorder()",
-      "_origin": "ast",
-      "community": 29,
-      "community_name": "audit/audit.go",
-      "file_type": "code",
-      "norm_label": "newmemoryrecorder()",
-      "source_file": "pkg/audit/audit.go",
-      "source_location": "L70"
+      "source_location": "L218"
     },
     {
       "id": "pkg_audit_audit_property_test",
       "label": "audit_property_test.go",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "audit_property_test.go",
       "source_file": "pkg/audit/audit_property_test.go",
@@ -3712,7 +3944,7 @@
       "label": "TestProperty_ClassifyNeverPanicsOnArbitraryFuzz()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "testproperty_classifyneverpanicsonarbitraryfuzz()",
       "source_file": "pkg/audit/audit_property_test.go",
@@ -3723,7 +3955,7 @@
       "label": "TestProperty_InteractionClassificationAndFHIRSerialization()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "testproperty_interactionclassificationandfhirserialization()",
       "source_file": "pkg/audit/audit_property_test.go",
@@ -3734,7 +3966,7 @@
       "label": "TestProperty_OutcomeClassificationInvariance()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "testproperty_outcomeclassificationinvariance()",
       "source_file": "pkg/audit/audit_property_test.go",
@@ -3745,7 +3977,7 @@
       "label": "audit_test.go",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "audit_test.go",
       "source_file": "pkg/audit/audit_test.go",
@@ -3756,40 +3988,18 @@
       "label": "TestClassifyHTTPInteraction()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "testclassifyhttpinteraction()",
       "source_file": "pkg/audit/audit_test.go",
       "source_location": "L16"
     },
     {
-      "id": "pkg_audit_audit_test_testmemoryrecorderandtofhirresource",
-      "label": "TestMemoryRecorderAndToFHIRResource()",
-      "_origin": "ast",
-      "community": 29,
-      "community_name": "audit/audit.go",
-      "file_type": "code",
-      "norm_label": "testmemoryrecorderandtofhirresource()",
-      "source_file": "pkg/audit/audit_test.go",
-      "source_location": "L139"
-    },
-    {
-      "id": "pkg_audit_audit_tofhirresource",
-      "label": "ToFHIRResource()",
-      "_origin": "ast",
-      "community": 29,
-      "community_name": "audit/audit.go",
-      "file_type": "code",
-      "norm_label": "tofhirresource()",
-      "source_file": "pkg/audit/audit.go",
-      "source_location": "L234"
-    },
-    {
       "id": "server_auditactorholder",
       "label": "auditActorHolder",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "auditactorholder",
       "source_file": "server/middleware.go",
@@ -3800,7 +4010,7 @@
       "label": "auditActorKeyType",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "auditactorkeytype",
       "source_file": "server/middleware.go",
@@ -3811,7 +4021,7 @@
       "label": "auditResponseWriter",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "auditresponsewriter",
       "source_file": "server/middleware.go",
@@ -3822,7 +4032,7 @@
       "label": ".Write()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": ".write()",
       "source_file": "server/middleware.go",
@@ -3833,7 +4043,7 @@
       "label": ".WriteHeader()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": ".writeheader()",
       "source_file": "server/middleware.go",
@@ -3844,7 +4054,7 @@
       "label": "middleware.go",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "middleware.go",
       "source_file": "server/middleware.go",
@@ -3855,7 +4065,7 @@
       "label": "cleanID()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "cleanid()",
       "source_file": "server/middleware.go",
@@ -3866,7 +4076,7 @@
       "label": "extractClientIP()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "extractclientip()",
       "source_file": "server/middleware.go",
@@ -3877,7 +4087,7 @@
       "label": "Server",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "server",
       "source_file": "server/middleware.go",
@@ -3888,7 +4098,7 @@
       "label": "isPublicEndpoint()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": "ispublicendpoint()",
       "source_file": "server/middleware.go",
@@ -3899,7 +4109,7 @@
       "label": ".auditMiddleware()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": ".auditmiddleware()",
       "source_file": "server/middleware.go",
@@ -3910,7 +4120,7 @@
       "label": ".authMiddleware()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": ".authmiddleware()",
       "source_file": "server/middleware.go",
@@ -3921,7 +4131,7 @@
       "label": ".Handler()",
       "_origin": "ast",
       "community": 29,
-      "community_name": "audit/audit.go",
+      "community_name": ".auditMiddleware",
       "file_type": "code",
       "norm_label": ".handler()",
       "source_file": "server/server.go",
@@ -4203,39 +4413,6 @@
       "source_location": ""
     },
     {
-      "id": "ingest_activity_activities_test",
-      "label": "activities_test.go",
-      "_origin": "ast",
-      "community": 30,
-      "community_name": "testing.T",
-      "file_type": "code",
-      "norm_label": "activities_test.go",
-      "source_file": "ingest/activity/activities_test.go",
-      "source_location": "L1"
-    },
-    {
-      "id": "ingest_activity_activities_test_testpublishtoautomq_nilproducer",
-      "label": "TestPublishToAutoMQ_NilProducer()",
-      "_origin": "ast",
-      "community": 30,
-      "community_name": "testing.T",
-      "file_type": "code",
-      "norm_label": "testpublishtoautomq_nilproducer()",
-      "source_file": "ingest/activity/activities_test.go",
-      "source_location": "L110"
-    },
-    {
-      "id": "ingest_activity_activities_test_testwritepostgresbatch_withextractors",
-      "label": "TestWritePostgresBatch_WithExtractors()",
-      "_origin": "ast",
-      "community": 30,
-      "community_name": "testing.T",
-      "file_type": "code",
-      "norm_label": "testwritepostgresbatch_withextractors()",
-      "source_file": "ingest/activity/activities_test.go",
-      "source_location": "L23"
-    },
-    {
       "id": "ingest_workflow_ingest_test",
       "label": "ingest_test.go",
       "_origin": "ast",
@@ -4300,6 +4477,28 @@
       "norm_label": "testoutcome_tooperationoutcomemap()",
       "source_file": "pkg/validation/validator_test.go",
       "source_location": "L200"
+    },
+    {
+      "id": "server_server_auth_test",
+      "label": "server_auth_test.go",
+      "_origin": "ast",
+      "community": 30,
+      "community_name": "testing.T",
+      "file_type": "code",
+      "norm_label": "server_auth_test.go",
+      "source_file": "server/server_auth_test.go",
+      "source_location": "L1"
+    },
+    {
+      "id": "server_server_auth_test_testserver_authmiddleware",
+      "label": "TestServer_AuthMiddleware()",
+      "_origin": "ast",
+      "community": 30,
+      "community_name": "testing.T",
+      "file_type": "code",
+      "norm_label": "testserver_authmiddleware()",
+      "source_file": "server/server_auth_test.go",
+      "source_location": "L21"
     },
     {
       "id": "server_server_test",
@@ -4423,17 +4622,6 @@
       "source_location": "L76"
     },
     {
-      "id": "pkg_validation_validator",
-      "label": "validator.go",
-      "_origin": "ast",
-      "community": 31,
-      "community_name": "Outcome",
-      "file_type": "code",
-      "norm_label": "validator.go",
-      "source_file": "pkg/validation/validator.go",
-      "source_location": "L1"
-    },
-    {
       "id": "pkg_validation_validator_extractstringorwrapped",
       "label": "extractStringOrWrapped()",
       "_origin": "ast",
@@ -4553,17 +4741,6 @@
       "norm_label": "issueseverity",
       "source_file": "pkg/validation/outcome.go",
       "source_location": "L9"
-    },
-    {
-      "id": "validation_options",
-      "label": "Options",
-      "_origin": "ast",
-      "community": 31,
-      "community_name": "Outcome",
-      "file_type": "code",
-      "norm_label": "options",
-      "source_file": "pkg/validation/validator.go",
-      "source_location": "L16"
     },
     {
       "id": "validation_outcome",
@@ -4841,114 +5018,6 @@
       "source_location": ""
     },
     {
-      "id": "contributing_code_generation_proto2type_buf",
-      "label": "Code Generation (`proto2type` & `buf`)",
-      "_origin": "ast",
-      "community": 33,
-      "community_name": "Contributing to Flint",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "code generation (`proto2type` & `buf`)",
-      "source_file": "CONTRIBUTING.md",
-      "source_location": "L77"
-    },
-    {
-      "id": "contributing_code_of_conduct",
-      "label": "Code of Conduct",
-      "_origin": "ast",
-      "community": 33,
-      "community_name": "Contributing to Flint",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "code of conduct",
-      "source_file": "CONTRIBUTING.md",
-      "source_location": "L9"
-    },
-    {
-      "id": "contributing_contributing_to_flint",
-      "label": "Contributing to Flint",
-      "_origin": "ast",
-      "community": 33,
-      "community_name": "Contributing to Flint",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "contributing to flint",
-      "source_file": "CONTRIBUTING.md",
-      "source_location": "L1"
-    },
-    {
-      "id": "contributing_development_environment_setup",
-      "label": "Development Environment Setup",
-      "_origin": "ast",
-      "community": 33,
-      "community_name": "Contributing to Flint",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "development environment setup",
-      "source_file": "CONTRIBUTING.md",
-      "source_location": "L15"
-    },
-    {
-      "id": "contributing_git_workflow_conventional_commits",
-      "label": "Git Workflow & Conventional Commits",
-      "_origin": "ast",
-      "community": 33,
-      "community_name": "Contributing to Flint",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "git workflow & conventional commits",
-      "source_file": "CONTRIBUTING.md",
-      "source_location": "L118"
-    },
-    {
-      "id": "contributing_local_development_stack",
-      "label": "Local Development Stack",
-      "_origin": "ast",
-      "community": 33,
-      "community_name": "Contributing to Flint",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "local development stack",
-      "source_file": "CONTRIBUTING.md",
-      "source_location": "L48"
-    },
-    {
-      "id": "contributing_prerequisites",
-      "label": "Prerequisites",
-      "_origin": "ast",
-      "community": 33,
-      "community_name": "Contributing to Flint",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "prerequisites",
-      "source_file": "CONTRIBUTING.md",
-      "source_location": "L19"
-    },
-    {
-      "id": "contributing_quick_start_with_nix_direnv",
-      "label": "Quick Start with Nix & Direnv",
-      "_origin": "ast",
-      "community": 33,
-      "community_name": "Contributing to Flint",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "quick start with nix & direnv",
-      "source_file": "CONTRIBUTING.md",
-      "source_location": "L25"
-    },
-    {
-      "id": "contributing_testing_quality_assurance",
-      "label": "Testing & Quality Assurance",
-      "_origin": "ast",
-      "community": 33,
-      "community_name": "Contributing to Flint",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "testing & quality assurance",
-      "source_file": "CONTRIBUTING.md",
-      "source_location": "L94"
-    },
-    {
       "id": "gen_go_store_postgres_patient_search_index",
       "label": "patient_search_index.go",
       "_origin": "ast",
@@ -5041,7 +5110,7 @@
       "label": "CODE_OF_CONDUCT.md",
       "_origin": "ast",
       "community": 35,
-      "community_name": "README.md",
+      "community_name": "Contributor Covenant Code of Conduct",
       "file_type": "document",
       "node_kind": "page",
       "norm_label": "code_of_conduct.md",
@@ -5049,11 +5118,155 @@
       "source_location": "L1"
     },
     {
+      "id": "code_of_conduct_1_correction",
+      "label": "1. Correction",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "1. correction",
+      "source_file": "CODE_OF_CONDUCT.md",
+      "source_location": "L73"
+    },
+    {
+      "id": "code_of_conduct_2_warning",
+      "label": "2. Warning",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "2. warning",
+      "source_file": "CODE_OF_CONDUCT.md",
+      "source_location": "L82"
+    },
+    {
+      "id": "code_of_conduct_3_temporary_ban",
+      "label": "3. Temporary Ban",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "3. temporary ban",
+      "source_file": "CODE_OF_CONDUCT.md",
+      "source_location": "L94"
+    },
+    {
+      "id": "code_of_conduct_4_permanent_ban",
+      "label": "4. Permanent Ban",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "4. permanent ban",
+      "source_file": "CODE_OF_CONDUCT.md",
+      "source_location": "L105"
+    },
+    {
+      "id": "code_of_conduct_attribution",
+      "label": "Attribution",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "attribution",
+      "source_file": "CODE_OF_CONDUCT.md",
+      "source_location": "L114"
+    },
+    {
+      "id": "code_of_conduct_contributor_covenant_code_of_conduct",
+      "label": "Contributor Covenant Code of Conduct",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "contributor covenant code of conduct",
+      "source_file": "CODE_OF_CONDUCT.md",
+      "source_location": "L1"
+    },
+    {
+      "id": "code_of_conduct_enforcement",
+      "label": "Enforcement",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "enforcement",
+      "source_file": "CODE_OF_CONDUCT.md",
+      "source_location": "L59"
+    },
+    {
+      "id": "code_of_conduct_enforcement_guidelines",
+      "label": "Enforcement Guidelines",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "enforcement guidelines",
+      "source_file": "CODE_OF_CONDUCT.md",
+      "source_location": "L68"
+    },
+    {
+      "id": "code_of_conduct_enforcement_responsibilities",
+      "label": "Enforcement Responsibilities",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "enforcement responsibilities",
+      "source_file": "CODE_OF_CONDUCT.md",
+      "source_location": "L39"
+    },
+    {
+      "id": "code_of_conduct_our_pledge",
+      "label": "Our Pledge",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "our pledge",
+      "source_file": "CODE_OF_CONDUCT.md",
+      "source_location": "L3"
+    },
+    {
+      "id": "code_of_conduct_our_standards",
+      "label": "Our Standards",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "our standards",
+      "source_file": "CODE_OF_CONDUCT.md",
+      "source_location": "L15"
+    },
+    {
+      "id": "code_of_conduct_scope",
+      "label": "Scope",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "scope",
+      "source_file": "CODE_OF_CONDUCT.md",
+      "source_location": "L51"
+    },
+    {
       "id": "contributing",
       "label": "CONTRIBUTING.md",
       "_origin": "ast",
       "community": 35,
-      "community_name": "README.md",
+      "community_name": "Contributor Covenant Code of Conduct",
       "file_type": "document",
       "node_kind": "page",
       "norm_label": "contributing.md",
@@ -5061,11 +5274,119 @@
       "source_location": "L1"
     },
     {
+      "id": "contributing_code_generation_proto2type_buf",
+      "label": "Code Generation (`proto2type` & `buf`)",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "code generation (`proto2type` & `buf`)",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L77"
+    },
+    {
+      "id": "contributing_code_of_conduct",
+      "label": "Code of Conduct",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "code of conduct",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L9"
+    },
+    {
+      "id": "contributing_contributing_to_flint",
+      "label": "Contributing to Flint",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "contributing to flint",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L1"
+    },
+    {
+      "id": "contributing_development_environment_setup",
+      "label": "Development Environment Setup",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "development environment setup",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L15"
+    },
+    {
+      "id": "contributing_git_workflow_conventional_commits",
+      "label": "Git Workflow & Conventional Commits",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "git workflow & conventional commits",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L118"
+    },
+    {
+      "id": "contributing_local_development_stack",
+      "label": "Local Development Stack",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "local development stack",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L48"
+    },
+    {
+      "id": "contributing_prerequisites",
+      "label": "Prerequisites",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "prerequisites",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L19"
+    },
+    {
+      "id": "contributing_quick_start_with_nix_direnv",
+      "label": "Quick Start with Nix & Direnv",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "quick start with nix & direnv",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L25"
+    },
+    {
+      "id": "contributing_testing_quality_assurance",
+      "label": "Testing & Quality Assurance",
+      "_origin": "ast",
+      "community": 35,
+      "community_name": "Contributor Covenant Code of Conduct",
+      "file_type": "document",
+      "node_kind": "heading",
+      "norm_label": "testing & quality assurance",
+      "source_file": "CONTRIBUTING.md",
+      "source_location": "L94"
+    },
+    {
       "id": "readme",
       "label": "README.md",
       "_origin": "ast",
       "community": 35,
-      "community_name": "README.md",
+      "community_name": "Contributor Covenant Code of Conduct",
       "file_type": "document",
       "node_kind": "page",
       "norm_label": "readme.md",
@@ -5077,7 +5398,7 @@
       "label": "SECURITY.md",
       "_origin": "ast",
       "community": 35,
-      "community_name": "README.md",
+      "community_name": "Contributor Covenant Code of Conduct",
       "file_type": "document",
       "node_kind": "page",
       "norm_label": "security.md",
@@ -5089,7 +5410,7 @@
       "label": "Healthcare & Security Architecture Principles",
       "_origin": "ast",
       "community": 35,
-      "community_name": "README.md",
+      "community_name": "Contributor Covenant Code of Conduct",
       "file_type": "document",
       "node_kind": "heading",
       "norm_label": "healthcare & security architecture principles",
@@ -5101,7 +5422,7 @@
       "label": "Information to Include",
       "_origin": "ast",
       "community": 35,
-      "community_name": "README.md",
+      "community_name": "Contributor Covenant Code of Conduct",
       "file_type": "document",
       "node_kind": "heading",
       "norm_label": "information to include",
@@ -5113,7 +5434,7 @@
       "label": "Reporting a Vulnerability",
       "_origin": "ast",
       "community": 35,
-      "community_name": "README.md",
+      "community_name": "Contributor Covenant Code of Conduct",
       "file_type": "document",
       "node_kind": "heading",
       "norm_label": "reporting a vulnerability",
@@ -5125,7 +5446,7 @@
       "label": "Response Timeline",
       "_origin": "ast",
       "community": 35,
-      "community_name": "README.md",
+      "community_name": "Contributor Covenant Code of Conduct",
       "file_type": "document",
       "node_kind": "heading",
       "norm_label": "response timeline",
@@ -5137,7 +5458,7 @@
       "label": "Security Policy",
       "_origin": "ast",
       "community": 35,
-      "community_name": "README.md",
+      "community_name": "Contributor Covenant Code of Conduct",
       "file_type": "document",
       "node_kind": "heading",
       "norm_label": "security policy",
@@ -5149,7 +5470,7 @@
       "label": "Supported Versions",
       "_origin": "ast",
       "community": 35,
-      "community_name": "README.md",
+      "community_name": "Contributor Covenant Code of Conduct",
       "file_type": "document",
       "node_kind": "heading",
       "norm_label": "supported versions",
@@ -5234,138 +5555,6 @@
       "source_location": "L118"
     },
     {
-      "id": "readme_1_development_environment_hermetic_nix_shell",
-      "label": "1. Development Environment (Hermetic Nix Shell)",
-      "_origin": "ast",
-      "community": 37,
-      "community_name": "Quickstart",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "1. development environment (hermetic nix shell)",
-      "source_file": "README.md",
-      "source_location": "L91"
-    },
-    {
-      "id": "readme_2_launch_local_dev_stack_k3d",
-      "label": "2. Launch Local Dev Stack (k3d)",
-      "_origin": "ast",
-      "community": 37,
-      "community_name": "Quickstart",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "2. launch local dev stack (k3d)",
-      "source_file": "README.md",
-      "source_location": "L104"
-    },
-    {
-      "id": "readme_3_build_run_flint",
-      "label": "3. Build & Run Flint",
-      "_origin": "ast",
-      "community": 37,
-      "community_name": "Quickstart",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "3. build & run flint",
-      "source_file": "README.md",
-      "source_location": "L119"
-    },
-    {
-      "id": "readme_4_run_benchmarks_tests",
-      "label": "4. Run Benchmarks & Tests",
-      "_origin": "ast",
-      "community": 37,
-      "community_name": "Quickstart",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "4. run benchmarks & tests",
-      "source_file": "README.md",
-      "source_location": "L132"
-    },
-    {
-      "id": "readme_5_query_analytical_iceberg_table_with_duckdb",
-      "label": "5. Query Analytical Iceberg Table with DuckDB",
-      "_origin": "ast",
-      "community": 37,
-      "community_name": "Quickstart",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "5. query analytical iceberg table with duckdb",
-      "source_file": "README.md",
-      "source_location": "L148"
-    },
-    {
-      "id": "readme_quickstart",
-      "label": "Quickstart",
-      "_origin": "ast",
-      "community": 37,
-      "community_name": "Quickstart",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "quickstart",
-      "source_file": "README.md",
-      "source_location": "L89"
-    },
-    {
-      "id": "code_of_conduct_1_correction",
-      "label": "1. Correction",
-      "_origin": "ast",
-      "community": 38,
-      "community_name": "Enforcement Guidelines",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "1. correction",
-      "source_file": "CODE_OF_CONDUCT.md",
-      "source_location": "L73"
-    },
-    {
-      "id": "code_of_conduct_2_warning",
-      "label": "2. Warning",
-      "_origin": "ast",
-      "community": 38,
-      "community_name": "Enforcement Guidelines",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "2. warning",
-      "source_file": "CODE_OF_CONDUCT.md",
-      "source_location": "L82"
-    },
-    {
-      "id": "code_of_conduct_3_temporary_ban",
-      "label": "3. Temporary Ban",
-      "_origin": "ast",
-      "community": 38,
-      "community_name": "Enforcement Guidelines",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "3. temporary ban",
-      "source_file": "CODE_OF_CONDUCT.md",
-      "source_location": "L94"
-    },
-    {
-      "id": "code_of_conduct_4_permanent_ban",
-      "label": "4. Permanent Ban",
-      "_origin": "ast",
-      "community": 38,
-      "community_name": "Enforcement Guidelines",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "4. permanent ban",
-      "source_file": "CODE_OF_CONDUCT.md",
-      "source_location": "L105"
-    },
-    {
-      "id": "code_of_conduct_enforcement_guidelines",
-      "label": "Enforcement Guidelines",
-      "_origin": "ast",
-      "community": 38,
-      "community_name": "Enforcement Guidelines",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "enforcement guidelines",
-      "source_file": "CODE_OF_CONDUCT.md",
-      "source_location": "L68"
-    },
-    {
       "id": "pkg_validation_property_test",
       "label": "validation/property_test.go",
       "_origin": "ast",
@@ -5419,6 +5608,17 @@
       "norm_label": "testproperty_validpatientinvariance()",
       "source_file": "pkg/validation/property_test.go",
       "source_location": "L13"
+    },
+    {
+      "id": "pkg_validation_validator",
+      "label": "validator.go",
+      "_origin": "ast",
+      "community": 39,
+      "community_name": "NewEngine",
+      "file_type": "code",
+      "norm_label": "validator.go",
+      "source_file": "pkg/validation/validator.go",
+      "source_location": "L1"
     },
     {
       "id": "pkg_validation_validator_defaultoptions",
@@ -5509,28 +5709,6 @@
       "source_location": "L135"
     },
     {
-      "id": "server_server_auth_test",
-      "label": "server_auth_test.go",
-      "_origin": "ast",
-      "community": 39,
-      "community_name": "NewEngine",
-      "file_type": "code",
-      "norm_label": "server_auth_test.go",
-      "source_file": "server/server_auth_test.go",
-      "source_location": "L1"
-    },
-    {
-      "id": "server_server_auth_test_testserver_authmiddleware",
-      "label": "TestServer_AuthMiddleware()",
-      "_origin": "ast",
-      "community": 39,
-      "community_name": "NewEngine",
-      "file_type": "code",
-      "norm_label": "testserver_authmiddleware()",
-      "source_file": "server/server_auth_test.go",
-      "source_location": "L21"
-    },
-    {
       "id": "server_server_new",
       "label": "New()",
       "_origin": "ast",
@@ -5540,6 +5718,17 @@
       "norm_label": "new()",
       "source_file": "server/server.go",
       "source_location": "L50"
+    },
+    {
+      "id": "validation_options",
+      "label": "Options",
+      "_origin": "ast",
+      "community": 39,
+      "community_name": "NewEngine",
+      "file_type": "code",
+      "norm_label": "options",
+      "source_file": "pkg/validation/validator.go",
+      "source_location": "L16"
     },
     {
       "id": "go_type_google_golang_org_protobuf_proto_message",
@@ -5608,6 +5797,17 @@
       "source_location": "L34"
     },
     {
+      "id": "pkg_audit_audit_tofhirresource",
+      "label": "ToFHIRResource()",
+      "_origin": "ast",
+      "community": 4,
+      "community_name": "Server",
+      "file_type": "code",
+      "norm_label": "tofhirresource()",
+      "source_file": "pkg/audit/audit.go",
+      "source_location": "L239"
+    },
+    {
       "id": "pkg_auth_auth_go_auth_tokenvalidator",
       "label": "TokenValidator",
       "_origin": "ast",
@@ -5638,7 +5838,7 @@
       "file_type": "code",
       "norm_label": "server",
       "source_file": "server/bundle.go",
-      "source_location": "L40"
+      "source_location": "L41"
     },
     {
       "id": "server_server_auditrecorder",
@@ -5660,7 +5860,7 @@
       "file_type": "code",
       "norm_label": "extractprotoresourceid()",
       "source_file": "server/server.go",
-      "source_location": "L501"
+      "source_location": "L544"
     },
     {
       "id": "server_server_generateid",
@@ -5671,7 +5871,7 @@
       "file_type": "code",
       "norm_label": "generateid()",
       "source_file": "server/server.go",
-      "source_location": "L582"
+      "source_location": "L625"
     },
     {
       "id": "server_server_go_server_server",
@@ -5693,7 +5893,7 @@
       "file_type": "code",
       "norm_label": ".handlebundle()",
       "source_file": "server/bundle.go",
-      "source_location": "L40"
+      "source_location": "L41"
     },
     {
       "id": "server_server_handlecreate",
@@ -5704,7 +5904,7 @@
       "file_type": "code",
       "norm_label": ".handlecreate()",
       "source_file": "server/server.go",
-      "source_location": "L289"
+      "source_location": "L290"
     },
     {
       "id": "server_server_handledelete",
@@ -5715,7 +5915,7 @@
       "file_type": "code",
       "norm_label": ".handledelete()",
       "source_file": "server/server.go",
-      "source_location": "L484"
+      "source_location": "L527"
     },
     {
       "id": "server_server_handleinstancehistory",
@@ -5726,7 +5926,7 @@
       "file_type": "code",
       "norm_label": ".handleinstancehistory()",
       "source_file": "server/server.go",
-      "source_location": "L213"
+      "source_location": "L214"
     },
     {
       "id": "server_server_handlemetadata",
@@ -5737,7 +5937,18 @@
       "file_type": "code",
       "norm_label": ".handlemetadata()",
       "source_file": "server/server.go",
-      "source_location": "L838"
+      "source_location": "L854"
+    },
+    {
+      "id": "server_server_handlepatienteverything",
+      "label": ".handlePatientEverything()",
+      "_origin": "ast",
+      "community": 4,
+      "community_name": "Server",
+      "file_type": "code",
+      "norm_label": ".handlepatienteverything()",
+      "source_file": "server/server.go",
+      "source_location": "L720"
     },
     {
       "id": "server_server_handleread",
@@ -5748,7 +5959,7 @@
       "file_type": "code",
       "norm_label": ".handleread()",
       "source_file": "server/server.go",
-      "source_location": "L124"
+      "source_location": "L125"
     },
     {
       "id": "server_server_handlereadauditevent",
@@ -5759,7 +5970,7 @@
       "file_type": "code",
       "norm_label": ".handlereadauditevent()",
       "source_file": "server/server.go",
-      "source_location": "L587"
+      "source_location": "L630"
     },
     {
       "id": "server_server_handlesearch",
@@ -5770,7 +5981,7 @@
       "file_type": "code",
       "norm_label": ".handlesearch()",
       "source_file": "server/server.go",
-      "source_location": "L677"
+      "source_location": "L782"
     },
     {
       "id": "server_server_handlesearchauditevents",
@@ -5781,7 +5992,7 @@
       "file_type": "code",
       "norm_label": ".handlesearchauditevents()",
       "source_file": "server/server.go",
-      "source_location": "L608"
+      "source_location": "L651"
     },
     {
       "id": "server_server_handlesmartconfig",
@@ -5803,7 +6014,7 @@
       "file_type": "code",
       "norm_label": ".handleupdate()",
       "source_file": "server/server.go",
-      "source_location": "L377"
+      "source_location": "L420"
     },
     {
       "id": "server_server_handlevalidate",
@@ -5814,7 +6025,7 @@
       "file_type": "code",
       "norm_label": ".handlevalidate()",
       "source_file": "server/server.go",
-      "source_location": "L531"
+      "source_location": "L574"
     },
     {
       "id": "server_server_handlevread",
@@ -5825,7 +6036,7 @@
       "file_type": "code",
       "norm_label": ".handlevread()",
       "source_file": "server/server.go",
-      "source_location": "L165"
+      "source_location": "L166"
     },
     {
       "id": "server_server_prototojson",
@@ -5836,7 +6047,7 @@
       "file_type": "code",
       "norm_label": ".prototojson()",
       "source_file": "server/server.go",
-      "source_location": "L976"
+      "source_location": "L1007"
     },
     {
       "id": "server_server_registerindexextractor",
@@ -5880,7 +6091,7 @@
       "file_type": "code",
       "norm_label": "setprotoresourceid()",
       "source_file": "server/server.go",
-      "source_location": "L517"
+      "source_location": "L560"
     },
     {
       "id": "server_server_setsmartconfig",
@@ -5924,7 +6135,18 @@
       "file_type": "code",
       "norm_label": "writeoperationoutcome()",
       "source_file": "server/server.go",
-      "source_location": "L1003"
+      "source_location": "L1034"
+    },
+    {
+      "id": "server_server_writesearchsetbundle",
+      "label": ".writeSearchSetBundle()",
+      "_origin": "ast",
+      "community": 4,
+      "community_name": "Server",
+      "file_type": "code",
+      "norm_label": ".writesearchsetbundle()",
+      "source_file": "server/server.go",
+      "source_location": "L798"
     },
     {
       "id": "server_smart",
@@ -6004,114 +6226,6 @@
       "source_location": "L72"
     },
     {
-      "id": "readme_decoupled_tokenvalidator_interface_pkg_auth",
-      "label": "Decoupled `TokenValidator` Interface (`pkg/auth`)",
-      "_origin": "ast",
-      "community": 40,
-      "community_name": "SMART on FHIR v2 & Identity Architecture",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "decoupled `tokenvalidator` interface (`pkg/auth`)",
-      "source_file": "README.md",
-      "source_location": "L258"
-    },
-    {
-      "id": "readme_environment_configuration",
-      "label": "Environment Configuration",
-      "_origin": "ast",
-      "community": 40,
-      "community_name": "SMART on FHIR v2 & Identity Architecture",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "environment configuration",
-      "source_file": "README.md",
-      "source_location": "L272"
-    },
-    {
-      "id": "readme_security_guarantees",
-      "label": "Security Guarantees",
-      "_origin": "ast",
-      "community": 40,
-      "community_name": "SMART on FHIR v2 & Identity Architecture",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "security guarantees",
-      "source_file": "README.md",
-      "source_location": "L264"
-    },
-    {
-      "id": "readme_smart_on_fhir_v2_identity_architecture",
-      "label": "SMART on FHIR v2 & Identity Architecture",
-      "_origin": "ast",
-      "community": 40,
-      "community_name": "SMART on FHIR v2 & Identity Architecture",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "smart on fhir v2 & identity architecture",
-      "source_file": "README.md",
-      "source_location": "L241"
-    },
-    {
-      "id": "readme_advanced_fhir_search_engine",
-      "label": "Advanced FHIR Search Engine",
-      "_origin": "ast",
-      "community": 41,
-      "community_name": "API Reference",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "advanced fhir search engine",
-      "source_file": "README.md",
-      "source_location": "L219"
-    },
-    {
-      "id": "readme_api_reference",
-      "label": "API Reference",
-      "_origin": "ast",
-      "community": 41,
-      "community_name": "API Reference",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "api reference",
-      "source_file": "README.md",
-      "source_location": "L169"
-    },
-    {
-      "id": "readme_batch_transaction_bundles",
-      "label": "Batch / Transaction Bundles",
-      "_origin": "ast",
-      "community": 41,
-      "community_name": "API Reference",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "batch / transaction bundles",
-      "source_file": "README.md",
-      "source_location": "L173"
-    },
-    {
-      "id": "readme_fhir_conformance_validation_engine_pkg_validation",
-      "label": "FHIR Conformance & Validation Engine (`pkg/validation`)",
-      "_origin": "ast",
-      "community": 41,
-      "community_name": "API Reference",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "fhir conformance & validation engine (`pkg/validation`)",
-      "source_file": "README.md",
-      "source_location": "L208"
-    },
-    {
-      "id": "readme_resource_interactions",
-      "label": "Resource Interactions",
-      "_origin": "ast",
-      "community": 41,
-      "community_name": "API Reference",
-      "file_type": "document",
-      "node_kind": "heading",
-      "norm_label": "resource interactions",
-      "source_file": "README.md",
-      "source_location": "L195"
-    },
-    {
       "id": "go_type_encoding_json_rawmessage",
       "label": "encoding/json.RawMessage",
       "_origin": "ast",
@@ -6142,7 +6256,7 @@
       "file_type": "code",
       "norm_label": "bundleerrorresponse()",
       "source_file": "server/bundle.go",
-      "source_location": "L276"
+      "source_location": "L324"
     },
     {
       "id": "server_bundleentry",
@@ -8064,7 +8178,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "pkg/audit/audit_test.go",
-      "source_location": "L129",
+      "source_location": "L148",
       "weight": 1.0
     },
     {
@@ -8076,7 +8190,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "pkg/audit/audit_test.go",
-      "source_location": "L141",
+      "source_location": "L160",
       "weight": 1.0
     },
     {
@@ -8088,7 +8202,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "pkg/audit/audit_test.go",
-      "source_location": "L177",
+      "source_location": "L196",
       "weight": 1.0
     },
     {
@@ -8645,6 +8759,18 @@
     },
     {
       "source": "postgres_store_search",
+      "target": "store_postgres_search_builddatecondition",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "store/postgres/search.go",
+      "source_location": "L102",
+      "weight": 1.0
+    },
+    {
+      "source": "postgres_store_search",
       "target": "store_postgres_search_buildquantitycondition",
       "relation": "calls",
       "_origin": "ast",
@@ -8652,7 +8778,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "store/postgres/search.go",
-      "source_location": "L104",
+      "source_location": "L115",
       "weight": 1.0
     },
     {
@@ -8664,19 +8790,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "store/postgres/search.go",
-      "source_location": "L190",
-      "weight": 1.0
-    },
-    {
-      "source": "postgres_store_search",
-      "target": "store_postgres_search_builddatecondition",
-      "relation": "calls",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "call",
-      "source_file": "store/postgres/search.go",
-      "source_location": "L91",
+      "source_location": "L201",
       "weight": 1.0
     },
     {
@@ -8880,7 +8994,19 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/bundle.go",
-      "source_location": "L112",
+      "source_location": "L113",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_handlebundle",
+      "target": "store_postgres_search_parse_parseifnoneexist",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "server/bundle.go",
+      "source_location": "L205",
       "weight": 1.0
     },
     {
@@ -8892,7 +9018,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/bundle.go",
-      "source_location": "L83",
+      "source_location": "L84",
       "weight": 1.0
     },
     {
@@ -8904,7 +9030,43 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L295",
+      "source_location": "L296",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_handlecreate",
+      "target": "store_postgres_search_parse_parseifnoneexist",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "server/server.go",
+      "source_location": "L328",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_handlecreate",
+      "target": "server_server_prototojson",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "server/server.go",
+      "source_location": "L352",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_handlecreate",
+      "target": "store_postgres_store_formatetag",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "server/server.go",
+      "source_location": "L360",
       "weight": 1.0
     },
     {
@@ -8916,7 +9078,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L326",
+      "source_location": "L369",
       "weight": 1.0
     },
     {
@@ -8928,7 +9090,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L329",
+      "source_location": "L372",
       "weight": 1.0
     },
     {
@@ -8940,19 +9102,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L330",
-      "weight": 1.0
-    },
-    {
-      "source": "server_server_handlecreate",
-      "target": "store_postgres_store_formatetag",
-      "relation": "calls",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "call",
-      "source_file": "server/server.go",
-      "source_location": "L369",
+      "source_location": "L373",
       "weight": 1.0
     },
     {
@@ -8964,7 +9114,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L492",
+      "source_location": "L535",
       "weight": 1.0
     },
     {
@@ -8976,7 +9126,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L496",
+      "source_location": "L539",
       "weight": 1.0
     },
     {
@@ -8988,7 +9138,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L234",
+      "source_location": "L235",
       "weight": 1.0
     },
     {
@@ -9000,7 +9150,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L258",
+      "source_location": "L259",
       "weight": 1.0
     },
     {
@@ -9012,95 +9162,11 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L264",
+      "source_location": "L265",
       "weight": 1.0
     },
     {
-      "source": "server_server_handleread",
-      "target": "server_server_writeoperationoutcome",
-      "relation": "calls",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "call",
-      "source_file": "server/server.go",
-      "source_location": "L131",
-      "weight": 1.0
-    },
-    {
-      "source": "server_server_handleread",
-      "target": "store_postgres_store_formatetag",
-      "relation": "calls",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "call",
-      "source_file": "server/server.go",
-      "source_location": "L137",
-      "weight": 1.0
-    },
-    {
-      "source": "server_server_handleread",
-      "target": "server_server_prototojson",
-      "relation": "calls",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "call",
-      "source_file": "server/server.go",
-      "source_location": "L150",
-      "weight": 1.0
-    },
-    {
-      "source": "server_server_handlereadauditevent",
-      "target": "server_server_writeoperationoutcome",
-      "relation": "calls",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "call",
-      "source_file": "server/server.go",
-      "source_location": "L589",
-      "weight": 1.0
-    },
-    {
-      "source": "server_server_handlereadauditevent",
-      "target": "pkg_audit_audit_tofhirresource",
-      "relation": "calls",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "call",
-      "source_file": "server/server.go",
-      "source_location": "L604",
-      "weight": 1.0
-    },
-    {
-      "source": "server_server_handlesearch",
-      "target": "store_postgres_search_parse_parseinclude",
-      "relation": "calls",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "call",
-      "source_file": "server/server.go",
-      "source_location": "L705",
-      "weight": 1.0
-    },
-    {
-      "source": "server_server_handlesearch",
-      "target": "store_postgres_search_parse_parsechainedparam",
-      "relation": "calls",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "call",
-      "source_file": "server/server.go",
-      "source_location": "L748",
-      "weight": 1.0
-    },
-    {
-      "source": "server_server_handlesearch",
+      "source": "server_server_handlepatienteverything",
       "target": "store_postgres_search_parse_parsedateop",
       "relation": "calls",
       "_origin": "ast",
@@ -9108,19 +9174,103 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L761",
+      "source_location": "L740",
       "weight": 1.0
     },
     {
-      "source": "server_server_handlesearch",
-      "target": "store_postgres_search_parse_parsequantityop",
+      "source": "server_server_handlepatienteverything",
+      "target": "server_server_writeoperationoutcome",
       "relation": "calls",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L765",
+      "source_location": "L742",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_handlepatienteverything",
+      "target": "server_server_writesearchsetbundle",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "server/server.go",
+      "source_location": "L778",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_handleread",
+      "target": "server_server_writeoperationoutcome",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "server/server.go",
+      "source_location": "L132",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_handleread",
+      "target": "store_postgres_store_formatetag",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "server/server.go",
+      "source_location": "L138",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_handleread",
+      "target": "server_server_prototojson",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "server/server.go",
+      "source_location": "L151",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_handlereadauditevent",
+      "target": "server_server_writeoperationoutcome",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "server/server.go",
+      "source_location": "L632",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_handlereadauditevent",
+      "target": "pkg_audit_audit_tofhirresource",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "server/server.go",
+      "source_location": "L647",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_handlesearch",
+      "target": "store_postgres_search_parse_buildsearchparamsfromquery",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "server/server.go",
+      "source_location": "L786",
       "weight": 1.0
     },
     {
@@ -9132,19 +9282,19 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L777",
+      "source_location": "L791",
       "weight": 1.0
     },
     {
       "source": "server_server_handlesearch",
-      "target": "server_server_prototojson",
+      "target": "server_server_writesearchsetbundle",
       "relation": "calls",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L793",
+      "source_location": "L795",
       "weight": 1.0
     },
     {
@@ -9156,7 +9306,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L648",
+      "source_location": "L691",
       "weight": 1.0
     },
     {
@@ -9168,7 +9318,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L657",
+      "source_location": "L700",
       "weight": 1.0
     },
     {
@@ -9180,7 +9330,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L384",
+      "source_location": "L427",
       "weight": 1.0
     },
     {
@@ -9192,7 +9342,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L391",
+      "source_location": "L434",
       "weight": 1.0
     },
     {
@@ -9204,7 +9354,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L422",
+      "source_location": "L465",
       "weight": 1.0
     },
     {
@@ -9216,7 +9366,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L429",
+      "source_location": "L472",
       "weight": 1.0
     },
     {
@@ -9228,7 +9378,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L466",
+      "source_location": "L509",
       "weight": 1.0
     },
     {
@@ -9240,7 +9390,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L472",
+      "source_location": "L515",
       "weight": 1.0
     },
     {
@@ -9252,7 +9402,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L538",
+      "source_location": "L581",
       "weight": 1.0
     },
     {
@@ -9264,7 +9414,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L572",
+      "source_location": "L615",
       "weight": 1.0
     },
     {
@@ -9276,7 +9426,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L173",
+      "source_location": "L174",
       "weight": 1.0
     },
     {
@@ -9288,7 +9438,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L186",
+      "source_location": "L187",
       "weight": 1.0
     },
     {
@@ -9300,7 +9450,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "server/server.go",
-      "source_location": "L198",
+      "source_location": "L199",
       "weight": 1.0
     },
     {
@@ -9397,6 +9547,18 @@
       "context": "call",
       "source_file": "server/server_test.go",
       "source_location": "L49",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_writesearchsetbundle",
+      "target": "server_server_prototojson",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "server/server.go",
+      "source_location": "L803",
       "weight": 1.0
     },
     {
@@ -9976,6 +10138,66 @@
       "weight": 1.0
     },
     {
+      "source": "store_postgres_search_parse_buildsearchparamsfromquery",
+      "target": "store_postgres_search_parse_parseinclude",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "store/postgres/search_parse.go",
+      "source_location": "L254",
+      "weight": 1.0
+    },
+    {
+      "source": "store_postgres_search_parse_buildsearchparamsfromquery",
+      "target": "store_postgres_search_parse_parsechainedparam",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "store/postgres/search_parse.go",
+      "source_location": "L270",
+      "weight": 1.0
+    },
+    {
+      "source": "store_postgres_search_parse_buildsearchparamsfromquery",
+      "target": "store_postgres_search_parse_parsedateop",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "store/postgres/search_parse.go",
+      "source_location": "L283",
+      "weight": 1.0
+    },
+    {
+      "source": "store_postgres_search_parse_buildsearchparamsfromquery",
+      "target": "store_postgres_search_parse_parsequantityop",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "store/postgres/search_parse.go",
+      "source_location": "L287",
+      "weight": 1.0
+    },
+    {
+      "source": "store_postgres_search_parse_parseifnoneexist",
+      "target": "store_postgres_search_parse_buildsearchparamsfromquery",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "store/postgres/search_parse.go",
+      "source_location": "L328",
+      "weight": 1.0
+    },
+    {
       "source": "store_postgres_search_parse_test_testparsechainedparam",
       "target": "store_postgres_search_parse_parsechainedparam",
       "relation": "calls",
@@ -10060,6 +10282,18 @@
       "weight": 1.0
     },
     {
+      "source": "store_postgres_search_property_test_testproperty_ifnoneexistparsinginvariance",
+      "target": "store_postgres_search_parse_parseifnoneexist",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "store/postgres/search_property_test.go",
+      "source_location": "L123",
+      "weight": 1.0
+    },
+    {
       "source": "store_postgres_search_property_test_testproperty_includeparsinginvariance",
       "target": "store_postgres_search_parse_parseinclude",
       "relation": "calls",
@@ -10080,7 +10314,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "store/postgres/search_property_test.go",
-      "source_location": "L119",
+      "source_location": "L144",
       "weight": 1.0
     },
     {
@@ -10092,7 +10326,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "store/postgres/search_property_test.go",
-      "source_location": "L120",
+      "source_location": "L145",
       "weight": 1.0
     },
     {
@@ -10104,7 +10338,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "store/postgres/search_property_test.go",
-      "source_location": "L121",
+      "source_location": "L146",
       "weight": 1.0
     },
     {
@@ -10116,7 +10350,7 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "store/postgres/search_property_test.go",
-      "source_location": "L122",
+      "source_location": "L147",
       "weight": 1.0
     },
     {
@@ -10128,7 +10362,19 @@
       "confidence_score": 1.0,
       "context": "call",
       "source_file": "store/postgres/search_property_test.go",
-      "source_location": "L123",
+      "source_location": "L148",
+      "weight": 1.0
+    },
+    {
+      "source": "store_postgres_search_property_test_testproperty_parsersneverpaniconarbitraryfuzz",
+      "target": "store_postgres_search_parse_parseifnoneexist",
+      "relation": "calls",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "call",
+      "source_file": "store/postgres/search_property_test.go",
+      "source_location": "L149",
       "weight": 1.0
     },
     {
@@ -10884,7 +11130,19 @@
       "confidence_score": 1.0,
       "context": "field",
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L13",
+      "source_location": "L14",
+      "weight": 1.0
+    },
+    {
+      "source": "postgres_patienteverythingparams",
+      "target": "go_type_time_time",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "field",
+      "source_file": "store/postgres/search.go",
+      "source_location": "L32",
       "weight": 1.0
     },
     {
@@ -10992,7 +11250,7 @@
       "confidence_score": 1.0,
       "context": "field",
       "source_file": "store/postgres/search.go",
-      "source_location": "L32",
+      "source_location": "L43",
       "weight": 1.0
     },
     {
@@ -11004,7 +11262,7 @@
       "confidence_score": 1.0,
       "context": "field",
       "source_file": "store/postgres/search.go",
-      "source_location": "L33",
+      "source_location": "L44",
       "weight": 1.0
     },
     {
@@ -11016,7 +11274,7 @@
       "confidence_score": 1.0,
       "context": "field",
       "source_file": "store/postgres/search.go",
-      "source_location": "L35",
+      "source_location": "L46",
       "weight": 1.0
     },
     {
@@ -11028,19 +11286,7 @@
       "confidence_score": 1.0,
       "context": "field",
       "source_file": "store/postgres/search.go",
-      "source_location": "L37",
-      "weight": 1.0
-    },
-    {
-      "source": "postgres_searchresults",
-      "target": "postgres_searchresult",
-      "relation": "references",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "context": "field",
-      "source_file": "store/postgres/search.go",
-      "source_location": "L22",
+      "source_location": "L48",
       "weight": 1.0
     },
     {
@@ -11737,6 +11983,18 @@
       "context": "field",
       "source_file": "store/postgres/audit.go",
       "source_location": "L14",
+      "weight": 1.0
+    },
+    {
+      "source": "store_postgres_search_go_postgres_searchresults",
+      "target": "postgres_searchresult",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "field",
+      "source_file": "store/postgres/search.go",
+      "source_location": "L23",
       "weight": 1.0
     },
     {
@@ -12780,7 +13038,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "pkg/audit/audit_test.go",
-      "source_location": "L139",
+      "source_location": "L158",
       "weight": 1.0
     },
     {
@@ -12792,7 +13050,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "pkg/audit/audit.go",
-      "source_location": "L234",
+      "source_location": "L239",
       "weight": 1.0
     },
     {
@@ -13240,6 +13498,30 @@
       "weight": 1.0
     },
     {
+      "source": "postgres_store_patienteverything",
+      "target": "go_type_context_context",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "parameter_type",
+      "source_file": "store/postgres/search.go",
+      "source_location": "L351",
+      "weight": 1.0
+    },
+    {
+      "source": "postgres_store_patienteverything",
+      "target": "postgres_patienteverythingparams",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "parameter_type",
+      "source_file": "store/postgres/search.go",
+      "source_location": "L351",
+      "weight": 1.0
+    },
+    {
       "source": "postgres_store_queryauditevents",
       "target": "go_type_context_context",
       "relation": "references",
@@ -13320,7 +13602,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "store/postgres/search.go",
-      "source_location": "L203",
+      "source_location": "L214",
       "weight": 1.0
     },
     {
@@ -13332,7 +13614,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "store/postgres/search.go",
-      "source_location": "L203",
+      "source_location": "L214",
       "weight": 1.0
     },
     {
@@ -13344,7 +13626,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "store/postgres/search.go",
-      "source_location": "L45",
+      "source_location": "L56",
       "weight": 1.0
     },
     {
@@ -13356,7 +13638,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "store/postgres/search.go",
-      "source_location": "L45",
+      "source_location": "L56",
       "weight": 1.0
     },
     {
@@ -13488,7 +13770,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L501",
+      "source_location": "L544",
       "weight": 1.0
     },
     {
@@ -13500,7 +13782,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/bundle.go",
-      "source_location": "L40",
+      "source_location": "L41",
       "weight": 1.0
     },
     {
@@ -13512,7 +13794,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/bundle.go",
-      "source_location": "L40",
+      "source_location": "L41",
       "weight": 1.0
     },
     {
@@ -13524,7 +13806,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L289",
+      "source_location": "L290",
       "weight": 1.0
     },
     {
@@ -13536,7 +13818,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L289",
+      "source_location": "L290",
       "weight": 1.0
     },
     {
@@ -13548,7 +13830,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L484",
+      "source_location": "L527",
       "weight": 1.0
     },
     {
@@ -13560,7 +13842,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L484",
+      "source_location": "L527",
       "weight": 1.0
     },
     {
@@ -13572,7 +13854,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L213",
+      "source_location": "L214",
       "weight": 1.0
     },
     {
@@ -13584,7 +13866,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L213",
+      "source_location": "L214",
       "weight": 1.0
     },
     {
@@ -13596,7 +13878,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L838",
+      "source_location": "L854",
       "weight": 1.0
     },
     {
@@ -13608,7 +13890,31 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L838",
+      "source_location": "L854",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_handlepatienteverything",
+      "target": "go_type_net_http_request",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "parameter_type",
+      "source_file": "server/server.go",
+      "source_location": "L720",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_handlepatienteverything",
+      "target": "go_type_net_http_responsewriter",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "parameter_type",
+      "source_file": "server/server.go",
+      "source_location": "L720",
       "weight": 1.0
     },
     {
@@ -13620,7 +13926,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L124",
+      "source_location": "L125",
       "weight": 1.0
     },
     {
@@ -13632,7 +13938,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L124",
+      "source_location": "L125",
       "weight": 1.0
     },
     {
@@ -13644,7 +13950,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L587",
+      "source_location": "L630",
       "weight": 1.0
     },
     {
@@ -13656,7 +13962,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L587",
+      "source_location": "L630",
       "weight": 1.0
     },
     {
@@ -13668,7 +13974,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L677",
+      "source_location": "L782",
       "weight": 1.0
     },
     {
@@ -13680,7 +13986,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L677",
+      "source_location": "L782",
       "weight": 1.0
     },
     {
@@ -13692,7 +13998,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L608",
+      "source_location": "L651",
       "weight": 1.0
     },
     {
@@ -13704,7 +14010,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L608",
+      "source_location": "L651",
       "weight": 1.0
     },
     {
@@ -13740,7 +14046,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L377",
+      "source_location": "L420",
       "weight": 1.0
     },
     {
@@ -13752,7 +14058,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L377",
+      "source_location": "L420",
       "weight": 1.0
     },
     {
@@ -13764,7 +14070,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L531",
+      "source_location": "L574",
       "weight": 1.0
     },
     {
@@ -13776,7 +14082,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L531",
+      "source_location": "L574",
       "weight": 1.0
     },
     {
@@ -13788,7 +14094,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L165",
+      "source_location": "L166",
       "weight": 1.0
     },
     {
@@ -13800,7 +14106,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L165",
+      "source_location": "L166",
       "weight": 1.0
     },
     {
@@ -13872,7 +14178,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L517",
+      "source_location": "L560",
       "weight": 1.0
     },
     {
@@ -13932,7 +14238,31 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "server/server.go",
-      "source_location": "L1003",
+      "source_location": "L1034",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_writesearchsetbundle",
+      "target": "go_type_net_http_responsewriter",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "parameter_type",
+      "source_file": "server/server.go",
+      "source_location": "L798",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_writesearchsetbundle",
+      "target": "store_postgres_search_go_postgres_searchresults",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "parameter_type",
+      "source_file": "server/server.go",
+      "source_location": "L798",
       "weight": 1.0
     },
     {
@@ -14328,7 +14658,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "store/postgres/search.go",
-      "source_location": "L281",
+      "source_location": "L292",
       "weight": 1.0
     },
     {
@@ -14340,7 +14670,19 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "store/postgres/search.go",
-      "source_location": "L301",
+      "source_location": "L312",
+      "weight": 1.0
+    },
+    {
+      "source": "store_postgres_search_parse_buildsearchparamsfromquery",
+      "target": "go_type_net_url_values",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "parameter_type",
+      "source_file": "store/postgres/search_parse.go",
+      "source_location": "L231",
       "weight": 1.0
     },
     {
@@ -14416,6 +14758,18 @@
       "weight": 1.0
     },
     {
+      "source": "store_postgres_search_property_test_testproperty_ifnoneexistparsinginvariance",
+      "target": "go_type_testing_t",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "parameter_type",
+      "source_file": "store/postgres/search_property_test.go",
+      "source_location": "L114",
+      "weight": 1.0
+    },
+    {
       "source": "store_postgres_search_property_test_testproperty_includeparsinginvariance",
       "target": "go_type_testing_t",
       "relation": "references",
@@ -14436,7 +14790,7 @@
       "confidence_score": 1.0,
       "context": "parameter_type",
       "source_file": "store/postgres/search_property_test.go",
-      "source_location": "L114",
+      "source_location": "L139",
       "weight": 1.0
     },
     {
@@ -15316,6 +15670,18 @@
       "weight": 1.0
     },
     {
+      "source": "postgres_store_patienteverything",
+      "target": "store_postgres_search_go_postgres_searchresults",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "return_type",
+      "source_file": "store/postgres/search.go",
+      "source_location": "L351",
+      "weight": 1.0
+    },
+    {
       "source": "postgres_store_queryauditevents",
       "target": "store_postgres_audit_go_postgres_auditrecord",
       "relation": "references",
@@ -15372,19 +15738,19 @@
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "store/postgres/search.go",
-      "source_location": "L203",
+      "source_location": "L214",
       "weight": 1.0
     },
     {
       "source": "postgres_store_search",
-      "target": "postgres_searchresults",
+      "target": "store_postgres_search_go_postgres_searchresults",
       "relation": "references",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "store/postgres/search.go",
-      "source_location": "L45",
+      "source_location": "L56",
       "weight": 1.0
     },
     {
@@ -16012,6 +16378,18 @@
       "weight": 1.0
     },
     {
+      "source": "store_postgres_search_parse_buildsearchparamsfromquery",
+      "target": "postgres_searchparams",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "return_type",
+      "source_file": "store/postgres/search_parse.go",
+      "source_location": "L231",
+      "weight": 1.0
+    },
+    {
       "source": "store_postgres_search_parse_parsechainedparam",
       "target": "postgres_chainedparam",
       "relation": "references",
@@ -16020,7 +16398,7 @@
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L163",
+      "source_location": "L164",
       "weight": 1.0
     },
     {
@@ -16032,7 +16410,19 @@
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L62",
+      "source_location": "L63",
+      "weight": 1.0
+    },
+    {
+      "source": "store_postgres_search_parse_parseifnoneexist",
+      "target": "postgres_searchparams",
+      "relation": "references",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "context": "return_type",
+      "source_file": "store/postgres/search_parse.go",
+      "source_location": "L300",
       "weight": 1.0
     },
     {
@@ -16044,7 +16434,7 @@
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L144",
+      "source_location": "L145",
       "weight": 1.0
     },
     {
@@ -16056,7 +16446,7 @@
       "confidence_score": 1.0,
       "context": "return_type",
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L104",
+      "source_location": "L105",
       "weight": 1.0
     },
     {
@@ -17260,7 +17650,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "pkg/audit/audit.go",
-      "source_location": "L213",
+      "source_location": "L218",
       "weight": 1.0
     },
     {
@@ -17271,7 +17661,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "pkg/audit/audit.go",
-      "source_location": "L234",
+      "source_location": "L239",
       "weight": 1.0
     },
     {
@@ -17370,7 +17760,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "pkg/audit/audit_test.go",
-      "source_location": "L139",
+      "source_location": "L158",
       "weight": 1.0
     },
     {
@@ -18151,7 +18541,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L173",
+      "source_location": "L176",
       "weight": 1.0
     },
     {
@@ -18162,7 +18552,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L195",
+      "source_location": "L198",
       "weight": 1.0
     },
     {
@@ -18173,7 +18563,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L208",
+      "source_location": "L212",
       "weight": 1.0
     },
     {
@@ -18184,7 +18574,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L219",
+      "source_location": "L223",
       "weight": 1.0
     },
     {
@@ -18206,7 +18596,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L169",
+      "source_location": "L172",
       "weight": 1.0
     },
     {
@@ -18217,7 +18607,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L241",
+      "source_location": "L245",
       "weight": 1.0
     },
     {
@@ -18228,18 +18618,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L285",
-      "weight": 1.0
-    },
-    {
-      "source": "readme_flint_high_performance_fhir_r4_server_on_a_data_lakehouse",
-      "target": "readme_project_structure",
-      "relation": "contains",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "README.md",
-      "source_location": "L297",
+      "source_location": "L289",
       "weight": 1.0
     },
     {
@@ -18255,13 +18634,35 @@
     },
     {
       "source": "readme_flint_high_performance_fhir_r4_server_on_a_data_lakehouse",
+      "target": "readme_clinical_dimensional_lakehouse_analytics_sqlmesh_on_duckdb_iceberg",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": "L302",
+      "weight": 1.0
+    },
+    {
+      "source": "readme_flint_high_performance_fhir_r4_server_on_a_data_lakehouse",
+      "target": "readme_project_structure",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "README.md",
+      "source_location": "L325",
+      "weight": 1.0
+    },
+    {
+      "source": "readme_flint_high_performance_fhir_r4_server_on_a_data_lakehouse",
       "target": "readme_community_contributing",
       "relation": "contains",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L334",
+      "source_location": "L364",
       "weight": 1.0
     },
     {
@@ -18272,7 +18673,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L343",
+      "source_location": "L373",
       "weight": 1.0
     },
     {
@@ -18349,7 +18750,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L148",
+      "source_location": "L151",
       "weight": 1.0
     },
     {
@@ -18371,7 +18772,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L258",
+      "source_location": "L262",
       "weight": 1.0
     },
     {
@@ -18382,7 +18783,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L264",
+      "source_location": "L268",
       "weight": 1.0
     },
     {
@@ -18393,7 +18794,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L272",
+      "source_location": "L276",
       "weight": 1.0
     },
     {
@@ -18492,7 +18893,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/bundle.go",
-      "source_location": "L276",
+      "source_location": "L324",
       "weight": 1.0
     },
     {
@@ -18591,7 +18992,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L1003",
+      "source_location": "L1034",
       "weight": 1.0
     },
     {
@@ -18624,7 +19025,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L501",
+      "source_location": "L544",
       "weight": 1.0
     },
     {
@@ -18635,7 +19036,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L517",
+      "source_location": "L560",
       "weight": 1.0
     },
     {
@@ -18646,7 +19047,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L582",
+      "source_location": "L625",
       "weight": 1.0
     },
     {
@@ -19504,29 +19905,29 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search.go",
-      "source_location": "L12",
+      "source_location": "L13",
       "weight": 1.0
     },
     {
       "source": "store_postgres_search",
-      "target": "postgres_searchresults",
+      "target": "store_postgres_search_go_postgres_searchresults",
       "relation": "contains",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search.go",
-      "source_location": "L20",
+      "source_location": "L21",
       "weight": 1.0
     },
     {
       "source": "store_postgres_search",
-      "target": "postgres_searchparams",
+      "target": "postgres_patienteverythingparams",
       "relation": "contains",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search.go",
-      "source_location": "L27",
+      "source_location": "L28",
       "weight": 1.0
     },
     {
@@ -19537,7 +19938,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search.go",
-      "source_location": "L281",
+      "source_location": "L292",
       "weight": 1.0
     },
     {
@@ -19548,7 +19949,18 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search.go",
-      "source_location": "L301",
+      "source_location": "L312",
+      "weight": 1.0
+    },
+    {
+      "source": "store_postgres_search",
+      "target": "postgres_searchparams",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "store/postgres/search.go",
+      "source_location": "L38",
       "weight": 1.0
     },
     {
@@ -19559,7 +19971,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L104",
+      "source_location": "L105",
       "weight": 1.0
     },
     {
@@ -19570,7 +19982,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L11",
+      "source_location": "L12",
       "weight": 1.0
     },
     {
@@ -19581,7 +19993,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L144",
+      "source_location": "L145",
       "weight": 1.0
     },
     {
@@ -19592,7 +20004,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L163",
+      "source_location": "L164",
       "weight": 1.0
     },
     {
@@ -19603,7 +20015,18 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L17",
+      "source_location": "L18",
+      "weight": 1.0
+    },
+    {
+      "source": "store_postgres_search_parse",
+      "target": "store_postgres_search_parse_buildsearchparamsfromquery",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "store/postgres/search_parse.go",
+      "source_location": "L231",
       "weight": 1.0
     },
     {
@@ -19614,7 +20037,18 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L26",
+      "source_location": "L27",
+      "weight": 1.0
+    },
+    {
+      "source": "store_postgres_search_parse",
+      "target": "store_postgres_search_parse_parseifnoneexist",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "store/postgres/search_parse.go",
+      "source_location": "L300",
       "weight": 1.0
     },
     {
@@ -19625,7 +20059,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L33",
+      "source_location": "L34",
       "weight": 1.0
     },
     {
@@ -19636,7 +20070,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search_parse.go",
-      "source_location": "L62",
+      "source_location": "L63",
       "weight": 1.0
     },
     {
@@ -19685,13 +20119,24 @@
     },
     {
       "source": "store_postgres_search_property_test",
-      "target": "store_postgres_search_property_test_testproperty_parsersneverpaniconarbitraryfuzz",
+      "target": "store_postgres_search_property_test_testproperty_ifnoneexistparsinginvariance",
       "relation": "contains",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search_property_test.go",
       "source_location": "L114",
+      "weight": 1.0
+    },
+    {
+      "source": "store_postgres_search_property_test",
+      "target": "store_postgres_search_property_test_testproperty_parsersneverpaniconarbitraryfuzz",
+      "relation": "contains",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "store/postgres/search_property_test.go",
+      "source_location": "L139",
       "weight": 1.0
     },
     {
@@ -20285,7 +20730,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/bundle.go",
-      "source_location": "L40",
+      "source_location": "L41",
       "weight": 1.0
     },
     {
@@ -20312,6 +20757,17 @@
     },
     {
       "source": "server_server_go_server_server",
+      "target": "server_server_prototojson",
+      "relation": "method",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "server/server.go",
+      "source_location": "L1007",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_go_server_server",
       "target": "server_server_handler",
       "relation": "method",
       "_origin": "ast",
@@ -20329,7 +20785,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L124",
+      "source_location": "L125",
       "weight": 1.0
     },
     {
@@ -20340,7 +20796,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L165",
+      "source_location": "L166",
       "weight": 1.0
     },
     {
@@ -20351,7 +20807,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L213",
+      "source_location": "L214",
       "weight": 1.0
     },
     {
@@ -20362,7 +20818,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L289",
+      "source_location": "L290",
       "weight": 1.0
     },
     {
@@ -20373,7 +20829,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L377",
+      "source_location": "L420",
       "weight": 1.0
     },
     {
@@ -20384,7 +20840,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L484",
+      "source_location": "L527",
       "weight": 1.0
     },
     {
@@ -20395,7 +20851,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L531",
+      "source_location": "L574",
       "weight": 1.0
     },
     {
@@ -20406,7 +20862,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L587",
+      "source_location": "L630",
       "weight": 1.0
     },
     {
@@ -20417,18 +20873,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L608",
-      "weight": 1.0
-    },
-    {
-      "source": "server_server_go_server_server",
-      "target": "server_server_handlesearch",
-      "relation": "method",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "server/server.go",
-      "source_location": "L677",
+      "source_location": "L651",
       "weight": 1.0
     },
     {
@@ -20444,6 +20889,17 @@
     },
     {
       "source": "server_server_go_server_server",
+      "target": "server_server_handlepatienteverything",
+      "relation": "method",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "server/server.go",
+      "source_location": "L720",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_go_server_server",
       "target": "server_server_auditrecorder",
       "relation": "method",
       "_origin": "ast",
@@ -20451,6 +20907,17 @@
       "confidence_score": 1.0,
       "source_file": "server/server.go",
       "source_location": "L73",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_go_server_server",
+      "target": "server_server_handlesearch",
+      "relation": "method",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "server/server.go",
+      "source_location": "L782",
       "weight": 1.0
     },
     {
@@ -20466,13 +20933,13 @@
     },
     {
       "source": "server_server_go_server_server",
-      "target": "server_server_handlemetadata",
+      "target": "server_server_writesearchsetbundle",
       "relation": "method",
       "_origin": "ast",
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "server/server.go",
-      "source_location": "L838",
+      "source_location": "L798",
       "weight": 1.0
     },
     {
@@ -20484,6 +20951,17 @@
       "confidence_score": 1.0,
       "source_file": "server/server.go",
       "source_location": "L85",
+      "weight": 1.0
+    },
+    {
+      "source": "server_server_go_server_server",
+      "target": "server_server_handlemetadata",
+      "relation": "method",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "server/server.go",
+      "source_location": "L854",
       "weight": 1.0
     },
     {
@@ -20506,17 +20984,6 @@
       "confidence_score": 1.0,
       "source_file": "server/server.go",
       "source_location": "L96",
-      "weight": 1.0
-    },
-    {
-      "source": "server_server_go_server_server",
-      "target": "server_server_prototojson",
-      "relation": "method",
-      "_origin": "ast",
-      "confidence": "EXTRACTED",
-      "confidence_score": 1.0,
-      "source_file": "server/server.go",
-      "source_location": "L976",
       "weight": 1.0
     },
     {
@@ -21473,7 +21940,18 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search.go",
-      "source_location": "L203",
+      "source_location": "L214",
+      "weight": 1.0
+    },
+    {
+      "source": "store_postgres_search_go_postgres_store",
+      "target": "postgres_store_patienteverything",
+      "relation": "method",
+      "_origin": "ast",
+      "confidence": "EXTRACTED",
+      "confidence_score": 1.0,
+      "source_file": "store/postgres/search.go",
+      "source_location": "L351",
       "weight": 1.0
     },
     {
@@ -21484,7 +21962,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "store/postgres/search.go",
-      "source_location": "L45",
+      "source_location": "L56",
       "weight": 1.0
     },
     {
@@ -22265,7 +22743,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L337",
+      "source_location": "L367",
       "weight": 1.0
     },
     {
@@ -22276,7 +22754,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L338",
+      "source_location": "L368",
       "weight": 1.0
     },
     {
@@ -22287,7 +22765,7 @@
       "confidence": "EXTRACTED",
       "confidence_score": 1.0,
       "source_file": "README.md",
-      "source_location": "L339",
+      "source_location": "L369",
       "weight": 1.0
     },
     {
@@ -22503,7 +22981,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "server/bundle.go",
-      "source_location": "L204",
+      "source_location": "L252",
       "weight": 1.0
     },
     {
@@ -22515,7 +22993,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "server/bundle.go",
-      "source_location": "L207",
+      "source_location": "L255",
       "weight": 1.0
     },
     {
@@ -22527,7 +23005,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "server/bundle.go",
-      "source_location": "L208",
+      "source_location": "L256",
       "weight": 1.0
     },
     {
@@ -22539,7 +23017,7 @@
       "confidence_score": 0.85,
       "context": "call",
       "source_file": "server/bundle.go",
-      "source_location": "L45",
+      "source_location": "L46",
       "weight": 1.0
     },
     {
@@ -22664,5 +23142,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "f6a4bb9d149b3fd28e922c1dcfdb39bb978fdb7d"
+  "built_at_commit": "d1d6bec9c2f54f68158851b63359ebeb37ed93d8"
 }

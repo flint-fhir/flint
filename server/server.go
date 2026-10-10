@@ -104,6 +104,7 @@ func (s *Server) Handler() http.Handler {
 	// FHIR REST endpoints
 	mux.HandleFunc("GET /fhir/r4/{tenant}/AuditEvent/{id}", s.handleReadAuditEvent)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/AuditEvent", s.handleSearchAuditEvents)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/Patient/{id}/$everything", s.handlePatientEverything)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history/{vid}", s.handleVRead)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history", s.handleInstanceHistory)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}", s.handleRead)
@@ -320,6 +321,48 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusBadRequest, "structure",
 			fmt.Sprintf("invalid FHIR JSON: %v", err))
 		return
+	}
+
+	// Evaluate Conditional Create (If-None-Exist header) per FHIR R4 3.1.0.5.1
+	if ifNoneExist := strings.TrimSpace(r.Header.Get("If-None-Exist")); ifNoneExist != "" && s.store != nil {
+		condParams, err := postgres.ParseIfNoneExist(tenant, resType, ifNoneExist)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+			return
+		}
+		sr, err := s.store.Search(r.Context(), condParams)
+		if err != nil {
+			s.logger.Error("conditional create search", "error", err, "type", resType, "ifNoneExist", ifNoneExist)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "conditional create search failed")
+			return
+		}
+		if sr.Total > 1 {
+			writeOperationOutcome(w, http.StatusPreconditionFailed, "duplicate",
+				fmt.Sprintf("If-None-Exist matched %d existing %s resources", sr.Total, resType))
+			return
+		}
+		if sr.Total == 1 && len(sr.Matches) == 1 {
+			existingID := sr.Matches[0].ResID
+			existingRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, existingID)
+			if err != nil {
+				s.logger.Error("conditional create read existing", "error", err, "type", resType, "id", existingID)
+				writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read matched resource")
+				return
+			}
+			jsonBytes, err := s.protoToJSON(resType, existingRec.ResourceProto)
+			if err != nil {
+				s.logger.Error("conditional create proto to json", "error", err, "type", resType, "id", existingID)
+				writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
+				return
+			}
+			w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+			w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, existingID))
+			w.Header().Set("ETag", postgres.FormatETag(existingRec.ResVersion))
+			w.Header().Set("Last-Modified", existingRec.LastUpdated.UTC().Format(http.TimeFormat))
+			w.WriteHeader(http.StatusOK)
+			w.Write(jsonBytes)
+			return
+		}
 	}
 
 	// Extract resource ID from the proto
@@ -673,103 +716,74 @@ func (s *Server) handleSearchAuditEvents(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(bundle)
 }
 
+// handlePatientEverything handles GET /{tenant}/Patient/{id}/$everything — assemble full patient compartment Bundle.
+func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	patientID := r.PathValue("id")
+	q := r.URL.Query()
+
+	params := postgres.PatientEverythingParams{
+		TenantID:  tenant,
+		PatientID: patientID,
+		Count:     100,
+	}
+
+	if typeRaw := strings.TrimSpace(q.Get("_type")); typeRaw != "" {
+		for part := range strings.SplitSeq(typeRaw, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				params.ResourceTypes = append(params.ResourceTypes, trimmed)
+			}
+		}
+	}
+
+	if sinceRaw := strings.TrimSpace(q.Get("_since")); sinceRaw != "" {
+		dOp, err := postgres.ParseDateOp(sinceRaw)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _since parameter %q: %v", sinceRaw, err))
+			return
+		}
+		t := dOp.Value
+		params.Since = &t
+	}
+
+	if v := q.Get("_count"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			params.Count = n
+		}
+	}
+	if v := q.Get("_offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			params.Offset = n
+		}
+	}
+
+	sr, err := s.store.PatientEverything(r.Context(), params)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found",
+			fmt.Sprintf("Patient/%s not found", patientID))
+		return
+	}
+	if errors.Is(err, postgres.ErrResourceDeleted) {
+		writeOperationOutcome(w, http.StatusGone, "deleted",
+			fmt.Sprintf("Patient/%s has been deleted", patientID))
+		return
+	}
+	if err != nil {
+		s.logger.Error("patient $everything", "error", err, "patient", patientID)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to assemble Patient/$everything")
+		return
+	}
+
+	s.writeSearchSetBundle(w, sr)
+}
+
 // handleSearch handles GET /{resourceType}?{params} — search resources.
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	resType := r.PathValue("resourceType")
 
-	params := postgres.SearchParams{
-		TenantID:   tenant,
-		ResType:    resType,
-		Strings:    make(map[string]string),
-		Tokens:     make(map[string]string),
-		Dates:      make(map[string]postgres.DateOp),
-		Quantities: make(map[string]postgres.QuantityOp),
-		References: make(map[string]string),
-	}
-
-	// Parse _count and _offset
-	if v := r.URL.Query().Get("_count"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			params.Count = n
-		}
-	}
-	if v := r.URL.Query().Get("_offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			params.Offset = n
-		}
-	}
-
-	// Parse _include and _revinclude
-	for _, incVal := range r.URL.Query()["_include"] {
-		if inc, err := postgres.ParseInclude(incVal); err == nil {
-			params.Includes = append(params.Includes, inc)
-		}
-	}
-	for _, revVal := range r.URL.Query()["_revinclude"] {
-		if rev, err := postgres.ParseInclude(revVal); err == nil {
-			params.RevIncludes = append(params.RevIncludes, rev)
-		}
-	}
-
-	// Classify search parameters by type
-	stringParams := map[string]bool{
-		"family": true, "given": true, "name": true,
-		"address": true, "address-city": true, "address-state": true,
-		"address-postalcode": true, "address-country": true,
-	}
-	tokenParams := map[string]bool{
-		"identifier": true, "gender": true, "active": true,
-		"email": true, "phone": true, "language": true,
-		"deceased": true, "status": true, "code": true,
-		"category": true, "type": true, "class": true,
-		"clinical-status": true, "verification-status": true,
-	}
-	refParams := map[string]bool{
-		"organization": true, "general-practitioner": true,
-		"subject": true, "patient": true, "encounter": true,
-		"performer": true, "asserter": true, "recorder": true,
-		"participant": true,
-	}
-	dateParams := map[string]bool{
-		"birthdate": true, "date": true, "onset-date": true,
-	}
-	quantityParams := map[string]bool{
-		"value-quantity": true,
-	}
-
-	for key, values := range r.URL.Query() {
-		if strings.HasPrefix(key, "_") {
-			continue // skip special params handled above
-		}
-		value := values[0]
-
-		// Check for chained parameters (e.g., patient.name=Smith)
-		if chained, ok := postgres.ParseChainedParam(key, value); ok {
-			params.Chained = append(params.Chained, *chained)
-			continue
-		}
-
-		switch {
-		case stringParams[key]:
-			params.Strings[key] = value
-		case tokenParams[key]:
-			params.Tokens[key] = value
-		case refParams[key]:
-			params.References[key] = value
-		case dateParams[key]:
-			if dOp, err := postgres.ParseDateOp(value); err == nil {
-				params.Dates[key] = dOp
-			}
-		case quantityParams[key]:
-			if qOp, err := postgres.ParseQuantityOp(value); err == nil {
-				params.Quantities[key] = qOp
-			}
-		default:
-			// Default fallback for unknown params
-			params.Tokens[key] = value
-		}
-	}
+	params := postgres.BuildSearchParamsFromQuery(tenant, resType, r.URL.Query())
 
 	sr, err := s.store.Search(r.Context(), params)
 	if err != nil {
@@ -778,14 +792,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build FHIR Bundle response
-	bundle := map[string]any{
-		"resourceType": "Bundle",
-		"type":         "searchset",
-		"total":        sr.Total,
-		"entry":        []any{},
-	}
+	s.writeSearchSetBundle(w, sr)
+}
 
+func (s *Server) writeSearchSetBundle(w http.ResponseWriter, sr *postgres.SearchResults) {
 	entries := make([]any, 0, len(sr.Matches)+len(sr.Includes))
 
 	// 1. Primary search matches
@@ -808,7 +818,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// 2. Included resources (_include and _revinclude)
+	// 2. Included resources (_include, _revinclude, and $everything compartment resources)
 	for _, inc := range sr.Includes {
 		jsonBytes, err := s.protoToJSON(inc.ResType, inc.ResourceProto)
 		if err != nil {
@@ -827,7 +837,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	}
-	bundle["entry"] = entries
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"type":         "searchset",
+		"total":        sr.Total,
+		"entry":        entries,
+	}
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -861,11 +877,12 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 				"mode": "server",
 				"resource": []map[string]any{
 					{
-						"type":         "Patient",
-						"versioning":   "versioned-update",
-						"readHistory":  true,
-						"updateCreate": true,
-						"interaction":  interactions,
+						"type":              "Patient",
+						"versioning":        "versioned-update",
+						"readHistory":       true,
+						"updateCreate":      true,
+						"conditionalCreate": true,
+						"interaction":       interactions,
 						"searchParam": []map[string]string{
 							{"name": "family", "type": "string"},
 							{"name": "given", "type": "string"},
@@ -874,13 +891,20 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 							{"name": "birthdate", "type": "date"},
 							{"name": "organization", "type": "reference"},
 						},
+						"operation": []map[string]string{
+							{
+								"name":       "everything",
+								"definition": "http://hl7.org/fhir/OperationDefinition/Patient-everything",
+							},
+						},
 					},
 					{
-						"type":         "Condition",
-						"versioning":   "versioned-update",
-						"readHistory":  true,
-						"updateCreate": true,
-						"interaction":  interactions,
+						"type":              "Condition",
+						"versioning":        "versioned-update",
+						"readHistory":       true,
+						"updateCreate":      true,
+						"conditionalCreate": true,
+						"interaction":       interactions,
 						"searchParam": []map[string]string{
 							{"name": "code", "type": "token"},
 							{"name": "clinical-status", "type": "token"},
@@ -893,11 +917,12 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 						},
 					},
 					{
-						"type":         "Encounter",
-						"versioning":   "versioned-update",
-						"readHistory":  true,
-						"updateCreate": true,
-						"interaction":  interactions,
+						"type":              "Encounter",
+						"versioning":        "versioned-update",
+						"readHistory":       true,
+						"updateCreate":      true,
+						"conditionalCreate": true,
+						"interaction":       interactions,
 						"searchParam": []map[string]string{
 							{"name": "class", "type": "token"},
 							{"name": "status", "type": "token"},
@@ -909,11 +934,12 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 						},
 					},
 					{
-						"type":         "Observation",
-						"versioning":   "versioned-update",
-						"readHistory":  true,
-						"updateCreate": true,
-						"interaction":  interactions,
+						"type":              "Observation",
+						"versioning":        "versioned-update",
+						"readHistory":       true,
+						"updateCreate":      true,
+						"conditionalCreate": true,
+						"interaction":       interactions,
 						"searchParam": []map[string]string{
 							{"name": "code", "type": "token"},
 							{"name": "status", "type": "token"},
@@ -925,11 +951,12 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 						},
 					},
 					{
-						"type":         "Practitioner",
-						"versioning":   "versioned-update",
-						"readHistory":  true,
-						"updateCreate": true,
-						"interaction":  interactions,
+						"type":              "Practitioner",
+						"versioning":        "versioned-update",
+						"readHistory":       true,
+						"updateCreate":      true,
+						"conditionalCreate": true,
+						"interaction":       interactions,
 						"searchParam": []map[string]string{
 							{"name": "family", "type": "string"},
 							{"name": "given", "type": "string"},
@@ -961,6 +988,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "validate",
 						"definition": "http://hl7.org/fhir/OperationDefinition/Resource-validate",
+					},
+					{
+						"name":       "everything",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Patient-everything",
 					},
 				},
 			},

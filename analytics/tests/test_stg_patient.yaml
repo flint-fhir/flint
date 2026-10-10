@@ -1,0 +1,56 @@
+test_stg_patient_cdc_dedup_and_tombstone:
+  model: flint_stg.stg_patient
+  inputs:
+    fhir_raw.patient:
+      rows:
+        - tenant_id: "tenant-a"
+          _kafka_key: "pat-001"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-01 10:00:00+00:00"
+          op: "I"
+          _kafka_value: '{"name":[{"family":{"value":"OldName"},"given":[{"value":"Alice"}]}],"gender":{"value":"female"},"birthDate":{"value":"1990-05-15"},"active":{"value":true},"address":[{"postalCode":{"value":"94101"}}]}'
+        - tenant_id: "tenant-a"
+          _kafka_key: "pat-001"
+          _kafka_offset: 2
+          _kafka_timestamp: "2026-10-01 11:00:00+00:00"
+          op: "U"
+          _kafka_value: '{"name":[{"family":{"value":"Wonderland"},"given":[{"value":"Alice"}]}],"gender":{"value":"female"},"birthDate":{"value":"1990-05-15"},"active":{"value":true},"address":[{"postalCode":{"value":"94105"}}]}'
+        - tenant_id: "tenant-a"
+          _kafka_key: "pat-002"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-01 12:00:00+00:00"
+          op: "I"
+          _kafka_value: '{"name":[{"family":"Smith","given":["Bob"]}],"gender":"male","birthDate":"1985-10-20","active":true,"address":[{"postalCode":"10001"}]}'
+        - tenant_id: "tenant-a"
+          _kafka_key: "pat-003"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-01 12:30:00+00:00"
+          op: "I"
+          _kafka_value: '{"name":[{"family":"Deleted"}]}'
+        - tenant_id: "tenant-a"
+          _kafka_key: "pat-003"
+          _kafka_offset: 2
+          _kafka_timestamp: "2026-10-01 13:00:00+00:00"
+          op: "D"
+          _kafka_value: "[tombstone]"
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          patient_id: "pat-001"
+          family_name: "Wonderland"
+          given_name: "Alice"
+          gender: "female"
+          birth_date: "1990-05-15"
+          active: true
+          postal_code: "94105"
+          updated_at: "2026-10-01 11:00:00+00:00"
+        - tenant_id: "tenant-a"
+          patient_id: "pat-002"
+          family_name: "Smith"
+          given_name: "Bob"
+          gender: "male"
+          birth_date: "1985-10-20"
+          active: true
+          postal_code: "10001"
+          updated_at: "2026-10-01 12:00:00+00:00"

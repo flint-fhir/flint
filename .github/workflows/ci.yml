@@ -74,3 +74,16 @@ jobs:
 
       - name: buf lint
         run: buf lint
+
+  analytics:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: SQLMesh Lakehouse Unit Tests (DuckDB)
+        run: uv run --project analytics sqlmesh --paths analytics test
+

@@ -31,9 +31,10 @@ type bundleEntry struct {
 
 // bundleEntryRequest is the request part of a Bundle entry.
 type bundleEntryRequest struct {
-	Method  string `json:"method"`            // PUT, POST, DELETE
-	URL     string `json:"url"`               // e.g. "Patient/123"
-	IfMatch string `json:"ifMatch,omitempty"` // Optional ETag for optimistic concurrency (e.g. W/"1")
+	Method      string `json:"method"`                // PUT, POST, DELETE
+	URL         string `json:"url"`                   // e.g. "Patient/123"
+	IfMatch     string `json:"ifMatch,omitempty"`     // Optional ETag for optimistic concurrency (e.g. W/"1")
+	IfNoneExist string `json:"ifNoneExist,omitempty"` // Optional search query for conditional create (e.g. "identifier=http://mrn|123")
 }
 
 // handleBundle handles POST /{tenant} — process a FHIR transaction/batch Bundle.
@@ -197,6 +198,53 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			responseEntries = append(responseEntries, bundleErrorResponse(
 				http.StatusBadRequest, fmt.Sprintf("entry[%d]: invalid %s JSON: %v", i, resType, err)))
 			continue
+		}
+
+		// Handle Conditional Create (request.ifNoneExist) on POST
+		if method == "POST" && entry.Request != nil && strings.TrimSpace(entry.Request.IfNoneExist) != "" && s.store != nil {
+			condParams, err := postgres.ParseIfNoneExist(tenant, resType, entry.Request.IfNoneExist)
+			if err != nil {
+				if bundle.Type == "transaction" {
+					writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+						fmt.Sprintf("entry[%d]: %v", i, err))
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(
+					http.StatusBadRequest, fmt.Sprintf("entry[%d]: %v", i, err)))
+				continue
+			}
+			sr, err := s.store.Search(r.Context(), condParams)
+			if err != nil {
+				if bundle.Type == "transaction" {
+					writeOperationOutcome(w, http.StatusInternalServerError, "exception",
+						fmt.Sprintf("entry[%d]: conditional create search failed: %v", i, err))
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(
+					http.StatusInternalServerError, fmt.Sprintf("entry[%d]: conditional create search failed: %v", i, err)))
+				continue
+			}
+			if sr.Total > 1 {
+				if bundle.Type == "transaction" {
+					writeOperationOutcome(w, http.StatusPreconditionFailed, "duplicate",
+						fmt.Sprintf("entry[%d]: ifNoneExist matched %d existing %s resources", i, sr.Total, resType))
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(
+					http.StatusPreconditionFailed, fmt.Sprintf("entry[%d]: ifNoneExist matched %d existing %s resources", i, sr.Total, resType)))
+				continue
+			}
+			if sr.Total == 1 && len(sr.Matches) == 1 {
+				existingID := sr.Matches[0].ResID
+				responseEntries = append(responseEntries, map[string]any{
+					"fullUrl": fmt.Sprintf("%s/%s", resType, existingID),
+					"response": map[string]any{
+						"status":   "200 OK",
+						"location": fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, existingID),
+					},
+				})
+				continue
+			}
 		}
 
 		// Extract ID from proto if not in request URL

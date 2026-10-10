@@ -431,6 +431,138 @@ func TestStore_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("PatientEverything", func(t *testing.T) {
+		// Seed a Patient, a Practitioner, an Encounter referencing both, and an Observation referencing the Patient
+		if err := store.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Practitioner",
+			ResID:         "prac-ev-1",
+			ResourceProto: []byte("prac-proto"),
+		}); err != nil {
+			t.Fatalf("write practitioner: %v", err)
+		}
+		if err := store.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Patient",
+			ResID:         "pat-ev-1",
+			ResourceProto: []byte("pat-proto"),
+		}); err != nil {
+			t.Fatalf("write patient: %v", err)
+		}
+		if err := store.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Encounter",
+			ResID:         "enc-ev-1",
+			ResourceProto: []byte("enc-proto"),
+			SearchIndexes: &postgres.SearchIndexes{
+				References: []postgres.SpidxReference{
+					{TenantID: "test-tenant", ResType: "Encounter", ResID: "enc-ev-1", SpName: "subject", TargetType: "Patient", TargetID: "pat-ev-1"},
+					{TenantID: "test-tenant", ResType: "Encounter", ResID: "enc-ev-1", SpName: "participant", TargetType: "Practitioner", TargetID: "prac-ev-1"},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("write encounter: %v", err)
+		}
+		if err := store.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Observation",
+			ResID:         "obs-ev-1",
+			ResourceProto: []byte("obs-proto"),
+			SearchIndexes: &postgres.SearchIndexes{
+				References: []postgres.SpidxReference{
+					{TenantID: "test-tenant", ResType: "Observation", ResID: "obs-ev-1", SpName: "subject", TargetType: "Patient", TargetID: "pat-ev-1"},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("write observation: %v", err)
+		}
+
+		sr, err := store.PatientEverything(ctx, postgres.PatientEverythingParams{
+			TenantID:  "test-tenant",
+			PatientID: "pat-ev-1",
+		})
+		if err != nil {
+			t.Fatalf("PatientEverything: %v", err)
+		}
+		// Expect 1 match (Patient) + 3 includes (Encounter, Observation, and Encounter's participant Practitioner)
+		if len(sr.Matches) != 1 || sr.Matches[0].ResID != "pat-ev-1" {
+			t.Fatalf("expected 1 Patient match, got %+v", sr.Matches)
+		}
+		if len(sr.Includes) != 3 || sr.Total != 4 {
+			t.Fatalf("expected 3 compartment includes (total 4), got len=%d total=%d includes=%+v", len(sr.Includes), sr.Total, sr.Includes)
+		}
+
+		// Filter by _type=Observation
+		srObs, err := store.PatientEverything(ctx, postgres.PatientEverythingParams{
+			TenantID:      "test-tenant",
+			PatientID:     "pat-ev-1",
+			ResourceTypes: []string{"Observation"},
+		})
+		if err != nil {
+			t.Fatalf("PatientEverything(_type=Observation): %v", err)
+		}
+		if len(srObs.Matches) != 0 || len(srObs.Includes) != 1 || srObs.Includes[0].ResType != "Observation" {
+			t.Fatalf("expected only Observation in filtered $everything, got matches=%+v includes=%+v", srObs.Matches, srObs.Includes)
+		}
+
+		// Filter by _since in the past -> 1 Patient match + 3 compartment includes
+		past := time.Now().UTC().Add(-time.Hour)
+		srPast, err := store.PatientEverything(ctx, postgres.PatientEverythingParams{
+			TenantID:  "test-tenant",
+			PatientID: "pat-ev-1",
+			Since:     &past,
+		})
+		if err != nil {
+			t.Fatalf("PatientEverything(_since=past): %v", err)
+		}
+		if len(srPast.Matches) != 1 || len(srPast.Includes) != 3 {
+			t.Fatalf("expected 1 Patient match and 3 includes for past _since, got matches=%d includes=%d", len(srPast.Matches), len(srPast.Includes))
+		}
+
+		// Filter by _since in the future -> 0 matches and 0 compartment includes
+		future := time.Now().UTC().Add(time.Hour)
+		srFuture, err := store.PatientEverything(ctx, postgres.PatientEverythingParams{
+			TenantID:  "test-tenant",
+			PatientID: "pat-ev-1",
+			Since:     &future,
+		})
+		if err != nil {
+			t.Fatalf("PatientEverything(_since=future): %v", err)
+		}
+		if len(srFuture.Matches) != 0 || len(srFuture.Includes) != 0 {
+			t.Fatalf("expected 0 matches and 0 includes for future _since, got matches=%d includes=%d", len(srFuture.Matches), len(srFuture.Includes))
+		}
+
+		// Pagination (_count=1, _offset=1) on compartment includes
+		srPage, err := store.PatientEverything(ctx, postgres.PatientEverythingParams{
+			TenantID:  "test-tenant",
+			PatientID: "pat-ev-1",
+			Count:     1,
+			Offset:    1,
+		})
+		if err != nil {
+			t.Fatalf("PatientEverything(count=1,offset=1): %v", err)
+		}
+		if srPage.Total != 4 || len(srPage.Includes) != 1 {
+			t.Fatalf("expected Total=4 and 1 paginated include, got Total=%d len(Includes)=%d", srPage.Total, len(srPage.Includes))
+		}
+
+		// Soft-deleting Observation removes it from PatientEverything
+		if _, err := store.DeleteResourceWithMeta(ctx, "test-tenant", "Observation", "obs-ev-1"); err != nil {
+			t.Fatalf("delete obs-ev-1: %v", err)
+		}
+		srAfterDel, err := store.PatientEverything(ctx, postgres.PatientEverythingParams{
+			TenantID:  "test-tenant",
+			PatientID: "pat-ev-1",
+		})
+		if err != nil {
+			t.Fatalf("PatientEverything after delete: %v", err)
+		}
+		if srAfterDel.Total != 3 || len(srAfterDel.Includes) != 2 {
+			t.Fatalf("expected Total=3 (Patient + Encounter + Practitioner) after deleting Observation, got Total=%d len=%d", srAfterDel.Total, len(srAfterDel.Includes))
+		}
+	})
+
 	// Clean up
 	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
 		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-tenant'")

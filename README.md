@@ -132,8 +132,11 @@ task run-worker
 ### 4. Run Benchmarks & Tests
 
 ```bash
-# Run unit and integration tests
+# Run Go unit, property, and integration tests
 task test
+
+# Run SQLMesh clinical dimensional lakehouse tests (DuckDB)
+task test-analytics
 
 # Run high-throughput HTTP load test
 task bench-http
@@ -196,9 +199,10 @@ Content-Type: application/fhir+json
 * **Point Read**: `GET /fhir/r4/{tenant}/{resourceType}/{id}` (returns `ETag: W/"<version>"` and `Last-Modified`; `410 Gone` if deleted)
 * **Version Read (`vread`)**: `GET /fhir/r4/{tenant}/{resourceType}/{id}/_history/{vid}`
 * **Instance History (`_history`)**: `GET /fhir/r4/{tenant}/{resourceType}/{id}/_history?_count=100&_offset=0`
-* **Create**: `POST /fhir/r4/{tenant}/{resourceType}` (`201 Created` + `Location` + `ETag`)
+* **Create & Conditional Create (`If-None-Exist`)**: `POST /fhir/r4/{tenant}/{resourceType}` (`201 Created` + `Location` + `ETag`; when `If-None-Exist` header or Bundle `request.ifNoneExist` matches 1 existing resource, returns `200 OK` idempotently; returns `412 Precondition Failed` on multiple matches)
 * **Update / Create-on-Update**: `PUT /fhir/r4/{tenant}/{resourceType}/{id}` (supports optimistic concurrency via `If-Match: W/"<version>"`, returning `412 Precondition Failed` on version conflict)
 * **Soft Delete**: `DELETE /fhir/r4/{tenant}/{resourceType}/{id}` (`204 No Content` + tombstone version `ETag`)
+* **Patient Compartment (`$everything`)**: `GET /fhir/r4/{tenant}/Patient/{id}/$everything?_type=Encounter,Condition,Observation&_since=2025-01-01T00:00:00Z&_count=100&_offset=0` (returns a `searchset` Bundle containing the target `Patient` plus all compartment-linked resources via `spidx_reference` and referenced `Practitioner` records)
 * **Validate**: `POST /fhir/r4/{tenant}/{resourceType}/$validate` and `POST /fhir/r4/{tenant}/$validate`
 * **Search**: `GET /fhir/r4/{tenant}/{resourceType}?{searchParams}&_count=20&_offset=0`
 * **Security Audit Log (`AuditEvent`)**: `GET /fhir/r4/{tenant}/AuditEvent?entity=Patient/123&outcome=0&agent=Practitioner/dr-smith` and `GET /fhir/r4/{tenant}/AuditEvent/{id}`
@@ -289,8 +293,32 @@ Flint leverages [Hegel](https://hegel.dev) (`hegel.dev/go/hegel`) for type-drive
 * **Scope Grammar Invariance**: Validates that all strings matching the formal SMART v1/v2 grammar parse deterministically.
 * **Query Filter Invariance**: Asserts that fine-grained query filters (`?category=vital-signs`) never alter base resource permissions.
 * **Search Parameter Invariance**: Verifies parser prefix and grammar preservation across generated ISO date formats, decimal quantities, units, and `_include`/`_revinclude` strings.
+* **Conditional Create (`If-None-Exist`) Invariance**: Verifies search criteria query string parsing and deterministic round-trip matching.
 * **AuditEvent Classification & Serialization Invariance**: Verifies HTTP status-to-outcome partitioning (`0`, `4`, `8`) and round-trip FHIR R4 `AuditEvent` serialization across generated inputs.
 * **No-Panic Invariance**: Fuzzes parsers with arbitrary inputs and unicode sequences to guarantee zero crashes or hangs.
+
+---
+
+## Clinical Dimensional Lakehouse (`analytics/` — SQLMesh on DuckDB / Iceberg)
+
+Flint ships with an out-of-the-box **SQLMesh** analytical pipeline (`analytics/`) that transforms raw AutoMQ Table Topic Iceberg CDC streams (`fhir.fhir_patient`, `fhir.fhir_encounter`, `fhir.fhir_condition`, `fhir.fhir_observation`) into a Kimball healthcare dimensional model:
+
+* **Staging Layer (`flint_analytics.stg_*`)**:
+  * Deduplicates CDC events by `(tenant_id, res_id)` using the latest Kafka `(partition, offset)`.
+  * Filters out hard/soft delete tombstones (`op = 'D'`).
+  * Supports dual extraction across `google/fhir` wrapped JSON (`{"value": "..."}`) and standard HL7 FHIR R4 JSON.
+* **Dimensional & Fact Layer (`flint_analytics.dim_*`, `flint_analytics.fct_*`)**:
+  * `dim_patient`: Demographics, full name, birth date, calculated age, postal code, and active flag.
+  * `fct_encounter`: Encounter class, type code/system, period timestamps, and calculated length-of-stay (`length_of_stay_hours`).
+  * `fct_condition`: SNOMED/ICD-10 condition codes, clinical/verification status, `is_active_condition` flag, and onset date.
+  * `fct_observation`: LOINC observation codes, category, numeric `value_quantity`, `value_unit`, `value_code`, and effective timestamps.
+* **Longitudinal Patient 360 Mart (`flint_analytics.mart_patient_360`)**:
+  * Single-row-per-patient population health summary aggregating total/inpatient encounters, cumulative length of stay, active condition counts, and latest vital sign/lab timestamps.
+
+Run the hermetic SQLMesh unit test suite locally via `uv` and DuckDB:
+```bash
+task test-analytics
+```
 
 ---
 
@@ -298,6 +326,7 @@ Flint leverages [Hegel](https://hegel.dev) (`hegel.dev/go/hegel`) for type-drive
 
 ```
 flint/
+├── analytics/            # SQLMesh clinical dimensional lakehouse models & DuckDB unit tests
 ├── automq/               # Franz-go Kafka producer with CDC headers
 ├── bin/                  # Compiled binaries (flintd, worker, loadtest)
 ├── cmd/
@@ -318,12 +347,13 @@ flint/
 ├── pkg/
 │   ├── audit/            # HIPAA/ONC FHIR R4 AuditEvent classification, serialization & recorders
 │   ├── auth/             # TokenValidator, OIDC/Zitadel, and Hegel property tests
-│   └── fhirutil/         # Protobuf nil-safe accessors & helpers
+│   ├── fhirutil/         # Protobuf nil-safe accessors & helpers
+│   └── validation/       # FHIR StructureDefinition, ValueSet, and cardinality validator
 ├── proto/
 │   ├── flint/auth/v1/    # Canonical Protobuf schemas for auth & security context
 │   └── google/fhir/      # Vendored google/fhir R4 protocol buffers
 ├── server/               # stdlib HTTP router, Bundle engine, SMART discovery, auth middleware
-├── store/postgres/       # Operational store, DDL migrations, spidx_* tables
+├── store/postgres/       # Operational store, Atlas SQL migrations, spidx_* tables
 ├── flake.nix             # Hermetic Nix development environment
 ├── lefthook.yml          # Git pre-commit & pre-push hooks
 └── Taskfile.yaml         # Project workflow automation tasks
