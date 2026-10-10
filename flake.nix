@@ -28,6 +28,7 @@
             kubectl
             uv
             duckdb
+            atlas
           ];
 
           shellHook = ''
@@ -35,6 +36,7 @@
             echo "  Go:      $(go version)"
             echo "  Buf:     $(buf --version)"
             echo "  Protoc:  $(protoc --version)"
+            echo "  Atlas:   $(atlas version | head -n 1)"
             lefthook install >/dev/null 2>&1 || true
           '';
         };

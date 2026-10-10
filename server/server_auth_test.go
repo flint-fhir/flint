@@ -197,4 +197,43 @@ func TestServer_AuthMiddleware(t *testing.T) {
 		defer respMismatched.Body.Close()
 		assert.Equal(t, http.StatusForbidden, respMismatched.StatusCode)
 	})
+
+	t.Run("PUT and DELETE Enforce Update/Delete Scopes and Patient Compartment", func(t *testing.T) {
+		readOnlyToken, err := mockVal.IssueToken("user-ro", "patient/Patient.rs", "pat-100", time.Hour, nil)
+		require.NoError(t, err)
+
+		// PUT with read-only token -> 403 Forbidden
+		reqPut, _ := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/default/Patient/pat-100", strings.NewReader(`{"resourceType":"Patient"}`))
+		reqPut.Header.Set("Authorization", "Bearer "+readOnlyToken)
+		respPut, err := http.DefaultClient.Do(reqPut)
+		require.NoError(t, err)
+		defer respPut.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respPut.StatusCode)
+
+		// DELETE with read-only token -> 403 Forbidden
+		reqDel, _ := http.NewRequest(http.MethodDelete, ts.URL+"/fhir/r4/default/Patient/pat-100", nil)
+		reqDel.Header.Set("Authorization", "Bearer "+readOnlyToken)
+		respDel, err := http.DefaultClient.Do(reqDel)
+		require.NoError(t, err)
+		defer respDel.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respDel.StatusCode)
+
+		// Patient-scoped token with u/d scopes blocked from updating/deleting another patient
+		udToken, err := mockVal.IssueToken("user-ud", "patient/Patient.ud", "pat-100", time.Hour, nil)
+		require.NoError(t, err)
+
+		reqPutOther, _ := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/default/Patient/pat-999", strings.NewReader(`{"resourceType":"Patient"}`))
+		reqPutOther.Header.Set("Authorization", "Bearer "+udToken)
+		respPutOther, err := http.DefaultClient.Do(reqPutOther)
+		require.NoError(t, err)
+		defer respPutOther.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respPutOther.StatusCode)
+
+		reqDelOther, _ := http.NewRequest(http.MethodDelete, ts.URL+"/fhir/r4/default/Patient/pat-999", nil)
+		reqDelOther.Header.Set("Authorization", "Bearer "+udToken)
+		respDelOther, err := http.DefaultClient.Do(reqDelOther)
+		require.NoError(t, err)
+		defer respDelOther.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respDelOther.StatusCode)
+	})
 }

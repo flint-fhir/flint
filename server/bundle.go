@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -30,8 +31,9 @@ type bundleEntry struct {
 
 // bundleEntryRequest is the request part of a Bundle entry.
 type bundleEntryRequest struct {
-	Method string `json:"method"` // PUT, POST, DELETE
-	URL    string `json:"url"`    // e.g. "Patient/123"
+	Method  string `json:"method"`            // PUT, POST, DELETE
+	URL     string `json:"url"`               // e.g. "Patient/123"
+	IfMatch string `json:"ifMatch,omitempty"` // Optional ETag for optimistic concurrency (e.g. W/"1")
 }
 
 // handleBundle handles POST /{tenant} — process a FHIR transaction/batch Bundle.
@@ -95,15 +97,30 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Determine method and URL
+		// Determine method, URL, and optional If-Match version
 		method := "PUT"
 		resID := ""
+		expectedVersion := 0
 		if entry.Request != nil {
 			method = entry.Request.Method
 			// Parse URL like "Patient/123"
 			parts := strings.SplitN(entry.Request.URL, "/", 2)
 			if len(parts) == 2 {
 				resID = parts[1]
+			}
+			if strings.TrimSpace(entry.Request.IfMatch) != "" {
+				v, err := postgres.ParseETagVersion(entry.Request.IfMatch)
+				if err != nil {
+					if bundle.Type == "transaction" {
+						writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+							fmt.Sprintf("entry[%d]: invalid ifMatch %q", i, entry.Request.IfMatch))
+						return
+					}
+					responseEntries = append(responseEntries, bundleErrorResponse(
+						http.StatusBadRequest, fmt.Sprintf("entry[%d]: invalid ifMatch %q", i, entry.Request.IfMatch)))
+					continue
+				}
+				expectedVersion = v
 			}
 		}
 
@@ -184,19 +201,11 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 
 		// Extract ID from proto if not in request URL
 		if resID == "" {
-			idField := msg.Descriptor().Fields().ByName("id")
-			if idField != nil {
-				idMsg := msg.Get(idField).Message()
-				if idMsg.IsValid() {
-					valField := idMsg.Descriptor().Fields().ByName("value")
-					if valField != nil {
-						resID = idMsg.Get(valField).String()
-					}
-				}
-			}
+			resID = extractProtoResourceID(msg)
 		}
 		if resID == "" {
 			resID = generateID()
+			setProtoResourceID(msg, resID)
 		}
 
 		protoBytes, err := proto.Marshal(msg)
@@ -217,11 +226,12 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		inputs = append(inputs, postgres.ResourceInput{
-			TenantID:      tenant,
-			ResType:       resType,
-			ResID:         resID,
-			ResourceProto: protoBytes,
-			SearchIndexes: idx,
+			TenantID:        tenant,
+			ResType:         resType,
+			ResID:           resID,
+			ResourceProto:   protoBytes,
+			SearchIndexes:   idx,
+			ExpectedVersion: expectedVersion,
 		})
 
 		status := "200 OK"
@@ -240,6 +250,10 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 	// Batch write all resources in a single transaction
 	if len(inputs) > 0 {
 		if err := s.store.WriteBatch(r.Context(), inputs); err != nil {
+			if errors.Is(err, postgres.ErrVersionConflict) {
+				writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", err.Error())
+				return
+			}
 			s.logger.Error("bundle write", "error", err, "entries", len(inputs))
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception",
 				fmt.Sprintf("batch write failed: %v", err))

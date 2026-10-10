@@ -8,10 +8,22 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	genpostgres "github.com/flint-fhir/flint/gen/go/store/postgres"
+)
+
+var (
+	// ErrVersionConflict is returned when an optimistic concurrency check (If-Match / ExpectedVersion) fails.
+	ErrVersionConflict = errors.New("version conflict")
+	// ErrResourceDeleted is returned when reading a resource or version that has been soft-deleted.
+	ErrResourceDeleted = errors.New("resource deleted")
+	// ErrInvalidETag is returned when an ETag / If-Match header cannot be parsed as a positive version integer.
+	ErrInvalidETag = errors.New("invalid ETag")
 )
 
 // SearchIndexes holds all extracted search index rows for a resource.
@@ -30,12 +42,55 @@ type IndexExtractorFunc func(tenantID string, resID string, protoBytes []byte) (
 
 // ResourceInput is the input to write a single FHIR resource.
 type ResourceInput struct {
-	TenantID       string
-	ResType        string
-	ResID          string
-	ResourceProto  []byte         // proto-encoded FHIR resource
-	SearchIndexes  *SearchIndexes // extracted search index rows
-	IdempotencyKey string         // Bundle ID for dedup
+	TenantID        string
+	ResType         string
+	ResID           string
+	ResourceProto   []byte         // proto-encoded FHIR resource
+	SearchIndexes   *SearchIndexes // extracted search index rows
+	IdempotencyKey  string         // Bundle ID for dedup
+	ExpectedVersion int            // Optional: if > 0, enforces optimistic concurrency (If-Match)
+}
+
+// ResourceRecord represents a stored FHIR resource version and its metadata.
+type ResourceRecord struct {
+	TenantID      string
+	ResType       string
+	ResID         string
+	ResVersion    int
+	LastUpdated   time.Time
+	ResourceProto []byte
+	IsDeleted     bool
+	Created       bool // True if this write created a new resource or resurrected a deleted one
+}
+
+// FormatETag formats a positive integer resource version as a weak HTTP ETag per FHIR R4 (e.g., W/"1").
+func FormatETag(version int) string {
+	return fmt.Sprintf(`W/"%d"`, version)
+}
+
+// ParseETagVersion parses an HTTP ETag or If-Match header (e.g., W/"3", "3", or 3) into a positive version integer.
+func ParseETagVersion(etag string) (int, error) {
+	s := strings.TrimSpace(etag)
+	if s == "" {
+		return 0, fmt.Errorf("%w: empty value", ErrInvalidETag)
+	}
+	if strings.HasPrefix(s, "W/") || strings.HasPrefix(s, "w/") {
+		s = strings.TrimSpace(s[2:])
+		if len(s) < 2 || !strings.HasPrefix(s, `"`) || !strings.HasSuffix(s, `"`) {
+			return 0, fmt.Errorf("%w: %q", ErrInvalidETag, etag)
+		}
+		s = s[1 : len(s)-1]
+	} else if strings.HasPrefix(s, `"`) || strings.HasSuffix(s, `"`) {
+		if len(s) < 2 || !strings.HasPrefix(s, `"`) || !strings.HasSuffix(s, `"`) {
+			return 0, fmt.Errorf("%w: %q", ErrInvalidETag, etag)
+		}
+		s = s[1 : len(s)-1]
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf("%w: %q", ErrInvalidETag, etag)
+	}
+	return v, nil
 }
 
 // Store provides FHIR resource storage operations on Postgres.
@@ -49,46 +104,35 @@ func New(db *sql.DB) *Store {
 }
 
 // WriteResource writes a single resource in a single transaction:
-// 1. Upsert the resource blob
+// 1. Upsert the resource blob (and append to fhir_resource_history)
 // 2. Delete old search indexes for this resource
 // 3. Bulk insert new search indexes
 //
 // This is idempotent: re-processing the same resource produces the same state.
 func (s *Store) WriteResource(ctx context.Context, input ResourceInput) error {
+	_, err := s.WriteResourceWithMeta(ctx, input)
+	return err
+}
+
+// WriteResourceWithMeta writes a single resource in a transaction, enforcing
+// ExpectedVersion if > 0, recording a snapshot in fhir_resource_history, and
+// returning the resulting version metadata.
+func (s *Store) WriteResourceWithMeta(ctx context.Context, input ResourceInput) (*ResourceRecord, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	// 1. Upsert resource blob
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO fhir_resource (tenant_id, res_type, res_id, resource_proto, idempotency_key, last_updated)
-		VALUES ($1, $2, $3, $4, $5, NOW())
-		ON CONFLICT (tenant_id, res_type, res_id) DO UPDATE SET
-			resource_proto  = EXCLUDED.resource_proto,
-			res_version     = fhir_resource.res_version + 1,
-			last_updated    = NOW(),
-			idempotency_key = EXCLUDED.idempotency_key,
-			is_deleted      = FALSE
-	`, input.TenantID, input.ResType, input.ResID, input.ResourceProto, input.IdempotencyKey)
+	rec, err := writeResourceInTx(ctx, tx, input)
 	if err != nil {
-		return fmt.Errorf("upsert resource: %w", err)
+		return nil, err
 	}
 
-	// 2. Delete old search indexes
-	if err := deleteSearchIndexes(ctx, tx, input.TenantID, input.ResType, input.ResID); err != nil {
-		return fmt.Errorf("delete indexes: %w", err)
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
-
-	// 3. Bulk insert new search indexes
-	if input.SearchIndexes != nil {
-		if err := insertSearchIndexes(ctx, tx, input.SearchIndexes); err != nil {
-			return fmt.Errorf("insert indexes: %w", err)
-		}
-	}
-
-	return tx.Commit()
+	return rec, nil
 }
 
 // WriteBatch writes multiple resources in a single transaction.
@@ -101,39 +145,97 @@ func (s *Store) WriteBatch(ctx context.Context, inputs []ResourceInput) error {
 	defer tx.Rollback() //nolint:errcheck
 
 	for _, input := range inputs {
-		// Upsert resource blob
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO fhir_resource (tenant_id, res_type, res_id, resource_proto, idempotency_key, last_updated)
-			VALUES ($1, $2, $3, $4, $5, NOW())
-			ON CONFLICT (tenant_id, res_type, res_id) DO UPDATE SET
-				resource_proto  = EXCLUDED.resource_proto,
-				res_version     = fhir_resource.res_version + 1,
-				last_updated    = NOW(),
-				idempotency_key = EXCLUDED.idempotency_key,
-				is_deleted      = FALSE
-		`, input.TenantID, input.ResType, input.ResID, input.ResourceProto, input.IdempotencyKey)
-		if err != nil {
-			return fmt.Errorf("upsert resource %s/%s: %w", input.ResType, input.ResID, err)
-		}
-
-		// Delete old indexes
-		if err := deleteSearchIndexes(ctx, tx, input.TenantID, input.ResType, input.ResID); err != nil {
-			return fmt.Errorf("delete indexes %s/%s: %w", input.ResType, input.ResID, err)
-		}
-
-		// Insert new indexes
-		if input.SearchIndexes != nil {
-			if err := insertSearchIndexes(ctx, tx, input.SearchIndexes); err != nil {
-				return fmt.Errorf("insert indexes %s/%s: %w", input.ResType, input.ResID, err)
-			}
+		if _, err := writeResourceInTx(ctx, tx, input); err != nil {
+			return fmt.Errorf("resource %s/%s: %w", input.ResType, input.ResID, err)
 		}
 	}
 
 	return tx.Commit()
 }
 
+func writeResourceInTx(ctx context.Context, tx *sql.Tx, input ResourceInput) (*ResourceRecord, error) {
+	var curVersion int
+	var curDeleted bool
+	err := tx.QueryRowContext(ctx, `
+		SELECT res_version, is_deleted FROM fhir_resource
+		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
+		FOR UPDATE
+	`, input.TenantID, input.ResType, input.ResID).Scan(&curVersion, &curDeleted)
+
+	created := false
+	if errors.Is(err, sql.ErrNoRows) {
+		created = true
+		if input.ExpectedVersion > 0 {
+			return nil, fmt.Errorf("%w: resource does not exist (expected version %d)", ErrVersionConflict, input.ExpectedVersion)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("check current version: %w", err)
+	} else {
+		if curDeleted {
+			created = true
+		}
+		if input.ExpectedVersion > 0 && (curDeleted || curVersion != input.ExpectedVersion) {
+			return nil, fmt.Errorf("%w: expected version %d, current version %d", ErrVersionConflict, input.ExpectedVersion, curVersion)
+		}
+	}
+
+	// 1. Upsert resource blob
+	var newVersion int
+	var lastUpdated time.Time
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO fhir_resource (tenant_id, res_type, res_id, resource_proto, idempotency_key, last_updated)
+		VALUES ($1, $2, $3, $4, $5, NOW())
+		ON CONFLICT (tenant_id, res_type, res_id) DO UPDATE SET
+			resource_proto  = EXCLUDED.resource_proto,
+			res_version     = fhir_resource.res_version + 1,
+			last_updated    = NOW(),
+			idempotency_key = EXCLUDED.idempotency_key,
+			is_deleted      = FALSE
+		RETURNING res_version, last_updated
+	`, input.TenantID, input.ResType, input.ResID, input.ResourceProto, input.IdempotencyKey).Scan(&newVersion, &lastUpdated)
+	if err != nil {
+		return nil, fmt.Errorf("upsert resource: %w", err)
+	}
+
+	// 2. Append to version history table
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO fhir_resource_history (tenant_id, res_type, res_id, res_version, last_updated, resource_proto, is_deleted)
+		VALUES ($1, $2, $3, $4, $5, $6, FALSE)
+		ON CONFLICT (tenant_id, res_type, res_id, res_version) DO UPDATE SET
+			last_updated   = EXCLUDED.last_updated,
+			resource_proto = EXCLUDED.resource_proto,
+			is_deleted     = FALSE
+	`, input.TenantID, input.ResType, input.ResID, newVersion, lastUpdated, input.ResourceProto)
+	if err != nil {
+		return nil, fmt.Errorf("insert history: %w", err)
+	}
+
+	// 3. Delete old search indexes
+	if err := deleteSearchIndexes(ctx, tx, input.TenantID, input.ResType, input.ResID); err != nil {
+		return nil, fmt.Errorf("delete indexes: %w", err)
+	}
+
+	// 4. Bulk insert new search indexes
+	if input.SearchIndexes != nil {
+		if err := insertSearchIndexes(ctx, tx, input.SearchIndexes); err != nil {
+			return nil, fmt.Errorf("insert indexes: %w", err)
+		}
+	}
+
+	return &ResourceRecord{
+		TenantID:      input.TenantID,
+		ResType:       input.ResType,
+		ResID:         input.ResID,
+		ResVersion:    newVersion,
+		LastUpdated:   lastUpdated,
+		ResourceProto: input.ResourceProto,
+		IsDeleted:     false,
+		Created:       created,
+	}, nil
+}
+
 // ReadResource reads a single resource by (tenant_id, res_type, res_id).
-// Returns the proto-encoded resource bytes, or sql.ErrNoRows if not found.
+// Returns the proto-encoded resource bytes, or sql.ErrNoRows if not found or deleted.
 func (s *Store) ReadResource(ctx context.Context, tenantID, resType, resID string) ([]byte, error) {
 	var proto []byte
 	err := s.db.QueryRowContext(ctx, `
@@ -146,27 +248,190 @@ func (s *Store) ReadResource(ctx context.Context, tenantID, resType, resID strin
 	return proto, nil
 }
 
-// DeleteResource marks a resource as deleted (soft delete).
+// ReadResourceWithMeta reads a single resource and its version metadata.
+// Returns sql.ErrNoRows if the resource never existed, or ErrResourceDeleted
+// (alongside the tombstone ResourceRecord) if the resource was soft-deleted.
+func (s *Store) ReadResourceWithMeta(ctx context.Context, tenantID, resType, resID string) (*ResourceRecord, error) {
+	rec := &ResourceRecord{
+		TenantID: tenantID,
+		ResType:  resType,
+		ResID:    resID,
+	}
+	err := s.db.QueryRowContext(ctx, `
+		SELECT resource_proto, res_version, last_updated, is_deleted
+		FROM fhir_resource
+		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
+	`, tenantID, resType, resID).Scan(&rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted)
+	if err != nil {
+		return nil, err
+	}
+	if rec.IsDeleted {
+		return rec, ErrResourceDeleted
+	}
+	return rec, nil
+}
+
+// ReadResourceVersion reads a specific historical version of a resource (FHIR vread).
+// Returns sql.ErrNoRows if the version does not exist, or ErrResourceDeleted if
+// that version is a deletion tombstone.
+func (s *Store) ReadResourceVersion(ctx context.Context, tenantID, resType, resID string, version int) (*ResourceRecord, error) {
+	rec := &ResourceRecord{
+		TenantID: tenantID,
+		ResType:  resType,
+		ResID:    resID,
+	}
+	err := s.db.QueryRowContext(ctx, `
+		SELECT resource_proto, res_version, last_updated, is_deleted
+		FROM fhir_resource_history
+		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3 AND res_version = $4
+	`, tenantID, resType, resID, version).Scan(&rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Fallback to fhir_resource if row was seeded directly without history table entry.
+		err = s.db.QueryRowContext(ctx, `
+			SELECT resource_proto, res_version, last_updated, is_deleted
+			FROM fhir_resource
+			WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3 AND res_version = $4
+		`, tenantID, resType, resID, version).Scan(&rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if rec.IsDeleted {
+		return rec, ErrResourceDeleted
+	}
+	return rec, nil
+}
+
+// ListResourceHistory returns the version history of a resource ordered by version descending.
+func (s *Store) ListResourceHistory(ctx context.Context, tenantID, resType, resID string, limit, offset int) ([]ResourceRecord, int, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	var total int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM fhir_resource_history
+		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
+	`, tenantID, resType, resID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count resource history: %w", err)
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT resource_proto, res_version, last_updated, is_deleted
+		FROM fhir_resource_history
+		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
+		ORDER BY res_version DESC
+		LIMIT $4 OFFSET $5
+	`, tenantID, resType, resID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("query resource history: %w", err)
+	}
+	defer rows.Close()
+
+	var records []ResourceRecord
+	for rows.Next() {
+		rec := ResourceRecord{
+			TenantID: tenantID,
+			ResType:  resType,
+			ResID:    resID,
+		}
+		if err := rows.Scan(&rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted); err != nil {
+			return nil, 0, fmt.Errorf("scan resource history: %w", err)
+		}
+		records = append(records, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return records, total, nil
+}
+
+// DeleteResource marks a resource as deleted (soft delete) and removes its search indexes.
 func (s *Store) DeleteResource(ctx context.Context, tenantID, resType, resID string) error {
+	_, err := s.DeleteResourceWithMeta(ctx, tenantID, resType, resID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	return err
+}
+
+// DeleteResourceWithMeta marks a resource as deleted, increments its version,
+// records a deletion tombstone in fhir_resource_history, and clears search indexes.
+// Returns sql.ErrNoRows if the resource does not exist.
+func (s *Store) DeleteResourceWithMeta(ctx context.Context, tenantID, resType, resID string) (*ResourceRecord, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 
-	_, err = tx.ExecContext(ctx, `
-		UPDATE fhir_resource SET is_deleted = TRUE, last_updated = NOW()
+	var curVersion int
+	var curUpdated time.Time
+	var curDeleted bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT res_version, last_updated, is_deleted
+		FROM fhir_resource
 		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
-	`, tenantID, resType, resID)
+		FOR UPDATE
+	`, tenantID, resType, resID).Scan(&curVersion, &curUpdated, &curDeleted)
 	if err != nil {
-		return fmt.Errorf("soft delete: %w", err)
+		return nil, err
+	}
+
+	if curDeleted {
+		return &ResourceRecord{
+			TenantID:    tenantID,
+			ResType:     resType,
+			ResID:       resID,
+			ResVersion:  curVersion,
+			LastUpdated: curUpdated,
+			IsDeleted:   true,
+		}, nil
+	}
+
+	var newVersion int
+	var lastUpdated time.Time
+	err = tx.QueryRowContext(ctx, `
+		UPDATE fhir_resource
+		SET is_deleted = TRUE, res_version = res_version + 1, last_updated = NOW()
+		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
+		RETURNING res_version, last_updated
+	`, tenantID, resType, resID).Scan(&newVersion, &lastUpdated)
+	if err != nil {
+		return nil, fmt.Errorf("soft delete: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO fhir_resource_history (tenant_id, res_type, res_id, res_version, last_updated, resource_proto, is_deleted)
+		VALUES ($1, $2, $3, $4, $5, NULL, TRUE)
+		ON CONFLICT (tenant_id, res_type, res_id, res_version) DO UPDATE SET
+			last_updated   = EXCLUDED.last_updated,
+			resource_proto = NULL,
+			is_deleted     = TRUE
+	`, tenantID, resType, resID, newVersion, lastUpdated)
+	if err != nil {
+		return nil, fmt.Errorf("insert delete history: %w", err)
 	}
 
 	if err := deleteSearchIndexes(ctx, tx, tenantID, resType, resID); err != nil {
-		return fmt.Errorf("delete indexes: %w", err)
+		return nil, fmt.Errorf("delete indexes: %w", err)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return &ResourceRecord{
+		TenantID:    tenantID,
+		ResType:     resType,
+		ResID:       resID,
+		ResVersion:  newVersion,
+		LastUpdated: lastUpdated,
+		IsDeleted:   true,
+	}, nil
 }
 
 // deleteSearchIndexes removes all search index rows for a resource.

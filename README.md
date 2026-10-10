@@ -193,8 +193,12 @@ Content-Type: application/fhir+json
 ```
 
 ### Resource Interactions
-* **Point Read**: `GET /fhir/r4/{tenant}/{resourceType}/{id}`
-* **Create**: `POST /fhir/r4/{tenant}/{resourceType}`
+* **Point Read**: `GET /fhir/r4/{tenant}/{resourceType}/{id}` (returns `ETag: W/"<version>"` and `Last-Modified`; `410 Gone` if deleted)
+* **Version Read (`vread`)**: `GET /fhir/r4/{tenant}/{resourceType}/{id}/_history/{vid}`
+* **Instance History (`_history`)**: `GET /fhir/r4/{tenant}/{resourceType}/{id}/_history?_count=100&_offset=0`
+* **Create**: `POST /fhir/r4/{tenant}/{resourceType}` (`201 Created` + `Location` + `ETag`)
+* **Update / Create-on-Update**: `PUT /fhir/r4/{tenant}/{resourceType}/{id}` (supports optimistic concurrency via `If-Match: W/"<version>"`, returning `412 Precondition Failed` on version conflict)
+* **Soft Delete**: `DELETE /fhir/r4/{tenant}/{resourceType}/{id}` (`204 No Content` + tombstone version `ETag`)
 * **Validate**: `POST /fhir/r4/{tenant}/{resourceType}/$validate` and `POST /fhir/r4/{tenant}/$validate`
 * **Search**: `GET /fhir/r4/{tenant}/{resourceType}?{searchParams}&_count=20&_offset=0`
 * **CapabilityStatement**: `GET /fhir/r4/{tenant}/metadata`

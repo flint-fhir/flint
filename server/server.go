@@ -7,6 +7,7 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -79,7 +80,11 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// FHIR REST endpoints
+	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history/{vid}", s.handleVRead)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history", s.handleInstanceHistory)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}", s.handleRead)
+	mux.HandleFunc("PUT /fhir/r4/{tenant}/{resourceType}/{id}", s.handleUpdate)
+	mux.HandleFunc("DELETE /fhir/r4/{tenant}/{resourceType}/{id}", s.handleDelete)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}", s.handleSearch)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$validate", s.handleValidate)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$validate", s.handleValidate)
@@ -97,10 +102,18 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	resType := r.PathValue("resourceType")
 	resID := r.PathValue("id")
 
-	protoBytes, err := s.store.ReadResource(r.Context(), tenant, resType, resID)
-	if err == sql.ErrNoRows {
+	rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID)
+	if errors.Is(err, sql.ErrNoRows) {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found",
 			fmt.Sprintf("%s/%s not found", resType, resID))
+		return
+	}
+	if errors.Is(err, postgres.ErrResourceDeleted) {
+		if rec != nil && rec.ResVersion > 0 {
+			w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+		}
+		writeOperationOutcome(w, http.StatusGone, "deleted",
+			fmt.Sprintf("%s/%s has been deleted", resType, resID))
 		return
 	}
 	if err != nil {
@@ -110,7 +123,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert proto bytes to JSON
-	jsonBytes, err := s.protoToJSON(resType, protoBytes)
+	jsonBytes, err := s.protoToJSON(resType, rec.ResourceProto)
 	if err != nil {
 		s.logger.Error("proto to json", "error", err, "type", resType, "id", resID)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
@@ -118,8 +131,133 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 	w.WriteHeader(http.StatusOK)
 	w.Write(jsonBytes)
+}
+
+// handleVRead handles GET /{resourceType}/{id}/_history/{vid} — read a specific historical version.
+func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resType := r.PathValue("resourceType")
+	resID := r.PathValue("id")
+	vidStr := r.PathValue("vid")
+
+	version, err := strconv.Atoi(vidStr)
+	if err != nil || version <= 0 {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+			fmt.Sprintf("invalid version id %q", vidStr))
+		return
+	}
+
+	rec, err := s.store.ReadResourceVersion(r.Context(), tenant, resType, resID, version)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found",
+			fmt.Sprintf("%s/%s/_history/%d not found", resType, resID, version))
+		return
+	}
+	if errors.Is(err, postgres.ErrResourceDeleted) {
+		if rec != nil && rec.ResVersion > 0 {
+			w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+		}
+		writeOperationOutcome(w, http.StatusGone, "deleted",
+			fmt.Sprintf("%s/%s/_history/%d was a deletion", resType, resID, version))
+		return
+	}
+	if err != nil {
+		s.logger.Error("vread resource", "error", err, "type", resType, "id", resID, "version", version)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal error")
+		return
+	}
+
+	jsonBytes, err := s.protoToJSON(resType, rec.ResourceProto)
+	if err != nil {
+		s.logger.Error("proto to json in vread", "error", err, "type", resType, "id", resID, "version", version)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+	w.WriteHeader(http.StatusOK)
+	w.Write(jsonBytes)
+}
+
+// handleInstanceHistory handles GET /{resourceType}/{id}/_history — list resource versions as a history Bundle.
+func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resType := r.PathValue("resourceType")
+	resID := r.PathValue("id")
+
+	count := 100
+	offset := 0
+	if v := r.URL.Query().Get("_count"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			count = n
+		}
+	}
+	if v := r.URL.Query().Get("_offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	records, total, err := s.store.ListResourceHistory(r.Context(), tenant, resType, resID, count, offset)
+	if err != nil {
+		s.logger.Error("list resource history", "error", err, "type", resType, "id", resID)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to query resource history")
+		return
+	}
+
+	entries := make([]any, 0, len(records))
+	for _, rec := range records {
+		method := "PUT"
+		status := "200 OK"
+		if rec.IsDeleted {
+			method = "DELETE"
+			status = "204 No Content"
+		} else if rec.ResVersion == 1 {
+			method = "POST"
+			status = "201 Created"
+		}
+
+		entry := map[string]any{
+			"fullUrl": fmt.Sprintf("%s/%s", resType, resID),
+			"request": map[string]any{
+				"method": method,
+				"url":    fmt.Sprintf("%s/%s", resType, resID),
+			},
+			"response": map[string]any{
+				"status":       status,
+				"etag":         postgres.FormatETag(rec.ResVersion),
+				"lastModified": rec.LastUpdated.UTC().Format(time.RFC3339),
+			},
+		}
+
+		if !rec.IsDeleted && len(rec.ResourceProto) > 0 {
+			if jsonBytes, err := s.protoToJSON(resType, rec.ResourceProto); err == nil {
+				var resource any
+				if err := json.Unmarshal(jsonBytes, &resource); err == nil {
+					entry["resource"] = resource
+				}
+			}
+		}
+
+		entries = append(entries, entry)
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"type":         "history",
+		"total":        total,
+		"entry":        entries,
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(bundle)
 }
 
 // handleCreate handles POST /{resourceType} — create a FHIR resource.
@@ -161,20 +299,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extract resource ID from the proto
-	idField := msg.Descriptor().Fields().ByName("id")
-	resID := ""
-	if idField != nil {
-		idMsg := msg.Get(idField).Message()
-		if idMsg.IsValid() {
-			valField := idMsg.Descriptor().Fields().ByName("value")
-			if valField != nil {
-				resID = idMsg.Get(valField).String()
-			}
-		}
-	}
+	resID := extractProtoResourceID(msg)
 	if resID == "" {
-		// Generate a UUID if no ID provided
+		// Generate a unique ID if none provided
 		resID = generateID()
+		setProtoResourceID(msg, resID)
 	}
 
 	// Marshal proto → bytes for storage
@@ -197,7 +326,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store in Postgres
-	err = s.store.WriteResource(r.Context(), postgres.ResourceInput{
+	rec, err := s.store.WriteResourceWithMeta(r.Context(), postgres.ResourceInput{
 		TenantID:      tenant,
 		ResType:       resType,
 		ResID:         resID,
@@ -210,11 +339,166 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Return the resource as JSON with 201 Created
+	// Return the resource as JSON with 201 Created, ETag, and Last-Modified
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, resID))
+	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 	w.WriteHeader(http.StatusCreated)
 	w.Write(body) // echo back the input JSON
+}
+
+// handleUpdate handles PUT /{resourceType}/{id} — update or create-on-update a FHIR resource.
+// Supports optimistic concurrency control via the If-Match header (returning 412 Precondition Failed on conflict).
+func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resType := r.PathValue("resourceType")
+	resID := r.PathValue("id")
+
+	md, ok := s.protoRegistry[resType]
+	if !ok {
+		writeOperationOutcome(w, http.StatusBadRequest, "not-supported",
+			fmt.Sprintf("resource type %s not registered", resType))
+		return
+	}
+
+	expectedVersion := 0
+	if ifMatch := strings.TrimSpace(r.Header.Get("If-Match")); ifMatch != "" {
+		v, err := postgres.ParseETagVersion(ifMatch)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid If-Match header %q", ifMatch))
+			return
+		}
+		expectedVersion = v
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // 10MB max
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read body")
+		return
+	}
+
+	if s.validator != nil {
+		outcome := s.validator.ValidateJSON(resType, body)
+		if !outcome.IsValid() {
+			outcome.WriteHTTP(w, http.StatusBadRequest)
+			return
+		}
+	}
+
+	msg := dynamicpb.NewMessage(md)
+	unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+	if err := unmarshaler.Unmarshal(body, msg); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "structure",
+			fmt.Sprintf("invalid FHIR JSON: %v", err))
+		return
+	}
+
+	bodyID := extractProtoResourceID(msg)
+	if bodyID != "" && bodyID != resID {
+		writeOperationOutcome(w, http.StatusBadRequest, "invariant",
+			fmt.Sprintf("resource id %q in body does not match URL id %q", bodyID, resID))
+		return
+	}
+	if bodyID == "" {
+		setProtoResourceID(msg, resID)
+	}
+
+	protoBytes, err := proto.Marshal(msg)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to encode resource")
+		return
+	}
+
+	var idx *postgres.SearchIndexes
+	if extractor, ok := s.extractors[resType]; ok {
+		var extractErr error
+		idx, extractErr = extractor(tenant, resID, protoBytes)
+		if extractErr != nil {
+			s.logger.Warn("index extraction failed on update, storing without indexes",
+				"type", resType, "id", resID, "error", extractErr)
+		}
+	}
+
+	rec, err := s.store.WriteResourceWithMeta(r.Context(), postgres.ResourceInput{
+		TenantID:        tenant,
+		ResType:         resType,
+		ResID:           resID,
+		ResourceProto:   protoBytes,
+		SearchIndexes:   idx,
+		ExpectedVersion: expectedVersion,
+	})
+	if errors.Is(err, postgres.ErrVersionConflict) {
+		writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", err.Error())
+		return
+	}
+	if err != nil {
+		s.logger.Error("update resource", "error", err, "type", resType, "id", resID)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to update resource")
+		return
+	}
+
+	jsonBytes, err := s.protoToJSON(resType, protoBytes)
+	if err != nil {
+		jsonBytes = body
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+	if rec.Created {
+		w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, resID))
+		w.WriteHeader(http.StatusCreated)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.Write(jsonBytes)
+}
+
+// handleDelete handles DELETE /{resourceType}/{id} — soft-delete a FHIR resource.
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resType := r.PathValue("resourceType")
+	resID := r.PathValue("id")
+
+	rec, err := s.store.DeleteResourceWithMeta(r.Context(), tenant, resType, resID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		s.logger.Error("delete resource", "error", err, "type", resType, "id", resID)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to delete resource")
+		return
+	}
+	if rec != nil && rec.ResVersion > 0 {
+		w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func extractProtoResourceID(msg *dynamicpb.Message) string {
+	idField := msg.Descriptor().Fields().ByName("id")
+	if idField == nil {
+		return ""
+	}
+	idMsg := msg.Get(idField).Message()
+	if !idMsg.IsValid() {
+		return ""
+	}
+	valField := idMsg.Descriptor().Fields().ByName("value")
+	if valField == nil {
+		return ""
+	}
+	return idMsg.Get(valField).String()
+}
+
+func setProtoResourceID(msg *dynamicpb.Message, resID string) {
+	idField := msg.Descriptor().Fields().ByName("id")
+	if idField == nil {
+		return
+	}
+	idMsg := msg.Mutable(idField).Message()
+	if valField := idMsg.Descriptor().Fields().ByName("value"); valField != nil {
+		idMsg.Set(valField, protoreflect.ValueOfString(resID))
+	}
 }
 
 // handleValidate handles POST /{tenant}/{resourceType}/$validate and POST /{tenant}/$validate.
@@ -438,6 +722,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 // handleMetadata returns the FHIR CapabilityStatement.
 func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
+	interactions := []map[string]string{
+		{"code": "read"},
+		{"code": "vread"},
+		{"code": "update"},
+		{"code": "delete"},
+		{"code": "history-instance"},
+		{"code": "create"},
+		{"code": "search-type"},
+	}
+
 	cap := map[string]any{
 		"resourceType": "CapabilityStatement",
 		"status":       "active",
@@ -453,8 +747,11 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 				"mode": "server",
 				"resource": []map[string]any{
 					{
-						"type":        "Patient",
-						"interaction": []map[string]string{{"code": "read"}, {"code": "search-type"}},
+						"type":         "Patient",
+						"versioning":   "versioned-update",
+						"readHistory":  true,
+						"updateCreate": true,
+						"interaction":  interactions,
 						"searchParam": []map[string]string{
 							{"name": "family", "type": "string"},
 							{"name": "given", "type": "string"},
@@ -465,8 +762,11 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 						},
 					},
 					{
-						"type":        "Condition",
-						"interaction": []map[string]string{{"code": "read"}, {"code": "search-type"}},
+						"type":         "Condition",
+						"versioning":   "versioned-update",
+						"readHistory":  true,
+						"updateCreate": true,
+						"interaction":  interactions,
 						"searchParam": []map[string]string{
 							{"name": "code", "type": "token"},
 							{"name": "clinical-status", "type": "token"},
@@ -479,8 +779,11 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 						},
 					},
 					{
-						"type":        "Encounter",
-						"interaction": []map[string]string{{"code": "read"}, {"code": "search-type"}},
+						"type":         "Encounter",
+						"versioning":   "versioned-update",
+						"readHistory":  true,
+						"updateCreate": true,
+						"interaction":  interactions,
 						"searchParam": []map[string]string{
 							{"name": "class", "type": "token"},
 							{"name": "status", "type": "token"},
@@ -492,8 +795,11 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 						},
 					},
 					{
-						"type":        "Observation",
-						"interaction": []map[string]string{{"code": "read"}, {"code": "search-type"}},
+						"type":         "Observation",
+						"versioning":   "versioned-update",
+						"readHistory":  true,
+						"updateCreate": true,
+						"interaction":  interactions,
 						"searchParam": []map[string]string{
 							{"name": "code", "type": "token"},
 							{"name": "status", "type": "token"},
@@ -505,8 +811,11 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 						},
 					},
 					{
-						"type":        "Practitioner",
-						"interaction": []map[string]string{{"code": "read"}, {"code": "search-type"}},
+						"type":         "Practitioner",
+						"versioning":   "versioned-update",
+						"readHistory":  true,
+						"updateCreate": true,
+						"interaction":  interactions,
 						"searchParam": []map[string]string{
 							{"name": "family", "type": "string"},
 							{"name": "given", "type": "string"},

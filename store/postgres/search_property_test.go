@@ -90,6 +90,27 @@ func TestProperty_IncludeParsingInvariance(t *testing.T) {
 	})
 }
 
+func TestProperty_ETagRoundTripInvariance(t *testing.T) {
+	hegel.Test(t, func(ht *hegel.T) {
+		version := hegel.Draw(ht, hegel.Integers(1, 1_000_000))
+		etag := postgres.FormatETag(version)
+
+		parsed, err := postgres.ParseETagVersion(etag)
+		if err != nil {
+			ht.Fatalf("ParseETagVersion(%q) failed: %v", etag, err)
+		}
+		if parsed != version {
+			ht.Fatalf("expected version %d, got %d", version, parsed)
+		}
+
+		// Strong ETag and bare version should also parse to the same version
+		strongParsed, err := postgres.ParseETagVersion(fmt.Sprintf(`"%d"`, version))
+		if err != nil || strongParsed != version {
+			ht.Fatalf("ParseETagVersion strong failed: %v (%d)", err, strongParsed)
+		}
+	})
+}
+
 func TestProperty_ParsersNeverPanicOnArbitraryFuzz(t *testing.T) {
 	hegel.Test(t, func(ht *hegel.T) {
 		arbitraryInput := hegel.Draw(ht, hegel.FromRegex(`.*`, true))
@@ -99,5 +120,6 @@ func TestProperty_ParsersNeverPanicOnArbitraryFuzz(t *testing.T) {
 		_, _ = postgres.ParseQuantityOp(arbitraryInput)
 		_, _ = postgres.ParseInclude(arbitraryInput)
 		_, _ = postgres.ParseChainedParam(arbitraryInput, arbitraryInput)
+		_, _ = postgres.ParseETagVersion(arbitraryInput)
 	})
 }
