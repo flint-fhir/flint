@@ -47,6 +47,18 @@ jobs:
         with:
           go-version: '1.26'
 
+      - name: gofmt check
+        run: |
+          unformatted=$(gofmt -s -l .)
+          if [ -n "$unformatted" ]; then
+            echo "The following files are not formatted with gofmt -s:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: SQL schema & Atlas migration integrity
+        run: go test -v ./store/postgres -run TestSchema_NoJSONBAndAtlasSumSync
+
       - name: staticcheck
         uses: dominikh/staticcheck-action@v1
         with:

@@ -15,6 +15,7 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/server"
+	"github.com/flint-fhir/flint/store/postgres"
 )
 
 func TestServer_AuthMiddleware(t *testing.T) {
@@ -235,5 +236,42 @@ func TestServer_AuthMiddleware(t *testing.T) {
 		require.NoError(t, err)
 		defer respDelOther.Body.Close()
 		assert.Equal(t, http.StatusForbidden, respDelOther.StatusCode)
+	})
+
+	t.Run("Security Rejections (401 and 403) Are Recorded in AuditEvent Log With Actor Identity", func(t *testing.T) {
+		rec := srv.AuditRecorder()
+		require.NotNil(t, rec)
+
+		// Verify 403 DELETE attempt by user-ud on Patient/pat-999 captured actor identity and compartment
+		records, total, err := rec.Query(t.Context(), postgres.AuditQueryParams{
+			TenantID:     "default",
+			Action:       "D",
+			Outcome:      "4",
+			AgentSubject: "user-ud",
+			EntityType:   "Patient",
+			EntityID:     "pat-999",
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, total)
+		require.Len(t, records, 1)
+		assert.Equal(t, http.StatusForbidden, records[0].HTTPStatus)
+		assert.Equal(t, "pat-100", records[0].AgentPatient)
+		assert.Equal(t, "delete", records[0].SubtypeCode)
+
+		// Verify authorized auditor with system/AuditEvent.rs can query AuditEvent via FHIR REST
+		auditorToken, err := mockVal.IssueToken("sec-auditor", "system/AuditEvent.rs", "", time.Hour, nil)
+		require.NoError(t, err)
+
+		reqSearch, _ := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/default/AuditEvent?outcome=4&agent=user-ud", nil)
+		reqSearch.Header.Set("Authorization", "Bearer "+auditorToken)
+		respSearch, err := http.DefaultClient.Do(reqSearch)
+		require.NoError(t, err)
+		defer respSearch.Body.Close()
+		assert.Equal(t, http.StatusOK, respSearch.StatusCode)
+
+		var bundle map[string]any
+		require.NoError(t, json.NewDecoder(respSearch.Body).Decode(&bundle))
+		assert.Equal(t, "Bundle", bundle["resourceType"])
+		assert.GreaterOrEqual(t, int(bundle["total"].(float64)), 2) // PUT + DELETE 403s by user-ud
 	})
 }
