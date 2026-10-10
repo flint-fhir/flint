@@ -137,7 +137,7 @@ func ParseJWT(raw string) (*ParsedToken, error) {
 func (t *ParsedToken) VerifyClaims(expectedIssuer, expectedAudience string, now time.Time) error {
 	p := t.Payload
 
-	if p.ExpiresAt != 0 && now.Unix() > p.ExpiresAt {
+	if p.ExpiresAt <= 0 || now.Unix() > p.ExpiresAt {
 		return ErrTokenExpired
 	}
 
@@ -149,7 +149,7 @@ func (t *ParsedToken) VerifyClaims(expectedIssuer, expectedAudience string, now 
 		return fmt.Errorf("%w: got %q, expected %q", ErrInvalidIssuer, p.Issuer, expectedIssuer)
 	}
 
-	if expectedAudience != "" && len(p.Audience) > 0 && !p.Audience.Contains(expectedAudience) {
+	if expectedAudience != "" && !p.Audience.Contains(expectedAudience) {
 		return fmt.Errorf("%w: expected audience %q", ErrInvalidAudience, expectedAudience)
 	}
 
@@ -229,11 +229,11 @@ func (k *JWK) PublicKey() (crypto.PublicKey, error) {
 	switch k.Kty {
 	case "RSA":
 		nBytes, err := decodeBase64URL(k.N)
-		if err != nil {
+		if err != nil || len(nBytes) == 0 {
 			return nil, fmt.Errorf("invalid RSA modulus n: %w", err)
 		}
 		eBytes, err := decodeBase64URL(k.E)
-		if err != nil {
+		if err != nil || len(eBytes) == 0 || len(eBytes) > 4 {
 			return nil, fmt.Errorf("invalid RSA exponent e: %w", err)
 		}
 
@@ -244,6 +244,9 @@ func (k *JWK) PublicKey() (crypto.PublicKey, error) {
 			eInt = int(binary.BigEndian.Uint32(buf))
 		} else {
 			eInt = int(binary.BigEndian.Uint32(eBytes))
+		}
+		if eInt < 3 {
+			return nil, fmt.Errorf("invalid RSA public exponent: %d", eInt)
 		}
 
 		return &rsa.PublicKey{
@@ -262,6 +265,18 @@ func (k *JWK) PublicKey() (crypto.PublicKey, error) {
 		yBytes, err := decodeBase64URL(k.Y)
 		if err != nil {
 			return nil, fmt.Errorf("invalid EC y coordinate: %w", err)
+		}
+		if len(xBytes) == 33 && xBytes[0] == 0 {
+			xBytes = xBytes[1:]
+		}
+		if len(yBytes) == 33 && yBytes[0] == 0 {
+			yBytes = yBytes[1:]
+		}
+		if len(xBytes) == 0 || len(xBytes) > 32 {
+			return nil, fmt.Errorf("invalid EC x coordinate length: %d", len(xBytes))
+		}
+		if len(yBytes) == 0 || len(yBytes) > 32 {
+			return nil, fmt.Errorf("invalid EC y coordinate length: %d", len(yBytes))
 		}
 		// Uncompressed ANSI X9.62 format: 0x04 || 32-byte X || 32-byte Y
 		uncompressed := make([]byte, 65)

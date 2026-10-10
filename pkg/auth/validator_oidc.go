@@ -106,7 +106,18 @@ func (v *OIDCValidator) ValidateToken(ctx context.Context, bearerToken string) (
 
 	claimsMap := make(map[string]string)
 	for k, val := range token.Payload.Extra {
-		claimsMap[k] = fmt.Sprintf("%v", val)
+		switch v := val.(type) {
+		case string:
+			claimsMap[k] = v
+		case map[string]any, []any:
+			if b, err := json.Marshal(v); err == nil {
+				claimsMap[k] = string(b)
+			} else {
+				claimsMap[k] = fmt.Sprintf("%v", v)
+			}
+		default:
+			claimsMap[k] = fmt.Sprintf("%v", v)
+		}
 	}
 
 	patientID := token.Payload.Patient

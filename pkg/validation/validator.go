@@ -117,6 +117,9 @@ func (e *Engine) ValidateResource(expectedResType string, resMap map[string]any)
 	if e.opts.EnforceRequiredElements {
 		for _, reqField := range schema.RequiredFields {
 			val, present := resMap[reqField]
+			if (!present || val == nil || isEmptyValue(val)) && reqField == "class" {
+				val, present = resMap["classValue"]
+			}
 			if !present || val == nil || isEmptyValue(val) {
 				outcome.AddError(CodeRequired,
 					fmt.Sprintf("Missing required element %q on %s", reqField, resTypeStr),
@@ -180,6 +183,14 @@ func (e *Engine) validatePrimitiveFormats(resType string, resMap map[string]any,
 	}
 }
 
+func isValidCodeInSet(validCodes map[string]bool, code string) bool {
+	if validCodes[code] {
+		return true
+	}
+	normalized := strings.ToLower(strings.ReplaceAll(code, "_", "-"))
+	return validCodes[normalized]
+}
+
 func (e *Engine) validateCodeBindings(resType string, schema ResourceSchema, resMap map[string]any, outcome *Outcome) {
 	for field, validCodes := range schema.CodeBindings {
 		val, present := resMap[field]
@@ -198,9 +209,9 @@ func (e *Engine) validateCodeBindings(resType string, schema ResourceSchema, res
 					path)
 			}
 		case map[string]any:
-			// Check protojson wrapped value: {"value": "male"}
+			// Check protojson wrapped value: {"value": "male"} or {"value": "MALE"}
 			if wrappedVal, ok := v["value"].(string); ok {
-				if !validCodes[wrappedVal] {
+				if !isValidCodeInSet(validCodes, wrappedVal) {
 					outcome.AddError(CodeInvalid,
 						fmt.Sprintf("Code %q is not in required ValueSet %s", wrappedVal, uri),
 						path)
@@ -213,7 +224,7 @@ func (e *Engine) validateCodeBindings(resType string, schema ResourceSchema, res
 				for _, cItem := range codingList {
 					if cMap, ok := cItem.(map[string]any); ok {
 						codeStr := extractStringOrWrapped(cMap["code"])
-						if codeStr != "" && validCodes[codeStr] {
+						if codeStr != "" && isValidCodeInSet(validCodes, codeStr) {
 							foundValid = true
 							break
 						}
@@ -226,7 +237,7 @@ func (e *Engine) validateCodeBindings(resType string, schema ResourceSchema, res
 				}
 			} else {
 				codeStr := extractStringOrWrapped(v["code"])
-				if codeStr != "" && !validCodes[codeStr] {
+				if codeStr != "" && !isValidCodeInSet(validCodes, codeStr) {
 					outcome.AddError(CodeInvalid,
 						fmt.Sprintf("Code %q is not in required ValueSet %s", codeStr, uri),
 						path)

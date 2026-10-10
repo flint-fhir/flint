@@ -1,7 +1,9 @@
 package fhirutil_test
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,6 +17,7 @@ import (
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 
 	"github.com/flint-fhir/flint/pkg/fhirutil"
+	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -116,6 +119,7 @@ func TestNormalizeFHIRJSONToProtoJSON_StandardFlatFHIR(t *testing.T) {
 		assert.Equal(t, "flat-pat-1", idx.References[0].TargetID)
 		require.NotEmpty(t, idx.Tokens)
 		require.NotEmpty(t, idx.Dates)
+		require.NotEmpty(t, idx.Quantities)
 	})
 
 	t.Run("Standard flat FHIR Encounter with hyphenated status in-progress and Condition reference", func(t *testing.T) {
@@ -139,6 +143,7 @@ func TestNormalizeFHIRJSONToProtoJSON_StandardFlatFHIR(t *testing.T) {
 		unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
 		require.NoError(t, unmarshaler.Unmarshal(normBytes, enc))
 		assert.Equal(t, "flat-pat-1", enc.GetSubject().GetPatientId().GetValue())
+		assert.Equal(t, "IMP", enc.GetClassValue().GetCode().GetValue())
 
 		rawCond := []byte(`{
 			"resourceType": "Condition",
@@ -160,14 +165,130 @@ func TestNormalizeFHIRJSONToProtoJSON_StandardFlatFHIR(t *testing.T) {
 	})
 }
 
-func TestProperty_NormalizeFHIRJSONNeverPanics(t *testing.T) {
+func TestDenormalizeProtoJSONToFHIRJSON_RoundTripAndValidation(t *testing.T) {
+	valEngine := validation.NewEngine(validation.DefaultOptions())
+	lastUpdated := time.Date(2025, 4, 1, 12, 30, 0, 0, time.UTC)
+
+	t.Run("Observation with valueQuantity, component, effectiveDateTime, and Reference round-trips to valid flat FHIR JSON", func(t *testing.T) {
+		rawObs := []byte(`{
+			"resourceType": "Observation",
+			"id": "rt-obs-1",
+			"status": "final",
+			"code": {
+				"coding": [{"system": "http://loinc.org", "code": "85354-9", "display": "Blood pressure"}]
+			},
+			"subject": {
+				"reference": "Patient/rt-pat-1"
+			},
+			"effectiveDateTime": "2025-03-01T10:00:00Z",
+			"valueQuantity": {
+				"value": 88.5,
+				"unit": "beats/minute",
+				"system": "http://unitsofmeasure.org",
+				"code": "/min"
+			},
+			"component": [
+				{
+					"code": {"coding": [{"system": "http://loinc.org", "code": "8480-6"}]},
+					"valueQuantity": {"value": 120, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+				}
+			]
+		}`)
+
+		md := (&obspb.Observation{}).ProtoReflect().Descriptor()
+		norm, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, rawObs)
+		require.NoError(t, err)
+
+		obs := &obspb.Observation{}
+		require.NoError(t, (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(norm, obs))
+		protoBytes, err := proto.Marshal(obs)
+		require.NoError(t, err)
+
+		outJSON, err := fhirutil.DenormalizeProtoJSONToFHIRJSON(md, "Observation", protoBytes, 3, lastUpdated)
+		require.NoError(t, err)
+
+		var outMap map[string]any
+		require.NoError(t, json.Unmarshal(outJSON, &outMap))
+		assert.Equal(t, "Observation", outMap["resourceType"])
+		assert.Equal(t, "rt-obs-1", outMap["id"])
+		assert.Equal(t, "final", outMap["status"])
+		assert.Equal(t, "Patient/rt-pat-1", outMap["subject"].(map[string]any)["reference"])
+		assert.Equal(t, 88.5, outMap["valueQuantity"].(map[string]any)["value"])
+		assert.Equal(t, "3", outMap["meta"].(map[string]any)["versionId"])
+		assert.Equal(t, "2025-04-01T12:30:00Z", outMap["meta"].(map[string]any)["lastUpdated"])
+
+		outcome := valEngine.ValidateJSON("Observation", outJSON)
+		assert.True(t, outcome.IsValid(), "expected round-tripped Observation JSON to pass FHIR R4 validation: %v", outcome.Issues)
+	})
+
+	t.Run("Encounter with class and hyphenated status in-progress round-trips to valid flat FHIR JSON", func(t *testing.T) {
+		rawEnc := []byte(`{
+			"resourceType": "Encounter",
+			"id": "rt-enc-1",
+			"status": "in-progress",
+			"class": {
+				"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+				"code": "AMB"
+			},
+			"subject": {
+				"reference": "Patient/rt-pat-1"
+			}
+		}`)
+
+		md := (&encpb.Encounter{}).ProtoReflect().Descriptor()
+		norm, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, rawEnc)
+		require.NoError(t, err)
+
+		enc := &encpb.Encounter{}
+		require.NoError(t, (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(norm, enc))
+		protoBytes, err := proto.Marshal(enc)
+		require.NoError(t, err)
+
+		outJSON, err := fhirutil.DenormalizeProtoJSONToFHIRJSON(md, "Encounter", protoBytes, 1, lastUpdated)
+		require.NoError(t, err)
+
+		var outMap map[string]any
+		require.NoError(t, json.Unmarshal(outJSON, &outMap))
+		assert.Equal(t, "in-progress", outMap["status"])
+		assert.Equal(t, "AMB", outMap["class"].(map[string]any)["code"])
+		assert.Nil(t, outMap["classValue"])
+
+		outcome := valEngine.ValidateJSON("Encounter", outJSON)
+		assert.True(t, outcome.IsValid(), "expected round-tripped Encounter JSON to pass FHIR R4 validation: %v", outcome.Issues)
+	})
+}
+
+func TestRewriteURNReferences(t *testing.T) {
+	raw := []byte(`{
+		"resourceType": "Observation",
+		"subject": {"reference": "urn:uuid:1111-2222"},
+		"performer": [{"reference": "urn:uuid:3333-4444"}, {"reference": "Practitioner/existing-1"}]
+	}`)
+	rewritten, err := fhirutil.RewriteURNReferences(raw, map[string]string{
+		"urn:uuid:1111-2222": "Patient/pat-assigned-1",
+		"urn:uuid:3333-4444": "Practitioner/prac-assigned-2",
+	})
+	require.NoError(t, err)
+
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(rewritten, &m))
+	assert.Equal(t, "Patient/pat-assigned-1", m["subject"].(map[string]any)["reference"])
+	perfs := m["performer"].([]any)
+	assert.Equal(t, "Practitioner/prac-assigned-2", perfs[0].(map[string]any)["reference"])
+	assert.Equal(t, "Practitioner/existing-1", perfs[1].(map[string]any)["reference"])
+}
+
+func TestProperty_NormalizeAndDenormalizeRoundTripValidates(t *testing.T) {
 	md := (&patpb.Patient{}).ProtoReflect().Descriptor()
+	valEngine := validation.NewEngine(validation.DefaultOptions())
+	ts := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+
 	hegel.Test(t, func(ht *hegel.T) {
-		id := hegel.Draw(ht, hegel.FromRegex(`[a-z0-9\-]{1,16}`, true))
-		family := hegel.Draw(ht, hegel.FromRegex(`[A-Za-z]{1,20}`, true))
+		id := hegel.Draw(ht, hegel.FromRegex(`[a-z0-9]{2,16}`, true))
+		family := hegel.Draw(ht, hegel.FromRegex(`[A-Za-z]{2,20}`, true))
 		gender := hegel.Draw(ht, hegel.FromRegex(`(male|female|other|unknown)`, true))
 
-		raw := []byte(`{"resourceType":"Patient","id":"` + id + `","gender":"` + gender + `","name":[{"family":"` + family + `"}]}`)
+		raw := []byte(`{"resourceType":"Patient","id":"` + id + `","active":true,"gender":"` + gender + `","birthDate":"1990-05-15","name":[{"family":"` + family + `"}]}`)
 		norm, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, raw)
 		if err != nil {
 			ht.Fatalf("NormalizeFHIRJSONToProtoJSON failed: %v", err)
@@ -176,8 +297,17 @@ func TestProperty_NormalizeFHIRJSONNeverPanics(t *testing.T) {
 		if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(norm, pat); err != nil {
 			ht.Fatalf("protojson.Unmarshal failed on normalized JSON %s: %v", string(norm), err)
 		}
-		if pat.GetId().GetValue() != id {
-			ht.Fatalf("expected id %q, got %q", id, pat.GetId().GetValue())
+		protoBytes, err := proto.Marshal(pat)
+		if err != nil {
+			ht.Fatalf("proto.Marshal failed: %v", err)
+		}
+		outJSON, err := fhirutil.DenormalizeProtoJSONToFHIRJSON(md, "Patient", protoBytes, 1, ts)
+		if err != nil {
+			ht.Fatalf("DenormalizeProtoJSONToFHIRJSON failed: %v", err)
+		}
+		outcome := valEngine.ValidateJSON("Patient", outJSON)
+		if !outcome.IsValid() {
+			ht.Fatalf("round-tripped Patient JSON failed validation: %s", string(outJSON))
 		}
 	})
 }

@@ -149,7 +149,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Convert proto bytes to JSON
-	jsonBytes, err := s.protoToJSON(resType, rec.ResourceProto)
+	jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
 		s.logger.Error("proto to json", "error", err, "type", resType, "id", resID)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
@@ -197,7 +197,7 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jsonBytes, err := s.protoToJSON(resType, rec.ResourceProto)
+	jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
 		s.logger.Error("proto to json in vread", "error", err, "type", resType, "id", resID, "version", version)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
@@ -263,7 +263,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if !rec.IsDeleted && len(rec.ResourceProto) > 0 {
-			if jsonBytes, err := s.protoToJSON(resType, rec.ResourceProto); err == nil {
+			if jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
 				var resource any
 				if err := json.Unmarshal(jsonBytes, &resource); err == nil {
 					entry["resource"] = resource
@@ -395,9 +395,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 				if condParams.References == nil {
 					condParams.References = make(map[string]string)
 				}
-				if condParams.References["subject"] == "" {
-					condParams.References["patient"] = "Patient/" + allowedPatientID
-				}
+				condParams.References["patient"] = "Patient/" + allowedPatientID
 			}
 		}
 
@@ -415,7 +413,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "conditional create failed")
 			return
 		}
-		jsonBytes, err := s.protoToJSON(resType, rec.ResourceProto)
+		jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if err != nil {
 			s.logger.Error("conditional create proto to json", "error", err, "type", resType, "id", rec.ResID)
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
@@ -446,7 +444,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jsonBytes, err := s.protoToJSON(resType, rec.ResourceProto)
+	jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
 		jsonBytes = body
 	}
@@ -570,7 +568,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jsonBytes, err := s.protoToJSON(resType, protoBytes)
+	jsonBytes, err := s.protoToJSONWithMeta(resType, protoBytes, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
 		jsonBytes = body
 	}
@@ -868,23 +866,43 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	params := postgres.BuildSearchParamsFromQuery(tenant, resType, r.URL.Query())
 
-	// Enforce patient compartment scoping on searches when using a patient-restricted SMART token
-	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
-		allowedPatientID := cleanID(secCtx.GetPatientId())
-		if strings.EqualFold(resType, "Patient") {
-			if params.ID != "" && cleanID(params.ID) != allowedPatientID {
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	if hasSecCtx {
+		// Enforce SMART scopes on explicit _include target types and _revinclude source types
+		for _, inc := range params.Includes {
+			if inc.TargetType != "" && !auth.Allows(secCtx, inc.TargetType, auth.ActionRead) && !auth.Allows(secCtx, inc.TargetType, auth.ActionSearch) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-					fmt.Sprintf("patient-scoped token (%s) cannot search patient %s",
-						secCtx.GetPatientId(), params.ID))
+					fmt.Sprintf("insufficient scope for _include target %s", inc.TargetType))
 				return
 			}
-			params.ID = allowedPatientID
-		} else if postgres.IsPatientCompartmentResourceType(resType) {
-			if params.References == nil {
-				params.References = make(map[string]string)
+		}
+		for _, rev := range params.RevIncludes {
+			if rev.SourceType != "" && !auth.Allows(secCtx, rev.SourceType, auth.ActionRead) && !auth.Allows(secCtx, rev.SourceType, auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope for _revinclude source %s", rev.SourceType))
+				return
 			}
-			if params.References["subject"] == "" {
+		}
+
+		// Enforce patient compartment scoping on searches when using a patient-restricted SMART token
+		if auth.IsPatientRestricted(secCtx) {
+			allowedPatientID := cleanID(secCtx.GetPatientId())
+			if strings.EqualFold(resType, "Patient") {
+				if params.ID != "" && cleanID(params.ID) != allowedPatientID {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+						fmt.Sprintf("patient-scoped token (%s) cannot search patient %s",
+							secCtx.GetPatientId(), params.ID))
+					return
+				}
+				params.ID = allowedPatientID
+			} else if postgres.IsPatientCompartmentResourceType(resType) {
+				if params.References == nil {
+					params.References = make(map[string]string)
+				}
 				params.References["patient"] = "Patient/" + allowedPatientID
+				if params.References["subject"] != "" {
+					params.References["subject"] = "Patient/" + allowedPatientID
+				}
 			}
 		}
 	}
@@ -896,7 +914,47 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if hasSecCtx && len(sr.Includes) > 0 {
+		sr.Includes = s.filterAuthorizedIncludes(r, tenant, secCtx, sr.Includes)
+	}
+
 	s.writeSearchSetBundle(w, sr)
+}
+
+func (s *Server) filterAuthorizedIncludes(r *http.Request, tenant string, secCtx *auth.SecurityContext, includes []postgres.SearchResult) []postgres.SearchResult {
+	if secCtx == nil || len(includes) == 0 {
+		return includes
+	}
+	patientRestricted := auth.IsPatientRestricted(secCtx)
+	allowedPatientID := cleanID(secCtx.GetPatientId())
+	filtered := make([]postgres.SearchResult, 0, len(includes))
+
+	for _, inc := range includes {
+		if !auth.Allows(secCtx, inc.ResType, auth.ActionRead) && !auth.Allows(secCtx, inc.ResType, auth.ActionSearch) {
+			continue
+		}
+		if patientRestricted {
+			if strings.EqualFold(inc.ResType, "Patient") {
+				if cleanID(inc.ResID) != allowedPatientID {
+					continue
+				}
+			} else if postgres.IsPatientCompartmentResourceType(inc.ResType) {
+				if extractor, ok := s.extractors[inc.ResType]; ok && len(inc.ResourceProto) > 0 {
+					idx, err := extractor(tenant, inc.ResID, inc.ResourceProto)
+					if err != nil || !postgres.IndexesBelongToPatientCompartment(inc.ResType, inc.ResID, idx, allowedPatientID) {
+						continue
+					}
+				} else if s.store != nil {
+					belongs, err := s.store.BelongsToPatientCompartment(r.Context(), tenant, inc.ResType, inc.ResID, allowedPatientID)
+					if err != nil || !belongs {
+						continue
+					}
+				}
+			}
+		}
+		filtered = append(filtered, inc)
+	}
+	return filtered
 }
 
 func (s *Server) writeSearchSetBundle(w http.ResponseWriter, sr *postgres.SearchResults) {
@@ -904,7 +962,7 @@ func (s *Server) writeSearchSetBundle(w http.ResponseWriter, sr *postgres.Search
 
 	// 1. Primary search matches
 	for _, res := range sr.Matches {
-		jsonBytes, err := s.protoToJSON(res.ResType, res.ResourceProto)
+		jsonBytes, err := s.protoToJSONWithMeta(res.ResType, res.ResourceProto, res.ResVersion, res.LastUpdated)
 		if err != nil {
 			s.logger.Error("proto to json in search", "error", err, "type", res.ResType, "id", res.ResID)
 			continue
@@ -924,7 +982,7 @@ func (s *Server) writeSearchSetBundle(w http.ResponseWriter, sr *postgres.Search
 
 	// 2. Included resources (_include, _revinclude, and $everything compartment resources)
 	for _, inc := range sr.Includes {
-		jsonBytes, err := s.protoToJSON(inc.ResType, inc.ResourceProto)
+		jsonBytes, err := s.protoToJSONWithMeta(inc.ResType, inc.ResourceProto, inc.ResVersion, inc.LastUpdated)
 		if err != nil {
 			s.logger.Error("proto to json for included resource", "error", err, "type", inc.ResType, "id", inc.ResID)
 			continue
@@ -1052,6 +1110,9 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 							{"name": "subject", "type": "reference"},
 							{"name": "date", "type": "date"},
 							{"name": "performer", "type": "reference"},
+							{"name": "value-quantity", "type": "quantity"},
+							{"name": "component-value-quantity", "type": "quantity"},
+							{"name": "combo-value-quantity", "type": "quantity"},
 						},
 					},
 					{
@@ -1107,8 +1168,8 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(cap)
 }
 
-// protoToJSON converts proto bytes to FHIR JSON using the registered message type.
-func (s *Server) protoToJSON(resType string, protoBytes []byte) ([]byte, error) {
+// protoToJSONWithMeta converts proto bytes to standard flat HL7 FHIR R4 JSON using the registered message type.
+func (s *Server) protoToJSONWithMeta(resType string, protoBytes []byte, version int, lastUpdated time.Time) ([]byte, error) {
 	md, ok := s.protoRegistry[resType]
 	if !ok {
 		// Fallback: try to use Any wrapper
@@ -1119,23 +1180,8 @@ func (s *Server) protoToJSON(resType string, protoBytes []byte) ([]byte, error) 
 		return protojson.Marshal(&anyMsg)
 	}
 
-	// Use the registered message descriptor to create a dynamic message
 	_ = protodesc.ToFileDescriptorProto // ensure import is used
-	msg := dynamicpb.NewMessage(md)
-	if err := proto.Unmarshal(protoBytes, msg); err != nil {
-		return nil, fmt.Errorf("unmarshal %s proto: %w", resType, err)
-	}
-
-	marshaler := protojson.MarshalOptions{
-		UseProtoNames:   false, // use camelCase JSON names
-		EmitUnpopulated: false, // skip empty fields
-	}
-
-	rawJSON, err := marshaler.Marshal(msg)
-	if err != nil {
-		return nil, err
-	}
-	return fhirutil.InjectResourceType(resType, rawJSON)
+	return fhirutil.DenormalizeProtoJSONToFHIRJSON(md, resType, protoBytes, version, lastUpdated)
 }
 
 // writeOperationOutcome writes a FHIR OperationOutcome error response.

@@ -131,28 +131,41 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 					// Patient compartment enforcement in search query parameters
 					if auth.IsPatientRestricted(secCtx) {
+						allowedPatientID := cleanID(secCtx.GetPatientId())
 						q := r.URL.Query()
 						if strings.EqualFold(resType, "Patient") {
-							if idParam := q.Get("_id"); idParam != "" && cleanID(idParam) != cleanID(secCtx.GetPatientId()) {
-								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-									fmt.Sprintf("patient-scoped token (%s) cannot search patient %s",
-										secCtx.GetPatientId(), idParam))
-								return
+							for _, rawVal := range q["_id"] {
+								for part := range strings.SplitSeq(rawVal, ",") {
+									if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+										writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+											fmt.Sprintf("patient-scoped token (%s) cannot search patient %s",
+												secCtx.GetPatientId(), trimmed))
+										return
+									}
+								}
 							}
 						}
 
-						// For clinical resources, reject mismatched patient/subject filters
-						if pParam := q.Get("patient"); pParam != "" && cleanID(pParam) != cleanID(secCtx.GetPatientId()) {
-							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-								fmt.Sprintf("cannot query records of patient %s with token restricted to %s",
-									pParam, secCtx.GetPatientId()))
-							return
+						// For clinical resources, reject any mismatched patient/subject filters across all query values
+						for _, rawVal := range q["patient"] {
+							for part := range strings.SplitSeq(rawVal, ",") {
+								if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+									writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+										fmt.Sprintf("cannot query records of patient %s with token restricted to %s",
+											trimmed, secCtx.GetPatientId()))
+									return
+								}
+							}
 						}
-						if sParam := q.Get("subject"); sParam != "" && cleanID(sParam) != cleanID(secCtx.GetPatientId()) {
-							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-								fmt.Sprintf("cannot query records of subject %s with token restricted to %s",
-									sParam, secCtx.GetPatientId()))
-							return
+						for _, rawVal := range q["subject"] {
+							for part := range strings.SplitSeq(rawVal, ",") {
+								if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+									writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+										fmt.Sprintf("cannot query records of subject %s with token restricted to %s",
+											trimmed, secCtx.GetPatientId()))
+									return
+								}
+							}
 						}
 					}
 				}

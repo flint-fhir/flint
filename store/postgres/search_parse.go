@@ -223,7 +223,9 @@ var (
 		"birthdate": true, "date": true, "onset-date": true,
 	}
 	knownQuantitySearchParams = map[string]bool{
-		"value-quantity": true,
+		"value-quantity":           true,
+		"component-value-quantity": true,
+		"combo-value-quantity":     true,
 	}
 )
 

@@ -116,3 +116,36 @@ func TestPublishToAutoMQ_NilProducer(t *testing.T) {
 	})
 	assert.NoError(t, err)
 }
+
+func TestActivities_SliceBoundsAndNilStoreValidation(t *testing.T) {
+	activities := &activity.Activities{
+		Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+	}
+
+	err := activities.WritePostgresBatch(context.Background(), activity.WritePostgresBatchInput{
+		TenantID:       "test-tenant",
+		ResourceProtos: [][]byte{{1, 2}},
+		ResourceTypes:  []string{},
+		ResourceIDs:    []string{"id-1"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mismatched batch input lengths")
+
+	err = activities.WritePostgresBatch(context.Background(), activity.WritePostgresBatchInput{
+		TenantID:       "test-tenant",
+		ResourceProtos: [][]byte{{1, 2}},
+		ResourceTypes:  []string{"Patient"},
+		ResourceIDs:    []string{"id-1"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "postgres store is nil")
+
+	err = activities.PublishToAutoMQ(context.Background(), activity.PublishToAutoMQInput{
+		TenantID:       "test-tenant",
+		ResourceProtos: [][]byte{{1, 2}},
+		ResourceTypes:  []string{"Patient"},
+		ResourceIDs:    []string{},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mismatched automq input lengths")
+}

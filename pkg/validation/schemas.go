@@ -79,8 +79,8 @@ func DefaultSchemas() map[string]ResourceSchema {
 			ResourceType: "Patient",
 			AllowedFields: buildFieldMap(commonResourceFields, []string{
 				"identifier", "active", "name", "telecom", "gender",
-				"birthDate", "deceasedBoolean", "deceasedDateTime", "address",
-				"maritalStatus", "multipleBirthBoolean", "multipleBirthInteger",
+				"birthDate", "deceased", "deceasedBoolean", "deceasedDateTime", "address",
+				"maritalStatus", "multipleBirth", "multipleBirthBoolean", "multipleBirthInteger",
 				"photo", "contact", "communication", "generalPractitioner",
 				"managingOrganization", "link",
 			}),
@@ -97,8 +97,8 @@ func DefaultSchemas() map[string]ResourceSchema {
 			ResourceType: "Observation",
 			AllowedFields: buildFieldMap(commonResourceFields, []string{
 				"identifier", "basedOn", "partOf", "status", "category", "code",
-				"subject", "focus", "encounter", "effectiveDateTime", "effectivePeriod",
-				"effectiveTiming", "effectiveInstant", "issued", "performer",
+				"subject", "focus", "encounter", "effective", "effectiveDateTime", "effectivePeriod",
+				"effectiveTiming", "effectiveInstant", "issued", "performer", "value",
 				"valueQuantity", "valueCodeableConcept", "valueString", "valueBoolean",
 				"valueInteger", "valueRange", "valueRatio", "valueSampledData",
 				"valueTime", "valueDateTime", "valuePeriod", "dataAbsentReason",
@@ -118,9 +118,9 @@ func DefaultSchemas() map[string]ResourceSchema {
 			ResourceType: "Condition",
 			AllowedFields: buildFieldMap(commonResourceFields, []string{
 				"identifier", "clinicalStatus", "verificationStatus", "category",
-				"severity", "code", "bodySite", "subject", "encounter",
+				"severity", "code", "bodySite", "subject", "encounter", "onset",
 				"onsetDateTime", "onsetAge", "onsetPeriod", "onsetRange", "onsetString",
-				"abatementDateTime", "abatementAge", "abatementPeriod", "abatementRange",
+				"abatement", "abatementDateTime", "abatementAge", "abatementPeriod", "abatementRange",
 				"abatementString", "recordedDate", "recorder", "asserter", "stage",
 				"evidence", "note",
 			}),
@@ -138,7 +138,7 @@ func DefaultSchemas() map[string]ResourceSchema {
 		"Encounter": {
 			ResourceType: "Encounter",
 			AllowedFields: buildFieldMap(commonResourceFields, []string{
-				"identifier", "status", "statusHistory", "class", "classHistory",
+				"identifier", "status", "statusHistory", "class", "classValue", "classHistory",
 				"type", "serviceType", "priority", "subject", "episodeOfCare",
 				"basedOn", "participant", "appointment", "period", "length",
 				"reasonCode", "reasonReference", "diagnosis", "account",

@@ -18,6 +18,7 @@ import (
 
 	obspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto"
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
+	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
 
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/server"
@@ -324,6 +325,7 @@ func TestServer_PatientCompartmentIsolation_Integration(t *testing.T) {
 	srv := server.New(store, logger)
 	srv.RegisterResourceType("Patient", &patpb.Patient{})
 	srv.RegisterResourceType("Observation", &obspb.Observation{})
+	srv.RegisterResourceType("Practitioner", &pracpb.Practitioner{})
 
 	mockVal, err := auth.NewMockTokenValidator("https://auth.azra.dev", "flint-api")
 	require.NoError(t, err)
@@ -339,7 +341,7 @@ func TestServer_PatientCompartmentIsolation_Integration(t *testing.T) {
 		}
 	}()
 
-	// System token to seed 2 patients (pat-100 and pat-200) and their Observations (obs-100 and obs-200)
+	// System token to seed 2 patients (pat-100 and pat-200), a shared Practitioner (prac-shared), and their Observations (obs-100 and obs-200)
 	sysToken, err := mockVal.IssueToken("sys-admin", "system/*.cruds", "", time.Hour, nil)
 	require.NoError(t, err)
 
@@ -353,13 +355,14 @@ func TestServer_PatientCompartmentIsolation_Integration(t *testing.T) {
 		require.Less(t, resp.StatusCode, 300)
 	}
 
+	seedReq(http.MethodPut, "/fhir/r4/test-compartment/Practitioner/prac-shared", `{"resourceType":"Practitioner","id":"prac-shared","name":[{"family":"House"}]}`)
 	seedReq(http.MethodPut, "/fhir/r4/test-compartment/Patient/pat-100", `{"resourceType":"Patient","id":"pat-100","name":[{"family":"Hundred"}]}`)
 	seedReq(http.MethodPut, "/fhir/r4/test-compartment/Patient/pat-200", `{"resourceType":"Patient","id":"pat-200","name":[{"family":"TwoHundred"}]}`)
-	seedReq(http.MethodPut, "/fhir/r4/test-compartment/Observation/obs-100", `{"resourceType":"Observation","id":"obs-100","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/pat-100"}}`)
-	seedReq(http.MethodPut, "/fhir/r4/test-compartment/Observation/obs-200", `{"resourceType":"Observation","id":"obs-200","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/pat-200"}}`)
+	seedReq(http.MethodPut, "/fhir/r4/test-compartment/Observation/obs-100", `{"resourceType":"Observation","id":"obs-100","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/pat-100"},"performer":[{"reference":"Practitioner/prac-shared"}]}`)
+	seedReq(http.MethodPut, "/fhir/r4/test-compartment/Observation/obs-200", `{"resourceType":"Observation","id":"obs-200","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/pat-200"},"performer":[{"reference":"Practitioner/prac-shared"}]}`)
 
-	// Issue a patient-scoped token restricted to pat-100 with full cruds on Patient and Observation
-	pat100Token, err := mockVal.IssueToken("pat-100-user", "patient/Patient.cruds patient/Observation.cruds", "pat-100", time.Hour, nil)
+	// Issue a patient-scoped token restricted to pat-100 with full cruds on Patient, Observation, and Practitioner
+	pat100Token, err := mockVal.IssueToken("pat-100-user", "patient/Patient.cruds patient/Observation.cruds patient/Practitioner.rs", "pat-100", time.Hour, nil)
 	require.NoError(t, err)
 
 	doPat100 := func(method, path, body string) *http.Response {
@@ -417,6 +420,79 @@ func TestServer_PatientCompartmentIsolation_Integration(t *testing.T) {
 		var patBundle map[string]any
 		require.NoError(t, json.NewDecoder(respPat.Body).Decode(&patBundle))
 		assert.Equal(t, 1, int(patBundle["total"].(float64)))
+	})
+
+	t.Run("RevInclude and Include Enforce Patient Compartment and SMART Scopes", func(t *testing.T) {
+		// 1. Searching shared Practitioner with _revinclude=Observation:performer must ONLY include obs-100, never obs-200
+		respRev := doPat100(http.MethodGet, "/fhir/r4/test-compartment/Practitioner?family=House&_revinclude=Observation:performer", "")
+		defer respRev.Body.Close()
+		require.Equal(t, http.StatusOK, respRev.StatusCode)
+
+		var revBundle map[string]any
+		require.NoError(t, json.NewDecoder(respRev.Body).Decode(&revBundle))
+		entries := revBundle["entry"].([]any)
+		require.Len(t, entries, 2, "expected 1 Practitioner match + 1 authorized Observation include (obs-100 only)")
+		var fullURLs []string
+		for _, e := range entries {
+			fullURLs = append(fullURLs, e.(map[string]any)["fullUrl"].(string))
+		}
+		assert.Contains(t, fullURLs, "Practitioner/prac-shared")
+		assert.Contains(t, fullURLs, "Observation/obs-100")
+		assert.NotContains(t, fullURLs, "Observation/obs-200")
+
+		// 2. Token with only Practitioner scope (no Observation scope) cannot _revinclude=Observation:performer -> 403 Forbidden
+		pracOnlyToken, err := mockVal.IssueToken("prac-only", "user/Practitioner.rs", "", time.Hour, nil)
+		require.NoError(t, err)
+		reqPracOnly, _ := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/test-compartment/Practitioner?family=House&_revinclude=Observation:performer", nil)
+		reqPracOnly.Header.Set("Authorization", "Bearer "+pracOnlyToken)
+		respPracOnly, err := http.DefaultClient.Do(reqPracOnly)
+		require.NoError(t, err)
+		defer respPracOnly.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respPracOnly.StatusCode)
+
+		// 3. Token with only Observation scope (no Patient scope) filters out Patient on untyped _include=Observation:subject
+		obsOnlyToken, err := mockVal.IssueToken("obs-only", "patient/Observation.rs", "pat-100", time.Hour, nil)
+		require.NoError(t, err)
+		reqObsOnly, _ := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/test-compartment/Observation?_include=Observation:subject", nil)
+		reqObsOnly.Header.Set("Authorization", "Bearer "+obsOnlyToken)
+		respObsOnly, err := http.DefaultClient.Do(reqObsOnly)
+		require.NoError(t, err)
+		defer respObsOnly.Body.Close()
+		require.Equal(t, http.StatusOK, respObsOnly.StatusCode)
+		var obsOnlyBundle map[string]any
+		require.NoError(t, json.NewDecoder(respObsOnly.Body).Decode(&obsOnlyBundle))
+		obsOnlyEntries := obsOnlyBundle["entry"].([]any)
+		require.Len(t, obsOnlyEntries, 1, "expected Patient include to be stripped when caller lacks Patient read/search scope")
+	})
+
+	t.Run("Multi-Value Query Parameter Smuggling and Chained Search Bypass Are Blocked", func(t *testing.T) {
+		// 1. Multi-value ?patient=pat-100&patient=pat-200 -> 403 Forbidden
+		respMultiPat := doPat100(http.MethodGet, "/fhir/r4/test-compartment/Observation?patient=pat-100&patient=pat-200", "")
+		defer respMultiPat.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respMultiPat.StatusCode)
+
+		// 2. Multi-value ?subject=pat-100&subject=pat-200 -> 403 Forbidden
+		respMultiSub := doPat100(http.MethodGet, "/fhir/r4/test-compartment/Observation?subject=pat-100&subject=pat-200", "")
+		defer respMultiSub.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respMultiSub.StatusCode)
+
+		// 3. Comma-separated ?patient=pat-100,pat-200 -> 403 Forbidden
+		respCommaPat := doPat100(http.MethodGet, "/fhir/r4/test-compartment/Observation?patient=pat-100,pat-200", "")
+		defer respCommaPat.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respCommaPat.StatusCode)
+
+		// 4. Multi-value ?_id=pat-100&_id=pat-200 on Patient -> 403 Forbidden
+		respMultiID := doPat100(http.MethodGet, "/fhir/r4/test-compartment/Patient?_id=pat-100&_id=pat-200", "")
+		defer respMultiID.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respMultiID.StatusCode)
+
+		// 5. Chained search ?patient.family=TwoHundred with pat-100 token must return 0 matches
+		respChain := doPat100(http.MethodGet, "/fhir/r4/test-compartment/Observation?patient.family=TwoHundred", "")
+		defer respChain.Body.Close()
+		require.Equal(t, http.StatusOK, respChain.StatusCode)
+		var chainBundle map[string]any
+		require.NoError(t, json.NewDecoder(respChain.Body).Decode(&chainBundle))
+		assert.Equal(t, 0, int(chainBundle["total"].(float64)))
 	})
 
 	t.Run("Clinical POST, PUT, DELETE, and Bundle Block Cross-Patient Writes", func(t *testing.T) {

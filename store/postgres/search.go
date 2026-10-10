@@ -23,6 +23,8 @@ type queryExecer interface {
 type SearchResult struct {
 	ResType       string
 	ResID         string
+	ResVersion    int
+	LastUpdated   time.Time
 	ResourceProto []byte
 }
 
@@ -104,6 +106,14 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 				alias, alias, alias, alias, alias, len(args)+1, alias, len(args)+2, alias, len(args)+3,
 			))
 			args = append(args, spName, parts[0], parts[1])
+		} else if isEnumTokenParam(spName) {
+			normVal := strings.ToLower(strings.ReplaceAll(value, "_", "-"))
+			upperVal := strings.ToUpper(strings.ReplaceAll(value, "-", "_"))
+			joins = append(joins, fmt.Sprintf(
+				"JOIN spidx_token %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.sp_value IN ($%d, $%d, $%d)",
+				alias, alias, alias, alias, alias, len(args)+1, alias, len(args)+2, len(args)+3, len(args)+4,
+			))
+			args = append(args, spName, value, normVal, upperVal)
 		} else {
 			joins = append(joins, fmt.Sprintf(
 				"JOIN spidx_token %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.sp_value = $%d",
@@ -198,7 +208,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 
 	// Data query with pagination
 	dataSQL := fmt.Sprintf(
-		"SELECT DISTINCT r.res_type, r.res_id, r.resource_proto FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE%s ORDER BY r.res_id LIMIT $%d OFFSET $%d",
+		"SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE%s ORDER BY r.res_id LIMIT $%d OFFSET $%d",
 		joinClause, whereExtra, len(args)+1, len(args)+2,
 	)
 	args = append(args, params.Count, params.Offset)
@@ -212,7 +222,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 	var matches []SearchResult
 	for rows.Next() {
 		var r SearchResult
-		if err := rows.Scan(&r.ResType, &r.ResID, &r.ResourceProto); err != nil {
+		if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
 			return nil, fmt.Errorf("scan: %w", err)
 		}
 		matches = append(matches, r)
@@ -255,7 +265,7 @@ func (s *Store) ResolveIncludes(ctx context.Context, tenantID string, matches []
 	// Handle _include (Source:param)
 	for _, inc := range includes {
 		query := `
-			SELECT DISTINCT r.res_type, r.res_id, r.resource_proto
+			SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto
 			FROM spidx_reference rf
 			JOIN fhir_resource r ON r.tenant_id = rf.tenant_id AND r.res_type = rf.target_type AND r.res_id = rf.target_id AND r.is_deleted = FALSE
 			WHERE rf.tenant_id = $1 AND rf.res_type = $2 AND rf.res_id = ANY($3) AND rf.sp_name = $4
@@ -272,7 +282,7 @@ func (s *Store) ResolveIncludes(ctx context.Context, tenantID string, matches []
 		}
 		for rows.Next() {
 			var r SearchResult
-			if err := rows.Scan(&r.ResType, &r.ResID, &r.ResourceProto); err != nil {
+			if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -288,7 +298,7 @@ func (s *Store) ResolveIncludes(ctx context.Context, tenantID string, matches []
 	// Handle _revinclude (Source:param)
 	for _, rev := range revIncludes {
 		query := `
-			SELECT DISTINCT r.res_type, r.res_id, r.resource_proto
+			SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto
 			FROM spidx_reference rf
 			JOIN fhir_resource r ON r.tenant_id = rf.tenant_id AND r.res_type = rf.res_type AND r.res_id = rf.res_id AND r.is_deleted = FALSE
 			WHERE rf.tenant_id = $1 AND rf.target_id = ANY($2) AND rf.res_type = $3 AND rf.sp_name = $4
@@ -300,7 +310,7 @@ func (s *Store) ResolveIncludes(ctx context.Context, tenantID string, matches []
 		}
 		for rows.Next() {
 			var r SearchResult
-			if err := rows.Scan(&r.ResType, &r.ResID, &r.ResourceProto); err != nil {
+			if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -408,6 +418,8 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 		matches = append(matches, SearchResult{
 			ResType:       "Patient",
 			ResID:         params.PatientID,
+			ResVersion:    patRec.ResVersion,
+			LastUpdated:   patRec.LastUpdated,
 			ResourceProto: patRec.ResourceProto,
 		})
 	}
@@ -471,7 +483,7 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 	}
 
 	dataSQL := fmt.Sprintf(
-		"SELECT r.res_type, r.res_id, r.resource_proto FROM fhir_resource r WHERE %s ORDER BY r.res_type ASC, r.res_id ASC LIMIT $%d OFFSET $%d",
+		"SELECT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r WHERE %s ORDER BY r.res_type ASC, r.res_id ASC LIMIT $%d OFFSET $%d",
 		whereClause, len(args)+1, len(args)+2,
 	)
 	args = append(args, params.Count, offset)
@@ -485,7 +497,7 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 	var includes []SearchResult
 	for rows.Next() {
 		var r SearchResult
-		if err := rows.Scan(&r.ResType, &r.ResID, &r.ResourceProto); err != nil {
+		if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
 			return nil, fmt.Errorf("scan patient everything row: %w", err)
 		}
 		includes = append(includes, r)

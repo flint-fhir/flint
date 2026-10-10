@@ -68,6 +68,14 @@ func (a *Activities) WriteMedplumBatch(ctx context.Context, input WriteMedplumBa
 // WritePostgresBatch writes resources to Postgres in a single transaction.
 // This is the hot path — upsert resource blob + delete old indexes + bulk insert new indexes.
 func (a *Activities) WritePostgresBatch(ctx context.Context, input WritePostgresBatchInput) error {
+	if len(input.ResourceTypes) != len(input.ResourceProtos) || len(input.ResourceIDs) != len(input.ResourceProtos) {
+		return fmt.Errorf("mismatched batch input lengths: protos=%d, types=%d, ids=%d",
+			len(input.ResourceProtos), len(input.ResourceTypes), len(input.ResourceIDs))
+	}
+	if len(input.ResourceProtos) > 0 && a.Store == nil {
+		return fmt.Errorf("postgres store is nil")
+	}
+
 	inputs := make([]postgres.ResourceInput, len(input.ResourceProtos))
 
 	for i := range input.ResourceProtos {
@@ -96,8 +104,10 @@ func (a *Activities) WritePostgresBatch(ctx context.Context, input WritePostgres
 		inputs[i] = ri
 	}
 
-	if err := a.Store.WriteBatch(ctx, inputs); err != nil {
-		return fmt.Errorf("postgres batch write: %w", err)
+	if a.Store != nil {
+		if err := a.Store.WriteBatch(ctx, inputs); err != nil {
+			return fmt.Errorf("postgres batch write: %w", err)
+		}
 	}
 
 	a.Logger.Info("WritePostgresBatch complete",
@@ -112,6 +122,10 @@ func (a *Activities) WritePostgresBatch(ctx context.Context, input WritePostgres
 // Each resource type maps to a topic: {TopicPrefix}{ResourceType} (e.g., "fhir.Patient").
 // Messages are keyed by resource ID for partition locality and log compaction.
 func (a *Activities) PublishToAutoMQ(ctx context.Context, input PublishToAutoMQInput) error {
+	if len(input.ResourceTypes) != len(input.ResourceProtos) || len(input.ResourceIDs) != len(input.ResourceProtos) {
+		return fmt.Errorf("mismatched automq input lengths: protos=%d, types=%d, ids=%d",
+			len(input.ResourceProtos), len(input.ResourceTypes), len(input.ResourceIDs))
+	}
 	if a.Producer == nil {
 		a.Logger.Info("PublishToAutoMQ skipped (no producer configured)",
 			"tenant", input.TenantID,

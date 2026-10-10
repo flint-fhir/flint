@@ -169,6 +169,9 @@ func TestExtractEncounter(t *testing.T) {
 func TestExtractObservation(t *testing.T) {
 	obs := &obspb.Observation{
 		Id: &dtpb.Id{Value: "obs-100"},
+		Status: &obspb.Observation_StatusCode{
+			Value: 3, // FINAL
+		},
 		Code: &dtpb.CodeableConcept{
 			Coding: []*dtpb.Coding{
 				{
@@ -187,6 +190,30 @@ func TestExtractObservation(t *testing.T) {
 				DateTime: &dtpb.DateTime{ValueUs: 1609459200000000},
 			},
 		},
+		Value: &obspb.Observation_ValueX{
+			Choice: &obspb.Observation_ValueX_Quantity{
+				Quantity: &dtpb.Quantity{
+					Value:  &dtpb.Decimal{Value: "88.5"},
+					Unit:   &dtpb.String{Value: "beats/minute"},
+					System: &dtpb.Uri{Value: "http://unitsofmeasure.org"},
+					Code:   &dtpb.Code{Value: "/min"},
+				},
+			},
+		},
+		Component: []*obspb.Observation_Component{
+			{
+				Value: &obspb.Observation_Component_ValueX{
+					Choice: &obspb.Observation_Component_ValueX_Quantity{
+						Quantity: &dtpb.Quantity{
+							Value:  &dtpb.Decimal{Value: "120"},
+							Unit:   &dtpb.String{Value: "mmHg"},
+							System: &dtpb.Uri{Value: "http://unitsofmeasure.org"},
+							Code:   &dtpb.Code{Value: "mm[Hg]"},
+						},
+					},
+				},
+			},
+		},
 	}
 	bytes, err := proto.Marshal(obs)
 	require.NoError(t, err)
@@ -195,13 +222,33 @@ func TestExtractObservation(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 
-	var foundCode bool
+	var foundCode, foundStatusFinal bool
 	for _, tok := range idx.Tokens {
 		if tok.SpName == "code" && tok.SpValue == "8867-4" {
 			foundCode = true
 		}
+		if tok.SpName == "status" && tok.SpValue == "final" {
+			foundStatusFinal = true
+		}
 	}
 	assert.True(t, foundCode, "expected observation code 8867-4")
+	assert.True(t, foundStatusFinal, "expected normalized lowercase observation status final")
+
+	var foundValQty, foundCompQty, foundComboQty bool
+	for _, q := range idx.Quantities {
+		if q.SpName == "value-quantity" && q.SpValue == 88.5 && q.SpCode == "/min" {
+			foundValQty = true
+		}
+		if q.SpName == "component-value-quantity" && q.SpValue == 120 && q.SpCode == "mm[Hg]" {
+			foundCompQty = true
+		}
+		if q.SpName == "combo-value-quantity" && q.SpValue == 88.5 {
+			foundComboQty = true
+		}
+	}
+	assert.True(t, foundValQty, "expected value-quantity index 88.5 /min")
+	assert.True(t, foundCompQty, "expected component-value-quantity index 120 mm[Hg]")
+	assert.True(t, foundComboQty, "expected combo-value-quantity index")
 }
 
 func TestExtractPractitioner(t *testing.T) {
