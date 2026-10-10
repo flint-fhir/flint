@@ -1,12 +1,30 @@
 package server
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/flint-fhir/flint/pkg/audit"
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/google/uuid"
 )
+
+type auditActorKeyType struct{}
+
+var auditActorKey = auditActorKeyType{}
+
+// auditActorHolder captures authenticated actor metadata inside authMiddleware
+// even if authMiddleware subsequently aborts the request with 403 Forbidden.
+type auditActorHolder struct {
+	actorSubject string
+	patientID    string
+}
 
 // authMiddleware enforces SMART on FHIR bearer token authentication,
 // scope checking, and patient compartment isolation.
@@ -41,6 +59,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			s.logger.Warn("token validation failed", "error", err, "path", r.URL.Path)
 			writeOperationOutcome(w, http.StatusUnauthorized, "login", err.Error())
 			return
+		}
+
+		if holder, ok := r.Context().Value(auditActorKey).(*auditActorHolder); ok && holder != nil {
+			holder.actorSubject = secCtx.GetSubject()
+			holder.patientID = cleanID(secCtx.GetPatientId())
 		}
 
 		// Ensure path is /fhir/r4/{tenant}/...
@@ -209,4 +232,138 @@ func cleanID(id string) string {
 		return id[idx+1:]
 	}
 	return id
+}
+
+type auditResponseWriter struct {
+	http.ResponseWriter
+	statusCode  int
+	wroteHeader bool
+}
+
+func (w *auditResponseWriter) WriteHeader(code int) {
+	if !w.wroteHeader {
+		w.statusCode = code
+		w.wroteHeader = true
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *auditResponseWriter) Write(b []byte) (int, error) {
+	if !w.wroteHeader {
+		w.statusCode = http.StatusOK
+		w.wroteHeader = true
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// auditMiddleware records an immutable HL7 FHIR R4 / US Core AuditEvent for every
+// clinical interaction and security rejection (401/403).
+func (s *Server) auditMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.auditRecorder == nil {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		path := strings.Trim(r.URL.Path, "/")
+		parts := strings.Split(path, "/")
+
+		// Only audit FHIR tenant endpoints, skipping public discovery endpoints
+		if len(parts) < 3 || parts[0] != "fhir" || parts[1] != "r4" || isPublicEndpoint(parts) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		holder := &auditActorHolder{}
+		ctx := context.WithValue(r.Context(), auditActorKey, holder)
+		arw := &auditResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+
+		next.ServeHTTP(arw, r.WithContext(ctx))
+
+		tenantID := parts[2]
+		actionCode, subtypeCode, entityType, entityID, entityVersion := audit.ClassifyHTTPInteraction(
+			r.Method,
+			parts,
+			arw.statusCode,
+		)
+
+		// Skip recording successful GET reads/searches on AuditEvent itself to prevent
+		// self-referential audit log inflation while still auditing 401/403 attempts.
+		if entityType == "AuditEvent" && r.Method == http.MethodGet && arw.statusCode < 400 {
+			return
+		}
+
+		// On successful POST Create, extract newly assigned resource ID from Location header:
+		// Location: /fhir/r4/{tenant}/{resourceType}/{id}/_history/{vid}
+		if r.Method == http.MethodPost && entityID == "" && arw.statusCode == http.StatusCreated {
+			if loc := arw.Header().Get("Location"); loc != "" {
+				locParts := strings.Split(strings.Trim(loc, "/"), "/")
+				if len(locParts) >= 5 && locParts[0] == "fhir" && locParts[1] == "r4" {
+					entityID = locParts[4]
+				}
+			}
+		}
+
+		if entityVersion == "" {
+			if etag := arw.Header().Get("ETag"); etag != "" {
+				if v, err := postgres.ParseETagVersion(etag); err == nil && v > 0 {
+					entityVersion = strconv.Itoa(v)
+				}
+			}
+		}
+
+		actorSubject := holder.actorSubject
+		if actorSubject == "" {
+			actorSubject = "anonymous"
+		}
+
+		patientID := holder.patientID
+		if patientID == "" && strings.EqualFold(entityType, "Patient") && entityID != "" {
+			patientID = cleanID(entityID)
+		}
+		if patientID == "" {
+			q := r.URL.Query()
+			if p := q.Get("patient"); p != "" {
+				patientID = cleanID(p)
+			} else if sub := q.Get("subject"); sub != "" {
+				patientID = cleanID(sub)
+			}
+		}
+
+		outcomeCode, outcomeDesc := audit.ClassifyHTTPOutcome(arw.statusCode)
+
+		rec := postgres.AuditRecord{
+			TenantID:      tenantID,
+			AuditID:       uuid.NewString(),
+			Recorded:      time.Now().UTC(),
+			Action:        actionCode,
+			SubtypeCode:   subtypeCode,
+			Outcome:       outcomeCode,
+			OutcomeDesc:   outcomeDesc,
+			HTTPMethod:    r.Method,
+			HTTPStatus:    arw.statusCode,
+			RequestURI:    r.URL.RequestURI(),
+			AgentSubject:  actorSubject,
+			AgentPatient:  patientID,
+			ClientIP:      extractClientIP(r),
+			EntityType:    entityType,
+			EntityID:      entityID,
+			EntityVersion: entityVersion,
+		}
+
+		if err := s.auditRecorder.Record(r.Context(), rec); err != nil {
+			s.logger.Warn("failed to record audit event", "error", err, "path", r.URL.Path)
+		}
+	})
+}
+
+func extractClientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
 }

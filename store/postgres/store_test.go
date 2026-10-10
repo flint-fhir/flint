@@ -367,8 +367,72 @@ func TestStore_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("AuditEventWriteReadAndQuery", func(t *testing.T) {
+		rec1 := postgres.AuditRecord{
+			TenantID:      "test-tenant",
+			AuditID:       "audit-001",
+			Recorded:      time.Now().UTC().Add(-time.Minute),
+			Action:        "C",
+			SubtypeCode:   "create",
+			Outcome:       "0",
+			OutcomeDesc:   "201 Created",
+			HTTPMethod:    "POST",
+			HTTPStatus:    201,
+			RequestURI:    "/fhir/r4/test-tenant/Patient",
+			AgentSubject:  "Practitioner/dr-smith",
+			AgentPatient:  "pat-audit-1",
+			ClientIP:      "10.0.0.1",
+			EntityType:    "Patient",
+			EntityID:      "pat-audit-1",
+			EntityVersion: "1",
+		}
+		rec2 := postgres.AuditRecord{
+			TenantID:     "test-tenant",
+			AuditID:      "audit-002",
+			Recorded:     time.Now().UTC(),
+			Action:       "R",
+			SubtypeCode:  "read",
+			Outcome:      "4",
+			OutcomeDesc:  "403 Forbidden",
+			HTTPMethod:   "GET",
+			HTTPStatus:   403,
+			RequestURI:   "/fhir/r4/test-tenant/Patient/pat-audit-1",
+			AgentSubject: "Patient/intruder",
+			ClientIP:     "10.0.0.2",
+			EntityType:   "Patient",
+			EntityID:     "pat-audit-1",
+		}
+
+		if err := store.WriteAuditEvent(ctx, rec1); err != nil {
+			t.Fatalf("WriteAuditEvent rec1: %v", err)
+		}
+		if err := store.WriteAuditEvent(ctx, rec2); err != nil {
+			t.Fatalf("WriteAuditEvent rec2: %v", err)
+		}
+
+		got1, err := store.ReadAuditEvent(ctx, "test-tenant", "audit-001")
+		if err != nil {
+			t.Fatalf("ReadAuditEvent: %v", err)
+		}
+		if got1.Action != "C" || got1.AgentSubject != "Practitioner/dr-smith" || got1.EntityID != "pat-audit-1" {
+			t.Fatalf("unexpected ReadAuditEvent result: %+v", got1)
+		}
+
+		// Query by outcome=4 (security rejection)
+		rejected, total, err := store.QueryAuditEvents(ctx, postgres.AuditQueryParams{
+			TenantID: "test-tenant",
+			Outcome:  "4",
+		})
+		if err != nil {
+			t.Fatalf("QueryAuditEvents: %v", err)
+		}
+		if total != 1 || len(rejected) != 1 || rejected[0].AuditID != "audit-002" {
+			t.Fatalf("expected 1 rejected audit event (audit-002), got total=%d records=%+v", total, rejected)
+		}
+	})
+
 	// Clean up
-	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_resource_history", "fhir_resource"} {
+	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
 		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-tenant'")
 	}
 }

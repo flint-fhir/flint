@@ -201,6 +201,7 @@ Content-Type: application/fhir+json
 * **Soft Delete**: `DELETE /fhir/r4/{tenant}/{resourceType}/{id}` (`204 No Content` + tombstone version `ETag`)
 * **Validate**: `POST /fhir/r4/{tenant}/{resourceType}/$validate` and `POST /fhir/r4/{tenant}/$validate`
 * **Search**: `GET /fhir/r4/{tenant}/{resourceType}?{searchParams}&_count=20&_offset=0`
+* **Security Audit Log (`AuditEvent`)**: `GET /fhir/r4/{tenant}/AuditEvent?entity=Patient/123&outcome=0&agent=Practitioner/dr-smith` and `GET /fhir/r4/{tenant}/AuditEvent/{id}`
 * **CapabilityStatement**: `GET /fhir/r4/{tenant}/metadata`
 * **SMART Discovery**: `GET /fhir/r4/{tenant}/.well-known/smart-configuration`
 
@@ -266,6 +267,7 @@ Flint protects endpoints through a pluggable interface:
 3. **Patient Compartment Isolation**: When a token carries a `patient_id` launch claim:
    * Reading records of another patient returns `403 Forbidden`.
    * Queries with mismatched `patient` or `subject` parameters return `403 Forbidden`.
+4. **HIPAA / ONC Security Audit Logging (`AuditEvent`)**: Every clinical REST interaction (`read`, `vread`, `update`, `delete`, `history-instance`, `create`, `search-type`, `batch`, `validate`) and security rejection (`401 Unauthorized` / `403 Forbidden`) is recorded in `fhir_audit_event` with actor identity, patient compartment, client IP, and target entity reference, and is queryable via `GET /fhir/r4/{tenant}/AuditEvent`.
 
 ### Environment Configuration
 ```bash
@@ -287,6 +289,7 @@ Flint leverages [Hegel](https://hegel.dev) (`hegel.dev/go/hegel`) for type-drive
 * **Scope Grammar Invariance**: Validates that all strings matching the formal SMART v1/v2 grammar parse deterministically.
 * **Query Filter Invariance**: Asserts that fine-grained query filters (`?category=vital-signs`) never alter base resource permissions.
 * **Search Parameter Invariance**: Verifies parser prefix and grammar preservation across generated ISO date formats, decimal quantities, units, and `_include`/`_revinclude` strings.
+* **AuditEvent Classification & Serialization Invariance**: Verifies HTTP status-to-outcome partitioning (`0`, `4`, `8`) and round-trip FHIR R4 `AuditEvent` serialization across generated inputs.
 * **No-Panic Invariance**: Fuzzes parsers with arbitrary inputs and unicode sequences to guarantee zero crashes or hangs.
 
 ---
@@ -313,6 +316,7 @@ flint/
 │   ├── activity/         # Temporal activities (WritePostgresBatch, AutoMQ CDC)
 │   └── workflow/         # Temporal IngestFHIRBundle workflow
 ├── pkg/
+│   ├── audit/            # HIPAA/ONC FHIR R4 AuditEvent classification, serialization & recorders
 │   ├── auth/             # TokenValidator, OIDC/Zitadel, and Hegel property tests
 │   └── fhirutil/         # Protobuf nil-safe accessors & helpers
 ├── proto/

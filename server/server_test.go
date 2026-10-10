@@ -995,8 +995,70 @@ func TestServer_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("AuditEvent is automatically recorded across CRUD interactions and queryable via FHIR REST", func(t *testing.T) {
+		// Query AuditEvent for crud-pat-1 from the previous subtest
+		auditSearchURL := ts.URL + "/fhir/r4/test-api/AuditEvent?entity=Patient/crud-pat-1"
+		resp, err := http.Get(auditSearchURL)
+		if err != nil {
+			t.Fatalf("GET AuditEvent search: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK on AuditEvent search, got %d", resp.StatusCode)
+		}
+		var bundle map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&bundle); err != nil {
+			t.Fatalf("decode AuditEvent bundle: %v", err)
+		}
+		if bundle["resourceType"] != "Bundle" || bundle["type"] != "searchset" {
+			t.Fatalf("expected searchset Bundle, got %v / %v", bundle["resourceType"], bundle["type"])
+		}
+		total := int(bundle["total"].(float64))
+		if total < 5 {
+			t.Fatalf("expected at least 5 AuditEvents for crud-pat-1 lifecycle, got %d", total)
+		}
+
+		entries := bundle["entry"].([]any)
+		firstEntry := entries[0].(map[string]any)
+		firstRes := firstEntry["resource"].(map[string]any)
+		if firstRes["resourceType"] != "AuditEvent" {
+			t.Fatalf("expected AuditEvent resourceType, got %v", firstRes["resourceType"])
+		}
+		auditID, _ := firstRes["id"].(string)
+		if auditID == "" {
+			t.Fatal("expected non-empty AuditEvent.id")
+		}
+
+		// Read individual AuditEvent by ID
+		readResp, err := http.Get(ts.URL + "/fhir/r4/test-api/AuditEvent/" + auditID)
+		if err != nil {
+			t.Fatalf("GET AuditEvent/%s: %v", auditID, err)
+		}
+		defer readResp.Body.Close()
+		if readResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK on GET AuditEvent/%s, got %d", auditID, readResp.StatusCode)
+		}
+		var singleAudit map[string]any
+		json.NewDecoder(readResp.Body).Decode(&singleAudit)
+		if singleAudit["id"] != auditID {
+			t.Errorf("expected AuditEvent id %s, got %v", auditID, singleAudit["id"])
+		}
+
+		// Verify reading/searching AuditEvent did NOT inflate the AuditEvent count
+		resp2, err := http.Get(auditSearchURL)
+		if err != nil {
+			t.Fatalf("second GET AuditEvent search: %v", err)
+		}
+		defer resp2.Body.Close()
+		var bundle2 map[string]any
+		json.NewDecoder(resp2.Body).Decode(&bundle2)
+		if int(bundle2["total"].(float64)) != total {
+			t.Errorf("expected AuditEvent count to remain %d after AuditEvent reads, got %v", total, bundle2["total"])
+		}
+	})
+
 	// Clean up
-	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_resource_history", "fhir_resource"} {
+	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
 		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-api'")
 	}
 }
