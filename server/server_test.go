@@ -1275,6 +1275,236 @@ func TestServer_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("Standard flat HL7 FHIR R4 JSON wire compatibility, generated id in 201 Created, and _id search", func(t *testing.T) {
+		// 1. POST Patient using standard flat FHIR R4 JSON without client-supplied id
+		flatPatient := `{
+			"resourceType": "Patient",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1988-11-23",
+			"name": [{"family": "WireStandard", "given": ["Alice"]}]
+		}`
+		resp, err := http.Post(ts.URL+"/fhir/r4/test-api/Patient", "application/fhir+json", strings.NewReader(flatPatient))
+		if err != nil {
+			t.Fatalf("POST flat Patient: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 201 Created for flat Patient JSON, got %d: %s", resp.StatusCode, bodyBytes)
+		}
+
+		var createdMap map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&createdMap); err != nil {
+			t.Fatalf("decode 201 Created body: %v", err)
+		}
+		if createdMap["resourceType"] != "Patient" {
+			t.Errorf("expected resourceType=Patient in 201 response body, got %v", createdMap["resourceType"])
+		}
+		// Verify server-generated ID is present in the 201 Created response body
+		var generatedID string
+		switch idVal := createdMap["id"].(type) {
+		case string:
+			generatedID = idVal
+		case map[string]any:
+			generatedID, _ = idVal["value"].(string)
+		}
+		if generatedID == "" {
+			t.Fatalf("expected server-generated id in 201 Created response body, got %+v", createdMap["id"])
+		}
+
+		// 2. Search by _id=<generatedID> and verify resourceType is injected on GET
+		searchResp, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient?_id=" + generatedID)
+		if err != nil {
+			t.Fatalf("GET Patient?_id=%s: %v", generatedID, err)
+		}
+		defer searchResp.Body.Close()
+		var searchBundle map[string]any
+		json.NewDecoder(searchResp.Body).Decode(&searchBundle)
+		if int(searchBundle["total"].(float64)) != 1 {
+			t.Fatalf("expected _id search to match 1 Patient, got %v", searchBundle["total"])
+		}
+
+		// 3. POST Observation using standard flat FHIR R4 JSON with subject.reference = "Patient/<generatedID>"
+		flatObs := `{
+			"resourceType": "Observation",
+			"status": "final",
+			"code": {
+				"coding": [{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}]
+			},
+			"subject": {"reference": "Patient/` + generatedID + `"},
+			"valueQuantity": {"value": 74.0, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+		}`
+		obsResp, err := http.Post(ts.URL+"/fhir/r4/test-api/Observation", "application/fhir+json", strings.NewReader(flatObs))
+		if err != nil {
+			t.Fatalf("POST flat Observation: %v", err)
+		}
+		defer obsResp.Body.Close()
+		if obsResp.StatusCode != http.StatusCreated {
+			bodyBytes, _ := io.ReadAll(obsResp.Body)
+			t.Fatalf("expected 201 Created for flat Observation JSON, got %d: %s", obsResp.StatusCode, bodyBytes)
+		}
+
+		// Verify the flat Observation's subject reference was indexed and is searchable by patient=
+		obsSearch, err := http.Get(ts.URL + "/fhir/r4/test-api/Observation?patient=Patient/" + generatedID)
+		if err != nil {
+			t.Fatalf("GET Observation?patient: %v", err)
+		}
+		defer obsSearch.Body.Close()
+		var obsBundle map[string]any
+		json.NewDecoder(obsSearch.Body).Decode(&obsBundle)
+		if int(obsBundle["total"].(float64)) != 1 {
+			t.Fatalf("expected 1 Observation linked to flat Patient/%s, got %v", generatedID, obsBundle["total"])
+		}
+	})
+
+	t.Run("POST with duplicate existing ID returns 409 Conflict instead of overwriting", func(t *testing.T) {
+		patJSON := `{"resourceType":"Patient","id":"dup-post-id-1","name":[{"family":"Original"}]}`
+		resp1, err := http.Post(ts.URL+"/fhir/r4/test-api/Patient", "application/fhir+json", strings.NewReader(patJSON))
+		if err != nil {
+			t.Fatalf("first POST: %v", err)
+		}
+		resp1.Body.Close()
+		if resp1.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 Created on first POST, got %d", resp1.StatusCode)
+		}
+
+		// Second POST with same ID must return 409 Conflict and NOT overwrite version 1
+		overwriteJSON := `{"resourceType":"Patient","id":"dup-post-id-1","name":[{"family":"Overwritten"}]}`
+		resp2, err := http.Post(ts.URL+"/fhir/r4/test-api/Patient", "application/fhir+json", strings.NewReader(overwriteJSON))
+		if err != nil {
+			t.Fatalf("second POST: %v", err)
+		}
+		resp2.Body.Close()
+		if resp2.StatusCode != http.StatusConflict {
+			t.Fatalf("expected 409 Conflict on duplicate POST ID, got %d", resp2.StatusCode)
+		}
+
+		// Verify version is still W/"1" and family is still Original
+		getResp, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient/dup-post-id-1")
+		if err != nil {
+			t.Fatalf("GET dup-post-id-1: %v", err)
+		}
+		defer getResp.Body.Close()
+		if getResp.Header.Get("ETag") != `W/"1"` {
+			t.Errorf("expected ETag W/\"1\" (unmodified), got %q", getResp.Header.Get("ETag"))
+		}
+		bodyBytes, _ := io.ReadAll(getResp.Body)
+		if !strings.Contains(string(bodyBytes), "Original") {
+			t.Errorf("expected resource to retain Original family name, got %s", string(bodyBytes))
+		}
+	})
+
+	t.Run("Transaction Bundle ACID rollback of DELETE and intra-bundle ifNoneExist visibility", func(t *testing.T) {
+		// 1. Seed a patient that will be targeted by DELETE in entry[0] of a failing transaction bundle
+		seedPat := `{"resourceType":"Patient","id":"tx-acid-pat-1","name":[{"family":"Survivor"}]}`
+		respSeed, err := http.Post(ts.URL+"/fhir/r4/test-api/Patient", "application/fhir+json", strings.NewReader(seedPat))
+		if err != nil {
+			t.Fatalf("seed tx-acid-pat-1: %v", err)
+		}
+		respSeed.Body.Close()
+
+		// Transaction bundle: entry[0] DELETEs tx-acid-pat-1, entry[1] PUTs with stale If-Match W/"999" -> 412
+		failingTx := `{
+			"resourceType": "Bundle",
+			"type": "transaction",
+			"entry": [
+				{
+					"request": {
+						"method": "DELETE",
+						"url": "Patient/tx-acid-pat-1"
+					}
+				},
+				{
+					"resource": {
+						"resourceType": "Patient",
+						"id": "tx-acid-pat-1",
+						"name": [{"family": "StaleUpdate"}]
+					},
+					"request": {
+						"method": "PUT",
+						"url": "Patient/tx-acid-pat-1",
+						"ifMatch": "W/\"999\""
+					}
+				}
+			]
+		}`
+		respFail, err := http.Post(ts.URL+"/fhir/r4/test-api", "application/fhir+json", strings.NewReader(failingTx))
+		if err != nil {
+			t.Fatalf("POST failing transaction bundle: %v", err)
+		}
+		respFail.Body.Close()
+		if respFail.StatusCode != http.StatusPreconditionFailed {
+			t.Fatalf("expected 412 Precondition Failed on failing transaction bundle, got %d", respFail.StatusCode)
+		}
+
+		// Verify tx-acid-pat-1 is STILL alive (200 OK, not 410 Gone!) because DELETE rolled back
+		respCheck, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient/tx-acid-pat-1")
+		if err != nil {
+			t.Fatalf("GET tx-acid-pat-1 after rollback: %v", err)
+		}
+		respCheck.Body.Close()
+		if respCheck.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK for tx-acid-pat-1 after transaction rollback, got %d", respCheck.StatusCode)
+		}
+
+		// 2. Intra-bundle ifNoneExist: entry[0] creates a Patient, entry[1] uses ifNoneExist for the same family name
+		// and must see entry[0] inside the same transaction!
+		intraTx := `{
+			"resourceType": "Bundle",
+			"type": "transaction",
+			"entry": [
+				{
+					"resource": {
+						"resourceType": "Patient",
+						"id": "intra-cond-1",
+						"name": [{"family": "IntraBundleDedup"}]
+					},
+					"request": {
+						"method": "POST",
+						"url": "Patient",
+						"ifNoneExist": "family=IntraBundleDedup"
+					}
+				},
+				{
+					"resource": {
+						"resourceType": "Patient",
+						"id": "intra-cond-2",
+						"name": [{"family": "IntraBundleDedup"}]
+					},
+					"request": {
+						"method": "POST",
+						"url": "Patient",
+						"ifNoneExist": "family=IntraBundleDedup"
+					}
+				}
+			]
+		}`
+		respIntra, err := http.Post(ts.URL+"/fhir/r4/test-api", "application/fhir+json", strings.NewReader(intraTx))
+		if err != nil {
+			t.Fatalf("POST intra-bundle ifNoneExist: %v", err)
+		}
+		defer respIntra.Body.Close()
+		if respIntra.StatusCode != http.StatusOK {
+			bodyBytes, _ := io.ReadAll(respIntra.Body)
+			t.Fatalf("expected 200 OK on intra-bundle ifNoneExist, got %d: %s", respIntra.StatusCode, bodyBytes)
+		}
+		var intraBundle map[string]any
+		json.NewDecoder(respIntra.Body).Decode(&intraBundle)
+		entries := intraBundle["entry"].([]any)
+		e0 := entries[0].(map[string]any)["response"].(map[string]any)
+		e1 := entries[1].(map[string]any)["response"].(map[string]any)
+		if e0["status"] != "201 Created" {
+			t.Errorf("expected entry[0] status 201 Created, got %v", e0["status"])
+		}
+		if e1["status"] != "200 OK" {
+			t.Errorf("expected entry[1] status 200 OK (matched entry[0] in same tx), got %v", e1["status"])
+		}
+		if e0["location"] != e1["location"] {
+			t.Errorf("expected entry[0] and entry[1] to share location %v, got %v", e0["location"], e1["location"])
+		}
+	})
+
 	// Clean up
 	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
 		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-api'")

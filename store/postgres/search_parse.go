@@ -239,6 +239,12 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 		References: make(map[string]string),
 	}
 
+	if idVal := strings.TrimSpace(q.Get("_id")); idVal != "" {
+		if idx := strings.LastIndex(idVal, "/"); idx != -1 {
+			idVal = idVal[idx+1:]
+		}
+		params.ID = idVal
+	}
 	if v := q.Get("_count"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			params.Count = n

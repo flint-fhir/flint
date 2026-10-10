@@ -24,6 +24,10 @@ var (
 	ErrResourceDeleted = errors.New("resource deleted")
 	// ErrInvalidETag is returned when an ETag / If-Match header cannot be parsed as a positive version integer.
 	ErrInvalidETag = errors.New("invalid ETag")
+	// ErrResourceAlreadyExists is returned when a CreateOnly (POST) write attempts to overwrite an existing active resource.
+	ErrResourceAlreadyExists = errors.New("resource already exists")
+	// ErrPreconditionFailed is returned when a conditional operation (such as If-None-Exist) matches multiple existing resources.
+	ErrPreconditionFailed = errors.New("precondition failed")
 )
 
 // SearchIndexes holds all extracted search index rows for a resource.
@@ -49,6 +53,7 @@ type ResourceInput struct {
 	SearchIndexes   *SearchIndexes // extracted search index rows
 	IdempotencyKey  string         // Bundle ID for dedup
 	ExpectedVersion int            // Optional: if > 0, enforces optimistic concurrency (If-Match)
+	CreateOnly      bool           // Optional: if true, returns ErrResourceAlreadyExists when active resource exists
 }
 
 // ResourceRecord represents a stored FHIR resource version and its metadata.
@@ -61,6 +66,34 @@ type ResourceRecord struct {
 	ResourceProto []byte
 	IsDeleted     bool
 	Created       bool // True if this write created a new resource or resurrected a deleted one
+}
+
+// BundleOperationType identifies whether a Bundle entry writes or deletes a resource.
+type BundleOperationType string
+
+const (
+	BundleOpWrite  BundleOperationType = "WRITE"
+	BundleOpDelete BundleOperationType = "DELETE"
+)
+
+// BundleOperation represents a single entry inside a FHIR Transaction or Batch Bundle.
+type BundleOperation struct {
+	OpType      BundleOperationType
+	Method      string        // "POST", "PUT", "DELETE"
+	Input       ResourceInput // Resource input for WRITE or target identity for DELETE
+	IfNoneExist *SearchParams // Optional conditional create criteria for POST
+}
+
+// BundleOpResult holds the outcome of a single BundleOperation.
+type BundleOpResult struct {
+	Status        string
+	ResType       string
+	ResID         string
+	ResVersion    int
+	LastUpdated   time.Time
+	ResourceProto []byte
+	Record        *ResourceRecord
+	Created       bool
 }
 
 // FormatETag formats a positive integer resource version as a weak HTTP ETag per FHIR R4 (e.g., W/"1").
@@ -135,6 +168,138 @@ func (s *Store) WriteResourceWithMeta(ctx context.Context, input ResourceInput) 
 	return rec, nil
 }
 
+// ConditionalCreateResource evaluates an If-None-Exist search query and creates the resource
+// inside a single transaction guarded by a transaction-scoped advisory lock, preventing TOCTOU
+// duplicate creation races. Returns (record, created, error).
+func (s *Store) ConditionalCreateResource(ctx context.Context, input ResourceInput, condParams SearchParams) (*ResourceRecord, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, false, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	rec, created, err := s.conditionalCreateInTx(ctx, tx, input, condParams)
+	if err != nil {
+		return nil, false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	return rec, created, nil
+}
+
+func (s *Store) conditionalCreateInTx(ctx context.Context, tx *sql.Tx, input ResourceInput, condParams SearchParams) (*ResourceRecord, bool, error) {
+	lockKey := input.TenantID + ":" + input.ResType
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
+		return nil, false, fmt.Errorf("acquire conditional create lock: %w", err)
+	}
+
+	sr, err := s.searchWithExecutor(ctx, tx, condParams)
+	if err != nil {
+		return nil, false, err
+	}
+	if sr.Total > 1 {
+		return nil, false, fmt.Errorf("%w: If-None-Exist matched %d existing %s resources", ErrPreconditionFailed, sr.Total, input.ResType)
+	}
+	if sr.Total == 1 && len(sr.Matches) == 1 {
+		existingID := sr.Matches[0].ResID
+		existingRec, err := s.readResourceWithMetaInTx(ctx, tx, input.TenantID, input.ResType, existingID)
+		if err != nil {
+			return nil, false, err
+		}
+		return existingRec, false, nil
+	}
+
+	rec, err := writeResourceInTx(ctx, tx, input)
+	if err != nil {
+		return nil, false, err
+	}
+	return rec, true, nil
+}
+
+// ExecuteTransactionBundle executes a sequence of Bundle operations (POST, PUT, DELETE,
+// including If-Match and If-None-Exist) atomically within a single SQL transaction.
+// If any entry fails, all prior writes and deletes in the Bundle are rolled back.
+func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []BundleOperation) ([]BundleOpResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin bundle tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	results := make([]BundleOpResult, 0, len(ops))
+	for i, op := range ops {
+		if op.OpType == BundleOpDelete || strings.EqualFold(op.Method, "DELETE") {
+			rec, err := s.deleteResourceInTx(ctx, tx, op.Input.TenantID, op.Input.ResType, op.Input.ResID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("entry[%d] delete %s/%s: %w", i, op.Input.ResType, op.Input.ResID, err)
+			}
+			ver := 0
+			var lastUpd time.Time
+			if rec != nil {
+				ver = rec.ResVersion
+				lastUpd = rec.LastUpdated
+			}
+			results = append(results, BundleOpResult{
+				Status:      "204 No Content",
+				ResType:     op.Input.ResType,
+				ResID:       op.Input.ResID,
+				ResVersion:  ver,
+				LastUpdated: lastUpd,
+				Record:      rec,
+			})
+			continue
+		}
+
+		if strings.EqualFold(op.Method, "POST") && op.IfNoneExist != nil {
+			rec, created, err := s.conditionalCreateInTx(ctx, tx, op.Input, *op.IfNoneExist)
+			if err != nil {
+				return nil, fmt.Errorf("entry[%d] conditional create %s: %w", i, op.Input.ResType, err)
+			}
+			status := "200 OK"
+			if created {
+				status = "201 Created"
+			}
+			results = append(results, BundleOpResult{
+				Status:        status,
+				ResType:       rec.ResType,
+				ResID:         rec.ResID,
+				ResVersion:    rec.ResVersion,
+				LastUpdated:   rec.LastUpdated,
+				ResourceProto: rec.ResourceProto,
+				Record:        rec,
+				Created:       created,
+			})
+			continue
+		}
+
+		rec, err := writeResourceInTx(ctx, tx, op.Input)
+		if err != nil {
+			return nil, fmt.Errorf("entry[%d] resource %s/%s: %w", i, op.Input.ResType, op.Input.ResID, err)
+		}
+		status := "200 OK"
+		if strings.EqualFold(op.Method, "POST") || rec.Created {
+			status = "201 Created"
+		}
+		results = append(results, BundleOpResult{
+			Status:        status,
+			ResType:       rec.ResType,
+			ResID:         rec.ResID,
+			ResVersion:    rec.ResVersion,
+			LastUpdated:   rec.LastUpdated,
+			ResourceProto: rec.ResourceProto,
+			Record:        rec,
+			Created:       rec.Created,
+		})
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit bundle tx: %w", err)
+	}
+	return results, nil
+}
+
 // WriteBatch writes multiple resources in a single transaction.
 // This is the hot path for FHIR Bundle ingestion (R8: batch per Bundle).
 func (s *Store) WriteBatch(ctx context.Context, inputs []ResourceInput) error {
@@ -173,6 +338,8 @@ func writeResourceInTx(ctx context.Context, tx *sql.Tx, input ResourceInput) (*R
 	} else {
 		if curDeleted {
 			created = true
+		} else if input.CreateOnly {
+			return nil, fmt.Errorf("%w: %s/%s already exists", ErrResourceAlreadyExists, input.ResType, input.ResID)
 		}
 		if input.ExpectedVersion > 0 && (curDeleted || curVersion != input.ExpectedVersion) {
 			return nil, fmt.Errorf("%w: expected version %d, current version %d", ErrVersionConflict, input.ExpectedVersion, curVersion)
@@ -252,12 +419,20 @@ func (s *Store) ReadResource(ctx context.Context, tenantID, resType, resID strin
 // Returns sql.ErrNoRows if the resource never existed, or ErrResourceDeleted
 // (alongside the tombstone ResourceRecord) if the resource was soft-deleted.
 func (s *Store) ReadResourceWithMeta(ctx context.Context, tenantID, resType, resID string) (*ResourceRecord, error) {
+	return s.readResourceWithMetaWithExec(ctx, s.db, tenantID, resType, resID)
+}
+
+func (s *Store) readResourceWithMetaInTx(ctx context.Context, tx *sql.Tx, tenantID, resType, resID string) (*ResourceRecord, error) {
+	return s.readResourceWithMetaWithExec(ctx, tx, tenantID, resType, resID)
+}
+
+func (s *Store) readResourceWithMetaWithExec(ctx context.Context, exec queryExecer, tenantID, resType, resID string) (*ResourceRecord, error) {
 	rec := &ResourceRecord{
 		TenantID: tenantID,
 		ResType:  resType,
 		ResID:    resID,
 	}
-	err := s.db.QueryRowContext(ctx, `
+	err := exec.QueryRowContext(ctx, `
 		SELECT resource_proto, res_version, last_updated, is_deleted
 		FROM fhir_resource
 		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
@@ -306,6 +481,9 @@ func (s *Store) ReadResourceVersion(ctx context.Context, tenantID, resType, resI
 func (s *Store) ListResourceHistory(ctx context.Context, tenantID, resType, resID string, limit, offset int) ([]ResourceRecord, int, error) {
 	if limit <= 0 {
 		limit = 100
+	}
+	if limit > MaxSearchCount {
+		limit = MaxSearchCount
 	}
 	if offset < 0 {
 		offset = 0
@@ -368,10 +546,23 @@ func (s *Store) DeleteResourceWithMeta(ctx context.Context, tenantID, resType, r
 	}
 	defer tx.Rollback() //nolint:errcheck
 
+	rec, err := s.deleteResourceInTx(ctx, tx, tenantID, resType, resID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return rec, nil
+}
+
+func (s *Store) deleteResourceInTx(ctx context.Context, tx *sql.Tx, tenantID, resType, resID string) (*ResourceRecord, error) {
 	var curVersion int
 	var curUpdated time.Time
 	var curDeleted bool
-	err = tx.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		SELECT res_version, last_updated, is_deleted
 		FROM fhir_resource
 		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
@@ -420,10 +611,6 @@ func (s *Store) DeleteResourceWithMeta(ctx context.Context, tenantID, resType, r
 		return nil, fmt.Errorf("delete indexes: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
 	return &ResourceRecord{
 		TenantID:    tenantID,
 		ResType:     resType,
@@ -455,6 +642,10 @@ func deleteSearchIndexes(ctx context.Context, tx *sql.Tx, tenantID, resType, res
 	}
 	return nil
 }
+
+// maxBulkInsertRows bounds the number of index rows per INSERT statement
+// so parameter counts stay well under PostgreSQL's 65,535 parameter limit.
+const maxBulkInsertRows = 2000
 
 // insertSearchIndexes bulk inserts all search index rows for a resource.
 func insertSearchIndexes(ctx context.Context, tx *sql.Tx, idx *SearchIndexes) error {
@@ -493,108 +684,144 @@ func insertSearchIndexes(ctx context.Context, tx *sql.Tx, idx *SearchIndexes) er
 
 // bulkInsertStrings inserts string search index rows using a multi-row VALUES clause.
 func bulkInsertStrings(ctx context.Context, tx *sql.Tx, rows []SpidxString) error {
-	var b strings.Builder
-	args := make([]any, 0, len(rows)*5)
-	b.WriteString("INSERT INTO spidx_string (tenant_id, res_type, res_id, sp_name, sp_value) VALUES ")
-	for i, r := range rows {
-		if i > 0 {
-			b.WriteString(", ")
+	for start := 0; start < len(rows); start += maxBulkInsertRows {
+		end := min(start+maxBulkInsertRows, len(rows))
+		chunk := rows[start:end]
+		var b strings.Builder
+		args := make([]any, 0, len(chunk)*5)
+		b.WriteString("INSERT INTO spidx_string (tenant_id, res_type, res_id, sp_name, sp_value) VALUES ")
+		for i, r := range chunk {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			n := i * 5
+			fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5)
+			args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, r.SpValue)
 		}
-		n := i * 5
-		fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5)
-		args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, r.SpValue)
+		b.WriteString(" ON CONFLICT DO NOTHING")
+		if _, err := tx.ExecContext(ctx, b.String(), args...); err != nil {
+			return err
+		}
 	}
-	b.WriteString(" ON CONFLICT DO NOTHING")
-	_, err := tx.ExecContext(ctx, b.String(), args...)
-	return err
+	return nil
 }
 
 // bulkInsertTokens inserts token search index rows.
 func bulkInsertTokens(ctx context.Context, tx *sql.Tx, rows []SpidxToken) error {
-	var b strings.Builder
-	args := make([]any, 0, len(rows)*6)
-	b.WriteString("INSERT INTO spidx_token (tenant_id, res_type, res_id, sp_name, sp_system, sp_value) VALUES ")
-	for i, r := range rows {
-		if i > 0 {
-			b.WriteString(", ")
+	for start := 0; start < len(rows); start += maxBulkInsertRows {
+		end := min(start+maxBulkInsertRows, len(rows))
+		chunk := rows[start:end]
+		var b strings.Builder
+		args := make([]any, 0, len(chunk)*6)
+		b.WriteString("INSERT INTO spidx_token (tenant_id, res_type, res_id, sp_name, sp_system, sp_value) VALUES ")
+		for i, r := range chunk {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			n := i * 6
+			fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5, n+6)
+			args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, r.SpSystem, r.SpValue)
 		}
-		n := i * 6
-		fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5, n+6)
-		args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, r.SpSystem, r.SpValue)
+		b.WriteString(" ON CONFLICT DO NOTHING")
+		if _, err := tx.ExecContext(ctx, b.String(), args...); err != nil {
+			return err
+		}
 	}
-	b.WriteString(" ON CONFLICT DO NOTHING")
-	_, err := tx.ExecContext(ctx, b.String(), args...)
-	return err
+	return nil
 }
 
 // bulkInsertDates inserts date search index rows.
 func bulkInsertDates(ctx context.Context, tx *sql.Tx, rows []SpidxDate) error {
-	var b strings.Builder
-	args := make([]any, 0, len(rows)*6)
-	b.WriteString("INSERT INTO spidx_date (tenant_id, res_type, res_id, sp_name, sp_low, sp_high) VALUES ")
-	for i, r := range rows {
-		if i > 0 {
-			b.WriteString(", ")
+	for start := 0; start < len(rows); start += maxBulkInsertRows {
+		end := min(start+maxBulkInsertRows, len(rows))
+		chunk := rows[start:end]
+		var b strings.Builder
+		args := make([]any, 0, len(chunk)*6)
+		b.WriteString("INSERT INTO spidx_date (tenant_id, res_type, res_id, sp_name, sp_low, sp_high) VALUES ")
+		for i, r := range chunk {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			n := i * 6
+			fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5, n+6)
+			args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, r.SpLow, r.SpHigh)
 		}
-		n := i * 6
-		fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5, n+6)
-		args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, r.SpLow, r.SpHigh)
+		b.WriteString(" ON CONFLICT DO NOTHING")
+		if _, err := tx.ExecContext(ctx, b.String(), args...); err != nil {
+			return err
+		}
 	}
-	b.WriteString(" ON CONFLICT DO NOTHING")
-	_, err := tx.ExecContext(ctx, b.String(), args...)
-	return err
+	return nil
 }
 
 // bulkInsertReferences inserts reference search index rows.
 func bulkInsertReferences(ctx context.Context, tx *sql.Tx, rows []SpidxReference) error {
-	var b strings.Builder
-	args := make([]any, 0, len(rows)*6)
-	b.WriteString("INSERT INTO spidx_reference (tenant_id, res_type, res_id, sp_name, target_type, target_id) VALUES ")
-	for i, r := range rows {
-		if i > 0 {
-			b.WriteString(", ")
+	for start := 0; start < len(rows); start += maxBulkInsertRows {
+		end := min(start+maxBulkInsertRows, len(rows))
+		chunk := rows[start:end]
+		var b strings.Builder
+		args := make([]any, 0, len(chunk)*6)
+		b.WriteString("INSERT INTO spidx_reference (tenant_id, res_type, res_id, sp_name, target_type, target_id) VALUES ")
+		for i, r := range chunk {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			n := i * 6
+			fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5, n+6)
+			args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, r.TargetType, r.TargetID)
 		}
-		n := i * 6
-		fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5, n+6)
-		args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, r.TargetType, r.TargetID)
+		b.WriteString(" ON CONFLICT DO NOTHING")
+		if _, err := tx.ExecContext(ctx, b.String(), args...); err != nil {
+			return err
+		}
 	}
-	b.WriteString(" ON CONFLICT DO NOTHING")
-	_, err := tx.ExecContext(ctx, b.String(), args...)
-	return err
+	return nil
 }
 
 // bulkInsertQuantities inserts quantity search index rows.
 func bulkInsertQuantities(ctx context.Context, tx *sql.Tx, rows []SpidxQuantity) error {
-	var b strings.Builder
-	args := make([]any, 0, len(rows)*7)
-	b.WriteString("INSERT INTO spidx_quantity (tenant_id, res_type, res_id, sp_name, sp_system, sp_code, sp_value) VALUES ")
-	for i, r := range rows {
-		if i > 0 {
-			b.WriteString(", ")
+	for start := 0; start < len(rows); start += maxBulkInsertRows {
+		end := min(start+maxBulkInsertRows, len(rows))
+		chunk := rows[start:end]
+		var b strings.Builder
+		args := make([]any, 0, len(chunk)*7)
+		b.WriteString("INSERT INTO spidx_quantity (tenant_id, res_type, res_id, sp_name, sp_system, sp_code, sp_value) VALUES ")
+		for i, r := range chunk {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			n := i * 7
+			fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5, n+6, n+7)
+			args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, r.SpSystem, r.SpCode, r.SpValue)
 		}
-		n := i * 7
-		fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5, n+6, n+7)
-		args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, r.SpSystem, r.SpCode, r.SpValue)
+		b.WriteString(" ON CONFLICT DO NOTHING")
+		if _, err := tx.ExecContext(ctx, b.String(), args...); err != nil {
+			return err
+		}
 	}
-	b.WriteString(" ON CONFLICT DO NOTHING")
-	_, err := tx.ExecContext(ctx, b.String(), args...)
-	return err
+	return nil
 }
 
 // bulkInsertURIs inserts URI search index rows.
 func bulkInsertURIs(ctx context.Context, tx *sql.Tx, rows []SpidxURI) error {
-	var b strings.Builder
-	args := make([]any, 0, len(rows)*5)
-	b.WriteString("INSERT INTO spidx_uri (tenant_id, res_type, res_id, sp_name, sp_value) VALUES ")
-	for i, r := range rows {
-		if i > 0 {
-			b.WriteString(", ")
+	for start := 0; start < len(rows); start += maxBulkInsertRows {
+		end := min(start+maxBulkInsertRows, len(rows))
+		chunk := rows[start:end]
+		var b strings.Builder
+		args := make([]any, 0, len(chunk)*5)
+		b.WriteString("INSERT INTO spidx_uri (tenant_id, res_type, res_id, sp_name, sp_value) VALUES ")
+		for i, r := range chunk {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			n := i * 5
+			fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5)
+			args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, r.SpValue)
 		}
-		n := i * 5
-		fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5)
-		args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, r.SpValue)
+		b.WriteString(" ON CONFLICT DO NOTHING")
+		if _, err := tx.ExecContext(ctx, b.String(), args...); err != nil {
+			return err
+		}
 	}
-	b.WriteString(" ON CONFLICT DO NOTHING")
-	_, err := tx.ExecContext(ctx, b.String(), args...)
-	return err
+	return nil
 }

@@ -99,6 +99,9 @@ func (s *Store) QueryAuditEvents(ctx context.Context, params AuditQueryParams) (
 	if count <= 0 {
 		count = 100
 	}
+	if count > MaxSearchCount {
+		count = MaxSearchCount
+	}
 	offset := max(params.Offset, 0)
 
 	var clauses []string

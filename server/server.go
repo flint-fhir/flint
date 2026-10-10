@@ -26,6 +26,7 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/audit"
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/store/postgres"
 )
@@ -286,7 +287,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleCreate handles POST /{resourceType} — create a FHIR resource.
-// Accepts FHIR JSON, converts to proto, stores in Postgres.
+// Accepts FHIR JSON (standard flat R4 JSON or google/fhir protojson), converts to proto, stores in Postgres.
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	resType := r.PathValue("resourceType")
@@ -314,55 +315,21 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Unmarshal JSON → proto
-	msg := dynamicpb.NewMessage(md)
-	unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
-	if err := unmarshaler.Unmarshal(body, msg); err != nil {
+	// Normalize standard flat HL7 FHIR R4 JSON to google/fhir protojson shape
+	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, body)
+	if err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "structure",
 			fmt.Sprintf("invalid FHIR JSON: %v", err))
 		return
 	}
 
-	// Evaluate Conditional Create (If-None-Exist header) per FHIR R4 3.1.0.5.1
-	if ifNoneExist := strings.TrimSpace(r.Header.Get("If-None-Exist")); ifNoneExist != "" && s.store != nil {
-		condParams, err := postgres.ParseIfNoneExist(tenant, resType, ifNoneExist)
-		if err != nil {
-			writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
-			return
-		}
-		sr, err := s.store.Search(r.Context(), condParams)
-		if err != nil {
-			s.logger.Error("conditional create search", "error", err, "type", resType, "ifNoneExist", ifNoneExist)
-			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "conditional create search failed")
-			return
-		}
-		if sr.Total > 1 {
-			writeOperationOutcome(w, http.StatusPreconditionFailed, "duplicate",
-				fmt.Sprintf("If-None-Exist matched %d existing %s resources", sr.Total, resType))
-			return
-		}
-		if sr.Total == 1 && len(sr.Matches) == 1 {
-			existingID := sr.Matches[0].ResID
-			existingRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, existingID)
-			if err != nil {
-				s.logger.Error("conditional create read existing", "error", err, "type", resType, "id", existingID)
-				writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read matched resource")
-				return
-			}
-			jsonBytes, err := s.protoToJSON(resType, existingRec.ResourceProto)
-			if err != nil {
-				s.logger.Error("conditional create proto to json", "error", err, "type", resType, "id", existingID)
-				writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
-				return
-			}
-			w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-			w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, existingID))
-			w.Header().Set("ETag", postgres.FormatETag(existingRec.ResVersion))
-			w.Header().Set("Last-Modified", existingRec.LastUpdated.UTC().Format(http.TimeFormat))
-			w.WriteHeader(http.StatusOK)
-			w.Write(jsonBytes)
-			return
-		}
+	// Unmarshal JSON → proto
+	msg := dynamicpb.NewMessage(md)
+	unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+	if err := unmarshaler.Unmarshal(normalizedBody, msg); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "structure",
+			fmt.Sprintf("invalid FHIR JSON: %v", err))
+		return
 	}
 
 	// Extract resource ID from the proto
@@ -392,27 +359,105 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Store in Postgres
-	rec, err := s.store.WriteResourceWithMeta(r.Context(), postgres.ResourceInput{
+	// Enforce patient compartment isolation on incoming resource payload
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
+			if !postgres.IndexesBelongToPatientCompartment(resType, resID, idx, cleanID(secCtx.GetPatientId())) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("patient-scoped token (%s) cannot create %s outside patient compartment",
+						secCtx.GetPatientId(), resType))
+				return
+			}
+		}
+	}
+
+	input := postgres.ResourceInput{
 		TenantID:      tenant,
 		ResType:       resType,
 		ResID:         resID,
 		ResourceProto: protoBytes,
 		SearchIndexes: idx,
-	})
+		CreateOnly:    true,
+	}
+
+	// Evaluate Conditional Create (If-None-Exist header) atomically per FHIR R4 3.1.0.5.1
+	if ifNoneExist := strings.TrimSpace(r.Header.Get("If-None-Exist")); ifNoneExist != "" && s.store != nil {
+		condParams, err := postgres.ParseIfNoneExist(tenant, resType, ifNoneExist)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+			return
+		}
+		if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+			allowedPatientID := cleanID(secCtx.GetPatientId())
+			if strings.EqualFold(resType, "Patient") {
+				condParams.ID = allowedPatientID
+			} else if postgres.IsPatientCompartmentResourceType(resType) {
+				if condParams.References == nil {
+					condParams.References = make(map[string]string)
+				}
+				if condParams.References["subject"] == "" {
+					condParams.References["patient"] = "Patient/" + allowedPatientID
+				}
+			}
+		}
+
+		rec, created, err := s.store.ConditionalCreateResource(r.Context(), input, condParams)
+		if errors.Is(err, postgres.ErrPreconditionFailed) {
+			writeOperationOutcome(w, http.StatusPreconditionFailed, "duplicate", err.Error())
+			return
+		}
+		if errors.Is(err, postgres.ErrResourceAlreadyExists) {
+			writeOperationOutcome(w, http.StatusConflict, "duplicate", err.Error())
+			return
+		}
+		if err != nil {
+			s.logger.Error("conditional create", "error", err, "type", resType, "ifNoneExist", ifNoneExist)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "conditional create failed")
+			return
+		}
+		jsonBytes, err := s.protoToJSON(resType, rec.ResourceProto)
+		if err != nil {
+			s.logger.Error("conditional create proto to json", "error", err, "type", resType, "id", rec.ResID)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
+			return
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, rec.ResID))
+		w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+		w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+		if created {
+			w.WriteHeader(http.StatusCreated)
+		} else {
+			w.WriteHeader(http.StatusOK)
+		}
+		w.Write(jsonBytes)
+		return
+	}
+
+	// Store in Postgres (CreateOnly = true ensures POST does not overwrite existing active resources)
+	rec, err := s.store.WriteResourceWithMeta(r.Context(), input)
+	if errors.Is(err, postgres.ErrResourceAlreadyExists) {
+		writeOperationOutcome(w, http.StatusConflict, "duplicate", err.Error())
+		return
+	}
 	if err != nil {
 		s.logger.Error("create resource", "error", err, "type", resType, "id", resID)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to store resource")
 		return
 	}
 
-	// Return the resource as JSON with 201 Created, ETag, and Last-Modified
+	jsonBytes, err := s.protoToJSON(resType, rec.ResourceProto)
+	if err != nil {
+		jsonBytes = body
+	}
+
+	// Return the serialized resource as JSON with 201 Created, Location, ETag, and Last-Modified
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, resID))
 	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 	w.WriteHeader(http.StatusCreated)
-	w.Write(body) // echo back the input JSON
+	w.Write(jsonBytes)
 }
 
 // handleUpdate handles PUT /{resourceType}/{id} — update or create-on-update a FHIR resource.
@@ -454,9 +499,16 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, body)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "structure",
+			fmt.Sprintf("invalid FHIR JSON: %v", err))
+		return
+	}
+
 	msg := dynamicpb.NewMessage(md)
 	unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
-	if err := unmarshaler.Unmarshal(body, msg); err != nil {
+	if err := unmarshaler.Unmarshal(normalizedBody, msg); err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "structure",
 			fmt.Sprintf("invalid FHIR JSON: %v", err))
 		return
@@ -485,6 +537,18 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		if extractErr != nil {
 			s.logger.Warn("index extraction failed on update, storing without indexes",
 				"type", resType, "id", resID, "error", extractErr)
+		}
+	}
+
+	// Enforce patient compartment isolation on incoming resource payload
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
+			if !postgres.IndexesBelongToPatientCompartment(resType, resID, idx, cleanID(secCtx.GetPatientId())) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("patient-scoped token (%s) cannot update %s/%s outside patient compartment",
+						secCtx.GetPatientId(), resType, resID))
+				return
+			}
 		}
 	}
 
@@ -642,6 +706,15 @@ func (s *Server) handleReadAuditEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		if cleanID(rec.AgentPatient) != cleanID(secCtx.GetPatientId()) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot read AuditEvent/%s outside patient compartment",
+					secCtx.GetPatientId(), auditID))
+			return
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(audit.ToFHIRResource(*rec))
@@ -661,6 +734,16 @@ func (s *Server) handleSearchAuditEvents(w http.ResponseWriter, r *http.Request)
 		AgentPatient: q.Get("patient"),
 		EntityType:   q.Get("entity-type"),
 		EntityID:     q.Get("entity-id"),
+	}
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		allowedPatientID := cleanID(secCtx.GetPatientId())
+		if params.AgentPatient != "" && cleanID(params.AgentPatient) != allowedPatientID {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot query AuditEvents for patient %s",
+					secCtx.GetPatientId(), params.AgentPatient))
+			return
+		}
+		params.AgentPatient = allowedPatientID
 	}
 	if entityRef := q.Get("entity"); entityRef != "" {
 		if parts := strings.SplitN(entityRef, "/", 2); len(parts) == 2 {
@@ -784,6 +867,27 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	resType := r.PathValue("resourceType")
 
 	params := postgres.BuildSearchParamsFromQuery(tenant, resType, r.URL.Query())
+
+	// Enforce patient compartment scoping on searches when using a patient-restricted SMART token
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		allowedPatientID := cleanID(secCtx.GetPatientId())
+		if strings.EqualFold(resType, "Patient") {
+			if params.ID != "" && cleanID(params.ID) != allowedPatientID {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("patient-scoped token (%s) cannot search patient %s",
+						secCtx.GetPatientId(), params.ID))
+				return
+			}
+			params.ID = allowedPatientID
+		} else if postgres.IsPatientCompartmentResourceType(resType) {
+			if params.References == nil {
+				params.References = make(map[string]string)
+			}
+			if params.References["subject"] == "" {
+				params.References["patient"] = "Patient/" + allowedPatientID
+			}
+		}
+	}
 
 	sr, err := s.store.Search(r.Context(), params)
 	if err != nil {
@@ -1027,7 +1131,11 @@ func (s *Server) protoToJSON(resType string, protoBytes []byte) ([]byte, error) 
 		EmitUnpopulated: false, // skip empty fields
 	}
 
-	return marshaler.Marshal(msg)
+	rawJSON, err := marshaler.Marshal(msg)
+	if err != nil {
+		return nil, err
+	}
+	return fhirutil.InjectResourceType(resType, rawJSON)
 }
 
 // writeOperationOutcome writes a FHIR OperationOutcome error response.
