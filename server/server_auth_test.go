@@ -1,17 +1,23 @@
 package server_test
 
 import (
+	"database/sql"
 	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	obspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto"
+	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/server"
@@ -299,5 +305,149 @@ func TestServer_AuthMiddleware(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, 1, total)
 		assert.Equal(t, "pat-100", records[0].AgentPatient)
+	})
+}
+
+func TestServer_PatientCompartmentIsolation_Integration(t *testing.T) {
+	dsn := os.Getenv("FLINT_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("FLINT_TEST_POSTGRES_DSN not set")
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	require.NoError(t, err)
+	defer db.Close()
+	require.NoError(t, postgres.RunMigrations(t.Context(), db))
+
+	store := postgres.New(db)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := server.New(store, logger)
+	srv.RegisterResourceType("Patient", &patpb.Patient{})
+	srv.RegisterResourceType("Observation", &obspb.Observation{})
+
+	mockVal, err := auth.NewMockTokenValidator("https://auth.azra.dev", "flint-api")
+	require.NoError(t, err)
+	srv.SetTokenValidator(mockVal)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx := t.Context()
+	defer func() {
+		for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
+			db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-compartment'")
+		}
+	}()
+
+	// System token to seed 2 patients (pat-100 and pat-200) and their Observations (obs-100 and obs-200)
+	sysToken, err := mockVal.IssueToken("sys-admin", "system/*.cruds", "", time.Hour, nil)
+	require.NoError(t, err)
+
+	seedReq := func(method, path, body string) {
+		req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+sysToken)
+		req.Header.Set("Content-Type", "application/fhir+json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Less(t, resp.StatusCode, 300)
+	}
+
+	seedReq(http.MethodPut, "/fhir/r4/test-compartment/Patient/pat-100", `{"resourceType":"Patient","id":"pat-100","name":[{"family":"Hundred"}]}`)
+	seedReq(http.MethodPut, "/fhir/r4/test-compartment/Patient/pat-200", `{"resourceType":"Patient","id":"pat-200","name":[{"family":"TwoHundred"}]}`)
+	seedReq(http.MethodPut, "/fhir/r4/test-compartment/Observation/obs-100", `{"resourceType":"Observation","id":"obs-100","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/pat-100"}}`)
+	seedReq(http.MethodPut, "/fhir/r4/test-compartment/Observation/obs-200", `{"resourceType":"Observation","id":"obs-200","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/pat-200"}}`)
+
+	// Issue a patient-scoped token restricted to pat-100 with full cruds on Patient and Observation
+	pat100Token, err := mockVal.IssueToken("pat-100-user", "patient/Patient.cruds patient/Observation.cruds", "pat-100", time.Hour, nil)
+	require.NoError(t, err)
+
+	doPat100 := func(method, path, body string) *http.Response {
+		var r io.Reader
+		if body != "" {
+			r = strings.NewReader(body)
+		}
+		req, _ := http.NewRequest(method, ts.URL+path, r)
+		req.Header.Set("Authorization", "Bearer "+pat100Token)
+		req.Header.Set("Content-Type", "application/fhir+json")
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		return resp
+	}
+
+	t.Run("Clinical Point Read, VRead, and History Block Cross-Patient Access", func(t *testing.T) {
+		// Own observation -> 200 OK
+		respOwn := doPat100(http.MethodGet, "/fhir/r4/test-compartment/Observation/obs-100", "")
+		defer respOwn.Body.Close()
+		assert.Equal(t, http.StatusOK, respOwn.StatusCode)
+
+		// Other patient's observation -> 403 Forbidden
+		respOther := doPat100(http.MethodGet, "/fhir/r4/test-compartment/Observation/obs-200", "")
+		defer respOther.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respOther.StatusCode)
+
+		// Other patient's observation _history and vread -> 403 Forbidden
+		respHist := doPat100(http.MethodGet, "/fhir/r4/test-compartment/Observation/obs-200/_history", "")
+		defer respHist.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respHist.StatusCode)
+
+		respVRead := doPat100(http.MethodGet, "/fhir/r4/test-compartment/Observation/obs-200/_history/1", "")
+		defer respVRead.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respVRead.StatusCode)
+	})
+
+	t.Run("Unfiltered Clinical and Patient Searches Auto-Scope to Patient Compartment", func(t *testing.T) {
+		// Unfiltered GET /Observation?code=8867-4 without patient= parameter must ONLY return obs-100
+		respObs := doPat100(http.MethodGet, "/fhir/r4/test-compartment/Observation?code=8867-4", "")
+		defer respObs.Body.Close()
+		require.Equal(t, http.StatusOK, respObs.StatusCode)
+
+		var obsBundle map[string]any
+		require.NoError(t, json.NewDecoder(respObs.Body).Decode(&obsBundle))
+		assert.Equal(t, 1, int(obsBundle["total"].(float64)))
+		entries := obsBundle["entry"].([]any)
+		require.Len(t, entries, 1)
+		assert.Equal(t, "Observation/obs-100", entries[0].(map[string]any)["fullUrl"])
+
+		// Unfiltered GET /Patient without _id= parameter must ONLY return pat-100
+		respPat := doPat100(http.MethodGet, "/fhir/r4/test-compartment/Patient", "")
+		defer respPat.Body.Close()
+		require.Equal(t, http.StatusOK, respPat.StatusCode)
+
+		var patBundle map[string]any
+		require.NoError(t, json.NewDecoder(respPat.Body).Decode(&patBundle))
+		assert.Equal(t, 1, int(patBundle["total"].(float64)))
+	})
+
+	t.Run("Clinical POST, PUT, DELETE, and Bundle Block Cross-Patient Writes", func(t *testing.T) {
+		// 1. POST Observation referencing pat-200 -> 403 Forbidden
+		respPostOther := doPat100(http.MethodPost, "/fhir/r4/test-compartment/Observation",
+			`{"resourceType":"Observation","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/pat-200"}}`)
+		defer respPostOther.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respPostOther.StatusCode)
+
+		// 2. PUT overwriting obs-200 -> 403 Forbidden
+		respPutOther := doPat100(http.MethodPut, "/fhir/r4/test-compartment/Observation/obs-200",
+			`{"resourceType":"Observation","id":"obs-200","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/pat-100"}}`)
+		defer respPutOther.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respPutOther.StatusCode)
+
+		// 3. DELETE obs-200 -> 403 Forbidden
+		respDelOther := doPat100(http.MethodDelete, "/fhir/r4/test-compartment/Observation/obs-200", "")
+		defer respDelOther.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respDelOther.StatusCode)
+
+		// 4. Transaction Bundle attempting to DELETE obs-200 -> 403 Forbidden
+		respBundleOther := doPat100(http.MethodPost, "/fhir/r4/test-compartment", `{
+			"resourceType": "Bundle",
+			"type": "transaction",
+			"entry": [
+				{
+					"request": {"method": "DELETE", "url": "Observation/obs-200"}
+				}
+			]
+		}`)
+		defer respBundleOther.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respBundleOther.StatusCode)
 	})
 }

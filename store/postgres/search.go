@@ -2,12 +2,22 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/lib/pq"
 )
+
+// MaxSearchCount is the maximum number of resources returned in a single search page.
+const MaxSearchCount = 1000
+
+type queryExecer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
 
 // SearchResult is a single resource matching a search query.
 type SearchResult struct {
@@ -38,6 +48,7 @@ type PatientEverythingParams struct {
 type SearchParams struct {
 	TenantID    string
 	ResType     string
+	ID          string                // Optional _id filter
 	Strings     map[string]string     // sp_name → value (prefix match)
 	Tokens      map[string]string     // sp_name → value (exact or system|value)
 	Dates       map[string]DateOp     // sp_name → date operation
@@ -54,11 +65,18 @@ type SearchParams struct {
 // It performs an intersection (AND) of all provided search parameters,
 // and resolves any requested _include or _revinclude resources.
 func (s *Store) Search(ctx context.Context, params SearchParams) (*SearchResults, error) {
+	return s.searchWithExecutor(ctx, s.db, params)
+}
+
+func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params SearchParams) (*SearchResults, error) {
 	if params.Count <= 0 {
 		params.Count = 20
 	}
-	if params.Count > 1000 {
-		params.Count = 1000
+	if params.Count > MaxSearchCount {
+		params.Count = MaxSearchCount
+	}
+	if params.Offset < 0 {
+		params.Offset = 0
 	}
 
 	args := []any{params.TenantID, params.ResType}
@@ -162,24 +180,30 @@ func (s *Store) Search(ctx context.Context, params SearchParams) (*SearchResults
 
 	joinClause := strings.Join(joins, "\n")
 
+	whereExtra := ""
+	if params.ID != "" {
+		whereExtra = fmt.Sprintf(" AND r.res_id = $%d", len(args)+1)
+		args = append(args, params.ID)
+	}
+
 	// Count query
 	countSQL := fmt.Sprintf(
-		"SELECT COUNT(DISTINCT r.res_id) FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE",
-		joinClause,
+		"SELECT COUNT(DISTINCT r.res_id) FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE%s",
+		joinClause, whereExtra,
 	)
 	var total int
-	if err := s.db.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
+	if err := exec.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("count query: %w", err)
 	}
 
 	// Data query with pagination
 	dataSQL := fmt.Sprintf(
-		"SELECT DISTINCT r.res_type, r.res_id, r.resource_proto FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE ORDER BY r.res_id LIMIT $%d OFFSET $%d",
-		joinClause, len(args)+1, len(args)+2,
+		"SELECT DISTINCT r.res_type, r.res_id, r.resource_proto FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE%s ORDER BY r.res_id LIMIT $%d OFFSET $%d",
+		joinClause, whereExtra, len(args)+1, len(args)+2,
 	)
 	args = append(args, params.Count, params.Offset)
 
-	rows, err := s.db.QueryContext(ctx, dataSQL, args...)
+	rows, err := exec.QueryContext(ctx, dataSQL, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search query: %w", err)
 	}
@@ -198,9 +222,12 @@ func (s *Store) Search(ctx context.Context, params SearchParams) (*SearchResults
 	}
 
 	// 7. Resolve _include and _revinclude resources
-	includes, err := s.ResolveIncludes(ctx, params.TenantID, matches, params.Includes, params.RevIncludes)
-	if err != nil {
-		return nil, fmt.Errorf("resolve includes: %w", err)
+	var includes []SearchResult
+	if len(params.Includes) > 0 || len(params.RevIncludes) > 0 {
+		includes, err = s.ResolveIncludes(ctx, params.TenantID, matches, params.Includes, params.RevIncludes)
+		if err != nil {
+			return nil, fmt.Errorf("resolve includes: %w", err)
+		}
 	}
 
 	return &SearchResults{
@@ -472,4 +499,81 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 		Includes: includes,
 		Total:    len(matches) + compTotal,
 	}, nil
+}
+
+// IsPatientCompartmentResourceType returns true if the resource type is a clinical
+// resource scoped to the FHIR R4 Patient compartment (Condition, Encounter, Observation).
+func IsPatientCompartmentResourceType(resType string) bool {
+	switch resType {
+	case "Condition", "Encounter", "Observation":
+		return true
+	default:
+		return false
+	}
+}
+
+// BelongsToPatientCompartment checks whether an existing resource in Postgres belongs
+// to the given patientID's compartment. If the resource does not exist in fhir_resource,
+// it returns (true, nil) so the caller can proceed to normal 404 or create-on-update handling.
+func (s *Store) BelongsToPatientCompartment(ctx context.Context, tenantID, resType, resID, patientID string) (bool, error) {
+	if strings.EqualFold(resType, "Patient") {
+		return resID == patientID, nil
+	}
+	if !IsPatientCompartmentResourceType(resType) {
+		return true, nil
+	}
+
+	var isDeleted bool
+	err := s.db.QueryRowContext(ctx, `
+		SELECT is_deleted FROM fhir_resource
+		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
+	`, tenantID, resType, resID).Scan(&isDeleted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	var inCompartment bool
+	err = s.db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM spidx_reference
+			WHERE tenant_id = $1
+			  AND res_type = $2
+			  AND res_id = $3
+			  AND target_id = $4
+			  AND (target_type = 'Patient' OR target_type = '')
+		)
+	`, tenantID, resType, resID, patientID).Scan(&inCompartment)
+	if err != nil {
+		return false, err
+	}
+	return inCompartment, nil
+}
+
+// IndexesBelongToPatientCompartment verifies whether the extracted SearchIndexes of an incoming
+// resource link it to the expected patientID compartment.
+func IndexesBelongToPatientCompartment(resType, resID string, idx *SearchIndexes, patientID string) bool {
+	if strings.EqualFold(resType, "Patient") {
+		return resID == "" || resID == patientID
+	}
+	if !IsPatientCompartmentResourceType(resType) {
+		return true
+	}
+	if idx == nil {
+		return false
+	}
+	matchedOwnPatient := false
+	for _, ref := range idx.References {
+		if ref.TargetType == "Patient" || ref.TargetType == "" || ref.SpName == "patient" || ref.SpName == "subject" {
+			if ref.TargetID != "" && ref.TargetID != patientID {
+				return false
+			}
+			if ref.TargetID == patientID {
+				matchedOwnPatient = true
+			}
+		}
+	}
+	return matchedOwnPatient
 }

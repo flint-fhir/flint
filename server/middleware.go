@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -88,7 +90,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			switch r.Method {
 			case http.MethodGet:
 				if len(parts) >= 5 {
-					// Read: GET /{tenant}/{resourceType}/{id}
+					// Read / VRead / History / $everything: GET /{tenant}/{resourceType}/{id}...
 					id := parts[4]
 					if !auth.Allows(secCtx, resType, auth.ActionRead) {
 						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
@@ -96,13 +98,27 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						return
 					}
 
-					// Patient compartment enforcement
+					// Patient compartment enforcement on point reads, vread, _history, and $everything
 					if auth.IsPatientRestricted(secCtx) {
 						if strings.EqualFold(resType, "Patient") && cleanID(id) != cleanID(secCtx.GetPatientId()) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("patient-scoped token (%s) cannot access patient %s",
 									secCtx.GetPatientId(), id))
 							return
+						}
+						if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+							_, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
+							if err != nil {
+								s.logger.Error("patient compartment check failed", "error", err, "type", resType, "id", id)
+								writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+								return
+							}
+							if !allowed {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("patient-scoped token (%s) cannot access %s/%s outside patient compartment",
+										secCtx.GetPatientId(), resType, id))
+								return
+							}
 						}
 					}
 				} else {
@@ -179,6 +195,20 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								secCtx.GetPatientId(), id))
 						return
 					}
+					if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+						exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
+						if err != nil {
+							s.logger.Error("patient compartment check on PUT failed", "error", err, "type", resType, "id", id)
+							writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+							return
+						}
+						if exists && !allowed {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("patient-scoped token (%s) cannot update %s/%s belonging to another patient",
+									secCtx.GetPatientId(), resType, id))
+							return
+						}
+					}
 				}
 
 			case http.MethodDelete:
@@ -195,14 +225,21 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								secCtx.GetPatientId(), id))
 						return
 					}
+					if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+						_, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
+						if err != nil {
+							s.logger.Error("patient compartment check on DELETE failed", "error", err, "type", resType, "id", id)
+							writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+							return
+						}
+						if !allowed {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("patient-scoped token (%s) cannot delete %s/%s outside patient compartment",
+									secCtx.GetPatientId(), resType, id))
+							return
+						}
+					}
 				}
-			}
-		} else if r.Method == http.MethodPost && len(parts) == 3 {
-			// Bundle: POST /{tenant}
-			if !auth.Allows(secCtx, "*", auth.ActionCreate) && !auth.Allows(secCtx, "*", auth.ActionUpdate) {
-				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-					"insufficient scope for transaction bundle processing")
-				return
 			}
 		}
 
@@ -232,6 +269,56 @@ func cleanID(id string) string {
 		return id[idx+1:]
 	}
 	return id
+}
+
+// checkExistingResourceCompartment verifies whether an existing resource (active or in history)
+// belongs to the restricted patient compartment.
+// Returns (exists, allowed, err).
+func (s *Server) checkExistingResourceCompartment(ctx context.Context, tenant, resType, resID, patientID string) (bool, bool, error) {
+	patientID = cleanID(patientID)
+	if strings.EqualFold(resType, "Patient") {
+		return true, cleanID(resID) == patientID, nil
+	}
+	if !postgres.IsPatientCompartmentResourceType(resType) {
+		return true, true, nil
+	}
+	if s.store == nil {
+		return false, false, nil
+	}
+	belongs, err := s.store.BelongsToPatientCompartment(ctx, tenant, resType, resID, patientID)
+	if err != nil {
+		return false, false, err
+	}
+	if belongs {
+		return true, true, nil
+	}
+	rec, err := s.store.ReadResourceWithMeta(ctx, tenant, resType, resID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil && !errors.Is(err, postgres.ErrResourceDeleted) {
+		return false, false, err
+	}
+	if rec != nil && !rec.IsDeleted {
+		return true, false, nil
+	}
+	history, _, err := s.store.ListResourceHistory(ctx, tenant, resType, resID, 10, 0)
+	if err != nil {
+		return true, false, err
+	}
+	if extractor, hasExtractor := s.extractors[resType]; hasExtractor {
+		for _, h := range history {
+			if len(h.ResourceProto) > 0 {
+				if idx, err := extractor(tenant, resID, h.ResourceProto); err == nil {
+					if postgres.IndexesBelongToPatientCompartment(resType, resID, idx, patientID) {
+						return true, true, nil
+					}
+					return true, false, nil
+				}
+			}
+		}
+	}
+	return true, false, nil
 }
 
 type auditResponseWriter struct {

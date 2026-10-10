@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -560,6 +561,216 @@ func TestStore_Integration(t *testing.T) {
 		}
 		if srAfterDel.Total != 3 || len(srAfterDel.Includes) != 2 {
 			t.Fatalf("expected Total=3 (Patient + Encounter + Practitioner) after deleting Observation, got Total=%d len=%d", srAfterDel.Total, len(srAfterDel.Includes))
+		}
+	})
+
+	t.Run("CreateOnly rejects duplicate active ID with ErrResourceAlreadyExists and allows re-creation after soft delete", func(t *testing.T) {
+		input := postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Patient",
+			ResID:         "pat-create-only-1",
+			ResourceProto: []byte("v1"),
+			CreateOnly:    true,
+		}
+		rec1, err := store.WriteResourceWithMeta(ctx, input)
+		if err != nil || !rec1.Created || rec1.ResVersion != 1 {
+			t.Fatalf("expected initial CreateOnly write to succeed at v1, got rec=%+v err=%v", rec1, err)
+		}
+
+		// Second CreateOnly with same ID must fail with ErrResourceAlreadyExists
+		input.ResourceProto = []byte("v2-illegal-overwrite")
+		_, err = store.WriteResourceWithMeta(ctx, input)
+		if !errors.Is(err, postgres.ErrResourceAlreadyExists) {
+			t.Fatalf("expected ErrResourceAlreadyExists on duplicate CreateOnly, got %v", err)
+		}
+
+		// Soft-delete and then CreateOnly again -> succeeds at v3
+		if _, err := store.DeleteResourceWithMeta(ctx, "test-tenant", "Patient", "pat-create-only-1"); err != nil {
+			t.Fatalf("delete pat-create-only-1: %v", err)
+		}
+		input.ResourceProto = []byte("v3-recreated")
+		rec3, err := store.WriteResourceWithMeta(ctx, input)
+		if err != nil || !rec3.Created || rec3.ResVersion != 3 {
+			t.Fatalf("expected CreateOnly after delete to succeed at v3, got rec=%+v err=%v", rec3, err)
+		}
+	})
+
+	t.Run("Concurrent ConditionalCreateResource serializes via advisory lock without TOCTOU duplicates", func(t *testing.T) {
+		const workers = 10
+		condParams, err := postgres.ParseIfNoneExist("test-tenant", "Patient", "identifier=http://hospital.org/mrn|CONC-MRN-999")
+		if err != nil {
+			t.Fatalf("ParseIfNoneExist: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		createdCount := 0
+		matchedCount := 0
+		var mu sync.Mutex
+		var winningID string
+		var errs []error
+
+		for i := range workers {
+			wg.Add(1)
+			go func(workerID int) {
+				defer wg.Done()
+				resID := fmt.Sprintf("pat-conc-%d", workerID)
+				input := postgres.ResourceInput{
+					TenantID:      "test-tenant",
+					ResType:       "Patient",
+					ResID:         resID,
+					ResourceProto: []byte(fmt.Sprintf("proto-%d", workerID)),
+					CreateOnly:    true,
+					SearchIndexes: &postgres.SearchIndexes{
+						Tokens: []postgres.SpidxToken{
+							{
+								TenantID: "test-tenant",
+								ResType:  "Patient",
+								ResID:    resID,
+								SpName:   "identifier",
+								SpSystem: "http://hospital.org/mrn",
+								SpValue:  "CONC-MRN-999",
+							},
+						},
+					},
+				}
+				rec, created, cErr := store.ConditionalCreateResource(ctx, input, condParams)
+				mu.Lock()
+				defer mu.Unlock()
+				if cErr != nil {
+					errs = append(errs, cErr)
+					return
+				}
+				if created {
+					createdCount++
+				} else {
+					matchedCount++
+				}
+				if winningID == "" {
+					winningID = rec.ResID
+				} else if winningID != rec.ResID {
+					errs = append(errs, fmt.Errorf("expected all workers to converge on ID %s, got %s", winningID, rec.ResID))
+				}
+			}(i)
+		}
+		wg.Wait()
+
+		if len(errs) > 0 {
+			t.Fatalf("concurrent ConditionalCreateResource errors: %v", errs)
+		}
+		if createdCount != 1 || matchedCount != workers-1 {
+			t.Fatalf("expected exactly 1 created and %d matched, got created=%d matched=%d", workers-1, createdCount, matchedCount)
+		}
+	})
+
+	t.Run("ExecuteTransactionBundle rolls back earlier DELETE and POST when subsequent entry fails", func(t *testing.T) {
+		// Seed a resource to be deleted in op[0] and another resource for op[2] If-Match conflict
+		if _, err := store.WriteResourceWithMeta(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Patient",
+			ResID:         "tx-survivor-1",
+			ResourceProto: []byte("survivor-v1"),
+		}); err != nil {
+			t.Fatalf("seed tx-survivor-1: %v", err)
+		}
+
+		ops := []postgres.BundleOperation{
+			{
+				Method: "DELETE",
+				Input: postgres.ResourceInput{
+					TenantID: "test-tenant",
+					ResType:  "Patient",
+					ResID:    "tx-survivor-1",
+				},
+			},
+			{
+				Method: "POST",
+				Input: postgres.ResourceInput{
+					TenantID:      "test-tenant",
+					ResType:       "Patient",
+					ResID:         "tx-ephemeral-1",
+					ResourceProto: []byte("ephemeral"),
+					CreateOnly:    true,
+				},
+			},
+			{
+				Method: "PUT",
+				Input: postgres.ResourceInput{
+					TenantID:        "test-tenant",
+					ResType:         "Patient",
+					ResID:           "tx-survivor-1",
+					ResourceProto:   []byte("conflict"),
+					ExpectedVersion: 99, // Stale version -> triggers ErrVersionConflict
+				},
+			},
+		}
+
+		_, err := store.ExecuteTransactionBundle(ctx, ops)
+		if !errors.Is(err, postgres.ErrVersionConflict) {
+			t.Fatalf("expected ErrVersionConflict from ExecuteTransactionBundle, got %v", err)
+		}
+
+		// Verify tx-survivor-1 was NOT deleted (DELETE in op[0] rolled back!)
+		survivor, err := store.ReadResourceWithMeta(ctx, "test-tenant", "Patient", "tx-survivor-1")
+		if err != nil || survivor.IsDeleted || survivor.ResVersion != 1 {
+			t.Fatalf("expected tx-survivor-1 to remain intact at v1 after rollback, got rec=%+v err=%v", survivor, err)
+		}
+
+		// Verify tx-ephemeral-1 was NOT created (POST in op[1] rolled back!)
+		_, err = store.ReadResourceWithMeta(ctx, "test-tenant", "Patient", "tx-ephemeral-1")
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("expected tx-ephemeral-1 to not exist after rollback, got %v", err)
+		}
+	})
+
+	t.Run("BelongsToPatientCompartment and large bulkInsert chunking (>2000 index rows)", func(t *testing.T) {
+		manyStrings := make([]postgres.SpidxString, 2500)
+		for i := range manyStrings {
+			manyStrings[i] = postgres.SpidxString{
+				TenantID: "test-tenant",
+				ResType:  "Observation",
+				ResID:    "obs-large-idx-1",
+				SpName:   "note",
+				SpValue:  fmt.Sprintf("chunk-val-%d", i),
+			}
+		}
+		idx := &postgres.SearchIndexes{
+			Strings: manyStrings,
+			References: []postgres.SpidxReference{
+				{
+					TenantID:   "test-tenant",
+					ResType:    "Observation",
+					ResID:      "obs-large-idx-1",
+					SpName:     "patient",
+					TargetType: "Patient",
+					TargetID:   "pat-ev-1",
+				},
+			},
+		}
+
+		if !postgres.IndexesBelongToPatientCompartment("Observation", "obs-large-idx-1", idx, "pat-ev-1") {
+			t.Fatal("expected IndexesBelongToPatientCompartment to return true for pat-ev-1")
+		}
+		if postgres.IndexesBelongToPatientCompartment("Observation", "obs-large-idx-1", idx, "pat-other") {
+			t.Fatal("expected IndexesBelongToPatientCompartment to return false for pat-other")
+		}
+
+		if err := store.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Observation",
+			ResID:         "obs-large-idx-1",
+			ResourceProto: []byte("large-obs"),
+			SearchIndexes: idx,
+		}); err != nil {
+			t.Fatalf("WriteResource with 2500 string indexes failed: %v", err)
+		}
+
+		belongs, err := store.BelongsToPatientCompartment(ctx, "test-tenant", "Observation", "obs-large-idx-1", "pat-ev-1")
+		if err != nil || !belongs {
+			t.Fatalf("expected BelongsToPatientCompartment=true for pat-ev-1, got belongs=%v err=%v", belongs, err)
+		}
+		belongsOther, err := store.BelongsToPatientCompartment(ctx, "test-tenant", "Observation", "obs-large-idx-1", "pat-other")
+		if err != nil || belongsOther {
+			t.Fatalf("expected BelongsToPatientCompartment=false for pat-other, got belongs=%v err=%v", belongsOther, err)
 		}
 	})
 
