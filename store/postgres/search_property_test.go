@@ -111,6 +111,31 @@ func TestProperty_ETagRoundTripInvariance(t *testing.T) {
 	})
 }
 
+func TestProperty_IfNoneExistParsingInvariance(t *testing.T) {
+	hegel.Test(t, func(ht *hegel.T) {
+		tenant := hegel.Draw(ht, hegel.FromRegex(`tenant-[a-z]{3,6}`, true))
+		resType := hegel.Draw(ht, hegel.FromRegex(`(Patient|Observation|Encounter|Condition|Practitioner)`, true))
+		system := hegel.Draw(ht, hegel.FromRegex(`http://[a-z]{3,8}\.org/mrn`, true))
+		mrn := hegel.Draw(ht, hegel.FromRegex(`MRN-[0-9]{4,8}`, true))
+		family := hegel.Draw(ht, hegel.FromRegex(`[A-Za-z]{3,10}`, true))
+
+		raw := fmt.Sprintf("%s?identifier=%s|%s&family=%s", resType, system, mrn, family)
+		params, err := postgres.ParseIfNoneExist(tenant, resType, raw)
+		if err != nil {
+			ht.Fatalf("ParseIfNoneExist(%q) failed: %v", raw, err)
+		}
+		if params.TenantID != tenant || params.ResType != resType {
+			ht.Fatalf("unexpected tenant/resType: %s / %s", params.TenantID, params.ResType)
+		}
+		if params.Tokens["identifier"] != system+"|"+mrn {
+			ht.Fatalf("expected identifier token %s|%s, got %q", system, mrn, params.Tokens["identifier"])
+		}
+		if params.Strings["family"] != family {
+			ht.Fatalf("expected family string %q, got %q", family, params.Strings["family"])
+		}
+	})
+}
+
 func TestProperty_ParsersNeverPanicOnArbitraryFuzz(t *testing.T) {
 	hegel.Test(t, func(ht *hegel.T) {
 		arbitraryInput := hegel.Draw(ht, hegel.FromRegex(`.*`, true))
@@ -121,5 +146,6 @@ func TestProperty_ParsersNeverPanicOnArbitraryFuzz(t *testing.T) {
 		_, _ = postgres.ParseInclude(arbitraryInput)
 		_, _ = postgres.ParseChainedParam(arbitraryInput, arbitraryInput)
 		_, _ = postgres.ParseETagVersion(arbitraryInput)
+		_, _ = postgres.ParseIfNoneExist("default", "Patient", arbitraryInput)
 	})
 }

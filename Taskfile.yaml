@@ -80,6 +80,11 @@ tasks:
     cmds:
       - FLINT_TEST_POSTGRES_DSN="{{.PG_DSN}}" go test -race ./... -v -count=1
 
+  test-analytics:
+    desc: Run SQLMesh lakehouse dimensional model unit tests on DuckDB
+    cmds:
+      - uv run --project analytics sqlmesh --paths analytics test
+
   test-unit:
     desc: Run unit tests only (no Postgres needed)
     cmds:

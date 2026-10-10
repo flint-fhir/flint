@@ -173,12 +173,18 @@ func ClassifyHTTPInteraction(method string, parts []string, statusCode int) (act
 		if len(parts) >= 6 && parts[5] == "_history" {
 			return ActionRead, "history-instance", resType, parts[4], ""
 		}
+		if len(parts) >= 6 && strings.HasPrefix(parts[5], "$") {
+			return ActionExecute, strings.TrimPrefix(parts[5], "$"), resType, parts[4], ""
+		}
 		if len(parts) >= 5 {
 			return ActionRead, "read", resType, parts[4], ""
 		}
 		return ActionExecute, "search-type", resType, "", ""
 
 	case http.MethodPost:
+		if len(parts) >= 6 && strings.HasPrefix(parts[5], "$") {
+			return ActionExecute, strings.TrimPrefix(parts[5], "$"), resType, parts[4], ""
+		}
 		if len(parts) >= 5 && strings.HasPrefix(parts[4], "$") {
 			return ActionExecute, strings.TrimPrefix(parts[4], "$"), resType, "", ""
 		}

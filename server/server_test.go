@@ -1057,6 +1057,224 @@ func TestServer_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("Conditional Create (If-None-Exist) prevents duplicate creates and returns 200 OK or 412", func(t *testing.T) {
+		patBody := `{"resourceType":"Patient","id":{"value":"cond-create-pat-1"},"name":[{"family":{"value":"UniqueFamilyName"}}]}`
+
+		// 1. First POST with If-None-Exist (0 existing matches) -> 201 Created
+		req1, _ := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/test-api/Patient", strings.NewReader(patBody))
+		req1.Header.Set("Content-Type", "application/fhir+json")
+		req1.Header.Set("If-None-Exist", "family=UniqueFamilyName")
+		resp1, err := http.DefaultClient.Do(req1)
+		if err != nil {
+			t.Fatalf("first conditional POST: %v", err)
+		}
+		resp1.Body.Close()
+		if resp1.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 Created on 0 matches, got %d", resp1.StatusCode)
+		}
+
+		// 2. Second POST with same If-None-Exist (1 existing match) -> 200 OK with existing resource
+		dupBody := `{"resourceType":"Patient","id":{"value":"cond-create-pat-dup"},"name":[{"family":{"value":"UniqueFamilyName"}}]}`
+		req2, _ := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/test-api/Patient", strings.NewReader(dupBody))
+		req2.Header.Set("Content-Type", "application/fhir+json")
+		req2.Header.Set("If-None-Exist", "Patient?family=UniqueFamilyName")
+		resp2, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			t.Fatalf("second conditional POST: %v", err)
+		}
+		defer resp2.Body.Close()
+		if resp2.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK on 1 match, got %d", resp2.StatusCode)
+		}
+		if loc := resp2.Header.Get("Location"); loc != "/fhir/r4/test-api/Patient/cond-create-pat-1" {
+			t.Errorf("expected Location /fhir/r4/test-api/Patient/cond-create-pat-1, got %q", loc)
+		}
+		if etag := resp2.Header.Get("ETag"); etag != `W/"1"` {
+			t.Errorf("expected ETag W/\"1\", got %q", etag)
+		}
+
+		// 3. Seed a second patient with family=UniqueFamilyName directly (without If-None-Exist),
+		// then verify If-None-Exist returns 412 Precondition Failed when >1 matches exist.
+		secondPat := `{"resourceType":"Patient","id":{"value":"cond-create-pat-2"},"name":[{"family":{"value":"UniqueFamilyName"}}]}`
+		respSeed, err := http.Post(ts.URL+"/fhir/r4/test-api/Patient", "application/fhir+json", strings.NewReader(secondPat))
+		if err != nil {
+			t.Fatalf("seed second patient: %v", err)
+		}
+		respSeed.Body.Close()
+
+		req3, _ := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/test-api/Patient", strings.NewReader(dupBody))
+		req3.Header.Set("Content-Type", "application/fhir+json")
+		req3.Header.Set("If-None-Exist", "family=UniqueFamilyName")
+		resp3, err := http.DefaultClient.Do(req3)
+		if err != nil {
+			t.Fatalf("third conditional POST: %v", err)
+		}
+		resp3.Body.Close()
+		if resp3.StatusCode != http.StatusPreconditionFailed {
+			t.Fatalf("expected 412 Precondition Failed on >1 matches, got %d", resp3.StatusCode)
+		}
+
+		// 4. Transaction Bundle with request.ifNoneExist matching 1 existing Practitioner -> 200 OK in bundle response
+		practSeed := `{"resourceType":"Practitioner","id":{"value":"cond-pract-1"},"name":[{"family":{"value":"BundleIfNoneExistDoc"}}]}`
+		respPract, err := http.Post(ts.URL+"/fhir/r4/test-api/Practitioner", "application/fhir+json", strings.NewReader(practSeed))
+		if err != nil {
+			t.Fatalf("seed practitioner: %v", err)
+		}
+		respPract.Body.Close()
+
+		txBundle := `{
+			"resourceType": "Bundle",
+			"type": "transaction",
+			"entry": [
+				{
+					"resource": {
+						"resourceType": "Practitioner",
+						"id": {"value": "cond-pract-dup"},
+						"name": [{"family": {"value": "BundleIfNoneExistDoc"}}]
+					},
+					"request": {
+						"method": "POST",
+						"url": "Practitioner",
+						"ifNoneExist": "family=BundleIfNoneExistDoc"
+					}
+				}
+			]
+		}`
+		respTx, err := http.Post(ts.URL+"/fhir/r4/test-api", "application/fhir+json", strings.NewReader(txBundle))
+		if err != nil {
+			t.Fatalf("POST transaction bundle with ifNoneExist: %v", err)
+		}
+		defer respTx.Body.Close()
+		if respTx.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK for transaction bundle with 1 ifNoneExist match, got %d", respTx.StatusCode)
+		}
+		var txRespMap map[string]any
+		json.NewDecoder(respTx.Body).Decode(&txRespMap)
+		txEntries := txRespMap["entry"].([]any)
+		txEntryResp := txEntries[0].(map[string]any)["response"].(map[string]any)
+		if txEntryResp["status"] != "200 OK" {
+			t.Errorf("expected bundle entry status 200 OK, got %v", txEntryResp["status"])
+		}
+		if txEntryResp["location"] != "/fhir/r4/test-api/Practitioner/cond-pract-1" {
+			t.Errorf("expected bundle entry location /fhir/r4/test-api/Practitioner/cond-pract-1, got %v", txEntryResp["location"])
+		}
+
+		// 5. Transaction Bundle with request.ifNoneExist matching >1 Patients -> 412 Precondition Failed
+		txMulti := `{
+			"resourceType": "Bundle",
+			"type": "transaction",
+			"entry": [
+				{
+					"resource": {
+						"resourceType": "Patient",
+						"id": {"value": "cond-pat-tx-fail"},
+						"name": [{"family": {"value": "UniqueFamilyName"}}]
+					},
+					"request": {
+						"method": "POST",
+						"url": "Patient",
+						"ifNoneExist": "family=UniqueFamilyName"
+					}
+				}
+			]
+		}`
+		respTxMulti, err := http.Post(ts.URL+"/fhir/r4/test-api", "application/fhir+json", strings.NewReader(txMulti))
+		if err != nil {
+			t.Fatalf("POST transaction bundle with >1 ifNoneExist matches: %v", err)
+		}
+		respTxMulti.Body.Close()
+		if respTxMulti.StatusCode != http.StatusPreconditionFailed {
+			t.Fatalf("expected 412 Precondition Failed for transaction bundle with >1 matches, got %d", respTxMulti.StatusCode)
+		}
+	})
+
+	t.Run("GET /Patient/{id}/$everything returns full patient chart Bundle", func(t *testing.T) {
+		// api-pat-1 was seeded earlier with linked Condition (post-cond-1)
+		resp, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient/api-pat-1/$everything")
+		if err != nil {
+			t.Fatalf("GET Patient/api-pat-1/$everything: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("expected 200 OK on $everything, got %d: %s", resp.StatusCode, body)
+		}
+
+		var bundle map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&bundle); err != nil {
+			t.Fatalf("decode $everything bundle: %v", err)
+		}
+		if bundle["resourceType"] != "Bundle" || bundle["type"] != "searchset" {
+			t.Fatalf("expected searchset Bundle, got %v / %v", bundle["resourceType"], bundle["type"])
+		}
+		total := int(bundle["total"].(float64))
+		if total < 2 {
+			t.Fatalf("expected at least 2 resources (Patient + Condition) in $everything, got %d", total)
+		}
+
+		// Filter by _type=Condition
+		respCond, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient/api-pat-1/$everything?_type=Condition")
+		if err != nil {
+			t.Fatalf("GET $everything?_type=Condition: %v", err)
+		}
+		defer respCond.Body.Close()
+		var condBundle map[string]any
+		json.NewDecoder(respCond.Body).Decode(&condBundle)
+		if int(condBundle["total"].(float64)) != 1 {
+			t.Errorf("expected 1 Condition in _type=Condition $everything, got %v", condBundle["total"])
+		}
+
+		// Filter by valid _since date
+		respSince, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient/api-pat-1/$everything?_since=2020-01-01")
+		if err != nil {
+			t.Fatalf("GET $everything?_since=2020-01-01: %v", err)
+		}
+		respSince.Body.Close()
+		if respSince.StatusCode != http.StatusOK {
+			t.Errorf("expected 200 OK for valid _since date, got %d", respSince.StatusCode)
+		}
+
+		// Invalid _since returns 400 Bad Request
+		respBadSince, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient/api-pat-1/$everything?_since=not-a-date")
+		if err != nil {
+			t.Fatalf("GET $everything?_since=not-a-date: %v", err)
+		}
+		respBadSince.Body.Close()
+		if respBadSince.StatusCode != http.StatusBadRequest {
+			t.Errorf("expected 400 Bad Request for invalid _since, got %d", respBadSince.StatusCode)
+		}
+
+		// $everything on non-Patient resource returns 404 Not Found
+		respNonPat, err := http.Get(ts.URL + "/fhir/r4/test-api/Condition/post-cond-1/$everything")
+		if err != nil {
+			t.Fatalf("GET Condition/$everything: %v", err)
+		}
+		respNonPat.Body.Close()
+		if respNonPat.StatusCode != http.StatusNotFound {
+			t.Errorf("expected 404 Not Found for non-Patient $everything, got %d", respNonPat.StatusCode)
+		}
+
+		// Deleted patient (crud-pat-1) returns 410 Gone
+		respGone, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient/crud-pat-1/$everything")
+		if err != nil {
+			t.Fatalf("GET deleted Patient/$everything: %v", err)
+		}
+		respGone.Body.Close()
+		if respGone.StatusCode != http.StatusGone {
+			t.Errorf("expected 410 Gone for deleted Patient/$everything, got %d", respGone.StatusCode)
+		}
+
+		// Non-existent patient returns 404 Not Found
+		resp404, err := http.Get(ts.URL + "/fhir/r4/test-api/Patient/non-existent-pat/$everything")
+		if err != nil {
+			t.Fatalf("GET missing Patient/$everything: %v", err)
+		}
+		resp404.Body.Close()
+		if resp404.StatusCode != http.StatusNotFound {
+			t.Errorf("expected 404 Not Found for missing Patient/$everything, got %d", resp404.StatusCode)
+		}
+	})
+
 	// Clean up
 	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
 		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-api'")

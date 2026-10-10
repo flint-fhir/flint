@@ -1,0 +1,9 @@
+[project]
+name = "flint-analytics"
+version = "0.1.0"
+description = "Flint Horizon 2 Clinical Dimensional Lakehouse (SQLMesh on Iceberg / DuckDB)"
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.1.0",
+    "sqlmesh>=0.140.0",
+]
