@@ -141,6 +141,38 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						return
 					}
 				}
+
+			case http.MethodPut:
+				if !auth.Allows(secCtx, resType, auth.ActionUpdate) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+						fmt.Sprintf("insufficient scope for update on %s", resType))
+					return
+				}
+				if len(parts) >= 5 && auth.IsPatientRestricted(secCtx) {
+					id := parts[4]
+					if strings.EqualFold(resType, "Patient") && cleanID(id) != cleanID(secCtx.GetPatientId()) {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							fmt.Sprintf("patient-scoped token (%s) cannot update patient %s",
+								secCtx.GetPatientId(), id))
+						return
+					}
+				}
+
+			case http.MethodDelete:
+				if !auth.Allows(secCtx, resType, auth.ActionDelete) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+						fmt.Sprintf("insufficient scope for delete on %s", resType))
+					return
+				}
+				if len(parts) >= 5 && auth.IsPatientRestricted(secCtx) {
+					id := parts[4]
+					if strings.EqualFold(resType, "Patient") && cleanID(id) != cleanID(secCtx.GetPatientId()) {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							fmt.Sprintf("patient-scoped token (%s) cannot delete patient %s",
+								secCtx.GetPatientId(), id))
+						return
+					}
+				}
 			}
 		} else if r.Method == http.MethodPost && len(parts) == 3 {
 			// Bundle: POST /{tenant}

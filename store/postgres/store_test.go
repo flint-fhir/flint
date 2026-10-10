@@ -1,8 +1,10 @@
 package postgres_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -32,12 +34,8 @@ func TestStore_Integration(t *testing.T) {
 	ctx := context.Background()
 
 	// Run migrations
-	migration, err := os.ReadFile("migrations/001_core_schema.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := db.ExecContext(ctx, string(migration)); err != nil {
-		t.Fatalf("run migration: %v", err)
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
 	}
 
 	store := postgres.New(db)
@@ -281,8 +279,96 @@ func TestStore_Integration(t *testing.T) {
 		t.Logf("Page 3: results=%d (last page)", len(sr3.Matches))
 	})
 
+	t.Run("VersioningHistoryAndCAS", func(t *testing.T) {
+		v1Bytes := []byte("v1-payload")
+		v2Bytes := []byte("v2-payload")
+
+		rec1, err := store.WriteResourceWithMeta(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Patient",
+			ResID:         "pat-cas-1",
+			ResourceProto: v1Bytes,
+		})
+		if err != nil {
+			t.Fatalf("WriteResourceWithMeta v1: %v", err)
+		}
+		if rec1.ResVersion != 1 || !rec1.Created {
+			t.Fatalf("expected version 1 created=true, got version=%d created=%v", rec1.ResVersion, rec1.Created)
+		}
+
+		// Update with matching ExpectedVersion=1 -> version 2
+		rec2, err := store.WriteResourceWithMeta(ctx, postgres.ResourceInput{
+			TenantID:        "test-tenant",
+			ResType:         "Patient",
+			ResID:           "pat-cas-1",
+			ResourceProto:   v2Bytes,
+			ExpectedVersion: 1,
+		})
+		if err != nil {
+			t.Fatalf("WriteResourceWithMeta v2: %v", err)
+		}
+		if rec2.ResVersion != 2 || rec2.Created {
+			t.Fatalf("expected version 2 created=false, got version=%d created=%v", rec2.ResVersion, rec2.Created)
+		}
+
+		// Stale ExpectedVersion=1 -> ErrVersionConflict
+		_, err = store.WriteResourceWithMeta(ctx, postgres.ResourceInput{
+			TenantID:        "test-tenant",
+			ResType:         "Patient",
+			ResID:           "pat-cas-1",
+			ResourceProto:   []byte("stale"),
+			ExpectedVersion: 1,
+		})
+		if !errors.Is(err, postgres.ErrVersionConflict) {
+			t.Fatalf("expected ErrVersionConflict, got %v", err)
+		}
+
+		// vread v1 and v2
+		hist1, err := store.ReadResourceVersion(ctx, "test-tenant", "Patient", "pat-cas-1", 1)
+		if err != nil || !bytes.Equal(hist1.ResourceProto, v1Bytes) {
+			t.Fatalf("ReadResourceVersion(1): err=%v proto=%q", err, hist1.ResourceProto)
+		}
+		hist2, err := store.ReadResourceVersion(ctx, "test-tenant", "Patient", "pat-cas-1", 2)
+		if err != nil || !bytes.Equal(hist2.ResourceProto, v2Bytes) {
+			t.Fatalf("ReadResourceVersion(2): err=%v proto=%q", err, hist2.ResourceProto)
+		}
+
+		// Delete -> version 3 tombstone
+		delRec, err := store.DeleteResourceWithMeta(ctx, "test-tenant", "Patient", "pat-cas-1")
+		if err != nil {
+			t.Fatalf("DeleteResourceWithMeta: %v", err)
+		}
+		if delRec.ResVersion != 3 || !delRec.IsDeleted {
+			t.Fatalf("expected deleted version 3, got %+v", delRec)
+		}
+
+		// ReadResourceWithMeta returns ErrResourceDeleted
+		_, err = store.ReadResourceWithMeta(ctx, "test-tenant", "Patient", "pat-cas-1")
+		if !errors.Is(err, postgres.ErrResourceDeleted) {
+			t.Fatalf("expected ErrResourceDeleted, got %v", err)
+		}
+
+		// vread v3 returns ErrResourceDeleted
+		_, err = store.ReadResourceVersion(ctx, "test-tenant", "Patient", "pat-cas-1", 3)
+		if !errors.Is(err, postgres.ErrResourceDeleted) {
+			t.Fatalf("expected ErrResourceDeleted on vread(3), got %v", err)
+		}
+
+		// ListResourceHistory returns [3, 2, 1]
+		history, total, err := store.ListResourceHistory(ctx, "test-tenant", "Patient", "pat-cas-1", 10, 0)
+		if err != nil {
+			t.Fatalf("ListResourceHistory: %v", err)
+		}
+		if total != 3 || len(history) != 3 {
+			t.Fatalf("expected 3 history records, got total=%d len=%d", total, len(history))
+		}
+		if history[0].ResVersion != 3 || !history[0].IsDeleted || history[1].ResVersion != 2 || history[2].ResVersion != 1 {
+			t.Fatalf("unexpected history order: %+v", history)
+		}
+	})
+
 	// Clean up
-	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_resource"} {
+	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_resource_history", "fhir_resource"} {
 		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-tenant'")
 	}
 }

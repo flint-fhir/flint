@@ -30,9 +30,7 @@ func TestWritePostgresBatch_WithExtractors(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	migration, err := os.ReadFile("../../store/postgres/migrations/001_core_schema.sql")
-	require.NoError(t, err)
-	_, err = db.ExecContext(t.Context(), string(migration))
+	err = postgres.RunMigrations(t.Context(), db)
 	require.NoError(t, err)
 
 	store := postgres.New(db)
@@ -104,7 +102,7 @@ func TestWritePostgresBatch_WithExtractors(t *testing.T) {
 	assert.Equal(t, "act-cond-1", condRes.Matches[0].ResID)
 
 	// Cleanup
-	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_resource"} {
+	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_resource_history", "fhir_resource"} {
 		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-act'")
 	}
 }

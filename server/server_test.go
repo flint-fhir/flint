@@ -40,12 +40,8 @@ func TestServer_Integration(t *testing.T) {
 	defer db.Close()
 
 	// Run migrations
-	migration, err := os.ReadFile("../store/postgres/migrations/001_core_schema.sql")
-	if err != nil {
-		t.Fatalf("read migration: %v", err)
-	}
-	if _, err := db.ExecContext(t.Context(), string(migration)); err != nil {
-		t.Fatalf("run migration: %v", err)
+	if err := postgres.RunMigrations(t.Context(), db); err != nil {
+		t.Fatalf("run migrations: %v", err)
 	}
 
 	store := postgres.New(db)
@@ -854,8 +850,153 @@ func TestServer_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("Full CRUD lifecycle with ETag, If-Match, vread, _history, and DELETE (410 Gone)", func(t *testing.T) {
+		resURL := ts.URL + "/fhir/r4/test-api/Patient/crud-pat-1"
+
+		// 1. PUT create-on-update -> 201 Created with ETag W/"1"
+		v1Body := `{"resourceType":"Patient","id":{"value":"crud-pat-1"},"name":[{"family":{"value":"Alpha"}}]}`
+		reqPut1, _ := http.NewRequest(http.MethodPut, resURL, strings.NewReader(v1Body))
+		reqPut1.Header.Set("Content-Type", "application/fhir+json")
+		resp1, err := http.DefaultClient.Do(reqPut1)
+		if err != nil {
+			t.Fatalf("PUT v1: %v", err)
+		}
+		resp1.Body.Close()
+		if resp1.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 Created on initial PUT, got %d", resp1.StatusCode)
+		}
+		if etag := resp1.Header.Get("ETag"); etag != `W/"1"` {
+			t.Fatalf("expected ETag W/\"1\", got %q", etag)
+		}
+		if resp1.Header.Get("Last-Modified") == "" {
+			t.Fatal("expected Last-Modified header on PUT")
+		}
+
+		// 2. PUT update with matching If-Match: W/"1" -> 200 OK with ETag W/"2"
+		v2Body := `{"resourceType":"Patient","id":{"value":"crud-pat-1"},"name":[{"family":{"value":"Beta"}}]}`
+		reqPut2, _ := http.NewRequest(http.MethodPut, resURL, strings.NewReader(v2Body))
+		reqPut2.Header.Set("Content-Type", "application/fhir+json")
+		reqPut2.Header.Set("If-Match", `W/"1"`)
+		resp2, err := http.DefaultClient.Do(reqPut2)
+		if err != nil {
+			t.Fatalf("PUT v2: %v", err)
+		}
+		resp2.Body.Close()
+		if resp2.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK on PUT update, got %d", resp2.StatusCode)
+		}
+		if etag := resp2.Header.Get("ETag"); etag != `W/"2"` {
+			t.Fatalf("expected ETag W/\"2\", got %q", etag)
+		}
+
+		// 3. PUT update with stale If-Match: W/"1" -> 412 Precondition Failed
+		reqPutStale, _ := http.NewRequest(http.MethodPut, resURL, strings.NewReader(v2Body))
+		reqPutStale.Header.Set("Content-Type", "application/fhir+json")
+		reqPutStale.Header.Set("If-Match", `W/"1"`)
+		respStale, err := http.DefaultClient.Do(reqPutStale)
+		if err != nil {
+			t.Fatalf("PUT stale: %v", err)
+		}
+		respStale.Body.Close()
+		if respStale.StatusCode != http.StatusPreconditionFailed {
+			t.Fatalf("expected 412 Precondition Failed on stale If-Match, got %d", respStale.StatusCode)
+		}
+
+		// 4. PUT with mismatched body ID -> 400 Bad Request
+		mismatchBody := `{"resourceType":"Patient","id":{"value":"wrong-id"},"name":[{"family":{"value":"Beta"}}]}`
+		reqMismatch, _ := http.NewRequest(http.MethodPut, resURL, strings.NewReader(mismatchBody))
+		reqMismatch.Header.Set("Content-Type", "application/fhir+json")
+		respMismatch, err := http.DefaultClient.Do(reqMismatch)
+		if err != nil {
+			t.Fatalf("PUT mismatch: %v", err)
+		}
+		respMismatch.Body.Close()
+		if respMismatch.StatusCode != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request on mismatched ID, got %d", respMismatch.StatusCode)
+		}
+
+		// 5. vread v1 and v2
+		vread1, err := http.Get(resURL + "/_history/1")
+		if err != nil {
+			t.Fatalf("GET vread 1: %v", err)
+		}
+		defer vread1.Body.Close()
+		if vread1.StatusCode != http.StatusOK || vread1.Header.Get("ETag") != `W/"1"` {
+			t.Fatalf("expected 200 OK with ETag W/\"1\" on vread 1, got %d (%q)", vread1.StatusCode, vread1.Header.Get("ETag"))
+		}
+		vread1Bytes, _ := io.ReadAll(vread1.Body)
+		if !strings.Contains(string(vread1Bytes), "Alpha") {
+			t.Errorf("expected v1 body to contain Alpha, got %s", string(vread1Bytes))
+		}
+
+		vread2, err := http.Get(resURL + "/_history/2")
+		if err != nil {
+			t.Fatalf("GET vread 2: %v", err)
+		}
+		defer vread2.Body.Close()
+		if vread2.StatusCode != http.StatusOK || vread2.Header.Get("ETag") != `W/"2"` {
+			t.Fatalf("expected 200 OK with ETag W/\"2\" on vread 2, got %d (%q)", vread2.StatusCode, vread2.Header.Get("ETag"))
+		}
+		vread2Bytes, _ := io.ReadAll(vread2.Body)
+		if !strings.Contains(string(vread2Bytes), "Beta") {
+			t.Errorf("expected v2 body to contain Beta, got %s", string(vread2Bytes))
+		}
+
+		// 6. DELETE -> 204 No Content with ETag W/"3"
+		reqDel, _ := http.NewRequest(http.MethodDelete, resURL, nil)
+		respDel, err := http.DefaultClient.Do(reqDel)
+		if err != nil {
+			t.Fatalf("DELETE: %v", err)
+		}
+		respDel.Body.Close()
+		if respDel.StatusCode != http.StatusNoContent {
+			t.Fatalf("expected 204 No Content on DELETE, got %d", respDel.StatusCode)
+		}
+		if etag := respDel.Header.Get("ETag"); etag != `W/"3"` {
+			t.Fatalf("expected ETag W/\"3\" on DELETE, got %q", etag)
+		}
+
+		// 7. GET after DELETE -> 410 Gone
+		respGone, err := http.Get(resURL)
+		if err != nil {
+			t.Fatalf("GET after DELETE: %v", err)
+		}
+		respGone.Body.Close()
+		if respGone.StatusCode != http.StatusGone {
+			t.Fatalf("expected 410 Gone after DELETE, got %d", respGone.StatusCode)
+		}
+
+		// 8. vread v3 (tombstone) -> 410 Gone
+		vread3, err := http.Get(resURL + "/_history/3")
+		if err != nil {
+			t.Fatalf("GET vread 3: %v", err)
+		}
+		vread3.Body.Close()
+		if vread3.StatusCode != http.StatusGone {
+			t.Fatalf("expected 410 Gone on vread 3, got %d", vread3.StatusCode)
+		}
+
+		// 9. GET /_history -> Bundle of type "history" with 3 entries
+		histResp, err := http.Get(resURL + "/_history")
+		if err != nil {
+			t.Fatalf("GET _history: %v", err)
+		}
+		defer histResp.Body.Close()
+		if histResp.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK on _history, got %d", histResp.StatusCode)
+		}
+		var histBundle map[string]any
+		json.NewDecoder(histResp.Body).Decode(&histBundle)
+		if histBundle["type"] != "history" {
+			t.Fatalf("expected bundle type history, got %v", histBundle["type"])
+		}
+		if int(histBundle["total"].(float64)) != 3 {
+			t.Fatalf("expected 3 history entries, got %v", histBundle["total"])
+		}
+	})
+
 	// Clean up
-	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_resource"} {
+	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_resource_history", "fhir_resource"} {
 		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-api'")
 	}
 }
