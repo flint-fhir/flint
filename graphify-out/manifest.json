@@ -78,21 +78,21 @@
     "semantic_hash": "473fe8c145dce1d9d803055c6d1b756d"
   },
   "server/bundle.go": {
-    "mtime": 1791436084.2448344,
-    "seen": 1791565354.453523,
-    "ast_hash": "1a94688ff85d82464a1efab97662a1fc",
+    "mtime": 1791601299.2889926,
+    "seen": 1791604011.214941,
+    "ast_hash": "57b2be88612efcad5dc994362f7f48bb",
     "semantic_hash": ""
   },
   "server/server.go": {
-    "mtime": 1791561411.867109,
-    "seen": 1791565354.4535239,
-    "ast_hash": "8dd30c4f7f4699d27dde8933370d6f41",
+    "mtime": 1791601820.454746,
+    "seen": 1791604011.214943,
+    "ast_hash": "6d77391c0c04c66e300746b2fbdb2762",
     "semantic_hash": ""
   },
   "server/server_test.go": {
-    "mtime": 1791564914.8667054,
-    "seen": 1791565354.453525,
-    "ast_hash": "dd0e6471137abd25e9e832f4fe4be8a8",
+    "mtime": 1791603883.8151479,
+    "seen": 1791604011.214945,
+    "ast_hash": "f5b3f6c0ea37022b3aae239dd236e67f",
     "semantic_hash": ""
   },
   "server/smart.go": {
@@ -156,21 +156,21 @@
     "semantic_hash": ""
   },
   "store/postgres/search.go": {
-    "mtime": 1791564985.2932448,
-    "seen": 1791565354.453642,
+    "mtime": 1791569142.9763153,
+    "seen": 1791598963.854911,
     "ast_hash": "b9ac56ebaaecbcb16a09f804d45c9e83",
     "semantic_hash": ""
   },
   "store/postgres/store.go": {
-    "mtime": 1791404621.9553814,
-    "seen": 1791422840.930214,
-    "ast_hash": "b2b3bee9f089221fb8f0b51a96edaeab",
+    "mtime": 1791601299.2977598,
+    "seen": 1791604011.2153149,
+    "ast_hash": "84610f11e3b56a47facceac61a8eb9f7",
     "semantic_hash": ""
   },
   "store/postgres/store_test.go": {
-    "mtime": 1791561600.144789,
-    "seen": 1791565354.45366,
-    "ast_hash": "9dab3e0cf0715fae313ef1eef035a288",
+    "mtime": 1791603883.8098469,
+    "seen": 1791604011.215316,
+    "ast_hash": "a31da3f97d83e653a661e5a7bdc3807c",
     "semantic_hash": ""
   },
   "testdata/synthea/patient_example.json": {
@@ -204,21 +204,21 @@
     "semantic_hash": ""
   },
   ".github/workflows/ci.yml": {
-    "mtime": 1791437141.9784703,
-    "seen": 1791565354.453713,
-    "ast_hash": "75f1970ff06ad882c015ad01cb63df26",
+    "mtime": 1791603731.089673,
+    "seen": 1791604011.2153878,
+    "ast_hash": "37a263ad3e635b44cd9c3c40e8c97aa0",
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1791437141.979112,
-    "seen": 1791565354.453716,
-    "ast_hash": "c91eab02d19893e00a0b07c6b776c10f",
+    "mtime": 1791603808.230495,
+    "seen": 1791604011.215445,
+    "ast_hash": "4133e34e86178890ca29dd513d6dbbda",
     "semantic_hash": ""
   },
   "Taskfile.yaml": {
-    "mtime": 1791422900.6573884,
-    "seen": 1791433687.1737869,
-    "ast_hash": "8545086cb14de3d8e68a082f815047c6",
+    "mtime": 1791603947.3570333,
+    "seen": 1791604011.215465,
+    "ast_hash": "1d6d2a4fc2fb0f27a2980cf4217472d2",
     "semantic_hash": ""
   },
   "buf.gen.search_index.yaml": {
@@ -318,9 +318,9 @@
     "semantic_hash": ""
   },
   "ingest/activity/activities_test.go": {
-    "mtime": 1791562543.9753587,
-    "seen": 1791565354.453439,
-    "ast_hash": "22cdad708b67281374ca42ffaa1c2cdb",
+    "mtime": 1791601299.2886384,
+    "seen": 1791604011.21451,
+    "ast_hash": "8e28c47bfaac9bea1bee47d0edb02906",
     "semantic_hash": ""
   },
   "store/postgres/extract.go": {
@@ -432,39 +432,105 @@
     "semantic_hash": ""
   },
   "server/middleware.go": {
-    "mtime": 1791436084.2449949,
-    "seen": 1791565354.453523,
-    "ast_hash": "1dd0e26f1f82c0c13267abf0525edb1d",
+    "mtime": 1791603883.8019066,
+    "seen": 1791604011.214942,
+    "ast_hash": "8c2cbfc42cab4e72cf05cc145505f781",
     "semantic_hash": ""
   },
   "server/server_auth_test.go": {
-    "mtime": 1791436084.2455304,
-    "seen": 1791565354.4535239,
-    "ast_hash": "779b81357c95f54fa1438a66031daf9b",
+    "mtime": 1791603883.8016233,
+    "seen": 1791604011.214944,
+    "ast_hash": "b8d17ea31819cba4aea0e937088e6299",
     "semantic_hash": ""
   },
   "store/postgres/search_parse.go": {
-    "mtime": 1791560318.1591804,
-    "seen": 1791565354.453643,
+    "mtime": 1791569142.9765863,
+    "seen": 1791598963.854911,
     "ast_hash": "cbf8e6b6dea7f792a8a5acad6cbf0fba",
     "semantic_hash": ""
   },
   "store/postgres/search_parse_test.go": {
-    "mtime": 1791561681.6806643,
-    "seen": 1791565354.453643,
+    "mtime": 1791569142.9770656,
+    "seen": 1791598963.854912,
     "ast_hash": "5c6dfd7ac0d108157a2adbaeef333392",
     "semantic_hash": ""
   },
   "store/postgres/search_property_test.go": {
-    "mtime": 1791562323.1188998,
-    "seen": 1791565354.453644,
-    "ast_hash": "dcccb29a42b6acd3e6289ebe897f61fc",
+    "mtime": 1791601299.2973406,
+    "seen": 1791604011.215314,
+    "ast_hash": "cfa26068974eb8215d7d94d662f77392",
     "semantic_hash": ""
   },
   "buf.gen.auth.yaml": {
     "mtime": 1791436084.2414224,
     "seen": 1791565354.453731,
     "ast_hash": "1e974cffa44e8e2349f550ce20b0fca5",
+    "semantic_hash": ""
+  },
+  "pkg/validation/outcome.go": {
+    "mtime": 1791589179.9741085,
+    "seen": 1791598963.854687,
+    "ast_hash": "7cabeeb522eccd0c88e56aef8f28d703",
+    "semantic_hash": ""
+  },
+  "pkg/validation/property_test.go": {
+    "mtime": 1791589179.974366,
+    "seen": 1791598963.854687,
+    "ast_hash": "fcf261a25701ab23916db744b08b95c6",
+    "semantic_hash": ""
+  },
+  "pkg/validation/schemas.go": {
+    "mtime": 1791589179.974675,
+    "seen": 1791598963.854688,
+    "ast_hash": "5f0753254be60f585d2e5db3ca88cf72",
+    "semantic_hash": ""
+  },
+  "pkg/validation/validator.go": {
+    "mtime": 1791589179.9751794,
+    "seen": 1791598963.8546891,
+    "ast_hash": "44cf6df658e35b1f168e288e5720c934",
+    "semantic_hash": ""
+  },
+  "pkg/validation/validator_test.go": {
+    "mtime": 1791589179.9755554,
+    "seen": 1791598963.85469,
+    "ast_hash": "03d0ef545c8a1e0bc615a15cc0197bfc",
+    "semantic_hash": ""
+  },
+  "store/postgres/schema.go": {
+    "mtime": 1791601299.2925081,
+    "seen": 1791604011.215243,
+    "ast_hash": "6bb60b0a731209958ef54a318e2d0f1d",
+    "semantic_hash": ""
+  },
+  "pkg/audit/audit.go": {
+    "mtime": 1791603883.8035877,
+    "seen": 1791604011.21456,
+    "ast_hash": "c59e8c6a9eac2766c68d3d1e735fc2d2",
+    "semantic_hash": ""
+  },
+  "pkg/audit/audit_property_test.go": {
+    "mtime": 1791601464.1737614,
+    "seen": 1791604011.214561,
+    "ast_hash": "f2fbcdeefe1c04c414579643b88a17dc",
+    "semantic_hash": ""
+  },
+  "pkg/audit/audit_test.go": {
+    "mtime": 1791601458.3597357,
+    "seen": 1791604011.214564,
+    "ast_hash": "ac4159f5d115dda6ff10d5f35c8035c6",
+    "semantic_hash": ""
+  },
+  "store/postgres/audit.go": {
+    "mtime": 1791601378.6404212,
+    "seen": 1791604011.215195,
+    "ast_hash": "192d55603d5d0d02e17a0ac9b64d3246",
+    "semantic_hash": ""
+  },
+  "store/postgres/schema_test.go": {
+    "mtime": 1791603714.1966817,
+    "seen": 1791604011.215244,
+    "ast_hash": "faa202ebf6e541889c9fdbf943fcb063",
     "semantic_hash": ""
   }
 }

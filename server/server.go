@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -23,10 +24,13 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/known/anypb"
 
+	"github.com/flint-fhir/flint/pkg/audit"
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/store/postgres"
 )
+
+var idSeq atomic.Uint64
 
 // Server is the Flint FHIR REST API server.
 type Server struct {
@@ -39,17 +43,35 @@ type Server struct {
 	smartConfig    *SMARTConfig
 	tokenValidator auth.TokenValidator
 	validator      validation.Validator
+	auditRecorder  audit.Recorder
 }
 
 // New creates a new FHIR server.
 func New(store *postgres.Store, logger *slog.Logger) *Server {
+	var auditRec audit.Recorder
+	if store != nil {
+		auditRec = audit.NewStoreRecorder(store)
+	} else {
+		auditRec = audit.NewMemoryRecorder()
+	}
 	return &Server{
 		store:         store,
 		logger:        logger,
 		protoRegistry: make(map[string]protoreflect.MessageDescriptor),
 		extractors:    postgres.DefaultIndexExtractors(),
 		validator:     validation.NewEngine(validation.DefaultOptions()),
+		auditRecorder: auditRec,
 	}
+}
+
+// SetAuditRecorder configures the HIPAA / ONC security audit event recorder.
+func (s *Server) SetAuditRecorder(r audit.Recorder) {
+	s.auditRecorder = r
+}
+
+// AuditRecorder returns the active security audit event recorder.
+func (s *Server) AuditRecorder() audit.Recorder {
+	return s.auditRecorder
 }
 
 // SetValidator configures the FHIR StructureDefinition and ValueSet validator.
@@ -80,6 +102,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
 	// FHIR REST endpoints
+	mux.HandleFunc("GET /fhir/r4/{tenant}/AuditEvent/{id}", s.handleReadAuditEvent)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/AuditEvent", s.handleSearchAuditEvents)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history/{vid}", s.handleVRead)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history", s.handleInstanceHistory)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}", s.handleRead)
@@ -93,7 +117,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/metadata", s.handleMetadata)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/smart-configuration", s.handleSMARTConfig)
 
-	return s.authMiddleware(mux)
+	return s.auditMiddleware(s.authMiddleware(mux))
 }
 
 // handleRead handles GET /{resourceType}/{id} — read a single resource.
@@ -554,9 +578,99 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	outcome.WriteHTTP(w, http.StatusOK)
 }
 
-// generateID creates a simple unique ID for resources without one.
+// generateID creates a collision-free unique ID for resources and audit events.
 func generateID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), idSeq.Add(1))
+}
+
+// handleReadAuditEvent handles GET /{tenant}/AuditEvent/{id}.
+func (s *Server) handleReadAuditEvent(w http.ResponseWriter, r *http.Request) {
+	if s.auditRecorder == nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", "AuditEvent recorder not configured")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	auditID := r.PathValue("id")
+
+	rec, err := s.auditRecorder.Read(r.Context(), tenant, auditID)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found",
+			fmt.Sprintf("AuditEvent/%s not found", auditID))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(audit.ToFHIRResource(*rec))
+}
+
+// handleSearchAuditEvents handles GET /{tenant}/AuditEvent?{params}.
+func (s *Server) handleSearchAuditEvents(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	q := r.URL.Query()
+
+	params := postgres.AuditQueryParams{
+		TenantID:     tenant,
+		Action:       q.Get("action"),
+		SubtypeCode:  q.Get("subtype"),
+		Outcome:      q.Get("outcome"),
+		AgentSubject: q.Get("agent"),
+		AgentPatient: q.Get("patient"),
+		EntityType:   q.Get("entity-type"),
+		EntityID:     q.Get("entity-id"),
+	}
+	if entityRef := q.Get("entity"); entityRef != "" {
+		if parts := strings.SplitN(entityRef, "/", 2); len(parts) == 2 {
+			params.EntityType = parts[0]
+			params.EntityID = parts[1]
+		} else {
+			params.EntityID = entityRef
+		}
+	}
+	if v := q.Get("_count"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			params.Count = n
+		}
+	}
+	if v := q.Get("_offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			params.Offset = n
+		}
+	}
+
+	var records []postgres.AuditRecord
+	var total int
+	if s.auditRecorder != nil {
+		var err error
+		records, total, err = s.auditRecorder.Query(r.Context(), params)
+		if err != nil {
+			s.logger.Error("query audit events", "error", err, "tenant", tenant)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to query AuditEvents")
+			return
+		}
+	}
+
+	entries := make([]any, 0, len(records))
+	for _, rec := range records {
+		entries = append(entries, map[string]any{
+			"fullUrl":  fmt.Sprintf("AuditEvent/%s", rec.AuditID),
+			"resource": audit.ToFHIRResource(rec),
+			"search": map[string]any{
+				"mode": "match",
+			},
+		})
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"type":         "searchset",
+		"total":        total,
+		"entry":        entries,
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(bundle)
 }
 
 // handleSearch handles GET /{resourceType}?{params} — search resources.
@@ -826,6 +940,20 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 							{"name": "email", "type": "token"},
 							{"name": "phone", "type": "token"},
 							{"name": "address", "type": "string"},
+						},
+					},
+					{
+						"type":        "AuditEvent",
+						"interaction": []map[string]string{{"code": "read"}, {"code": "search-type"}},
+						"searchParam": []map[string]string{
+							{"name": "action", "type": "token"},
+							{"name": "subtype", "type": "token"},
+							{"name": "outcome", "type": "token"},
+							{"name": "agent", "type": "token"},
+							{"name": "patient", "type": "reference"},
+							{"name": "entity", "type": "reference"},
+							{"name": "entity-type", "type": "token"},
+							{"name": "entity-id", "type": "token"},
 						},
 					},
 				},

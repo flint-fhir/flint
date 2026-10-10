@@ -78,7 +78,7 @@ tasks:
   test:
     desc: Run all Go tests (Postgres integration tests need FLINT_TEST_POSTGRES_DSN)
     cmds:
-      - FLINT_TEST_POSTGRES_DSN="{{.PG_DSN}}" go test ./... -v -count=1
+      - FLINT_TEST_POSTGRES_DSN="{{.PG_DSN}}" go test -race ./... -v -count=1
 
   test-unit:
     desc: Run unit tests only (no Postgres needed)
@@ -132,7 +132,7 @@ tasks:
       - kubectl get pods -n {{.NAMESPACE}} -o wide
 
   logs:
-    desc: Tail logs for a specific pod (usage: task logs -- postgres)
+    desc: "Tail logs for a specific pod (usage: task logs -- postgres)"
     cmds:
       - kubectl logs -f -n {{.NAMESPACE}} -l app={{.CLI_ARGS}} --tail=50
 
