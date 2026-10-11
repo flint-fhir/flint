@@ -83,6 +83,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		isValidateReq := r.Method == http.MethodPost && ((len(parts) >= 4 && parts[3] == "$validate") || (len(parts) >= 5 && parts[4] == "$validate"))
+		if auth.IsPatientRestricted(secCtx) && !isValidateReq && cleanID(secCtx.GetPatientId()) == "" {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token is missing required patient_id claim")
+			return
+		}
+
 		// Check SMART scopes based on request shape
 		if len(parts) >= 4 {
 			resType := parts[3]
@@ -147,23 +153,27 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						}
 
 						// For clinical resources, reject any mismatched patient/subject filters across all query values
-						for _, rawVal := range q["patient"] {
-							for part := range strings.SplitSeq(rawVal, ",") {
-								if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
-									writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-										fmt.Sprintf("cannot query records of patient %s with token restricted to %s",
-											trimmed, secCtx.GetPatientId()))
-									return
+						for _, key := range []string{"patient", "patient._id"} {
+							for _, rawVal := range q[key] {
+								for part := range strings.SplitSeq(rawVal, ",") {
+									if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+										writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+											fmt.Sprintf("cannot query records of patient %s with token restricted to %s",
+												trimmed, secCtx.GetPatientId()))
+										return
+									}
 								}
 							}
 						}
-						for _, rawVal := range q["subject"] {
-							for part := range strings.SplitSeq(rawVal, ",") {
-								if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
-									writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-										fmt.Sprintf("cannot query records of subject %s with token restricted to %s",
-											trimmed, secCtx.GetPatientId()))
-									return
+						for _, key := range []string{"subject", "subject._id"} {
+							for _, rawVal := range q[key] {
+								for part := range strings.SplitSeq(rawVal, ",") {
+									if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+										writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+											fmt.Sprintf("cannot query records of subject %s with token restricted to %s",
+												trimmed, secCtx.GetPatientId()))
+										return
+									}
 								}
 							}
 						}
@@ -192,6 +202,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							fmt.Sprintf("insufficient scope for create on %s", resType))
 						return
 					}
+					if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							fmt.Sprintf("patient-scoped token (%s) cannot create non-compartment resource %s",
+								secCtx.GetPatientId(), resType))
+						return
+					}
 				}
 
 			case http.MethodPut:
@@ -202,6 +218,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				}
 				if len(parts) >= 5 && auth.IsPatientRestricted(secCtx) {
 					id := parts[4]
+					if !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							fmt.Sprintf("patient-scoped token (%s) cannot update non-compartment resource %s",
+								secCtx.GetPatientId(), resType))
+						return
+					}
 					if strings.EqualFold(resType, "Patient") && cleanID(id) != cleanID(secCtx.GetPatientId()) {
 						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 							fmt.Sprintf("patient-scoped token (%s) cannot update patient %s",
@@ -232,6 +254,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				}
 				if len(parts) >= 5 && auth.IsPatientRestricted(secCtx) {
 					id := parts[4]
+					if !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							fmt.Sprintf("patient-scoped token (%s) cannot delete non-compartment resource %s",
+								secCtx.GetPatientId(), resType))
+						return
+					}
 					if strings.EqualFold(resType, "Patient") && cleanID(id) != cleanID(secCtx.GetPatientId()) {
 						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 							fmt.Sprintf("patient-scoped token (%s) cannot delete patient %s",

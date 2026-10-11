@@ -8,13 +8,13 @@ MODEL (
 WITH ranked AS (
   SELECT
     COALESCE(tenant_id, 'default') AS tenant_id,
-    _kafka_key AS encounter_id,
+    regexp_replace(_kafka_key, '^(' || COALESCE(tenant_id, 'default') || '/|Encounter/)', '') AS encounter_id,
     _kafka_offset AS kafka_offset,
     _kafka_timestamp AS updated_at,
     COALESCE(op, 'U') AS op,
     CAST(_kafka_value AS VARCHAR) AS raw_json,
     ROW_NUMBER() OVER (
-      PARTITION BY COALESCE(tenant_id, 'default'), _kafka_key
+      PARTITION BY COALESCE(tenant_id, 'default'), regexp_replace(_kafka_key, '^(' || COALESCE(tenant_id, 'default') || '/|Encounter/)', '')
       ORDER BY _kafka_offset DESC
     ) AS rn
   FROM fhir_raw.encounter
@@ -37,7 +37,9 @@ SELECT
   )) AS status,
   COALESCE(
     json_extract_string(raw_json, '$.class.code.value'),
-    json_extract_string(raw_json, '$.class.code')
+    json_extract_string(raw_json, '$.class.code'),
+    json_extract_string(raw_json, '$.classValue.code.value'),
+    json_extract_string(raw_json, '$.classValue.code')
   ) AS class_code,
   TRY_CAST(COALESCE(
     json_extract_string(raw_json, '$.period.start.value'),

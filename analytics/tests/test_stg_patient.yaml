@@ -10,13 +10,13 @@ test_stg_patient_cdc_dedup_and_tombstone:
           op: "I"
           _kafka_value: '{"name":[{"family":{"value":"OldName"},"given":[{"value":"Alice"}]}],"gender":{"value":"female"},"birthDate":{"value":"1990-05-15"},"active":{"value":true},"address":[{"postalCode":{"value":"94101"}}]}'
         - tenant_id: "tenant-a"
-          _kafka_key: "pat-001"
+          _kafka_key: "tenant-a/pat-001"
           _kafka_offset: 2
           _kafka_timestamp: "2026-10-01 11:00:00+00:00"
           op: "U"
           _kafka_value: '{"name":[{"family":{"value":"Wonderland"},"given":[{"value":"Alice"}]}],"gender":{"value":"female"},"birthDate":{"value":"1990-05-15"},"active":{"value":true},"address":[{"postalCode":{"value":"94105"}}]}'
         - tenant_id: "tenant-a"
-          _kafka_key: "pat-002"
+          _kafka_key: "tenant-a/pat-002"
           _kafka_offset: 1
           _kafka_timestamp: "2026-10-01 12:00:00+00:00"
           op: "I"

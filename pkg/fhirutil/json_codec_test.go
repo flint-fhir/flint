@@ -284,6 +284,53 @@ func TestDenormalizeProtoJSONToFHIRJSON_RoundTripAndValidation(t *testing.T) {
 		assert.Equal(t, "1985-11-23", outPat["birthDate"])
 		assert.Equal(t, "female", outPat["gender"])
 		assert.True(t, valEngine.ValidateJSON("Patient", outPatJSON).IsValid())
+
+		// Condition with onsetDateTime, abatementDateTime, clinicalStatus, and verificationStatus
+		rawCond := []byte(`{
+			"resourceType": "Condition",
+			"id": "rt-cond-full",
+			"clinicalStatus": {
+				"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "resolved"}]
+			},
+			"verificationStatus": {
+				"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"}]
+			},
+			"code": {
+				"coding": [{"system": "http://snomed.info/sct", "code": "44054006", "display": "Type 2 diabetes mellitus"}]
+			},
+			"subject": {"reference": "Patient/rt-pat-full"},
+			"onsetDateTime": "2024-01-15T09:00:00Z",
+			"abatementDateTime": "2025-01-15T09:00:00Z"
+		}`)
+		condMD := (&condpb.Condition{}).ProtoReflect().Descriptor()
+		normCond, err := fhirutil.NormalizeFHIRJSONToProtoJSON(condMD, rawCond)
+		require.NoError(t, err)
+		cond := &condpb.Condition{}
+		require.NoError(t, (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(normCond, cond))
+		condBytes, err := proto.Marshal(cond)
+		require.NoError(t, err)
+
+		outCondJSON, err := fhirutil.DenormalizeProtoJSONToFHIRJSON(condMD, "Condition", condBytes, 1, lastUpdated)
+		require.NoError(t, err)
+		var outCond map[string]any
+		require.NoError(t, json.Unmarshal(outCondJSON, &outCond))
+		assert.Equal(t, "2024-01-15T09:00:00Z", outCond["onsetDateTime"])
+		assert.Equal(t, "2025-01-15T09:00:00Z", outCond["abatementDateTime"])
+		assert.Nil(t, outCond["onset"])
+		assert.Nil(t, outCond["abatement"])
+		condOutcome := valEngine.ValidateJSON("Condition", outCondJSON)
+		assert.True(t, condOutcome.IsValid(), "expected round-tripped Condition JSON to pass validation: %v", condOutcome.Issues)
+
+		// Untyped InjectResourceType also flattens choice[x] and classValue wrappers
+		protoJSONCond, err := protojson.Marshal(cond)
+		require.NoError(t, err)
+		injectedCond, err := fhirutil.InjectResourceType("Condition", protoJSONCond)
+		require.NoError(t, err)
+		var injectedMap map[string]any
+		require.NoError(t, json.Unmarshal(injectedCond, &injectedMap))
+		assert.Equal(t, "Condition", injectedMap["resourceType"])
+		assert.Equal(t, "2024-01-15T09:00:00Z", injectedMap["onsetDateTime"])
+		assert.Equal(t, "2025-01-15T09:00:00Z", injectedMap["abatementDateTime"])
 	})
 }
 

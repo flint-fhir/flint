@@ -8,13 +8,13 @@ MODEL (
 WITH ranked AS (
   SELECT
     COALESCE(tenant_id, 'default') AS tenant_id,
-    _kafka_key AS condition_id,
+    regexp_replace(_kafka_key, '^(' || COALESCE(tenant_id, 'default') || '/|Condition/)', '') AS condition_id,
     _kafka_offset AS kafka_offset,
     _kafka_timestamp AS updated_at,
     COALESCE(op, 'U') AS op,
     CAST(_kafka_value AS VARCHAR) AS raw_json,
     ROW_NUMBER() OVER (
-      PARTITION BY COALESCE(tenant_id, 'default'), _kafka_key
+      PARTITION BY COALESCE(tenant_id, 'default'), regexp_replace(_kafka_key, '^(' || COALESCE(tenant_id, 'default') || '/|Condition/)', '')
       ORDER BY _kafka_offset DESC
     ) AS rn
   FROM fhir_raw.condition
@@ -51,7 +51,9 @@ SELECT
   )) AS verification_status,
   TRY_CAST(COALESCE(
     json_extract_string(raw_json, '$.onsetDateTime.value'),
-    json_extract_string(raw_json, '$.onsetDateTime')
+    json_extract_string(raw_json, '$.onsetDateTime'),
+    json_extract_string(raw_json, '$.onset.dateTime.value'),
+    json_extract_string(raw_json, '$.onset.dateTime')
   ) AS DATE) AS onset_date,
   updated_at
 FROM ranked

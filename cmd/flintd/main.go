@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"net/http"
@@ -44,6 +45,11 @@ func main() {
 
 	if err := db.Ping(); err != nil {
 		logger.Error("ping db", "error", err)
+		os.Exit(1)
+	}
+
+	if err := postgres.RunMigrations(context.Background(), db); err != nil {
+		logger.Error("run migrations", "error", err)
 		os.Exit(1)
 	}
 

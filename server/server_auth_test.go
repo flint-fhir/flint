@@ -596,4 +596,97 @@ func TestServer_PatientCompartmentIsolation_Integration(t *testing.T) {
 		require.NoError(t, json.NewDecoder(respAudit.Body).Decode(&auditBundle))
 		assert.GreaterOrEqual(t, int(auditBundle["total"].(float64)), 2, "expected clinician read and create on pat-100's Observation to be attributed to pat-100 in AuditEvent log")
 	})
+
+	t.Run("Patient-Scoped Token Missing patient_id Claim Fails Closed With 403 Forbidden", func(t *testing.T) {
+		noClaimToken, err := mockVal.IssueToken("broken-launch-user", "patient/Patient.cruds patient/Observation.cruds", "", time.Hour, nil)
+		require.NoError(t, err)
+
+		for _, tc := range []struct {
+			method string
+			path   string
+			body   string
+		}{
+			{http.MethodGet, "/fhir/r4/test-compartment/Patient/pat-100", ""},
+			{http.MethodGet, "/fhir/r4/test-compartment/Observation", ""},
+			{http.MethodPost, "/fhir/r4/test-compartment/Observation", `{"resourceType":"Observation","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/pat-100"}}`},
+			{http.MethodPost, "/fhir/r4/test-compartment", `{"resourceType":"Bundle","type":"transaction","entry":[{"request":{"method":"DELETE","url":"Observation/obs-100"}}]}`},
+		} {
+			var r io.Reader
+			if tc.body != "" {
+				r = strings.NewReader(tc.body)
+			}
+			req, _ := http.NewRequest(tc.method, ts.URL+tc.path, r)
+			req.Header.Set("Authorization", "Bearer "+noClaimToken)
+			req.Header.Set("Content-Type", "application/fhir+json")
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			resp.Body.Close()
+			assert.Equal(t, http.StatusForbidden, resp.StatusCode, "expected 403 Forbidden for %s %s with patient/* scope and empty patient_id", tc.method, tc.path)
+		}
+	})
+
+	t.Run("Patient-Scoped Token Cannot Mutate Shared Non-Compartment Practitioner Resource", func(t *testing.T) {
+		patWithPracWrite, err := mockVal.IssueToken("pat-100-user", "patient/Patient.cruds patient/Practitioner.cruds", "pat-100", time.Hour, nil)
+		require.NoError(t, err)
+
+		for _, tc := range []struct {
+			method string
+			path   string
+			body   string
+		}{
+			{http.MethodPost, "/fhir/r4/test-compartment/Practitioner", `{"resourceType":"Practitioner","name":[{"family":"FakeDoc"}]}`},
+			{http.MethodPut, "/fhir/r4/test-compartment/Practitioner/prac-shared", `{"resourceType":"Practitioner","id":"prac-shared","name":[{"family":"Hijacked"}]}`},
+			{http.MethodDelete, "/fhir/r4/test-compartment/Practitioner/prac-shared", ""},
+			{http.MethodPost, "/fhir/r4/test-compartment", `{"resourceType":"Bundle","type":"transaction","entry":[{"request":{"method":"DELETE","url":"Practitioner/prac-shared"}}]}`},
+		} {
+			var r io.Reader
+			if tc.body != "" {
+				r = strings.NewReader(tc.body)
+			}
+			req, _ := http.NewRequest(tc.method, ts.URL+tc.path, r)
+			req.Header.Set("Authorization", "Bearer "+patWithPracWrite)
+			req.Header.Set("Content-Type", "application/fhir+json")
+			resp, err := http.DefaultClient.Do(req)
+			require.NoError(t, err)
+			resp.Body.Close()
+			assert.Equal(t, http.StatusForbidden, resp.StatusCode, "patient-scoped token must not %s %s", tc.method, tc.path)
+		}
+	})
+
+	t.Run("Patient/$everything Enforces Per-Resource SMART Scopes and Pagination Validation", func(t *testing.T) {
+		// Token with ONLY Patient.r (no Observation or Practitioner scope)
+		patOnlyToken, err := mockVal.IssueToken("pat-100-only", "patient/Patient.r", "pat-100", time.Hour, nil)
+		require.NoError(t, err)
+
+		// 1. Explicit _type=Observation without Observation scope -> 403 Forbidden
+		reqType, _ := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/test-compartment/Patient/pat-100/$everything?_type=Observation", nil)
+		reqType.Header.Set("Authorization", "Bearer "+patOnlyToken)
+		respType, err := http.DefaultClient.Do(reqType)
+		require.NoError(t, err)
+		respType.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respType.StatusCode)
+
+		// 2. Unfiltered $everything with only Patient.r strips unauthorized Observation and Practitioner includes
+		reqAll, _ := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/test-compartment/Patient/pat-100/$everything", nil)
+		reqAll.Header.Set("Authorization", "Bearer "+patOnlyToken)
+		respAll, err := http.DefaultClient.Do(reqAll)
+		require.NoError(t, err)
+		defer respAll.Body.Close()
+		require.Equal(t, http.StatusOK, respAll.StatusCode)
+		var evBundle map[string]any
+		require.NoError(t, json.NewDecoder(respAll.Body).Decode(&evBundle))
+		evEntries := evBundle["entry"].([]any)
+		require.Len(t, evEntries, 1, "expected only Patient/pat-100 when token lacks Observation and Practitioner scopes")
+		assert.Equal(t, "Patient/pat-100", evEntries[0].(map[string]any)["fullUrl"])
+
+		// 3. Malformed _count or _offset on $everything returns 400 Bad Request
+		for _, q := range []string{"_count=-1", "_count=abc", "_offset=-5"} {
+			reqBad, _ := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/test-compartment/Patient/pat-100/$everything?"+q, nil)
+			reqBad.Header.Set("Authorization", "Bearer "+patOnlyToken)
+			respBad, err := http.DefaultClient.Do(reqBad)
+			require.NoError(t, err)
+			respBad.Body.Close()
+			assert.Equal(t, http.StatusBadRequest, respBad.StatusCode)
+		}
+	})
 }

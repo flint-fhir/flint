@@ -36,7 +36,7 @@ test_stg_observation_cdc_and_quantity:
           op: "I"
           _kafka_value: '{"status":{"value":"preliminary"},"subject":{"reference":{"value":"Patient/pat-001"}},"code":{"coding":[{"system":{"value":"http://loinc.org"},"code":{"value":"8867-4"}}]},"valueQuantity":{"value":{"value":"68.5"},"unit":{"value":"/min"}},"effectiveDateTime":{"value":"2026-10-05T09:00:00Z"}}'
         - tenant_id: "tenant-a"
-          _kafka_key: "obs-100"
+          _kafka_key: "tenant-a/obs-100"
           _kafka_offset: 2
           _kafka_timestamp: "2026-10-05 09:30:00+00:00"
           op: "U"
@@ -67,11 +67,11 @@ test_stg_encounter_cdc_and_patient_ref:
           op: "I"
           _kafka_value: '{"status":{"value":"in-progress"},"class":{"code":{"value":"IMP"}},"subject":{"reference":{"value":"Patient/pat-001"}},"period":{"start":{"value":"2026-10-01T08:00:00Z"}}}'
         - tenant_id: "tenant-a"
-          _kafka_key: "enc-100"
+          _kafka_key: "tenant-a/enc-100"
           _kafka_offset: 2
           _kafka_timestamp: "2026-10-02 14:00:00+00:00"
           op: "U"
-          _kafka_value: '{"status":{"value":"finished"},"class":{"code":{"value":"IMP"}},"subject":{"reference":{"value":"Patient/pat-001"}},"period":{"start":{"value":"2026-10-01T08:00:00Z"},"end":{"value":"2026-10-02T14:00:00Z"}}}'
+          _kafka_value: '{"status":{"value":"finished"},"classValue":{"code":{"value":"IMP"}},"subject":{"reference":{"value":"Patient/pat-001"}},"period":{"start":{"value":"2026-10-01T08:00:00Z"},"end":{"value":"2026-10-02T14:00:00Z"}}}'
   outputs:
     query:
       rows:
@@ -90,11 +90,11 @@ test_stg_condition_cdc_and_tombstone:
     fhir_raw.condition:
       rows:
         - tenant_id: "tenant-a"
-          _kafka_key: "cond-100"
+          _kafka_key: "tenant-a/cond-100"
           _kafka_offset: 1
           _kafka_timestamp: "2026-10-01 10:00:00+00:00"
           op: "I"
-          _kafka_value: '{"subject":{"reference":{"value":"Patient/pat-001"}},"code":{"coding":[{"system":{"value":"http://snomed.info/sct"},"code":{"value":"44054006"}}]},"clinicalStatus":{"coding":[{"code":{"value":"active"}}]},"verificationStatus":{"coding":[{"code":{"value":"confirmed"}}]},"onsetDateTime":{"value":"2025-01-01"}}'
+          _kafka_value: '{"subject":{"reference":{"value":"Patient/pat-001"}},"code":{"coding":[{"system":{"value":"http://snomed.info/sct"},"code":{"value":"44054006"}}]},"clinicalStatus":{"coding":[{"code":{"value":"active"}}]},"verificationStatus":{"coding":[{"code":{"value":"confirmed"}}]},"onset":{"dateTime":{"value":"2025-01-01"}}}'
         - tenant_id: "tenant-a"
           _kafka_key: "cond-deleted"
           _kafka_offset: 1
