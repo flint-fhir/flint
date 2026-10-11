@@ -256,26 +256,65 @@ func TestDenormalizeProtoJSONToFHIRJSON_RoundTripAndValidation(t *testing.T) {
 		outcome := valEngine.ValidateJSON("Encounter", outJSON)
 		assert.True(t, outcome.IsValid(), "expected round-tripped Encounter JSON to pass FHIR R4 validation: %v", outcome.Issues)
 	})
+
+	t.Run("Condition and Patient with birthDate, telecom, address, and identifier round-trip cleanly", func(t *testing.T) {
+		rawPat := []byte(`{
+			"resourceType": "Patient",
+			"id": "rt-pat-full",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1985-11-23",
+			"identifier": [{"system": "http://hospital.example/mrn", "value": "MRN-900"}],
+			"name": [{"use": "official", "family": "Connor", "given": ["Sarah"]}],
+			"telecom": [{"system": "phone", "value": "555-0199", "use": "mobile"}],
+			"address": [{"line": ["100 Cyberdyne Way"], "city": "Los Angeles", "state": "CA", "postalCode": "90001"}]
+		}`)
+		patMD := (&patpb.Patient{}).ProtoReflect().Descriptor()
+		normPat, err := fhirutil.NormalizeFHIRJSONToProtoJSON(patMD, rawPat)
+		require.NoError(t, err)
+		pat := &patpb.Patient{}
+		require.NoError(t, (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(normPat, pat))
+		patBytes, err := proto.Marshal(pat)
+		require.NoError(t, err)
+
+		outPatJSON, err := fhirutil.DenormalizeProtoJSONToFHIRJSON(patMD, "Patient", patBytes, 2, lastUpdated)
+		require.NoError(t, err)
+		var outPat map[string]any
+		require.NoError(t, json.Unmarshal(outPatJSON, &outPat))
+		assert.Equal(t, "1985-11-23", outPat["birthDate"])
+		assert.Equal(t, "female", outPat["gender"])
+		assert.True(t, valEngine.ValidateJSON("Patient", outPatJSON).IsValid())
+	})
 }
 
 func TestRewriteURNReferences(t *testing.T) {
 	raw := []byte(`{
 		"resourceType": "Observation",
+		"id": "urn:uuid:obs-self-0001",
+		"status": "final",
+		"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
 		"subject": {"reference": "urn:uuid:1111-2222"},
 		"performer": [{"reference": "urn:uuid:3333-4444"}, {"reference": "Practitioner/existing-1"}]
 	}`)
 	rewritten, err := fhirutil.RewriteURNReferences(raw, map[string]string{
-		"urn:uuid:1111-2222": "Patient/pat-assigned-1",
-		"urn:uuid:3333-4444": "Practitioner/prac-assigned-2",
+		"urn:uuid:obs-self-0001": "Observation/obs-assigned-0",
+		"urn:uuid:1111-2222":     "Patient/pat-assigned-1",
+		"urn:uuid:3333-4444":     "Practitioner/prac-assigned-2",
 	})
 	require.NoError(t, err)
 
 	var m map[string]any
 	require.NoError(t, json.Unmarshal(rewritten, &m))
+	// Resource "id" field must strip the "Observation/" prefix so it remains a valid FHIR id
+	assert.Equal(t, "obs-assigned-0", m["id"])
 	assert.Equal(t, "Patient/pat-assigned-1", m["subject"].(map[string]any)["reference"])
 	perfs := m["performer"].([]any)
 	assert.Equal(t, "Practitioner/prac-assigned-2", perfs[0].(map[string]any)["reference"])
 	assert.Equal(t, "Practitioner/existing-1", perfs[1].(map[string]any)["reference"])
+
+	valEngine := validation.NewEngine(validation.DefaultOptions())
+	outcome := valEngine.ValidateJSON("Observation", rewritten)
+	assert.True(t, outcome.IsValid(), "expected rewritten Observation with id to pass FHIR validation: %v", outcome.Issues)
 }
 
 func TestProperty_NormalizeAndDenormalizeRoundTripValidates(t *testing.T) {

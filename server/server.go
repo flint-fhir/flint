@@ -5,6 +5,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/known/anypb"
 
+	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/pkg/audit"
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
@@ -45,6 +47,7 @@ type Server struct {
 	tokenValidator auth.TokenValidator
 	validator      validation.Validator
 	auditRecorder  audit.Recorder
+	cdcPublisher   automq.Publisher
 }
 
 // New creates a new FHIR server.
@@ -62,6 +65,25 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 		extractors:    postgres.DefaultIndexExtractors(),
 		validator:     validation.NewEngine(validation.DefaultOptions()),
 		auditRecorder: auditRec,
+	}
+}
+
+// SetCDCPublisher configures the optional AutoMQ / Kafka CDC publisher for lakehouse streaming.
+func (s *Server) SetCDCPublisher(p automq.Publisher) {
+	s.cdcPublisher = p
+}
+
+// CDCPublisher returns the configured AutoMQ / Kafka CDC publisher, or nil if disabled.
+func (s *Server) CDCPublisher() automq.Publisher {
+	return s.cdcPublisher
+}
+
+func (s *Server) publishCDC(ctx context.Context, msgs ...automq.Message) {
+	if s.cdcPublisher == nil || len(msgs) == 0 {
+		return
+	}
+	if err := s.cdcPublisher.Publish(ctx, msgs); err != nil && s.logger != nil {
+		s.logger.Warn("failed to publish CDC event to AutoMQ", "error", err, "count", len(msgs))
 	}
 }
 
@@ -358,6 +380,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 				"type", resType, "id", resID, "error", extractErr)
 		}
 	}
+	setAuditPatientID(r.Context(), extractPatientIDFromIndexes(resType, resID, idx))
 
 	// Enforce patient compartment isolation on incoming resource payload
 	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
@@ -388,14 +411,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
-			allowedPatientID := cleanID(secCtx.GetPatientId())
-			if strings.EqualFold(resType, "Patient") {
-				condParams.ID = allowedPatientID
-			} else if postgres.IsPatientCompartmentResourceType(resType) {
-				if condParams.References == nil {
-					condParams.References = make(map[string]string)
-				}
-				condParams.References["patient"] = "Patient/" + allowedPatientID
+			if err := validateAndScopeIfNoneExistForPatient(&condParams, resType, cleanID(secCtx.GetPatientId()), secCtx.GetPatientId()); err != nil {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", err.Error())
+				return
 			}
 		}
 
@@ -412,6 +430,15 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			s.logger.Error("conditional create", "error", err, "type", resType, "ifNoneExist", ifNoneExist)
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "conditional create failed")
 			return
+		}
+		if created {
+			s.publishCDC(r.Context(), automq.Message{
+				TenantID:  tenant,
+				ResType:   resType,
+				ResID:     rec.ResID,
+				ProtoData: rec.ResourceProto,
+				Op:        "U",
+			})
 		}
 		jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if err != nil {
@@ -444,6 +471,14 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.publishCDC(r.Context(), automq.Message{
+		TenantID:  tenant,
+		ResType:   resType,
+		ResID:     resID,
+		ProtoData: rec.ResourceProto,
+		Op:        "U",
+	})
+
 	jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
 		jsonBytes = body
@@ -456,6 +491,32 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 	w.WriteHeader(http.StatusCreated)
 	w.Write(jsonBytes)
+}
+
+func validateAndScopeIfNoneExistForPatient(condParams *postgres.SearchParams, resType, allowedPatientID, rawPatientID string) error {
+	if strings.EqualFold(resType, "Patient") {
+		if condParams.ID != "" && cleanID(condParams.ID) != allowedPatientID {
+			return fmt.Errorf("patient-scoped token (%s) cannot evaluate If-None-Exist for patient %s", rawPatientID, condParams.ID)
+		}
+		condParams.ID = allowedPatientID
+		return nil
+	}
+	if postgres.IsPatientCompartmentResourceType(resType) {
+		if condParams.References == nil {
+			condParams.References = make(map[string]string)
+		}
+		if pRef := condParams.References["patient"]; pRef != "" && cleanID(pRef) != allowedPatientID {
+			return fmt.Errorf("patient-scoped token (%s) cannot evaluate If-None-Exist for patient %s", rawPatientID, pRef)
+		}
+		if sRef := condParams.References["subject"]; sRef != "" && cleanID(sRef) != allowedPatientID {
+			return fmt.Errorf("patient-scoped token (%s) cannot evaluate If-None-Exist for subject %s", rawPatientID, sRef)
+		}
+		condParams.References["patient"] = "Patient/" + allowedPatientID
+		if condParams.References["subject"] != "" {
+			condParams.References["subject"] = "Patient/" + allowedPatientID
+		}
+	}
+	return nil
 }
 
 // handleUpdate handles PUT /{resourceType}/{id} — update or create-on-update a FHIR resource.
@@ -537,6 +598,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 				"type", resType, "id", resID, "error", extractErr)
 		}
 	}
+	setAuditPatientID(r.Context(), extractPatientIDFromIndexes(resType, resID, idx))
 
 	// Enforce patient compartment isolation on incoming resource payload
 	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
@@ -567,6 +629,14 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to update resource")
 		return
 	}
+
+	s.publishCDC(r.Context(), automq.Message{
+		TenantID:  tenant,
+		ResType:   resType,
+		ResID:     resID,
+		ProtoData: protoBytes,
+		Op:        "U",
+	})
 
 	jsonBytes, err := s.protoToJSONWithMeta(resType, protoBytes, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
@@ -599,6 +669,12 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if rec != nil && rec.ResVersion > 0 {
 		w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+		s.publishCDC(r.Context(), automq.Message{
+			TenantID: tenant,
+			ResType:  resType,
+			ResID:    resID,
+			Op:       "D",
+		})
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -863,6 +939,11 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	resType := r.PathValue("resourceType")
+
+	if err := postgres.ValidateSearchQuery(r.URL.Query()); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
 
 	params := postgres.BuildSearchParamsFromQuery(tenant, resType, r.URL.Query())
 

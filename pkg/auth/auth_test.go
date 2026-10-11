@@ -2,10 +2,18 @@ package auth_test
 
 import (
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -349,4 +357,135 @@ func TestContextHelpers(t *testing.T) {
 	retrieved, ok := auth.FromContext(ctx)
 	assert.True(t, ok)
 	assert.Equal(t, "user-1", retrieved.Subject)
+}
+
+func TestOIDCValidator_HTTPJWKSAndHardening(t *testing.T) {
+	ctx := context.Background()
+	audience := "flint-api"
+
+	// Generate an RSA 2048 keypair to test RS256 signing and JWK Set discovery over HTTP
+	rsaPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	rsaJWK := auth.JWK{
+		Kty: "RSA",
+		Use: "sig",
+		Alg: "RS256",
+		Kid: "rsa-key-1",
+		N:   base64.RawURLEncoding.EncodeToString(rsaPriv.N.Bytes()),
+		E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(rsaPriv.E)).Bytes()),
+	}
+	encJWK := auth.JWK{
+		Kty: "RSA",
+		Use: "enc",
+		Alg: "RSA-OAEP",
+		Kid: "enc-key-only",
+		N:   rsaJWK.N,
+		E:   rsaJWK.E,
+	}
+
+	var jwksFetchCount atomic.Int32
+	var activeJWKS atomic.Value
+	activeJWKS.Store(auth.JWKSet{Keys: []auth.JWK{encJWK, rsaJWK}})
+
+	var serverURL string
+	idpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/openid-configuration":
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{
+				"issuer":   serverURL,
+				"jwks_uri": serverURL + "/oauth/v2/keys",
+			})
+		case "/oauth/v2/keys":
+			jwksFetchCount.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(activeJWKS.Load().(auth.JWKSet))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer idpServer.Close()
+	serverURL = idpServer.URL
+
+	validator, err := auth.NewOIDCValidator(auth.OIDCConfig{
+		Issuer:             serverURL,
+		Audience:           audience,
+		JWKSURL:            serverURL + "/oauth/v2/keys",
+		HTTPClient:         idpServer.Client(),
+		CacheTTL:           10 * time.Minute,
+		MinRefreshInterval: 500 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	signRS256 := func(kid, alg string, exp time.Time) string {
+		hdr, _ := json.Marshal(map[string]string{"alg": alg, "typ": "JWT", "kid": kid})
+		payload, _ := json.Marshal(map[string]any{
+			"iss":   serverURL,
+			"sub":   "rsa-practitioner-1",
+			"aud":   audience,
+			"exp":   exp.Unix(),
+			"iat":   time.Now().Unix(),
+			"scope": "user/Patient.rs user/Observation.cruds",
+		})
+		unsigned := base64.RawURLEncoding.EncodeToString(hdr) + "." + base64.RawURLEncoding.EncodeToString(payload)
+		digest := sha256.Sum256([]byte(unsigned))
+		sig, err := rsa.SignPKCS1v15(rand.Reader, rsaPriv, crypto.SHA256, digest[:])
+		require.NoError(t, err)
+		return unsigned + "." + base64.RawURLEncoding.EncodeToString(sig)
+	}
+
+	t.Run("Live OIDC Discovery and RS256 Verification", func(t *testing.T) {
+		tok := signRS256("rsa-key-1", "RS256", time.Now().Add(time.Hour))
+		secCtx, err := validator.ValidateToken(ctx, tok)
+		require.NoError(t, err)
+		assert.Equal(t, "rsa-practitioner-1", secCtx.GetSubject())
+		assert.Equal(t, int32(1), jwksFetchCount.Load())
+	})
+
+	t.Run("Rejects Non-Signing Key (use=enc)", func(t *testing.T) {
+		tok := signRS256("enc-key-only", "RS256", time.Now().Add(time.Hour))
+		_, err := validator.ValidateToken(ctx, tok)
+		require.ErrorIs(t, err, auth.ErrKeyNotFound)
+	})
+
+	t.Run("Rejects Unsupported Algorithms Before Triggering Any JWKS HTTP Refresh", func(t *testing.T) {
+		beforeCount := jwksFetchCount.Load()
+		tokHS256 := signRS256("unknown-kid-999", "HS256", time.Now().Add(time.Hour))
+		_, err := validator.ValidateToken(ctx, tokHS256)
+		require.ErrorIs(t, err, auth.ErrUnsupportedAlg)
+		assert.Equal(t, beforeCount, jwksFetchCount.Load(), "unsupported alg must be rejected before JWKS fetch")
+
+		tokNone := signRS256("unknown-kid-999", "none", time.Now().Add(time.Hour))
+		_, err = validator.ValidateToken(ctx, tokNone)
+		require.ErrorIs(t, err, auth.ErrUnsupportedAlg)
+		assert.Equal(t, beforeCount, jwksFetchCount.Load())
+	})
+
+	t.Run("MinRefreshInterval Cooldown Prevents JWKS Hammering on Unknown kid", func(t *testing.T) {
+		// Wait for cooldown to expire once, then send 5 tokens with random kids in a burst
+		time.Sleep(550 * time.Millisecond)
+		beforeCount := jwksFetchCount.Load()
+
+		for i := range 5 {
+			tok := signRS256("forged-kid-"+string(rune('A'+i)), "RS256", time.Now().Add(time.Hour))
+			_, err := validator.ValidateToken(ctx, tok)
+			require.ErrorIs(t, err, auth.ErrKeyNotFound)
+		}
+
+		// Only the first miss in the 500ms window should trigger a JWKS HTTP fetch
+		assert.Equal(t, beforeCount+1, jwksFetchCount.Load(), "expected MinRefreshInterval to rate-limit JWKS refresh on kid misses")
+	})
+
+	t.Run("Key Rotation Succeeds After Cooldown", func(t *testing.T) {
+		time.Sleep(550 * time.Millisecond)
+		rotatedJWK := rsaJWK
+		rotatedJWK.Kid = "rsa-key-rotated-2"
+		activeJWKS.Store(auth.JWKSet{Keys: []auth.JWK{rotatedJWK}})
+
+		tokRotated := signRS256("rsa-key-rotated-2", "RS256", time.Now().Add(time.Hour))
+		secCtx, err := validator.ValidateToken(ctx, tokRotated)
+		require.NoError(t, err)
+		assert.Equal(t, "rsa-practitioner-1", secCtx.GetSubject())
+	})
 }

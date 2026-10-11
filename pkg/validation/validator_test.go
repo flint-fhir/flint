@@ -1,6 +1,8 @@
 package validation_test
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/flint-fhir/flint/pkg/validation"
@@ -199,7 +201,16 @@ func TestValidationEngine_PrimitiveFormats(t *testing.T) {
 
 func TestOutcome_ToOperationOutcomeMap(t *testing.T) {
 	outcome := validation.NewOutcome()
+	outcome.AddWarning(validation.CodeInformational, "Advisory warning", "Observation.note")
+	outcome.AddIssue(validation.SeverityInformation, validation.CodeInformational, "All checks nominal")
+	if !outcome.IsValid() {
+		t.Fatal("expected outcome with only warning/information to remain valid")
+	}
+
 	outcome.AddError(validation.CodeRequired, "Missing element", "Observation.status")
+	if outcome.IsValid() {
+		t.Fatal("expected outcome with error to be invalid")
+	}
 
 	oo := outcome.ToOperationOutcomeMap()
 	if oo["resourceType"] != "OperationOutcome" {
@@ -207,10 +218,84 @@ func TestOutcome_ToOperationOutcomeMap(t *testing.T) {
 	}
 
 	issues := oo["issue"].([]map[string]any)
-	if len(issues) != 1 {
-		t.Fatalf("expected 1 issue, got %d", len(issues))
+	if len(issues) != 3 {
+		t.Fatalf("expected 3 issues, got %d", len(issues))
 	}
-	if issues[0]["severity"] != "error" || issues[0]["code"] != "required" {
-		t.Errorf("issue fields mismatch: %+v", issues[0])
+	if issues[2]["severity"] != "error" || issues[2]["code"] != "required" {
+		t.Errorf("issue fields mismatch: %+v", issues[2])
 	}
+
+	rec := httptest.NewRecorder()
+	outcome.WriteHTTP(rec, http.StatusBadRequest)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected status 400, got %d", rec.Code)
+	}
+}
+
+func TestValidationEngine_StrictUnknownAndTypes(t *testing.T) {
+	strictEngine := validation.NewEngine(validation.DefaultOptions())
+
+	t.Run("Unknown top-level element rejected in strict mode", func(t *testing.T) {
+		outcome := strictEngine.ValidateJSON("Patient", []byte(`{
+			"resourceType": "Patient",
+			"id": "pat-strict-1",
+			"unknownCustomField": "foo"
+		}`))
+		if outcome.IsValid() {
+			t.Fatal("expected strict mode to reject unknownCustomField")
+		}
+	})
+
+	t.Run("Empty payload, malformed JSON, mismatched resourceType, and unregistered resourceType warning", func(t *testing.T) {
+		if strictEngine.ValidateJSON("Patient", nil).IsValid() {
+			t.Fatal("expected empty payload to fail")
+		}
+		if strictEngine.ValidateJSON("Patient", []byte(`{malformed`)).IsValid() {
+			t.Fatal("expected malformed JSON to fail")
+		}
+		if strictEngine.ValidateJSON("Patient", []byte(`{"id":"1"}`)).IsValid() {
+			t.Fatal("expected missing resourceType to fail")
+		}
+		if strictEngine.ValidateJSON("Patient", []byte(`{"resourceType":123}`)).IsValid() {
+			t.Fatal("expected non-string resourceType to fail")
+		}
+		if strictEngine.ValidateJSON("Patient", []byte(`{"resourceType":"Observation"}`)).IsValid() {
+			t.Fatal("expected mismatched resourceType to fail")
+		}
+		unreg := strictEngine.ValidateJSON("AllergyIntolerance", []byte(`{"resourceType":"AllergyIntolerance"}`))
+		if !unreg.IsValid() || len(unreg.Issues) == 0 {
+			t.Fatal("expected unregistered resourceType to return warning outcome")
+		}
+	})
+
+	t.Run("Invalid effectiveDateTime, issued instant, wrapped code, and RegisterSchema", func(t *testing.T) {
+		obsBadDates := strictEngine.ValidateJSON("Observation", []byte(`{
+			"resourceType": "Observation",
+			"status": {"value": "bad-wrapped-status"},
+			"code": {"coding": [{"code": "8867-4"}]},
+			"effectiveDateTime": "not-a-datetime",
+			"issued": "2025-01-01"
+		}`))
+		if obsBadDates.IsValid() || len(obsBadDates.Issues) < 3 {
+			t.Fatalf("expected invalid status, effectiveDateTime, and issued to produce >=3 errors, got %+v", obsBadDates.Issues)
+		}
+
+		condBadCoding := strictEngine.ValidateJSON("Condition", []byte(`{
+			"resourceType": "Condition",
+			"subject": {"reference": "Patient/1"},
+			"clinicalStatus": {"coding": [{"code": "not-a-valid-clinical-status"}]}
+		}`))
+		if condBadCoding.IsValid() {
+			t.Fatal("expected invalid Condition.clinicalStatus coding to fail")
+		}
+
+		strictEngine.RegisterSchema(validation.ResourceSchema{
+			ResourceType:   "CustomResource",
+			RequiredFields: []string{"mandatoryField"},
+			AllowedFields:  map[string]bool{"resourceType": true, "mandatoryField": true},
+		})
+		if strictEngine.ValidateJSON("CustomResource", []byte(`{"resourceType":"CustomResource"}`)).IsValid() {
+			t.Fatal("expected missing mandatoryField on CustomResource to fail")
+		}
+	})
 }

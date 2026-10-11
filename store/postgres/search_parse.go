@@ -192,10 +192,23 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 		}
 	}
 
+	paramType := "token"
+	switch {
+	case targetParam == "_id":
+		paramType = "id"
+	case knownStringSearchParams[targetParam]:
+		paramType = "string"
+	case knownDateSearchParams[targetParam]:
+		paramType = "date"
+	case knownQuantitySearchParams[targetParam]:
+		paramType = "quantity"
+	}
+
 	return &ChainedParam{
 		RefParam:    refParam,
 		TargetType:  targetType,
 		TargetParam: targetParam,
+		ParamType:   paramType,
 		Value:       value,
 	}, true
 }
@@ -229,16 +242,79 @@ var (
 	}
 )
 
+// ValidateSearchQuery validates that all date, quantity, pagination, chained, and include
+// query parameters in q are syntactically well-formed.
+func ValidateSearchQuery(q url.Values) error {
+	for _, v := range q["_count"] {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			n, err := strconv.Atoi(trimmed)
+			if err != nil || n <= 0 {
+				return fmt.Errorf("invalid _count parameter %q: must be a positive integer", v)
+			}
+		}
+	}
+	for _, v := range q["_offset"] {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			n, err := strconv.Atoi(trimmed)
+			if err != nil || n < 0 {
+				return fmt.Errorf("invalid _offset parameter %q: must be a non-negative integer", v)
+			}
+		}
+	}
+	for _, incVal := range q["_include"] {
+		if _, err := ParseInclude(incVal); err != nil {
+			return err
+		}
+	}
+	for _, revVal := range q["_revinclude"] {
+		if _, err := ParseInclude(revVal); err != nil {
+			return err
+		}
+	}
+	for key, values := range q {
+		if strings.HasPrefix(key, "_") || len(values) == 0 {
+			continue
+		}
+		for _, val := range values {
+			if chained, ok := ParseChainedParam(key, val); ok {
+				switch chained.ParamType {
+				case "date":
+					if _, err := ParseDateOp(chained.Value); err != nil {
+						return fmt.Errorf("invalid chained date parameter %s=%q: %w", key, val, err)
+					}
+				case "quantity":
+					if _, err := ParseQuantityOp(chained.Value); err != nil {
+						return fmt.Errorf("invalid chained quantity parameter %s=%q: %w", key, val, err)
+					}
+				}
+				continue
+			}
+			if knownDateSearchParams[key] {
+				if _, err := ParseDateOp(val); err != nil {
+					return fmt.Errorf("invalid date parameter %s=%q: %w", key, val, err)
+				}
+			} else if knownQuantitySearchParams[key] {
+				if _, err := ParseQuantityOp(val); err != nil {
+					return fmt.Errorf("invalid quantity parameter %s=%q: %w", key, val, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // BuildSearchParamsFromQuery converts URL query values into a typed SearchParams struct.
 func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchParams {
 	params := SearchParams{
-		TenantID:   tenant,
-		ResType:    resType,
-		Strings:    make(map[string]string),
-		Tokens:     make(map[string]string),
-		Dates:      make(map[string]DateOp),
-		Quantities: make(map[string]QuantityOp),
-		References: make(map[string]string),
+		TenantID:        tenant,
+		ResType:         resType,
+		Strings:         make(map[string]string),
+		Tokens:          make(map[string]string),
+		Dates:           make(map[string]DateOp),
+		DateFilters:     make(map[string][]DateOp),
+		Quantities:      make(map[string]QuantityOp),
+		QuantityFilters: make(map[string][]QuantityOp),
+		References:      make(map[string]string),
 	}
 
 	if idVal := strings.TrimSpace(q.Get("_id")); idVal != "" {
@@ -275,8 +351,12 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 		}
 		value := values[0]
 
-		if chained, ok := ParseChainedParam(key, value); ok {
-			params.Chained = append(params.Chained, *chained)
+		if _, ok := ParseChainedParam(key, value); ok {
+			for _, rawVal := range values {
+				if ch, ok := ParseChainedParam(key, rawVal); ok {
+					params.Chained = append(params.Chained, *ch)
+				}
+			}
 			continue
 		}
 
@@ -288,12 +368,22 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 		case knownRefSearchParams[key]:
 			params.References[key] = value
 		case knownDateSearchParams[key]:
-			if dOp, err := ParseDateOp(value); err == nil {
-				params.Dates[key] = dOp
+			for _, rawVal := range values {
+				if dOp, err := ParseDateOp(rawVal); err == nil {
+					if _, exists := params.Dates[key]; !exists {
+						params.Dates[key] = dOp
+					}
+					params.DateFilters[key] = append(params.DateFilters[key], dOp)
+				}
 			}
 		case knownQuantitySearchParams[key]:
-			if qOp, err := ParseQuantityOp(value); err == nil {
-				params.Quantities[key] = qOp
+			for _, rawVal := range values {
+				if qOp, err := ParseQuantityOp(rawVal); err == nil {
+					if _, exists := params.Quantities[key]; !exists {
+						params.Quantities[key] = qOp
+					}
+					params.QuantityFilters[key] = append(params.QuantityFilters[key], qOp)
+				}
 			}
 		default:
 			params.Tokens[key] = value
@@ -331,6 +421,9 @@ func ParseIfNoneExist(tenant, resType, rawHeader string) (SearchParams, error) {
 		if strings.TrimSpace(k) == "" || len(vals) == 0 || strings.TrimSpace(vals[0]) == "" {
 			return SearchParams{}, fmt.Errorf("If-None-Exist query %q contains empty parameter key or value", rawHeader)
 		}
+	}
+	if err := ValidateSearchQuery(q); err != nil {
+		return SearchParams{}, fmt.Errorf("invalid If-None-Exist query %q: %w", rawHeader, err)
 	}
 
 	params := BuildSearchParamsFromQuery(tenant, resType, q)

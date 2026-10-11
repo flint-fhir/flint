@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/dynamicpb"
 
+	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/store/postgres"
@@ -293,6 +294,12 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					http.StatusInternalServerError, fmt.Sprintf("entry[%d]: delete failed: %v", i, err)))
 				continue
 			}
+			s.publishCDC(r.Context(), automq.Message{
+				TenantID: tenant,
+				ResType:  resType,
+				ResID:    resID,
+				Op:       "D",
+			})
 			responseEntries = append(responseEntries, map[string]any{
 				"response": map[string]any{
 					"status": "204 No Content",
@@ -404,6 +411,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					"type", resType, "id", resID, "error", extractErr)
 			}
 		}
+		setAuditPatientID(r.Context(), extractPatientIDFromIndexes(resType, resID, idx))
 
 		// Enforce patient compartment isolation on existing target (PUT) and incoming payload (POST/PUT)
 		if hasSecCtx && auth.IsPatientRestricted(secCtx) {
@@ -458,15 +466,14 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 			if hasSecCtx && auth.IsPatientRestricted(secCtx) {
 				allowedPatientID := cleanID(secCtx.GetPatientId())
-				if strings.EqualFold(resType, "Patient") {
-					parsed.ID = allowedPatientID
-				} else if postgres.IsPatientCompartmentResourceType(resType) {
-					if parsed.References == nil {
-						parsed.References = make(map[string]string)
+				if err := validateAndScopeIfNoneExistForPatient(&parsed, resType, allowedPatientID, secCtx.GetPatientId()); err != nil {
+					msg := fmt.Sprintf("entry[%d]: %v", i, err)
+					if isTransaction {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
+						return
 					}
-					if parsed.References["subject"] == "" {
-						parsed.References["patient"] = "Patient/" + allowedPatientID
-					}
+					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
+					continue
 				}
 			}
 			condParams = &parsed
@@ -506,6 +513,15 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, err.Error()))
 				continue
 			}
+			if created {
+				s.publishCDC(r.Context(), automq.Message{
+					TenantID:  tenant,
+					ResType:   resType,
+					ResID:     rec.ResID,
+					ProtoData: rec.ResourceProto,
+					Op:        "U",
+				})
+			}
 			status := "200 OK"
 			if created {
 				status = "201 Created"
@@ -535,6 +551,13 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, err.Error()))
 				continue
 			}
+			s.publishCDC(r.Context(), automq.Message{
+				TenantID:  tenant,
+				ResType:   resType,
+				ResID:     rec.ResID,
+				ProtoData: rec.ResourceProto,
+				Op:        "U",
+			})
 			status := "200 OK"
 			if method == "POST" || rec.Created {
 				status = "201 Created"
@@ -576,6 +599,12 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				}
 				if res.Record != nil && res.Record.ResVersion > 0 {
 					respMap["etag"] = postgres.FormatETag(res.Record.ResVersion)
+					s.publishCDC(r.Context(), automq.Message{
+						TenantID: tenant,
+						ResType:  op.Input.ResType,
+						ResID:    op.Input.ResID,
+						Op:       "D",
+					})
 				}
 				responseEntries = append(responseEntries, map[string]any{
 					"response": respMap,
@@ -584,6 +613,15 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 
 			rec := res.Record
+			if res.Created || op.IfNoneExist == nil {
+				s.publishCDC(r.Context(), automq.Message{
+					TenantID:  tenant,
+					ResType:   rec.ResType,
+					ResID:     rec.ResID,
+					ProtoData: rec.ResourceProto,
+					Op:        "U",
+				})
+			}
 			status := res.Status
 			if status == "" {
 				status = "200 OK"

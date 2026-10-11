@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"sync"
 	"testing"
@@ -771,6 +772,182 @@ func TestStore_Integration(t *testing.T) {
 		belongsOther, err := store.BelongsToPatientCompartment(ctx, "test-tenant", "Observation", "obs-large-idx-1", "pat-other")
 		if err != nil || belongsOther {
 			t.Fatalf("expected BelongsToPatientCompartment=false for pat-other, got belongs=%v err=%v", belongsOther, err)
+		}
+	})
+
+	t.Run("Multi-Value Date & Quantity Ranges, Chained Non-String Search, URIs, and _revinclude Disambiguation", func(t *testing.T) {
+		// 1. ValidateSearchQuery catches malformed parameters
+		badQueries := []string{
+			"date=not-a-date",
+			"value-quantity=not-a-number",
+			"_count=zero",
+			"_offset=-5",
+			"_include=InvalidIncludeFormat",
+			"_revinclude=Observation",
+		}
+		for _, rawQ := range badQueries {
+			vals, _ := url.ParseQuery(rawQ)
+			if err := postgres.ValidateSearchQuery(vals); err == nil {
+				t.Errorf("expected ValidateSearchQuery(%q) to return an error", rawQ)
+			}
+		}
+
+		// 2. Write Patient/shared-id-99 and Encounter/shared-id-99 to test _revinclude target-type disambiguation
+		// plus Patient token/date indexes for chained non-string searches
+		bDate := time.Date(1980, 6, 15, 0, 0, 0, 0, time.UTC)
+		if err := store.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Patient",
+			ResID:         "shared-id-99",
+			ResourceProto: []byte("patient-shared-99"),
+			SearchIndexes: &postgres.SearchIndexes{
+				Strings: []postgres.SpidxString{
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "shared-id-99", SpName: "family", SpValue: "RangeTester"},
+				},
+				Tokens: []postgres.SpidxToken{
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "shared-id-99", SpName: "identifier", SpSystem: "http://mrn", SpValue: "MRN-SHARED-99"},
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "shared-id-99", SpName: "gender", SpValue: "female"},
+				},
+				Dates: []postgres.SpidxDate{
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "shared-id-99", SpName: "birthdate", SpLow: bDate, SpHigh: bDate.Add(24*time.Hour - time.Nanosecond)},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("write Patient/shared-id-99: %v", err)
+		}
+
+		if err := store.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Encounter",
+			ResID:         "shared-id-99",
+			ResourceProto: []byte("encounter-shared-99"),
+		}); err != nil {
+			t.Fatalf("write Encounter/shared-id-99: %v", err)
+		}
+
+		// Observation 1: belongs to Patient/shared-id-99, effective 2025-03-15, value 7.2 mg/dL
+		obs1Date := time.Date(2025, 3, 15, 10, 0, 0, 0, time.UTC)
+		if err := store.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Observation",
+			ResID:         "obs-range-1",
+			ResourceProto: []byte("obs-range-1-proto"),
+			SearchIndexes: &postgres.SearchIndexes{
+				References: []postgres.SpidxReference{
+					{TenantID: "test-tenant", ResType: "Observation", ResID: "obs-range-1", SpName: "subject", TargetType: "Patient", TargetID: "shared-id-99"},
+					{TenantID: "test-tenant", ResType: "Observation", ResID: "obs-range-1", SpName: "patient", TargetType: "Patient", TargetID: "shared-id-99"},
+				},
+				Dates: []postgres.SpidxDate{
+					{TenantID: "test-tenant", ResType: "Observation", ResID: "obs-range-1", SpName: "date", SpLow: obs1Date, SpHigh: obs1Date},
+				},
+				Quantities: []postgres.SpidxQuantity{
+					{TenantID: "test-tenant", ResType: "Observation", ResID: "obs-range-1", SpName: "value-quantity", SpValue: 7.2, SpSystem: "http://unitsofmeasure.org", SpCode: "mg/dL"},
+				},
+				URIs: []postgres.SpidxURI{
+					{TenantID: "test-tenant", ResType: "Observation", ResID: "obs-range-1", SpName: "url", SpValue: "http://example.org/obs/1"},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("write Observation/obs-range-1: %v", err)
+		}
+
+		// Observation 2: references Encounter/shared-id-99 (NOT Patient/shared-id-99), effective 2025-09-01, value 14.5 mg/dL
+		obs2Date := time.Date(2025, 9, 1, 10, 0, 0, 0, time.UTC)
+		if err := store.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Observation",
+			ResID:         "obs-range-2",
+			ResourceProto: []byte("obs-range-2-proto"),
+			SearchIndexes: &postgres.SearchIndexes{
+				References: []postgres.SpidxReference{
+					{TenantID: "test-tenant", ResType: "Observation", ResID: "obs-range-2", SpName: "encounter", TargetType: "Encounter", TargetID: "shared-id-99"},
+				},
+				Dates: []postgres.SpidxDate{
+					{TenantID: "test-tenant", ResType: "Observation", ResID: "obs-range-2", SpName: "date", SpLow: obs2Date, SpHigh: obs2Date},
+				},
+				Quantities: []postgres.SpidxQuantity{
+					{TenantID: "test-tenant", ResType: "Observation", ResID: "obs-range-2", SpName: "value-quantity", SpValue: 14.5, SpSystem: "http://unitsofmeasure.org", SpCode: "mg/dL"},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("write Observation/obs-range-2: %v", err)
+		}
+
+		// 3. Test multi-value Date range: ge2025-01-01 & le2025-06-30 -> only obs-range-1
+		qDateRange, _ := url.ParseQuery("date=ge2025-01-01&date=le2025-06-30")
+		spDateRange := postgres.BuildSearchParamsFromQuery("test-tenant", "Observation", qDateRange)
+		srDate, err := store.Search(ctx, spDateRange)
+		if err != nil {
+			t.Fatalf("date range search: %v", err)
+		}
+		if srDate.Total != 1 || srDate.Matches[0].ResID != "obs-range-1" {
+			t.Fatalf("expected only obs-range-1 for date range [2025-01-01, 2025-06-30], got total=%d matches=%+v", srDate.Total, srDate.Matches)
+		}
+
+		// Also exercise lt, gt, ne, sa, eb date prefixes
+		for _, prefixQ := range []string{"date=lt2025-06-01", "date=gt2025-01-01", "date=ne2026-01-01", "date=sa2025-01-01", "date=eb2025-06-01"} {
+			vals, _ := url.ParseQuery(prefixQ)
+			sp := postgres.BuildSearchParamsFromQuery("test-tenant", "Observation", vals)
+			if _, err := store.Search(ctx, sp); err != nil {
+				t.Fatalf("date prefix search %s failed: %v", prefixQ, err)
+			}
+		}
+
+		// 4. Test multi-value Quantity range: ge5.0 & le10.0 -> only obs-range-1
+		qQtyRange, _ := url.ParseQuery("value-quantity=ge5.0|http://unitsofmeasure.org|mg/dL&value-quantity=le10.0|http://unitsofmeasure.org|mg/dL")
+		spQtyRange := postgres.BuildSearchParamsFromQuery("test-tenant", "Observation", qQtyRange)
+		srQty, err := store.Search(ctx, spQtyRange)
+		if err != nil {
+			t.Fatalf("quantity range search: %v", err)
+		}
+		if srQty.Total != 1 || srQty.Matches[0].ResID != "obs-range-1" {
+			t.Fatalf("expected only obs-range-1 for quantity range [5.0, 10.0], got total=%d", srQty.Total)
+		}
+
+		// Test quantity ne prefix
+		qQtyNe, _ := url.ParseQuery("value-quantity=ne14.5&_id=obs-range-1")
+		srQtyNe, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Observation", qQtyNe))
+		if err != nil || srQtyNe.Total != 1 {
+			t.Fatalf("quantity ne search failed: total=%v err=%v", srQtyNe, err)
+		}
+
+		// 5. Test non-string Chained search: patient.identifier, patient.gender, patient.birthdate, patient._id
+		for _, chainQ := range []string{
+			"patient.identifier=http://mrn|MRN-SHARED-99",
+			"patient.gender=female",
+			"patient.birthdate=1980-06-15",
+			"patient._id=shared-id-99",
+		} {
+			vals, _ := url.ParseQuery(chainQ)
+			srChain, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Observation", vals))
+			if err != nil {
+				t.Fatalf("chained search %s failed: %v", chainQ, err)
+			}
+			if srChain.Total != 1 || srChain.Matches[0].ResID != "obs-range-1" {
+				t.Errorf("expected obs-range-1 for chained search %q, got total=%d", chainQ, srChain.Total)
+			}
+		}
+
+		// 6. Test _revinclude target-type disambiguation:
+		// Searching Patient?_id=shared-id-99&_revinclude=Observation:encounter must return 0 revincludes
+		// because Observation:encounter points to Encounter/shared-id-99, NOT Patient/shared-id-99!
+		valsRevEnc, _ := url.ParseQuery("_id=shared-id-99&_revinclude=Observation:encounter")
+		srRevEnc, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Patient", valsRevEnc))
+		if err != nil {
+			t.Fatalf("search with _revinclude=Observation:encounter: %v", err)
+		}
+		if len(srRevEnc.Includes) != 0 {
+			t.Errorf("expected 0 revincludes on Patient for Observation:encounter targeting Encounter/shared-id-99, got %d", len(srRevEnc.Includes))
+		}
+
+		// Whereas Patient?_id=shared-id-99&_revinclude=Observation:subject returns obs-range-1
+		valsRevSub, _ := url.ParseQuery("_id=shared-id-99&_revinclude=Observation:subject")
+		srRevSub, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Patient", valsRevSub))
+		if err != nil {
+			t.Fatalf("search with _revinclude=Observation:subject: %v", err)
+		}
+		if len(srRevSub.Includes) != 1 || srRevSub.Includes[0].ResID != "obs-range-1" {
+			t.Errorf("expected 1 revinclude (obs-range-1) for Observation:subject, got %+v", srRevSub.Includes)
 		}
 	})
 

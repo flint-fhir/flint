@@ -291,16 +291,31 @@ func (k *JWK) PublicKey() (crypto.PublicKey, error) {
 	}
 }
 
-// FindKey locates a key matching kid. If kid is empty and only one key exists, returns that key.
+// FindKey locates a signing key matching kid. If kid is empty and only one signing key exists, returns that key.
 func (set *JWKSet) FindKey(kid string) (*JWK, error) {
 	if len(set.Keys) == 0 {
 		return nil, ErrKeyNotFound
 	}
-	if kid == "" && len(set.Keys) == 1 {
-		return &set.Keys[0], nil
+	if kid == "" {
+		var sigKey *JWK
+		count := 0
+		for i := range set.Keys {
+			if set.Keys[i].Use != "" && set.Keys[i].Use != "sig" {
+				continue
+			}
+			sigKey = &set.Keys[i]
+			count++
+		}
+		if count == 1 {
+			return sigKey, nil
+		}
+		return nil, ErrKeyNotFound
 	}
 	for i := range set.Keys {
 		if set.Keys[i].Kid == kid {
+			if set.Keys[i].Use != "" && set.Keys[i].Use != "sig" {
+				continue
+			}
 			return &set.Keys[i], nil
 		}
 	}
