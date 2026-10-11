@@ -48,19 +48,21 @@ type PatientEverythingParams struct {
 
 // SearchParams holds parsed FHIR search parameters for a query.
 type SearchParams struct {
-	TenantID    string
-	ResType     string
-	ID          string                // Optional _id filter
-	Strings     map[string]string     // sp_name → value (prefix match)
-	Tokens      map[string]string     // sp_name → value (exact or system|value)
-	Dates       map[string]DateOp     // sp_name → date operation
-	Quantities  map[string]QuantityOp // sp_name → quantity operation
-	References  map[string]string     // sp_name → targetType/targetId
-	Chained     []ChainedParam        // chained search parameters (e.g. patient.name=Smith)
-	Includes    []IncludeParam        // _include parameters
-	RevIncludes []IncludeParam        // _revinclude parameters
-	Count       int                   // _count (default 20, max 1000)
-	Offset      int                   // _offset (default 0)
+	TenantID        string
+	ResType         string
+	ID              string                  // Optional _id filter
+	Strings         map[string]string       // sp_name → value (prefix match)
+	Tokens          map[string]string       // sp_name → value (exact or system|value)
+	Dates           map[string]DateOp       // sp_name → first date operation
+	DateFilters     map[string][]DateOp     // sp_name → all date operations (e.g. ge + le range)
+	Quantities      map[string]QuantityOp   // sp_name → first quantity operation
+	QuantityFilters map[string][]QuantityOp // sp_name → all quantity operations (e.g. ge + le range)
+	References      map[string]string       // sp_name → targetType/targetId
+	Chained         []ChainedParam          // chained search parameters (e.g. patient.name=Smith)
+	Includes        []IncludeParam          // _include parameters
+	RevIncludes     []IncludeParam          // _revinclude parameters
+	Count           int                     // _count (default 20, max 1000)
+	Offset          int                     // _offset (default 0)
 }
 
 // Search executes a FHIR search query using the covering spidx_* tables.
@@ -123,30 +125,60 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		}
 	}
 
-	// 3. Date search parameters (spidx_date)
-	for spName, dateOp := range params.Dates {
+	// 3. Date search parameters (spidx_date) — supports multi-bound ranges on the same row
+	dateFilters := params.DateFilters
+	if len(dateFilters) == 0 && len(params.Dates) > 0 {
+		dateFilters = make(map[string][]DateOp, len(params.Dates))
+		for k, v := range params.Dates {
+			dateFilters[k] = []DateOp{v}
+		}
+	}
+	for spName, ops := range dateFilters {
+		if len(ops) == 0 {
+			continue
+		}
 		joinIdx++
 		alias := fmt.Sprintf("d%d", joinIdx)
-		cond, dateArgs := buildDateCondition(alias, dateOp, len(args)+1)
+		spIdx := len(args) + 1
+		args = append(args, spName)
+		condParts := make([]string, 0, len(ops))
+		for _, dateOp := range ops {
+			cond, dateArgs := buildDateCondition(alias, dateOp, len(args))
+			condParts = append(condParts, cond)
+			args = append(args, dateArgs...)
+		}
 		joins = append(joins, fmt.Sprintf(
 			"JOIN spidx_date %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s",
-			alias, alias, alias, alias, alias, len(args)+1, cond,
+			alias, alias, alias, alias, alias, spIdx, strings.Join(condParts, " AND "),
 		))
-		args = append(args, spName)
-		args = append(args, dateArgs...)
 	}
 
-	// 4. Quantity search parameters (spidx_quantity)
-	for spName, qOp := range params.Quantities {
+	// 4. Quantity search parameters (spidx_quantity) — supports multi-bound ranges on the same row
+	quantityFilters := params.QuantityFilters
+	if len(quantityFilters) == 0 && len(params.Quantities) > 0 {
+		quantityFilters = make(map[string][]QuantityOp, len(params.Quantities))
+		for k, v := range params.Quantities {
+			quantityFilters[k] = []QuantityOp{v}
+		}
+	}
+	for spName, ops := range quantityFilters {
+		if len(ops) == 0 {
+			continue
+		}
 		joinIdx++
 		alias := fmt.Sprintf("q%d", joinIdx)
-		cond, qArgs := buildQuantityCondition(alias, qOp, len(args)+1)
+		spIdx := len(args) + 1
+		args = append(args, spName)
+		condParts := make([]string, 0, len(ops))
+		for _, qOp := range ops {
+			cond, qArgs := buildQuantityCondition(alias, qOp, len(args))
+			condParts = append(condParts, cond)
+			args = append(args, qArgs...)
+		}
 		joins = append(joins, fmt.Sprintf(
 			"JOIN spidx_quantity %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s",
-			alias, alias, alias, alias, alias, len(args)+1, cond,
+			alias, alias, alias, alias, alias, spIdx, strings.Join(condParts, " AND "),
 		))
-		args = append(args, spName)
-		args = append(args, qArgs...)
 	}
 
 	// 5. Reference search parameters (spidx_reference)
@@ -169,11 +201,40 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		}
 	}
 
-	// 6. Chained search parameters (Observation?patient.name=Smith)
+	// 6. Chained search parameters (e.g. Observation?patient.name=Smith, Observation?patient.identifier=MRN|123, Observation?patient.gender=female)
 	for _, chained := range params.Chained {
 		joinIdx++
 		refAlias := fmt.Sprintf("crf%d", joinIdx)
 		targetAlias := fmt.Sprintf("ctg%d", joinIdx)
+
+		paramType := chained.ParamType
+		if paramType == "" {
+			switch {
+			case chained.TargetParam == "_id":
+				paramType = "id"
+			case knownStringSearchParams[chained.TargetParam]:
+				paramType = "string"
+			case knownDateSearchParams[chained.TargetParam]:
+				paramType = "date"
+			case knownQuantitySearchParams[chained.TargetParam]:
+				paramType = "quantity"
+			default:
+				paramType = "token"
+			}
+		}
+
+		if paramType == "id" {
+			targetID := chained.Value
+			if slashIdx := strings.LastIndex(targetID, "/"); slashIdx != -1 {
+				targetID = targetID[slashIdx+1:]
+			}
+			joins = append(joins, fmt.Sprintf(
+				"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.target_type = $%d AND %s.target_id = $%d",
+				refAlias, refAlias, refAlias, refAlias, refAlias, len(args)+1, refAlias, len(args)+2, refAlias, len(args)+3,
+			))
+			args = append(args, chained.RefParam, chained.TargetType, targetID)
+			continue
+		}
 
 		joins = append(joins, fmt.Sprintf(
 			"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.target_type = $%d",
@@ -181,11 +242,60 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		))
 		args = append(args, chained.RefParam, chained.TargetType)
 
-		joins = append(joins, fmt.Sprintf(
-			"JOIN spidx_string %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s.sp_value LIKE $%d",
-			targetAlias, targetAlias, targetAlias, len(args)+1, targetAlias, refAlias, targetAlias, len(args)+2, targetAlias, len(args)+3,
-		))
-		args = append(args, chained.TargetType, chained.TargetParam, strings.ToLower(chained.Value)+"%")
+		switch paramType {
+		case "token":
+			if parts := strings.SplitN(chained.Value, "|", 2); len(parts) == 2 {
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_token %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s.sp_system = $%d AND %s.sp_value = $%d",
+					targetAlias, targetAlias, targetAlias, len(args)+1, targetAlias, refAlias, targetAlias, len(args)+2, targetAlias, len(args)+3, targetAlias, len(args)+4,
+				))
+				args = append(args, chained.TargetType, chained.TargetParam, parts[0], parts[1])
+			} else if isEnumTokenParam(chained.TargetParam) {
+				normVal := strings.ToLower(strings.ReplaceAll(chained.Value, "_", "-"))
+				upperVal := strings.ToUpper(strings.ReplaceAll(chained.Value, "-", "_"))
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_token %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s.sp_value IN ($%d, $%d, $%d)",
+					targetAlias, targetAlias, targetAlias, len(args)+1, targetAlias, refAlias, targetAlias, len(args)+2, targetAlias, len(args)+3, len(args)+4, len(args)+5,
+				))
+				args = append(args, chained.TargetType, chained.TargetParam, chained.Value, normVal, upperVal)
+			} else {
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_token %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s.sp_value = $%d",
+					targetAlias, targetAlias, targetAlias, len(args)+1, targetAlias, refAlias, targetAlias, len(args)+2, targetAlias, len(args)+3,
+				))
+				args = append(args, chained.TargetType, chained.TargetParam, chained.Value)
+			}
+		case "date":
+			if dOp, err := ParseDateOp(chained.Value); err == nil {
+				tTypeIdx := len(args) + 1
+				spIdx := len(args) + 2
+				args = append(args, chained.TargetType, chained.TargetParam)
+				cond, dateArgs := buildDateCondition(targetAlias, dOp, len(args))
+				args = append(args, dateArgs...)
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_date %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s",
+					targetAlias, targetAlias, targetAlias, tTypeIdx, targetAlias, refAlias, targetAlias, spIdx, cond,
+				))
+			}
+		case "quantity":
+			if qOp, err := ParseQuantityOp(chained.Value); err == nil {
+				tTypeIdx := len(args) + 1
+				spIdx := len(args) + 2
+				args = append(args, chained.TargetType, chained.TargetParam)
+				cond, qArgs := buildQuantityCondition(targetAlias, qOp, len(args))
+				args = append(args, qArgs...)
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_quantity %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s",
+					targetAlias, targetAlias, targetAlias, tTypeIdx, targetAlias, refAlias, targetAlias, spIdx, cond,
+				))
+			}
+		default:
+			joins = append(joins, fmt.Sprintf(
+				"JOIN spidx_string %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s.sp_value LIKE $%d",
+				targetAlias, targetAlias, targetAlias, len(args)+1, targetAlias, refAlias, targetAlias, len(args)+2, targetAlias, len(args)+3,
+			))
+			args = append(args, chained.TargetType, chained.TargetParam, strings.ToLower(chained.Value)+"%")
+		}
 	}
 
 	joinClause := strings.Join(joins, "\n")
@@ -234,7 +344,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 	// 7. Resolve _include and _revinclude resources
 	var includes []SearchResult
 	if len(params.Includes) > 0 || len(params.RevIncludes) > 0 {
-		includes, err = s.ResolveIncludes(ctx, params.TenantID, matches, params.Includes, params.RevIncludes)
+		includes, err = s.resolveIncludesWithExecutor(ctx, exec, params.TenantID, matches, params.Includes, params.RevIncludes)
 		if err != nil {
 			return nil, fmt.Errorf("resolve includes: %w", err)
 		}
@@ -249,15 +359,25 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 
 // ResolveIncludes fetches referenced resources for _include and referring resources for _revinclude.
 func (s *Store) ResolveIncludes(ctx context.Context, tenantID string, matches []SearchResult, includes []IncludeParam, revIncludes []IncludeParam) ([]SearchResult, error) {
+	return s.resolveIncludesWithExecutor(ctx, s.db, tenantID, matches, includes, revIncludes)
+}
+
+func (s *Store) resolveIncludesWithExecutor(ctx context.Context, exec queryExecer, tenantID string, matches []SearchResult, includes []IncludeParam, revIncludes []IncludeParam) ([]SearchResult, error) {
 	if len(matches) == 0 || (len(includes) == 0 && len(revIncludes) == 0) {
 		return nil, nil
 	}
 
 	matchedIDs := make([]string, len(matches))
 	matchedSet := make(map[string]bool)
+	matchedTypeSet := make(map[string]bool)
+	var matchedTypes []string
 	for i, m := range matches {
 		matchedIDs[i] = m.ResID
 		matchedSet[m.ResType+"/"+m.ResID] = true
+		if m.ResType != "" && !matchedTypeSet[m.ResType] {
+			matchedTypeSet[m.ResType] = true
+			matchedTypes = append(matchedTypes, m.ResType)
+		}
 	}
 
 	var includedResults []SearchResult
@@ -276,7 +396,7 @@ func (s *Store) ResolveIncludes(ctx context.Context, tenantID string, matches []
 			args = append(args, inc.TargetType)
 		}
 
-		rows, err := s.db.QueryContext(ctx, query, args...)
+		rows, err := exec.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, fmt.Errorf("query include %s:%s: %w", inc.SourceType, inc.ParamName, err)
 		}
@@ -295,7 +415,7 @@ func (s *Store) ResolveIncludes(ctx context.Context, tenantID string, matches []
 		rows.Close()
 	}
 
-	// Handle _revinclude (Source:param)
+	// Handle _revinclude (Source:param[:Target])
 	for _, rev := range revIncludes {
 		query := `
 			SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto
@@ -304,7 +424,14 @@ func (s *Store) ResolveIncludes(ctx context.Context, tenantID string, matches []
 			WHERE rf.tenant_id = $1 AND rf.target_id = ANY($2) AND rf.res_type = $3 AND rf.sp_name = $4
 		`
 		args := []any{tenantID, pq.Array(matchedIDs), rev.SourceType, rev.ParamName}
-		rows, err := s.db.QueryContext(ctx, query, args...)
+		if rev.TargetType != "" {
+			query += fmt.Sprintf(" AND (rf.target_type = $%d OR rf.target_type = '')", len(args)+1)
+			args = append(args, rev.TargetType)
+		} else if len(matchedTypes) > 0 {
+			query += fmt.Sprintf(" AND (rf.target_type = ANY($%d) OR rf.target_type = '')", len(args)+1)
+			args = append(args, pq.Array(matchedTypes))
+		}
+		rows, err := exec.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, fmt.Errorf("query revinclude %s:%s: %w", rev.SourceType, rev.ParamName, err)
 		}
@@ -361,6 +488,8 @@ func buildQuantityCondition(alias string, op QuantityOp, startIdx int) (string, 
 		compSQL = ">"
 	case "ge":
 		compSQL = ">="
+	case "ne":
+		compSQL = "!="
 	default:
 		compSQL = "="
 	}

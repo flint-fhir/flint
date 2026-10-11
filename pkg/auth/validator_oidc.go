@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sync"
 	"time"
@@ -13,23 +14,26 @@ import (
 
 // OIDCConfig configures the standard OIDC / JWKS token validator.
 type OIDCConfig struct {
-	Issuer     string
-	Audience   string
-	JWKSURL    string
-	HTTPClient *http.Client
-	CacheTTL   time.Duration
-	StaticJWKS *JWKSet // Optional: pre-configured keys for tests or isolated deployments
+	Issuer             string
+	Audience           string
+	JWKSURL            string
+	HTTPClient         *http.Client
+	CacheTTL           time.Duration
+	MinRefreshInterval time.Duration // Minimum cooldown between forced JWKS refreshes on kid miss (default 5s; <0 disables)
+	StaticJWKS         *JWKSet       // Optional: pre-configured keys for tests or isolated deployments
 }
 
 // OIDCValidator implements TokenValidator using standard JWKS and OIDC conventions.
 // It is compatible with Zitadel, Keycloak, Okta, Azure AD, Auth0, and any compliant IdP.
 type OIDCValidator struct {
-	cfg        OIDCConfig
-	httpClient *http.Client
+	cfg                OIDCConfig
+	httpClient         *http.Client
+	minRefreshInterval time.Duration
 
-	mu         sync.RWMutex
-	cachedJWKS *JWKSet
-	cacheExp   time.Time
+	mu          sync.RWMutex
+	cachedJWKS  *JWKSet
+	cacheExp    time.Time
+	lastRefresh time.Time
 }
 
 // NewOIDCValidator creates a new OIDC / JWKS token validator.
@@ -43,16 +47,23 @@ func NewOIDCValidator(cfg OIDCConfig) (*OIDCValidator, error) {
 	if cfg.CacheTTL <= 0 {
 		cfg.CacheTTL = time.Hour
 	}
+	minRefresh := cfg.MinRefreshInterval
+	if minRefresh == 0 {
+		minRefresh = 5 * time.Second
+	} else if minRefresh < 0 {
+		minRefresh = 0
+	}
 	client := cfg.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
 
 	return &OIDCValidator{
-		cfg:        cfg,
-		httpClient: client,
-		cachedJWKS: cfg.StaticJWKS,
-		cacheExp:   time.Now().Add(cfg.CacheTTL),
+		cfg:                cfg,
+		httpClient:         client,
+		minRefreshInterval: minRefresh,
+		cachedJWKS:         cfg.StaticJWKS,
+		cacheExp:           time.Now().Add(cfg.CacheTTL),
 	}, nil
 }
 
@@ -63,36 +74,47 @@ func (v *OIDCValidator) ValidateToken(ctx context.Context, bearerToken string) (
 		return nil, err
 	}
 
-	// 1. Verify standard claims (iss, aud, exp, nbf)
+	// 1. Enforce asymmetric signing algorithm before JWKS lookup
+	if token.Header.Alg != "RS256" && token.Header.Alg != "ES256" {
+		return nil, fmt.Errorf("%w: %s", ErrUnsupportedAlg, token.Header.Alg)
+	}
+
+	// 2. Verify standard claims (iss, aud, exp, nbf)
 	if err := token.VerifyClaims(v.cfg.Issuer, v.cfg.Audience, time.Now()); err != nil {
 		return nil, err
 	}
 
-	// 2. Fetch or retrieve cached JWKS
+	// 3. Fetch or retrieve cached JWKS
 	jwks, err := v.getJWKS(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to retrieve JWKS: %w", err)
 	}
 
-	// 3. Locate signing key
+	// 4. Locate signing key (with rate-limited rotation refresh on cache miss)
 	key, err := jwks.FindKey(token.Header.Kid)
 	if err != nil {
-		// Key might have rotated; refresh cache and retry once
 		if v.cfg.StaticJWKS == nil {
-			if refreshed, refErr := v.fetchJWKS(ctx); refErr == nil {
-				v.mu.Lock()
-				v.cachedJWKS = refreshed
-				v.cacheExp = time.Now().Add(v.cfg.CacheTTL)
-				v.mu.Unlock()
-				key, err = refreshed.FindKey(token.Header.Kid)
+			v.mu.Lock()
+			if v.cachedJWKS != nil {
+				key, err = v.cachedJWKS.FindKey(token.Header.Kid)
 			}
+			if err != nil && (v.minRefreshInterval == 0 || time.Since(v.lastRefresh) >= v.minRefreshInterval) {
+				if refreshed, refErr := v.fetchJWKS(ctx); refErr == nil {
+					now := time.Now()
+					v.cachedJWKS = refreshed
+					v.cacheExp = now.Add(v.cfg.CacheTTL)
+					v.lastRefresh = now
+					key, err = refreshed.FindKey(token.Header.Kid)
+				}
+			}
+			v.mu.Unlock()
 		}
 		if err != nil {
 			return nil, fmt.Errorf("find signing key %q: %w", token.Header.Kid, err)
 		}
 	}
 
-	// 4. Verify signature
+	// 5. Verify signature
 	pubKey, err := key.PublicKey()
 	if err != nil {
 		return nil, fmt.Errorf("parse public key: %w", err)
@@ -101,7 +123,7 @@ func (v *OIDCValidator) ValidateToken(ctx context.Context, bearerToken string) (
 		return nil, err
 	}
 
-	// 5. Build proto SecurityContext
+	// 6. Build proto SecurityContext
 	scopes := ParseScopes(token.Payload.Scope)
 
 	claimsMap := make(map[string]string)
@@ -178,8 +200,10 @@ func (v *OIDCValidator) getJWKS(ctx context.Context) (*JWKSet, error) {
 		return nil, err
 	}
 
+	now := time.Now()
 	v.cachedJWKS = set
-	v.cacheExp = time.Now().Add(v.cfg.CacheTTL)
+	v.cacheExp = now.Add(v.cfg.CacheTTL)
+	v.lastRefresh = now
 	return set, nil
 }
 
@@ -200,7 +224,7 @@ func (v *OIDCValidator) fetchJWKS(ctx context.Context) (*JWKSet, error) {
 	}
 
 	var set JWKSet
-	if err := json.NewDecoder(resp.Body).Decode(&set); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&set); err != nil {
 		return nil, fmt.Errorf("failed to decode JWKS response: %w", err)
 	}
 

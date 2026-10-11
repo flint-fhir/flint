@@ -525,5 +525,75 @@ func TestServer_PatientCompartmentIsolation_Integration(t *testing.T) {
 		}`)
 		defer respBundleOther.Body.Close()
 		assert.Equal(t, http.StatusForbidden, respBundleOther.StatusCode)
+
+		// 5. POST /Observation with If-None-Exist: subject=Patient/pat-200 -> 403 Forbidden
+		reqIfNone, _ := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/test-compartment/Observation",
+			strings.NewReader(`{"resourceType":"Observation","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/pat-100"}}`))
+		reqIfNone.Header.Set("Authorization", "Bearer "+pat100Token)
+		reqIfNone.Header.Set("Content-Type", "application/fhir+json")
+		reqIfNone.Header.Set("If-None-Exist", "subject=Patient/pat-200&code=http://loinc.org|8867-4")
+		respIfNone, err := http.DefaultClient.Do(reqIfNone)
+		require.NoError(t, err)
+		defer respIfNone.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respIfNone.StatusCode, "patient-scoped token must not probe another patient's compartment via If-None-Exist subject=Patient/pat-200")
+
+		// 6. Transaction Bundle with ifNoneExist: "subject=Patient/pat-200&code=8867-4" -> 403 Forbidden
+		respBundleIfNone := doPat100(http.MethodPost, "/fhir/r4/test-compartment", `{
+			"resourceType": "Bundle",
+			"type": "transaction",
+			"entry": [
+				{
+					"resource": {
+						"resourceType": "Observation",
+						"status": "final",
+						"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+						"subject": {"reference": "Patient/pat-100"}
+					},
+					"request": {
+						"method": "POST",
+						"url": "Observation",
+						"ifNoneExist": "subject=Patient/pat-200&code=http://loinc.org|8867-4"
+					}
+				}
+			]
+		}`)
+		defer respBundleIfNone.Body.Close()
+		assert.Equal(t, http.StatusForbidden, respBundleIfNone.StatusCode, "bundle entry with cross-patient ifNoneExist subject must be rejected with 403")
+	})
+
+	t.Run("Clinician Reads and Writes of Clinical Resources Populate AuditEvent Patient Attribution", func(t *testing.T) {
+		clinicianToken, err := mockVal.IssueToken("dr-house", "user/*.*", "", time.Hour, nil)
+		require.NoError(t, err)
+
+		// 1. Clinician reads Observation/obs-100 (no patient ID in URL or token)
+		reqRead, _ := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/test-compartment/Observation/obs-100", nil)
+		reqRead.Header.Set("Authorization", "Bearer "+clinicianToken)
+		respRead, err := http.DefaultClient.Do(reqRead)
+		require.NoError(t, err)
+		respRead.Body.Close()
+		require.Equal(t, http.StatusOK, respRead.StatusCode)
+
+		// 2. Clinician creates a new Observation for Patient/pat-100
+		reqCreate, _ := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/test-compartment/Observation",
+			strings.NewReader(`{"resourceType":"Observation","id":"obs-clinician-audit-1","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/pat-100"}}`))
+		reqCreate.Header.Set("Authorization", "Bearer "+clinicianToken)
+		reqCreate.Header.Set("Content-Type", "application/fhir+json")
+		respCreate, err := http.DefaultClient.Do(reqCreate)
+		require.NoError(t, err)
+		respCreate.Body.Close()
+		require.Equal(t, http.StatusCreated, respCreate.StatusCode)
+
+		// 3. Patient pat-100 queries GET /AuditEvent and sees BOTH clinician interactions in their Accounting of Disclosures
+		patAuditToken, err := mockVal.IssueToken("pat-100-user", "patient/AuditEvent.rs", "pat-100", time.Hour, nil)
+		require.NoError(t, err)
+		reqAudit, _ := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/test-compartment/AuditEvent?agent=dr-house", nil)
+		reqAudit.Header.Set("Authorization", "Bearer "+patAuditToken)
+		respAudit, err := http.DefaultClient.Do(reqAudit)
+		require.NoError(t, err)
+		defer respAudit.Body.Close()
+		require.Equal(t, http.StatusOK, respAudit.StatusCode)
+		var auditBundle map[string]any
+		require.NoError(t, json.NewDecoder(respAudit.Body).Decode(&auditBundle))
+		assert.GreaterOrEqual(t, int(auditBundle["total"].(float64)), 2, "expected clinician read and create on pat-100's Observation to be attributed to pat-100 in AuditEvent log")
 	})
 }

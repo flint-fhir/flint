@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 
 	_ "github.com/lib/pq"
 
@@ -20,6 +21,7 @@ import (
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
 
+	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store/postgres"
@@ -54,6 +56,30 @@ func main() {
 	srv.RegisterResourceType("Encounter", &encpb.Encounter{})
 	srv.RegisterResourceType("Observation", &obspb.Observation{})
 	srv.RegisterResourceType("Practitioner", &pracpb.Practitioner{})
+
+	// Optional AutoMQ / Kafka CDC producer configuration
+	if rawBrokers := strings.TrimSpace(os.Getenv("FLINT_AUTOMQ_BROKERS")); rawBrokers != "" {
+		var brokers []string
+		for b := range strings.SplitSeq(rawBrokers, ",") {
+			if trimmed := strings.TrimSpace(b); trimmed != "" {
+				brokers = append(brokers, trimmed)
+			}
+		}
+		if len(brokers) > 0 {
+			cdcProducer, err := automq.NewProducer(automq.Config{
+				Brokers:     brokers,
+				TopicPrefix: "fhir.",
+				Logger:      logger,
+			})
+			if err != nil {
+				logger.Error("init automq cdc producer", "error", err)
+				os.Exit(1)
+			}
+			defer cdcProducer.Close()
+			srv.SetCDCPublisher(cdcProducer)
+			logger.Info("AutoMQ CDC streaming enabled", "brokers", brokers)
+		}
+	}
 
 	// Optional SMART on FHIR Auth & OIDC/Zitadel configuration
 	if oidcIssuer := os.Getenv("FLINT_OIDC_ISSUER"); oidcIssuer != "" {

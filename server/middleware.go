@@ -429,6 +429,9 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 				patientID = cleanID(sub)
 			}
 		}
+		if patientID == "" && postgres.IsPatientCompartmentResourceType(entityType) && entityID != "" {
+			patientID = s.resolveClinicalResourcePatientID(r.Context(), tenantID, entityType, entityID)
+		}
 
 		outcomeCode, outcomeDesc := audit.ClassifyHTTPOutcome(arw.statusCode)
 
@@ -455,6 +458,61 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 			s.logger.Warn("failed to record audit event", "error", err, "path", r.URL.Path)
 		}
 	})
+}
+
+func setAuditPatientID(ctx context.Context, patientID string) {
+	if patientID == "" {
+		return
+	}
+	if holder, ok := ctx.Value(auditActorKey).(*auditActorHolder); ok && holder != nil && holder.patientID == "" {
+		holder.patientID = cleanID(patientID)
+	}
+}
+
+func extractPatientIDFromIndexes(resType, resID string, idx *postgres.SearchIndexes) string {
+	if strings.EqualFold(resType, "Patient") {
+		return cleanID(resID)
+	}
+	if idx == nil {
+		return ""
+	}
+	for _, ref := range idx.References {
+		if (ref.SpName == "subject" || ref.SpName == "patient") && strings.EqualFold(ref.TargetType, "Patient") && ref.TargetID != "" {
+			return cleanID(ref.TargetID)
+		}
+	}
+	return ""
+}
+
+func (s *Server) resolveClinicalResourcePatientID(ctx context.Context, tenant, resType, resID string) string {
+	if s.store == nil || !postgres.IsPatientCompartmentResourceType(resType) {
+		return ""
+	}
+	extractor, hasExtractor := s.extractors[resType]
+	if !hasExtractor {
+		return ""
+	}
+	rec, err := s.store.ReadResourceWithMeta(ctx, tenant, resType, resID)
+	if err == nil && rec != nil && len(rec.ResourceProto) > 0 {
+		if idx, err := extractor(tenant, resID, rec.ResourceProto); err == nil {
+			if pid := extractPatientIDFromIndexes(resType, resID, idx); pid != "" {
+				return pid
+			}
+		}
+	}
+	history, _, err := s.store.ListResourceHistory(ctx, tenant, resType, resID, 5, 0)
+	if err == nil {
+		for _, h := range history {
+			if len(h.ResourceProto) > 0 {
+				if idx, err := extractor(tenant, resID, h.ResourceProto); err == nil {
+					if pid := extractPatientIDFromIndexes(resType, resID, idx); pid != "" {
+						return pid
+					}
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func extractClientIP(r *http.Request) string {

@@ -1,6 +1,9 @@
 package automq_test
 
 import (
+	"context"
+	"log/slog"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,7 +26,7 @@ func TestProducer_BuildRecord(t *testing.T) {
 		wantTenantID string
 	}{
 		{
-			name: "Patient upsert",
+			name: "Patient upsert with tenant",
 			msg: automq.Message{
 				TenantID:  "tenant_a",
 				ResType:   "Patient",
@@ -32,12 +35,12 @@ func TestProducer_BuildRecord(t *testing.T) {
 				Op:        "U",
 			},
 			wantTopic:    "fhir.Patient",
-			wantKey:      "pat-100",
+			wantKey:      "tenant_a/pat-100",
 			wantOp:       "U",
 			wantTenantID: "tenant_a",
 		},
 		{
-			name: "Observation delete tombstone",
+			name: "Observation delete tombstone with tenant",
 			msg: automq.Message{
 				TenantID:  "tenant_b",
 				ResType:   "Observation",
@@ -46,9 +49,23 @@ func TestProducer_BuildRecord(t *testing.T) {
 				Op:        "D",
 			},
 			wantTopic:    "fhir.Observation",
-			wantKey:      "obs-555",
+			wantKey:      "tenant_b/obs-555",
 			wantOp:       "D",
 			wantTenantID: "tenant_b",
+		},
+		{
+			name: "Resource without tenant falls back to bare ResID",
+			msg: automq.Message{
+				TenantID:  "",
+				ResType:   "Condition",
+				ResID:     "cond-999",
+				ProtoData: []byte("proto"),
+				Op:        "U",
+			},
+			wantTopic:    "fhir.Condition",
+			wantKey:      "cond-999",
+			wantOp:       "U",
+			wantTenantID: "",
 		},
 	}
 
@@ -61,7 +78,6 @@ func TestProducer_BuildRecord(t *testing.T) {
 			assert.Equal(t, tt.wantKey, string(record.Key))
 			assert.Equal(t, tt.msg.ProtoData, record.Value)
 
-			// Verify CDC Headers
 			headerMap := make(map[string]string)
 			for _, h := range record.Headers {
 				headerMap[h.Key] = string(h.Value)
@@ -73,4 +89,61 @@ func TestProducer_BuildRecord(t *testing.T) {
 			assert.Equal(t, tt.wantOp, headerMap["op"])
 		})
 	}
+}
+
+func TestTopicSet(t *testing.T) {
+	topics := automq.TopicSet([]automq.Message{
+		{ResType: "Patient"},
+		{ResType: "Observation"},
+		{ResType: "Patient"},
+		{ResType: "Encounter"},
+	})
+	assert.Equal(t, []string{"Patient", "Observation", "Encounter"}, topics)
+}
+
+func TestMemoryPublisher(t *testing.T) {
+	pub := automq.NewMemoryPublisher()
+	require.Empty(t, pub.Messages())
+
+	err := pub.Publish(context.Background(), []automq.Message{
+		{
+			TenantID:  "tenant_1",
+			ResType:   "Patient",
+			ResID:     "pat-1",
+			ProtoData: []byte{1, 2, 3},
+			Op:        "U",
+		},
+		{
+			TenantID: "tenant_1",
+			ResType:  "Patient",
+			ResID:    "pat-1",
+			Op:       "D",
+		},
+	})
+	require.NoError(t, err)
+
+	msgs := pub.Messages()
+	require.Len(t, msgs, 2)
+	assert.Equal(t, "U", msgs[0].Op)
+	assert.Equal(t, "D", msgs[1].Op)
+
+	pub.Reset()
+	assert.Empty(t, pub.Messages())
+}
+
+func TestNewProducer(t *testing.T) {
+	_, err := automq.NewProducer(automq.Config{})
+	require.Error(t, err)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	prod, err := automq.NewProducer(automq.Config{
+		Brokers:     []string{"127.0.0.1:19092"},
+		TopicPrefix: "fhir.",
+		Logger:      logger,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, prod)
+	assert.Equal(t, "fhir.", prod.TopicPrefix)
+	require.NoError(t, prod.Publish(context.Background(), nil))
+	prod.Close()
 }

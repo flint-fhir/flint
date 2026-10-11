@@ -23,6 +23,7 @@ import (
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
 
+	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store/postgres"
 )
@@ -1702,6 +1703,88 @@ func TestServer_Integration(t *testing.T) {
 		respBad.Body.Close()
 		if respBad.StatusCode != http.StatusBadRequest {
 			t.Errorf("expected 400 Bad Request for unsupported PATCH method in Bundle, got %d", respBad.StatusCode)
+		}
+	})
+
+	t.Run("Batch Bundle Partial Failure, Malformed Search Query 400, and CDC Publisher Emission", func(t *testing.T) {
+		cdcMem := automq.NewMemoryPublisher()
+		srv.SetCDCPublisher(cdcMem)
+		defer srv.SetCDCPublisher(nil)
+
+		// 1. Batch Bundle with mixed valid and invalid entries returns 200 batch-response with per-entry outcomes
+		batchBundle := `{
+			"resourceType": "Bundle",
+			"type": "batch",
+			"entry": [
+				{
+					"resource": {"resourceType": "Patient", "id": "batch-pat-1", "name": [{"family": "BatchSuccess"}]},
+					"request": {"method": "PUT", "url": "Patient/batch-pat-1"}
+				},
+				{
+					"resource": {"resourceType": "Patient", "id": "batch-pat-bad"},
+					"request": {"method": "PATCH", "url": "Patient/batch-pat-bad"}
+				},
+				{
+					"resource": {"resourceType": "Patient", "id": "batch-mismatch", "name": [{"family": "Mismatch"}]},
+					"request": {"method": "PUT", "url": "Patient/other-id"}
+				},
+				{
+					"request": {"method": "DELETE", "url": "Patient/batch-pat-1"}
+				}
+			]
+		}`
+		respBatch, err := http.Post(ts.URL+"/fhir/r4/test-api", "application/fhir+json", strings.NewReader(batchBundle))
+		if err != nil {
+			t.Fatalf("POST batch bundle: %v", err)
+		}
+		batchBytes, _ := io.ReadAll(respBatch.Body)
+		respBatch.Body.Close()
+		if respBatch.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK for batch bundle, got %d: %s", respBatch.StatusCode, batchBytes)
+		}
+		var batchResp map[string]any
+		json.Unmarshal(batchBytes, &batchResp)
+		if batchResp["type"] != "batch-response" {
+			t.Errorf("expected type=batch-response, got %v", batchResp["type"])
+		}
+		bEntries := batchResp["entry"].([]any)
+		if len(bEntries) != 4 {
+			t.Fatalf("expected 4 batch response entries, got %d", len(bEntries))
+		}
+		if status0 := bEntries[0].(map[string]any)["response"].(map[string]any)["status"].(string); !strings.HasPrefix(status0, "201") && !strings.HasPrefix(status0, "200") {
+			t.Errorf("expected entry[0] 200/201, got %s", status0)
+		}
+		if status1 := bEntries[1].(map[string]any)["response"].(map[string]any)["status"].(string); !strings.HasPrefix(status1, "400") {
+			t.Errorf("expected entry[1] 400 Bad Request, got %s", status1)
+		}
+		if status2 := bEntries[2].(map[string]any)["response"].(map[string]any)["status"].(string); !strings.HasPrefix(status2, "400") {
+			t.Errorf("expected entry[2] 400 Bad Request, got %s", status2)
+		}
+		if status3 := bEntries[3].(map[string]any)["response"].(map[string]any)["status"].(string); !strings.HasPrefix(status3, "204") {
+			t.Errorf("expected entry[3] 204 No Content, got %s", status3)
+		}
+
+		// Verify CDC events were emitted for the PUT and DELETE in the batch bundle
+		msgs := cdcMem.Messages()
+		if len(msgs) != 2 || msgs[0].Op != "U" || msgs[1].Op != "D" {
+			t.Errorf("expected 2 CDC messages (U then D) from batch bundle, got %+v", msgs)
+		}
+
+		// 2. Malformed search query parameters return 400 Bad Request OperationOutcome
+		for _, badSearch := range []string{
+			"/fhir/r4/test-api/Observation?date=not-a-valid-date",
+			"/fhir/r4/test-api/Observation?value-quantity=not-a-number",
+			"/fhir/r4/test-api/Patient?_count=-1",
+			"/fhir/r4/test-api/Patient?_include=MalformedInclude",
+		} {
+			respBadSearch, err := http.Get(ts.URL + badSearch)
+			if err != nil {
+				t.Fatalf("GET %s: %v", badSearch, err)
+			}
+			respBadSearch.Body.Close()
+			if respBadSearch.StatusCode != http.StatusBadRequest {
+				t.Errorf("expected 400 Bad Request for %s, got %d", badSearch, respBadSearch.StatusCode)
+			}
 		}
 	})
 

@@ -91,29 +91,34 @@ func RewriteURNReferences(rawJSON []byte, urnToTarget map[string]string) ([]byte
 	if err := json.Unmarshal(rawJSON, &root); err != nil {
 		return rawJSON, err
 	}
-	if rewriteURNNode(root, urnToTarget) {
+	if rewriteURNNode(root, urnToTarget, "") {
 		return json.Marshal(root)
 	}
 	return rawJSON, nil
 }
 
-func rewriteURNNode(node any, urnToTarget map[string]string) bool {
+func rewriteURNNode(node any, urnToTarget map[string]string, parentKey string) bool {
 	changed := false
 	switch v := node.(type) {
 	case map[string]any:
 		for k, child := range v {
 			if s, ok := child.(string); ok {
 				if resolved, exists := urnToTarget[s]; exists {
+					if k == "id" || (k == "value" && parentKey == "id") {
+						if slashIdx := strings.LastIndex(resolved, "/"); slashIdx != -1 {
+							resolved = resolved[slashIdx+1:]
+						}
+					}
 					v[k] = resolved
 					changed = true
 				}
-			} else if rewriteURNNode(child, urnToTarget) {
+			} else if rewriteURNNode(child, urnToTarget, k) {
 				changed = true
 			}
 		}
 	case []any:
 		for _, elem := range v {
-			if rewriteURNNode(elem, urnToTarget) {
+			if rewriteURNNode(elem, urnToTarget, parentKey) {
 				changed = true
 			}
 		}
