@@ -58,6 +58,9 @@ type Server struct {
 	extractors     map[string]postgres.IndexExtractorFunc
 	smartConfig    *SMARTConfig
 	tokenValidator auth.TokenValidator
+	devAuth        *auth.MockTokenValidator
+	oauthMu        sync.Mutex
+	oauthCodes     map[string]authCodeEntry
 	validator      validation.Validator
 	auditRecorder  audit.Recorder
 	cdcPublisher   automq.Publisher
@@ -73,11 +76,14 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 	} else {
 		auditRec = audit.NewMemoryRecorder()
 	}
+	devAuth, _ := auth.NewMockTokenValidator("", "")
 	return &Server{
 		store:         store,
 		logger:        logger,
 		protoRegistry: make(map[string]protoreflect.MessageDescriptor),
 		extractors:    postgres.DefaultIndexExtractors(),
+		devAuth:       devAuth,
+		oauthCodes:    make(map[string]authCodeEntry),
 		validator:     validation.NewEngine(validation.DefaultOptions()),
 		auditRecorder: auditRec,
 		exportJobs:    make(map[string]*exportJob),
@@ -155,6 +161,14 @@ func (s *Server) RegisterIndexExtractor(resType string, fn postgres.IndexExtract
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
+	// Built-in SMART on FHIR v2.0.0 OAuth2 & OIDC Discovery endpoints
+	mux.HandleFunc("GET /oauth2/authorize", s.handleOAuthAuthorize)
+	mux.HandleFunc("POST /oauth2/authorize", s.handleOAuthAuthorize)
+	mux.HandleFunc("POST /oauth2/token", s.handleOAuthToken)
+	mux.HandleFunc("POST /oauth2/introspect", s.handleOAuthIntrospect)
+	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
+	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCConfig)
+
 	// Discovery & OpenAPI 3.1 / Interactive Explorer endpoints
 	mux.HandleFunc("GET /fhir/r4/openapi.json", s.handleOpenAPI)
 	mux.HandleFunc("GET /fhir/r4/$docs", s.handleDocsUI)
@@ -189,6 +203,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}", s.handleBundle)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/metadata", s.handleMetadata)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/smart-configuration", s.handleSMARTConfig)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/openid-configuration", s.handleOIDCConfig)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/jwks.json", s.handleJWKS)
 
 	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
@@ -1224,6 +1240,53 @@ func (s *Server) writeSearchSetBundle(w http.ResponseWriter, sr *postgres.Search
 	json.NewEncoder(w).Encode(bundle)
 }
 
+func usCoreSupportedProfiles(rt string) []string {
+	switch rt {
+	case "Patient":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"}
+	case "Encounter":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-encounter"}
+	case "Condition":
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-encounter-diagnosis",
+		}
+	case "Observation":
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-vital-signs",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-blood-pressure",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-heart-rate",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-respiratory-rate",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-temperature",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-weight",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-height",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-bmi",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pulse-oximetry",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-smokingstatus",
+		}
+	case "Practitioner":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitioner"}
+	case "MedicationRequest":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationrequest"}
+	case "AllergyIntolerance":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-allergyintolerance"}
+	case "Procedure":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-procedure"}
+	case "DiagnosticReport":
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-lab",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note",
+		}
+	case "Immunization":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-immunization"}
+	case "Organization":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-organization"}
+	default:
+		return nil
+	}
+}
+
 // handleMetadata returns the FHIR CapabilityStatement.
 func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	interactions := []map[string]string{
@@ -1243,10 +1306,12 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		"MedicationRequest", "AllergyIntolerance", "Procedure", "DiagnosticReport",
 		"Immunization", "Organization",
 	}
-	resEntries := make([]map[string]any, 0, len(usCoreOrder)+1)
+	resEntries := make([]map[string]any, 0, len(usCoreOrder)+2)
 	for _, rt := range usCoreOrder {
 		entry := map[string]any{
 			"type":              rt,
+			"profile":           "http://hl7.org/fhir/StructureDefinition/" + rt,
+			"supportedProfile":  usCoreSupportedProfiles(rt),
 			"versioning":        "versioned-update",
 			"readHistory":       true,
 			"updateCreate":      true,
@@ -1271,7 +1336,19 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		resEntries = append(resEntries, entry)
 	}
 	resEntries = append(resEntries, map[string]any{
+		"type":        "Group",
+		"profile":     "http://hl7.org/fhir/StructureDefinition/Group",
+		"interaction": []map[string]string{{"code": "read"}},
+		"operation": []map[string]string{
+			{
+				"name":       "export",
+				"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/group-export",
+			},
+		},
+	})
+	resEntries = append(resEntries, map[string]any{
 		"type":        "AuditEvent",
+		"profile":     "http://hl7.org/fhir/StructureDefinition/AuditEvent",
 		"interaction": []map[string]string{{"code": "read"}, {"code": "search-type"}},
 		"searchParam": []map[string]string{
 			{"name": "action", "type": "token"},
@@ -1285,20 +1362,51 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		},
 	})
 
+	smartCfg := s.resolveSMARTConfig(r)
+
 	cap := map[string]any{
 		"resourceType": "CapabilityStatement",
 		"status":       "active",
 		"kind":         "instance",
 		"fhirVersion":  "4.0.1",
-		"format":       []string{"json", "application/fhir+json", "application/fhir+ndjson"},
-		"patchFormat":  []string{"application/json-patch+json", "application/merge-patch+json"},
+		"instantiates": []string{
+			"http://hl7.org/fhir/us/core/CapabilityStatement/us-core-server",
+			"http://hl7.org/fhir/uv/bulkdata/CapabilityStatement/bulk-data",
+		},
+		"format":      []string{"json", "application/fhir+json", "application/fhir+ndjson"},
+		"patchFormat": []string{"application/json-patch+json", "application/merge-patch+json"},
 		"software": map[string]any{
 			"name":    "Flint FHIR Server",
 			"version": "0.1.0",
 		},
 		"rest": []map[string]any{
 			{
-				"mode":     "server",
+				"mode": "server",
+				"security": map[string]any{
+					"cors": true,
+					"service": []map[string]any{
+						{
+							"coding": []map[string]string{
+								{
+									"system":  "http://terminology.hl7.org/CodeSystem/restful-security-service",
+									"code":    "SMART-on-FHIR",
+									"display": "SMART-on-FHIR",
+								},
+							},
+							"text": "OAuth2 using SMART-on-FHIR v2.0.0 profile (see http://hl7.org/fhir/smart-app-launch)",
+						},
+					},
+					"extension": []map[string]any{
+						{
+							"url": "http://fhir-registry.smarthealthit.org/StructureDefinition/oauth-uris",
+							"extension": []map[string]string{
+								{"url": "authorize", "valueUri": smartCfg.AuthorizationEndpoint},
+								{"url": "token", "valueUri": smartCfg.TokenEndpoint},
+								{"url": "introspect", "valueUri": smartCfg.IntrospectionEndpoint},
+							},
+						},
+					},
+				},
 				"resource": resEntries,
 				"operation": []map[string]any{
 					{

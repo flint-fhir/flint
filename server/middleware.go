@@ -32,23 +32,29 @@ type auditActorHolder struct {
 // scope checking, and patient compartment isolation.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// If no token validator configured, server is in unauthenticated dev mode
-		if s.tokenValidator == nil {
-			next.ServeHTTP(w, r)
-			return
-		}
-
 		path := strings.Trim(r.URL.Path, "/")
 		parts := strings.Split(path, "/")
 
-		// Allow public endpoints
+		// Allow public endpoints (discovery, metadata, OAuth2 authorize/token/introspect, JWKS)
 		if isPublicEndpoint(parts) {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Extract Bearer token
 		authHeader := r.Header.Get("Authorization")
+		validator := s.tokenValidator
+		if validator == nil {
+			// If no external token validator is configured and no Authorization header is supplied,
+			// server operates in unauthenticated dev mode. When an Authorization header IS supplied
+			// (e.g. SMART App Launch / HL7 Inferno conformance tests), validate and enforce scopes via devAuth.
+			if authHeader == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			validator = s.devAuth
+		}
+
+		// Extract Bearer token
 		if authHeader == "" || !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
 			writeOperationOutcome(w, http.StatusUnauthorized, "login", "missing or malformed Authorization header")
 			return
@@ -56,7 +62,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		rawToken := strings.TrimSpace(authHeader[7:])
 
 		// Validate token using configured TokenValidator (OIDC/Zitadel/Mock)
-		secCtx, err := s.tokenValidator.ValidateToken(r.Context(), rawToken)
+		secCtx, err := validator.ValidateToken(r.Context(), rawToken)
 		if err != nil {
 			s.logger.Warn("token validation failed", "error", err, "path", r.URL.Path)
 			writeOperationOutcome(w, http.StatusUnauthorized, "login", err.Error())
@@ -300,6 +306,17 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 }
 
 func isPublicEndpoint(parts []string) bool {
+	if len(parts) == 0 {
+		return false
+	}
+	if parts[0] == "oauth2" {
+		return true
+	}
+	for _, p := range parts {
+		if strings.HasPrefix(p, ".well-known") {
+			return true
+		}
+	}
 	if len(parts) < 3 {
 		return false
 	}
@@ -308,11 +325,6 @@ func isPublicEndpoint(parts []string) bool {
 	}
 	if len(parts) >= 4 && (parts[3] == "metadata" || parts[3] == "openapi.json" || parts[3] == "$docs") {
 		return true
-	}
-	for _, p := range parts {
-		if strings.HasPrefix(p, ".well-known") {
-			return true
-		}
 	}
 	return false
 }
