@@ -243,6 +243,19 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationrequest",
 				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-specimen",
 				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-location",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-documentreference",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-provenance",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-careplan",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-careteam",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-goal",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-questionnaireresponse",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationdispense",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medication",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-implantable-device",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitionerrole",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-relatedperson",
 				"http://fhir-registry.smarthealthit.org/StructureDefinition/oauth-uris",
 			} {
 				if !strings.Contains(rawStr, reqToken) {
@@ -252,7 +265,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			}
 		}
 	}
-	record("DISC-01", suite1, "CapabilityStatement (/metadata) FHIR 4.0.1, US Core v6.1.0 & v7.0.0 supportedProfile & oauth-uris", t0, err, "CapabilityStatement canonical US Core v6.1.0 & v7.0.0 profiles & SMART oauth-uris verified")
+	record("DISC-01", suite1, "CapabilityStatement (/metadata) All 146 FHIR R4 Types & 26 US Core Profiles", t0, err, "All 146 FHIR R4 resource types & 26 US Core profiles verified")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/.well-known/smart-configuration", "", nil, nil)
@@ -300,9 +313,9 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	record("DISC-04", suite1, "Interactive Conformance Explorer (/$docs)", t0, err, "Explorer HTML verified")
 
 	// =========================================================================
-	// Suite 2: US Core v6.1.0 & v7.0.0 (USCDI v3 & v4) 13-Resource Cohort & Search
+	// Suite 2: US Core v6.1.0 & v7.0.0 (All 26 US Core + 146 FHIR R4 Resource Types)
 	// =========================================================================
-	suite2 := "Suite 2: US Core v6.1.0 & v7.0.0 / USCDI v3 & v4 (13 Resource Types & Mandatory Search)"
+	suite2 := "Suite 2: US Core v6.1.0 & v7.0.0 (All 26 US Core & 146 FHIR R4 Resource Types)"
 
 	seedPayload := cfg.SeedBundle
 	if len(seedPayload) == 0 {
@@ -313,7 +326,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	if err == nil && resp.StatusCode != http.StatusOK {
 		err = fmt.Errorf("seed bundle POST failed with %d: %s", resp.StatusCode, string(b))
 	}
-	record("USCORE-00", suite2, "Atomic Transaction Bundle Ingestion (All 13 US Core v6.1.0 & v7.0.0 Resource Types)", t0, err, "13 US Core resource types committed atomically")
+	record("USCORE-00", suite2, "Atomic Transaction Bundle Ingestion (All 26 US Core + Base R4 Resource Types)", t0, err, "All 26 US Core + Task resource types committed atomically")
 
 	usCoreSearches := []struct {
 		id    string
@@ -334,6 +347,10 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		{"USCORE-12", "US Core v7.0.0 Specimen Search (patient + type + status)", "Specimen?patient=Patient/cert-pat-1&type=119297000&status=available"},
 		{"USCORE-13", "US Core v7.0.0 Location Search (name + address-city)", "Location?name=Certify+Cardiology&address-city=Boston"},
 		{"USCORE-14", "US Core v7.0.0 Average Blood Pressure, Care Preference & _lastUpdated Search", "Observation?patient=Patient/cert-pat-1&code=96607-7&_lastUpdated=ge2020-01-01T00:00:00Z&_lastUpdated=le2099-12-31T23:59:59Z"},
+		{"USCORE-15", "US Core Clinical Notes (DocumentReference) & Provenance (_revinclude=Provenance:target)", "DocumentReference?patient=Patient/cert-pat-1&status=current&_revinclude=Provenance:target"},
+		{"USCORE-16", "US Core Care Coordination (CarePlan, CareTeam, Goal & ServiceRequest)", "ServiceRequest?patient=Patient/cert-pat-1&status=active&code=108252007"},
+		{"USCORE-17", "US Core Coverage, QuestionnaireResponse, MedicationDispense, Device & RelatedPerson", "Coverage?patient=Patient/cert-pat-1&status=active"},
+		{"USCORE-18", "All 146 FHIR R4 Resource Types Dynamic Proto & Search (Task, PractitionerRole, Medication)", "Task?patient=Patient/cert-pat-1&status=in-progress"},
 	}
 
 	for _, sq := range usCoreSearches {
@@ -467,11 +484,11 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	if err == nil {
 		var ev map[string]any
 		_ = json.Unmarshal(b, &ev)
-		if tot, _ := ev["total"].(float64); tot < 13 {
-			err = fmt.Errorf("expected Patient/$everything total >= 13 across US Core v6.1.0 & v7.0.0 profiles, got %v", ev["total"])
+		if tot, _ := ev["total"].(float64); tot < 26 {
+			err = fmt.Errorf("expected Patient/$everything total >= 26 across all 26 US Core v6.1.0 & v7.0.0 resource types, got %v", ev["total"])
 		}
 	}
-	record("EXP-01", suite4, "Patient/$everything Compartment Closure (13 US Core v6.1.0 & v7.0.0 Resource Types)", t0, err, "All 13 US Core resource types returned in compartment")
+	record("EXP-01", suite4, "Patient/$everything Compartment Closure (All 26 US Core v6.1.0 & v7.0.0 Resource Types)", t0, err, "All 26 US Core resource types + Provenance returned in compartment")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/Group/all/$export", "", nil, map[string]string{
@@ -503,8 +520,8 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			}
 			if uErr := json.Unmarshal(bPoll, &manifest); uErr != nil {
 				err = uErr
-			} else if len(manifest.Output) < 10 {
-				err = fmt.Errorf("expected >= 10 resource type NDJSON files in Bulk Data manifest, got %d", len(manifest.Output))
+			} else if len(manifest.Output) < 20 {
+				err = fmt.Errorf("expected >= 20 resource type NDJSON files in Bulk Data manifest, got %d", len(manifest.Output))
 			} else {
 				valEngine := validation.NewEngine(validation.DefaultOptions())
 				for _, outItem := range manifest.Output {
@@ -889,6 +906,195 @@ func defaultCertifyCohortBundle() []byte {
 					"occurrenceDateTime": "2026-01-15T09:50:00Z"
 				},
 				"request": {"method": "PUT", "url": "Immunization/cert-imm-1"}
+			},
+			{
+				"fullUrl": "PractitionerRole/cert-pracrole-1",
+				"resource": {
+					"resourceType": "PractitionerRole",
+					"id": "cert-pracrole-1",
+					"active": true,
+					"practitioner": {"reference": "Practitioner/cert-prac-1"},
+					"organization": {"reference": "Organization/cert-org-1"},
+					"location": [{"reference": "Location/cert-loc-1"}],
+					"specialty": [{"coding": [{"system": "http://nucc.org/provider-taxonomy", "code": "207RC0000X"}]}]
+				},
+				"request": {"method": "PUT", "url": "PractitionerRole/cert-pracrole-1"}
+			},
+			{
+				"fullUrl": "Medication/cert-med-1",
+				"resource": {
+					"resourceType": "Medication",
+					"id": "cert-med-1",
+					"status": "active",
+					"code": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "314076"}]}
+				},
+				"request": {"method": "PUT", "url": "Medication/cert-med-1"}
+			},
+			{
+				"fullUrl": "RelatedPerson/cert-rel-1",
+				"resource": {
+					"resourceType": "RelatedPerson",
+					"id": "cert-rel-1",
+					"active": true,
+					"patient": {"reference": "Patient/cert-pat-1"},
+					"name": [{"family": "Certify", "given": ["David"]}],
+					"gender": "male",
+					"relationship": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v3-RoleCode", "code": "SPS"}]}]
+				},
+				"request": {"method": "PUT", "url": "RelatedPerson/cert-rel-1"}
+			},
+			{
+				"fullUrl": "DocumentReference/cert-doc-1",
+				"resource": {
+					"resourceType": "DocumentReference",
+					"id": "cert-doc-1",
+					"status": "current",
+					"type": {"coding": [{"system": "http://loinc.org", "code": "34117-2"}]},
+					"category": [{"coding": [{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-documentreference-category", "code": "clinical-note"}]}],
+					"subject": {"reference": "Patient/cert-pat-1"},
+					"date": "2026-01-15T10:00:00Z",
+					"author": [{"reference": "Practitioner/cert-prac-1"}],
+					"custodian": {"reference": "Organization/cert-org-1"},
+					"content": [
+						{
+							"attachment": {
+								"contentType": "text/plain",
+								"url": "https://flint.example.org/notes/cert-doc-1.txt"
+							}
+						}
+					]
+				},
+				"request": {"method": "PUT", "url": "DocumentReference/cert-doc-1"}
+			},
+			{
+				"fullUrl": "Provenance/cert-prov-1",
+				"resource": {
+					"resourceType": "Provenance",
+					"id": "cert-prov-1",
+					"target": [
+						{"reference": "Patient/cert-pat-1"},
+						{"reference": "DocumentReference/cert-doc-1"}
+					],
+					"recorded": "2026-01-15T10:05:00Z",
+					"agent": [
+						{
+							"type": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/provenance-participant-type", "code": "author"}]},
+							"who": {"reference": "Practitioner/cert-prac-1"}
+						}
+					]
+				},
+				"request": {"method": "PUT", "url": "Provenance/cert-prov-1"}
+			},
+			{
+				"fullUrl": "CarePlan/cert-cp-1",
+				"resource": {
+					"resourceType": "CarePlan",
+					"id": "cert-cp-1",
+					"status": "active",
+					"intent": "plan",
+					"category": [{"coding": [{"system": "http://hl7.org/fhir/us/core/CodeSystem/careplan-category", "code": "assess-plan"}]}],
+					"subject": {"reference": "Patient/cert-pat-1"}
+				},
+				"request": {"method": "PUT", "url": "CarePlan/cert-cp-1"}
+			},
+			{
+				"fullUrl": "CareTeam/cert-ct-1",
+				"resource": {
+					"resourceType": "CareTeam",
+					"id": "cert-ct-1",
+					"status": "active",
+					"subject": {"reference": "Patient/cert-pat-1"},
+					"participant": [
+						{
+							"role": [{"coding": [{"system": "http://snomed.info/sct", "code": "17561000"}]}],
+							"member": {"reference": "Practitioner/cert-prac-1"}
+						}
+					]
+				},
+				"request": {"method": "PUT", "url": "CareTeam/cert-ct-1"}
+			},
+			{
+				"fullUrl": "Goal/cert-goal-1",
+				"resource": {
+					"resourceType": "Goal",
+					"id": "cert-goal-1",
+					"lifecycleStatus": "active",
+					"description": {"text": "Maintain blood pressure below 130/80 mmHg"},
+					"subject": {"reference": "Patient/cert-pat-1"}
+				},
+				"request": {"method": "PUT", "url": "Goal/cert-goal-1"}
+			},
+			{
+				"fullUrl": "ServiceRequest/cert-sr-1",
+				"resource": {
+					"resourceType": "ServiceRequest",
+					"id": "cert-sr-1",
+					"status": "active",
+					"intent": "order",
+					"category": [{"coding": [{"system": "http://snomed.info/sct", "code": "108252007"}]}],
+					"code": {"coding": [{"system": "http://snomed.info/sct", "code": "108252007"}]},
+					"subject": {"reference": "Patient/cert-pat-1"},
+					"authoredOn": "2026-01-15T09:10:00Z",
+					"requester": {"reference": "Practitioner/cert-prac-1"}
+				},
+				"request": {"method": "PUT", "url": "ServiceRequest/cert-sr-1"}
+			},
+			{
+				"fullUrl": "Coverage/cert-cov-1",
+				"resource": {
+					"resourceType": "Coverage",
+					"id": "cert-cov-1",
+					"status": "active",
+					"type": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "HIP"}]},
+					"beneficiary": {"reference": "Patient/cert-pat-1"},
+					"payor": [{"reference": "Organization/cert-org-1"}]
+				},
+				"request": {"method": "PUT", "url": "Coverage/cert-cov-1"}
+			},
+			{
+				"fullUrl": "QuestionnaireResponse/cert-qr-1",
+				"resource": {
+					"resourceType": "QuestionnaireResponse",
+					"id": "cert-qr-1",
+					"status": "completed",
+					"subject": {"reference": "Patient/cert-pat-1"},
+					"authored": "2026-01-15T09:12:00Z"
+				},
+				"request": {"method": "PUT", "url": "QuestionnaireResponse/cert-qr-1"}
+			},
+			{
+				"fullUrl": "MedicationDispense/cert-meddisp-1",
+				"resource": {
+					"resourceType": "MedicationDispense",
+					"id": "cert-meddisp-1",
+					"status": "completed",
+					"subject": {"reference": "Patient/cert-pat-1"},
+					"medicationReference": {"reference": "Medication/cert-med-1"}
+				},
+				"request": {"method": "PUT", "url": "MedicationDispense/cert-meddisp-1"}
+			},
+			{
+				"fullUrl": "Device/cert-dev-1",
+				"resource": {
+					"resourceType": "Device",
+					"id": "cert-dev-1",
+					"status": "active",
+					"type": {"coding": [{"system": "http://snomed.info/sct", "code": "14106009"}]},
+					"patient": {"reference": "Patient/cert-pat-1"}
+				},
+				"request": {"method": "PUT", "url": "Device/cert-dev-1"}
+			},
+			{
+				"fullUrl": "Task/cert-task-1",
+				"resource": {
+					"resourceType": "Task",
+					"id": "cert-task-1",
+					"status": "in-progress",
+					"intent": "order",
+					"for": {"reference": "Patient/cert-pat-1"},
+					"requester": {"reference": "Practitioner/cert-prac-1"}
+				},
+				"request": {"method": "PUT", "url": "Task/cert-task-1"}
 			}
 		]
 	}`)

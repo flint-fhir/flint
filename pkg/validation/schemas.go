@@ -2,6 +2,11 @@ package validation
 
 import (
 	"regexp"
+	"strings"
+
+	"google.golang.org/protobuf/reflect/protoreflect"
+
+	"github.com/flint-fhir/flint/pkg/fhirutil"
 )
 
 // Standard FHIR R4 Primitive Format Regexes
@@ -103,6 +108,59 @@ var (
 	LocationModeValueSet = map[string]bool{
 		"instance": true, "kind": true,
 	}
+
+	DocumentReferenceStatusValueSet = map[string]bool{
+		"current": true, "superseded": true, "entered-in-error": true,
+	}
+
+	CarePlanStatusValueSet = map[string]bool{
+		"draft": true, "active": true, "on-hold": true, "revoked": true,
+		"completed": true, "entered-in-error": true, "unknown": true,
+	}
+
+	CarePlanIntentValueSet = map[string]bool{
+		"proposal": true, "plan": true, "order": true, "option": true,
+	}
+
+	CareTeamStatusValueSet = map[string]bool{
+		"proposed": true, "active": true, "suspended": true, "inactive": true, "entered-in-error": true,
+	}
+
+	GoalLifecycleStatusValueSet = map[string]bool{
+		"proposed": true, "planned": true, "accepted": true, "active": true,
+		"on-hold": true, "completed": true, "cancelled": true, "entered-in-error": true, "rejected": true,
+	}
+
+	ServiceRequestStatusValueSet = map[string]bool{
+		"draft": true, "active": true, "on-hold": true, "revoked": true,
+		"completed": true, "entered-in-error": true, "unknown": true,
+	}
+
+	ServiceRequestIntentValueSet = map[string]bool{
+		"proposal": true, "plan": true, "directive": true, "order": true,
+		"original-order": true, "reflex-order": true, "filler-order": true, "instance-order": true, "option": true,
+	}
+
+	CoverageStatusValueSet = map[string]bool{
+		"active": true, "cancelled": true, "draft": true, "entered-in-error": true,
+	}
+
+	QuestionnaireResponseStatusValueSet = map[string]bool{
+		"in-progress": true, "completed": true, "amended": true, "entered-in-error": true, "stopped": true,
+	}
+
+	MedicationDispenseStatusValueSet = map[string]bool{
+		"preparation": true, "in-progress": true, "cancelled": true, "on-hold": true,
+		"completed": true, "entered-in-error": true, "stopped": true, "declined": true, "unknown": true,
+	}
+
+	MedicationStatusValueSet = map[string]bool{
+		"active": true, "inactive": true, "entered-in-error": true,
+	}
+
+	DeviceStatusValueSet = map[string]bool{
+		"active": true, "inactive": true, "entered-in-error": true, "unknown": true,
+	}
 )
 
 // ResourceSchema represents validation rules derived from a FHIR StructureDefinition.
@@ -129,9 +187,40 @@ func buildFieldMap(fields ...[]string) map[string]bool {
 	return m
 }
 
-// DefaultSchemas returns built-in StructureDefinition rules for US Core / USCDI v3 FHIR R4 resources.
+func allowedFieldsFromDescriptor(md protoreflect.MessageDescriptor) map[string]bool {
+	m := buildFieldMap(commonResourceFields)
+	if md == nil {
+		return m
+	}
+	fields := md.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		jsonName := fd.JSONName()
+		m[jsonName] = true
+		if jsonName == "classValue" {
+			m["class"] = true
+		}
+		if fd.Kind() == protoreflect.MessageKind && fd.Message() != nil && fd.Message().Oneofs().ByName("choice") != nil {
+			choiceFields := fd.Message().Fields()
+			for j := 0; j < choiceFields.Len(); j++ {
+				optJSON := choiceFields.Get(j).JSONName()
+				if optJSON == "stringValue" {
+					optJSON = "string"
+				}
+				if len(optJSON) > 0 {
+					m[jsonName+strings.ToUpper(optJSON[:1])+optJSON[1:]] = true
+				}
+			}
+		}
+	}
+	return m
+}
+
+// DefaultSchemas returns StructureDefinition validation schemas for all ~146 official
+// HL7 FHIR R4 resource types (derived from compiled protobuf descriptors) overlaid with
+// US Core v6.1.0 & v7.0.0 required element and ValueSet bindings across all 26 US Core types.
 func DefaultSchemas() map[string]ResourceSchema {
-	return map[string]ResourceSchema{
+	usCoreOverrides := map[string]ResourceSchema{
 		"Patient": {
 			ResourceType: "Patient",
 			AllowedFields: buildFieldMap(commonResourceFields, []string{
@@ -376,5 +465,173 @@ func DefaultSchemas() map[string]ResourceSchema {
 				"mode":   "http://hl7.org/fhir/valueset/location-mode",
 			},
 		},
+
+		"DocumentReference": {
+			ResourceType:   "DocumentReference",
+			RequiredFields: []string{"status", "type", "subject", "content"},
+			CodeBindings: map[string]map[string]bool{
+				"status": DocumentReferenceStatusValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status": "http://hl7.org/fhir/valueset/document-reference-status",
+			},
+		},
+
+		"Provenance": {
+			ResourceType:   "Provenance",
+			RequiredFields: []string{"target", "recorded", "agent"},
+			CodeBindings:   map[string]map[string]bool{},
+			ValueSetURIs:   map[string]string{},
+		},
+
+		"CarePlan": {
+			ResourceType:   "CarePlan",
+			RequiredFields: []string{"status", "intent", "subject"},
+			CodeBindings: map[string]map[string]bool{
+				"status": CarePlanStatusValueSet,
+				"intent": CarePlanIntentValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status": "http://hl7.org/fhir/valueset/request-status",
+				"intent": "http://hl7.org/fhir/valueset/care-plan-intent",
+			},
+		},
+
+		"CareTeam": {
+			ResourceType:   "CareTeam",
+			RequiredFields: []string{"subject"},
+			CodeBindings: map[string]map[string]bool{
+				"status": CareTeamStatusValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status": "http://hl7.org/fhir/valueset/care-team-status",
+			},
+		},
+
+		"Goal": {
+			ResourceType:   "Goal",
+			RequiredFields: []string{"lifecycleStatus", "description", "subject"},
+			CodeBindings: map[string]map[string]bool{
+				"lifecycleStatus": GoalLifecycleStatusValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"lifecycleStatus": "http://hl7.org/fhir/valueset/goal-status",
+			},
+		},
+
+		"ServiceRequest": {
+			ResourceType:   "ServiceRequest",
+			RequiredFields: []string{"status", "intent", "code", "subject"},
+			CodeBindings: map[string]map[string]bool{
+				"status":   ServiceRequestStatusValueSet,
+				"intent":   ServiceRequestIntentValueSet,
+				"priority": RequestPriorityValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status":   "http://hl7.org/fhir/valueset/request-status",
+				"intent":   "http://hl7.org/fhir/valueset/request-intent",
+				"priority": "http://hl7.org/fhir/valueset/request-priority",
+			},
+		},
+
+		"Coverage": {
+			ResourceType:   "Coverage",
+			RequiredFields: []string{"status", "beneficiary", "payor"},
+			CodeBindings: map[string]map[string]bool{
+				"status": CoverageStatusValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status": "http://hl7.org/fhir/valueset/fm-status",
+			},
+		},
+
+		"QuestionnaireResponse": {
+			ResourceType:   "QuestionnaireResponse",
+			RequiredFields: []string{"status"},
+			CodeBindings: map[string]map[string]bool{
+				"status": QuestionnaireResponseStatusValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status": "http://hl7.org/fhir/valueset/questionnaire-answers-status",
+			},
+		},
+
+		"MedicationDispense": {
+			ResourceType:   "MedicationDispense",
+			RequiredFields: []string{"status", "medication", "subject"},
+			CodeBindings: map[string]map[string]bool{
+				"status": MedicationDispenseStatusValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status": "http://hl7.org/fhir/valueset/medicationdispense-status",
+			},
+		},
+
+		"Medication": {
+			ResourceType:   "Medication",
+			RequiredFields: []string{"code"},
+			CodeBindings: map[string]map[string]bool{
+				"status": MedicationStatusValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status": "http://hl7.org/fhir/valueset/medication-status",
+			},
+		},
+
+		"Device": {
+			ResourceType:   "Device",
+			RequiredFields: []string{"type"},
+			CodeBindings: map[string]map[string]bool{
+				"status": DeviceStatusValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status": "http://hl7.org/fhir/valueset/device-status",
+			},
+		},
+
+		"PractitionerRole": {
+			ResourceType:   "PractitionerRole",
+			RequiredFields: []string{},
+			CodeBindings:   map[string]map[string]bool{},
+			ValueSetURIs:   map[string]string{},
+		},
+
+		"RelatedPerson": {
+			ResourceType:   "RelatedPerson",
+			RequiredFields: []string{"patient"},
+			CodeBindings: map[string]map[string]bool{
+				"gender": AdministrativeGenderValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"gender": "http://hl7.org/fhir/valueset/administrative-gender",
+			},
+		},
 	}
+
+	allDescs := fhirutil.AllR4ResourceDescriptors()
+	schemas := make(map[string]ResourceSchema, len(allDescs))
+	for resType, md := range allDescs {
+		allowed := allowedFieldsFromDescriptor(md)
+		if override, ok := usCoreOverrides[resType]; ok {
+			for k := range override.AllowedFields {
+				allowed[k] = true
+			}
+			override.AllowedFields = allowed
+			schemas[resType] = override
+		} else {
+			schemas[resType] = ResourceSchema{
+				ResourceType:   resType,
+				AllowedFields:  allowed,
+				RequiredFields: []string{},
+				CodeBindings:   map[string]map[string]bool{},
+				ValueSetURIs:   map[string]string{},
+			}
+		}
+	}
+	for resType, override := range usCoreOverrides {
+		if _, exists := schemas[resType]; !exists {
+			schemas[resType] = override
+		}
+	}
+	return schemas
 }

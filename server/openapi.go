@@ -261,6 +261,132 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "organization", "type": "reference"},
 			{"name": "partof", "type": "reference"},
 		},
+		"DocumentReference": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "identifier", "type": "token"},
+			{"name": "status", "type": "token"},
+			{"name": "type", "type": "token"},
+			{"name": "category", "type": "token"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "date", "type": "date"},
+			{"name": "period", "type": "date"},
+			{"name": "author", "type": "reference"},
+			{"name": "custodian", "type": "reference"},
+		},
+		"Provenance": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "target", "type": "reference"},
+			{"name": "patient", "type": "reference"},
+			{"name": "recorded", "type": "date"},
+			{"name": "agent", "type": "reference"},
+		},
+		"CarePlan": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "status", "type": "token"},
+			{"name": "intent", "type": "token"},
+			{"name": "category", "type": "token"},
+			{"name": "date", "type": "date"},
+		},
+		"CareTeam": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "status", "type": "token"},
+			{"name": "role", "type": "token"},
+			{"name": "participant", "type": "reference"},
+		},
+		"Goal": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "lifecycle-status", "type": "token"},
+			{"name": "target-date", "type": "date"},
+			{"name": "description", "type": "token"},
+		},
+		"ServiceRequest": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "status", "type": "token"},
+			{"name": "intent", "type": "token"},
+			{"name": "category", "type": "token"},
+			{"name": "code", "type": "token"},
+			{"name": "authored", "type": "date"},
+			{"name": "requester", "type": "reference"},
+			{"name": "performer", "type": "reference"},
+		},
+		"Coverage": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "patient", "type": "reference"},
+			{"name": "beneficiary", "type": "reference"},
+			{"name": "payor", "type": "reference"},
+			{"name": "status", "type": "token"},
+			{"name": "type", "type": "token"},
+			{"name": "identifier", "type": "token"},
+		},
+		"QuestionnaireResponse": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "status", "type": "token"},
+			{"name": "authored", "type": "date"},
+			{"name": "questionnaire", "type": "token"},
+		},
+		"MedicationDispense": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "status", "type": "token"},
+			{"name": "type", "type": "token"},
+			{"name": "code", "type": "token"},
+			{"name": "medication", "type": "reference"},
+		},
+		"Medication": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "code", "type": "token"},
+			{"name": "status", "type": "token"},
+			{"name": "identifier", "type": "token"},
+		},
+		"Device": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "patient", "type": "reference"},
+			{"name": "type", "type": "token"},
+			{"name": "status", "type": "token"},
+			{"name": "identifier", "type": "token"},
+			{"name": "udi-carrier", "type": "string"},
+		},
+		"PractitionerRole": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "practitioner", "type": "reference"},
+			{"name": "organization", "type": "reference"},
+			{"name": "location", "type": "reference"},
+			{"name": "specialty", "type": "token"},
+			{"name": "role", "type": "token"},
+			{"name": "identifier", "type": "token"},
+		},
+		"RelatedPerson": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "patient", "type": "reference"},
+			{"name": "name", "type": "string"},
+			{"name": "relationship", "type": "token"},
+			{"name": "identifier", "type": "token"},
+		},
 	}
 }
 
@@ -275,18 +401,14 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 
 	schemas := make(map[string]any)
 	defaultSchemas := validation.DefaultSchemas()
-	resOrder := []string{
-		"Patient", "Condition", "Encounter", "Observation", "Practitioner",
-		"MedicationRequest", "AllergyIntolerance", "Procedure", "DiagnosticReport",
-		"Immunization", "Organization", "Specimen", "Location",
-	}
+	resOrder := fhirutil.USCoreResourceTypes()
 	seenRes := make(map[string]bool, len(resOrder))
 	for _, rt := range resOrder {
 		seenRes[rt] = true
 	}
 	var extraRes []string
 	for rt := range s.protoRegistry {
-		if !seenRes[rt] {
+		if !seenRes[rt] && rt != "AuditEvent" && rt != "Bundle" && rt != "OperationOutcome" {
 			extraRes = append(extraRes, rt)
 		}
 	}
@@ -296,7 +418,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 	for _, rt := range resOrder {
 		sch := defaultSchemas[rt]
 		md := s.protoRegistry[rt]
-		if md != nil {
+		if md != nil && seenRes[rt] {
 			protoSchema := fhirutil.ProtoDescriptorToOpenAPISchema(rt, md, sch.RequiredFields)
 			// Annotate ValueSet URI bindings from validation schema where present
 			if props, ok := protoSchema["properties"].(map[string]any); ok {

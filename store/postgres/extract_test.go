@@ -6,7 +6,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 
 	c3pb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/codes_go_proto"
 	dtpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto"
@@ -24,26 +27,23 @@ import (
 	procpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/procedure_go_proto"
 	specpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/specimen_go_proto"
 
+	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
 func TestDefaultIndexExtractors(t *testing.T) {
 	extractors := postgres.DefaultIndexExtractors()
 	require.NotNil(t, extractors)
-	assert.Contains(t, extractors, "Patient")
-	assert.Contains(t, extractors, "Condition")
-	assert.Contains(t, extractors, "Encounter")
-	assert.Contains(t, extractors, "Observation")
-	assert.Contains(t, extractors, "Practitioner")
-	assert.Contains(t, extractors, "MedicationRequest")
-	assert.Contains(t, extractors, "AllergyIntolerance")
-	assert.Contains(t, extractors, "Procedure")
-	assert.Contains(t, extractors, "DiagnosticReport")
-	assert.Contains(t, extractors, "Immunization")
-	assert.Contains(t, extractors, "Organization")
-	assert.Contains(t, extractors, "Specimen")
-	assert.Contains(t, extractors, "Location")
-	assert.Len(t, extractors, 13)
+	for _, rt := range fhirutil.USCoreResourceTypes() {
+		assert.Contains(t, extractors, rt, "expected US Core resource type %s in DefaultIndexExtractors", rt)
+	}
+	assert.Contains(t, extractors, "Task")
+	assert.Contains(t, extractors, "Appointment")
+	assert.Contains(t, extractors, "Claim")
+	assert.Contains(t, extractors, "RiskAssessment")
+	assert.Contains(t, extractors, "VisionPrescription")
+	assert.Len(t, extractors, len(fhirutil.AllR4ResourceTypes()))
+	assert.GreaterOrEqual(t, len(extractors), 145)
 }
 
 func TestExtractPatient(t *testing.T) {
@@ -653,4 +653,170 @@ func TestExtractLocation(t *testing.T) {
 	assert.True(t, foundCity, "expected address-city boston")
 	assert.True(t, foundStatus, "expected status active")
 	assert.True(t, foundOrg, "expected organization reference org-100")
+}
+
+func jsonToProtoBytes(t *testing.T, md protoreflect.MessageDescriptor, rawJSON []byte) []byte {
+	t.Helper()
+	norm, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, rawJSON)
+	require.NoError(t, err)
+	msg := dynamicpb.NewMessage(md)
+	require.NoError(t, (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(norm, msg))
+	b, err := proto.Marshal(msg)
+	require.NoError(t, err)
+	return b
+}
+
+func TestDynamicResourceExtractor_USCoreAndR4Resources(t *testing.T) {
+	extractors := postgres.DefaultIndexExtractors()
+	descriptors := fhirutil.AllR4ResourceDescriptors()
+
+	t.Run("DocumentReference dynamic extraction", func(t *testing.T) {
+		rawJSON := []byte(`{
+			"resourceType": "DocumentReference",
+			"id": "docref-test-1",
+			"status": "current",
+			"type": {"coding": [{"system": "http://loinc.org", "code": "34133-9"}]},
+			"category": [{"coding": [{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-documentreference-category", "code": "clinical-note"}]}],
+			"subject": {"reference": "Patient/pat-100"},
+			"date": "2025-03-10T10:30:00Z",
+			"content": [{"attachment": {"contentType": "text/plain", "url": "Binary/bin-1"}}]
+		}`)
+		protoBytes := jsonToProtoBytes(t, descriptors["DocumentReference"], rawJSON)
+		idx, err := extractors["DocumentReference"]("tenant-1", "docref-test-1", protoBytes)
+		require.NoError(t, err)
+		require.NotNil(t, idx)
+
+		var foundStatus, foundType, foundCategory, foundPatient bool
+		for _, tok := range idx.Tokens {
+			if tok.SpName == "status" && tok.SpValue == "current" {
+				foundStatus = true
+			}
+			if tok.SpName == "type" && tok.SpValue == "34133-9" {
+				foundType = true
+			}
+			if tok.SpName == "category" && tok.SpValue == "clinical-note" {
+				foundCategory = true
+			}
+		}
+		for _, ref := range idx.References {
+			if ref.SpName == "patient" && ref.TargetType == "Patient" && ref.TargetID == "pat-100" {
+				foundPatient = true
+			}
+		}
+		assert.True(t, foundStatus, "expected status=current")
+		assert.True(t, foundType, "expected type=34133-9")
+		assert.True(t, foundCategory, "expected category=clinical-note")
+		assert.True(t, foundPatient, "expected patient=Patient/pat-100")
+		assert.NotEmpty(t, idx.Dates, "expected date index")
+	})
+
+	t.Run("CarePlan, Goal, Coverage, Provenance, and Task dynamic extraction", func(t *testing.T) {
+		// CarePlan
+		cpJSON := []byte(`{
+			"resourceType": "CarePlan",
+			"id": "cp-test-1",
+			"status": "active",
+			"intent": "plan",
+			"category": [{"coding": [{"system": "http://hl7.org/fhir/us/core/CodeSystem/careplan-category", "code": "assess-plan"}]}],
+			"subject": {"reference": "Patient/pat-100"}
+		}`)
+		cpBytes := jsonToProtoBytes(t, descriptors["CarePlan"], cpJSON)
+		cpIdx, err := extractors["CarePlan"]("tenant-1", "cp-test-1", cpBytes)
+		require.NoError(t, err)
+		require.NotEmpty(t, cpIdx.Tokens)
+		require.NotEmpty(t, cpIdx.References)
+
+		// Goal with lifecycleStatus -> lifecycle-status
+		goalJSON := []byte(`{
+			"resourceType": "Goal",
+			"id": "goal-test-1",
+			"lifecycleStatus": "active",
+			"description": {"text": "Walk 30 minutes daily"},
+			"subject": {"reference": "Patient/pat-100"},
+			"target": [{"dueDate": "2025-06-01"}]
+		}`)
+		goalBytes := jsonToProtoBytes(t, descriptors["Goal"], goalJSON)
+		goalIdx, err := extractors["Goal"]("tenant-1", "goal-test-1", goalBytes)
+		require.NoError(t, err)
+		var foundLifecycle bool
+		for _, tok := range goalIdx.Tokens {
+			if tok.SpName == "lifecycle-status" && tok.SpValue == "active" {
+				foundLifecycle = true
+			}
+		}
+		assert.True(t, foundLifecycle, "expected Goal lifecycle-status=active")
+		assert.NotEmpty(t, goalIdx.Dates, "expected Goal target-date index")
+
+		// Coverage with beneficiary -> patient + beneficiary
+		covJSON := []byte(`{
+			"resourceType": "Coverage",
+			"id": "cov-test-1",
+			"status": "active",
+			"beneficiary": {"reference": "Patient/pat-100"},
+			"payor": [{"reference": "Organization/org-100"}]
+		}`)
+		covBytes := jsonToProtoBytes(t, descriptors["Coverage"], covJSON)
+		covIdx, err := extractors["Coverage"]("tenant-1", "cov-test-1", covBytes)
+		require.NoError(t, err)
+		var foundBeneficiary, foundPatient bool
+		for _, ref := range covIdx.References {
+			if ref.SpName == "beneficiary" && ref.TargetID == "pat-100" {
+				foundBeneficiary = true
+			}
+			if ref.SpName == "patient" && ref.TargetID == "pat-100" {
+				foundPatient = true
+			}
+		}
+		assert.True(t, foundBeneficiary, "expected beneficiary reference")
+		assert.True(t, foundPatient, "expected patient reference derived from beneficiary")
+
+		// Provenance with target -> Reference
+		provJSON := []byte(`{
+			"resourceType": "Provenance",
+			"id": "prov-test-1",
+			"target": [{"reference": "Observation/obs-100"}],
+			"recorded": "2025-03-10T10:35:00Z",
+			"agent": [{"who": {"reference": "Practitioner/prac-100"}}]
+		}`)
+		provBytes := jsonToProtoBytes(t, descriptors["Provenance"], provJSON)
+		provIdx, err := extractors["Provenance"]("tenant-1", "prov-test-1", provBytes)
+		require.NoError(t, err)
+		var foundTarget, foundAgent bool
+		for _, ref := range provIdx.References {
+			if ref.SpName == "target" && ref.TargetType == "Observation" && ref.TargetID == "obs-100" {
+				foundTarget = true
+			}
+			if ref.SpName == "agent" && ref.TargetType == "Practitioner" && ref.TargetID == "prac-100" {
+				foundAgent = true
+			}
+		}
+		assert.True(t, foundTarget, "expected Provenance target reference")
+		assert.True(t, foundAgent, "expected Provenance agent reference")
+
+		// Non-US-Core R4 resource: Task with for -> patient
+		taskJSON := []byte(`{
+			"resourceType": "Task",
+			"id": "task-test-1",
+			"status": "requested",
+			"intent": "order",
+			"code": {"coding": [{"system": "http://hl7.org/fhir/CodeSystem/task-code", "code": "fulfill"}]},
+			"for": {"reference": "Patient/pat-100"}
+		}`)
+		taskBytes := jsonToProtoBytes(t, descriptors["Task"], taskJSON)
+		taskIdx, err := extractors["Task"]("tenant-1", "task-test-1", taskBytes)
+		require.NoError(t, err)
+		var foundTaskStatus, foundTaskPatient bool
+		for _, tok := range taskIdx.Tokens {
+			if tok.SpName == "status" && tok.SpValue == "requested" {
+				foundTaskStatus = true
+			}
+		}
+		for _, ref := range taskIdx.References {
+			if ref.SpName == "patient" && ref.TargetID == "pat-100" {
+				foundTaskPatient = true
+			}
+		}
+		assert.True(t, foundTaskStatus, "expected Task status=requested")
+		assert.True(t, foundTaskPatient, "expected Task patient reference from Task.for")
+	})
 }

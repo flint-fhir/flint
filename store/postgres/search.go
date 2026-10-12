@@ -606,7 +606,7 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 				  AND rf.target_id = r.res_id
 			)
 			OR (
-				r.res_type NOT IN ('Patient', 'Condition', 'Encounter', 'Observation', 'MedicationRequest', 'AllergyIntolerance', 'Procedure', 'DiagnosticReport', 'Immunization', 'Specimen')
+				r.res_type IN ('Organization', 'Practitioner', 'PractitionerRole', 'Location', 'Medication', 'HealthcareService', 'Endpoint', 'Substance')
 				AND EXISTS (
 					SELECT 1 FROM spidx_reference rf_clin
 					JOIN spidx_reference rf_pat
@@ -616,6 +616,22 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 					WHERE rf_clin.tenant_id = r.tenant_id
 					  AND rf_clin.target_type = r.res_type
 					  AND rf_clin.target_id = r.res_id
+					  AND rf_pat.target_id = $2
+					  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+				)
+			)
+			OR (
+				r.res_type = 'Provenance'
+				AND EXISTS (
+					SELECT 1 FROM spidx_reference rf_prov
+					JOIN spidx_reference rf_pat
+					  ON rf_pat.tenant_id = rf_prov.tenant_id
+					 AND rf_pat.res_type = rf_prov.target_type
+					 AND rf_pat.res_id = rf_prov.target_id
+					WHERE rf_prov.tenant_id = r.tenant_id
+					  AND rf_prov.res_type = 'Provenance'
+					  AND rf_prov.res_id = r.res_id
+					  AND rf_prov.sp_name = 'target'
 					  AND rf_pat.target_id = $2
 					  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
 				)
@@ -672,15 +688,81 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 	}, nil
 }
 
+var patientCompartmentTypes = map[string]bool{
+	"Account":                     true,
+	"AdverseEvent":                true,
+	"AllergyIntolerance":          true,
+	"Appointment":                 true,
+	"AppointmentResponse":         true,
+	"AuditEvent":                  true,
+	"Basic":                       true,
+	"BodyStructure":               true,
+	"CarePlan":                    true,
+	"CareTeam":                    true,
+	"ChargeItem":                  true,
+	"Claim":                       true,
+	"ClaimResponse":               true,
+	"ClinicalImpression":          true,
+	"Communication":               true,
+	"CommunicationRequest":        true,
+	"Composition":                 true,
+	"Condition":                   true,
+	"Consent":                     true,
+	"Coverage":                    true,
+	"CoverageEligibilityRequest":  true,
+	"CoverageEligibilityResponse": true,
+	"DetectedIssue":               true,
+	"Device":                      true,
+	"DeviceRequest":               true,
+	"DeviceUseStatement":          true,
+	"DiagnosticReport":            true,
+	"DocumentManifest":            true,
+	"DocumentReference":           true,
+	"Encounter":                   true,
+	"EnrollmentRequest":           true,
+	"EpisodeOfCare":               true,
+	"ExplanationOfBenefit":        true,
+	"FamilyMemberHistory":         true,
+	"Flag":                        true,
+	"Goal":                        true,
+	"ImagingStudy":                true,
+	"Immunization":                true,
+	"ImmunizationEvaluation":      true,
+	"ImmunizationRecommendation":  true,
+	"Invoice":                     true,
+	"List":                        true,
+	"MeasureReport":               true,
+	"Media":                       true,
+	"MedicationAdministration":    true,
+	"MedicationDispense":          true,
+	"MedicationRequest":           true,
+	"MedicationStatement":         true,
+	"MolecularSequence":           true,
+	"NutritionOrder":              true,
+	"Observation":                 true,
+	"PaymentNotice":               true,
+	"PaymentReconciliation":       true,
+	"Person":                      true,
+	"Procedure":                   true,
+	"Provenance":                  true,
+	"QuestionnaireResponse":       true,
+	"RelatedPerson":               true,
+	"RequestGroup":                true,
+	"ResearchSubject":             true,
+	"RiskAssessment":              true,
+	"Schedule":                    true,
+	"ServiceRequest":              true,
+	"Specimen":                    true,
+	"SupplyDelivery":              true,
+	"SupplyRequest":               true,
+	"Task":                        true,
+	"VisionPrescription":          true,
+}
+
 // IsPatientCompartmentResourceType returns true if the resource type is a clinical
-// resource scoped to the FHIR R4 Patient compartment.
+// resource scoped to the HL7 FHIR R4 Patient compartment (CompartmentDefinition-patient).
 func IsPatientCompartmentResourceType(resType string) bool {
-	switch resType {
-	case "Condition", "Encounter", "Observation", "MedicationRequest", "AllergyIntolerance", "Procedure", "DiagnosticReport", "Immunization", "Specimen":
-		return true
-	default:
-		return false
-	}
+	return patientCompartmentTypes[resType]
 }
 
 // BelongsToPatientCompartment checks whether an existing resource in Postgres belongs
@@ -715,6 +797,21 @@ func (s *Store) BelongsToPatientCompartment(ctx context.Context, tenantID, resTy
 			  AND res_id = $3
 			  AND target_id = $4
 			  AND (target_type = 'Patient' OR target_type = '')
+		) OR (
+			$2 = 'Provenance'
+			AND EXISTS (
+				SELECT 1 FROM spidx_reference rf_prov
+				JOIN spidx_reference rf_pat
+				  ON rf_pat.tenant_id = rf_prov.tenant_id
+				 AND rf_pat.res_type = rf_prov.target_type
+				 AND rf_pat.res_id = rf_prov.target_id
+				WHERE rf_prov.tenant_id = $1
+				  AND rf_prov.res_type = 'Provenance'
+				  AND rf_prov.res_id = $3
+				  AND rf_prov.sp_name = 'target'
+				  AND rf_pat.target_id = $4
+				  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+			)
 		)
 	`, tenantID, resType, resID, patientID).Scan(&inCompartment)
 	if err != nil {
