@@ -1,0 +1,575 @@
+package server_test
+
+import (
+	"bufio"
+	"database/sql"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strings"
+	"testing"
+
+	_ "github.com/lib/pq"
+
+	condpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/condition_go_proto"
+	encpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/encounter_go_proto"
+	obspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto"
+	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
+	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
+
+	authv1 "github.com/flint-fhir/flint/gen/go/flint/auth/v1"
+	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/server"
+	"github.com/flint-fhir/flint/store/postgres"
+)
+
+func TestServer_OpenAPIAndDocs(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := server.New(nil, logger)
+	srv.RegisterResourceType("Patient", &patpb.Patient{})
+	srv.RegisterResourceType("Condition", &condpb.Condition{})
+	srv.RegisterResourceType("Encounter", &encpb.Encounter{})
+	srv.RegisterResourceType("Observation", &obspb.Observation{})
+	srv.RegisterResourceType("Practitioner", &pracpb.Practitioner{})
+
+	// Enable SMART auth to verify that /openapi.json and /$docs remain publicly accessible discovery endpoints
+	mockAuth, err := auth.NewMockTokenValidator("https://auth.example.com", "flint-api")
+	if err != nil {
+		t.Fatalf("new mock validator: %v", err)
+	}
+	srv.SetTokenValidator(mockAuth)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// 1. Verify GET /fhir/r4/demo/openapi.json and GET /fhir/r4/openapi.json
+	for _, path := range []string{"/fhir/r4/demo/openapi.json", "/fhir/r4/openapi.json"} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s expected 200 OK, got %d: %s", path, resp.StatusCode, body)
+		}
+
+		var spec map[string]any
+		if err := json.Unmarshal(body, &spec); err != nil {
+			t.Fatalf("unmarshal OpenAPI spec from %s: %v", path, err)
+		}
+		if spec["openapi"] != "3.1.0" {
+			t.Errorf("expected openapi=3.1.0, got %v", spec["openapi"])
+		}
+
+		components, ok := spec["components"].(map[string]any)
+		if !ok {
+			t.Fatalf("missing components in OpenAPI spec")
+		}
+		schemas, ok := components["schemas"].(map[string]any)
+		if !ok {
+			t.Fatalf("missing components.schemas in OpenAPI spec")
+		}
+
+		// Verify proto-compiled Patient schema
+		patSchema, ok := schemas["Patient"].(map[string]any)
+		if !ok {
+			t.Fatalf("missing Patient schema in components.schemas")
+		}
+		if patSchema["x-protobuf-full-name"] != "google.fhir.r4.core.Patient" {
+			t.Errorf("expected Patient x-protobuf-full-name=google.fhir.r4.core.Patient, got %v", patSchema["x-protobuf-full-name"])
+		}
+		patProps, _ := patSchema["properties"].(map[string]any)
+		for _, field := range []string{"id", "meta", "active", "name", "gender", "birthDate", "deceasedBoolean", "deceasedDateTime"} {
+			if _, exists := patProps[field]; !exists {
+				t.Errorf("expected proto-compiled Patient schema to contain property %q", field)
+			}
+		}
+
+		// Verify proto-compiled Observation schema
+		obsSchema, ok := schemas["Observation"].(map[string]any)
+		if !ok {
+			t.Fatalf("missing Observation schema in components.schemas")
+		}
+		if obsSchema["x-protobuf-full-name"] != "google.fhir.r4.core.Observation" {
+			t.Errorf("expected Observation x-protobuf-full-name=google.fhir.r4.core.Observation, got %v", obsSchema["x-protobuf-full-name"])
+		}
+		obsProps, _ := obsSchema["properties"].(map[string]any)
+		for _, field := range []string{"status", "code", "subject", "effectiveDateTime", "valueQuantity", "valueCodeableConcept", "component"} {
+			if _, exists := obsProps[field]; !exists {
+				t.Errorf("expected proto-compiled Observation schema to contain property %q", field)
+			}
+		}
+
+		// Verify paths include CRUD, $validate, $everything, and Bulk Data $export
+		pathsMap, ok := spec["paths"].(map[string]any)
+		if !ok {
+			t.Fatalf("missing paths in OpenAPI spec")
+		}
+		for _, requiredPath := range []string{
+			"/metadata",
+			"/openapi.json",
+			"/$docs",
+			"/$export",
+			"/Patient/$export",
+			"/Patient/{id}/$export",
+			"/$export-poll/{jobId}",
+			"/$export-file/{jobId}/{fileName}",
+			"/Patient/{id}/$everything",
+			"/Patient",
+			"/Patient/{id}",
+			"/Observation",
+			"/AuditEvent",
+		} {
+			if _, exists := pathsMap[requiredPath]; !exists {
+				t.Errorf("expected OpenAPI paths to contain %q", requiredPath)
+			}
+		}
+	}
+
+	// 2. Verify GET /fhir/r4/demo/$docs and GET /fhir/r4/$docs
+	for _, path := range []string{"/fhir/r4/demo/$docs", "/fhir/r4/$docs"} {
+		resp, err := http.Get(ts.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		htmlBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s expected 200 OK, got %d", path, resp.StatusCode)
+		}
+		htmlStr := string(htmlBytes)
+		for _, expectedSubstr := range []string{
+			"Flint FHIR R4",
+			"FHIR R4 / US Core / ONC (g)(10) Conformance Matrix",
+			"google/fhir",
+			"$export",
+			"openapi.json",
+		} {
+			if !strings.Contains(htmlStr, expectedSubstr) {
+				t.Errorf("expected $docs HTML from %s to contain %q", path, expectedSubstr)
+			}
+		}
+	}
+
+	// 3. Verify ConformanceMatrix helper
+	matrix := server.ConformanceMatrix()
+	if len(matrix) < 7 {
+		t.Errorf("expected at least 7 rows in ConformanceMatrix, got %d", len(matrix))
+	}
+}
+
+func TestServer_BulkExport(t *testing.T) {
+	dsn := os.Getenv("FLINT_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("FLINT_TEST_POSTGRES_DSN not set")
+	}
+
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "test-export"
+	cleanup := func() {
+		for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
+			db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = $1", tenant)
+		}
+	}
+	cleanup()
+	defer cleanup()
+
+	store := postgres.New(db)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := server.New(store, logger)
+	srv.RegisterResourceType("Patient", &patpb.Patient{})
+	srv.RegisterResourceType("Condition", &condpb.Condition{})
+	srv.RegisterResourceType("Encounter", &encpb.Encounter{})
+	srv.RegisterResourceType("Observation", &obspb.Observation{})
+	srv.RegisterResourceType("Practitioner", &pracpb.Practitioner{})
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Seed cohort via transaction Bundle:
+	// - exp-prac-1 (Practitioner)
+	// - exp-pat-1 (Patient) + exp-enc-1 (Encounter) + exp-cond-1 (Condition) + exp-obs-1 (Observation referencing exp-prac-1)
+	// - exp-pat-2 (Patient) + exp-obs-2 (Observation)
+	seedBundle := `{
+		"resourceType": "Bundle",
+		"type": "transaction",
+		"entry": [
+			{
+				"resource": {"resourceType": "Practitioner", "id": "exp-prac-1", "active": true, "name": [{"family": "ExportDoc"}]},
+				"request": {"method": "PUT", "url": "Practitioner/exp-prac-1"}
+			},
+			{
+				"resource": {"resourceType": "Patient", "id": "exp-pat-1", "active": true, "gender": "female", "name": [{"family": "ExportOne"}]},
+				"request": {"method": "PUT", "url": "Patient/exp-pat-1"}
+			},
+			{
+				"resource": {
+					"resourceType": "Encounter",
+					"id": "exp-enc-1",
+					"status": "finished",
+					"class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB"},
+					"subject": {"reference": "Patient/exp-pat-1"}
+				},
+				"request": {"method": "PUT", "url": "Encounter/exp-enc-1"}
+			},
+			{
+				"resource": {
+					"resourceType": "Condition",
+					"id": "exp-cond-1",
+					"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+					"code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003"}]},
+					"subject": {"reference": "Patient/exp-pat-1"}
+				},
+				"request": {"method": "PUT", "url": "Condition/exp-cond-1"}
+			},
+			{
+				"resource": {
+					"resourceType": "Observation",
+					"id": "exp-obs-1",
+					"status": "final",
+					"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+					"subject": {"reference": "Patient/exp-pat-1"},
+					"performer": [{"reference": "Practitioner/exp-prac-1"}],
+					"valueQuantity": {"value": 72, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+				},
+				"request": {"method": "PUT", "url": "Observation/exp-obs-1"}
+			},
+			{
+				"resource": {"resourceType": "Patient", "id": "exp-pat-2", "active": true, "gender": "male", "name": [{"family": "ExportTwo"}]},
+				"request": {"method": "PUT", "url": "Patient/exp-pat-2"}
+			},
+			{
+				"resource": {
+					"resourceType": "Observation",
+					"id": "exp-obs-2",
+					"status": "final",
+					"code": {"coding": [{"system": "http://loinc.org", "code": "29463-7"}]},
+					"subject": {"reference": "Patient/exp-pat-2"},
+					"valueQuantity": {"value": 80, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg"}
+				},
+				"request": {"method": "PUT", "url": "Observation/exp-obs-2"}
+			}
+		]
+	}`
+	respSeed, err := http.Post(ts.URL+"/fhir/r4/"+tenant, "application/fhir+json", strings.NewReader(seedBundle))
+	if err != nil {
+		t.Fatalf("seed bundle: %v", err)
+	}
+	seedBytes, _ := io.ReadAll(respSeed.Body)
+	respSeed.Body.Close()
+	if respSeed.StatusCode != http.StatusOK {
+		t.Fatalf("seed bundle failed (%d): %s", respSeed.StatusCode, seedBytes)
+	}
+
+	parseNDJSON := func(t *testing.T, r io.Reader) []map[string]any {
+		t.Helper()
+		var out []map[string]any
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			var obj map[string]any
+			if err := json.Unmarshal([]byte(line), &obj); err != nil {
+				t.Fatalf("invalid NDJSON line %q: %v", line, err)
+			}
+			if obj["resourceType"] == "" || obj["id"] == "" {
+				t.Fatalf("NDJSON resource missing resourceType or id: %v", obj)
+			}
+			out = append(out, obj)
+		}
+		if err := scanner.Err(); err != nil {
+			t.Fatalf("scan NDJSON: %v", err)
+		}
+		return out
+	}
+
+	t.Run("Direct NDJSON streaming: System $export, Patient/$export, and Single-Patient Patient/{id}/$export", func(t *testing.T) {
+		// 1. System-level $export returns all 7 resources
+		respSys, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/$export")
+		if err != nil {
+			t.Fatalf("GET /$export: %v", err)
+		}
+		if !strings.Contains(respSys.Header.Get("Content-Type"), "application/fhir+ndjson") {
+			t.Errorf("expected Content-Type application/fhir+ndjson, got %q", respSys.Header.Get("Content-Type"))
+		}
+		sysItems := parseNDJSON(t, respSys.Body)
+		respSys.Body.Close()
+		if len(sysItems) != 7 {
+			t.Fatalf("expected 7 resources in system $export, got %d", len(sysItems))
+		}
+
+		// 2. All-Patients group $export returns all 7 compartment + referenced Practitioner resources
+		respGroup, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/Patient/$export")
+		if err != nil {
+			t.Fatalf("GET /Patient/$export: %v", err)
+		}
+		groupItems := parseNDJSON(t, respGroup.Body)
+		respGroup.Body.Close()
+		if len(groupItems) != 7 {
+			t.Fatalf("expected 7 resources in Patient/$export, got %d", len(groupItems))
+		}
+
+		// 3. Single-Patient compartment Patient/exp-pat-1/$export returns ONLY exp-pat-1's 5 resources
+		respPat1, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/Patient/exp-pat-1/$export")
+		if err != nil {
+			t.Fatalf("GET /Patient/exp-pat-1/$export: %v", err)
+		}
+		pat1Items := parseNDJSON(t, respPat1.Body)
+		respPat1.Body.Close()
+		if len(pat1Items) != 5 {
+			t.Fatalf("expected 5 resources in Patient/exp-pat-1/$export, got %d", len(pat1Items))
+		}
+		for _, item := range pat1Items {
+			id := item["id"].(string)
+			if id == "exp-pat-2" || id == "exp-obs-2" {
+				t.Errorf("Patient/exp-pat-1/$export leaked exp-pat-2 resource: %s", id)
+			}
+		}
+
+		// 4. Filter by _type=Patient,Observation on Patient/exp-pat-1/$export -> 2 resources
+		respTyped, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/Patient/exp-pat-1/$export?_type=Patient,Observation")
+		if err != nil {
+			t.Fatalf("GET _type=Patient,Observation: %v", err)
+		}
+		typedItems := parseNDJSON(t, respTyped.Body)
+		respTyped.Body.Close()
+		if len(typedItems) != 2 {
+			t.Fatalf("expected 2 resources with _type=Patient,Observation, got %d", len(typedItems))
+		}
+
+		// 5. Filter by future _since -> 0 resources
+		respFuture, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/$export?_since=2099-01-01T00:00:00Z")
+		if err != nil {
+			t.Fatalf("GET future _since: %v", err)
+		}
+		futureItems := parseNDJSON(t, respFuture.Body)
+		respFuture.Body.Close()
+		if len(futureItems) != 0 {
+			t.Fatalf("expected 0 resources for future _since, got %d", len(futureItems))
+		}
+	})
+
+	t.Run("Async Bulk Data Kick-Off (Prefer: respond-async), Status Polling, NDJSON File Download, and Cancellation", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/"+tenant+"/Patient/exp-pat-1/$export", nil)
+		req.Header.Set("Prefer", "respond-async")
+		req.Header.Set("Accept", "application/fhir+json")
+
+		respKickoff, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("async kickoff: %v", err)
+		}
+		respKickoff.Body.Close()
+		if respKickoff.StatusCode != http.StatusAccepted {
+			t.Fatalf("expected 202 Accepted for Prefer: respond-async, got %d", respKickoff.StatusCode)
+		}
+
+		pollURL := respKickoff.Header.Get("Content-Location")
+		if pollURL == "" || !strings.Contains(pollURL, "/$export-poll/") {
+			t.Fatalf("expected Content-Location header containing /$export-poll/, got %q", pollURL)
+		}
+
+		// Poll job status
+		respPoll, err := http.Get(pollURL)
+		if err != nil {
+			t.Fatalf("GET pollURL: %v", err)
+		}
+		pollBytes, _ := io.ReadAll(respPoll.Body)
+		respPoll.Body.Close()
+		if respPoll.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK from poll endpoint, got %d: %s", respPoll.StatusCode, pollBytes)
+		}
+
+		var manifest map[string]any
+		if err := json.Unmarshal(pollBytes, &manifest); err != nil {
+			t.Fatalf("unmarshal manifest: %v", err)
+		}
+		outputs, ok := manifest["output"].([]any)
+		if !ok || len(outputs) != 5 {
+			t.Fatalf("expected 5 output file entries in manifest (Condition, Encounter, Observation, Patient, Practitioner), got %v", manifest["output"])
+		}
+
+		// Download each NDJSON file in manifest["output"] and verify resource count
+		totalDownloaded := 0
+		for _, outEntry := range outputs {
+			entryMap := outEntry.(map[string]any)
+			fileURL := entryMap["url"].(string)
+			expectedCount := int(entryMap["count"].(float64))
+
+			respFile, err := http.Get(fileURL)
+			if err != nil {
+				t.Fatalf("GET %s: %v", fileURL, err)
+			}
+			if !strings.Contains(respFile.Header.Get("Content-Type"), "application/fhir+ndjson") {
+				t.Errorf("expected application/fhir+ndjson on file download, got %q", respFile.Header.Get("Content-Type"))
+			}
+			items := parseNDJSON(t, respFile.Body)
+			respFile.Body.Close()
+			if len(items) != expectedCount {
+				t.Errorf("expected %d items in %s, got %d", expectedCount, fileURL, len(items))
+			}
+			totalDownloaded += len(items)
+		}
+		if totalDownloaded != 5 {
+			t.Errorf("expected 5 total downloaded resources across NDJSON files, got %d", totalDownloaded)
+		}
+
+		// Cancel/Delete export job -> 202 Accepted, subsequent poll -> 404 Not Found
+		reqDel, _ := http.NewRequest(http.MethodDelete, pollURL, nil)
+		respDel, err := http.DefaultClient.Do(reqDel)
+		if err != nil {
+			t.Fatalf("DELETE pollURL: %v", err)
+		}
+		respDel.Body.Close()
+		if respDel.StatusCode != http.StatusAccepted {
+			t.Fatalf("expected 202 Accepted on DELETE pollURL, got %d", respDel.StatusCode)
+		}
+
+		respPollAfterDel, err := http.Get(pollURL)
+		if err != nil {
+			t.Fatalf("GET pollURL after DELETE: %v", err)
+		}
+		respPollAfterDel.Body.Close()
+		if respPollAfterDel.StatusCode != http.StatusNotFound {
+			t.Fatalf("expected 404 Not Found after job deletion, got %d", respPollAfterDel.StatusCode)
+		}
+	})
+
+	t.Run("Validation of invalid $export parameters and missing patients", func(t *testing.T) {
+		for _, tc := range []struct {
+			path       string
+			wantStatus int
+		}{
+			{"/$export?_outputFormat=text/csv", http.StatusBadRequest},
+			{"/$export?_since=invalid-date", http.StatusBadRequest},
+			{"/$export?_type=UnknownResource", http.StatusBadRequest},
+			{"/Patient/non-existent-id/$export", http.StatusNotFound},
+		} {
+			resp, err := http.Get(ts.URL + "/fhir/r4/" + tenant + tc.path)
+			if err != nil {
+				t.Fatalf("GET %s: %v", tc.path, err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("GET %s expected %d, got %d", tc.path, tc.wantStatus, resp.StatusCode)
+			}
+		}
+	})
+
+	t.Run("SMART on FHIR v2 Security & Compartment Isolation for $export", func(t *testing.T) {
+		mockAuth, err := auth.NewMockTokenValidator("https://auth.example.com", "flint-api")
+		if err != nil {
+			t.Fatalf("new mock validator: %v", err)
+		}
+		mockAuth.RegisterStatic("pat1-token", &authv1.SecurityContext{
+			Subject:   "patient-user-1",
+			TenantId:  tenant,
+			PatientId: "exp-pat-1",
+			Scopes:    auth.ParseScopes("patient/Patient.rs patient/Observation.rs"),
+		})
+		mockAuth.RegisterStatic("pat2-token", &authv1.SecurityContext{
+			Subject:   "patient-user-2",
+			TenantId:  tenant,
+			PatientId: "exp-pat-2",
+			Scopes:    auth.ParseScopes("patient/*.rs"),
+		})
+		mockAuth.RegisterStatic("system-token", &authv1.SecurityContext{
+			Subject:  "backend-service-1",
+			TenantId: tenant,
+			Scopes:   auth.ParseScopes("system/*.rs"),
+		})
+
+		srv.SetTokenValidator(mockAuth)
+		defer srv.SetTokenValidator(nil)
+
+		doAuthGet := func(urlStr, token, prefer string) *http.Response {
+			req, _ := http.NewRequest(http.MethodGet, urlStr, nil)
+			if token != "" {
+				req.Header.Set("Authorization", "Bearer "+token)
+			}
+			if prefer != "" {
+				req.Header.Set("Prefer", prefer)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("GET %s: %v", urlStr, err)
+			}
+			return resp
+		}
+
+		// 1. Unauthenticated $export returns 401 Unauthorized
+		r401 := doAuthGet(ts.URL+"/fhir/r4/"+tenant+"/$export", "", "")
+		r401.Body.Close()
+		if r401.StatusCode != http.StatusUnauthorized {
+			t.Errorf("expected 401 Unauthorized without token, got %d", r401.StatusCode)
+		}
+
+		// 2. Patient-scoped token cannot invoke System $export or All-Patients Patient/$export -> 403 Forbidden
+		rSys403 := doAuthGet(ts.URL+"/fhir/r4/"+tenant+"/$export", "pat1-token", "")
+		rSys403.Body.Close()
+		if rSys403.StatusCode != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden for patient token on system $export, got %d", rSys403.StatusCode)
+		}
+
+		rGrp403 := doAuthGet(ts.URL+"/fhir/r4/"+tenant+"/Patient/$export", "pat1-token", "")
+		rGrp403.Body.Close()
+		if rGrp403.StatusCode != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden for patient token on group Patient/$export, got %d", rGrp403.StatusCode)
+		}
+
+		// 3. Patient-1 token cannot export Patient-2's compartment -> 403 Forbidden
+		rCross403 := doAuthGet(ts.URL+"/fhir/r4/"+tenant+"/Patient/exp-pat-2/$export", "pat1-token", "")
+		rCross403.Body.Close()
+		if rCross403.StatusCode != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden for cross-patient $export, got %d", rCross403.StatusCode)
+		}
+
+		// 4. Patient-1 token CAN export Patient/exp-pat-1/$export, and only receives Patient + Observation (authorized by scopes!)
+		rPat1OK := doAuthGet(ts.URL+"/fhir/r4/"+tenant+"/Patient/exp-pat-1/$export", "pat1-token", "")
+		pat1ScopedItems := parseNDJSON(t, rPat1OK.Body)
+		rPat1OK.Body.Close()
+		if rPat1OK.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK for pat1-token on Patient/exp-pat-1/$export, got %d", rPat1OK.StatusCode)
+		}
+		if len(pat1ScopedItems) != 2 {
+			t.Fatalf("expected 2 resources (Patient + Observation) for pat1-token scopes, got %d", len(pat1ScopedItems))
+		}
+
+		// 5. System token CAN run async system $export, poll, and download; pat2-token is blocked (403) from polling/downloading system job
+		rSysKick := doAuthGet(ts.URL+"/fhir/r4/"+tenant+"/$export", "system-token", "respond-async")
+		rSysKick.Body.Close()
+		if rSysKick.StatusCode != http.StatusAccepted {
+			t.Fatalf("expected 202 Accepted for system-token async $export, got %d", rSysKick.StatusCode)
+		}
+		sysPollURL := rSysKick.Header.Get("Content-Location")
+
+		// pat2-token attempting to poll the system export job must get 403 Forbidden
+		rHijack := doAuthGet(sysPollURL, "pat2-token", "")
+		rHijack.Body.Close()
+		if rHijack.StatusCode != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden when pat2-token polls system export job, got %d", rHijack.StatusCode)
+		}
+
+		// system-token polls successfully
+		rSysPoll := doAuthGet(sysPollURL, "system-token", "")
+		rSysPoll.Body.Close()
+		if rSysPoll.StatusCode != http.StatusOK {
+			t.Errorf("expected 200 OK when system-token polls system export job, got %d", rSysPoll.StatusCode)
+		}
+	})
+}

@@ -72,17 +72,20 @@ Flint includes a dedicated benchmarking harness ([`cmd/loadtest`](cmd/loadtest/)
 
 ---
 
-## Supported FHIR Resources (Big 5)
+## Supported FHIR Resources (Big 5) & Conformance Matrix
 
-Flint implements full search index extraction and transactional persistence for the Core Big 5 healthcare resources:
+Flint implements full search index extraction, transactional persistence, SMART on FHIR v2 compartment isolation, and **Proto-compiled OpenAPI 3.1.0 schemas** (`protoreflect.MessageDescriptor` → OpenAPI 3.1 JSON Schema) for the Core Big 5 healthcare resources plus security `AuditEvent`s:
 
-| Resource Type | Search Index Extraction | Covering Tables | Status |
-|:--------------|:------------------------|:----------------|:-------|
-| **`Patient`** | `name`, `identifier`, `birthdate`, `gender`, `active`, `address-postalcode` | `spidx_string`, `spidx_token`, `spidx_date` | ✅ Production Ready |
-| **`Condition`** | `code`, `clinical-status`, `verification-status`, `patient`, `onset-date` | `spidx_token`, `spidx_reference`, `spidx_date` | ✅ Production Ready |
-| **`Encounter`** | `status`, `class`, `type`, `subject`, `date` | `spidx_token`, `spidx_reference`, `spidx_date` | ✅ Production Ready |
-| **`Observation`** | `status`, `category`, `code`, `subject`, `date`, `value-quantity`, `value-concept` | `spidx_token`, `spidx_reference`, `spidx_quantity`, `spidx_date` | ✅ Production Ready |
-| **`Practitioner`** | `name`, `identifier`, `telecom`, `active` | `spidx_string`, `spidx_token` | ✅ Production Ready |
+| Resource / Operation | US Core / ONC `(g)(10)` Profile | Interactions | Search Parameters (`spidx_*`) | SMART v2 Scopes | Status |
+|:---------------------|:--------------------------------|:-------------|:------------------------------|:----------------|:-------|
+| **`Patient`** | US Core Patient (`v6.1.0`) | `read`, `vread`, `update`, `delete`, `history-instance`, `create`, `search-type`, `$everything`, `$export`, `$validate` | `_id`, `identifier`, `name`, `family`, `given`, `birthdate`, `gender`, `active`, `address-postalcode`, `_revinclude` | `patient/Patient.rs`, `user/Patient.cruds`, `system/Patient.rs` | ✅ Production Ready |
+| **`Encounter`** | US Core Encounter (`v6.1.0`) | `read`, `vread`, `update`, `delete`, `history-instance`, `create`, `search-type`, `$validate` | `_id`, `date`, `patient`, `subject`, `status`, `class`, `type`, `_include` | `patient/Encounter.rs`, `user/Encounter.cruds`, `system/Encounter.rs` | ✅ Production Ready |
+| **`Condition`** | US Core Condition Problems & Health Concerns (`v6.1.0`) | `read`, `vread`, `update`, `delete`, `history-instance`, `create`, `search-type`, `$validate` | `_id`, `patient`, `subject`, `code`, `clinical-status`, `verification-status`, `category`, `onset-date`, `_include` | `patient/Condition.rs`, `user/Condition.cruds`, `system/Condition.rs` | ✅ Production Ready |
+| **`Observation`** | US Core Vital Signs & Laboratory Result (`v6.1.0`) | `read`, `vread`, `update`, `delete`, `history-instance`, `create`, `search-type`, `$validate` | `_id`, `patient`, `subject`, `code`, `category`, `status`, `date`, `value-quantity`, `component-code`, `component-value-quantity`, `_include` | `patient/Observation.rs`, `user/Observation.cruds`, `system/Observation.rs` | ✅ Production Ready |
+| **`Practitioner`** | US Core Practitioner (`v6.1.0`) | `read`, `vread`, `update`, `delete`, `history-instance`, `create`, `search-type`, `$validate` | `_id`, `identifier`, `name`, `family`, `given`, `active` | `patient/Practitioner.rs`, `user/Practitioner.cruds`, `system/Practitioner.rs` | ✅ Production Ready |
+| **`AuditEvent`** | ASTM E2147 / ONC `§170.315(d)(2)` Auditable Events | `read`, `search-type` | `_id`, `date`, `entity`, `patient`, `agent`, `action`, `subtype`, `outcome` | `user/AuditEvent.rs`, `system/AuditEvent.rs` | ✅ Production Ready |
+| **`Bundle`** | HL7 FHIR R4 Batch & ACID Transaction | `batch`, `transaction` (`urn:uuid:` resolution, `ifNoneExist`, `ifMatch`) | N/A | Per-entry SMART scope & compartment validation | ✅ Production Ready |
+| **`$export` (Bulk Data)** | HL7 FHIR Bulk Data Access v2.0.0 / ONC `§170.315(g)(10)` | System (`/$export`), Group (`/Patient/$export`), Single-Patient (`/Patient/{id}/$export`), Async Poll (`/$export-poll/{jobId}`), NDJSON Download (`/$export-file/{jobId}/{file}`) | `_type`, `_since`, `_outputFormat` (`application/fhir+ndjson`) | `system/*.rs` (System/Group), `patient/*.rs` (Single-Patient) | ✅ Production Ready |
 
 ---
 
@@ -131,6 +134,9 @@ task seed
 # (Optional) Run the Temporal ingestion worker
 task run-worker
 ```
+
+* **Interactive API & Conformance Explorer (`$docs`)**: [http://localhost:8080/fhir/r4/demo/$docs](http://localhost:8080/fhir/r4/demo/$docs)
+* **Proto-Compiled OpenAPI 3.1.0 Spec**: [http://localhost:8080/fhir/r4/demo/openapi.json](http://localhost:8080/fhir/r4/demo/openapi.json)
 
 ### 4. Run Benchmarks & Tests
 
@@ -212,7 +218,7 @@ curl -s -X POST "http://localhost:8080/fhir/r4/demo" \
     "entry": [
       {
         "fullUrl": "urn:uuid:11111111-2222-3333-4444-555555555555",
-        "resource": {"resourceType": "Patient", "name": [{"family": " Curie", "given": ["Marie"]}], "gender": "female"},
+        "resource": {"resourceType": "Patient", "name": [{"family": "Curie", "given": ["Marie"]}], "gender": "female"},
         "request": {"method": "POST", "url": "Patient"}
       },
       {
@@ -236,6 +242,18 @@ curl -s -X POST "http://localhost:8080/fhir/r4/demo/Patient/\$validate" \
 
 # 9. Query HIPAA / ONC Security AuditEvents
 curl -s "http://localhost:8080/fhir/r4/demo/AuditEvent?patient=pat-alice-001&_count=5" | jq .
+
+# 10. Bulk Data Access ($export) — Direct NDJSON Streaming (ONC (g)(10))
+curl -s "http://localhost:8080/fhir/r4/demo/Patient/pat-alice-001/\$export?_type=Patient,Observation" \
+  -H "Accept: application/fhir+ndjson"
+
+# 11. Bulk Data Access ($export) — Async Kick-Off (202 Accepted) + Job Status Poll + NDJSON File Download
+curl -i -s "http://localhost:8080/fhir/r4/demo/\$export?_type=Patient,Condition,Observation" \
+  -H "Prefer: respond-async" \
+  -H "Accept: application/fhir+json"
+
+# 12. Inspect the Protobuf-compiled OpenAPI 3.1.0 specification
+curl -s "http://localhost:8080/fhir/r4/demo/openapi.json" | jq '.components.schemas.Patient | {title, proto: ."x-protobuf-full-name", fields: (.properties | keys)}'
 ```
 
 ---
@@ -274,10 +292,18 @@ Content-Type: application/fhir+json
 * **Update / Create-on-Update**: `PUT /fhir/r4/{tenant}/{resourceType}/{id}` (supports optimistic concurrency via `If-Match: W/"<version>"`, returning `412 Precondition Failed` on version conflict)
 * **Soft Delete**: `DELETE /fhir/r4/{tenant}/{resourceType}/{id}` (`204 No Content` + tombstone version `ETag`)
 * **Patient Compartment (`$everything`)**: `GET /fhir/r4/{tenant}/Patient/{id}/$everything?_type=Encounter,Condition,Observation&_since=2025-01-01T00:00:00Z&_count=100&_offset=0` (returns a `searchset` Bundle containing the target `Patient` plus all compartment-linked resources via `spidx_reference` and referenced `Practitioner` records)
+* **Bulk Data Access (`$export` — ONC `(g)(10)`)**:
+  * System-level: `GET /fhir/r4/{tenant}/$export?_type=Patient,Observation&_since=2025-01-01T00:00:00Z`
+  * All-Patients Compartment: `GET /fhir/r4/{tenant}/Patient/$export`
+  * Single-Patient Compartment: `GET /fhir/r4/{tenant}/Patient/{id}/$export`
+  * Async Job Status Poll & Cancel: `GET /fhir/r4/{tenant}/$export-poll/{jobId}` & `DELETE /fhir/r4/{tenant}/$export-poll/{jobId}`
+  * NDJSON File Download: `GET /fhir/r4/{tenant}/$export-file/{jobId}/{ResourceType}.ndjson`
 * **Validate**: `POST /fhir/r4/{tenant}/{resourceType}/$validate` and `POST /fhir/r4/{tenant}/$validate`
 * **Search**: `GET /fhir/r4/{tenant}/{resourceType}?{searchParams}&_count=20&_offset=0`
 * **Security Audit Log (`AuditEvent`)**: `GET /fhir/r4/{tenant}/AuditEvent?entity=Patient/123&outcome=0&agent=Practitioner/dr-smith` and `GET /fhir/r4/{tenant}/AuditEvent/{id}`
 * **CapabilityStatement**: `GET /fhir/r4/{tenant}/metadata`
+* **Proto-Compiled OpenAPI 3.1.0 Spec**: `GET /fhir/r4/{tenant}/openapi.json` and `GET /fhir/r4/openapi.json`
+* **Interactive API & Conformance Explorer (`$docs`)**: `GET /fhir/r4/{tenant}/$docs` and `GET /fhir/r4/$docs`
 * **SMART Discovery**: `GET /fhir/r4/{tenant}/.well-known/smart-configuration`
 
 ### FHIR Conformance & Validation Engine (`pkg/validation`)

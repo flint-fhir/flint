@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -48,6 +49,8 @@ type Server struct {
 	validator      validation.Validator
 	auditRecorder  audit.Recorder
 	cdcPublisher   automq.Publisher
+	exportMu       sync.RWMutex
+	exportJobs     map[string]*exportJob
 }
 
 // New creates a new FHIR server.
@@ -65,6 +68,7 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 		extractors:    postgres.DefaultIndexExtractors(),
 		validator:     validation.NewEngine(validation.DefaultOptions()),
 		auditRecorder: auditRec,
+		exportJobs:    make(map[string]*exportJob),
 	}
 }
 
@@ -124,10 +128,23 @@ func (s *Server) RegisterIndexExtractor(resType string, fn postgres.IndexExtract
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
+	// Discovery & OpenAPI 3.1 / Interactive Explorer endpoints
+	mux.HandleFunc("GET /fhir/r4/openapi.json", s.handleOpenAPI)
+	mux.HandleFunc("GET /fhir/r4/$docs", s.handleDocsUI)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/openapi.json", s.handleOpenAPI)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$docs", s.handleDocsUI)
+
+	// FHIR Bulk Data Access ($export — ONC (g)(10))
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$export", s.handleSystemExport)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/Patient/$export", s.handlePatientGroupExport)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/$export", s.handleSinglePatientExport)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$export-poll/{jobId}", s.handleExportPoll)
+	mux.HandleFunc("DELETE /fhir/r4/{tenant}/$export-poll/{jobId}", s.handleExportCancel)
+
 	// FHIR REST endpoints
 	mux.HandleFunc("GET /fhir/r4/{tenant}/AuditEvent/{id}", s.handleReadAuditEvent)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/AuditEvent", s.handleSearchAuditEvents)
-	mux.HandleFunc("GET /fhir/r4/{tenant}/Patient/{id}/$everything", s.handlePatientEverything)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/$everything", s.handlePatientEverything)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history/{vid}", s.handleVRead)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history", s.handleInstanceHistory)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}", s.handleRead)
@@ -141,7 +158,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/metadata", s.handleMetadata)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/smart-configuration", s.handleSMARTConfig)
 
-	return s.auditMiddleware(s.authMiddleware(mux))
+	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" && parts[3] == "$export-file" {
+				r.SetPathValue("tenant", parts[2])
+				r.SetPathValue("jobId", parts[4])
+				r.SetPathValue("fileName", parts[5])
+				s.handleExportFile(w, r)
+				return
+			}
+		}
+		mux.ServeHTTP(w, r)
+	})
+
+	return s.auditMiddleware(s.authMiddleware(router))
 }
 
 // handleRead handles GET /{resourceType}/{id} — read a single resource.
@@ -1178,7 +1209,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		"status":       "active",
 		"kind":         "instance",
 		"fhirVersion":  "4.0.1",
-		"format":       []string{"json"},
+		"format":       []string{"json", "application/fhir+json", "application/fhir+ndjson"},
 		"software": map[string]any{
 			"name":    "Flint FHIR Server",
 			"version": "0.1.0",
@@ -1206,6 +1237,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 							{
 								"name":       "everything",
 								"definition": "http://hl7.org/fhir/OperationDefinition/Patient-everything",
+							},
+							{
+								"name":       "export",
+								"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/patient-export",
 							},
 						},
 					},
@@ -1306,6 +1341,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "everything",
 						"definition": "http://hl7.org/fhir/OperationDefinition/Patient-everything",
+					},
+					{
+						"name":       "export",
+						"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/export",
 					},
 				},
 			},
