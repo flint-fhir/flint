@@ -339,16 +339,16 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp := map[string]any{
-			"access_token":           accessToken,
-			"token_type":             "Bearer",
-			"expires_in":             3600,
-			"scope":                  scope,
-			"patient":                entry.PatientID,
-			"encounter":              entry.EncounterID,
-			"need_patient_banner":    true,
-			"smart_style_url":        "https://hl7.org/fhir/smart-app-launch/smart-styles.json",
-			"id_token":               accessToken,
-			"refresh_token":          "flint-rt-" + uuid.NewString(),
+			"access_token":        accessToken,
+			"token_type":          "Bearer",
+			"expires_in":          3600,
+			"scope":               scope,
+			"patient":             entry.PatientID,
+			"encounter":           entry.EncounterID,
+			"need_patient_banner": true,
+			"smart_style_url":     "https://hl7.org/fhir/smart-app-launch/smart-styles.json",
+			"id_token":            accessToken,
+			"refresh_token":       "flint-rt-" + uuid.NewString(),
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -462,4 +462,3 @@ func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
 		"error_description": desc,
 	})
 }
-
