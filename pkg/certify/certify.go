@@ -8,10 +8,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -226,9 +229,24 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			err = uErr
 		} else if cs["fhirVersion"] != "4.0.1" {
 			err = fmt.Errorf("expected fhirVersion=4.0.1, got %v", cs["fhirVersion"])
+		} else {
+			rawStr := string(b)
+			for _, reqToken := range []string{
+				"http://hl7.org/fhir/us/core/CapabilityStatement/us-core-server",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-vital-signs",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationrequest",
+				"http://fhir-registry.smarthealthit.org/StructureDefinition/oauth-uris",
+			} {
+				if !strings.Contains(rawStr, reqToken) {
+					err = fmt.Errorf("CapabilityStatement missing canonical US Core / SMART declaration: %s", reqToken)
+					break
+				}
+			}
 		}
 	}
-	record("DISC-01", suite1, "CapabilityStatement (/metadata) FHIR 4.0.1 & 11 US Core profiles", t0, err, "CapabilityStatement verified")
+	record("DISC-01", suite1, "CapabilityStatement (/metadata) FHIR 4.0.1, US Core v6.1.0 supportedProfile & oauth-uris", t0, err, "CapabilityStatement canonical US Core profiles & SMART oauth-uris verified")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/.well-known/smart-configuration", "", nil, nil)
@@ -241,9 +259,17 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			err = uErr
 		} else if _, ok := sc["capabilities"].([]any); !ok {
 			err = fmt.Errorf("missing capabilities array in smart-configuration")
+		} else {
+			respOIDC, _, errOIDC := doReq(http.MethodGet, basePath+"/.well-known/openid-configuration", "", nil, nil)
+			respJWKS, bJWKS, errJWKS := doReq(http.MethodGet, basePath+"/.well-known/jwks.json", "", nil, nil)
+			if errOIDC != nil || respOIDC.StatusCode != http.StatusOK {
+				err = fmt.Errorf("expected 200 OK on /.well-known/openid-configuration")
+			} else if errJWKS != nil || respJWKS.StatusCode != http.StatusOK || !strings.Contains(string(bJWKS), `"RS256"`) {
+				err = fmt.Errorf("expected 200 OK with RS256 key on /.well-known/jwks.json")
+			}
 		}
 	}
-	record("DISC-02", suite1, "SMART on FHIR v2.0.0 Discovery (.well-known/smart-configuration)", t0, err, "SMART v2 capabilities verified")
+	record("DISC-02", suite1, "SMART v2 (.well-known/smart-configuration), OIDC & JWKS Discovery", t0, err, "SMART v2, OIDC & RS256 JWKS discovery verified")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/openapi.json", "", nil, nil)
@@ -502,9 +528,115 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		fmt.Sprintf("Validated %d exported NDJSON resources across US Core profiles", exportedCount))
 
 	// =========================================================================
-	// Suite 5: StructureDefinition $validate & ONC (d)(2) AuditEvent Provenance
+	// Suite 5: SMART v2 OAuth2 PKCE Launch, $validate & ONC (d)(2) AuditEvent
 	// =========================================================================
-	suite5 := "Suite 5: StructureDefinition $validate & ONC §170.315(d)(2) AuditEvent"
+	suite5 := "Suite 5: SMART v2 OAuth2 PKCE Launch, $validate & ONC §170.315(d)(2) AuditEvent"
+
+	t0 = time.Now()
+	{
+		verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk-flint-smart-v2-pkce"
+		sum := sha256.Sum256([]byte(verifier))
+		challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+
+		noRedirectClient := *client
+		noRedirectClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		authURL := fmt.Sprintf("%s/oauth2/authorize?response_type=code&client_id=inferno&redirect_uri=%s&scope=%s&state=smart-state-1&code_challenge=%s&code_challenge_method=S256&patient=cert-pat-1",
+			baseURL,
+			url.QueryEscape("https://inferno.healthit.gov/cb"),
+			url.QueryEscape("openid fhirUser launch/patient patient/Patient.rs patient/Observation.rs"),
+			url.QueryEscape(challenge),
+		)
+		reqAuth, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, authURL, nil)
+		var authCode string
+		if reqErr != nil {
+			err = reqErr
+		} else {
+			respAuth, doErr := noRedirectClient.Do(reqAuth)
+			if doErr != nil {
+				err = doErr
+			} else {
+				respAuth.Body.Close()
+				if respAuth.StatusCode != http.StatusFound {
+					err = fmt.Errorf("expected 302 Found from /oauth2/authorize, got %d", respAuth.StatusCode)
+				} else {
+					loc, pErr := url.Parse(respAuth.Header.Get("Location"))
+					if pErr != nil {
+						err = pErr
+					} else {
+						authCode = loc.Query().Get("code")
+						if authCode == "" || loc.Query().Get("state") != "smart-state-1" {
+							err = fmt.Errorf("missing code or mismatched state in redirect Location %s", respAuth.Header.Get("Location"))
+						}
+					}
+				}
+			}
+		}
+
+		if err == nil {
+			form := url.Values{
+				"grant_type":    {"authorization_code"},
+				"code":          {authCode},
+				"redirect_uri":  {"https://inferno.healthit.gov/cb"},
+				"code_verifier": {verifier},
+			}
+			respTok, bTok, errTok := doReq(http.MethodPost, "/oauth2/token", "application/x-www-form-urlencoded", []byte(form.Encode()), nil)
+			if errTok != nil || respTok.StatusCode != http.StatusOK {
+				err = fmt.Errorf("expected 200 OK from /oauth2/token, got %d: %s", respTok.StatusCode, string(bTok))
+			} else {
+				var tokResp map[string]any
+				_ = json.Unmarshal(bTok, &tokResp)
+				accessToken, _ := tokResp["access_token"].(string)
+				if accessToken == "" || tokResp["patient"] != "cert-pat-1" || tokResp["id_token"] == "" {
+					err = fmt.Errorf("incomplete SMART v2 token response: %s", string(bTok))
+				} else {
+					// 1. Authorized read on own Patient compartment -> 200 OK
+					respOwn, _, errOwn := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1", "", nil, map[string]string{
+						"Authorization": "Bearer " + accessToken,
+					})
+					// 2. Cross-patient read -> 403 Forbidden
+					respOther, _, errOther := doReq(http.MethodGet, basePath+"/Patient/other-patient-999", "", nil, map[string]string{
+						"Authorization": "Bearer " + accessToken,
+					})
+					// 3. Unauthorized write/delete with read-only (.rs) scope -> 403 Forbidden
+					respDel, _, errDel := doReq(http.MethodDelete, basePath+"/Patient/cert-pat-1", "", nil, map[string]string{
+						"Authorization": "Bearer " + accessToken,
+					})
+					if errOwn != nil || respOwn.StatusCode != http.StatusOK {
+						err = fmt.Errorf("expected 200 OK reading own Patient with SMART token, got %d", respOwn.StatusCode)
+					} else if errOther != nil || respOther.StatusCode != http.StatusForbidden {
+						err = fmt.Errorf("expected 403 Forbidden on cross-patient read, got %d", respOther.StatusCode)
+					} else if errDel != nil || respDel.StatusCode != http.StatusForbidden {
+						err = fmt.Errorf("expected 403 Forbidden on DELETE with .rs scope, got %d", respDel.StatusCode)
+					}
+				}
+			}
+		}
+	}
+	record("SMART-01", suite5, "SMART v2 OAuth2 PKCE (S256) Launch & Patient Compartment Isolation", t0, err, "PKCE S256 exchange, id_token & 403 compartment isolation verified")
+
+	t0 = time.Now()
+	{
+		ccForm := url.Values{
+			"grant_type": {"client_credentials"},
+			"scope":      {"system/*.rs"},
+		}
+		respCC, bCC, errCC := doReq(http.MethodPost, "/oauth2/token", "application/x-www-form-urlencoded", []byte(ccForm.Encode()), nil)
+		if errCC != nil || respCC.StatusCode != http.StatusOK {
+			err = fmt.Errorf("expected 200 OK from client_credentials /oauth2/token, got %d", respCC.StatusCode)
+		} else {
+			var ccMap map[string]any
+			_ = json.Unmarshal(bCC, &ccMap)
+			sysTok, _ := ccMap["access_token"].(string)
+			introForm := url.Values{"token": {sysTok}}
+			respIntro, bIntro, errIntro := doReq(http.MethodPost, "/oauth2/introspect", "application/x-www-form-urlencoded", []byte(introForm.Encode()), nil)
+			if errIntro != nil || respIntro.StatusCode != http.StatusOK || !strings.Contains(string(bIntro), `"active":true`) {
+				err = fmt.Errorf("expected active:true from /oauth2/introspect, got %s", string(bIntro))
+			}
+		}
+	}
+	record("SMART-02", suite5, "SMART Backend Services (client_credentials) & RFC 7662 Introspection", t0, err, "Backend Services JWT & token introspection verified")
 
 	t0 = time.Now()
 	resp, _, err = doReq(http.MethodPost, basePath+"/MedicationRequest/$validate", "application/fhir+json",

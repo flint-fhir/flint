@@ -78,27 +78,27 @@
     "semantic_hash": "473fe8c145dce1d9d803055c6d1b756d"
   },
   "server/bundle.go": {
-    "mtime": 1791784686.3687572,
-    "seen": 1791785588.99996,
+    "mtime": 1791786693.0745182,
+    "seen": 1791789917.907707,
     "ast_hash": "6f002a82d8b796fd198b8f16e15786f9",
     "semantic_hash": ""
   },
   "server/server.go": {
-    "mtime": 1791784318.0702426,
-    "seen": 1791785588.999966,
-    "ast_hash": "377e63489c0ce6aa437b383282595cad",
+    "mtime": 1791787729.9876986,
+    "seen": 1791789917.9077702,
+    "ast_hash": "598c4f0f85bd6423fcffdb703a93430a",
     "semantic_hash": ""
   },
   "server/server_test.go": {
-    "mtime": 1791785251.988052,
-    "seen": 1791785588.9999669,
+    "mtime": 1791786693.0776742,
+    "seen": 1791789917.9077902,
     "ast_hash": "b6e9d0376866b9f7449eb728e10d0e08",
     "semantic_hash": ""
   },
   "server/smart.go": {
-    "mtime": 1791785229.9238868,
-    "seen": 1791785588.9999669,
-    "ast_hash": "1eaddb4de8128b787809f29fe954aab9",
+    "mtime": 1791787143.7054718,
+    "seen": 1791789917.9077911,
+    "ast_hash": "03da576bc2ac935a596959ecc0538f31",
     "semantic_hash": ""
   },
   "spike/spike1_fhir_json/roundtrip.go": {
@@ -210,14 +210,14 @@
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1791785440.752807,
-    "seen": 1791785589.0003269,
+    "mtime": 1791786693.0644653,
+    "seen": 1791789917.908402,
     "ast_hash": "ee54cea6ca7e5a27ee31c9ddf71a51a3",
     "semantic_hash": ""
   },
   "Taskfile.yaml": {
-    "mtime": 1791784497.154456,
-    "seen": 1791785589.000343,
+    "mtime": 1791786693.064907,
+    "seen": 1791789917.9084191,
     "ast_hash": "ae8e7c58fac9f73e979b7f3efc0e9767",
     "semantic_hash": ""
   },
@@ -432,9 +432,9 @@
     "semantic_hash": ""
   },
   "server/middleware.go": {
-    "mtime": 1791784087.7067592,
-    "seen": 1791785588.9999628,
-    "ast_hash": "b39a1fbb8a32482306e2667b51006e26",
+    "mtime": 1791787867.2927268,
+    "seen": 1791789917.9077098,
+    "ast_hash": "2594fa1351500b6116dd6b7fb0c348f6",
     "semantic_hash": ""
   },
   "server/server_auth_test.go": {
@@ -576,20 +576,20 @@
     "semantic_hash": ""
   },
   "cmd/certify/main.go": {
-    "mtime": 1791784343.5198054,
-    "seen": 1791785588.999498,
+    "mtime": 1791786693.06534,
+    "seen": 1791789917.906584,
     "ast_hash": "d648ba7a3ef5b6b3ee18cae8ce9b58d6",
     "semantic_hash": ""
   },
   "cmd/seed/main.go": {
-    "mtime": 1791783473.6537447,
-    "seen": 1791785588.99964,
+    "mtime": 1791786693.0658662,
+    "seen": 1791789917.906765,
     "ast_hash": "366d0bb4122211eeef3c0606e35a1f20",
     "semantic_hash": ""
   },
   "cmd/seed/seed_test.go": {
-    "mtime": 1791783482.7611182,
-    "seen": 1791785588.9996412,
+    "mtime": 1791786693.0662682,
+    "seen": 1791789917.9067662,
     "ast_hash": "fc4de19f0fd10226b52a65d16755553c",
     "semantic_hash": ""
   },
@@ -630,9 +630,9 @@
     "semantic_hash": ""
   },
   "pkg/certify/certify.go": {
-    "mtime": 1791785550.2988477,
-    "seen": 1791785588.9998589,
-    "ast_hash": "b146ed8a9a817b7428ca76f181873526",
+    "mtime": 1791788166.7610772,
+    "seen": 1791789917.9074519,
+    "ast_hash": "9900a8a91edbb1d5399dbd75a3e9ec65",
     "semantic_hash": ""
   },
   "pkg/fhirutil/openapi.go": {
@@ -648,20 +648,20 @@
     "semantic_hash": ""
   },
   "server/certify.go": {
-    "mtime": 1791784298.251789,
-    "seen": 1791785588.9999611,
+    "mtime": 1791786693.075009,
+    "seen": 1791789917.907708,
     "ast_hash": "5e19792becc56b4987a5382e6b72d56e",
     "semantic_hash": ""
   },
   "server/certify_test.go": {
-    "mtime": 1791784540.96522,
-    "seen": 1791785588.999962,
+    "mtime": 1791786693.0754693,
+    "seen": 1791789917.907708,
     "ast_hash": "e291a7ef4ba6b794fd72e995c29ae101",
     "semantic_hash": ""
   },
   "server/export.go": {
-    "mtime": 1791784080.0542798,
-    "seen": 1791785588.999962,
+    "mtime": 1791786693.0759165,
+    "seen": 1791789917.907709,
     "ast_hash": "d8536b0a6f3359b5506cb86a6f1e5a89",
     "semantic_hash": ""
   },
@@ -702,15 +702,15 @@
     "semantic_hash": ""
   },
   "deploy/inferno/README.md": {
-    "mtime": 1791784422.9885135,
-    "seen": 1791785589.0004292,
-    "ast_hash": "5aead230a2815e2bf96c34e53d703aa9",
+    "mtime": 1791789780.7332025,
+    "seen": 1791789917.908593,
+    "ast_hash": "5d4117421c36646cdaf3af93ec792664",
     "semantic_hash": ""
   },
   "deploy/inferno/docker-compose.yml": {
-    "mtime": 1791784384.211004,
-    "seen": 1791785589.0004292,
-    "ast_hash": "ca0207cf73f1d90efd32c83a28130803",
+    "mtime": 1791788783.4556947,
+    "seen": 1791789917.908593,
+    "ast_hash": "7848c071c3a3edbc16a72312de420c1e",
     "semantic_hash": ""
   }
 }

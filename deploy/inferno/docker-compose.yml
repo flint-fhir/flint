@@ -1,33 +1,37 @@
 services:
   inferno:
-    image: infernocommunity/inferno-core-us-core:latest
+    image: infernocommunity/inferno-program:latest
+    platform: linux/amd64
     ports:
       - "4567:4567"
     environment:
       - REDIS_URL=redis://redis:6379/0
       - RACK_ENV=production
       - BASE_PATH=
+      - VALIDATOR_BASE_URL=http://hl7_validator_service:3500
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       - redis
-      - validator_service
+      - hl7_validator_service
 
   worker:
-    image: infernocommunity/inferno-core-us-core:latest
-    command: bundle exec sidekiq -r ./lib/us_core_test_kit.rb
+    image: infernocommunity/inferno-program:latest
+    platform: linux/amd64
+    command: bundle exec sidekiq -r ./lib/onc_certification_g10_test_kit.rb
     environment:
       - REDIS_URL=redis://redis:6379/0
       - RACK_ENV=production
-      - VALIDATOR_BASE_URL=http://validator_service:3500
+      - VALIDATOR_BASE_URL=http://hl7_validator_service:3500
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:
       - redis
-      - validator_service
+      - hl7_validator_service
 
-  validator_service:
-    image: infernocommunity/fhir-validator-service:latest
+  hl7_validator_service:
+    image: infernocommunity/inferno-resource-validator:latest
+    platform: linux/amd64
     environment:
       - SESSION_CACHE_DURATION=-1
     ports:
@@ -38,3 +42,4 @@ services:
     ports:
       - "6379:6379"
     command: redis-server --appendonly yes
+

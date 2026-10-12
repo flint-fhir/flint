@@ -1,13 +1,13 @@
 # HL7 Inferno US Core v6.1.0 & ONC `(g)(10)` Certification Harness
 
-This directory provides a pre-configured Docker Compose stack for running the official **[HL7 Inferno US Core Test Kit](https://github.com/inferno-framework/us-core-test-kit)** against a local Flint server.
+This directory provides a pre-configured Docker Compose stack for running the official **[HL7 Inferno ONC `(g)(10)` / US Core Test Kit](https://github.com/inferno-framework/onc-certification-g10-test-kit)** against a local Flint server.
 
 ## 1. Quick Automated Certification (No Docker Required)
 
-Run Flint's built-in 24-check FHIR R4 / US Core v6.1.0 / ONC `(g)(10)` Conformance & Certification Runner (`cmd/certify`):
+Run Flint's built-in 26-check FHIR R4 / US Core v6.1.0 / SMART v2 / ONC `(g)(10)` Conformance & Certification Runner (`cmd/certify`):
 
 ```bash
-# Prints the full Certification Scorecard and writes a FHIR R4 TestReport JSON
+# Prints the full 26/26 Certification Scorecard and writes a FHIR R4 TestReport JSON
 task certify
 ```
 
@@ -24,12 +24,19 @@ curl -s -X POST http://localhost:8080/fhir/r4/demo/$certify | jq .
    task run
    task seed
    ```
-2. Launch the HL7 Inferno US Core test kit:
+2. Launch the HL7 Inferno ONC `(g)(10)` / US Core test kit:
    ```bash
    task certify-inferno
    ```
 3. Open **[http://localhost:4567](http://localhost:4567)** in your browser:
-   - Select **US Core v6.1.0** (USCDI v3)
-   - Set **FHIR Endpoint** to: `http://host.docker.internal:8080/fhir/r4/demo`
-   - Set **Patient IDs** to: `pat-alice-001,pat-robert-002,pat-elena-003`
-   - Set **Group ID** (for Bulk Data `$export`) to: `all`
+   - Select **US Core v6.1.0** (USCDI v3) or **ONC Certification `(g)(10)` Standardized API**
+   - **FHIR Endpoint**: `http://host.docker.internal:8080/fhir/r4/demo`
+   - **Patient IDs**: `pat-alice-001,pat-robert-002,pat-elena-003`
+   - **Group ID** (for Bulk Data `$export`): `all`
+   - **OAuth2 / SMART App Launch v2.0.0 Endpoints** (auto-discovered via `/.well-known/smart-configuration` and `/.well-known/openid-configuration`):
+     - **Authorize URL**: `http://host.docker.internal:8080/oauth2/authorize`
+     - **Token URL**: `http://host.docker.internal:8080/oauth2/token`
+     - **Introspection URL**: `http://host.docker.internal:8080/oauth2/introspect`
+     - **JWKS URL**: `http://host.docker.internal:8080/fhir/r4/demo/.well-known/jwks.json`
+     - **Client ID**: `inferno`
+
