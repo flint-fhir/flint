@@ -218,6 +218,115 @@ func (s *Store) conditionalCreateInTx(ctx context.Context, tx *sql.Tx, input Res
 	return rec, true, nil
 }
 
+// ConditionalUpdateResource evaluates a conditional search query inside a transaction guarded by
+// a transaction-scoped advisory lock:
+//   - >1 matches: returns ErrPreconditionFailed (412 Precondition Failed)
+//   - 1 match: invokes buildInput(matchedID, true) and updates the matched resource
+//   - 0 matches: invokes buildInput("", false) and creates a new resource
+func (s *Store) ConditionalUpdateResource(
+	ctx context.Context,
+	tenantID, resType string,
+	condParams SearchParams,
+	buildInput func(matchedID string, isExisting bool) (ResourceInput, error),
+) (*ResourceRecord, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	lockKey := tenantID + ":" + resType
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
+		return nil, fmt.Errorf("acquire conditional update lock: %w", err)
+	}
+
+	condParams.Count = 2
+	condParams.Offset = 0
+	sr, err := s.searchWithExecutor(ctx, tx, condParams)
+	if err != nil {
+		return nil, err
+	}
+	if sr.Total > 1 {
+		return nil, fmt.Errorf("%w: conditional update matched %d existing %s resources", ErrPreconditionFailed, sr.Total, resType)
+	}
+
+	matchedID := ""
+	isExisting := false
+	if sr.Total == 1 && len(sr.Matches) == 1 {
+		matchedID = sr.Matches[0].ResID
+		isExisting = true
+	}
+
+	input, err := buildInput(matchedID, isExisting)
+	if err != nil {
+		return nil, err
+	}
+
+	rec, err := writeResourceInTx(ctx, tx, input)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// ConditionalDeleteResource evaluates a conditional search query inside a transaction guarded by
+// a transaction-scoped advisory lock:
+//   - >1 matches: returns ErrPreconditionFailed (412 Precondition Failed)
+//   - 1 match: soft-deletes the matched resource (after optional verifyMatch callback)
+//   - 0 matches: returns (nil, nil) for idempotent 204 No Content
+func (s *Store) ConditionalDeleteResource(
+	ctx context.Context,
+	tenantID, resType string,
+	condParams SearchParams,
+	verifyMatch func(matchedID string) error,
+) (*ResourceRecord, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	lockKey := tenantID + ":" + resType
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
+		return nil, fmt.Errorf("acquire conditional delete lock: %w", err)
+	}
+
+	condParams.Count = 2
+	condParams.Offset = 0
+	sr, err := s.searchWithExecutor(ctx, tx, condParams)
+	if err != nil {
+		return nil, err
+	}
+	if sr.Total > 1 {
+		return nil, fmt.Errorf("%w: conditional delete matched %d existing %s resources", ErrPreconditionFailed, sr.Total, resType)
+	}
+	if sr.Total == 0 || len(sr.Matches) == 0 {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	matchedID := sr.Matches[0].ResID
+	if verifyMatch != nil {
+		if err := verifyMatch(matchedID); err != nil {
+			return nil, err
+		}
+	}
+
+	rec, err := s.deleteResourceInTx(ctx, tx, tenantID, resType, matchedID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
 // ExecuteTransactionBundle executes a sequence of Bundle operations (POST, PUT, DELETE,
 // including If-Match and If-None-Exist) atomically within a single SQL transaction.
 // If any entry fails, all prior writes and deletes in the Bundle are rolled back.

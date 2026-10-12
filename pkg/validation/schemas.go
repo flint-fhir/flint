@@ -46,6 +46,51 @@ var (
 		"in-progress": true, "onleave": true, "finished": true,
 		"cancelled": true, "entered-in-error": true, "unknown": true,
 	}
+
+	MedicationRequestStatusValueSet = map[string]bool{
+		"active": true, "on-hold": true, "cancelled": true, "completed": true,
+		"entered-in-error": true, "stopped": true, "draft": true, "unknown": true,
+	}
+
+	MedicationRequestIntentValueSet = map[string]bool{
+		"proposal": true, "plan": true, "order": true, "original-order": true,
+		"reflex-order": true, "filler-order": true, "instance-order": true, "option": true,
+	}
+
+	RequestPriorityValueSet = map[string]bool{
+		"routine": true, "urgent": true, "asap": true, "stat": true,
+	}
+
+	AllergyIntoleranceClinicalStatusValueSet = map[string]bool{
+		"active": true, "inactive": true, "resolved": true,
+	}
+
+	AllergyIntoleranceVerificationStatusValueSet = map[string]bool{
+		"unconfirmed": true, "confirmed": true, "refuted": true, "entered-in-error": true,
+	}
+
+	AllergyIntoleranceTypeValueSet = map[string]bool{
+		"allergy": true, "intolerance": true,
+	}
+
+	AllergyIntoleranceCriticalityValueSet = map[string]bool{
+		"low": true, "high": true, "unable-to-assess": true,
+	}
+
+	ProcedureStatusValueSet = map[string]bool{
+		"preparation": true, "in-progress": true, "not-done": true, "on-hold": true,
+		"stopped": true, "completed": true, "entered-in-error": true, "unknown": true,
+	}
+
+	DiagnosticReportStatusValueSet = map[string]bool{
+		"registered": true, "partial": true, "preliminary": true, "final": true,
+		"amended": true, "corrected": true, "appended": true, "cancelled": true,
+		"entered-in-error": true, "unknown": true,
+	}
+
+	ImmunizationStatusValueSet = map[string]bool{
+		"completed": true, "entered-in-error": true, "not-done": true,
+	}
 )
 
 // ResourceSchema represents validation rules derived from a FHIR StructureDefinition.
@@ -72,7 +117,7 @@ func buildFieldMap(fields ...[]string) map[string]bool {
 	return m
 }
 
-// DefaultSchemas returns built-in StructureDefinition rules for Core Big 5 resources.
+// DefaultSchemas returns built-in StructureDefinition rules for US Core / USCDI v3 FHIR R4 resources.
 func DefaultSchemas() map[string]ResourceSchema {
 	return map[string]ResourceSchema{
 		"Patient": {
@@ -166,6 +211,123 @@ func DefaultSchemas() map[string]ResourceSchema {
 			ValueSetURIs: map[string]string{
 				"gender": "http://hl7.org/fhir/valueset/administrative-gender",
 			},
+		},
+
+		"MedicationRequest": {
+			ResourceType: "MedicationRequest",
+			AllowedFields: buildFieldMap(commonResourceFields, []string{
+				"identifier", "status", "statusReason", "intent", "category", "priority",
+				"doNotPerform", "reported", "reportedBoolean", "reportedReference",
+				"medication", "medicationCodeableConcept", "medicationReference",
+				"subject", "encounter", "supportingInformation", "authoredOn", "requester",
+				"performer", "performerType", "recorder", "reasonCode", "reasonReference",
+				"instantiatesCanonical", "instantiatesUri", "basedOn", "groupIdentifier",
+				"courseOfTherapyType", "insurance", "note", "dosageInstruction",
+				"dispenseRequest", "substitution", "priorPrescription", "detectedIssue",
+				"eventHistory",
+			}),
+			RequiredFields: []string{"status", "intent", "medication", "subject"},
+			CodeBindings: map[string]map[string]bool{
+				"status":   MedicationRequestStatusValueSet,
+				"intent":   MedicationRequestIntentValueSet,
+				"priority": RequestPriorityValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status":   "http://hl7.org/fhir/valueset/medicationrequest-status",
+				"intent":   "http://hl7.org/fhir/valueset/medicationrequest-intent",
+				"priority": "http://hl7.org/fhir/valueset/request-priority",
+			},
+		},
+
+		"AllergyIntolerance": {
+			ResourceType: "AllergyIntolerance",
+			AllowedFields: buildFieldMap(commonResourceFields, []string{
+				"identifier", "clinicalStatus", "verificationStatus", "type", "category",
+				"criticality", "code", "patient", "encounter", "onset",
+				"onsetDateTime", "onsetAge", "onsetPeriod", "onsetRange", "onsetString",
+				"recordedDate", "recorder", "asserter", "lastOccurrence", "note", "reaction",
+			}),
+			RequiredFields: []string{"patient"},
+			CodeBindings: map[string]map[string]bool{
+				"clinicalStatus":     AllergyIntoleranceClinicalStatusValueSet,
+				"verificationStatus": AllergyIntoleranceVerificationStatusValueSet,
+				"type":               AllergyIntoleranceTypeValueSet,
+				"criticality":        AllergyIntoleranceCriticalityValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"clinicalStatus":     "http://hl7.org/fhir/valueset/allergyintolerance-clinical",
+				"verificationStatus": "http://hl7.org/fhir/valueset/allergyintolerance-verification",
+				"type":               "http://hl7.org/fhir/valueset/allergy-intolerance-type",
+				"criticality":        "http://hl7.org/fhir/valueset/allergy-intolerance-criticality",
+			},
+		},
+
+		"Procedure": {
+			ResourceType: "Procedure",
+			AllowedFields: buildFieldMap(commonResourceFields, []string{
+				"identifier", "instantiatesCanonical", "instantiatesUri", "basedOn", "partOf",
+				"status", "statusReason", "category", "code", "subject", "encounter",
+				"performed", "performedDateTime", "performedPeriod", "performedString",
+				"performedAge", "performedRange", "recorder", "asserter", "performer",
+				"location", "reasonCode", "reasonReference", "bodySite", "outcome",
+				"report", "complication", "complicationDetail", "followUp", "note",
+				"focalDevice", "usedReference", "usedCode",
+			}),
+			RequiredFields: []string{"status", "subject"},
+			CodeBindings: map[string]map[string]bool{
+				"status": ProcedureStatusValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status": "http://hl7.org/fhir/valueset/event-status",
+			},
+		},
+
+		"DiagnosticReport": {
+			ResourceType: "DiagnosticReport",
+			AllowedFields: buildFieldMap(commonResourceFields, []string{
+				"identifier", "basedOn", "status", "category", "code", "subject",
+				"encounter", "effective", "effectiveDateTime", "effectivePeriod",
+				"issued", "performer", "resultsInterpreter", "specimen", "result",
+				"imagingStudy", "media", "conclusion", "conclusionCode", "presentedForm",
+			}),
+			RequiredFields: []string{"status", "code"},
+			CodeBindings: map[string]map[string]bool{
+				"status": DiagnosticReportStatusValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status": "http://hl7.org/fhir/valueset/diagnostic-report-status",
+			},
+		},
+
+		"Immunization": {
+			ResourceType: "Immunization",
+			AllowedFields: buildFieldMap(commonResourceFields, []string{
+				"identifier", "status", "statusReason", "vaccineCode", "patient",
+				"encounter", "occurrence", "occurrenceDateTime", "occurrenceString",
+				"recorded", "primarySource", "reportOrigin", "location", "manufacturer",
+				"lotNumber", "expirationDate", "site", "route", "doseQuantity",
+				"performer", "note", "reasonCode", "reasonReference", "isSubpotent",
+				"subpotentReason", "education", "programEligibility", "fundingSource",
+				"reaction", "protocolApplied",
+			}),
+			RequiredFields: []string{"status", "vaccineCode", "patient", "occurrence"},
+			CodeBindings: map[string]map[string]bool{
+				"status": ImmunizationStatusValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status": "http://hl7.org/fhir/valueset/immunization-status",
+			},
+		},
+
+		"Organization": {
+			ResourceType: "Organization",
+			AllowedFields: buildFieldMap(commonResourceFields, []string{
+				"identifier", "active", "type", "name", "alias", "telecom",
+				"address", "partOf", "contact", "endpoint",
+			}),
+			RequiredFields: []string{},
+			CodeBindings:   map[string]map[string]bool{},
+			ValueSetURIs:   map[string]string{},
 		},
 	}
 }

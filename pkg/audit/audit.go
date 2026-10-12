@@ -227,6 +227,13 @@ func ClassifyHTTPInteraction(method string, parts []string, statusCode int) (act
 		}
 		return ActionUpdate, "update", resType, id, ""
 
+	case http.MethodPatch:
+		id := ""
+		if len(parts) >= 5 {
+			id = parts[4]
+		}
+		return ActionUpdate, "patch", resType, id, ""
+
 	case http.MethodDelete:
 		id := ""
 		if len(parts) >= 5 {

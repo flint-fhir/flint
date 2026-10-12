@@ -1,0 +1,141 @@
+test_stg_medication_request_cdc:
+  model: flint_stg.stg_medication_request
+  inputs:
+    fhir_raw.medication_request:
+      rows:
+        - tenant_id: "tenant-a"
+          _kafka_key: "tenant-a/medreq-100"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-05 10:00:00+00:00"
+          op: "I"
+          _kafka_value: '{"status":{"value":"active"},"intent":{"value":"order"},"subject":{"reference":{"value":"Patient/pat-001"}},"medicationCodeableConcept":{"coding":[{"system":{"value":"http://www.nlm.nih.gov/research/umls/rxnorm"},"code":{"value":"1049502"}}]},"authoredOn":{"value":"2026-10-05T10:00:00Z"}}'
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          medication_request_id: "medreq-100"
+          patient_id: "pat-001"
+          status: "active"
+          intent: "order"
+          medication_system: "http://www.nlm.nih.gov/research/umls/rxnorm"
+          medication_code: "1049502"
+          authored_on: "2026-10-05 10:00:00+00:00"
+          updated_at: "2026-10-05 10:00:00+00:00"
+
+test_stg_immunization_cdc:
+  model: flint_stg.stg_immunization
+  inputs:
+    fhir_raw.immunization:
+      rows:
+        - tenant_id: "tenant-a"
+          _kafka_key: "tenant-a/imm-100"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-05 11:00:00+00:00"
+          op: "I"
+          _kafka_value: '{"status":{"value":"completed"},"patient":{"reference":{"value":"Patient/pat-001"}},"vaccineCode":{"coding":[{"system":{"value":"http://hl7.org/fhir/sid/cvx"},"code":{"value":"207"}}]},"occurrenceDateTime":{"value":"2026-10-05T11:00:00Z"}}'
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          immunization_id: "imm-100"
+          patient_id: "pat-001"
+          status: "completed"
+          vaccine_system: "http://hl7.org/fhir/sid/cvx"
+          vaccine_code: "207"
+          occurrence_datetime: "2026-10-05 11:00:00+00:00"
+          updated_at: "2026-10-05 11:00:00+00:00"
+
+test_stg_procedure_cdc:
+  model: flint_stg.stg_procedure
+  inputs:
+    fhir_raw.procedure:
+      rows:
+        - tenant_id: "tenant-a"
+          _kafka_key: "tenant-a/proc-100"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-05 12:00:00+00:00"
+          op: "I"
+          _kafka_value: '{"status":{"value":"completed"},"subject":{"reference":{"value":"Patient/pat-001"}},"code":{"coding":[{"system":{"value":"http://snomed.info/sct"},"code":{"value":"80146002"}}]},"performedDateTime":{"value":"2026-10-05T12:00:00Z"}}'
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          procedure_id: "proc-100"
+          patient_id: "pat-001"
+          status: "completed"
+          code_system: "http://snomed.info/sct"
+          code: "80146002"
+          performed_datetime: "2026-10-05 12:00:00+00:00"
+          updated_at: "2026-10-05 12:00:00+00:00"
+
+test_stg_allergy_intolerance_cdc:
+  model: flint_stg.stg_allergy_intolerance
+  inputs:
+    fhir_raw.allergy_intolerance:
+      rows:
+        - tenant_id: "tenant-a"
+          _kafka_key: "tenant-a/allergy-100"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-05 13:00:00+00:00"
+          op: "I"
+          _kafka_value: '{"patient":{"reference":{"value":"Patient/pat-001"}},"clinicalStatus":{"coding":[{"code":{"value":"active"}}]},"verificationStatus":{"coding":[{"code":{"value":"confirmed"}}]},"criticality":{"value":"high"},"code":{"coding":[{"system":{"value":"http://www.nlm.nih.gov/research/umls/rxnorm"},"code":{"value":"7980"}}]}}'
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          allergy_intolerance_id: "allergy-100"
+          patient_id: "pat-001"
+          clinical_status: "active"
+          verification_status: "confirmed"
+          criticality: "high"
+          code_system: "http://www.nlm.nih.gov/research/umls/rxnorm"
+          code: "7980"
+          updated_at: "2026-10-05 13:00:00+00:00"
+
+test_stg_diagnostic_report_cdc:
+  model: flint_stg.stg_diagnostic_report
+  inputs:
+    fhir_raw.diagnostic_report:
+      rows:
+        - tenant_id: "tenant-a"
+          _kafka_key: "tenant-a/dr-100"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-05 14:00:00+00:00"
+          op: "I"
+          _kafka_value: '{"status":{"value":"final"},"subject":{"reference":{"value":"Patient/pat-001"}},"code":{"coding":[{"system":{"value":"http://loinc.org"},"code":{"value":"58410-2"}}]},"effectiveDateTime":{"value":"2026-10-05T14:00:00Z"},"issued":{"value":"2026-10-05T14:05:00Z"}}'
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          diagnostic_report_id: "dr-100"
+          patient_id: "pat-001"
+          status: "final"
+          code_system: "http://loinc.org"
+          code: "58410-2"
+          effective_datetime: "2026-10-05 14:00:00+00:00"
+          issued: "2026-10-05 14:05:00+00:00"
+          updated_at: "2026-10-05 14:00:00+00:00"
+
+test_stg_organization_cdc:
+  model: flint_stg.stg_organization
+  inputs:
+    fhir_raw.organization:
+      rows:
+        - tenant_id: "tenant-a"
+          _kafka_key: "tenant-a/org-100"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-05 15:00:00+00:00"
+          op: "I"
+          _kafka_value: '{"name":{"value":"Flint Health System"},"active":{"value":true},"type":[{"coding":[{"code":{"value":"prov"}}]}],"address":[{"city":{"value":"San Francisco"},"state":{"value":"CA"},"postalCode":{"value":"94105"}}]}'
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          organization_id: "org-100"
+          name: "Flint Health System"
+          active: true
+          type_code: "prov"
+          city: "San Francisco"
+          state: "CA"
+          postal_code: "94105"
+          updated_at: "2026-10-05 15:00:00+00:00"

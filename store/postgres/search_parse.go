@@ -185,9 +185,9 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 			targetType = "Patient"
 		case "encounter":
 			targetType = "Encounter"
-		case "performer", "general-practitioner":
+		case "performer", "general-practitioner", "requester", "asserter", "recorder", "results-interpreter":
 			targetType = "Practitioner"
-		case "organization":
+		case "organization", "partof", "manufacturer", "intended-dispenser":
 			targetType = "Organization"
 		}
 	}
@@ -218,6 +218,7 @@ var (
 		"family": true, "given": true, "name": true,
 		"address": true, "address-city": true, "address-state": true,
 		"address-postalcode": true, "address-country": true,
+		"phonetic": true, "lot-number": true, "series": true,
 	}
 	knownTokenSearchParams = map[string]bool{
 		"identifier": true, "gender": true, "active": true,
@@ -225,15 +226,26 @@ var (
 		"deceased": true, "status": true, "code": true,
 		"category": true, "type": true, "class": true,
 		"clinical-status": true, "verification-status": true,
+		"intent": true, "priority": true, "criticality": true,
+		"severity": true, "manifestation": true, "route": true,
+		"reason-code": true, "conclusion": true, "vaccine-code": true,
+		"status-reason": true, "target-disease": true,
+		"intended-performertype": true, "address-use": true,
 	}
 	knownRefSearchParams = map[string]bool{
 		"organization": true, "general-practitioner": true,
 		"subject": true, "patient": true, "encounter": true,
 		"performer": true, "asserter": true, "recorder": true,
-		"participant": true,
+		"participant": true, "requester": true, "medication": true,
+		"intended-dispenser": true, "intended-performer": true,
+		"based-on": true, "location": true, "part-of": true, "partof": true,
+		"reason-reference": true, "result": true, "results-interpreter": true,
+		"specimen": true, "media": true, "manufacturer": true,
+		"reaction": true, "endpoint": true, "instantiates-canonical": true,
 	}
 	knownDateSearchParams = map[string]bool{
 		"birthdate": true, "date": true, "onset-date": true,
+		"authoredon": true, "issued": true, "last-date": true,
 	}
 	knownQuantitySearchParams = map[string]bool{
 		"value-quantity":           true,
@@ -446,4 +458,17 @@ func ParseIfNoneExist(tenant, resType, rawHeader string) (SearchParams, error) {
 	params.Count = 2
 	params.Offset = 0
 	return params, nil
+}
+
+// HasSearchCriteria returns true if SearchParams contains at least one filter criterion.
+func HasSearchCriteria(p SearchParams) bool {
+	return p.ID != "" ||
+		len(p.Strings) > 0 ||
+		len(p.Tokens) > 0 ||
+		len(p.Dates) > 0 ||
+		len(p.DateFilters) > 0 ||
+		len(p.Quantities) > 0 ||
+		len(p.QuantityFilters) > 0 ||
+		len(p.References) > 0 ||
+		len(p.Chained) > 0
 }

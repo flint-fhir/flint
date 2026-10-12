@@ -19,3 +19,9 @@ inputs:
       - proto/google/fhir/proto/r4/core/resources/observation.proto
       - proto/google/fhir/proto/r4/core/resources/condition.proto
       - proto/google/fhir/proto/r4/core/resources/practitioner.proto
+      - proto/google/fhir/proto/r4/core/resources/medication_request.proto
+      - proto/google/fhir/proto/r4/core/resources/allergy_intolerance.proto
+      - proto/google/fhir/proto/r4/core/resources/procedure.proto
+      - proto/google/fhir/proto/r4/core/resources/diagnostic_report.proto
+      - proto/google/fhir/proto/r4/core/resources/immunization.proto
+      - proto/google/fhir/proto/r4/core/resources/organization.proto
