@@ -126,6 +126,23 @@ func TestSecurityContext_Allows(t *testing.T) {
 	assert.False(t, auth.Allows(sc, "Encounter", auth.ActionRead))
 
 	assert.True(t, auth.IsPatientRestricted(sc))
+
+	// A token with patient/* scopes is still considered patient-restricted even if patient_id claim is missing
+	scMissingPatientID := &authv1.SecurityContext{
+		Subject:   "user-no-patient-claim",
+		PatientId: "",
+		Scopes:    auth.ParseScopes("patient/Patient.rs patient/Observation.rs"),
+	}
+	assert.True(t, auth.IsPatientRestricted(scMissingPatientID))
+
+	// A token with only user/* or system/* scopes and no patient_id is NOT patient-restricted
+	scSystem := &authv1.SecurityContext{
+		Subject:   "sys-worker",
+		PatientId: "",
+		Scopes:    auth.ParseScopes("user/Patient.rs system/Observation.cruds"),
+	}
+	assert.False(t, auth.IsPatientRestricted(scSystem))
+	assert.False(t, auth.IsPatientRestricted(nil))
 }
 
 func TestOIDCValidator_EndToEnd(t *testing.T) {

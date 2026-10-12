@@ -56,6 +56,8 @@ func DenormalizeProtoJSONToFHIRJSON(md protoreflect.MessageDescriptor, resType s
 	}
 	if md != nil {
 		denormalizeMessageMap(md, m)
+	} else {
+		denormalizeUntypedMap(m)
 	}
 	if resType != "" {
 		m["resourceType"] = resType
@@ -320,6 +322,9 @@ func normalizeChoiceField(fields protoreflect.FieldDescriptors, m map[string]any
 		}
 		choiceFieldJSON := strings.ToLower(suffix[:1]) + suffix[1:]
 		choiceMsgDesc := fd.Message()
+		if choiceMsgDesc.Oneofs().ByName("choice") == nil {
+			continue
+		}
 		subFD := findFieldDescriptor(choiceMsgDesc.Fields(), choiceFieldJSON)
 		if subFD == nil && choiceFieldJSON == "string" {
 			// Also try "stringValue" for "String" choice in google/fhir
@@ -371,7 +376,7 @@ func denormalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) 
 			if choiceMap, ok := val.(map[string]any); ok {
 				for subKey, subVal := range choiceMap {
 					subFD := findFieldDescriptor(msgDesc.Fields(), subKey)
-					if subFD != nil && subFD.Kind() == protoreflect.MessageKind {
+					if subFD != nil && subFD.Kind() == protoreflect.MessageKind && subFD.ContainingOneof() != nil && subFD.ContainingOneof().Name() == "choice" {
 						denormSub := denormalizeSingleValue(subFD.Message(), subVal)
 						suffixName := subFD.JSONName()
 						if suffixName == "stringValue" {
@@ -405,6 +410,83 @@ func denormalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) 
 			delete(m, key)
 			m[outKey] = denormVal
 		}
+	}
+}
+
+var untypedChoiceContainers = map[string]bool{
+	"onset":         true,
+	"abatement":     true,
+	"effective":     true,
+	"value":         true,
+	"deceased":      true,
+	"multipleBirth": true,
+}
+
+func denormalizeUntypedMap(m map[string]any) {
+	if m == nil {
+		return
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	for _, k := range keys {
+		val, exists := m[k]
+		if !exists || val == nil {
+			continue
+		}
+		if untypedChoiceContainers[k] {
+			if choiceMap, ok := val.(map[string]any); ok && choiceMap["value"] == nil && choiceMap["valueUs"] == nil {
+				flattened := false
+				for subKey, subVal := range choiceMap {
+					if subKey == "id" || subKey == "extension" || len(subKey) == 0 {
+						continue
+					}
+					suffixName := subKey
+					if suffixName == "stringValue" {
+						suffixName = "string"
+					}
+					flatKey := k + strings.ToUpper(suffixName[:1]) + suffixName[1:]
+					delete(m, k)
+					m[flatKey] = denormalizeUntypedValue(subVal)
+					flattened = true
+					break
+				}
+				if flattened {
+					continue
+				}
+			}
+		}
+		outKey := k
+		if k == "classValue" || k == "class_value" {
+			outKey = "class"
+		}
+		denorm := denormalizeUntypedValue(val)
+		if outKey != k {
+			delete(m, k)
+		}
+		m[outKey] = denorm
+	}
+}
+
+func denormalizeUntypedValue(val any) any {
+	switch v := val.(type) {
+	case map[string]any:
+		if formatted := formatProtoTemporalToISO(v); formatted != "" {
+			return formatted
+		}
+		if rawVal, hasVal := v["value"]; hasVal && len(v) == 1 {
+			return rawVal
+		}
+		denormalizeUntypedMap(v)
+		return v
+	case []any:
+		for i, elem := range v {
+			v[i] = denormalizeUntypedValue(elem)
+		}
+		return v
+	default:
+		return val
 	}
 }
 

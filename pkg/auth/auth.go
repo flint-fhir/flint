@@ -80,9 +80,21 @@ func ScopeMatches(s *authv1.SmartScope, resType string, action authv1.Action) bo
 	return false
 }
 
-// IsPatientRestricted returns true if the token is scoped to a specific patient compartment.
+// IsPatientRestricted returns true if the token is scoped to a specific patient compartment
+// (either via an explicit patient_id claim or because it carries patient/* SMART scopes).
 func IsPatientRestricted(sc *authv1.SecurityContext) bool {
-	return sc != nil && sc.GetPatientId() != ""
+	if sc == nil {
+		return false
+	}
+	if strings.TrimSpace(sc.GetPatientId()) != "" {
+		return true
+	}
+	for _, s := range sc.GetScopes() {
+		if s.GetContext() == ScopeContextPatient {
+			return true
+		}
+	}
+	return false
 }
 
 // ParseScopes parses a space-delimited string of OAuth2/SMART scopes into proto SmartScopes.

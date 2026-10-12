@@ -116,16 +116,19 @@ Inspect service endpoints:
 * **Garage S3 Console**: [http://localhost:9001](http://localhost:9001)
 * **Iceberg REST Catalog**: [http://localhost:8181](http://localhost:8181)
 
-### 3. Build & Run Flint
+### 3. Build, Run & Seed Clinical Data
 
 ```bash
-# Build flintd, worker, and loadtest binaries
+# Build flintd, worker, seed, and loadtest binaries
 task build
 
-# Run the Flint FHIR REST server
+# Run the Flint FHIR REST server (automatically applies SQL migrations on startup)
 task run
 
-# (In another terminal) Run the Temporal ingestion worker
+# (In another terminal) Seed a longitudinal clinical cohort (15 FHIR R4 resources in tenant "demo")
+task seed
+
+# (Optional) Run the Temporal ingestion worker
 task run-worker
 ```
 
@@ -165,6 +168,74 @@ e2e-recovery-post          3       0 {"gender":{"value":"male"},"id":{"value":"e
       e2e-wf-001          5       1 {"gender":{"value":"female"},"id":{"value":"e2e-wf-001"},"name":[{"family":"Wonderland"...}]}
       e2e-wf-002          3       0 {"gender":{"value":"male"},"id":{"value":"e2e-wf-002"},"name":[...]}
       e2e-wf-003          2       1 [tombstone]
+```
+
+---
+
+## Copy-Pasteable API Cookbook (`curl`)
+
+After running `task run` and `task seed`, you can explore the seeded `"demo"` tenant (`2 Practitioners`, `3 Patients`, `3 Encounters`, `2 Conditions`, `5 Observations`) directly from your terminal:
+
+```bash
+# 1. Assemble Alice Wonderland's complete longitudinal chart ($everything)
+curl -s "http://localhost:8080/fhir/r4/demo/Patient/pat-alice-001/\$everything" | jq .
+
+# 2. Search heart rate Observations > 70 bpm and include the referenced Patient
+curl -s "http://localhost:8080/fhir/r4/demo/Observation?code=8867-4&value-quantity=gt70&_include=Observation:patient" | jq .
+
+# 3. Chained search: find all Observations for patients with family name "Wonderland"
+curl -s "http://localhost:8080/fhir/r4/demo/Observation?patient.family=Wonderland" | jq .
+
+# 4. Date range search: find Encounters between 2026-01-01 and 2026-02-01
+curl -s "http://localhost:8080/fhir/r4/demo/Encounter?date=ge2026-01-01&date=le2026-02-01" | jq .
+
+# 5. Conditional Create (If-None-Exist): idempotently return existing Patient if MRN-1001 exists
+curl -i -X POST "http://localhost:8080/fhir/r4/demo/Patient" \
+  -H "Content-Type: application/fhir+json" \
+  -H "If-None-Exist: identifier=http://hospital.example.org/mrn|MRN-1001" \
+  -d '{"resourceType":"Patient","name":[{"family":"Wonderland","given":["Alice"]}]}'
+
+# 6. Optimistic concurrency control (If-Match) + Version History (_history)
+curl -i -X PUT "http://localhost:8080/fhir/r4/demo/Patient/pat-alice-001" \
+  -H "Content-Type: application/fhir+json" \
+  -H 'If-Match: W/"1"' \
+  -d '{"resourceType":"Patient","id":"pat-alice-001","active":true,"gender":"female","birthDate":"1985-04-12","name":[{"family":"Wonderland","given":["Alice","Marie"]}]}'
+
+curl -s "http://localhost:8080/fhir/r4/demo/Patient/pat-alice-001/_history" | jq .
+
+# 7. Transaction Bundle with intra-bundle urn:uuid: reference resolution
+curl -s -X POST "http://localhost:8080/fhir/r4/demo" \
+  -H "Content-Type: application/fhir+json" \
+  -d '{
+    "resourceType": "Bundle",
+    "type": "transaction",
+    "entry": [
+      {
+        "fullUrl": "urn:uuid:11111111-2222-3333-4444-555555555555",
+        "resource": {"resourceType": "Patient", "name": [{"family": " Curie", "given": ["Marie"]}], "gender": "female"},
+        "request": {"method": "POST", "url": "Patient"}
+      },
+      {
+        "fullUrl": "urn:uuid:66666666-7777-8888-9999-000000000000",
+        "resource": {
+          "resourceType": "Observation",
+          "status": "final",
+          "code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+          "subject": {"reference": "urn:uuid:11111111-2222-3333-4444-555555555555"},
+          "valueQuantity": {"value": 68, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+        },
+        "request": {"method": "POST", "url": "Observation"}
+      }
+    ]
+  }' | jq .
+
+# 8. Validate a FHIR R4 resource without persisting ($validate)
+curl -s -X POST "http://localhost:8080/fhir/r4/demo/Patient/\$validate" \
+  -H "Content-Type: application/fhir+json" \
+  -d '{"resourceType":"Patient","gender":"female","birthDate":"1990-05-15","name":[{"family":"Doe"}]}' | jq .
+
+# 9. Query HIPAA / ONC Security AuditEvents
+curl -s "http://localhost:8080/fhir/r4/demo/AuditEvent?patient=pat-alice-001&_count=5" | jq .
 ```
 
 ---
@@ -222,11 +293,11 @@ Flint validates incoming FHIR resources prior to persistence and exposes standar
 
 ### Advanced FHIR Search Engine
 Flint implements high-performance relational search against the covering `spidx_*` index tables:
-* **Date Range Queries**: Supports FHIR prefix comparators (`eq`, `ne`, `lt`, `le`, `gt`, `ge`, `sa`, `eb`, `ap`) over `spidx_date` timestamps:
+* **Date Range Queries**: Supports FHIR prefix comparators (`eq`, `ne`, `lt`, `le`, `gt`, `ge`, `sa`, `eb`, `ap`) and multi-value intersections over `spidx_date` timestamps:
   ```http
-  GET /fhir/r4/tenant-a/Patient?birthdate=ge1980-01-01
+  GET /fhir/r4/tenant-a/Patient?birthdate=ge1980-01-01&birthdate=le1995-12-31
   ```
-* **Quantity Queries**: Supports comparator prefixes (`gt`, `lt`, `ge`, `le`, `eq`), systems, and units over `spidx_quantity`:
+* **Quantity Queries**: Supports comparator prefixes (`gt`, `lt`, `ge`, `le`, `eq`), systems, units, and multi-value ranges over `spidx_quantity`:
   ```http
   GET /fhir/r4/tenant-a/Observation?value-quantity=gt70|http://unitsofmeasure.org|kg
   ```
@@ -235,9 +306,10 @@ Flint implements high-performance relational search against the covering `spidx_
   GET /fhir/r4/tenant-a/Observation?code=29463-7&_include=Observation:patient
   GET /fhir/r4/tenant-a/Patient?family=smith&_revinclude=Observation:patient
   ```
-* **Chained Searches**: Joins reference indexes with target parameter tables:
+* **Chained Searches**: Joins reference indexes with target parameter tables across string, token, date, and quantity parameters:
   ```http
   GET /fhir/r4/tenant-a/Observation?patient.name=smith
+  GET /fhir/r4/tenant-a/Observation?patient.identifier=http://hospital.example.org/mrn|MRN-1001
   ```
 
 ---
@@ -261,17 +333,18 @@ flowchart LR
 
 ### Decoupled `TokenValidator` Interface (`pkg/auth`)
 Flint protects endpoints through a pluggable interface:
-* **`OIDCValidator`**: Standard OIDC and JWKS caching with RS256/ES256 verification (compatible with Okta, Azure AD, Keycloak, Auth0).
+* **`OIDCValidator`**: Standard OIDC and JWKS caching with RS256/ES256 verification and refresh rate-limiting (compatible with Okta, Azure AD, Keycloak, Auth0).
 * **`ZitadelValidator`**: Specialized decorator mapping Zitadel organization domains to Flint tenant schemas, user metadata to patient IDs, and project roles to clinical SMART scopes.
-* **`MockTokenValidator`**: In-memory RSA keypair signer and validator enabling sub-millisecond, zero-dependency unit tests.
+* **`MockTokenValidator`**: In-memory ECDSA P-256 keypair signer and validator enabling sub-millisecond, zero-dependency unit tests.
 
 ### Security Guarantees
-1. **SMART v1 & v2 Scopes**: Granular action enforcement (`c`, `r`, `u`, `d`, `s`) across patient, user, and system tiers.
+1. **SMART v1 & v2 Scopes**: Granular action enforcement (`c`, `r`, `u`, `d`, `s`) across patient, user, and system tiers, including `_include`, `_revinclude`, and `Patient/$everything`.
 2. **Tenant Boundary Enforcement**: Rejects cross-tenant token access with HTTP 403.
-3. **Patient Compartment Isolation**: When a token carries a `patient_id` launch claim:
-   * Reading records of another patient returns `403 Forbidden`.
-   * Queries with mismatched `patient` or `subject` parameters return `403 Forbidden`.
-4. **HIPAA / ONC Security Audit Logging (`AuditEvent`)**: Every clinical REST interaction (`read`, `vread`, `update`, `delete`, `history-instance`, `create`, `search-type`, `batch`, `validate`) and security rejection (`401 Unauthorized` / `403 Forbidden`) is recorded in `fhir_audit_event` with actor identity, patient compartment, client IP, and target entity reference, and is queryable via `GET /fhir/r4/{tenant}/AuditEvent`.
+3. **Patient Compartment Isolation**: When a token carries `patient/*` scopes or a `patient_id` launch claim:
+   * Missing `patient_id` claims on `patient/*` tokens fail closed with `403 Forbidden`.
+   * Reading, searching, or mutating records of another patient returns `403 Forbidden`.
+   * Patient-scoped tokens are blocked from mutating shared non-compartment resources such as `Practitioner`.
+4. **HIPAA / ONC Security Audit Logging (`AuditEvent`)**: Every clinical REST interaction (`read`, `vread`, `update`, `delete`, `history-instance`, `create`, `search-type`, `batch`, `everything`, `validate`) and security rejection (`401 Unauthorized` / `403 Forbidden`) is recorded in `fhir_audit_event` with actor identity, patient compartment attribution, client IP, and target entity reference, and is queryable via `GET /fhir/r4/{tenant}/AuditEvent`.
 
 ### Environment Configuration
 ```bash
@@ -301,19 +374,19 @@ Flint leverages [Hegel](https://hegel.dev) (`hegel.dev/go/hegel`) for type-drive
 
 ## Clinical Dimensional Lakehouse (`analytics/` — SQLMesh on DuckDB / Iceberg)
 
-Flint ships with an out-of-the-box **SQLMesh** analytical pipeline (`analytics/`) that transforms raw AutoMQ Table Topic Iceberg CDC streams (`fhir.fhir_patient`, `fhir.fhir_encounter`, `fhir.fhir_condition`, `fhir.fhir_observation`) into a Kimball healthcare dimensional model:
+Flint ships with an out-of-the-box **SQLMesh** analytical pipeline (`analytics/`) that transforms raw AutoMQ Table Topic Iceberg CDC streams (`fhir_raw.patient`, `fhir_raw.encounter`, `fhir_raw.condition`, `fhir_raw.observation`) into a Kimball healthcare dimensional model:
 
-* **Staging Layer (`flint_analytics.stg_*`)**:
-  * Deduplicates CDC events by `(tenant_id, res_id)` using the latest Kafka `(partition, offset)`.
-  * Filters out hard/soft delete tombstones (`op = 'D'`).
-  * Supports dual extraction across `google/fhir` wrapped JSON (`{"value": "..."}`) and standard HL7 FHIR R4 JSON.
-* **Dimensional & Fact Layer (`flint_analytics.dim_*`, `flint_analytics.fct_*`)**:
-  * `dim_patient`: Demographics, full name, birth date, calculated age, postal code, and active flag.
-  * `fct_encounter`: Encounter class, type code/system, period timestamps, and calculated length-of-stay (`length_of_stay_hours`).
-  * `fct_condition`: SNOMED/ICD-10 condition codes, clinical/verification status, `is_active_condition` flag, and onset date.
-  * `fct_observation`: LOINC observation codes, category, numeric `value_quantity`, `value_unit`, `value_code`, and effective timestamps.
-* **Longitudinal Patient 360 Mart (`flint_analytics.mart_patient_360`)**:
-  * Single-row-per-patient population health summary aggregating total/inpatient encounters, cumulative length of stay, active condition counts, and latest vital sign/lab timestamps.
+* **Staging Layer (`flint_stg.stg_*`)**:
+  * Deduplicates multi-tenant CDC events by `(tenant_id, res_id)` (normalizing `{tenant_id}/{res_id}` Kafka keys) using the latest `_kafka_offset`.
+  * Filters out hard/soft delete tombstones (`op = 'D'` or `[tombstone]`).
+  * Supports dual extraction across `google/fhir` wrapped JSON (`{"value": "..."}`) and standard flat HL7 FHIR R4 JSON.
+* **Dimensional & Fact Layer (`flint_marts.dim_*`, `flint_marts.fct_*`)**:
+  * `dim_patient`: Demographics, full name, birth date, gender, postal code, and active flag.
+  * `fct_encounter`: Encounter class (`AMB`, `IMP`), status, period timestamps, and calculated length-of-stay (`los_hours`).
+  * `fct_condition`: SNOMED/ICD-10 condition codes, clinical/verification status, and onset date.
+  * `fct_observation`: LOINC observation codes, status, numeric `value_quantity`, `value_unit`, and effective timestamps.
+* **Longitudinal Patient 360 Mart (`flint_marts.mart_patient_360`)**:
+  * Single-row-per-patient population health summary aggregating total encounters, latest encounter timestamp, total/active condition counts, and observation counts/timestamps.
 
 Run the hermetic SQLMesh unit test suite locally via `uv` and DuckDB:
 ```bash
@@ -327,11 +400,12 @@ task test-analytics
 ```
 flint/
 ├── analytics/            # SQLMesh clinical dimensional lakehouse models & DuckDB unit tests
-├── automq/               # Franz-go Kafka producer with CDC headers
-├── bin/                  # Compiled binaries (flintd, worker, loadtest)
+├── automq/               # Franz-go Kafka producer with tenant-scoped CDC keys & headers
+├── bin/                  # Compiled binaries (flintd, worker, seed, loadtest)
 ├── cmd/
 │   ├── flintd/           # FHIR REST HTTP server entrypoint
 │   ├── worker/           # Temporal ingestion worker entrypoint
+│   ├── seed/             # Deterministic clinical cohort seeder (task seed)
 │   ├── loadtest/         # High-throughput load testing harness
 │   └── e2e/              # End-to-end integration & restart recovery tests
 ├── deploy/
@@ -347,12 +421,12 @@ flint/
 ├── pkg/
 │   ├── audit/            # HIPAA/ONC FHIR R4 AuditEvent classification, serialization & recorders
 │   ├── auth/             # TokenValidator, OIDC/Zitadel, and Hegel property tests
-│   ├── fhirutil/         # Protobuf nil-safe accessors & helpers
+│   ├── fhirutil/         # Bidirectional flat FHIR R4 JSON <-> google/fhir protojson codec & helpers
 │   └── validation/       # FHIR StructureDefinition, ValueSet, and cardinality validator
 ├── proto/
 │   ├── flint/auth/v1/    # Canonical Protobuf schemas for auth & security context
 │   └── google/fhir/      # Vendored google/fhir R4 protocol buffers
-├── server/               # stdlib HTTP router, Bundle engine, SMART discovery, auth middleware
+├── server/               # stdlib HTTP router, Bundle engine, SMART discovery, auth/audit middleware
 ├── store/postgres/       # Operational store, Atlas SQL migrations, spidx_* tables
 ├── flake.nix             # Hermetic Nix development environment
 ├── lefthook.yml          # Git pre-commit & pre-push hooks

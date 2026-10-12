@@ -219,6 +219,10 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 
 		// Per-entry SMART scope verification
 		if hasSecCtx {
+			if auth.IsPatientRestricted(secCtx) && cleanID(secCtx.GetPatientId()) == "" {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token is missing required patient_id claim")
+				return
+			}
 			var requiredAction auth.Action
 			switch method {
 			case "POST":
@@ -232,6 +236,15 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 			if !auth.Allows(secCtx, resType, requiredAction) {
 				msg := fmt.Sprintf("entry[%d]: insufficient scope for %s on %s", i, method, resType)
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
+				continue
+			}
+			if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
+				msg := fmt.Sprintf("entry[%d]: patient-scoped token (%s) cannot %s non-compartment resource %s", i, secCtx.GetPatientId(), method, resType)
 				if isTransaction {
 					writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
 					return

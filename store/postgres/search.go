@@ -560,7 +560,7 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 	whereConds := []string{
 		"r.tenant_id = $1",
 		"r.is_deleted = FALSE",
-		"NOT (r.res_type = 'Patient' AND r.res_id = $2)",
+		"r.res_type != 'Patient'",
 		`(
 			EXISTS (
 				SELECT 1 FROM spidx_reference rf
@@ -578,17 +578,20 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 				  AND rf.target_type = r.res_type
 				  AND rf.target_id = r.res_id
 			)
-			OR EXISTS (
-				SELECT 1 FROM spidx_reference rf_clin
-				JOIN spidx_reference rf_pat
-				  ON rf_pat.tenant_id = rf_clin.tenant_id
-				 AND rf_pat.res_type = rf_clin.res_type
-				 AND rf_pat.res_id = rf_clin.res_id
-				WHERE rf_clin.tenant_id = r.tenant_id
-				  AND rf_clin.target_type = r.res_type
-				  AND rf_clin.target_id = r.res_id
-				  AND rf_pat.target_id = $2
-				  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+			OR (
+				r.res_type NOT IN ('Patient', 'Condition', 'Encounter', 'Observation')
+				AND EXISTS (
+					SELECT 1 FROM spidx_reference rf_clin
+					JOIN spidx_reference rf_pat
+					  ON rf_pat.tenant_id = rf_clin.tenant_id
+					 AND rf_pat.res_type = rf_clin.res_type
+					 AND rf_pat.res_id = rf_clin.res_id
+					WHERE rf_clin.tenant_id = r.tenant_id
+					  AND rf_clin.target_type = r.res_type
+					  AND rf_clin.target_id = r.res_id
+					  AND rf_pat.target_id = $2
+					  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+				)
 			)
 		)`,
 	}

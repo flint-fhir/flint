@@ -33,14 +33,28 @@ func RunMigrations(ctx context.Context, db *sql.DB) error {
 	}
 	sort.Strings(names)
 
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext('flint_schema_migrations'))"); err != nil {
+		return fmt.Errorf("acquire migration advisory lock: %w", err)
+	}
+
 	for _, name := range names {
 		sqlBytes, err := MigrationsFS.ReadFile("migrations/" + name)
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", name, err)
 		}
-		if _, err := db.ExecContext(ctx, string(sqlBytes)); err != nil {
+		if _, err := tx.ExecContext(ctx, string(sqlBytes)); err != nil {
 			return fmt.Errorf("apply migration %s: %w", name, err)
 		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migrations: %w", err)
 	}
 	return nil
 }

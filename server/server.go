@@ -241,15 +241,23 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 
 	count := 100
 	offset := 0
-	if v := r.URL.Query().Get("_count"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			count = n
+	if v := strings.TrimSpace(r.URL.Query().Get("_count")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _count parameter %q: must be a positive integer", v))
+			return
 		}
+		count = n
 	}
-	if v := r.URL.Query().Get("_offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			offset = n
+	if v := strings.TrimSpace(r.URL.Query().Get("_offset")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _offset parameter %q: must be a non-negative integer", v))
+			return
 		}
+		offset = n
 	}
 
 	records, total, err := s.store.ListResourceHistory(r.Context(), tenant, resType, resID, count, offset)
@@ -494,9 +502,16 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func validateAndScopeIfNoneExistForPatient(condParams *postgres.SearchParams, resType, allowedPatientID, rawPatientID string) error {
+	if allowedPatientID == "" {
+		return fmt.Errorf("patient-scoped token is missing required patient_id claim")
+	}
 	if strings.EqualFold(resType, "Patient") {
-		if condParams.ID != "" && cleanID(condParams.ID) != allowedPatientID {
-			return fmt.Errorf("patient-scoped token (%s) cannot evaluate If-None-Exist for patient %s", rawPatientID, condParams.ID)
+		if condParams.ID != "" {
+			for part := range strings.SplitSeq(condParams.ID, ",") {
+				if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+					return fmt.Errorf("patient-scoped token (%s) cannot evaluate If-None-Exist for patient %s", rawPatientID, trimmed)
+				}
+			}
 		}
 		condParams.ID = allowedPatientID
 		return nil
@@ -505,18 +520,36 @@ func validateAndScopeIfNoneExistForPatient(condParams *postgres.SearchParams, re
 		if condParams.References == nil {
 			condParams.References = make(map[string]string)
 		}
-		if pRef := condParams.References["patient"]; pRef != "" && cleanID(pRef) != allowedPatientID {
-			return fmt.Errorf("patient-scoped token (%s) cannot evaluate If-None-Exist for patient %s", rawPatientID, pRef)
+		if pRef := condParams.References["patient"]; pRef != "" {
+			for part := range strings.SplitSeq(pRef, ",") {
+				if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+					return fmt.Errorf("patient-scoped token (%s) cannot evaluate If-None-Exist for patient %s", rawPatientID, trimmed)
+				}
+			}
 		}
-		if sRef := condParams.References["subject"]; sRef != "" && cleanID(sRef) != allowedPatientID {
-			return fmt.Errorf("patient-scoped token (%s) cannot evaluate If-None-Exist for subject %s", rawPatientID, sRef)
+		if sRef := condParams.References["subject"]; sRef != "" {
+			for part := range strings.SplitSeq(sRef, ",") {
+				if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+					return fmt.Errorf("patient-scoped token (%s) cannot evaluate If-None-Exist for subject %s", rawPatientID, trimmed)
+				}
+			}
+		}
+		for _, ch := range condParams.Chained {
+			if (ch.RefParam == "patient" || ch.RefParam == "subject") && ch.TargetParam == "_id" {
+				for part := range strings.SplitSeq(ch.Value, ",") {
+					if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+						return fmt.Errorf("patient-scoped token (%s) cannot evaluate If-None-Exist for %s._id=%s", rawPatientID, ch.RefParam, trimmed)
+					}
+				}
+			}
 		}
 		condParams.References["patient"] = "Patient/" + allowedPatientID
 		if condParams.References["subject"] != "" {
 			condParams.References["subject"] = "Patient/" + allowedPatientID
 		}
+		return nil
 	}
-	return nil
+	return fmt.Errorf("patient-scoped token (%s) cannot evaluate If-None-Exist on non-compartment resource %s", rawPatientID, resType)
 }
 
 // handleUpdate handles PUT /{resourceType}/{id} — update or create-on-update a FHIR resource.
@@ -827,15 +860,23 @@ func (s *Server) handleSearchAuditEvents(w http.ResponseWriter, r *http.Request)
 			params.EntityID = entityRef
 		}
 	}
-	if v := q.Get("_count"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			params.Count = n
+	if v := strings.TrimSpace(q.Get("_count")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _count parameter %q: must be a positive integer", v))
+			return
 		}
+		params.Count = n
 	}
-	if v := q.Get("_offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			params.Offset = n
+	if v := strings.TrimSpace(q.Get("_offset")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _offset parameter %q: must be a non-negative integer", v))
+			return
 		}
+		params.Offset = n
 	}
 
 	var records []postgres.AuditRecord
@@ -893,6 +934,17 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	if hasSecCtx {
+		for _, rt := range params.ResourceTypes {
+			if !auth.Allows(secCtx, rt, auth.ActionRead) && !auth.Allows(secCtx, rt, auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope for $everything _type %s", rt))
+				return
+			}
+		}
+	}
+
 	if sinceRaw := strings.TrimSpace(q.Get("_since")); sinceRaw != "" {
 		dOp, err := postgres.ParseDateOp(sinceRaw)
 		if err != nil {
@@ -904,15 +956,23 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		params.Since = &t
 	}
 
-	if v := q.Get("_count"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			params.Count = n
+	if v := strings.TrimSpace(q.Get("_count")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _count parameter %q: must be a positive integer", v))
+			return
 		}
+		params.Count = n
 	}
-	if v := q.Get("_offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-			params.Offset = n
+	if v := strings.TrimSpace(q.Get("_offset")); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _offset parameter %q: must be a non-negative integer", v))
+			return
 		}
+		params.Offset = n
 	}
 
 	sr, err := s.store.PatientEverything(r.Context(), params)
@@ -930,6 +990,14 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		s.logger.Error("patient $everything", "error", err, "patient", patientID)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to assemble Patient/$everything")
 		return
+	}
+
+	if hasSecCtx && len(sr.Includes) > 0 {
+		beforeInc := len(sr.Includes)
+		sr.Includes = s.filterAuthorizedIncludes(r, tenant, secCtx, sr.Includes)
+		if removed := beforeInc - len(sr.Includes); removed > 0 {
+			sr.Total = max(len(sr.Matches)+len(sr.Includes), sr.Total-removed)
+		}
 	}
 
 	s.writeSearchSetBundle(w, sr)

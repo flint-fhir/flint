@@ -42,6 +42,8 @@ tasks:
       - kubectl create namespace {{.NAMESPACE}} --dry-run=client -o yaml | kubectl apply -f -
       - kubectl create configmap postgres-init -n {{.NAMESPACE}}
           --from-file=001_core_schema.sql=store/postgres/migrations/001_core_schema.sql
+          --from-file=002_resource_history.sql=store/postgres/migrations/002_resource_history.sql
+          --from-file=003_audit_event.sql=store/postgres/migrations/003_audit_event.sql
           --dry-run=client -o yaml | kubectl apply -f -
       - kubectl apply -f deploy/k8s/postgres.yaml
       - echo "Waiting for Postgres..."
@@ -91,11 +93,17 @@ tasks:
       - go test ./ingest/workflow/ -v -count=1
 
   build:
-    desc: Build flintd server, worker, and loadtest binaries
+    desc: Build flintd server, worker, seed, and loadtest binaries
     cmds:
       - go build -o bin/flintd ./cmd/flintd/
       - go build -o bin/worker ./cmd/worker/
+      - go build -o bin/seed ./cmd/seed/
       - go build -o bin/loadtest ./cmd/loadtest/
+
+  seed:
+    desc: Seed a realistic longitudinal clinical cohort into Flint (tenant=demo)
+    cmds:
+      - go run ./cmd/seed {{.CLI_ARGS}}
 
   bench-store:
     desc: Run load test against Postgres operational store directly
@@ -147,6 +155,8 @@ tasks:
       - kubectl exec -it -n {{.NAMESPACE}} postgres-0 -- psql -U flint
 
   migrate:
-    desc: Run schema migration against Postgres
+    desc: Run schema migrations against Postgres
     cmds:
       - psql "{{.PG_DSN}}" -f store/postgres/migrations/001_core_schema.sql
+      - psql "{{.PG_DSN}}" -f store/postgres/migrations/002_resource_history.sql
+      - psql "{{.PG_DSN}}" -f store/postgres/migrations/003_audit_event.sql

@@ -183,3 +183,30 @@ func TestParseChainedParam(t *testing.T) {
 		assert.False(t, ok)
 	})
 }
+
+func TestParseIfNoneExist(t *testing.T) {
+	t.Run("Valid If-None-Exist query", func(t *testing.T) {
+		sp, err := postgres.ParseIfNoneExist("t1", "Patient", "Patient?identifier=http://mrn|123")
+		require.NoError(t, err)
+		assert.Equal(t, "http://mrn|123", sp.Tokens["identifier"])
+		assert.Equal(t, 2, sp.Count)
+	})
+
+	t.Run("Rejects multi-value reference or _id smuggling, comma-separated references, and _include", func(t *testing.T) {
+		invalidHeaders := []string{
+			"",
+			"Observation?code=8867-4", // mismatched prefix for Patient
+			"patient=pat-1&patient=pat-2",
+			"subject=Patient/pat-1,Patient/pat-2",
+			"_id=pat-1&_id=pat-2",
+			"_id=pat-1,pat-2",
+			"identifier=123&_include=Patient:organization",
+			"identifier=123&_revinclude=Observation:patient",
+			"identifier=",
+		}
+		for _, h := range invalidHeaders {
+			_, err := postgres.ParseIfNoneExist("t1", "Patient", h)
+			assert.Error(t, err, "expected ParseIfNoneExist to reject %q", h)
+		}
+	})
+}

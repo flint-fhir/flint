@@ -418,8 +418,24 @@ func ParseIfNoneExist(tenant, resType, rawHeader string) (SearchParams, error) {
 		return SearchParams{}, fmt.Errorf("If-None-Exist query %q contains no search parameters", rawHeader)
 	}
 	for k, vals := range q {
-		if strings.TrimSpace(k) == "" || len(vals) == 0 || strings.TrimSpace(vals[0]) == "" {
+		if strings.TrimSpace(k) == "" || len(vals) == 0 {
 			return SearchParams{}, fmt.Errorf("If-None-Exist query %q contains empty parameter key or value", rawHeader)
+		}
+		if k == "_include" || k == "_revinclude" {
+			return SearchParams{}, fmt.Errorf("If-None-Exist query %q cannot contain %s", rawHeader, k)
+		}
+		for _, v := range vals {
+			if strings.TrimSpace(v) == "" {
+				return SearchParams{}, fmt.Errorf("If-None-Exist query %q contains empty parameter value for %q", rawHeader, k)
+			}
+		}
+		if len(vals) > 1 && !knownDateSearchParams[k] && !knownQuantitySearchParams[k] {
+			if ch, ok := ParseChainedParam(k, vals[0]); !ok || (ch.ParamType != "date" && ch.ParamType != "quantity") {
+				return SearchParams{}, fmt.Errorf("If-None-Exist query %q contains multiple values for non-range parameter %q", rawHeader, k)
+			}
+		}
+		if (k == "_id" || knownRefSearchParams[k]) && strings.Contains(vals[0], ",") {
+			return SearchParams{}, fmt.Errorf("If-None-Exist query %q cannot contain comma-separated values for %q", rawHeader, k)
 		}
 	}
 	if err := ValidateSearchQuery(q); err != nil {
