@@ -579,7 +579,7 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 				  AND rf.target_id = r.res_id
 			)
 			OR (
-				r.res_type NOT IN ('Patient', 'Condition', 'Encounter', 'Observation')
+				r.res_type NOT IN ('Patient', 'Condition', 'Encounter', 'Observation', 'MedicationRequest', 'AllergyIntolerance', 'Procedure', 'DiagnosticReport', 'Immunization')
 				AND EXISTS (
 					SELECT 1 FROM spidx_reference rf_clin
 					JOIN spidx_reference rf_pat
@@ -646,10 +646,10 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 }
 
 // IsPatientCompartmentResourceType returns true if the resource type is a clinical
-// resource scoped to the FHIR R4 Patient compartment (Condition, Encounter, Observation).
+// resource scoped to the FHIR R4 Patient compartment.
 func IsPatientCompartmentResourceType(resType string) bool {
 	switch resType {
-	case "Condition", "Encounter", "Observation":
+	case "Condition", "Encounter", "Observation", "MedicationRequest", "AllergyIntolerance", "Procedure", "DiagnosticReport", "Immunization":
 		return true
 	default:
 		return false

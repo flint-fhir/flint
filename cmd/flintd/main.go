@@ -16,12 +16,6 @@ import (
 
 	_ "github.com/lib/pq"
 
-	condpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/condition_go_proto"
-	encpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/encounter_go_proto"
-	obspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto"
-	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
-	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
-
 	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/server"
@@ -56,12 +50,8 @@ func main() {
 	store := postgres.New(db)
 	srv := server.New(store, logger)
 
-	// Register known FHIR resource types
-	srv.RegisterResourceType("Patient", &patpb.Patient{})
-	srv.RegisterResourceType("Condition", &condpb.Condition{})
-	srv.RegisterResourceType("Encounter", &encpb.Encounter{})
-	srv.RegisterResourceType("Observation", &obspb.Observation{})
-	srv.RegisterResourceType("Practitioner", &pracpb.Practitioner{})
+	// Register all supported US Core / USCDI v3 FHIR R4 resource types
+	server.RegisterDefaultResourceTypes(srv)
 
 	// Optional AutoMQ / Kafka CDC producer configuration
 	if rawBrokers := strings.TrimSpace(os.Getenv("FLINT_AUTOMQ_BROKERS")); rawBrokers != "" {

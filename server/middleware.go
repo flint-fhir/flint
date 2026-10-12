@@ -213,38 +213,40 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						}
 					}
 
-				case http.MethodPut:
+				case http.MethodPut, http.MethodPatch:
 					if !auth.Allows(secCtx, resType, auth.ActionUpdate) {
 						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 							fmt.Sprintf("insufficient scope for update on %s", resType))
 						return
 					}
-					if len(parts) >= 5 && auth.IsPatientRestricted(secCtx) {
-						id := parts[4]
+					if auth.IsPatientRestricted(secCtx) {
 						if !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("patient-scoped token (%s) cannot update non-compartment resource %s",
 									secCtx.GetPatientId(), resType))
 							return
 						}
-						if strings.EqualFold(resType, "Patient") && cleanID(id) != cleanID(secCtx.GetPatientId()) {
-							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-								fmt.Sprintf("patient-scoped token (%s) cannot update patient %s",
-									secCtx.GetPatientId(), id))
-							return
-						}
-						if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
-							exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
-							if err != nil {
-								s.logger.Error("patient compartment check on PUT failed", "error", err, "type", resType, "id", id)
-								writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+						if len(parts) >= 5 {
+							id := parts[4]
+							if strings.EqualFold(resType, "Patient") && cleanID(id) != cleanID(secCtx.GetPatientId()) {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("patient-scoped token (%s) cannot update patient %s",
+										secCtx.GetPatientId(), id))
 								return
 							}
-							if exists && !allowed {
-								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-									fmt.Sprintf("patient-scoped token (%s) cannot update %s/%s belonging to another patient",
-										secCtx.GetPatientId(), resType, id))
-								return
+							if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+								exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
+								if err != nil {
+									s.logger.Error("patient compartment check on PUT/PATCH failed", "error", err, "type", resType, "id", id)
+									writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+									return
+								}
+								if exists && !allowed {
+									writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+										fmt.Sprintf("patient-scoped token (%s) cannot update %s/%s belonging to another patient",
+											secCtx.GetPatientId(), resType, id))
+									return
+								}
 							}
 						}
 					}
@@ -255,32 +257,34 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							fmt.Sprintf("insufficient scope for delete on %s", resType))
 						return
 					}
-					if len(parts) >= 5 && auth.IsPatientRestricted(secCtx) {
-						id := parts[4]
+					if auth.IsPatientRestricted(secCtx) {
 						if !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("patient-scoped token (%s) cannot delete non-compartment resource %s",
 									secCtx.GetPatientId(), resType))
 							return
 						}
-						if strings.EqualFold(resType, "Patient") && cleanID(id) != cleanID(secCtx.GetPatientId()) {
-							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-								fmt.Sprintf("patient-scoped token (%s) cannot delete patient %s",
-									secCtx.GetPatientId(), id))
-							return
-						}
-						if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
-							_, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
-							if err != nil {
-								s.logger.Error("patient compartment check on DELETE failed", "error", err, "type", resType, "id", id)
-								writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+						if len(parts) >= 5 {
+							id := parts[4]
+							if strings.EqualFold(resType, "Patient") && cleanID(id) != cleanID(secCtx.GetPatientId()) {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("patient-scoped token (%s) cannot delete patient %s",
+										secCtx.GetPatientId(), id))
 								return
 							}
-							if !allowed {
-								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-									fmt.Sprintf("patient-scoped token (%s) cannot delete %s/%s outside patient compartment",
-										secCtx.GetPatientId(), resType, id))
-								return
+							if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+								_, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
+								if err != nil {
+									s.logger.Error("patient compartment check on DELETE failed", "error", err, "type", resType, "id", id)
+									writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+									return
+								}
+								if !allowed {
+									writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+										fmt.Sprintf("patient-scoped token (%s) cannot delete %s/%s outside patient compartment",
+											secCtx.GetPatientId(), resType, id))
+									return
+								}
 							}
 						}
 					}
@@ -428,9 +432,9 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// On successful POST Create (201) or Conditional Create match (200), extract resource ID from Location header:
+		// On successful POST Create (201/200) or Conditional PUT/DELETE, extract resource ID from Location header:
 		// Location: /fhir/r4/{tenant}/{resourceType}/{id}
-		if r.Method == http.MethodPost && entityID == "" && (arw.statusCode == http.StatusCreated || arw.statusCode == http.StatusOK) {
+		if entityID == "" && (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete) && arw.statusCode < 400 {
 			if loc := arw.Header().Get("Location"); loc != "" {
 				locParts := strings.Split(strings.Trim(loc, "/"), "/")
 				if len(locParts) >= 5 && locParts[0] == "fhir" && locParts[1] == "r4" {

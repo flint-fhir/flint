@@ -31,18 +31,18 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 			Endpoint:      "/fhir/r4/{tenant}/{resourceType}",
 		},
 		{
-			Category:      "FHIR R4 CRUD & Versioning",
-			Capability:    "read, vread, create, update, delete, history-instance, ETag / If-Match CAS",
-			Specification: "HL7 FHIR R4 RESTful API (4.0.1)",
+			Category:      "FHIR R4 CRUD, Versioning & Patch",
+			Capability:    "read, vread, create, update, patch (RFC 6902 & Merge Patch), delete, history-instance, ETag / If-Match CAS",
+			Specification: "HL7 FHIR R4 RESTful API (4.0.1) & RFC 6902 / RFC 7396",
 			Status:        "Verified",
-			Endpoint:      "/fhir/r4/{tenant}/{resourceType}/{id}/_history/{vid}",
+			Endpoint:      "/fhir/r4/{tenant}/{resourceType}/{id}",
 		},
 		{
 			Category:      "Conditional Operations & Bundles",
-			Capability:    "If-None-Exist Conditional Create & ACID Transaction / Batch Bundles (urn:uuid:)",
-			Specification: "HL7 FHIR R4 Bundle & Conditional Create",
+			Capability:    "Conditional Create (If-None-Exist), Conditional Update, Conditional Delete & ACID Transaction / Batch Bundles",
+			Specification: "HL7 FHIR R4 Bundle & Conditional Operations",
 			Status:        "Verified",
-			Endpoint:      "/fhir/r4/{tenant}",
+			Endpoint:      "/fhir/r4/{tenant}/{resourceType}?identifier=...",
 		},
 		{
 			Category:      "Advanced Search Engine",
@@ -148,6 +148,67 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "phone", "type": "token"},
 			{"name": "address", "type": "string"},
 		},
+		"MedicationRequest": {
+			{"name": "code", "type": "token"},
+			{"name": "status", "type": "token"},
+			{"name": "intent", "type": "token"},
+			{"name": "category", "type": "token"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "encounter", "type": "reference"},
+			{"name": "requester", "type": "reference"},
+			{"name": "authoredon", "type": "date"},
+		},
+		"AllergyIntolerance": {
+			{"name": "code", "type": "token"},
+			{"name": "clinical-status", "type": "token"},
+			{"name": "verification-status", "type": "token"},
+			{"name": "category", "type": "token"},
+			{"name": "criticality", "type": "token"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "date", "type": "date"},
+		},
+		"Procedure": {
+			{"name": "code", "type": "token"},
+			{"name": "status", "type": "token"},
+			{"name": "category", "type": "token"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "encounter", "type": "reference"},
+			{"name": "performer", "type": "reference"},
+			{"name": "date", "type": "date"},
+		},
+		"DiagnosticReport": {
+			{"name": "code", "type": "token"},
+			{"name": "status", "type": "token"},
+			{"name": "category", "type": "token"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "encounter", "type": "reference"},
+			{"name": "result", "type": "reference"},
+			{"name": "date", "type": "date"},
+			{"name": "issued", "type": "date"},
+		},
+		"Immunization": {
+			{"name": "vaccine-code", "type": "token"},
+			{"name": "status", "type": "token"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "date", "type": "date"},
+			{"name": "lot-number", "type": "string"},
+		},
+		"Organization": {
+			{"name": "name", "type": "string"},
+			{"name": "identifier", "type": "token"},
+			{"name": "active", "type": "token"},
+			{"name": "type", "type": "token"},
+			{"name": "address", "type": "string"},
+			{"name": "address-city", "type": "string"},
+			{"name": "address-state", "type": "string"},
+			{"name": "address-postalcode", "type": "string"},
+			{"name": "partof", "type": "reference"},
+		},
 	}
 }
 
@@ -162,7 +223,11 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 
 	schemas := make(map[string]any)
 	defaultSchemas := validation.DefaultSchemas()
-	resOrder := []string{"Patient", "Condition", "Encounter", "Observation", "Practitioner"}
+	resOrder := []string{
+		"Patient", "Condition", "Encounter", "Observation", "Practitioner",
+		"MedicationRequest", "AllergyIntolerance", "Procedure", "DiagnosticReport",
+		"Immunization", "Organization",
+	}
 	seenRes := make(map[string]bool, len(resOrder))
 	for _, rt := range resOrder {
 		seenRes[rt] = true
@@ -514,6 +579,27 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					"412": map[string]any{"description": "Multiple matches for If-None-Exist"},
 				},
 			},
+			"put": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Conditional Update %s via search query parameters", rt),
+				"operationId": "conditionalUpdate" + rt,
+				"parameters":  queryParams,
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Updated single matching " + rt},
+					"201": map[string]any{"description": "Created new " + rt + " (zero matches)"},
+					"412": map[string]any{"description": "Precondition failed (multiple matches or If-Match conflict)"},
+				},
+			},
+			"delete": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Conditional Delete %s via search query parameters", rt),
+				"operationId": "conditionalDelete" + rt,
+				"parameters":  queryParams,
+				"responses": map[string]any{
+					"204": map[string]any{"description": "Deleted matching " + rt + " (or no-op if zero matches)"},
+					"412": map[string]any{"description": "Precondition failed (multiple matches)"},
+				},
+			},
 		}
 
 		paths["/"+rt+"/{id}"] = map[string]any{
@@ -542,6 +628,21 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					"200": map[string]any{"description": "Updated " + rt},
 					"201": map[string]any{"description": "Created " + rt},
 					"412": map[string]any{"description": "If-Match version conflict"},
+				},
+			},
+			"patch": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Patch %s via JSON Patch (RFC 6902) or JSON Merge Patch (RFC 7396)", rt),
+				"operationId": "patch" + rt,
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "If-Match", "in": "header", "required": false, "description": `Expected version ETag (e.g. W/"1") for optimistic concurrency control`, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Patched " + rt},
+					"400": map[string]any{"description": "Malformed patch or StructureDefinition validation error"},
+					"412": map[string]any{"description": "If-Match version conflict"},
+					"422": map[string]any{"description": "JSON Patch test or path precondition failed"},
 				},
 			},
 			"delete": map[string]any{

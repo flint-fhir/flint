@@ -26,6 +26,18 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 	"google.golang.org/protobuf/types/known/anypb"
 
+	allpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/allergy_intolerance_go_proto"
+	condpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/condition_go_proto"
+	diagpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/diagnostic_report_go_proto"
+	encpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/encounter_go_proto"
+	immpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/immunization_go_proto"
+	medreqpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/medication_request_go_proto"
+	obspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto"
+	orgpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/organization_go_proto"
+	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
+	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
+	procpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/procedure_go_proto"
+
 	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/pkg/audit"
 	"github.com/flint-fhir/flint/pkg/auth"
@@ -70,6 +82,21 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 		auditRecorder: auditRec,
 		exportJobs:    make(map[string]*exportJob),
 	}
+}
+
+// RegisterDefaultResourceTypes registers all 11 standard US Core / USCDI v3 FHIR R4 resource types.
+func RegisterDefaultResourceTypes(srv *Server) {
+	srv.RegisterResourceType("Patient", &patpb.Patient{})
+	srv.RegisterResourceType("Condition", &condpb.Condition{})
+	srv.RegisterResourceType("Encounter", &encpb.Encounter{})
+	srv.RegisterResourceType("Observation", &obspb.Observation{})
+	srv.RegisterResourceType("Practitioner", &pracpb.Practitioner{})
+	srv.RegisterResourceType("MedicationRequest", &medreqpb.MedicationRequest{})
+	srv.RegisterResourceType("AllergyIntolerance", &allpb.AllergyIntolerance{})
+	srv.RegisterResourceType("Procedure", &procpb.Procedure{})
+	srv.RegisterResourceType("DiagnosticReport", &diagpb.DiagnosticReport{})
+	srv.RegisterResourceType("Immunization", &immpb.Immunization{})
+	srv.RegisterResourceType("Organization", &orgpb.Organization{})
 }
 
 // SetCDCPublisher configures the optional AutoMQ / Kafka CDC publisher for lakehouse streaming.
@@ -149,8 +176,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history", s.handleInstanceHistory)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}", s.handleRead)
 	mux.HandleFunc("PUT /fhir/r4/{tenant}/{resourceType}/{id}", s.handleUpdate)
+	mux.HandleFunc("PATCH /fhir/r4/{tenant}/{resourceType}/{id}", s.handlePatch)
 	mux.HandleFunc("DELETE /fhir/r4/{tenant}/{resourceType}/{id}", s.handleDelete)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}", s.handleSearch)
+	mux.HandleFunc("PUT /fhir/r4/{tenant}/{resourceType}", s.handleConditionalUpdate)
+	mux.HandleFunc("DELETE /fhir/r4/{tenant}/{resourceType}", s.handleConditionalDelete)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$validate", s.handleValidate)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$validate", s.handleValidate)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}", s.handleCreate)
@@ -1198,11 +1228,60 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		{"code": "read"},
 		{"code": "vread"},
 		{"code": "update"},
+		{"code": "patch"},
 		{"code": "delete"},
 		{"code": "history-instance"},
 		{"code": "create"},
 		{"code": "search-type"},
 	}
+
+	spDefs := resourceSearchParamDefs()
+	usCoreOrder := []string{
+		"Patient", "Condition", "Encounter", "Observation", "Practitioner",
+		"MedicationRequest", "AllergyIntolerance", "Procedure", "DiagnosticReport",
+		"Immunization", "Organization",
+	}
+	resEntries := make([]map[string]any, 0, len(usCoreOrder)+1)
+	for _, rt := range usCoreOrder {
+		entry := map[string]any{
+			"type":              rt,
+			"versioning":        "versioned-update",
+			"readHistory":       true,
+			"updateCreate":      true,
+			"conditionalCreate": true,
+			"conditionalUpdate": true,
+			"conditionalDelete": "single",
+			"interaction":       interactions,
+			"searchParam":       spDefs[rt],
+		}
+		if rt == "Patient" {
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "everything",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Patient-everything",
+				},
+				{
+					"name":       "export",
+					"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/patient-export",
+				},
+			}
+		}
+		resEntries = append(resEntries, entry)
+	}
+	resEntries = append(resEntries, map[string]any{
+		"type":        "AuditEvent",
+		"interaction": []map[string]string{{"code": "read"}, {"code": "search-type"}},
+		"searchParam": []map[string]string{
+			{"name": "action", "type": "token"},
+			{"name": "subtype", "type": "token"},
+			{"name": "outcome", "type": "token"},
+			{"name": "agent", "type": "token"},
+			{"name": "patient", "type": "reference"},
+			{"name": "entity", "type": "reference"},
+			{"name": "entity-type", "type": "token"},
+			{"name": "entity-id", "type": "token"},
+		},
+	})
 
 	cap := map[string]any{
 		"resourceType": "CapabilityStatement",
@@ -1210,129 +1289,15 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		"kind":         "instance",
 		"fhirVersion":  "4.0.1",
 		"format":       []string{"json", "application/fhir+json", "application/fhir+ndjson"},
+		"patchFormat":  []string{"application/json-patch+json", "application/merge-patch+json"},
 		"software": map[string]any{
 			"name":    "Flint FHIR Server",
 			"version": "0.1.0",
 		},
 		"rest": []map[string]any{
 			{
-				"mode": "server",
-				"resource": []map[string]any{
-					{
-						"type":              "Patient",
-						"versioning":        "versioned-update",
-						"readHistory":       true,
-						"updateCreate":      true,
-						"conditionalCreate": true,
-						"interaction":       interactions,
-						"searchParam": []map[string]string{
-							{"name": "family", "type": "string"},
-							{"name": "given", "type": "string"},
-							{"name": "identifier", "type": "token"},
-							{"name": "gender", "type": "token"},
-							{"name": "birthdate", "type": "date"},
-							{"name": "organization", "type": "reference"},
-						},
-						"operation": []map[string]string{
-							{
-								"name":       "everything",
-								"definition": "http://hl7.org/fhir/OperationDefinition/Patient-everything",
-							},
-							{
-								"name":       "export",
-								"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/patient-export",
-							},
-						},
-					},
-					{
-						"type":              "Condition",
-						"versioning":        "versioned-update",
-						"readHistory":       true,
-						"updateCreate":      true,
-						"conditionalCreate": true,
-						"interaction":       interactions,
-						"searchParam": []map[string]string{
-							{"name": "code", "type": "token"},
-							{"name": "clinical-status", "type": "token"},
-							{"name": "verification-status", "type": "token"},
-							{"name": "category", "type": "token"},
-							{"name": "patient", "type": "reference"},
-							{"name": "subject", "type": "reference"},
-							{"name": "encounter", "type": "reference"},
-							{"name": "onset-date", "type": "date"},
-						},
-					},
-					{
-						"type":              "Encounter",
-						"versioning":        "versioned-update",
-						"readHistory":       true,
-						"updateCreate":      true,
-						"conditionalCreate": true,
-						"interaction":       interactions,
-						"searchParam": []map[string]string{
-							{"name": "class", "type": "token"},
-							{"name": "status", "type": "token"},
-							{"name": "type", "type": "token"},
-							{"name": "patient", "type": "reference"},
-							{"name": "subject", "type": "reference"},
-							{"name": "date", "type": "date"},
-							{"name": "participant", "type": "reference"},
-						},
-					},
-					{
-						"type":              "Observation",
-						"versioning":        "versioned-update",
-						"readHistory":       true,
-						"updateCreate":      true,
-						"conditionalCreate": true,
-						"interaction":       interactions,
-						"searchParam": []map[string]string{
-							{"name": "code", "type": "token"},
-							{"name": "status", "type": "token"},
-							{"name": "category", "type": "token"},
-							{"name": "patient", "type": "reference"},
-							{"name": "subject", "type": "reference"},
-							{"name": "date", "type": "date"},
-							{"name": "performer", "type": "reference"},
-							{"name": "value-quantity", "type": "quantity"},
-							{"name": "component-value-quantity", "type": "quantity"},
-							{"name": "combo-value-quantity", "type": "quantity"},
-						},
-					},
-					{
-						"type":              "Practitioner",
-						"versioning":        "versioned-update",
-						"readHistory":       true,
-						"updateCreate":      true,
-						"conditionalCreate": true,
-						"interaction":       interactions,
-						"searchParam": []map[string]string{
-							{"name": "family", "type": "string"},
-							{"name": "given", "type": "string"},
-							{"name": "name", "type": "string"},
-							{"name": "identifier", "type": "token"},
-							{"name": "active", "type": "token"},
-							{"name": "gender", "type": "token"},
-							{"name": "email", "type": "token"},
-							{"name": "phone", "type": "token"},
-							{"name": "address", "type": "string"},
-						},
-					},
-					{
-						"type":        "AuditEvent",
-						"interaction": []map[string]string{{"code": "read"}, {"code": "search-type"}},
-						"searchParam": []map[string]string{
-							{"name": "action", "type": "token"},
-							{"name": "subtype", "type": "token"},
-							{"name": "outcome", "type": "token"},
-							{"name": "agent", "type": "token"},
-							{"name": "patient", "type": "reference"},
-							{"name": "entity", "type": "reference"},
-							{"name": "entity-type", "type": "token"},
-							{"name": "entity-id", "type": "token"},
-						},
-					},
-				},
+				"mode":     "server",
+				"resource": resEntries,
 				"operation": []map[string]any{
 					{
 						"name":       "validate",

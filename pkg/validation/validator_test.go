@@ -262,7 +262,7 @@ func TestValidationEngine_StrictUnknownAndTypes(t *testing.T) {
 		if strictEngine.ValidateJSON("Patient", []byte(`{"resourceType":"Observation"}`)).IsValid() {
 			t.Fatal("expected mismatched resourceType to fail")
 		}
-		unreg := strictEngine.ValidateJSON("AllergyIntolerance", []byte(`{"resourceType":"AllergyIntolerance"}`))
+		unreg := strictEngine.ValidateJSON("RiskAssessment", []byte(`{"resourceType":"RiskAssessment"}`))
 		if !unreg.IsValid() || len(unreg.Issues) == 0 {
 			t.Fatal("expected unregistered resourceType to return warning outcome")
 		}

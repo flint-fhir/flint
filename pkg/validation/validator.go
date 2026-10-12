@@ -117,8 +117,23 @@ func (e *Engine) ValidateResource(expectedResType string, resMap map[string]any)
 	if e.opts.EnforceRequiredElements {
 		for _, reqField := range schema.RequiredFields {
 			val, present := resMap[reqField]
-			if (!present || val == nil || isEmptyValue(val)) && reqField == "class" {
-				val, present = resMap["classValue"]
+			if !present || val == nil || isEmptyValue(val) {
+				switch reqField {
+				case "class":
+					val, present = resMap["classValue"]
+				case "medication":
+					if v, ok := resMap["medicationCodeableConcept"]; ok && v != nil && !isEmptyValue(v) {
+						val, present = v, true
+					} else if v, ok := resMap["medicationReference"]; ok && v != nil && !isEmptyValue(v) {
+						val, present = v, true
+					}
+				case "occurrence":
+					if v, ok := resMap["occurrenceDateTime"]; ok && v != nil && !isEmptyValue(v) {
+						val, present = v, true
+					} else if v, ok := resMap["occurrenceString"]; ok && v != nil && !isEmptyValue(v) {
+						val, present = v, true
+					}
+				}
 			}
 			if !present || val == nil || isEmptyValue(val) {
 				outcome.AddError(CodeRequired,
@@ -162,13 +177,15 @@ func (e *Engine) validatePrimitiveFormats(resType string, resMap map[string]any,
 		}
 	}
 
-	// effectiveDateTime format
-	if dtVal, ok := resMap["effectiveDateTime"]; ok && dtVal != nil {
-		dtStr := extractStringOrWrapped(dtVal)
-		if dtStr != "" && !DateTimeRegex.MatchString(dtStr) {
-			outcome.AddError(CodeValue,
-				fmt.Sprintf("Invalid effectiveDateTime format %q", dtStr),
-				resType+".effectiveDateTime")
+	// dateTime fields format
+	for _, dtField := range []string{"effectiveDateTime", "authoredOn", "recordedDate", "occurrenceDateTime", "performedDateTime"} {
+		if dtVal, ok := resMap[dtField]; ok && dtVal != nil {
+			dtStr := extractStringOrWrapped(dtVal)
+			if dtStr != "" && !DateTimeRegex.MatchString(dtStr) {
+				outcome.AddError(CodeValue,
+					fmt.Sprintf("Invalid %s format %q", dtField, dtStr),
+					resType+"."+dtField)
+			}
 		}
 	}
 

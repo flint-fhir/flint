@@ -420,6 +420,14 @@ var untypedChoiceContainers = map[string]bool{
 	"value":         true,
 	"deceased":      true,
 	"multipleBirth": true,
+	"medication":    true,
+	"reported":      true,
+	"performed":     true,
+	"occurrence":    true,
+	"asNeeded":      true,
+	"dose":          true,
+	"rate":          true,
+	"statusReason":  true,
 }
 
 func denormalizeUntypedMap(m map[string]any) {

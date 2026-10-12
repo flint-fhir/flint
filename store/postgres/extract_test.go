@@ -8,12 +8,19 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/proto"
 
+	c3pb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/codes_go_proto"
 	dtpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto"
+	allpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/allergy_intolerance_go_proto"
 	condpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/condition_go_proto"
+	diagpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/diagnostic_report_go_proto"
 	encpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/encounter_go_proto"
+	immpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/immunization_go_proto"
+	medreqpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/medication_request_go_proto"
 	obspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto"
+	orgpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/organization_go_proto"
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
+	procpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/procedure_go_proto"
 
 	"github.com/flint-fhir/flint/store/postgres"
 )
@@ -26,7 +33,13 @@ func TestDefaultIndexExtractors(t *testing.T) {
 	assert.Contains(t, extractors, "Encounter")
 	assert.Contains(t, extractors, "Observation")
 	assert.Contains(t, extractors, "Practitioner")
-	assert.Len(t, extractors, 5)
+	assert.Contains(t, extractors, "MedicationRequest")
+	assert.Contains(t, extractors, "AllergyIntolerance")
+	assert.Contains(t, extractors, "Procedure")
+	assert.Contains(t, extractors, "DiagnosticReport")
+	assert.Contains(t, extractors, "Immunization")
+	assert.Contains(t, extractors, "Organization")
+	assert.Len(t, extractors, 11)
 }
 
 func TestExtractPatient(t *testing.T) {
@@ -276,4 +289,259 @@ func TestExtractPractitioner(t *testing.T) {
 		}
 	}
 	assert.True(t, foundFamily, "expected family name watson")
+}
+
+func TestExtractMedicationRequest(t *testing.T) {
+	mr := &medreqpb.MedicationRequest{
+		Id: &dtpb.Id{Value: "mr-100"},
+		Status: &medreqpb.MedicationRequest_StatusCode{
+			Value: c3pb.MedicationrequestStatusCode_ACTIVE,
+		},
+		Intent: &medreqpb.MedicationRequest_IntentCode{
+			Value: c3pb.MedicationRequestIntentCode_ORDER,
+		},
+		Medication: &medreqpb.MedicationRequest_MedicationX{
+			Choice: &medreqpb.MedicationRequest_MedicationX_CodeableConcept{
+				CodeableConcept: &dtpb.CodeableConcept{
+					Coding: []*dtpb.Coding{
+						{
+							System: &dtpb.Uri{Value: "http://www.nlm.nih.gov/research/umls/rxnorm"},
+							Code:   &dtpb.Code{Value: "1049502"},
+						},
+					},
+				},
+			},
+		},
+		Subject: &dtpb.Reference{
+			Reference: &dtpb.Reference_PatientId{
+				PatientId: &dtpb.ReferenceId{Value: "pat-100"},
+			},
+		},
+		AuthoredOn: &dtpb.DateTime{ValueUs: 1700000000000000},
+	}
+	b, err := proto.Marshal(mr)
+	require.NoError(t, err)
+
+	idx, err := postgres.ExtractMedicationRequest("tenant-1", "mr-100", b)
+	require.NoError(t, err)
+	require.NotNil(t, idx)
+
+	var foundCode, foundStatus, foundIntent bool
+	for _, tok := range idx.Tokens {
+		if tok.SpName == "code" && tok.SpValue == "1049502" {
+			foundCode = true
+		}
+		if tok.SpName == "status" && tok.SpValue == "active" {
+			foundStatus = true
+		}
+		if tok.SpName == "intent" && tok.SpValue == "order" {
+			foundIntent = true
+		}
+	}
+	assert.True(t, foundCode, "expected RxNorm code 1049502")
+	assert.True(t, foundStatus, "expected active status")
+	assert.True(t, foundIntent, "expected order intent")
+	require.NotEmpty(t, idx.Dates)
+	assert.Equal(t, "authoredon", idx.Dates[0].SpName)
+}
+
+func TestExtractAllergyIntolerance(t *testing.T) {
+	ai := &allpb.AllergyIntolerance{
+		Id: &dtpb.Id{Value: "allergy-100"},
+		ClinicalStatus: &dtpb.CodeableConcept{
+			Coding: []*dtpb.Coding{
+				{
+					System: &dtpb.Uri{Value: "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical"},
+					Code:   &dtpb.Code{Value: "active"},
+				},
+			},
+		},
+		Criticality: &allpb.AllergyIntolerance_CriticalityCode{
+			Value: c3pb.AllergyIntoleranceCriticalityCode_HIGH,
+		},
+		Code: &dtpb.CodeableConcept{
+			Coding: []*dtpb.Coding{
+				{
+					System: &dtpb.Uri{Value: "http://snomed.info/sct"},
+					Code:   &dtpb.Code{Value: "91936005"},
+				},
+			},
+		},
+		Patient: &dtpb.Reference{
+			Reference: &dtpb.Reference_PatientId{
+				PatientId: &dtpb.ReferenceId{Value: "pat-100"},
+			},
+		},
+	}
+	b, err := proto.Marshal(ai)
+	require.NoError(t, err)
+
+	idx, err := postgres.ExtractAllergyIntolerance("tenant-1", "allergy-100", b)
+	require.NoError(t, err)
+	require.NotNil(t, idx)
+
+	var foundCode, foundCrit, foundPatient, foundSubject bool
+	for _, tok := range idx.Tokens {
+		if tok.SpName == "code" && tok.SpValue == "91936005" {
+			foundCode = true
+		}
+		if tok.SpName == "criticality" && tok.SpValue == "high" {
+			foundCrit = true
+		}
+	}
+	for _, ref := range idx.References {
+		if ref.SpName == "patient" && ref.TargetID == "pat-100" {
+			foundPatient = true
+		}
+		if ref.SpName == "subject" && ref.TargetID == "pat-100" {
+			foundSubject = true
+		}
+	}
+	assert.True(t, foundCode)
+	assert.True(t, foundCrit)
+	assert.True(t, foundPatient)
+	assert.True(t, foundSubject, "expected automatic subject alias for patient reference")
+}
+
+func TestExtractProcedure(t *testing.T) {
+	proc := &procpb.Procedure{
+		Id: &dtpb.Id{Value: "proc-100"},
+		Status: &procpb.Procedure_StatusCode{
+			Value: c3pb.EventStatusCode_COMPLETED,
+		},
+		Code: &dtpb.CodeableConcept{
+			Coding: []*dtpb.Coding{
+				{
+					System: &dtpb.Uri{Value: "http://snomed.info/sct"},
+					Code:   &dtpb.Code{Value: "80146002"},
+				},
+			},
+		},
+		Subject: &dtpb.Reference{
+			Reference: &dtpb.Reference_PatientId{
+				PatientId: &dtpb.ReferenceId{Value: "pat-100"},
+			},
+		},
+		Performed: &procpb.Procedure_PerformedX{
+			Choice: &procpb.Procedure_PerformedX_DateTime{
+				DateTime: &dtpb.DateTime{ValueUs: 1700000000000000},
+			},
+		},
+	}
+	b, err := proto.Marshal(proc)
+	require.NoError(t, err)
+
+	idx, err := postgres.ExtractProcedure("tenant-1", "proc-100", b)
+	require.NoError(t, err)
+	require.NotNil(t, idx)
+	assert.NotEmpty(t, idx.Tokens)
+	assert.NotEmpty(t, idx.Dates)
+}
+
+func TestExtractDiagnosticReport(t *testing.T) {
+	dr := &diagpb.DiagnosticReport{
+		Id: &dtpb.Id{Value: "dr-100"},
+		Status: &diagpb.DiagnosticReport_StatusCode{
+			Value: c3pb.DiagnosticReportStatusCode_FINAL,
+		},
+		Code: &dtpb.CodeableConcept{
+			Coding: []*dtpb.Coding{
+				{
+					System: &dtpb.Uri{Value: "http://loinc.org"},
+					Code:   &dtpb.Code{Value: "58410-2"},
+				},
+			},
+		},
+		Subject: &dtpb.Reference{
+			Reference: &dtpb.Reference_PatientId{
+				PatientId: &dtpb.ReferenceId{Value: "pat-100"},
+			},
+		},
+		Result: []*dtpb.Reference{
+			{
+				Reference: &dtpb.Reference_ObservationId{
+					ObservationId: &dtpb.ReferenceId{Value: "obs-100"},
+				},
+			},
+		},
+	}
+	b, err := proto.Marshal(dr)
+	require.NoError(t, err)
+
+	idx, err := postgres.ExtractDiagnosticReport("tenant-1", "dr-100", b)
+	require.NoError(t, err)
+	require.NotNil(t, idx)
+
+	var foundResult bool
+	for _, ref := range idx.References {
+		if ref.SpName == "result" && ref.TargetType == "Observation" && ref.TargetID == "obs-100" {
+			foundResult = true
+		}
+	}
+	assert.True(t, foundResult, "expected result reference to Observation/obs-100")
+}
+
+func TestExtractImmunization(t *testing.T) {
+	imm := &immpb.Immunization{
+		Id: &dtpb.Id{Value: "imm-100"},
+		VaccineCode: &dtpb.CodeableConcept{
+			Coding: []*dtpb.Coding{
+				{
+					System: &dtpb.Uri{Value: "http://hl7.org/fhir/sid/cvx"},
+					Code:   &dtpb.Code{Value: "208"},
+				},
+			},
+		},
+		Patient: &dtpb.Reference{
+			Reference: &dtpb.Reference_PatientId{
+				PatientId: &dtpb.ReferenceId{Value: "pat-100"},
+			},
+		},
+		Occurrence: &immpb.Immunization_OccurrenceX{
+			Choice: &immpb.Immunization_OccurrenceX_DateTime{
+				DateTime: &dtpb.DateTime{ValueUs: 1700000000000000},
+			},
+		},
+	}
+	b, err := proto.Marshal(imm)
+	require.NoError(t, err)
+
+	idx, err := postgres.ExtractImmunization("tenant-1", "imm-100", b)
+	require.NoError(t, err)
+	require.NotNil(t, idx)
+
+	var foundVaccine bool
+	for _, tok := range idx.Tokens {
+		if tok.SpName == "vaccine-code" && tok.SpValue == "208" {
+			foundVaccine = true
+		}
+	}
+	assert.True(t, foundVaccine, "expected CVX vaccine-code 208")
+}
+
+func TestExtractOrganization(t *testing.T) {
+	org := &orgpb.Organization{
+		Id:     &dtpb.Id{Value: "org-100"},
+		Active: &dtpb.Boolean{Value: true},
+		Name:   &dtpb.String{Value: "Flint Health System"},
+		Alias:  []*dtpb.String{{Value: "FHS"}},
+	}
+	b, err := proto.Marshal(org)
+	require.NoError(t, err)
+
+	idx, err := postgres.ExtractOrganization("tenant-1", "org-100", b)
+	require.NoError(t, err)
+	require.NotNil(t, idx)
+
+	var foundName, foundAlias bool
+	for _, s := range idx.Strings {
+		if s.SpName == "name" && s.SpValue == "flint health system" {
+			foundName = true
+		}
+		if s.SpName == "name" && s.SpValue == "fhs" {
+			foundAlias = true
+		}
+	}
+	assert.True(t, foundName)
+	assert.True(t, foundAlias)
 }
