@@ -93,17 +93,30 @@ tasks:
       - go test ./ingest/workflow/ -v -count=1
 
   build:
-    desc: Build flintd server, worker, seed, and loadtest binaries
+    desc: Build flintd server, worker, seed, certify, and loadtest binaries
     cmds:
       - go build -o bin/flintd ./cmd/flintd/
       - go build -o bin/worker ./cmd/worker/
       - go build -o bin/seed ./cmd/seed/
+      - go build -o bin/certify ./cmd/certify/
       - go build -o bin/loadtest ./cmd/loadtest/
 
   seed:
-    desc: Seed a realistic longitudinal clinical cohort into Flint (tenant=demo)
+    desc: Seed a realistic 25-resource US Core v6.1.0 longitudinal clinical cohort into Flint (tenant=demo)
     cmds:
       - go run ./cmd/seed {{.CLI_ARGS}}
+
+  certify:
+    desc: Run automated FHIR R4, US Core v6.1.0 & ONC (g)(10) conformance certification suite
+    cmds:
+      - go run ./cmd/certify {{.CLI_ARGS}}
+
+  certify-inferno:
+    desc: Launch official HL7 Inferno US Core v6.1.0 / ONC (g)(10) test kit on http://localhost:4567
+    cmds:
+      - docker compose -f deploy/inferno/docker-compose.yml up -d
+      - echo "🔥 HL7 Inferno US Core v6.1.0 Test Kit running at http://localhost:4567"
+      - echo "   Target FHIR Endpoint → http://host.docker.internal:8080/fhir/r4/demo"
 
   bench-store:
     desc: Run load test against Postgres operational store directly

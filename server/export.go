@@ -103,9 +103,16 @@ func (s *Server) handlePatientGroupExport(w http.ResponseWriter, r *http.Request
 	s.executeBulkExport(w, r, true, "")
 }
 
-// handleSinglePatientExport handles GET /fhir/r4/{tenant}/Patient/{id}/$export (Single-Patient Compartment Bulk Export).
+// handleSinglePatientExport handles GET /fhir/r4/{tenant}/{resourceType}/{id}/$export
+// Supports Patient/{id}/$export (Single-Patient Compartment Bulk Export) and
+// Group/{id}/$export (ONC (g)(10) Group Cohort Bulk Export).
 func (s *Server) handleSinglePatientExport(w http.ResponseWriter, r *http.Request) {
-	if resType := r.PathValue("resourceType"); resType != "" && resType != "Patient" {
+	resType := r.PathValue("resourceType")
+	if resType == "Group" {
+		s.executeBulkExport(w, r, true, "")
+		return
+	}
+	if resType != "" && resType != "Patient" {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found",
 			fmt.Sprintf("$export is not supported on %s instances", resType))
 		return

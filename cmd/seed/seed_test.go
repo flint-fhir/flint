@@ -15,12 +15,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	condpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/condition_go_proto"
-	encpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/encounter_go_proto"
-	obspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto"
-	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
-	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
-
 	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store/postgres"
@@ -41,13 +35,21 @@ func TestCohortTransactionBundle_ValidatesAllResources(t *testing.T) {
 	require.NoError(t, json.Unmarshal(bundleBytes, &bundle))
 	assert.Equal(t, "Bundle", bundle.ResourceType)
 	assert.Equal(t, "transaction", bundle.Type)
-	assert.Len(t, bundle.Entry, 15)
+	assert.Len(t, bundle.Entry, 25)
 
 	engine := validation.NewEngine(validation.DefaultOptions())
+	seenTypes := make(map[string]bool)
 	for _, entry := range bundle.Entry {
+		var meta struct {
+			ResourceType string `json:"resourceType"`
+		}
+		require.NoError(t, json.Unmarshal(entry.Resource, &meta))
+		seenTypes[meta.ResourceType] = true
+
 		outcome := engine.ValidateJSON("", entry.Resource)
 		assert.True(t, outcome.IsValid(), "expected seeded resource %s to pass FHIR R4 validation: %v", entry.FullURL, outcome.Issues)
 	}
+	assert.Len(t, seenTypes, 11, "expected all 11 US Core v6.1.0 resource types in seed bundle")
 }
 
 func TestSeedRun_UnitHTTP(t *testing.T) {
@@ -64,7 +66,7 @@ func TestSeedRun_UnitHTTP(t *testing.T) {
 		var b map[string]any
 		require.NoError(t, json.Unmarshal(body, &b))
 		entries := b["entry"].([]any)
-		assert.Len(t, entries, 15)
+		assert.Len(t, entries, 25)
 
 		respEntries := make([]map[string]any, len(entries))
 		for i, rawEntry := range entries {
@@ -98,7 +100,7 @@ func TestSeedRun_UnitHTTP(t *testing.T) {
 		Out:         &buf,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, buf.String(), `Seeded 15 FHIR R4 resources into tenant "demo"`)
+	assert.Contains(t, buf.String(), `Seeded 25 FHIR R4 resources (all 11 US Core v6.1.0 profiles) into tenant "demo"`)
 	assert.Contains(t, buf.String(), "Practitioner/prac-cardiology-1")
 	assert.Contains(t, buf.String(), "Patient/pat-alice-001/$everything")
 }
@@ -106,22 +108,21 @@ func TestSeedRun_UnitHTTP(t *testing.T) {
 func TestSeedRun_EndToEndIntegration(t *testing.T) {
 	dsn := os.Getenv("FLINT_TEST_POSTGRES_DSN")
 	if dsn == "" {
-		t.Skip("FLINT_TEST_POSTGRES_DSN not set")
+		dsn = "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
 	}
 
 	db, err := sql.Open("postgres", dsn)
 	require.NoError(t, err)
 	defer db.Close()
+	if err := db.PingContext(t.Context()); err != nil {
+		t.Skipf("skipping postgres integration test: %v", err)
+	}
 	require.NoError(t, postgres.RunMigrations(t.Context(), db))
 
 	store := postgres.New(db)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := server.New(store, logger)
-	srv.RegisterResourceType("Patient", &patpb.Patient{})
-	srv.RegisterResourceType("Condition", &condpb.Condition{})
-	srv.RegisterResourceType("Encounter", &encpb.Encounter{})
-	srv.RegisterResourceType("Observation", &obspb.Observation{})
-	srv.RegisterResourceType("Practitioner", &pracpb.Practitioner{})
+	server.RegisterDefaultResourceTypes(srv)
 
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -141,9 +142,9 @@ func TestSeedRun_EndToEndIntegration(t *testing.T) {
 		Out:        &buf,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, buf.String(), `Seeded 15 FHIR R4 resources into tenant "test-seed"`)
+	assert.Contains(t, buf.String(), `Seeded 25 FHIR R4 resources (all 11 US Core v6.1.0 profiles) into tenant "test-seed"`)
 
-	// Verify Patient/$everything for Alice returns Patient + Practitioner + Encounter + Condition + 2 Observations (6 resources)
+	// Verify Patient/$everything for Alice returns Patient + Practitioner + Organization + Encounter + Condition + 2 Observations + MedicationRequest + AllergyIntolerance + Procedure + DiagnosticReport (11 resources)
 	resp, err := http.Get(ts.URL + "/fhir/r4/test-seed/Patient/pat-alice-001/$everything")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -151,5 +152,5 @@ func TestSeedRun_EndToEndIntegration(t *testing.T) {
 
 	var evBundle map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&evBundle))
-	assert.Equal(t, 6, int(evBundle["total"].(float64)))
+	assert.Equal(t, 11, int(evBundle["total"].(float64)))
 }

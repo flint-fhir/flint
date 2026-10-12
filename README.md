@@ -90,8 +90,9 @@ Flint implements full search index extraction, transactional persistence, SMART 
 | **`Practitioner`** | US Core Practitioner (`v6.1.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `identifier`, `name`, `family`, `given`, `active` | `patient/Practitioner.rs`, `user/Practitioner.cruds`, `system/Practitioner.rs` | ✅ Production Ready |
 | **`Organization`** | US Core Organization (`v6.1.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `identifier`, `name`, `active`, `type`, `address`, `address-city`, `address-state`, `address-postalcode`, `partof` | `patient/Organization.rs`, `user/Organization.cruds`, `system/Organization.rs` | ✅ Production Ready |
 | **`AuditEvent`** | ASTM E2147 / ONC `§170.315(d)(2)` Auditable Events | `read`, `search-type` | `_id`, `date`, `entity`, `patient`, `agent`, `action`, `subtype`, `outcome` | `user/AuditEvent.rs`, `system/AuditEvent.rs` | ✅ Production Ready |
-| **`Bundle`** | HL7 FHIR R4 Batch & ACID Transaction | `batch`, `transaction` (`urn:uuid:` resolution, `ifNoneExist`, `ifMatch`) | N/A | Per-entry SMART scope & compartment validation | ✅ Production Ready |
-| **`$export` (Bulk Data)** | HL7 FHIR Bulk Data Access v2.0.0 / ONC `§170.315(g)(10)` | System (`/$export`), Group (`/Patient/$export`), Single-Patient (`/Patient/{id}/$export`), Async Poll (`/$export-poll/{jobId}`), NDJSON Download (`/$export-file/{jobId}/{file}`) | `_type`, `_since`, `_outputFormat` (`application/fhir+ndjson`) | `system/*.rs` (System/Group), `patient/*.rs` (Single-Patient) | ✅ Production Ready |
+| **`Bundle`** | HL7 FHIR R4 Batch & ACID Transaction | `batch`, `transaction` (`POST`, `PUT`, `PATCH`, `DELETE`, `urn:uuid:` resolution, `ifNoneExist`, `ifMatch`, conditional `?searchParams` URLs) | N/A | Per-entry SMART scope & compartment validation | ✅ Production Ready |
+| **`$export` (Bulk Data)** | HL7 FHIR Bulk Data Access v2.0.0 / ONC `§170.315(g)(10)` | System (`/$export`), All-Patients (`/Patient/$export`), Group Cohort (`/Group/{id}/$export`), Single-Patient (`/Patient/{id}/$export`), Async Poll (`/$export-poll/{jobId}`), NDJSON Download (`/$export-file/{jobId}/{file}`) | `_type`, `_since`, `_outputFormat` (`application/fhir+ndjson`) | `system/*.rs` (System/Group), `patient/*.rs` (Single-Patient) | ✅ Production Ready |
+| **`$certify` (Conformance)** | HL7 FHIR R4 `TestReport` / US Core `v6.1.0` / ONC `(g)(10)` | `GET/POST /fhir/r4/{tenant}/$certify` & CLI (`task certify`) | 24-check automated conformance harness across 5 suites | Public / Admin | ✅ Production Ready |
 
 ---
 
@@ -125,23 +126,30 @@ Inspect service endpoints:
 * **Garage S3 Console**: [http://localhost:9001](http://localhost:9001)
 * **Iceberg REST Catalog**: [http://localhost:8181](http://localhost:8181)
 
-### 3. Build, Run & Seed Clinical Data
+### 3. Build, Run, Seed & Certify
 
 ```bash
-# Build flintd, worker, seed, and loadtest binaries
+# Build flintd, worker, seed, certify, and loadtest binaries
 task build
 
 # Run the Flint FHIR REST server (automatically applies SQL migrations on startup)
 task run
 
-# (In another terminal) Seed a longitudinal clinical cohort (15 FHIR R4 resources in tenant "demo")
+# (In another terminal) Seed a longitudinal clinical cohort (25 FHIR R4 resources across all 11 US Core v6.1.0 profiles in tenant "demo")
 task seed
+
+# Run the 24-check FHIR R4 / US Core v6.1.0 / ONC (g)(10) Certification Suite (outputs Scorecard + HL7 TestReport)
+task certify
+
+# (Optional) Launch the official HL7 Inferno US Core v6.1.0 Test Kit on http://localhost:4567
+task certify-inferno
 
 # (Optional) Run the Temporal ingestion worker
 task run-worker
 ```
 
 * **Interactive API & Conformance Explorer (`$docs`)**: [http://localhost:8080/fhir/r4/demo/$docs](http://localhost:8080/fhir/r4/demo/$docs)
+* **Live Conformance `TestReport` (`$certify`)**: [http://localhost:8080/fhir/r4/demo/$certify](http://localhost:8080/fhir/r4/demo/$certify)
 * **Proto-Compiled OpenAPI 3.1.0 Spec**: [http://localhost:8080/fhir/r4/demo/openapi.json](http://localhost:8080/fhir/r4/demo/openapi.json)
 
 ### 4. Run Benchmarks & Tests
@@ -149,6 +157,9 @@ task run-worker
 ```bash
 # Run Go unit, property, and integration tests
 task test
+
+# Run automated US Core v6.1.0 / ONC (g)(10) conformance certification suite
+task certify
 
 # Run SQLMesh clinical dimensional lakehouse tests (DuckDB)
 task test-analytics
@@ -301,9 +312,11 @@ Content-Type: application/fhir+json
 * **Bulk Data Access (`$export` — ONC `(g)(10)`)**:
   * System-level: `GET /fhir/r4/{tenant}/$export?_type=Patient,Observation&_since=2025-01-01T00:00:00Z`
   * All-Patients Compartment: `GET /fhir/r4/{tenant}/Patient/$export`
+  * Group Cohort Compartment: `GET /fhir/r4/{tenant}/Group/{id}/$export`
   * Single-Patient Compartment: `GET /fhir/r4/{tenant}/Patient/{id}/$export`
   * Async Job Status Poll & Cancel: `GET /fhir/r4/{tenant}/$export-poll/{jobId}` & `DELETE /fhir/r4/{tenant}/$export-poll/{jobId}`
   * NDJSON File Download: `GET /fhir/r4/{tenant}/$export-file/{jobId}/{ResourceType}.ndjson`
+* **Automated Conformance & Certification (`$certify`)**: `GET /fhir/r4/{tenant}/$certify` and `POST /fhir/r4/{tenant}/$certify` (executes 24 end-to-end conformance checks across FHIR R4, US Core v6.1.0, SMART v2, and ONC `(g)(10)` in an isolated sandbox and returns an HL7 FHIR R4 `TestReport` resource)
 * **Validate**: `POST /fhir/r4/{tenant}/{resourceType}/$validate` and `POST /fhir/r4/{tenant}/$validate`
 * **Search**: `GET /fhir/r4/{tenant}/{resourceType}?{searchParams}&_count=20&_offset=0`
 * **Security Audit Log (`AuditEvent`)**: `GET /fhir/r4/{tenant}/AuditEvent?entity=Patient/123&outcome=0&agent=Practitioner/dr-smith` and `GET /fhir/r4/{tenant}/AuditEvent/{id}`
@@ -406,17 +419,18 @@ Flint leverages [Hegel](https://hegel.dev) (`hegel.dev/go/hegel`) for type-drive
 
 ## Clinical Dimensional Lakehouse (`analytics/` — SQLMesh on DuckDB / Iceberg)
 
-Flint ships with an out-of-the-box **SQLMesh** analytical pipeline (`analytics/`) that transforms raw AutoMQ Table Topic Iceberg CDC streams (`fhir_raw.patient`, `fhir_raw.encounter`, `fhir_raw.condition`, `fhir_raw.observation`) into a Kimball healthcare dimensional model:
+Flint ships with an out-of-the-box **SQLMesh** analytical pipeline (`analytics/`) that transforms raw AutoMQ Table Topic Iceberg CDC streams (`fhir_raw.patient`, `fhir_raw.encounter`, `fhir_raw.condition`, `fhir_raw.observation`, `fhir_raw.medication_request`, `fhir_raw.allergy_intolerance`, `fhir_raw.procedure`, `fhir_raw.diagnostic_report`, `fhir_raw.immunization`, `fhir_raw.organization`, `fhir_raw.practitioner`) into a Kimball healthcare dimensional model:
 
 * **Staging Layer (`flint_stg.stg_*`)**:
   * Deduplicates multi-tenant CDC events by `(tenant_id, res_id)` (normalizing `{tenant_id}/{res_id}` Kafka keys) using the latest `_kafka_offset`.
   * Filters out hard/soft delete tombstones (`op = 'D'` or `[tombstone]`).
   * Supports dual extraction across `google/fhir` wrapped JSON (`{"value": "..."}`) and standard flat HL7 FHIR R4 JSON.
 * **Dimensional & Fact Layer (`flint_marts.dim_*`, `flint_marts.fct_*`)**:
-  * `dim_patient`: Demographics, full name, birth date, gender, postal code, and active flag.
+  * `dim_patient`, `dim_organization`: Demographics, full name, birth date, gender, postal code, NPI/TIN identifiers, and active flags.
   * `fct_encounter`: Encounter class (`AMB`, `IMP`), status, period timestamps, and calculated length-of-stay (`los_hours`).
   * `fct_condition`: SNOMED/ICD-10 condition codes, clinical/verification status, and onset date.
   * `fct_observation`: LOINC observation codes, status, numeric `value_quantity`, `value_unit`, and effective timestamps.
+  * `fct_medication_request`, `fct_allergy_intolerance`, `fct_procedure`, `fct_diagnostic_report`, `fct_immunization`: Full US Core v6.1.0 clinical fact tables.
 * **Longitudinal Patient 360 Mart (`flint_marts.mart_patient_360`)**:
   * Single-row-per-patient population health summary aggregating total encounters, latest encounter timestamp, total/active condition counts, and observation counts/timestamps.
 
@@ -433,14 +447,16 @@ task test-analytics
 flint/
 ├── analytics/            # SQLMesh clinical dimensional lakehouse models & DuckDB unit tests
 ├── automq/               # Franz-go Kafka producer with tenant-scoped CDC keys & headers
-├── bin/                  # Compiled binaries (flintd, worker, seed, loadtest)
+├── bin/                  # Compiled binaries (flintd, worker, seed, certify, loadtest)
 ├── cmd/
 │   ├── flintd/           # FHIR REST HTTP server entrypoint
 │   ├── worker/           # Temporal ingestion worker entrypoint
-│   ├── seed/             # Deterministic clinical cohort seeder (task seed)
+│   ├── seed/             # Deterministic 25-resource US Core v6.1.0 cohort seeder (task seed)
+│   ├── certify/          # Automated US Core v6.1.0 / ONC (g)(10) certification CLI (task certify)
 │   ├── loadtest/         # High-throughput load testing harness
 │   └── e2e/              # End-to-end integration & restart recovery tests
 ├── deploy/
+│   ├── inferno/          # Official HL7 Inferno US Core v6.1.0 Test Kit Docker Compose (task certify-inferno)
 │   ├── k3d/              # Local k3d cluster configuration
 │   └── k8s/              # Kubernetes manifests (Postgres, Temporal, AutoMQ StatefulSet, Iceberg)
 ├── fhir/r4/              # Machine-readable HL7 FHIR R4 SearchParameter definitions
@@ -453,6 +469,7 @@ flint/
 ├── pkg/
 │   ├── audit/            # HIPAA/ONC FHIR R4 AuditEvent classification, serialization & recorders
 │   ├── auth/             # TokenValidator, OIDC/Zitadel, and Hegel property tests
+│   ├── certify/          # 24-check FHIR R4 / US Core v6.1.0 / ONC (g)(10) conformance engine & TestReport builder
 │   ├── fhirutil/         # Bidirectional flat FHIR R4 JSON <-> google/fhir protojson codec & helpers
 │   └── validation/       # FHIR StructureDefinition, ValueSet, and cardinality validator
 ├── proto/
