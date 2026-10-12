@@ -58,7 +58,7 @@ func (s *Store) ExportResources(ctx context.Context, params ExportParams) ([]Sea
 				  AND rf.target_id = r.res_id
 			)
 			OR (
-				r.res_type NOT IN ('Patient', 'Condition', 'Encounter', 'Observation', 'MedicationRequest', 'AllergyIntolerance', 'Procedure', 'DiagnosticReport', 'Immunization')
+				r.res_type NOT IN ('Patient', 'Condition', 'Encounter', 'Observation', 'MedicationRequest', 'AllergyIntolerance', 'Procedure', 'DiagnosticReport', 'Immunization', 'Specimen')
 				AND EXISTS (
 					SELECT 1 FROM spidx_reference rf_clin
 					JOIN spidx_reference rf_pat

@@ -178,7 +178,7 @@ func (e *Engine) validatePrimitiveFormats(resType string, resMap map[string]any,
 	}
 
 	// dateTime fields format
-	for _, dtField := range []string{"effectiveDateTime", "authoredOn", "recordedDate", "occurrenceDateTime", "performedDateTime"} {
+	for _, dtField := range []string{"effectiveDateTime", "authoredOn", "recordedDate", "occurrenceDateTime", "performedDateTime", "receivedTime"} {
 		if dtVal, ok := resMap[dtField]; ok && dtVal != nil {
 			dtStr := extractStringOrWrapped(dtVal)
 			if dtStr != "" && !DateTimeRegex.MatchString(dtStr) {

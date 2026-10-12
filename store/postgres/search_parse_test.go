@@ -210,3 +210,21 @@ func TestParseIfNoneExist(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildSearchParamsFromQuery_LastUpdated(t *testing.T) {
+	q := map[string][]string{
+		"_lastUpdated": {"ge2026-01-01", "le2026-12-31T23:59:59Z"},
+		"patient":      {"Patient/pat-1"},
+	}
+	require.NoError(t, postgres.ValidateSearchQuery(q))
+	sp := postgres.BuildSearchParamsFromQuery("t1", "Observation", q)
+	require.Len(t, sp.LastUpdated, 2)
+	assert.Equal(t, "ge", sp.LastUpdated[0].Prefix)
+	assert.Equal(t, "le", sp.LastUpdated[1].Prefix)
+
+	badQ := map[string][]string{
+		"_lastUpdated": {"genot-a-date"},
+	}
+	err := postgres.ValidateSearchQuery(badQ)
+	assert.Error(t, err, "expected invalid _lastUpdated date to return an error")
+}

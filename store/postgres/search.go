@@ -51,6 +51,7 @@ type SearchParams struct {
 	TenantID        string
 	ResType         string
 	ID              string                  // Optional _id filter
+	LastUpdated     []DateOp                // Optional _lastUpdated filter(s) (e.g. ge + le range)
 	Strings         map[string]string       // sp_name → value (prefix match)
 	Tokens          map[string]string       // sp_name → value (exact or system|value)
 	Dates           map[string]DateOp       // sp_name → first date operation
@@ -305,6 +306,11 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		whereExtra = fmt.Sprintf(" AND r.res_id = $%d", len(args)+1)
 		args = append(args, params.ID)
 	}
+	for _, luOp := range params.LastUpdated {
+		cond, luArgs := buildTimestampColumnCondition("r.last_updated", luOp, len(args))
+		whereExtra += " AND " + cond
+		args = append(args, luArgs...)
+	}
 
 	// Count query
 	countSQL := fmt.Sprintf(
@@ -453,6 +459,27 @@ func (s *Store) resolveIncludesWithExecutor(ctx context.Context, exec queryExece
 	return includedResults, nil
 }
 
+func buildTimestampColumnCondition(colExpr string, op DateOp, startIdx int) (string, []any) {
+	val := op.Value
+	switch op.Prefix {
+	case "lt", "eb":
+		return fmt.Sprintf("%s < $%d", colExpr, startIdx+1), []any{val}
+	case "le":
+		return fmt.Sprintf("%s <= $%d", colExpr, startIdx+1), []any{val}
+	case "gt", "sa":
+		return fmt.Sprintf("%s > $%d", colExpr, startIdx+1), []any{val}
+	case "ge":
+		return fmt.Sprintf("%s >= $%d", colExpr, startIdx+1), []any{val}
+	case "ne":
+		return fmt.Sprintf("%s != $%d", colExpr, startIdx+1), []any{val}
+	default: // "eq"
+		if val.Hour() == 0 && val.Minute() == 0 && val.Second() == 0 && val.Nanosecond() == 0 {
+			return fmt.Sprintf("(%s >= $%d AND %s < $%d)", colExpr, startIdx+1, colExpr, startIdx+2), []any{val, val.Add(24 * time.Hour)}
+		}
+		return fmt.Sprintf("%s = $%d", colExpr, startIdx+1), []any{val}
+	}
+}
+
 func buildDateCondition(alias string, op DateOp, startIdx int) (string, []any) {
 	// spidx_date has columns: sp_low, sp_high (TIMESTAMPTZ)
 	val := op.Value
@@ -579,7 +606,7 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 				  AND rf.target_id = r.res_id
 			)
 			OR (
-				r.res_type NOT IN ('Patient', 'Condition', 'Encounter', 'Observation', 'MedicationRequest', 'AllergyIntolerance', 'Procedure', 'DiagnosticReport', 'Immunization')
+				r.res_type NOT IN ('Patient', 'Condition', 'Encounter', 'Observation', 'MedicationRequest', 'AllergyIntolerance', 'Procedure', 'DiagnosticReport', 'Immunization', 'Specimen')
 				AND EXISTS (
 					SELECT 1 FROM spidx_reference rf_clin
 					JOIN spidx_reference rf_pat
@@ -649,7 +676,7 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 // resource scoped to the FHIR R4 Patient compartment.
 func IsPatientCompartmentResourceType(resType string) bool {
 	switch resType {
-	case "Condition", "Encounter", "Observation", "MedicationRequest", "AllergyIntolerance", "Procedure", "DiagnosticReport", "Immunization":
+	case "Condition", "Encounter", "Observation", "MedicationRequest", "AllergyIntolerance", "Procedure", "DiagnosticReport", "Immunization", "Specimen":
 		return true
 	default:
 		return false

@@ -185,10 +185,12 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 			targetType = "Patient"
 		case "encounter":
 			targetType = "Encounter"
-		case "performer", "general-practitioner", "requester", "asserter", "recorder", "results-interpreter":
+		case "performer", "general-practitioner", "requester", "asserter", "recorder", "results-interpreter", "collector":
 			targetType = "Practitioner"
 		case "organization", "partof", "manufacturer", "intended-dispenser":
 			targetType = "Organization"
+		case "location":
+			targetType = "Location"
 		}
 	}
 
@@ -231,6 +233,7 @@ var (
 		"reason-code": true, "conclusion": true, "vaccine-code": true,
 		"status-reason": true, "target-disease": true,
 		"intended-performertype": true, "address-use": true,
+		"accession": true, "bodysite": true,
 	}
 	knownRefSearchParams = map[string]bool{
 		"organization": true, "general-practitioner": true,
@@ -240,12 +243,13 @@ var (
 		"intended-dispenser": true, "intended-performer": true,
 		"based-on": true, "location": true, "part-of": true, "partof": true,
 		"reason-reference": true, "result": true, "results-interpreter": true,
-		"specimen": true, "media": true, "manufacturer": true,
+		"specimen": true, "collector": true, "media": true, "manufacturer": true,
 		"reaction": true, "endpoint": true, "instantiates-canonical": true,
 	}
 	knownDateSearchParams = map[string]bool{
 		"birthdate": true, "date": true, "onset-date": true,
 		"authoredon": true, "issued": true, "last-date": true,
+		"collected": true,
 	}
 	knownQuantitySearchParams = map[string]bool{
 		"value-quantity":           true,
@@ -281,6 +285,11 @@ func ValidateSearchQuery(q url.Values) error {
 	for _, revVal := range q["_revinclude"] {
 		if _, err := ParseInclude(revVal); err != nil {
 			return err
+		}
+	}
+	for _, luVal := range q["_lastUpdated"] {
+		if _, err := ParseDateOp(luVal); err != nil {
+			return fmt.Errorf("invalid _lastUpdated parameter %q: %w", luVal, err)
 		}
 	}
 	for key, values := range q {
@@ -334,6 +343,11 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 			idVal = idVal[idx+1:]
 		}
 		params.ID = idVal
+	}
+	for _, luVal := range q["_lastUpdated"] {
+		if dOp, err := ParseDateOp(luVal); err == nil {
+			params.LastUpdated = append(params.LastUpdated, dOp)
+		}
 	}
 	if v := q.Get("_count"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -441,7 +455,7 @@ func ParseIfNoneExist(tenant, resType, rawHeader string) (SearchParams, error) {
 				return SearchParams{}, fmt.Errorf("If-None-Exist query %q contains empty parameter value for %q", rawHeader, k)
 			}
 		}
-		if len(vals) > 1 && !knownDateSearchParams[k] && !knownQuantitySearchParams[k] {
+		if len(vals) > 1 && k != "_lastUpdated" && !knownDateSearchParams[k] && !knownQuantitySearchParams[k] {
 			if ch, ok := ParseChainedParam(k, vals[0]); !ok || (ch.ParamType != "date" && ch.ParamType != "quantity") {
 				return SearchParams{}, fmt.Errorf("If-None-Exist query %q contains multiple values for non-range parameter %q", rawHeader, k)
 			}
@@ -463,6 +477,7 @@ func ParseIfNoneExist(tenant, resType, rawHeader string) (SearchParams, error) {
 // HasSearchCriteria returns true if SearchParams contains at least one filter criterion.
 func HasSearchCriteria(p SearchParams) bool {
 	return p.ID != "" ||
+		len(p.LastUpdated) > 0 ||
 		len(p.Strings) > 0 ||
 		len(p.Tokens) > 0 ||
 		len(p.Dates) > 0 ||

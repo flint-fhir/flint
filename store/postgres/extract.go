@@ -13,12 +13,14 @@ import (
 	diagpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/diagnostic_report_go_proto"
 	encpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/encounter_go_proto"
 	immpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/immunization_go_proto"
+	locpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/location_go_proto"
 	medreqpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/medication_request_go_proto"
 	obspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto"
 	orgpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/organization_go_proto"
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
 	procpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/procedure_go_proto"
+	specpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/specimen_go_proto"
 
 	genpostgres "github.com/flint-fhir/flint/gen/go/store/postgres"
 )
@@ -276,8 +278,32 @@ func ExtractOrganization(tenantID string, resID string, protoBytes []byte) (*Sea
 	return idx, nil
 }
 
+// ExtractSpecimen extracts search indexes from Specimen proto bytes.
+func ExtractSpecimen(tenantID string, resID string, protoBytes []byte) (*SearchIndexes, error) {
+	var r specpb.Specimen
+	if err := proto.Unmarshal(protoBytes, &r); err != nil {
+		return nil, fmt.Errorf("unmarshal Specimen: %w", err)
+	}
+	if (r.GetId() == nil || r.GetId().GetValue() == "") && resID != "" {
+		r.Id = &dtpb.Id{Value: resID}
+	}
+	return normalizeSearchIndexes(genpostgres.ExtractSpecimenIndexes(tenantID, &r)), nil
+}
+
+// ExtractLocation extracts search indexes from Location proto bytes.
+func ExtractLocation(tenantID string, resID string, protoBytes []byte) (*SearchIndexes, error) {
+	var r locpb.Location
+	if err := proto.Unmarshal(protoBytes, &r); err != nil {
+		return nil, fmt.Errorf("unmarshal Location: %w", err)
+	}
+	if (r.GetId() == nil || r.GetId().GetValue() == "") && resID != "" {
+		r.Id = &dtpb.Id{Value: resID}
+	}
+	return normalizeSearchIndexes(genpostgres.ExtractLocationIndexes(tenantID, &r)), nil
+}
+
 // DefaultIndexExtractors returns the default map of resource type to IndexExtractorFunc
-// for all supported US Core / USCDI v3 FHIR R4 resources.
+// for all supported US Core v6.1.0 & v7.0.0 / USCDI v3 & v4 FHIR R4 resources.
 func DefaultIndexExtractors() map[string]IndexExtractorFunc {
 	return map[string]IndexExtractorFunc{
 		"Patient":            ExtractPatient,
@@ -291,5 +317,7 @@ func DefaultIndexExtractors() map[string]IndexExtractorFunc {
 		"DiagnosticReport":   ExtractDiagnosticReport,
 		"Immunization":       ExtractImmunization,
 		"Organization":       ExtractOrganization,
+		"Specimen":           ExtractSpecimen,
+		"Location":           ExtractLocation,
 	}
 }

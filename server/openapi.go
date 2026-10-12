@@ -99,14 +99,19 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 func resourceSearchParamDefs() map[string][]map[string]string {
 	return map[string][]map[string]string{
 		"Patient": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
 			{"name": "family", "type": "string"},
 			{"name": "given", "type": "string"},
+			{"name": "name", "type": "string"},
 			{"name": "identifier", "type": "token"},
 			{"name": "gender", "type": "token"},
 			{"name": "birthdate", "type": "date"},
 			{"name": "organization", "type": "reference"},
 		},
 		"Condition": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
 			{"name": "code", "type": "token"},
 			{"name": "clinical-status", "type": "token"},
 			{"name": "verification-status", "type": "token"},
@@ -117,6 +122,8 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "onset-date", "type": "date"},
 		},
 		"Encounter": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
 			{"name": "class", "type": "token"},
 			{"name": "status", "type": "token"},
 			{"name": "type", "type": "token"},
@@ -124,8 +131,11 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "subject", "type": "reference"},
 			{"name": "date", "type": "date"},
 			{"name": "participant", "type": "reference"},
+			{"name": "location", "type": "reference"},
 		},
 		"Observation": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
 			{"name": "code", "type": "token"},
 			{"name": "status", "type": "token"},
 			{"name": "category", "type": "token"},
@@ -138,6 +148,8 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "combo-value-quantity", "type": "quantity"},
 		},
 		"Practitioner": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
 			{"name": "family", "type": "string"},
 			{"name": "given", "type": "string"},
 			{"name": "name", "type": "string"},
@@ -149,6 +161,8 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "address", "type": "string"},
 		},
 		"MedicationRequest": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
 			{"name": "code", "type": "token"},
 			{"name": "status", "type": "token"},
 			{"name": "intent", "type": "token"},
@@ -160,6 +174,8 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "authoredon", "type": "date"},
 		},
 		"AllergyIntolerance": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
 			{"name": "code", "type": "token"},
 			{"name": "clinical-status", "type": "token"},
 			{"name": "verification-status", "type": "token"},
@@ -170,6 +186,8 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "date", "type": "date"},
 		},
 		"Procedure": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
 			{"name": "code", "type": "token"},
 			{"name": "status", "type": "token"},
 			{"name": "category", "type": "token"},
@@ -180,6 +198,8 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "date", "type": "date"},
 		},
 		"DiagnosticReport": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
 			{"name": "code", "type": "token"},
 			{"name": "status", "type": "token"},
 			{"name": "category", "type": "token"},
@@ -187,10 +207,13 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "subject", "type": "reference"},
 			{"name": "encounter", "type": "reference"},
 			{"name": "result", "type": "reference"},
+			{"name": "specimen", "type": "reference"},
 			{"name": "date", "type": "date"},
 			{"name": "issued", "type": "date"},
 		},
 		"Immunization": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
 			{"name": "vaccine-code", "type": "token"},
 			{"name": "status", "type": "token"},
 			{"name": "patient", "type": "reference"},
@@ -199,6 +222,8 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "lot-number", "type": "string"},
 		},
 		"Organization": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
 			{"name": "name", "type": "string"},
 			{"name": "identifier", "type": "token"},
 			{"name": "active", "type": "token"},
@@ -207,6 +232,33 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "address-city", "type": "string"},
 			{"name": "address-state", "type": "string"},
 			{"name": "address-postalcode", "type": "string"},
+			{"name": "partof", "type": "reference"},
+		},
+		"Specimen": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "identifier", "type": "token"},
+			{"name": "accession", "type": "token"},
+			{"name": "status", "type": "token"},
+			{"name": "type", "type": "token"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "collected", "type": "date"},
+			{"name": "bodysite", "type": "token"},
+			{"name": "collector", "type": "reference"},
+		},
+		"Location": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "name", "type": "string"},
+			{"name": "identifier", "type": "token"},
+			{"name": "status", "type": "token"},
+			{"name": "type", "type": "token"},
+			{"name": "address", "type": "string"},
+			{"name": "address-city", "type": "string"},
+			{"name": "address-state", "type": "string"},
+			{"name": "address-postalcode", "type": "string"},
+			{"name": "organization", "type": "reference"},
 			{"name": "partof", "type": "reference"},
 		},
 	}
@@ -226,7 +278,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 	resOrder := []string{
 		"Patient", "Condition", "Encounter", "Observation", "Practitioner",
 		"MedicationRequest", "AllergyIntolerance", "Procedure", "DiagnosticReport",
-		"Immunization", "Organization",
+		"Immunization", "Organization", "Specimen", "Location",
 	}
 	seenRes := make(map[string]bool, len(resOrder))
 	for _, rt := range resOrder {
