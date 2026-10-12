@@ -92,8 +92,12 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 	}
 }
 
-// RegisterDefaultResourceTypes registers all 13 standard US Core v6.1.0 & v7.0.0 / USCDI v3 & v4 FHIR R4 resource types.
+// RegisterDefaultResourceTypes registers all ~146 official HL7 FHIR R4 resource types
+// compiled in google/fhir R4 ContainedResource (including all 26 US Core v6.1.0 & v7.0.0 types).
 func RegisterDefaultResourceTypes(srv *Server) {
+	for resType, md := range fhirutil.AllR4ResourceDescriptors() {
+		srv.protoRegistry[resType] = md
+	}
 	srv.RegisterResourceType("Patient", &patpb.Patient{})
 	srv.RegisterResourceType("Condition", &condpb.Condition{})
 	srv.RegisterResourceType("Encounter", &encpb.Encounter{})
@@ -1296,6 +1300,32 @@ func usCoreSupportedProfiles(rt string) []string {
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-specimen"}
 	case "Location":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-location"}
+	case "DocumentReference":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-documentreference"}
+	case "Provenance":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-provenance"}
+	case "CarePlan":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-careplan"}
+	case "CareTeam":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-careteam"}
+	case "Goal":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-goal"}
+	case "ServiceRequest":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest"}
+	case "Coverage":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"}
+	case "QuestionnaireResponse":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-questionnaireresponse"}
+	case "MedicationDispense":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationdispense"}
+	case "Medication":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medication"}
+	case "Device":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-implantable-device"}
+	case "PractitionerRole":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitionerrole"}
+	case "RelatedPerson":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-relatedperson"}
 	default:
 		return nil
 	}
@@ -1314,14 +1344,27 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		{"code": "search-type"},
 	}
 
-	spDefs := resourceSearchParamDefs()
-	usCoreOrder := []string{
-		"Patient", "Condition", "Encounter", "Observation", "Practitioner",
-		"MedicationRequest", "AllergyIntolerance", "Procedure", "DiagnosticReport",
-		"Immunization", "Organization", "Specimen", "Location",
+	defaultSearchParams := []map[string]string{
+		{"name": "_id", "type": "token"},
+		{"name": "_lastUpdated", "type": "date"},
+		{"name": "identifier", "type": "token"},
+		{"name": "status", "type": "token"},
+		{"name": "code", "type": "token"},
+		{"name": "patient", "type": "reference"},
+		{"name": "subject", "type": "reference"},
+		{"name": "date", "type": "date"},
 	}
-	resEntries := make([]map[string]any, 0, len(usCoreOrder)+2)
+
+	spDefs := resourceSearchParamDefs()
+	usCoreOrder := fhirutil.USCoreResourceTypes()
+	seenTypes := make(map[string]bool, len(s.protoRegistry)+2)
+	resEntries := make([]map[string]any, 0, len(s.protoRegistry)+2)
 	for _, rt := range usCoreOrder {
+		seenTypes[rt] = true
+		sp := spDefs[rt]
+		if len(sp) == 0 {
+			sp = defaultSearchParams
+		}
 		entry := map[string]any{
 			"type":              rt,
 			"profile":           "http://hl7.org/fhir/StructureDefinition/" + rt,
@@ -1333,7 +1376,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			"conditionalUpdate": true,
 			"conditionalDelete": "single",
 			"interaction":       interactions,
-			"searchParam":       spDefs[rt],
+			"searchParam":       sp,
 		}
 		if rt == "Patient" {
 			entry["operation"] = []map[string]string{
@@ -1349,10 +1392,17 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 		resEntries = append(resEntries, entry)
 	}
+	seenTypes["Group"] = true
 	resEntries = append(resEntries, map[string]any{
-		"type":        "Group",
-		"profile":     "http://hl7.org/fhir/StructureDefinition/Group",
-		"interaction": []map[string]string{{"code": "read"}},
+		"type":              "Group",
+		"profile":           "http://hl7.org/fhir/StructureDefinition/Group",
+		"versioning":        "versioned-update",
+		"readHistory":       true,
+		"updateCreate":      true,
+		"conditionalCreate": true,
+		"conditionalUpdate": true,
+		"conditionalDelete": "single",
+		"interaction":       interactions,
 		"operation": []map[string]string{
 			{
 				"name":       "export",
@@ -1360,6 +1410,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 	})
+	seenTypes["AuditEvent"] = true
 	resEntries = append(resEntries, map[string]any{
 		"type":        "AuditEvent",
 		"profile":     "http://hl7.org/fhir/StructureDefinition/AuditEvent",
@@ -1375,6 +1426,31 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			{"name": "entity-id", "type": "token"},
 		},
 	})
+
+	for _, rt := range fhirutil.AllR4ResourceTypes() {
+		if seenTypes[rt] {
+			continue
+		}
+		if _, registered := s.protoRegistry[rt]; !registered {
+			continue
+		}
+		sp := spDefs[rt]
+		if len(sp) == 0 {
+			sp = defaultSearchParams
+		}
+		resEntries = append(resEntries, map[string]any{
+			"type":              rt,
+			"profile":           "http://hl7.org/fhir/StructureDefinition/" + rt,
+			"versioning":        "versioned-update",
+			"readHistory":       true,
+			"updateCreate":      true,
+			"conditionalCreate": true,
+			"conditionalUpdate": true,
+			"conditionalDelete": "single",
+			"interaction":       interactions,
+			"searchParam":       sp,
+		})
+	}
 
 	smartCfg := s.resolveSMARTConfig(r)
 

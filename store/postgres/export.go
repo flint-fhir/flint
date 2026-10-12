@@ -58,7 +58,7 @@ func (s *Store) ExportResources(ctx context.Context, params ExportParams) ([]Sea
 				  AND rf.target_id = r.res_id
 			)
 			OR (
-				r.res_type NOT IN ('Patient', 'Condition', 'Encounter', 'Observation', 'MedicationRequest', 'AllergyIntolerance', 'Procedure', 'DiagnosticReport', 'Immunization', 'Specimen')
+				r.res_type IN ('Organization', 'Practitioner', 'PractitionerRole', 'Location', 'Medication', 'HealthcareService', 'Endpoint', 'Substance')
 				AND EXISTS (
 					SELECT 1 FROM spidx_reference rf_clin
 					JOIN spidx_reference rf_pat
@@ -73,6 +73,26 @@ func (s *Store) ExportResources(ctx context.Context, params ExportParams) ([]Sea
 					WHERE rf_clin.tenant_id = r.tenant_id
 					  AND rf_clin.target_type = r.res_type
 					  AND rf_clin.target_id = r.res_id
+					  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+				)
+			)
+			OR (
+				r.res_type = 'Provenance'
+				AND EXISTS (
+					SELECT 1 FROM spidx_reference rf_prov
+					JOIN spidx_reference rf_pat
+					  ON rf_pat.tenant_id = rf_prov.tenant_id
+					 AND rf_pat.res_type = rf_prov.target_type
+					 AND rf_pat.res_id = rf_prov.target_id
+					JOIN fhir_resource p
+					  ON p.tenant_id = rf_pat.tenant_id
+					 AND p.res_type = 'Patient'
+					 AND p.res_id = rf_pat.target_id
+					 AND p.is_deleted = FALSE
+					WHERE rf_prov.tenant_id = r.tenant_id
+					  AND rf_prov.res_type = 'Provenance'
+					  AND rf_prov.res_id = r.res_id
+					  AND rf_prov.sp_name = 'target'
 					  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
 				)
 			)

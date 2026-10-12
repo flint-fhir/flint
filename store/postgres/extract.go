@@ -23,11 +23,12 @@ import (
 	specpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/specimen_go_proto"
 
 	genpostgres "github.com/flint-fhir/flint/gen/go/store/postgres"
+	"github.com/flint-fhir/flint/pkg/fhirutil"
 )
 
 func isEnumTokenParam(spName string) bool {
 	switch spName {
-	case "status", "gender", "address-use", "telecom-use", "intent", "criticality", "category", "type", "priority", "severity":
+	case "status", "lifecycle-status", "clinical-status", "verification-status", "gender", "address-use", "telecom-use", "intent", "criticality", "category", "type", "priority", "severity", "mode":
 		return true
 	default:
 		return false
@@ -303,21 +304,26 @@ func ExtractLocation(tenantID string, resID string, protoBytes []byte) (*SearchI
 }
 
 // DefaultIndexExtractors returns the default map of resource type to IndexExtractorFunc
-// for all supported US Core v6.1.0 & v7.0.0 / USCDI v3 & v4 FHIR R4 resources.
+// for all ~146 official HL7 FHIR R4 resource types (combining universal protoreflect
+// extractors with static generated extractors).
 func DefaultIndexExtractors() map[string]IndexExtractorFunc {
-	return map[string]IndexExtractorFunc{
-		"Patient":            ExtractPatient,
-		"Condition":          ExtractCondition,
-		"Encounter":          ExtractEncounter,
-		"Observation":        ExtractObservation,
-		"Practitioner":       ExtractPractitioner,
-		"MedicationRequest":  ExtractMedicationRequest,
-		"AllergyIntolerance": ExtractAllergyIntolerance,
-		"Procedure":          ExtractProcedure,
-		"DiagnosticReport":   ExtractDiagnosticReport,
-		"Immunization":       ExtractImmunization,
-		"Organization":       ExtractOrganization,
-		"Specimen":           ExtractSpecimen,
-		"Location":           ExtractLocation,
+	allDescs := fhirutil.AllR4ResourceDescriptors()
+	extractors := make(map[string]IndexExtractorFunc, len(allDescs))
+	for resType, md := range allDescs {
+		extractors[resType] = NewDynamicResourceExtractor(resType, md)
 	}
+	extractors["Patient"] = ExtractPatient
+	extractors["Condition"] = ExtractCondition
+	extractors["Encounter"] = ExtractEncounter
+	extractors["Observation"] = ExtractObservation
+	extractors["Practitioner"] = ExtractPractitioner
+	extractors["MedicationRequest"] = ExtractMedicationRequest
+	extractors["AllergyIntolerance"] = ExtractAllergyIntolerance
+	extractors["Procedure"] = ExtractProcedure
+	extractors["DiagnosticReport"] = ExtractDiagnosticReport
+	extractors["Immunization"] = ExtractImmunization
+	extractors["Organization"] = ExtractOrganization
+	extractors["Specimen"] = ExtractSpecimen
+	extractors["Location"] = ExtractLocation
+	return extractors
 }

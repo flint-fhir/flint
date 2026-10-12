@@ -181,16 +181,18 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 	// Default inferred target types for standard FHIR references if not explicit
 	if targetType == "" {
 		switch refParam {
-		case "patient", "subject":
+		case "patient", "subject", "beneficiary":
 			targetType = "Patient"
 		case "encounter":
 			targetType = "Encounter"
-		case "performer", "general-practitioner", "requester", "asserter", "recorder", "results-interpreter", "collector":
+		case "performer", "general-practitioner", "requester", "asserter", "recorder", "results-interpreter", "collector", "practitioner", "author", "agent":
 			targetType = "Practitioner"
-		case "organization", "partof", "manufacturer", "intended-dispenser":
+		case "organization", "partof", "manufacturer", "intended-dispenser", "payor", "custodian":
 			targetType = "Organization"
 		case "location":
 			targetType = "Location"
+		case "medication":
+			targetType = "Medication"
 		}
 	}
 
@@ -221,6 +223,7 @@ var (
 		"address": true, "address-city": true, "address-state": true,
 		"address-postalcode": true, "address-country": true,
 		"phonetic": true, "lot-number": true, "series": true,
+		"title": true, "description": true, "udi-carrier": true, "device-name": true,
 	}
 	knownTokenSearchParams = map[string]bool{
 		"identifier": true, "gender": true, "active": true,
@@ -228,16 +231,18 @@ var (
 		"deceased": true, "status": true, "code": true,
 		"category": true, "type": true, "class": true,
 		"clinical-status": true, "verification-status": true,
+		"lifecycle-status": true, "docstatus": true, "mode": true,
 		"intent": true, "priority": true, "criticality": true,
 		"severity": true, "manifestation": true, "route": true,
 		"reason-code": true, "conclusion": true, "vaccine-code": true,
 		"status-reason": true, "target-disease": true,
 		"intended-performertype": true, "address-use": true,
-		"accession": true, "bodysite": true,
+		"accession": true, "bodysite": true, "specialty": true,
+		"role": true, "relationship": true,
 	}
 	knownRefSearchParams = map[string]bool{
 		"organization": true, "general-practitioner": true,
-		"subject": true, "patient": true, "encounter": true,
+		"subject": true, "patient": true, "beneficiary": true, "encounter": true,
 		"performer": true, "asserter": true, "recorder": true,
 		"participant": true, "requester": true, "medication": true,
 		"intended-dispenser": true, "intended-performer": true,
@@ -245,11 +250,17 @@ var (
 		"reason-reference": true, "result": true, "results-interpreter": true,
 		"specimen": true, "collector": true, "media": true, "manufacturer": true,
 		"reaction": true, "endpoint": true, "instantiates-canonical": true,
+		"target": true, "agent": true, "author": true, "custodian": true,
+		"payor": true, "subscriber": true, "practitioner": true, "device": true,
+		"questionnaire": true, "source": true, "care-team": true, "goal": true,
+		"focus": true, "owner": true, "for": true, "actor": true,
 	}
 	knownDateSearchParams = map[string]bool{
 		"birthdate": true, "date": true, "onset-date": true,
-		"authoredon": true, "issued": true, "last-date": true,
-		"collected": true,
+		"authoredon": true, "authored": true, "issued": true, "last-date": true,
+		"collected": true, "period": true, "recorded": true, "created": true,
+		"indexed": true, "target-date": true, "start-date": true,
+		"occurrence": true, "whenhandedover": true, "whenprepared": true,
 	}
 	knownQuantitySearchParams = map[string]bool{
 		"value-quantity":           true,
