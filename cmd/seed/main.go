@@ -1,6 +1,8 @@
 // Command seed populates a running Flint FHIR R4 server with a realistic,
-// deterministic longitudinal clinical cohort (Practitioner, Patient, Encounter,
-// Condition, Observation) using an atomic FHIR R4 transaction Bundle.
+// deterministic longitudinal clinical cohort covering all 11 US Core v6.1.0 /
+// USCDI v3 resource types (Organization, Practitioner, Patient, Encounter,
+// Condition, Observation, MedicationRequest, AllergyIntolerance, Procedure,
+// DiagnosticReport, Immunization) using an atomic FHIR R4 transaction Bundle.
 //
 // Usage:
 //
@@ -125,9 +127,9 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("decode transaction-response: %w", err)
 	}
 
-	fmt.Fprintf(out, "🔥 Seeded %d FHIR R4 resources into tenant %q (%s)\n\n", len(txResp.Entry), tenant, endpoint)
+	fmt.Fprintf(out, "🔥 Seeded %d FHIR R4 resources (all 11 US Core v6.1.0 profiles) into tenant %q (%s)\n\n", len(txResp.Entry), tenant, endpoint)
 	for _, e := range txResp.Entry {
-		fmt.Fprintf(out, "  • %-30s  %-12s  ETag: %s\n", e.FullURL, e.Response.Status, e.Response.ETag)
+		fmt.Fprintf(out, "  • %-42s  %-12s  ETag: %s\n", e.FullURL, e.Response.Status, e.Response.ETag)
 	}
 
 	fmt.Fprintf(out, "\nTry these queries:\n")
@@ -135,19 +137,55 @@ func Run(ctx context.Context, cfg Config) error {
 	fmt.Fprintf(out, "  curl -s %s/Patient/pat-alice-001/$everything | jq .\n\n", endpoint)
 	fmt.Fprintf(out, "  # 2. Search Observations by LOINC code + quantity + _include patient\n")
 	fmt.Fprintf(out, "  curl -s '%s/Observation?code=8867-4&value-quantity=gt70&_include=Observation:patient' | jq .\n\n", endpoint)
-	fmt.Fprintf(out, "  # 3. Chained search: Observations for patients with family name Wonderland\n")
-	fmt.Fprintf(out, "  curl -s '%s/Observation?patient.family=Wonderland' | jq .\n\n", endpoint)
-	fmt.Fprintf(out, "  # 4. HIPAA / ONC Security Audit Log (AuditEvent)\n")
-	fmt.Fprintf(out, "  curl -s '%s/AuditEvent?_count=5' | jq .\n", endpoint)
+	fmt.Fprintf(out, "  # 3. Search active MedicationRequests for Alice\n")
+	fmt.Fprintf(out, "  curl -s '%s/MedicationRequest?patient=Patient/pat-alice-001&intent=order' | jq .\n\n", endpoint)
+	fmt.Fprintf(out, "  # 4. Run ONC (g)(10) & US Core v6.1.0 Conformance Certification ($certify)\n")
+	fmt.Fprintf(out, "  curl -s -X POST %s/$certify | jq .\n", endpoint)
 
 	return nil
 }
 
 // CohortTransactionBundleJSON returns a deterministic, idempotent FHIR R4 transaction Bundle
-// containing 2 Practitioners, 3 Patients, 3 Encounters, 2 Conditions, and 5 Observations.
+// containing 25 resources across all 11 US Core v6.1.0 / USCDI v3 resource types:
+// 2 Organizations, 2 Practitioners, 3 Patients, 3 Encounters, 2 Conditions, 5 Observations,
+// 2 MedicationRequests, 1 AllergyIntolerance, 2 Procedures, 2 DiagnosticReports, and 1 Immunization.
 func CohortTransactionBundleJSON() ([]byte, error) {
 	entries := []map[string]any{
-		// 1. Practitioners
+		// 1. Organizations (2)
+		putEntry("Organization/org-flint-health", map[string]any{
+			"resourceType": "Organization",
+			"id":           "org-flint-health",
+			"active":       true,
+			"name":         "Flint Medical Center",
+			"alias":        []string{"Flint Health System"},
+			"identifier": []map[string]any{
+				{"system": "http://hl7.org/fhir/sid/us-npi", "value": "1122334455"},
+			},
+			"type": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/organization-type", "code": "prov", "display": "Healthcare Provider"},
+					},
+				},
+			},
+			"address": []map[string]any{
+				{"line": []string{"500 Parnassus Ave"}, "city": "San Francisco", "state": "CA", "postalCode": "94143"},
+			},
+		}),
+		putEntry("Organization/org-metro-lab", map[string]any{
+			"resourceType": "Organization",
+			"id":           "org-metro-lab",
+			"active":       true,
+			"name":         "Metro Clinical Reference Laboratory",
+			"identifier": []map[string]any{
+				{"system": "http://hl7.org/fhir/sid/us-npi", "value": "5544332211"},
+			},
+			"address": []map[string]any{
+				{"line": []string{"250 Park Ave"}, "city": "New York", "state": "NY", "postalCode": "10177"},
+			},
+		}),
+
+		// 2. Practitioners (2)
 		putEntry("Practitioner/prac-cardiology-1", map[string]any{
 			"resourceType": "Practitioner",
 			"id":           "prac-cardiology-1",
@@ -179,7 +217,7 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			},
 		}),
 
-		// 2. Patient 1: Alice Wonderland (Hypertension, Cardiology ambulatory visit)
+		// 3. Patient 1: Alice Wonderland (Hypertension, Cardiology ambulatory visit)
 		putEntry("Patient/pat-alice-001", map[string]any{
 			"resourceType": "Patient",
 			"id":           "pat-alice-001",
@@ -198,6 +236,9 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			"generalPractitioner": []map[string]any{
 				{"reference": "Practitioner/prac-cardiology-1"},
 			},
+			"managingOrganization": map[string]any{
+				"reference": "Organization/org-flint-health",
+			},
 		}),
 		putEntry("Encounter/enc-alice-001", map[string]any{
 			"resourceType": "Encounter",
@@ -214,6 +255,9 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 				{
 					"individual": map[string]any{"reference": "Practitioner/prac-cardiology-1"},
 				},
+			},
+			"serviceProvider": map[string]any{
+				"reference": "Organization/org-flint-health",
 			},
 			"period": map[string]any{
 				"start": "2026-01-15T09:00:00Z",
@@ -314,8 +358,100 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 				},
 			},
 		}),
+		putEntry("MedicationRequest/medreq-alice-lisinopril", map[string]any{
+			"resourceType": "MedicationRequest",
+			"id":           "medreq-alice-lisinopril",
+			"status":       "active",
+			"intent":       "order",
+			"subject": map[string]any{
+				"reference": "Patient/pat-alice-001",
+			},
+			"encounter": map[string]any{
+				"reference": "Encounter/enc-alice-001",
+			},
+			"requester": map[string]any{
+				"reference": "Practitioner/prac-cardiology-1",
+			},
+			"authoredOn": "2026-01-15T09:30:00Z",
+			"medicationCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "314076", "display": "Lisinopril 10 MG Oral Tablet"},
+				},
+			},
+		}),
+		putEntry("AllergyIntolerance/allergy-alice-penicillin", map[string]any{
+			"resourceType": "AllergyIntolerance",
+			"id":           "allergy-alice-penicillin",
+			"clinicalStatus": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical", "code": "active"},
+				},
+			},
+			"verificationStatus": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-verification", "code": "confirmed"},
+				},
+			},
+			"criticality": "high",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "7980", "display": "Penicillin G"},
+				},
+			},
+			"patient": map[string]any{
+				"reference": "Patient/pat-alice-001",
+			},
+		}),
+		putEntry("Procedure/proc-alice-ecg", map[string]any{
+			"resourceType": "Procedure",
+			"id":           "proc-alice-ecg",
+			"status":       "completed",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://snomed.info/sct", "code": "29303009", "display": "Electrocardiographic procedure"},
+				},
+			},
+			"subject": map[string]any{
+				"reference": "Patient/pat-alice-001",
+			},
+			"encounter": map[string]any{
+				"reference": "Encounter/enc-alice-001",
+			},
+			"performedDateTime": "2026-01-15T09:20:00Z",
+		}),
+		putEntry("DiagnosticReport/dr-alice-cardiac", map[string]any{
+			"resourceType": "DiagnosticReport",
+			"id":           "dr-alice-cardiac",
+			"status":       "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/v2-0074", "code": "LAB"},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://loinc.org", "code": "24323-8", "display": "Comprehensive metabolic 2000 panel"},
+				},
+			},
+			"subject": map[string]any{
+				"reference": "Patient/pat-alice-001",
+			},
+			"encounter": map[string]any{
+				"reference": "Encounter/enc-alice-001",
+			},
+			"effectiveDateTime": "2026-01-15T09:25:00Z",
+			"issued":            "2026-01-15T09:45:00Z",
+			"performer": []map[string]any{
+				{"reference": "Organization/org-flint-health"},
+			},
+			"result": []map[string]any{
+				{"reference": "Observation/obs-alice-hr"},
+			},
+		}),
 
-		// 3. Patient 2: Robert Frost (Type 2 Diabetes, Inpatient admission)
+		// 4. Patient 2: Robert Frost (Type 2 Diabetes, Inpatient admission)
 		putEntry("Patient/pat-robert-002", map[string]any{
 			"resourceType": "Patient",
 			"id":           "pat-robert-002",
@@ -428,8 +564,77 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 				"code":   "kg",
 			},
 		}),
+		putEntry("MedicationRequest/medreq-robert-metformin", map[string]any{
+			"resourceType": "MedicationRequest",
+			"id":           "medreq-robert-metformin",
+			"status":       "active",
+			"intent":       "order",
+			"subject": map[string]any{
+				"reference": "Patient/pat-robert-002",
+			},
+			"encounter": map[string]any{
+				"reference": "Encounter/enc-robert-001",
+			},
+			"requester": map[string]any{
+				"reference": "Practitioner/prac-primary-2",
+			},
+			"authoredOn": "2026-02-10T11:00:00Z",
+			"medicationCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "861004", "display": "Metformin hydrochloride 500 MG Oral Tablet"},
+				},
+			},
+		}),
+		putEntry("Procedure/proc-robert-foot-exam", map[string]any{
+			"resourceType": "Procedure",
+			"id":           "proc-robert-foot-exam",
+			"status":       "completed",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://snomed.info/sct", "code": "401191002", "display": "Diabetic foot examination"},
+				},
+			},
+			"subject": map[string]any{
+				"reference": "Patient/pat-robert-002",
+			},
+			"encounter": map[string]any{
+				"reference": "Encounter/enc-robert-001",
+			},
+			"performedDateTime": "2026-02-10T09:00:00Z",
+		}),
+		putEntry("DiagnosticReport/dr-robert-diabetes", map[string]any{
+			"resourceType": "DiagnosticReport",
+			"id":           "dr-robert-diabetes",
+			"status":       "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/v2-0074", "code": "LAB"},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://loinc.org", "code": "4548-4", "display": "Hemoglobin A1c/Hemoglobin.total in Blood"},
+				},
+			},
+			"subject": map[string]any{
+				"reference": "Patient/pat-robert-002",
+			},
+			"encounter": map[string]any{
+				"reference": "Encounter/enc-robert-001",
+			},
+			"effectiveDateTime": "2026-02-10T10:30:00Z",
+			"issued":            "2026-02-10T11:15:00Z",
+			"performer": []map[string]any{
+				{"reference": "Organization/org-metro-lab"},
+			},
+			"result": []map[string]any{
+				{"reference": "Observation/obs-robert-hba1c"},
+			},
+		}),
 
-		// 4. Patient 3: Elena Rostova (Wellness check, active Encounter)
+		// 5. Patient 3: Elena Rostova (Wellness check, active Encounter, COVID-19 Immunization)
 		putEntry("Patient/pat-elena-003", map[string]any{
 			"resourceType": "Patient",
 			"id":           "pat-elena-003",
@@ -491,6 +696,24 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 				"system": "http://unitsofmeasure.org",
 				"code":   "/min",
 			},
+		}),
+		putEntry("Immunization/imm-elena-covid", map[string]any{
+			"resourceType": "Immunization",
+			"id":           "imm-elena-covid",
+			"status":       "completed",
+			"vaccineCode": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://hl7.org/fhir/sid/cvx", "code": "207", "display": "COVID-19, mRNA, LNP-S, PF, 100 mcg/0.5mL dose"},
+				},
+			},
+			"patient": map[string]any{
+				"reference": "Patient/pat-elena-003",
+			},
+			"encounter": map[string]any{
+				"reference": "Encounter/enc-elena-001",
+			},
+			"occurrenceDateTime": "2026-03-01T11:20:00Z",
+			"lotNumber":          "FLINT-LOT-2026A",
 		}),
 	}
 

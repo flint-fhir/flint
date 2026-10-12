@@ -161,12 +161,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/openapi.json", s.handleOpenAPI)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$docs", s.handleDocsUI)
 
-	// FHIR Bulk Data Access ($export — ONC (g)(10))
+	// FHIR Bulk Data Access ($export — ONC (g)(10)) & Automated Conformance Certification ($certify)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$export", s.handleSystemExport)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/Patient/$export", s.handlePatientGroupExport)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/$export", s.handleSinglePatientExport)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$export-poll/{jobId}", s.handleExportPoll)
 	mux.HandleFunc("DELETE /fhir/r4/{tenant}/$export-poll/{jobId}", s.handleExportCancel)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$certify", s.handleCertify)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$certify", s.handleCertify)
 
 	// FHIR REST endpoints
 	mux.HandleFunc("GET /fhir/r4/{tenant}/AuditEvent/{id}", s.handleReadAuditEvent)

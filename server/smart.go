@@ -23,18 +23,34 @@ func (s *Server) SetSMARTConfig(cfg SMARTConfig) {
 }
 
 // handleSMARTConfig serves /.well-known/smart-configuration.
-// This is the discovery document that SMART apps use to find auth endpoints.
+// This is the discovery document that SMART apps and ONC (g)(10) test kits use to find auth endpoints.
 func (s *Server) handleSMARTConfig(w http.ResponseWriter, r *http.Request) {
-	if s.smartConfig == nil {
-		writeOperationOutcome(w, http.StatusNotFound, "not-found",
-			"SMART configuration not set")
-		return
+	cfg := s.smartConfig
+	if cfg == nil {
+		scheme := "http"
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+			scheme = "https"
+		}
+		host := r.Host
+		if host == "" {
+			host = "localhost:8080"
+		}
+		tenant := r.PathValue("tenant")
+		if tenant == "" {
+			tenant = "default"
+		}
+		baseOrigin := scheme + "://" + host
+		cfg = &SMARTConfig{
+			Issuer:                baseOrigin + "/fhir/r4/" + tenant,
+			AuthorizationEndpoint: baseOrigin + "/oauth2/authorize",
+			TokenEndpoint:         baseOrigin + "/oauth2/token",
+		}
 	}
 
 	config := map[string]any{
-		"issuer":                 s.smartConfig.Issuer,
-		"authorization_endpoint": s.smartConfig.AuthorizationEndpoint,
-		"token_endpoint":         s.smartConfig.TokenEndpoint,
+		"issuer":                 cfg.Issuer,
+		"authorization_endpoint": cfg.AuthorizationEndpoint,
+		"token_endpoint":         cfg.TokenEndpoint,
 		"token_endpoint_auth_methods_supported": []string{
 			"client_secret_basic",
 			"client_secret_post",
@@ -45,7 +61,22 @@ func (s *Server) handleSMARTConfig(w http.ResponseWriter, r *http.Request) {
 			"client_credentials",
 		},
 		"scopes_supported": []string{
-			// Patient-level scopes
+			// SMART v2 granular scopes
+			"patient/Patient.rs",
+			"patient/Observation.rs",
+			"patient/Condition.rs",
+			"patient/Encounter.rs",
+			"patient/MedicationRequest.rs",
+			"patient/AllergyIntolerance.rs",
+			"patient/Procedure.rs",
+			"patient/DiagnosticReport.rs",
+			"patient/Immunization.rs",
+			"patient/Practitioner.rs",
+			"patient/Organization.rs",
+			"patient/*.rs",
+			"user/*.cruds",
+			"system/*.rs",
+			// SMART v1 scopes
 			"patient/Patient.read",
 			"patient/Patient.write",
 			"patient/Observation.read",
@@ -56,12 +87,10 @@ func (s *Server) handleSMARTConfig(w http.ResponseWriter, r *http.Request) {
 			"patient/Procedure.read",
 			"patient/DiagnosticReport.read",
 			"patient/Immunization.read",
-			// User-level scopes
 			"user/Patient.read",
 			"user/Patient.write",
 			"user/*.read",
 			"user/*.write",
-			// System-level scopes
 			"system/Patient.read",
 			"system/*.read",
 			// Launch

@@ -1,12 +1,15 @@
 package server
 
 import (
+	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
@@ -141,6 +144,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		method := "PUT"
 		resTypeFromURL := ""
 		resID := ""
+		urlQuery := ""
 		expectedVersion := 0
 
 		if entry.Request != nil {
@@ -149,7 +153,11 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 			cleanURL := strings.Trim(entry.Request.URL, "/")
 			if cleanURL != "" {
-				parts := strings.SplitN(cleanURL, "/", 2)
+				pathPart, qPart, hasQuery := strings.Cut(cleanURL, "?")
+				if hasQuery {
+					urlQuery = qPart
+				}
+				parts := strings.SplitN(strings.Trim(pathPart, "/"), "/", 2)
 				resTypeFromURL = parts[0]
 				if len(parts) == 2 {
 					resID = parts[1]
@@ -171,8 +179,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if method != "POST" && method != "PUT" && method != "DELETE" {
-			msg := fmt.Sprintf("entry[%d]: unsupported bundle request method %q (expected POST, PUT, or DELETE)", i, method)
+		if method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" {
+			msg := fmt.Sprintf("entry[%d]: unsupported bundle request method %q (expected POST, PUT, PATCH, or DELETE)", i, method)
 			if isTransaction {
 				writeOperationOutcome(w, http.StatusBadRequest, "not-supported", msg)
 				return
@@ -182,7 +190,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resType := resTypeFromURL
-		if len(entry.Resource) > 0 && string(entry.Resource) != "null" {
+		if method != "PATCH" && len(entry.Resource) > 0 && string(entry.Resource) != "null" {
 			if len(urnMap) > 0 {
 				if rewritten, err := fhirutil.RewriteURNReferences(entry.Resource, urnMap); err == nil {
 					entry.Resource = rewritten
@@ -227,7 +235,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			switch method {
 			case "POST":
 				requiredAction = auth.ActionCreate
-			case "PUT":
+			case "PUT", "PATCH":
 				requiredAction = auth.ActionUpdate
 			case "DELETE":
 				requiredAction = auth.ActionDelete
@@ -238,9 +246,11 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				msg := fmt.Sprintf("entry[%d]: insufficient scope for %s on %s", i, method, resType)
 				if isTransaction {
 					writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
-					return
 				}
 				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
+				if isTransaction {
+					return
+				}
 				continue
 			}
 			if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
@@ -252,6 +262,169 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
 				continue
 			}
+		}
+
+		// Resolve Conditional PUT / Conditional DELETE when urlQuery is present
+		if urlQuery != "" && (method == "PUT" || method == "DELETE") && s.store != nil {
+			condParams, err := postgres.ParseIfNoneExist(tenant, resType, urlQuery)
+			if err != nil {
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("entry[%d]: %v", i, err))
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, fmt.Sprintf("entry[%d]: %v", i, err)))
+				continue
+			}
+			if hasSecCtx && auth.IsPatientRestricted(secCtx) {
+				if err := validateAndScopeIfNoneExistForPatient(&condParams, resType, cleanID(secCtx.GetPatientId()), secCtx.GetPatientId()); err != nil {
+					if isTransaction {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden", fmt.Sprintf("entry[%d]: %v", i, err))
+						return
+					}
+					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, fmt.Sprintf("entry[%d]: %v", i, err)))
+					continue
+				}
+			}
+			condParams.Count = 2
+			sr, err := s.store.Search(r.Context(), condParams)
+			if err != nil {
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusInternalServerError, "exception", fmt.Sprintf("entry[%d]: conditional search failed", i))
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, fmt.Sprintf("entry[%d]: conditional search failed", i)))
+				continue
+			}
+			if sr.Total > 1 {
+				msg := fmt.Sprintf("entry[%d]: conditional %s matched %d resources (expected 0 or 1)", i, method, sr.Total)
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusPreconditionFailed, "multiple-matches", msg)
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusPreconditionFailed, msg))
+				continue
+			}
+			if sr.Total == 1 {
+				resID = sr.Matches[0].ResID
+			} else if method == "DELETE" {
+				// 0 matches on conditional DELETE is an idempotent 204 No Content
+				responseEntries = append(responseEntries, map[string]any{
+					"response": map[string]any{"status": "204 No Content"},
+				})
+				continue
+			}
+		}
+
+		// Handle PATCH entry by reading current resource, applying RFC 6902 / RFC 7396 patch, and converting to PUT
+		if method == "PATCH" {
+			if resID == "" || s.store == nil {
+				msg := fmt.Sprintf("entry[%d]: PATCH requires resource ID and active store", i)
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusBadRequest, "required", msg)
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, msg))
+				continue
+			}
+			if _, ok := s.protoRegistry[resType]; !ok {
+				msg := fmt.Sprintf("entry[%d]: resource type %s not registered", i, resType)
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusBadRequest, "not-supported", msg)
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, msg))
+				continue
+			}
+			currentRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID)
+			if errors.Is(err, sql.ErrNoRows) {
+				msg := fmt.Sprintf("entry[%d]: %s/%s not found", i, resType, resID)
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusNotFound, "not-found", msg)
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusNotFound, msg))
+				continue
+			}
+			if err != nil {
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusInternalServerError, "exception", err.Error())
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, err.Error()))
+				continue
+			}
+			if expectedVersion > 0 && currentRec.ResVersion != expectedVersion {
+				msg := fmt.Sprintf("entry[%d]: version conflict on %s/%s", i, resType, resID)
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", msg)
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusPreconditionFailed, msg))
+				continue
+			}
+			currentJSON, err := s.protoToJSONWithMeta(resType, currentRec.ResourceProto, 0, time.Time{})
+			if err != nil {
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode existing resource")
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, "failed to decode existing resource"))
+				continue
+			}
+			trimmedPatch := bytes.TrimSpace(entry.Resource)
+			var patchedJSON []byte
+			if len(trimmedPatch) > 0 && trimmedPatch[0] == '[' {
+				var status int
+				patchedJSON, status, err = ApplyJSONPatch(currentJSON, trimmedPatch)
+				if err != nil {
+					if isTransaction {
+						writeOperationOutcome(w, status, "invalid", fmt.Sprintf("entry[%d]: %v", i, err))
+						return
+					}
+					responseEntries = append(responseEntries, bundleErrorResponse(status, fmt.Sprintf("entry[%d]: %v", i, err)))
+					continue
+				}
+			} else {
+				patchedJSON, err = ApplyMergePatch(currentJSON, trimmedPatch)
+				if err != nil {
+					if isTransaction {
+						writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("entry[%d]: %v", i, err))
+						return
+					}
+					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, fmt.Sprintf("entry[%d]: %v", i, err)))
+					continue
+				}
+			}
+			var patchedMap map[string]any
+			if err := json.Unmarshal(patchedJSON, &patchedMap); err == nil {
+				if rt, ok := patchedMap["resourceType"].(string); !ok || rt != resType {
+					msg := fmt.Sprintf("entry[%d]: PATCH cannot change resourceType from %q to %v", i, resType, patchedMap["resourceType"])
+					if isTransaction {
+						writeOperationOutcome(w, http.StatusBadRequest, "invariant", msg)
+						return
+					}
+					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, msg))
+					continue
+				}
+				if rawID, hasID := patchedMap["id"]; hasID && rawID != nil {
+					idStr, ok := rawID.(string)
+					if !ok || (idStr != "" && idStr != resID) {
+						msg := fmt.Sprintf("entry[%d]: PATCH cannot change resource id from %q to %v", i, resID, rawID)
+						if isTransaction {
+							writeOperationOutcome(w, http.StatusBadRequest, "invariant", msg)
+							return
+						}
+						responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, msg))
+						continue
+					}
+				}
+				patchedMap["id"] = resID
+				if remars, err := json.Marshal(patchedMap); err == nil {
+					patchedJSON = remars
+				}
+			}
+			entry.Resource = patchedJSON
+			method = "PUT"
 		}
 
 		// Handle DELETE

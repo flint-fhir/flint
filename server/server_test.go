@@ -1685,14 +1685,14 @@ func TestServer_Integration(t *testing.T) {
 			t.Errorf("expected 1 Observation linked to %s, got %v", patFullURL, searchBundle["total"])
 		}
 
-		// 2. Unsupported HTTP method (PATCH) in transaction Bundle returns 400 Bad Request
+		// 2. Unsupported HTTP method (HEAD) in transaction Bundle returns 400 Bad Request
 		badMethodBundle := `{
 			"resourceType": "Bundle",
 			"type": "transaction",
 			"entry": [
 				{
-					"resource": {"resourceType": "Patient", "id": "bad-method-1", "name": [{"family": "Patch"}]},
-					"request": {"method": "PATCH", "url": "Patient/bad-method-1"}
+					"resource": {"resourceType": "Patient", "id": "bad-method-1", "name": [{"family": "Head"}]},
+					"request": {"method": "HEAD", "url": "Patient/bad-method-1"}
 				}
 			]
 		}`
@@ -1702,7 +1702,7 @@ func TestServer_Integration(t *testing.T) {
 		}
 		respBad.Body.Close()
 		if respBad.StatusCode != http.StatusBadRequest {
-			t.Errorf("expected 400 Bad Request for unsupported PATCH method in Bundle, got %d", respBad.StatusCode)
+			t.Errorf("expected 400 Bad Request for unsupported HEAD method in Bundle, got %d", respBad.StatusCode)
 		}
 	})
 
@@ -1722,7 +1722,7 @@ func TestServer_Integration(t *testing.T) {
 				},
 				{
 					"resource": {"resourceType": "Patient", "id": "batch-pat-bad"},
-					"request": {"method": "PATCH", "url": "Patient/batch-pat-bad"}
+					"request": {"method": "HEAD", "url": "Patient/batch-pat-bad"}
 				},
 				{
 					"resource": {"resourceType": "Patient", "id": "batch-mismatch", "name": [{"family": "Mismatch"}]},

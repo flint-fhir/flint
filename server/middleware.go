@@ -92,8 +92,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// Check SMART scopes based on request shape
 		if len(parts) >= 4 {
 			resType := parts[3]
-			isBulkExportOp := resType == "$export" || resType == "$export-poll" || resType == "$export-file" ||
-				(strings.EqualFold(resType, "Patient") && len(parts) == 5 && parts[4] == "$export")
+			isBulkExportOp := resType == "$export" || resType == "$export-poll" || resType == "$export-file" || resType == "$certify" ||
+				(strings.EqualFold(resType, "Patient") && len(parts) == 5 && parts[4] == "$export") ||
+				(strings.EqualFold(resType, "Group") && len(parts) == 6 && parts[5] == "$export")
 
 			if !isBulkExportOp {
 				switch r.Method {
