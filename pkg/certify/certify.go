@@ -370,6 +370,64 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		record(sq.id, suite2, sq.name, t0, err, fmt.Sprintf("Matched total >= 1 (%s)", sq.query))
 	}
 
+	// 2.19 US Core Mandatory POST-Based Search (POST /{resourceType}/_search with application/x-www-form-urlencoded)
+	t0 = time.Now()
+	{
+		postForm := url.Values{
+			"patient":  {"Patient/cert-pat-1"},
+			"category": {"http://terminology.hl7.org/CodeSystem/observation-category|vital-signs"},
+			"status":   {"final"},
+		}
+		respPost, bPost, errPost := doReq(http.MethodPost, basePath+"/Observation/_search", "application/x-www-form-urlencoded", []byte(postForm.Encode()), nil)
+		if errPost != nil || respPost.StatusCode != http.StatusOK {
+			err = fmt.Errorf("expected 200 OK on POST /Observation/_search, got %d: %s", respPost.StatusCode, string(bPost))
+		} else {
+			var postBundle map[string]any
+			if uErr := json.Unmarshal(bPost, &postBundle); uErr != nil {
+				err = uErr
+			} else if tot, _ := postBundle["total"].(float64); tot < 1 {
+				err = fmt.Errorf("expected total >= 1 on POST /Observation/_search, got %v", postBundle["total"])
+			}
+		}
+	}
+	record("SEARCH-01", suite2, "HL7 Inferno POST-Based Search (POST /{resourceType}/_search Form Body)", t0, err, "POST /Observation/_search returned matching Bundle")
+
+	// 2.20 HL7 Inferno multipleOr Comma-Separated Search (status=final,amended,corrected & _id=id1,id2)
+	t0 = time.Now()
+	{
+		orQuery := "Observation?patient=Patient/cert-pat-1&status=final,amended,corrected&_id=cert-obs-1,cert-obs-avg-bp"
+		respOr, bOr, errOr := doReq(http.MethodGet, basePath+"/"+orQuery, "", nil, nil)
+		if errOr != nil || respOr.StatusCode != http.StatusOK {
+			err = fmt.Errorf("expected 200 OK on multipleOr search, got %d: %s", respOr.StatusCode, string(bOr))
+		} else {
+			var orBundle map[string]any
+			if uErr := json.Unmarshal(bOr, &orBundle); uErr != nil {
+				err = uErr
+			} else if tot, _ := orBundle["total"].(float64); tot < 2 {
+				err = fmt.Errorf("expected total >= 2 on multipleOr _id=cert-obs-1,cert-obs-avg-bp, got %v", orBundle["total"])
+			}
+		}
+	}
+	record("SEARCH-02", suite2, "HL7 Inferno multipleOr Comma-Separated Search (status=a,b & _id=id1,id2)", t0, err, "Matched multipleOr comma-separated token & _id filters")
+
+	// 2.21 FHIR R4 Search Modifiers (:exact, :contains, :not, :missing)
+	t0 = time.Now()
+	{
+		modQuery := "Patient?family:exact=Certify&given:contains=lic&gender:not=male&identifier:missing=false"
+		respMod, bMod, errMod := doReq(http.MethodGet, basePath+"/"+modQuery, "", nil, nil)
+		if errMod != nil || respMod.StatusCode != http.StatusOK {
+			err = fmt.Errorf("expected 200 OK on search modifiers query, got %d: %s", respMod.StatusCode, string(bMod))
+		} else {
+			var modBundle map[string]any
+			if uErr := json.Unmarshal(bMod, &modBundle); uErr != nil {
+				err = uErr
+			} else if tot, _ := modBundle["total"].(float64); tot < 1 {
+				err = fmt.Errorf("expected total >= 1 on :exact/:contains/:not/:missing query, got %v", modBundle["total"])
+			}
+		}
+	}
+	record("SEARCH-03", suite2, "FHIR R4 Search Modifiers (:exact, :contains, :not, :missing)", t0, err, "Verified :exact, :contains, :not, and :missing modifiers")
+
 	// =========================================================================
 	// Suite 3: FHIR R4 Versioning, CAS (If-Match), Patch (RFC 6902/7396) & Conditional CRUD
 	// =========================================================================
@@ -665,6 +723,44 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	record("SMART-02", suite5, "SMART Backend Services (client_credentials) & RFC 7662 Introspection", t0, err, "Backend Services JWT & token introspection verified")
 
 	t0 = time.Now()
+	{
+		err = nil
+		granForm := url.Values{
+			"grant_type": {"client_credentials"},
+			"scope":      {"system/Observation.rs?category=http://terminology.hl7.org/CodeSystem/observation-category|vital-signs"},
+		}
+		respGran, bGran, errGran := doReq(http.MethodPost, "/oauth2/token", "application/x-www-form-urlencoded", []byte(granForm.Encode()), nil)
+		if errGran != nil || respGran.StatusCode != http.StatusOK {
+			err = fmt.Errorf("expected 200 OK issuing granular SMART v2 token, got %d", respGran.StatusCode)
+		} else {
+			var granMap map[string]any
+			_ = json.Unmarshal(bGran, &granMap)
+			granTok, _ := granMap["access_token"].(string)
+			headers := map[string]string{"Authorization": "Bearer " + granTok}
+
+			// 1. Allowed category=vital-signs search -> 200 OK with >= 1 result
+			respAllowed, bAllowed, errAllowed := doReq(http.MethodGet, basePath+"/Observation?patient=Patient/cert-pat-1", "", nil, headers)
+			// 2. Disallowed category=social-history search -> 403 Forbidden
+			respDenied, _, errDenied := doReq(http.MethodGet, basePath+"/Observation?patient=Patient/cert-pat-1&category=social-history", "", nil, headers)
+			// 3. Revoke token via POST /oauth2/revoke (RFC 7009) and verify subsequent request returns 401 Unauthorized
+			revForm := url.Values{"token": {granTok}}
+			respRev, _, errRev := doReq(http.MethodPost, "/oauth2/revoke", "application/x-www-form-urlencoded", []byte(revForm.Encode()), nil)
+			respAfterRev, _, errAfterRev := doReq(http.MethodGet, basePath+"/Observation?patient=Patient/cert-pat-1", "", nil, headers)
+
+			if errAllowed != nil || respAllowed.StatusCode != http.StatusOK {
+				err = fmt.Errorf("expected 200 OK on granular Observation search, got %d: %s", respAllowed.StatusCode, string(bAllowed))
+			} else if errDenied != nil || respDenied.StatusCode != http.StatusForbidden {
+				err = fmt.Errorf("expected 403 Forbidden when querying category=social-history with vital-signs-only scope, got %d", respDenied.StatusCode)
+			} else if errRev != nil || respRev.StatusCode != http.StatusOK {
+				err = fmt.Errorf("expected 200 OK from /oauth2/revoke, got %d", respRev.StatusCode)
+			} else if errAfterRev != nil || respAfterRev.StatusCode != http.StatusUnauthorized {
+				err = fmt.Errorf("expected 401 Unauthorized after RFC 7009 token revocation, got %d", respAfterRev.StatusCode)
+			}
+		}
+	}
+	record("SMART-03", suite5, "SMART v2 Granular Sub-Resource Scopes (?category=) & RFC 7009 Revocation", t0, err, "Enforced ?category=vital-signs scope filter & RFC 7009 /oauth2/revoke")
+
+	t0 = time.Now()
 	resp, _, err = doReq(http.MethodPost, basePath+"/MedicationRequest/$validate", "application/fhir+json",
 		[]byte(`{"resourceType":"MedicationRequest","status":"active","intent":"order","subject":{"reference":"Patient/cert-pat-1"}}`), nil)
 	if err == nil && resp.StatusCode != http.StatusBadRequest {
@@ -784,6 +880,7 @@ func defaultCertifyCohortBundle() []byte {
 					"resourceType": "Observation",
 					"id": "cert-obs-1",
 					"status": "final",
+					"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
 					"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
 					"subject": {"reference": "Patient/cert-pat-1"},
 					"effectiveDateTime": "2026-01-15T09:15:00Z",

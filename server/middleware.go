@@ -61,6 +61,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 		rawToken := strings.TrimSpace(authHeader[7:])
 
+		if s.isTokenRevoked(rawToken) {
+			writeOperationOutcome(w, http.StatusUnauthorized, "login", "token has been revoked")
+			return
+		}
+
 		// Validate token using configured TokenValidator (OIDC/Zitadel/Mock)
 		secCtx, err := validator.ValidateToken(r.Context(), rawToken)
 		if err != nil {
@@ -139,59 +144,18 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						}
 					} else {
 						// Search: GET /{tenant}/{resourceType}
-						if !auth.Allows(secCtx, resType, auth.ActionSearch) {
-							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-								fmt.Sprintf("insufficient scope for search on %s", resType))
+						if !s.enforceSearchScopeAndCompartment(w, r, secCtx, resType) {
 							return
-						}
-
-						// Patient compartment enforcement in search query parameters
-						if auth.IsPatientRestricted(secCtx) {
-							allowedPatientID := cleanID(secCtx.GetPatientId())
-							q := r.URL.Query()
-							if strings.EqualFold(resType, "Patient") {
-								for _, rawVal := range q["_id"] {
-									for part := range strings.SplitSeq(rawVal, ",") {
-										if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
-											writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-												fmt.Sprintf("patient-scoped token (%s) cannot search patient %s",
-													secCtx.GetPatientId(), trimmed))
-											return
-										}
-									}
-								}
-							}
-
-							// For clinical resources, reject any mismatched patient/subject filters across all query values
-							for _, key := range []string{"patient", "patient._id"} {
-								for _, rawVal := range q[key] {
-									for part := range strings.SplitSeq(rawVal, ",") {
-										if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
-											writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-												fmt.Sprintf("cannot query records of patient %s with token restricted to %s",
-													trimmed, secCtx.GetPatientId()))
-											return
-										}
-									}
-								}
-							}
-							for _, key := range []string{"subject", "subject._id"} {
-								for _, rawVal := range q[key] {
-									for part := range strings.SplitSeq(rawVal, ",") {
-										if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
-											writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-												fmt.Sprintf("cannot query records of subject %s with token restricted to %s",
-													trimmed, secCtx.GetPatientId()))
-											return
-										}
-									}
-								}
-							}
 						}
 					}
 
 				case http.MethodPost:
-					if len(parts) >= 5 && parts[4] == "$validate" {
+					if len(parts) >= 5 && parts[4] == "_search" {
+						// POST-based search: POST /{tenant}/{resourceType}/_search
+						if !s.enforceSearchScopeAndCompartment(w, r, secCtx, resType) {
+							return
+						}
+					} else if len(parts) >= 5 && parts[4] == "$validate" {
 						// Validate operation: POST /{tenant}/{resourceType}/$validate
 						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionCreate) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
@@ -303,6 +267,58 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		ctx := auth.WithSecurityContext(r.Context(), secCtx)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func (s *Server) enforceSearchScopeAndCompartment(w http.ResponseWriter, r *http.Request, secCtx *auth.SecurityContext, resType string) bool {
+	if !auth.Allows(secCtx, resType, auth.ActionSearch) {
+		writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+			fmt.Sprintf("insufficient scope for search on %s", resType))
+		return false
+	}
+
+	if auth.IsPatientRestricted(secCtx) {
+		allowedPatientID := cleanID(secCtx.GetPatientId())
+		q := mergedSearchQuery(r)
+		if strings.EqualFold(resType, "Patient") {
+			for _, rawVal := range q["_id"] {
+				for part := range strings.SplitSeq(rawVal, ",") {
+					if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							fmt.Sprintf("patient-scoped token (%s) cannot search patient %s",
+								secCtx.GetPatientId(), trimmed))
+						return false
+					}
+				}
+			}
+		}
+
+		// For clinical resources, reject any mismatched patient/subject/beneficiary filters across all query values
+		for _, key := range []string{"patient", "patient._id"} {
+			for _, rawVal := range q[key] {
+				for part := range strings.SplitSeq(rawVal, ",") {
+					if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							fmt.Sprintf("cannot query records of patient %s with token restricted to %s",
+								trimmed, secCtx.GetPatientId()))
+						return false
+					}
+				}
+			}
+		}
+		for _, key := range []string{"subject", "subject._id"} {
+			for _, rawVal := range q[key] {
+				for part := range strings.SplitSeq(rawVal, ",") {
+					if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							fmt.Sprintf("cannot query records of subject %s with token restricted to %s",
+								trimmed, secCtx.GetPatientId()))
+						return false
+					}
+				}
+			}
+		}
+	}
+	return true
 }
 
 func isPublicEndpoint(parts []string) bool {
