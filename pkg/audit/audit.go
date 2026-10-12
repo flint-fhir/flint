@@ -161,7 +161,31 @@ func ClassifyHTTPInteraction(method string, parts []string, statusCode int) (act
 	if resType == "$validate" {
 		return ActionExecute, "validate", "Resource", "", ""
 	}
-	if resType == "metadata" || strings.HasPrefix(resType, ".well-known") {
+	if resType == "$export" {
+		return ActionExecute, "export", "System", "", ""
+	}
+	if resType == "$export-poll" {
+		jobID := ""
+		if len(parts) >= 5 {
+			jobID = parts[4]
+		}
+		if method == http.MethodDelete {
+			return ActionDelete, "export-cancel", "ExportJob", jobID, ""
+		}
+		return ActionRead, "export-poll", "ExportJob", jobID, ""
+	}
+	if resType == "$export-file" {
+		jobID := ""
+		fileType := "ExportFile"
+		if len(parts) >= 5 {
+			jobID = parts[4]
+		}
+		if len(parts) >= 6 {
+			fileType = strings.TrimSuffix(parts[5], ".ndjson")
+		}
+		return ActionRead, "export-file", fileType, jobID, ""
+	}
+	if resType == "metadata" || resType == "openapi.json" || resType == "$docs" || strings.HasPrefix(resType, ".well-known") {
 		return ActionRead, "capabilities", "CapabilityStatement", "", ""
 	}
 
@@ -175,6 +199,9 @@ func ClassifyHTTPInteraction(method string, parts []string, statusCode int) (act
 		}
 		if len(parts) >= 6 && strings.HasPrefix(parts[5], "$") {
 			return ActionExecute, strings.TrimPrefix(parts[5], "$"), resType, parts[4], ""
+		}
+		if len(parts) >= 5 && strings.HasPrefix(parts[4], "$") {
+			return ActionExecute, strings.TrimPrefix(parts[4], "$"), resType, "", ""
 		}
 		if len(parts) >= 5 {
 			return ActionRead, "read", resType, parts[4], ""
