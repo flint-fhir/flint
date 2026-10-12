@@ -1,7 +1,8 @@
-// Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 (USCDI v3),
-// and ONC §170.315(g)(10) Standardized API conformance & certification runner.
-// It executes 5 structured test suites against a target Flint server and produces
-// both a standard FHIR R4 TestReport resource and a human-readable scorecard.
+// Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
+// (USCDI v3 & v4), and ONC §170.315(g)(10) / HTI-1 Standardized API conformance
+// & certification runner. It executes 5 structured test suites (29 checks) against
+// a target Flint server and produces both a standard FHIR R4 TestReport resource
+// and a human-readable scorecard.
 package certify
 
 import (
@@ -80,8 +81,8 @@ func (r *Report) ToFHIRTestReport() map[string]any {
 		"id":           "flint-onc-uscore-certification",
 		"status":       "completed",
 		"testScript": map[string]any{
-			"reference": "TestScript/flint-onc-g10-uscore-v6",
-			"display":   "Flint FHIR R4 / US Core v6.1.0 / ONC (g)(10) Certification Suite",
+			"reference": "TestScript/flint-onc-g10-uscore-v6-v7",
+			"display":   "Flint FHIR R4 / US Core v6.1.0 & v7.0.0 / ONC (g)(10) & HTI-1 Certification Suite",
 		},
 		"result": r.Result,
 		"score":  r.Score,
@@ -102,7 +103,7 @@ func (r *Report) ToFHIRTestReport() map[string]any {
 func (r *Report) FormatScorecard() string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "================================================================================\n")
-	fmt.Fprintf(&sb, "  FLINT FHIR R4 / US CORE v6.1.0 / ONC (g)(10) CERTIFICATION SCORECARD\n")
+	fmt.Fprintf(&sb, "  FLINT FHIR R4 / US CORE v6.1.0 & v7.0.0 / ONC (g)(10) CERTIFICATION SCORECARD\n")
 	fmt.Fprintf(&sb, "================================================================================\n")
 	fmt.Fprintf(&sb, "  Target Server : %s/fhir/r4/%s\n", strings.TrimRight(r.BaseURL, "/"), r.Tenant)
 	fmt.Fprintf(&sb, "  Timestamp     : %s\n", r.Issued.UTC().Format(time.RFC3339))
@@ -236,7 +237,12 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient",
 				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-vital-signs",
 				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-average-blood-pressure",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-care-experience-preference",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-treatment-intervention-preference",
 				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationrequest",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-specimen",
+				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-location",
 				"http://fhir-registry.smarthealthit.org/StructureDefinition/oauth-uris",
 			} {
 				if !strings.Contains(rawStr, reqToken) {
@@ -246,7 +252,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			}
 		}
 	}
-	record("DISC-01", suite1, "CapabilityStatement (/metadata) FHIR 4.0.1, US Core v6.1.0 supportedProfile & oauth-uris", t0, err, "CapabilityStatement canonical US Core profiles & SMART oauth-uris verified")
+	record("DISC-01", suite1, "CapabilityStatement (/metadata) FHIR 4.0.1, US Core v6.1.0 & v7.0.0 supportedProfile & oauth-uris", t0, err, "CapabilityStatement canonical US Core v6.1.0 & v7.0.0 profiles & SMART oauth-uris verified")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/.well-known/smart-configuration", "", nil, nil)
@@ -294,9 +300,9 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	record("DISC-04", suite1, "Interactive Conformance Explorer (/$docs)", t0, err, "Explorer HTML verified")
 
 	// =========================================================================
-	// Suite 2: US Core v6.1.0 / USCDI v3 11-Resource Cohort & Mandatory Search
+	// Suite 2: US Core v6.1.0 & v7.0.0 (USCDI v3 & v4) 13-Resource Cohort & Search
 	// =========================================================================
-	suite2 := "Suite 2: US Core v6.1.0 / USCDI v3 (11 Profiles Read & Mandatory Search)"
+	suite2 := "Suite 2: US Core v6.1.0 & v7.0.0 / USCDI v3 & v4 (13 Resource Types & Mandatory Search)"
 
 	seedPayload := cfg.SeedBundle
 	if len(seedPayload) == 0 {
@@ -307,7 +313,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	if err == nil && resp.StatusCode != http.StatusOK {
 		err = fmt.Errorf("seed bundle POST failed with %d: %s", resp.StatusCode, string(b))
 	}
-	record("USCORE-00", suite2, "Atomic Transaction Bundle Ingestion (All 11 US Core Profiles)", t0, err, "11 US Core profiles committed atomically")
+	record("USCORE-00", suite2, "Atomic Transaction Bundle Ingestion (All 13 US Core v6.1.0 & v7.0.0 Resource Types)", t0, err, "13 US Core resource types committed atomically")
 
 	usCoreSearches := []struct {
 		id    string
@@ -325,6 +331,9 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		{"USCORE-09", "US Core Immunization Search (patient + vaccine-code + status)", "Immunization?patient=Patient/cert-pat-1&vaccine-code=207&status=completed"},
 		{"USCORE-10", "US Core Practitioner Search (identifier NPI)", "Practitioner?identifier=http://hl7.org/fhir/sid/us-npi|1234567899"},
 		{"USCORE-11", "US Core Organization Search (name + address-city)", "Organization?name=Certify+Medical&address-city=Boston"},
+		{"USCORE-12", "US Core v7.0.0 Specimen Search (patient + type + status)", "Specimen?patient=Patient/cert-pat-1&type=119297000&status=available"},
+		{"USCORE-13", "US Core v7.0.0 Location Search (name + address-city)", "Location?name=Certify+Cardiology&address-city=Boston"},
+		{"USCORE-14", "US Core v7.0.0 Average Blood Pressure, Care Preference & _lastUpdated Search", "Observation?patient=Patient/cert-pat-1&code=96607-7&_lastUpdated=ge2020-01-01T00:00:00Z&_lastUpdated=le2099-12-31T23:59:59Z"},
 	}
 
 	for _, sq := range usCoreSearches {
@@ -458,11 +467,11 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	if err == nil {
 		var ev map[string]any
 		_ = json.Unmarshal(b, &ev)
-		if tot, _ := ev["total"].(float64); tot < 11 {
-			err = fmt.Errorf("expected Patient/$everything total >= 11 across US Core profiles, got %v", ev["total"])
+		if tot, _ := ev["total"].(float64); tot < 13 {
+			err = fmt.Errorf("expected Patient/$everything total >= 13 across US Core v6.1.0 & v7.0.0 profiles, got %v", ev["total"])
 		}
 	}
-	record("EXP-01", suite4, "Patient/$everything Compartment Closure (11 US Core Profiles)", t0, err, "All 11 US Core profile resources returned in compartment")
+	record("EXP-01", suite4, "Patient/$everything Compartment Closure (13 US Core v6.1.0 & v7.0.0 Resource Types)", t0, err, "All 13 US Core resource types returned in compartment")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/Group/all/$export", "", nil, map[string]string{
@@ -689,6 +698,19 @@ func defaultCertifyCohortBundle() []byte {
 				"request": {"method": "PUT", "url": "Organization/cert-org-1"}
 			},
 			{
+				"fullUrl": "Location/cert-loc-1",
+				"resource": {
+					"resourceType": "Location",
+					"id": "cert-loc-1",
+					"status": "active",
+					"name": "Certify Cardiology Clinic",
+					"mode": "instance",
+					"address": {"city": "Boston", "state": "MA", "postalCode": "02115"},
+					"managingOrganization": {"reference": "Organization/cert-org-1"}
+				},
+				"request": {"method": "PUT", "url": "Location/cert-loc-1"}
+			},
+			{
 				"fullUrl": "Practitioner/cert-prac-1",
 				"resource": {
 					"resourceType": "Practitioner",
@@ -722,6 +744,7 @@ func defaultCertifyCohortBundle() []byte {
 					"status": "finished",
 					"class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB"},
 					"subject": {"reference": "Patient/cert-pat-1"},
+					"location": [{"location": {"reference": "Location/cert-loc-1"}}],
 					"period": {"start": "2026-01-15T09:00:00Z", "end": "2026-01-15T10:00:00Z"}
 				},
 				"request": {"method": "PUT", "url": "Encounter/cert-enc-1"}
@@ -750,6 +773,41 @@ func defaultCertifyCohortBundle() []byte {
 					"valueQuantity": {"value": 72.0, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
 				},
 				"request": {"method": "PUT", "url": "Observation/cert-obs-1"}
+			},
+			{
+				"fullUrl": "Observation/cert-obs-avg-bp",
+				"resource": {
+					"resourceType": "Observation",
+					"id": "cert-obs-avg-bp",
+					"status": "final",
+					"code": {"coding": [{"system": "http://loinc.org", "code": "96607-7"}]},
+					"subject": {"reference": "Patient/cert-pat-1"},
+					"effectiveDateTime": "2026-01-15T09:17:00Z",
+					"component": [
+						{
+							"code": {"coding": [{"system": "http://loinc.org", "code": "96608-5"}]},
+							"valueQuantity": {"value": 128.0, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+						},
+						{
+							"code": {"coding": [{"system": "http://loinc.org", "code": "96609-3"}]},
+							"valueQuantity": {"value": 80.0, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+						}
+					]
+				},
+				"request": {"method": "PUT", "url": "Observation/cert-obs-avg-bp"}
+			},
+			{
+				"fullUrl": "Observation/cert-obs-care-pref",
+				"resource": {
+					"resourceType": "Observation",
+					"id": "cert-obs-care-pref",
+					"status": "final",
+					"code": {"coding": [{"system": "http://loinc.org", "code": "95541-9"}]},
+					"subject": {"reference": "Patient/cert-pat-1"},
+					"effectiveDateTime": "2026-01-15T09:18:00Z",
+					"valueString": "Prefers digital care summaries"
+				},
+				"request": {"method": "PUT", "url": "Observation/cert-obs-care-pref"}
 			},
 			{
 				"fullUrl": "MedicationRequest/cert-medreq-1",
@@ -790,6 +848,22 @@ func defaultCertifyCohortBundle() []byte {
 				"request": {"method": "PUT", "url": "Procedure/cert-proc-1"}
 			},
 			{
+				"fullUrl": "Specimen/cert-spec-1",
+				"resource": {
+					"resourceType": "Specimen",
+					"id": "cert-spec-1",
+					"status": "available",
+					"type": {"coding": [{"system": "http://snomed.info/sct", "code": "119297000"}]},
+					"subject": {"reference": "Patient/cert-pat-1"},
+					"receivedTime": "2026-01-15T09:22:00Z",
+					"collection": {
+						"collector": {"reference": "Practitioner/cert-prac-1"},
+						"collectedDateTime": "2026-01-15T09:20:00Z"
+					}
+				},
+				"request": {"method": "PUT", "url": "Specimen/cert-spec-1"}
+			},
+			{
 				"fullUrl": "DiagnosticReport/cert-dr-1",
 				"resource": {
 					"resourceType": "DiagnosticReport",
@@ -799,6 +873,7 @@ func defaultCertifyCohortBundle() []byte {
 					"subject": {"reference": "Patient/cert-pat-1"},
 					"effectiveDateTime": "2026-01-15T09:25:00Z",
 					"issued": "2026-01-15T09:45:00Z",
+					"specimen": [{"reference": "Specimen/cert-spec-1"}],
 					"result": [{"reference": "Observation/cert-obs-1"}]
 				},
 				"request": {"method": "PUT", "url": "DiagnosticReport/cert-dr-1"}

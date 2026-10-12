@@ -15,12 +15,14 @@ import (
 	diagpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/diagnostic_report_go_proto"
 	encpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/encounter_go_proto"
 	immpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/immunization_go_proto"
+	locpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/location_go_proto"
 	medreqpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/medication_request_go_proto"
 	obspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto"
 	orgpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/organization_go_proto"
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
 	procpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/procedure_go_proto"
+	specpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/specimen_go_proto"
 
 	"github.com/flint-fhir/flint/store/postgres"
 )
@@ -39,7 +41,9 @@ func TestDefaultIndexExtractors(t *testing.T) {
 	assert.Contains(t, extractors, "DiagnosticReport")
 	assert.Contains(t, extractors, "Immunization")
 	assert.Contains(t, extractors, "Organization")
-	assert.Len(t, extractors, 11)
+	assert.Contains(t, extractors, "Specimen")
+	assert.Contains(t, extractors, "Location")
+	assert.Len(t, extractors, 13)
 }
 
 func TestExtractPatient(t *testing.T) {
@@ -544,4 +548,109 @@ func TestExtractOrganization(t *testing.T) {
 	}
 	assert.True(t, foundName)
 	assert.True(t, foundAlias)
+}
+
+func TestExtractSpecimen(t *testing.T) {
+	spec := &specpb.Specimen{
+		Id: &dtpb.Id{Value: "spec-100"},
+		Status: &specpb.Specimen_StatusCode{
+			Value: c3pb.SpecimenStatusCode_AVAILABLE,
+		},
+		AccessionIdentifier: &dtpb.Identifier{
+			System: &dtpb.Uri{Value: "http://hospital.example.org/specimens"},
+			Value:  &dtpb.String{Value: "ACC-100"},
+		},
+		Type: &dtpb.CodeableConcept{
+			Coding: []*dtpb.Coding{
+				{
+					System: &dtpb.Uri{Value: "http://snomed.info/sct"},
+					Code:   &dtpb.Code{Value: "119297000"},
+				},
+			},
+		},
+		Subject: &dtpb.Reference{
+			Reference: &dtpb.Reference_PatientId{
+				PatientId: &dtpb.ReferenceId{Value: "pat-1"},
+			},
+		},
+	}
+	b, err := proto.Marshal(spec)
+	require.NoError(t, err)
+
+	idx, err := postgres.ExtractSpecimen("tenant-1", "spec-100", b)
+	require.NoError(t, err)
+	require.NotNil(t, idx)
+
+	var foundStatus, foundAccession, foundType, foundPatient bool
+	for _, tok := range idx.Tokens {
+		if tok.SpName == "status" && tok.SpValue == "available" {
+			foundStatus = true
+		}
+		if tok.SpName == "accession" && tok.SpValue == "ACC-100" {
+			foundAccession = true
+		}
+		if tok.SpName == "type" && tok.SpValue == "119297000" {
+			foundType = true
+		}
+	}
+	for _, ref := range idx.References {
+		if ref.SpName == "patient" && ref.TargetType == "Patient" && ref.TargetID == "pat-1" {
+			foundPatient = true
+		}
+	}
+	assert.True(t, foundStatus, "expected status available")
+	assert.True(t, foundAccession, "expected accession ACC-100")
+	assert.True(t, foundType, "expected SNOMED type 119297000")
+	assert.True(t, foundPatient, "expected patient reference pat-1")
+}
+
+func TestExtractLocation(t *testing.T) {
+	loc := &locpb.Location{
+		Id: &dtpb.Id{Value: "loc-100"},
+		Status: &locpb.Location_StatusCode{
+			Value: c3pb.LocationStatusCode_ACTIVE,
+		},
+		Name: &dtpb.String{Value: "Flint Cardiology Clinic"},
+		Address: &dtpb.Address{
+			City:       &dtpb.String{Value: "Boston"},
+			State:      &dtpb.String{Value: "MA"},
+			PostalCode: &dtpb.String{Value: "02115"},
+		},
+		ManagingOrganization: &dtpb.Reference{
+			Reference: &dtpb.Reference_OrganizationId{
+				OrganizationId: &dtpb.ReferenceId{Value: "org-100"},
+			},
+		},
+	}
+	b, err := proto.Marshal(loc)
+	require.NoError(t, err)
+
+	idx, err := postgres.ExtractLocation("tenant-1", "loc-100", b)
+	require.NoError(t, err)
+	require.NotNil(t, idx)
+
+	var foundName, foundCity bool
+	for _, s := range idx.Strings {
+		if s.SpName == "name" && s.SpValue == "flint cardiology clinic" {
+			foundName = true
+		}
+		if s.SpName == "address-city" && s.SpValue == "boston" {
+			foundCity = true
+		}
+	}
+	var foundStatus, foundOrg bool
+	for _, tok := range idx.Tokens {
+		if tok.SpName == "status" && tok.SpValue == "active" {
+			foundStatus = true
+		}
+	}
+	for _, ref := range idx.References {
+		if ref.SpName == "organization" && ref.TargetType == "Organization" && ref.TargetID == "org-100" {
+			foundOrg = true
+		}
+	}
+	assert.True(t, foundName, "expected name")
+	assert.True(t, foundCity, "expected address-city boston")
+	assert.True(t, foundStatus, "expected status active")
+	assert.True(t, foundOrg, "expected organization reference org-100")
 }

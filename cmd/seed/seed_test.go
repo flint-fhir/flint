@@ -35,7 +35,7 @@ func TestCohortTransactionBundle_ValidatesAllResources(t *testing.T) {
 	require.NoError(t, json.Unmarshal(bundleBytes, &bundle))
 	assert.Equal(t, "Bundle", bundle.ResourceType)
 	assert.Equal(t, "transaction", bundle.Type)
-	assert.Len(t, bundle.Entry, 25)
+	assert.Len(t, bundle.Entry, 29)
 
 	engine := validation.NewEngine(validation.DefaultOptions())
 	seenTypes := make(map[string]bool)
@@ -49,7 +49,7 @@ func TestCohortTransactionBundle_ValidatesAllResources(t *testing.T) {
 		outcome := engine.ValidateJSON("", entry.Resource)
 		assert.True(t, outcome.IsValid(), "expected seeded resource %s to pass FHIR R4 validation: %v", entry.FullURL, outcome.Issues)
 	}
-	assert.Len(t, seenTypes, 11, "expected all 11 US Core v6.1.0 resource types in seed bundle")
+	assert.Len(t, seenTypes, 13, "expected all 13 US Core v6.1.0 & v7.0.0 resource types in seed bundle")
 }
 
 func TestSeedRun_UnitHTTP(t *testing.T) {
@@ -66,7 +66,7 @@ func TestSeedRun_UnitHTTP(t *testing.T) {
 		var b map[string]any
 		require.NoError(t, json.Unmarshal(body, &b))
 		entries := b["entry"].([]any)
-		assert.Len(t, entries, 25)
+		assert.Len(t, entries, 29)
 
 		respEntries := make([]map[string]any, len(entries))
 		for i, rawEntry := range entries {
@@ -100,7 +100,7 @@ func TestSeedRun_UnitHTTP(t *testing.T) {
 		Out:         &buf,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, buf.String(), `Seeded 25 FHIR R4 resources (all 11 US Core v6.1.0 profiles) into tenant "demo"`)
+	assert.Contains(t, buf.String(), `Seeded 29 FHIR R4 resources (all 13 US Core v6.1.0 & v7.0.0 profiles) into tenant "demo"`)
 	assert.Contains(t, buf.String(), "Practitioner/prac-cardiology-1")
 	assert.Contains(t, buf.String(), "Patient/pat-alice-001/$everything")
 }
@@ -142,9 +142,9 @@ func TestSeedRun_EndToEndIntegration(t *testing.T) {
 		Out:        &buf,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, buf.String(), `Seeded 25 FHIR R4 resources (all 11 US Core v6.1.0 profiles) into tenant "test-seed"`)
+	assert.Contains(t, buf.String(), `Seeded 29 FHIR R4 resources (all 13 US Core v6.1.0 & v7.0.0 profiles) into tenant "test-seed"`)
 
-	// Verify Patient/$everything for Alice returns Patient + Practitioner + Organization + Encounter + Condition + 2 Observations + MedicationRequest + AllergyIntolerance + Procedure + DiagnosticReport (11 resources)
+	// Verify Patient/$everything for Alice returns Patient + Practitioner + Organization + Location + Encounter + Condition + 4 Observations + MedicationRequest + AllergyIntolerance + Procedure + Specimen + DiagnosticReport (15 resources)
 	resp, err := http.Get(ts.URL + "/fhir/r4/test-seed/Patient/pat-alice-001/$everything")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -152,5 +152,5 @@ func TestSeedRun_EndToEndIntegration(t *testing.T) {
 
 	var evBundle map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&evBundle))
-	assert.Equal(t, 11, int(evBundle["total"].(float64)))
+	assert.Equal(t, 15, int(evBundle["total"].(float64)))
 }

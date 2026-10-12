@@ -25,3 +25,5 @@ inputs:
       - proto/google/fhir/proto/r4/core/resources/diagnostic_report.proto
       - proto/google/fhir/proto/r4/core/resources/immunization.proto
       - proto/google/fhir/proto/r4/core/resources/organization.proto
+      - proto/google/fhir/proto/r4/core/resources/specimen.proto
+      - proto/google/fhir/proto/r4/core/resources/location.proto

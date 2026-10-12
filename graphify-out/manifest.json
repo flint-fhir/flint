@@ -84,9 +84,9 @@
     "semantic_hash": ""
   },
   "server/server.go": {
-    "mtime": 1791787729.9876986,
-    "seen": 1791789917.9077702,
-    "ast_hash": "598c4f0f85bd6423fcffdb703a93430a",
+    "mtime": 1791827536.2184207,
+    "seen": 1791830882.526433,
+    "ast_hash": "dcd5701b8a7f459fccca756141314bdb",
     "semantic_hash": ""
   },
   "server/server_test.go": {
@@ -96,9 +96,9 @@
     "semantic_hash": ""
   },
   "server/smart.go": {
-    "mtime": 1791787143.7054718,
-    "seen": 1791789917.9077911,
-    "ast_hash": "03da576bc2ac935a596959ecc0538f31",
+    "mtime": 1791818284.1311727,
+    "seen": 1791830882.526479,
+    "ast_hash": "90871bee590223a7d229c55ec7280f43",
     "semantic_hash": ""
   },
   "spike/spike1_fhir_json/roundtrip.go": {
@@ -156,9 +156,9 @@
     "semantic_hash": ""
   },
   "store/postgres/search.go": {
-    "mtime": 1791783340.7156227,
-    "seen": 1791785589.000182,
-    "ast_hash": "132b19ef4a09ae5eb318f27f2e77bfb2",
+    "mtime": 1791827333.175489,
+    "seen": 1791830882.526861,
+    "ast_hash": "f966c957d1727d415cdbbc98c8008a4c",
     "semantic_hash": ""
   },
   "store/postgres/store.go": {
@@ -228,9 +228,9 @@
     "semantic_hash": ""
   },
   "buf.gen.yaml": {
-    "mtime": 1791783340.6490002,
-    "seen": 1791785589.000413,
-    "ast_hash": "ef1020a1b5691af8732cb5228782d4be",
+    "mtime": 1791823998.2054038,
+    "seen": 1791830882.527349,
+    "ast_hash": "64882c75d11a70f38e50913c309aa9da",
     "semantic_hash": ""
   },
   "buf.yaml": {
@@ -324,15 +324,15 @@
     "semantic_hash": ""
   },
   "store/postgres/extract.go": {
-    "mtime": 1791783340.7137766,
-    "seen": 1791785589.00016,
-    "ast_hash": "6b07941483aee50e604b9b8912c3abdc",
+    "mtime": 1791827362.3748922,
+    "seen": 1791830882.526807,
+    "ast_hash": "213b76d702a0794f9c449daec5c6e057",
     "semantic_hash": ""
   },
   "store/postgres/extract_test.go": {
-    "mtime": 1791783340.7145736,
-    "seen": 1791785589.000161,
-    "ast_hash": "64155978f7a866d7774c79008b720f88",
+    "mtime": 1791828960.626036,
+    "seen": 1791830882.526808,
+    "ast_hash": "3f149e0d124ab6ccc4c6fb1b254ed0b1",
     "semantic_hash": ""
   },
   "cmd/e2e/recovery.go": {
@@ -432,8 +432,8 @@
     "semantic_hash": ""
   },
   "server/middleware.go": {
-    "mtime": 1791787867.2927268,
-    "seen": 1791789917.9077098,
+    "mtime": 1791818284.130197,
+    "seen": 1791830882.5263848,
     "ast_hash": "2594fa1351500b6116dd6b7fb0c348f6",
     "semantic_hash": ""
   },
@@ -444,15 +444,15 @@
     "semantic_hash": ""
   },
   "store/postgres/search_parse.go": {
-    "mtime": 1791783340.7173338,
-    "seen": 1791785589.000183,
-    "ast_hash": "8fd5bf09dace652f4574e078d1539be3",
+    "mtime": 1791827321.9007056,
+    "seen": 1791830882.5268621,
+    "ast_hash": "3fd3bccd24a7badc4d068d59f4c9cd7a",
     "semantic_hash": ""
   },
   "store/postgres/search_parse_test.go": {
-    "mtime": 1791772669.9111624,
-    "seen": 1791785589.000184,
-    "ast_hash": "f6226fcbed1aa5490c5373dac6debc57",
+    "mtime": 1791830783.590151,
+    "seen": 1791830882.526863,
+    "ast_hash": "6866a97e8e81f720b3a354a28ca4d89f",
     "semantic_hash": ""
   },
   "store/postgres/search_property_test.go": {
@@ -480,15 +480,15 @@
     "semantic_hash": ""
   },
   "pkg/validation/schemas.go": {
-    "mtime": 1791783340.7044106,
-    "seen": 1791785588.999958,
-    "ast_hash": "346d651f1b95740c41cdb137f20b62cd",
+    "mtime": 1791827527.6262264,
+    "seen": 1791830882.5262651,
+    "ast_hash": "1f79bf4c8ea72ed0d2f9680e232ca2e4",
     "semantic_hash": ""
   },
   "pkg/validation/validator.go": {
-    "mtime": 1791783340.7055662,
-    "seen": 1791785588.999959,
-    "ast_hash": "4db34877dde38bd88bdaffcdd2d405ff",
+    "mtime": 1791827467.151994,
+    "seen": 1791830882.526266,
+    "ast_hash": "b17efc456ba53ee538ea2b946de52e13",
     "semantic_hash": ""
   },
   "pkg/validation/validator_test.go": {
@@ -582,15 +582,15 @@
     "semantic_hash": ""
   },
   "cmd/seed/main.go": {
-    "mtime": 1791786693.0658662,
-    "seen": 1791789917.906765,
-    "ast_hash": "366d0bb4122211eeef3c0606e35a1f20",
+    "mtime": 1791828221.1888797,
+    "seen": 1791830882.525214,
+    "ast_hash": "2a4249ed818e75c4c263af5ca526d8ff",
     "semantic_hash": ""
   },
   "cmd/seed/seed_test.go": {
-    "mtime": 1791786693.0662682,
-    "seen": 1791789917.9067662,
-    "ast_hash": "fc4de19f0fd10226b52a65d16755553c",
+    "mtime": 1791828230.7783914,
+    "seen": 1791830882.525216,
+    "ast_hash": "52c76121caadf9505f2e2d852029dc4e",
     "semantic_hash": ""
   },
   "gen/go/store/postgres/allergy_intolerance_search_index.go": {
@@ -630,9 +630,9 @@
     "semantic_hash": ""
   },
   "pkg/certify/certify.go": {
-    "mtime": 1791788166.7610772,
-    "seen": 1791789917.9074519,
-    "ast_hash": "9900a8a91edbb1d5399dbd75a3e9ec65",
+    "mtime": 1791828400.0159216,
+    "seen": 1791830882.526036,
+    "ast_hash": "8c37309608440d99e757a9241c8981e7",
     "semantic_hash": ""
   },
   "pkg/fhirutil/openapi.go": {
@@ -666,9 +666,9 @@
     "semantic_hash": ""
   },
   "server/openapi.go": {
-    "mtime": 1791783340.7088983,
-    "seen": 1791785588.999964,
-    "ast_hash": "d12c07fa2d1f091779f2906bbaf3ff1d",
+    "mtime": 1791827484.217042,
+    "seen": 1791830882.526387,
+    "ast_hash": "34b9464c29390ae7454e15fe59209749",
     "semantic_hash": ""
   },
   "server/openapi_export_test.go": {
@@ -690,9 +690,9 @@
     "semantic_hash": ""
   },
   "store/postgres/export.go": {
-    "mtime": 1791783340.7127526,
-    "seen": 1791785589.000159,
-    "ast_hash": "fa262800c2109255fd8939f2ae3db4ce",
+    "mtime": 1791827339.732915,
+    "seen": 1791830882.526806,
+    "ast_hash": "43449b1a17b059f5760cfcf4eadb5c24",
     "semantic_hash": ""
   },
   "analytics/tests/test_uscore_staging.yaml": {
@@ -702,15 +702,27 @@
     "semantic_hash": ""
   },
   "deploy/inferno/README.md": {
-    "mtime": 1791789780.7332025,
-    "seen": 1791789917.908593,
+    "mtime": 1791818284.1236248,
+    "seen": 1791830882.527371,
     "ast_hash": "5d4117421c36646cdaf3af93ec792664",
     "semantic_hash": ""
   },
   "deploy/inferno/docker-compose.yml": {
-    "mtime": 1791788783.4556947,
-    "seen": 1791789917.908593,
+    "mtime": 1791818284.123946,
+    "seen": 1791830882.5273721,
     "ast_hash": "7848c071c3a3edbc16a72312de420c1e",
+    "semantic_hash": ""
+  },
+  "gen/go/store/postgres/location_search_index.go": {
+    "mtime": 1791824149.1754344,
+    "seen": 1791830882.525439,
+    "ast_hash": "f5e087ce0818e5d3ca0a012b8d7c9d70",
+    "semantic_hash": ""
+  },
+  "gen/go/store/postgres/specimen_search_index.go": {
+    "mtime": 1791824004.340725,
+    "seen": 1791830882.525653,
+    "ast_hash": "352d78c27d354fbbb3abde342bafc889",
     "semantic_hash": ""
   }
 }

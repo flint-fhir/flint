@@ -1,8 +1,9 @@
 // Command seed populates a running Flint FHIR R4 server with a realistic,
-// deterministic longitudinal clinical cohort covering all 11 US Core v6.1.0 /
-// USCDI v3 resource types (Organization, Practitioner, Patient, Encounter,
-// Condition, Observation, MedicationRequest, AllergyIntolerance, Procedure,
-// DiagnosticReport, Immunization) using an atomic FHIR R4 transaction Bundle.
+// deterministic longitudinal clinical cohort covering all 13 US Core v6.1.0 &
+// v7.0.0 (USCDI v3 & v4) resource types (Organization, Location, Practitioner,
+// Patient, Encounter, Condition, Observation, MedicationRequest,
+// AllergyIntolerance, Procedure, DiagnosticReport, Specimen, Immunization)
+// using an atomic FHIR R4 transaction Bundle.
 //
 // Usage:
 //
@@ -127,7 +128,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("decode transaction-response: %w", err)
 	}
 
-	fmt.Fprintf(out, "🔥 Seeded %d FHIR R4 resources (all 11 US Core v6.1.0 profiles) into tenant %q (%s)\n\n", len(txResp.Entry), tenant, endpoint)
+	fmt.Fprintf(out, "🔥 Seeded %d FHIR R4 resources (all 13 US Core v6.1.0 & v7.0.0 profiles) into tenant %q (%s)\n\n", len(txResp.Entry), tenant, endpoint)
 	for _, e := range txResp.Entry {
 		fmt.Fprintf(out, "  • %-42s  %-12s  ETag: %s\n", e.FullURL, e.Response.Status, e.Response.ETag)
 	}
@@ -139,19 +140,21 @@ func Run(ctx context.Context, cfg Config) error {
 	fmt.Fprintf(out, "  curl -s '%s/Observation?code=8867-4&value-quantity=gt70&_include=Observation:patient' | jq .\n\n", endpoint)
 	fmt.Fprintf(out, "  # 3. Search active MedicationRequests for Alice\n")
 	fmt.Fprintf(out, "  curl -s '%s/MedicationRequest?patient=Patient/pat-alice-001&intent=order' | jq .\n\n", endpoint)
-	fmt.Fprintf(out, "  # 4. Run ONC (g)(10) & US Core v6.1.0 Conformance Certification ($certify)\n")
+	fmt.Fprintf(out, "  # 4. Run ONC (g)(10) & US Core v6.1.0 / v7.0.0 Conformance Certification ($certify)\n")
 	fmt.Fprintf(out, "  curl -s -X POST %s/$certify | jq .\n", endpoint)
 
 	return nil
 }
 
 // CohortTransactionBundleJSON returns a deterministic, idempotent FHIR R4 transaction Bundle
-// containing 25 resources across all 11 US Core v6.1.0 / USCDI v3 resource types:
-// 2 Organizations, 2 Practitioners, 3 Patients, 3 Encounters, 2 Conditions, 5 Observations,
-// 2 MedicationRequests, 1 AllergyIntolerance, 2 Procedures, 2 DiagnosticReports, and 1 Immunization.
+// containing 29 resources across all 13 US Core v6.1.0 & v7.0.0 (USCDI v3 & v4) resource types:
+// 2 Organizations, 1 Location, 2 Practitioners, 3 Patients, 3 Encounters, 2 Conditions,
+// 7 Observations (including Average Blood Pressure & Care Experience Preference),
+// 2 MedicationRequests, 1 AllergyIntolerance, 2 Procedures, 2 DiagnosticReports,
+// 1 Specimen, and 1 Immunization.
 func CohortTransactionBundleJSON() ([]byte, error) {
 	entries := []map[string]any{
-		// 1. Organizations (2)
+		// 1. Organizations (2) & Location (1)
 		putEntry("Organization/org-flint-health", map[string]any{
 			"resourceType": "Organization",
 			"id":           "org-flint-health",
@@ -170,6 +173,30 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			},
 			"address": []map[string]any{
 				{"line": []string{"500 Parnassus Ave"}, "city": "San Francisco", "state": "CA", "postalCode": "94143"},
+			},
+		}),
+		putEntry("Location/loc-flint-cardiology", map[string]any{
+			"resourceType": "Location",
+			"id":           "loc-flint-cardiology",
+			"status":       "active",
+			"name":         "Flint Cardiology Ambulatory Clinic",
+			"alias":        []string{"Flint Heart Center"},
+			"mode":         "instance",
+			"type": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/v3-RoleCode", "code": "CARD", "display": "Ambulatory Health Care Facilities; Clinic/Center; Rehabilitation: Cardiac Facilities"},
+					},
+				},
+			},
+			"address": map[string]any{
+				"line":       []string{"500 Parnassus Ave, Suite 400"},
+				"city":       "San Francisco",
+				"state":      "CA",
+				"postalCode": "94143",
+			},
+			"managingOrganization": map[string]any{
+				"reference": "Organization/org-flint-health",
 			},
 		}),
 		putEntry("Organization/org-metro-lab", map[string]any{
@@ -254,6 +281,11 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			"participant": []map[string]any{
 				{
 					"individual": map[string]any{"reference": "Practitioner/prac-cardiology-1"},
+				},
+			},
+			"location": []map[string]any{
+				{
+					"location": map[string]any{"reference": "Location/loc-flint-cardiology"},
 				},
 			},
 			"serviceProvider": map[string]any{
@@ -358,6 +390,83 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 				},
 			},
 		}),
+		putEntry("Observation/obs-alice-avg-bp", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-avg-bp",
+			"status":       "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://loinc.org", "code": "96607-7", "display": "Blood pressure panel mean systolic and mean diastolic"},
+				},
+			},
+			"subject": map[string]any{
+				"reference": "Patient/pat-alice-001",
+			},
+			"performer": []map[string]any{
+				{"reference": "Practitioner/prac-cardiology-1"},
+			},
+			"effectiveDateTime": "2026-01-15T09:17:00Z",
+			"component": []map[string]any{
+				{
+					"code": map[string]any{
+						"coding": []map[string]any{
+							{"system": "http://loinc.org", "code": "96608-5", "display": "Systolic blood pressure--mean"},
+						},
+					},
+					"valueQuantity": map[string]any{
+						"value":  132.0,
+						"unit":   "mmHg",
+						"system": "http://unitsofmeasure.org",
+						"code":   "mm[Hg]",
+					},
+				},
+				{
+					"code": map[string]any{
+						"coding": []map[string]any{
+							{"system": "http://loinc.org", "code": "96609-3", "display": "Diastolic blood pressure--mean"},
+						},
+					},
+					"valueQuantity": map[string]any{
+						"value":  82.0,
+						"unit":   "mmHg",
+						"system": "http://unitsofmeasure.org",
+						"code":   "mm[Hg]",
+					},
+				},
+			},
+		}),
+		putEntry("Observation/obs-alice-care-pref", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-care-pref",
+			"status":       "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-category", "code": "care-experience-preference", "display": "Care Experience Preference"},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://loinc.org", "code": "95541-9", "display": "Care experience preference"},
+				},
+			},
+			"subject": map[string]any{
+				"reference": "Patient/pat-alice-001",
+			},
+			"performer": []map[string]any{
+				{"reference": "Practitioner/prac-cardiology-1"},
+			},
+			"effectiveDateTime": "2026-01-15T09:18:00Z",
+			"valueString":       "Prefers morning appointments and digital portal messaging",
+		}),
 		putEntry("MedicationRequest/medreq-alice-lisinopril", map[string]any{
 			"resourceType": "MedicationRequest",
 			"id":           "medreq-alice-lisinopril",
@@ -419,6 +528,33 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			},
 			"performedDateTime": "2026-01-15T09:20:00Z",
 		}),
+		putEntry("Specimen/spec-alice-blood", map[string]any{
+			"resourceType": "Specimen",
+			"id":           "spec-alice-blood",
+			"status":       "available",
+			"identifier": []map[string]any{
+				{"system": "http://lab.example.org/specimens", "value": "SPEC-ALICE-001"},
+			},
+			"accessionIdentifier": map[string]any{
+				"system": "http://lab.example.org/accessions",
+				"value":  "ACC-2026-0001",
+			},
+			"type": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://snomed.info/sct", "code": "119297000", "display": "Blood specimen"},
+				},
+			},
+			"subject": map[string]any{
+				"reference": "Patient/pat-alice-001",
+			},
+			"receivedTime": "2026-01-15T09:22:00Z",
+			"collection": map[string]any{
+				"collector": map[string]any{
+					"reference": "Practitioner/prac-cardiology-1",
+				},
+				"collectedDateTime": "2026-01-15T09:20:00Z",
+			},
+		}),
 		putEntry("DiagnosticReport/dr-alice-cardiac", map[string]any{
 			"resourceType": "DiagnosticReport",
 			"id":           "dr-alice-cardiac",
@@ -445,6 +581,9 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			"issued":            "2026-01-15T09:45:00Z",
 			"performer": []map[string]any{
 				{"reference": "Organization/org-flint-health"},
+			},
+			"specimen": []map[string]any{
+				{"reference": "Specimen/spec-alice-blood"},
 			},
 			"result": []map[string]any{
 				{"reference": "Observation/obs-alice-hr"},

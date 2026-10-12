@@ -91,6 +91,18 @@ var (
 	ImmunizationStatusValueSet = map[string]bool{
 		"completed": true, "entered-in-error": true, "not-done": true,
 	}
+
+	SpecimenStatusValueSet = map[string]bool{
+		"available": true, "unavailable": true, "unsatisfactory": true, "entered-in-error": true,
+	}
+
+	LocationStatusValueSet = map[string]bool{
+		"active": true, "suspended": true, "inactive": true,
+	}
+
+	LocationModeValueSet = map[string]bool{
+		"instance": true, "kind": true,
+	}
 )
 
 // ResourceSchema represents validation rules derived from a FHIR StructureDefinition.
@@ -328,6 +340,41 @@ func DefaultSchemas() map[string]ResourceSchema {
 			RequiredFields: []string{},
 			CodeBindings:   map[string]map[string]bool{},
 			ValueSetURIs:   map[string]string{},
+		},
+
+		"Specimen": {
+			ResourceType: "Specimen",
+			AllowedFields: buildFieldMap(commonResourceFields, []string{
+				"identifier", "accessionIdentifier", "status", "type", "subject",
+				"receivedTime", "parent", "request", "collection", "processing",
+				"container", "condition", "note",
+			}),
+			RequiredFields: []string{"type", "subject"},
+			CodeBindings: map[string]map[string]bool{
+				"status": SpecimenStatusValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status": "http://hl7.org/fhir/valueset/specimen-status",
+			},
+		},
+
+		"Location": {
+			ResourceType: "Location",
+			AllowedFields: buildFieldMap(commonResourceFields, []string{
+				"identifier", "status", "operationalStatus", "name", "alias",
+				"description", "mode", "type", "telecom", "address", "physicalType",
+				"position", "managingOrganization", "partOf", "hoursOfOperation",
+				"availabilityExceptions", "endpoint",
+			}),
+			RequiredFields: []string{"name"},
+			CodeBindings: map[string]map[string]bool{
+				"status": LocationStatusValueSet,
+				"mode":   LocationModeValueSet,
+			},
+			ValueSetURIs: map[string]string{
+				"status": "http://hl7.org/fhir/valueset/location-status",
+				"mode":   "http://hl7.org/fhir/valueset/location-mode",
+			},
 		},
 	}
 }

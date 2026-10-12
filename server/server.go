@@ -31,12 +31,14 @@ import (
 	diagpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/diagnostic_report_go_proto"
 	encpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/encounter_go_proto"
 	immpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/immunization_go_proto"
+	locpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/location_go_proto"
 	medreqpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/medication_request_go_proto"
 	obspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto"
 	orgpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/organization_go_proto"
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
 	procpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/procedure_go_proto"
+	specpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/specimen_go_proto"
 
 	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/pkg/audit"
@@ -90,7 +92,7 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 	}
 }
 
-// RegisterDefaultResourceTypes registers all 11 standard US Core / USCDI v3 FHIR R4 resource types.
+// RegisterDefaultResourceTypes registers all 13 standard US Core v6.1.0 & v7.0.0 / USCDI v3 & v4 FHIR R4 resource types.
 func RegisterDefaultResourceTypes(srv *Server) {
 	srv.RegisterResourceType("Patient", &patpb.Patient{})
 	srv.RegisterResourceType("Condition", &condpb.Condition{})
@@ -103,6 +105,8 @@ func RegisterDefaultResourceTypes(srv *Server) {
 	srv.RegisterResourceType("DiagnosticReport", &diagpb.DiagnosticReport{})
 	srv.RegisterResourceType("Immunization", &immpb.Immunization{})
 	srv.RegisterResourceType("Organization", &orgpb.Organization{})
+	srv.RegisterResourceType("Specimen", &specpb.Specimen{})
+	srv.RegisterResourceType("Location", &locpb.Location{})
 }
 
 // SetCDCPublisher configures the optional AutoMQ / Kafka CDC publisher for lakehouse streaming.
@@ -1256,6 +1260,7 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-vital-signs",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-blood-pressure",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-average-blood-pressure",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-heart-rate",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-respiratory-rate",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-temperature",
@@ -1264,6 +1269,11 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-bmi",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pulse-oximetry",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-smokingstatus",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-care-experience-preference",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-treatment-intervention-preference",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-simple-observation",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-screening-assessment",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result",
 		}
 	case "Practitioner":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitioner"}
@@ -1282,6 +1292,10 @@ func usCoreSupportedProfiles(rt string) []string {
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-immunization"}
 	case "Organization":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-organization"}
+	case "Specimen":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-specimen"}
+	case "Location":
+		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-location"}
 	default:
 		return nil
 	}
@@ -1304,7 +1318,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	usCoreOrder := []string{
 		"Patient", "Condition", "Encounter", "Observation", "Practitioner",
 		"MedicationRequest", "AllergyIntolerance", "Procedure", "DiagnosticReport",
-		"Immunization", "Organization",
+		"Immunization", "Organization", "Specimen", "Location",
 	}
 	resEntries := make([]map[string]any, 0, len(usCoreOrder)+2)
 	for _, rt := range usCoreOrder {
