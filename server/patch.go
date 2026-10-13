@@ -188,12 +188,22 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 	}
 	setAuditPatientID(r.Context(), extractPatientIDFromIndexes(resType, resID, idx))
 
-	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
-		if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
-			if !postgres.IndexesBelongToPatientCompartment(resType, resID, idx, cleanID(secCtx.GetPatientId())) {
+	if secCtx, ok := auth.FromContext(r.Context()); ok {
+		if auth.IsPatientRestricted(secCtx) {
+			if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
+				if !postgres.IndexesBelongToPatientCompartment(resType, resID, idx, cleanID(secCtx.GetPatientId())) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+						fmt.Sprintf("patient-scoped token (%s) cannot patch %s/%s outside patient compartment",
+							secCtx.GetPatientId(), resType, resID))
+					return
+				}
+			}
+		}
+		if constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionUpdate); constrained {
+			if !s.resourceSatisfiesScopeConstraints(tenant, resType, resID, existingRec.ResourceProto, constraints) ||
+				!s.resourceSatisfiesScopeConstraints(tenant, resType, resID, protoBytes, constraints) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-					fmt.Sprintf("patient-scoped token (%s) cannot patch %s/%s outside patient compartment",
-						secCtx.GetPatientId(), resType, resID))
+					fmt.Sprintf("insufficient granular SMART v2 scope to patch %s/%s", resType, resID))
 				return
 			}
 		}

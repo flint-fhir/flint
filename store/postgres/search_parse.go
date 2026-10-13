@@ -9,9 +9,12 @@ import (
 )
 
 // DateOp represents a parsed date search operation.
+// Per FHIR R4 §3.1.1.4.5, a date parameter represents an implicit interval [Value, High)
+// based on the precision of the input string (YYYY, YYYY-MM, YYYY-MM-DD, or timestamp).
 type DateOp struct {
 	Prefix string    // eq, ne, lt, le, gt, ge, sa, eb, ap
-	Value  time.Time // Normalized UTC timestamp
+	Value  time.Time // Normalized UTC start timestamp (inclusive lower bound)
+	High   time.Time // Normalized UTC end timestamp (exclusive upper bound for date/month/year precision, or equal to Value for timestamp precision)
 }
 
 // QuantityOp represents a parsed quantity search operation.
@@ -78,11 +81,22 @@ func ParseDateOp(raw string) (DateOp, error) {
 	}
 
 	var parsedTime time.Time
+	var highTime time.Time
 	var parseErr error
 
 	for _, layout := range dateLayouts {
 		if t, err := time.Parse(layout, datePart); err == nil {
 			parsedTime = t.UTC()
+			switch layout {
+			case "2006":
+				highTime = parsedTime.AddDate(1, 0, 0)
+			case "2006-01":
+				highTime = parsedTime.AddDate(0, 1, 0)
+			case "2006-01-02":
+				highTime = parsedTime.AddDate(0, 0, 1)
+			default:
+				highTime = parsedTime
+			}
 			parseErr = nil
 			break
 		} else {
@@ -97,6 +111,7 @@ func ParseDateOp(raw string) (DateOp, error) {
 	return DateOp{
 		Prefix: prefix,
 		Value:  parsedTime,
+		High:   highTime,
 	}, nil
 }
 

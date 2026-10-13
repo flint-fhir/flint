@@ -1,7 +1,6 @@
 package server_test
 
 import (
-	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -29,15 +28,7 @@ import (
 )
 
 func TestServer_Integration(t *testing.T) {
-	dsn := os.Getenv("FLINT_TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("FLINT_TEST_POSTGRES_DSN not set")
-	}
-
-	db, err := sql.Open("postgres", dsn)
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
+	db := openTestPostgres(t)
 	defer db.Close()
 
 	// Run migrations

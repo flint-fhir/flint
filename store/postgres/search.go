@@ -119,11 +119,11 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 					orConds = append(orConds, fmt.Sprintf("%s.sp_value = $%d", alias, len(args)+1))
 					args = append(args, v)
 				case "contains":
-					orConds = append(orConds, fmt.Sprintf("%s.sp_value LIKE $%d", alias, len(args)+1))
-					args = append(args, "%"+v+"%")
+					orConds = append(orConds, fmt.Sprintf(`%s.sp_value LIKE $%d ESCAPE '\'`, alias, len(args)+1))
+					args = append(args, "%"+escapeLikePattern(v)+"%")
 				default:
-					orConds = append(orConds, fmt.Sprintf("%s.sp_value LIKE $%d", alias, len(args)+1))
-					args = append(args, v+"%")
+					orConds = append(orConds, fmt.Sprintf(`%s.sp_value LIKE $%d ESCAPE '\'`, alias, len(args)+1))
+					args = append(args, escapeLikePattern(v)+"%")
 				}
 			}
 			if len(orConds) > 0 {
@@ -390,10 +390,10 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 			}
 		default:
 			joins = append(joins, fmt.Sprintf(
-				"JOIN spidx_string %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s.sp_value LIKE $%d",
+				`JOIN spidx_string %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s.sp_value LIKE $%d ESCAPE '\'`,
 				targetAlias, targetAlias, targetAlias, len(args)+1, targetAlias, refAlias, targetAlias, len(args)+2, targetAlias, len(args)+3,
 			))
-			args = append(args, chained.TargetType, chained.TargetParam, strings.ToLower(chained.Value)+"%")
+			args = append(args, chained.TargetType, chained.TargetParam, escapeLikePattern(strings.ToLower(chained.Value))+"%")
 		}
 	}
 
@@ -594,44 +594,82 @@ func (s *Store) resolveIncludesWithExecutor(ctx context.Context, exec queryExece
 	return includedResults, nil
 }
 
+func escapeLikePattern(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
+
 func buildTimestampColumnCondition(colExpr string, op DateOp, startIdx int) (string, []any) {
-	val := op.Value
+	low := op.Value
+	high := op.High
+	if high.IsZero() && low.Hour() == 0 && low.Minute() == 0 && low.Second() == 0 && low.Nanosecond() == 0 {
+		high = low.Add(24 * time.Hour)
+	}
 	switch op.Prefix {
 	case "lt", "eb":
-		return fmt.Sprintf("%s < $%d", colExpr, startIdx+1), []any{val}
+		return fmt.Sprintf("%s < $%d", colExpr, startIdx+1), []any{low}
 	case "le":
-		return fmt.Sprintf("%s <= $%d", colExpr, startIdx+1), []any{val}
-	case "gt", "sa":
-		return fmt.Sprintf("%s > $%d", colExpr, startIdx+1), []any{val}
-	case "ge":
-		return fmt.Sprintf("%s >= $%d", colExpr, startIdx+1), []any{val}
-	case "ne":
-		return fmt.Sprintf("%s != $%d", colExpr, startIdx+1), []any{val}
-	default: // "eq"
-		if val.Hour() == 0 && val.Minute() == 0 && val.Second() == 0 && val.Nanosecond() == 0 {
-			return fmt.Sprintf("(%s >= $%d AND %s < $%d)", colExpr, startIdx+1, colExpr, startIdx+2), []any{val, val.Add(24 * time.Hour)}
+		if high.After(low) {
+			return fmt.Sprintf("%s < $%d", colExpr, startIdx+1), []any{high}
 		}
-		return fmt.Sprintf("%s = $%d", colExpr, startIdx+1), []any{val}
+		return fmt.Sprintf("%s <= $%d", colExpr, startIdx+1), []any{low}
+	case "gt", "sa":
+		if high.After(low) {
+			return fmt.Sprintf("%s >= $%d", colExpr, startIdx+1), []any{high}
+		}
+		return fmt.Sprintf("%s > $%d", colExpr, startIdx+1), []any{low}
+	case "ge":
+		return fmt.Sprintf("%s >= $%d", colExpr, startIdx+1), []any{low}
+	case "ne":
+		if high.After(low) {
+			return fmt.Sprintf("(%s < $%d OR %s >= $%d)", colExpr, startIdx+1, colExpr, startIdx+2), []any{low, high}
+		}
+		return fmt.Sprintf("%s != $%d", colExpr, startIdx+1), []any{low}
+	default: // "eq"
+		if high.After(low) {
+			return fmt.Sprintf("(%s >= $%d AND %s < $%d)", colExpr, startIdx+1, colExpr, startIdx+2), []any{low, high}
+		}
+		return fmt.Sprintf("%s = $%d", colExpr, startIdx+1), []any{low}
 	}
 }
 
 func buildDateCondition(alias string, op DateOp, startIdx int) (string, []any) {
 	// spidx_date has columns: sp_low, sp_high (TIMESTAMPTZ)
-	val := op.Value
+	low := op.Value
+	high := op.High
 	switch op.Prefix {
 	case "lt", "eb": // less than / ends before
-		return fmt.Sprintf("%s.sp_high < $%d", alias, startIdx+1), []any{val}
+		return fmt.Sprintf("%s.sp_high < $%d", alias, startIdx+1), []any{low}
 	case "le": // less or equal
-		return fmt.Sprintf("%s.sp_low <= $%d", alias, startIdx+1), []any{val}
-	case "gt", "sa": // greater than / starts after
-		return fmt.Sprintf("%s.sp_low > $%d", alias, startIdx+1), []any{val}
+		if high.After(low) {
+			return fmt.Sprintf("%s.sp_low < $%d", alias, startIdx+1), []any{high}
+		}
+		return fmt.Sprintf("%s.sp_low <= $%d", alias, startIdx+1), []any{low}
+	case "gt": // greater than
+		if high.After(low) {
+			return fmt.Sprintf("%s.sp_high >= $%d", alias, startIdx+1), []any{high}
+		}
+		return fmt.Sprintf("%s.sp_high > $%d", alias, startIdx+1), []any{low}
+	case "sa": // starts after
+		if high.After(low) {
+			return fmt.Sprintf("%s.sp_low >= $%d", alias, startIdx+1), []any{high}
+		}
+		return fmt.Sprintf("%s.sp_low > $%d", alias, startIdx+1), []any{low}
 	case "ge": // greater or equal
-		return fmt.Sprintf("%s.sp_high >= $%d", alias, startIdx+1), []any{val}
+		return fmt.Sprintf("%s.sp_high >= $%d", alias, startIdx+1), []any{low}
 	case "ne": // not equal
-		return fmt.Sprintf("(%s.sp_high < $%d OR %s.sp_low > $%d)", alias, startIdx+1, alias, startIdx+1), []any{val}
+		if high.After(low) {
+			return fmt.Sprintf("(%s.sp_high < $%d OR %s.sp_low >= $%d)", alias, startIdx+1, alias, startIdx+2), []any{low, high}
+		}
+		return fmt.Sprintf("(%s.sp_high < $%d OR %s.sp_low > $%d)", alias, startIdx+1, alias, startIdx+1), []any{low}
 	default: // "eq" (or unspecified)
-		// Overlaps the target date or point
-		return fmt.Sprintf("%s.sp_low <= $%d AND %s.sp_high >= $%d", alias, startIdx+1, alias, startIdx+1), []any{val}
+		// Overlaps the target date interval [low, high) or point [low, low]
+		if high.After(low) {
+			return fmt.Sprintf("%s.sp_low < $%d AND %s.sp_high >= $%d", alias, startIdx+1, alias, startIdx+2), []any{high, low}
+		}
+		return fmt.Sprintf("%s.sp_low <= $%d AND %s.sp_high >= $%d", alias, startIdx+1, alias, startIdx+1), []any{low}
 	}
 }
 

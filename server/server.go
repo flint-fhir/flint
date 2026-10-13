@@ -64,7 +64,8 @@ type Server struct {
 	devAuth        *auth.MockTokenValidator
 	oauthMu        sync.Mutex
 	oauthCodes     map[string]authCodeEntry
-	revokedTokens  map[string]bool
+	refreshTokens  map[string]refreshTokenEntry
+	revokedTokens  map[string]time.Time
 	validator      validation.Validator
 	auditRecorder  audit.Recorder
 	cdcPublisher   automq.Publisher
@@ -88,7 +89,8 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 		extractors:    postgres.DefaultIndexExtractors(),
 		devAuth:       devAuth,
 		oauthCodes:    make(map[string]authCodeEntry),
-		revokedTokens: make(map[string]bool),
+		refreshTokens: make(map[string]refreshTokenEntry),
+		revokedTokens: make(map[string]time.Time),
 		validator:     validation.NewEngine(validation.DefaultOptions()),
 		auditRecorder: auditRec,
 		exportJobs:    make(map[string]*exportJob),
@@ -322,6 +324,16 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		if constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionRead); constrained {
+			if !s.resourceSatisfiesScopeConstraints(tenant, resType, resID, rec.ResourceProto, constraints) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient granular SMART v2 scope to vread %s/%s/_history/%d", resType, resID, version))
+				return
+			}
+		}
+	}
+
 	jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
 		s.logger.Error("proto to json in vread", "error", err, "type", resType, "id", resID, "version", version)
@@ -368,6 +380,18 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("list resource history", "error", err, "type", resType, "id", resID)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to query resource history")
 		return
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		if constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionRead); constrained {
+			for _, rec := range records {
+				if !rec.IsDeleted && len(rec.ResourceProto) > 0 && !s.resourceSatisfiesScopeConstraints(tenant, resType, resID, rec.ResourceProto, constraints) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+						fmt.Sprintf("insufficient granular SMART v2 scope to read history of %s/%s", resType, resID))
+					return
+				}
+			}
+		}
 	}
 
 	entries := make([]any, 0, len(records))
@@ -1268,6 +1292,25 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	s.writeSearchSetBundle(w, sr)
 }
 
+func (s *Server) resourceAllowedByGranularScope(secCtx *auth.SecurityContext, tenant, resType, resID string, protoBytes []byte) bool {
+	if secCtx == nil {
+		return true
+	}
+	if auth.Allows(secCtx, resType, auth.ActionRead) {
+		constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionRead)
+		if !constrained || s.resourceSatisfiesScopeConstraints(tenant, resType, resID, protoBytes, constraints) {
+			return true
+		}
+	}
+	if auth.Allows(secCtx, resType, auth.ActionSearch) {
+		constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionSearch)
+		if !constrained || s.resourceSatisfiesScopeConstraints(tenant, resType, resID, protoBytes, constraints) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) filterAuthorizedIncludes(r *http.Request, tenant string, secCtx *auth.SecurityContext, includes []postgres.SearchResult) []postgres.SearchResult {
 	if secCtx == nil || len(includes) == 0 {
 		return includes
@@ -1277,7 +1320,7 @@ func (s *Server) filterAuthorizedIncludes(r *http.Request, tenant string, secCtx
 	filtered := make([]postgres.SearchResult, 0, len(includes))
 
 	for _, inc := range includes {
-		if !auth.Allows(secCtx, inc.ResType, auth.ActionRead) && !auth.Allows(secCtx, inc.ResType, auth.ActionSearch) {
+		if !s.resourceAllowedByGranularScope(secCtx, tenant, inc.ResType, inc.ResID, inc.ResourceProto) {
 			continue
 		}
 		if patientRestricted {

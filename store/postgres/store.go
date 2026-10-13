@@ -78,10 +78,13 @@ const (
 
 // BundleOperation represents a single entry inside a FHIR Transaction or Batch Bundle.
 type BundleOperation struct {
-	OpType      BundleOperationType
-	Method      string        // "POST", "PUT", "DELETE"
-	Input       ResourceInput // Resource input for WRITE or target identity for DELETE
-	IfNoneExist *SearchParams // Optional conditional create criteria for POST
+	OpType            BundleOperationType
+	Method            string                                                          // "POST", "PUT", "DELETE"
+	Input             ResourceInput                                                   // Resource input for WRITE or target identity for DELETE
+	IfNoneExist       *SearchParams                                                   // Optional conditional create criteria for POST
+	ConditionalParams *SearchParams                                                   // Optional conditional search criteria for PUT or DELETE
+	BuildWriteInput   func(matchedID string, isExisting bool) (ResourceInput, error) // Optional callback for conditional PUT inside tx
+	VerifyDeleteMatch func(matchedID string) error                                    // Optional callback for conditional DELETE inside tx
 }
 
 // BundleOpResult holds the outcome of a single BundleOperation.
@@ -328,7 +331,7 @@ func (s *Store) ConditionalDeleteResource(
 }
 
 // ExecuteTransactionBundle executes a sequence of Bundle operations (POST, PUT, DELETE,
-// including If-Match and If-None-Exist) atomically within a single SQL transaction.
+// including If-Match, If-None-Exist, and conditional PUT/DELETE) atomically within a single SQL transaction.
 // If any entry fails, all prior writes and deletes in the Bundle are rolled back.
 func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []BundleOperation) ([]BundleOpResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -340,9 +343,39 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []BundleOperat
 	results := make([]BundleOpResult, 0, len(ops))
 	for i, op := range ops {
 		if op.OpType == BundleOpDelete || strings.EqualFold(op.Method, "DELETE") {
-			rec, err := s.deleteResourceInTx(ctx, tx, op.Input.TenantID, op.Input.ResType, op.Input.ResID)
+			targetID := op.Input.ResID
+			if op.ConditionalParams != nil {
+				lockKey := op.Input.TenantID + ":" + op.Input.ResType
+				if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
+					return nil, fmt.Errorf("entry[%d] acquire conditional delete lock: %w", i, err)
+				}
+				condParams := *op.ConditionalParams
+				condParams.Count = 2
+				condParams.Offset = 0
+				sr, err := s.searchWithExecutor(ctx, tx, condParams)
+				if err != nil {
+					return nil, fmt.Errorf("entry[%d] conditional delete search %s: %w", i, op.Input.ResType, err)
+				}
+				if sr.Total > 1 {
+					return nil, fmt.Errorf("entry[%d] conditional delete %s: %w: matched %d existing resources", i, op.Input.ResType, ErrPreconditionFailed, sr.Total)
+				}
+				if sr.Total == 0 || len(sr.Matches) == 0 {
+					results = append(results, BundleOpResult{
+						Status:  "204 No Content",
+						ResType: op.Input.ResType,
+					})
+					continue
+				}
+				targetID = sr.Matches[0].ResID
+				if op.VerifyDeleteMatch != nil {
+					if err := op.VerifyDeleteMatch(targetID); err != nil {
+						return nil, fmt.Errorf("entry[%d] conditional delete %s/%s: %w", i, op.Input.ResType, targetID, err)
+					}
+				}
+			}
+			rec, err := s.deleteResourceInTx(ctx, tx, op.Input.TenantID, op.Input.ResType, targetID)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return nil, fmt.Errorf("entry[%d] delete %s/%s: %w", i, op.Input.ResType, op.Input.ResID, err)
+				return nil, fmt.Errorf("entry[%d] delete %s/%s: %w", i, op.Input.ResType, targetID, err)
 			}
 			ver := 0
 			var lastUpd time.Time
@@ -353,7 +386,7 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []BundleOperat
 			results = append(results, BundleOpResult{
 				Status:      "204 No Content",
 				ResType:     op.Input.ResType,
-				ResID:       op.Input.ResID,
+				ResID:       targetID,
 				ResVersion:  ver,
 				LastUpdated: lastUpd,
 				Record:      rec,
@@ -383,9 +416,38 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []BundleOperat
 			continue
 		}
 
-		rec, err := writeResourceInTx(ctx, tx, op.Input)
+		writeInput := op.Input
+		if strings.EqualFold(op.Method, "PUT") && op.ConditionalParams != nil && op.BuildWriteInput != nil {
+			lockKey := op.Input.TenantID + ":" + op.Input.ResType
+			if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
+				return nil, fmt.Errorf("entry[%d] acquire conditional update lock: %w", i, err)
+			}
+			condParams := *op.ConditionalParams
+			condParams.Count = 2
+			condParams.Offset = 0
+			sr, err := s.searchWithExecutor(ctx, tx, condParams)
+			if err != nil {
+				return nil, fmt.Errorf("entry[%d] conditional update search %s: %w", i, op.Input.ResType, err)
+			}
+			if sr.Total > 1 {
+				return nil, fmt.Errorf("entry[%d] conditional update %s: %w: matched %d existing resources", i, op.Input.ResType, ErrPreconditionFailed, sr.Total)
+			}
+			matchedID := ""
+			isExisting := false
+			if sr.Total == 1 && len(sr.Matches) == 1 {
+				matchedID = sr.Matches[0].ResID
+				isExisting = true
+			}
+			built, err := op.BuildWriteInput(matchedID, isExisting)
+			if err != nil {
+				return nil, fmt.Errorf("entry[%d] conditional update %s: %w", i, op.Input.ResType, err)
+			}
+			writeInput = built
+		}
+
+		rec, err := writeResourceInTx(ctx, tx, writeInput)
 		if err != nil {
-			return nil, fmt.Errorf("entry[%d] resource %s/%s: %w", i, op.Input.ResType, op.Input.ResID, err)
+			return nil, fmt.Errorf("entry[%d] resource %s/%s: %w", i, writeInput.ResType, writeInput.ResID, err)
 		}
 		status := "200 OK"
 		if strings.EqualFold(op.Method, "POST") || rec.Created {
@@ -805,7 +867,7 @@ func bulkInsertStrings(ctx context.Context, tx *sql.Tx, rows []SpidxString) erro
 			}
 			n := i * 5
 			fmt.Fprintf(&b, "($%d, $%d, $%d, $%d, $%d)", n+1, n+2, n+3, n+4, n+5)
-			args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, r.SpValue)
+			args = append(args, r.TenantID, r.ResType, r.ResID, r.SpName, strings.ToLower(r.SpValue))
 		}
 		b.WriteString(" ON CONFLICT DO NOTHING")
 		if _, err := tx.ExecContext(ctx, b.String(), args...); err != nil {
