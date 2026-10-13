@@ -224,23 +224,58 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/jwks.json", s.handleJWKS)
 
 	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
+		if r.Method == http.MethodGet || r.Method == http.MethodPost {
 			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-			if len(parts) == 5 && parts[0] == "fhir" && parts[1] == "r4" && parts[4] == "_history" && !strings.HasPrefix(parts[3], "$") {
-				r.SetPathValue("tenant", parts[2])
-				r.SetPathValue("resourceType", parts[3])
-				s.handleInstanceHistory(w, r)
-				return
+			if len(parts) == 5 && parts[0] == "fhir" && parts[1] == "r4" {
+				if r.Method == http.MethodGet && parts[4] == "_history" && !strings.HasPrefix(parts[3], "$") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					s.handleInstanceHistory(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ValueSet") && parts[4] == "$expand" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleValueSetExpand(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ValueSet") && parts[4] == "$validate-code" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleValueSetValidateCode(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "CodeSystem") && parts[4] == "$lookup" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCodeSystemLookup(w, r)
+					return
+				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
-				if parts[3] == "$export-file" {
+				if strings.EqualFold(parts[3], "ValueSet") && parts[5] == "$expand" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleValueSetExpand(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ValueSet") && parts[5] == "$validate-code" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleValueSetValidateCode(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "CodeSystem") && parts[5] == "$lookup" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCodeSystemLookup(w, r)
+					return
+				}
+				if r.Method == http.MethodGet && parts[3] == "$export-file" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("jobId", parts[4])
 					r.SetPathValue("fileName", parts[5])
 					s.handleExportFile(w, r)
 					return
 				}
-				if strings.EqualFold(parts[3], "Patient") && parts[5] != "$everything" && parts[5] != "$export" && parts[5] != "_history" {
+				if r.Method == http.MethodGet && strings.EqualFold(parts[3], "Patient") && parts[5] != "$everything" && parts[5] != "$export" && parts[5] != "_history" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("patientId", parts[4])
 					r.SetPathValue("resourceType", parts[5])
@@ -569,6 +604,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	body = normalizeSubscriptionOnWrite(resType, body)
+
 	// Normalize standard flat HL7 FHIR R4 JSON to google/fhir protojson shape
 	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, body)
 	if err != nil {
@@ -671,6 +708,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 				ProtoData: rec.ResourceProto,
 				Op:        "U",
 			})
+			s.dispatchSubscriptions(r.Context(), tenant, resType, rec.ResID, rec.ResourceProto, rec.ResVersion, rec.LastUpdated, idx)
 		}
 		jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if err != nil {
@@ -710,6 +748,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		ProtoData: rec.ResourceProto,
 		Op:        "U",
 	})
+	s.dispatchSubscriptions(r.Context(), tenant, resType, resID, rec.ResourceProto, rec.ResVersion, rec.LastUpdated, idx)
 
 	jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
@@ -815,6 +854,8 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	body = normalizeSubscriptionOnWrite(resType, body)
+
 	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, body)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "structure",
@@ -894,6 +935,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		ProtoData: protoBytes,
 		Op:        "U",
 	})
+	s.dispatchSubscriptions(r.Context(), tenant, resType, resID, protoBytes, rec.ResVersion, rec.LastUpdated, idx)
 
 	jsonBytes, err := s.protoToJSONWithMeta(resType, protoBytes, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
@@ -1942,7 +1984,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		if len(sp) == 0 {
 			sp = defaultSearchParams
 		}
-		resEntries = append(resEntries, map[string]any{
+		entry := map[string]any{
 			"type":              rt,
 			"profile":           "http://hl7.org/fhir/StructureDefinition/" + rt,
 			"versioning":        "versioned-update",
@@ -1953,7 +1995,28 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			"conditionalDelete": "single",
 			"interaction":       interactions,
 			"searchParam":       sp,
-		})
+		}
+		switch rt {
+		case "ValueSet":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "expand",
+					"definition": "http://hl7.org/fhir/OperationDefinition/ValueSet-expand",
+				},
+				{
+					"name":       "validate-code",
+					"definition": "http://hl7.org/fhir/OperationDefinition/ValueSet-validate-code",
+				},
+			}
+		case "CodeSystem":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "lookup",
+					"definition": "http://hl7.org/fhir/OperationDefinition/CodeSystem-lookup",
+				},
+			}
+		}
+		resEntries = append(resEntries, entry)
 	}
 
 	smartCfg := s.resolveSMARTConfig(r)
@@ -2014,6 +2077,18 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "export",
 						"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/export",
+					},
+					{
+						"name":       "expand",
+						"definition": "http://hl7.org/fhir/OperationDefinition/ValueSet-expand",
+					},
+					{
+						"name":       "validate-code",
+						"definition": "http://hl7.org/fhir/OperationDefinition/ValueSet-validate-code",
+					},
+					{
+						"name":       "lookup",
+						"definition": "http://hl7.org/fhir/OperationDefinition/CodeSystem-lookup",
 					},
 				},
 			},

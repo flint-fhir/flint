@@ -1153,8 +1153,65 @@ func TestStore_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("OAuthRefreshRevokedTokensAndExportJobs", func(t *testing.T) {
+		rtRec := postgres.OAuthRefreshTokenRecord{
+			Subject:     "inferno-client",
+			PatientID:   "shared-id-99",
+			EncounterID: "enc-1",
+			Scope:       "patient/Patient.rs",
+			ExpiresAt:   time.Now().Add(time.Hour),
+		}
+		if err := store.SaveRefreshToken(ctx, "raw-test-rt-1", rtRec); err != nil {
+			t.Fatalf("SaveRefreshToken: %v", err)
+		}
+		consumed, found, err := store.ConsumeRefreshToken(ctx, "raw-test-rt-1")
+		if err != nil || !found || consumed.PatientID != "shared-id-99" || consumed.Scope != "patient/Patient.rs" {
+			t.Fatalf("ConsumeRefreshToken failed: got %+v found=%v err=%v", consumed, found, err)
+		}
+		// Replay must return found == false
+		if _, found2, err := store.ConsumeRefreshToken(ctx, "raw-test-rt-1"); err != nil || found2 {
+			t.Errorf("expected found=false on replay of consumed refresh token, got found=%v err=%v", found2, err)
+		}
+
+		if err := store.RevokeToken(ctx, "raw-revoked-1", time.Hour); err != nil {
+			t.Fatalf("RevokeToken: %v", err)
+		}
+		if revoked, err := store.IsTokenRevoked(ctx, "raw-revoked-1"); err != nil || !revoked {
+			t.Errorf("expected IsTokenRevoked=true, got %v err=%v", revoked, err)
+		}
+		if revoked, err := store.IsTokenRevoked(ctx, "raw-not-revoked"); err != nil || revoked {
+			t.Errorf("expected IsTokenRevoked=false, got %v err=%v", revoked, err)
+		}
+
+		jobRec := postgres.ExportJobRecord{
+			ID:         "job-test-1",
+			TenantID:   "test-tenant",
+			PatientID:  "shared-id-99",
+			CreatedAt:  time.Now().UTC(),
+			RequestURL: "http://localhost/fhir/r4/test-tenant/$export",
+			TypesOrder: []string{"Patient"},
+			Files:      map[string][]byte{"Patient": []byte("{\"resourceType\":\"Patient\",\"id\":\"shared-id-99\"}\n")},
+			Counts:     map[string]int{"Patient": 1},
+		}
+		if err := store.SaveExportJob(ctx, jobRec); err != nil {
+			t.Fatalf("SaveExportJob: %v", err)
+		}
+		loadedJob, err := store.GetExportJob(ctx, "test-tenant", "job-test-1")
+		if err != nil || loadedJob.Counts["Patient"] != 1 || len(loadedJob.Files["Patient"]) == 0 {
+			t.Fatalf("GetExportJob failed: got %+v err=%v", loadedJob, err)
+		}
+		if deleted, err := store.DeleteExportJob(ctx, "test-tenant", "job-test-1"); err != nil || !deleted {
+			t.Fatalf("DeleteExportJob: deleted=%v err=%v", deleted, err)
+		}
+		if _, err := store.GetExportJob(ctx, "test-tenant", "job-test-1"); !errors.Is(err, sql.ErrNoRows) {
+			t.Errorf("expected sql.ErrNoRows after DeleteExportJob, got %v", err)
+		}
+	})
+
 	// Clean up
-	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
+	for _, table := range []string{"fhir_export_job", "spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
 		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-tenant'")
 	}
+	db.ExecContext(ctx, "DELETE FROM fhir_oauth_refresh_token WHERE subject = 'inferno-client'")
+	db.ExecContext(ctx, "DELETE FROM fhir_oauth_revoked_token")
 }

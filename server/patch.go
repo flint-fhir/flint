@@ -160,6 +160,8 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	patchedJSON = normalizeSubscriptionOnWrite(resType, patchedJSON)
+
 	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, patchedJSON)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "structure",
@@ -234,6 +236,7 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 		ProtoData: protoBytes,
 		Op:        "U",
 	})
+	s.dispatchSubscriptions(r.Context(), tenant, resType, resID, protoBytes, rec.ResVersion, rec.LastUpdated, idx)
 
 	outJSON, err := s.protoToJSONWithMeta(resType, protoBytes, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
@@ -303,6 +306,8 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+
+	body = normalizeSubscriptionOnWrite(resType, body)
 
 	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, body)
 	if err != nil {
@@ -399,6 +404,7 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 		ProtoData: finalProtoBytes,
 		Op:        "U",
 	})
+	s.dispatchSubscriptions(r.Context(), tenant, resType, rec.ResID, finalProtoBytes, rec.ResVersion, rec.LastUpdated, finalIdx)
 
 	jsonBytes, err := s.protoToJSONWithMeta(resType, finalProtoBytes, rec.ResVersion, rec.LastUpdated)
 	if err != nil {

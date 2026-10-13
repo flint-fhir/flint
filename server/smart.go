@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/flint-fhir/flint/store/postgres"
 	"github.com/google/uuid"
 )
 
@@ -82,6 +84,15 @@ func (s *Server) storeAuthCode(code string, entry authCodeEntry) {
 }
 
 func (s *Server) storeRefreshToken(token string, entry refreshTokenEntry) {
+	if s.store != nil {
+		_ = s.store.SaveRefreshToken(context.Background(), token, postgres.OAuthRefreshTokenRecord{
+			Subject:     entry.Subject,
+			PatientID:   entry.PatientID,
+			EncounterID: entry.EncounterID,
+			Scope:       entry.Scope,
+			ExpiresAt:   entry.ExpiresAt,
+		})
+	}
 	now := time.Now()
 	s.oauthMu.Lock()
 	defer s.oauthMu.Unlock()
@@ -110,6 +121,22 @@ func (s *Server) storeRefreshToken(token string, entry refreshTokenEntry) {
 }
 
 func (s *Server) consumeRefreshToken(token string) (refreshTokenEntry, bool) {
+	if s.store != nil {
+		if rec, ok, err := s.store.ConsumeRefreshToken(context.Background(), token); err == nil && ok {
+			s.oauthMu.Lock()
+			if s.refreshTokens != nil {
+				delete(s.refreshTokens, token)
+			}
+			s.oauthMu.Unlock()
+			return refreshTokenEntry{
+				Subject:     rec.Subject,
+				PatientID:   rec.PatientID,
+				EncounterID: rec.EncounterID,
+				Scope:       rec.Scope,
+				ExpiresAt:   rec.ExpiresAt,
+			}, true
+		}
+	}
 	s.oauthMu.Lock()
 	defer s.oauthMu.Unlock()
 	if s.refreshTokens == nil {
@@ -597,6 +624,9 @@ func (s *Server) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	rawToken := strings.TrimSpace(r.FormValue("token"))
 	if rawToken != "" {
+		if s.store != nil {
+			_ = s.store.RevokeToken(r.Context(), rawToken, 24*time.Hour)
+		}
 		now := time.Now()
 		s.oauthMu.Lock()
 		if s.revokedTokens == nil {
@@ -635,9 +665,17 @@ func (s *Server) isTokenRevoked(rawToken string) bool {
 		return false
 	}
 	s.oauthMu.Lock()
-	defer s.oauthMu.Unlock()
 	_, revoked := s.revokedTokens[rawToken]
-	return revoked
+	s.oauthMu.Unlock()
+	if revoked {
+		return true
+	}
+	if s.store != nil {
+		if dbRevoked, err := s.store.IsTokenRevoked(context.Background(), rawToken); err == nil && dbRevoked {
+			return true
+		}
+	}
+	return false
 }
 
 func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {

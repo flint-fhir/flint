@@ -2,12 +2,14 @@ package server_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/flint-fhir/flint/pkg/audit"
 	"github.com/flint-fhir/flint/pkg/certify"
@@ -529,5 +531,142 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 	respSysHist.Body.Close()
 	if !strings.Contains(string(bSysHist), `"history"`) {
 		t.Errorf("expected history Bundle from GET /_history, got %s", string(bSysHist))
+	}
+
+	// 6. Track 2: Terminology Services (stored CodeSystem & ValueSet + POST Parameters $expand / $validate-code / $lookup)
+	// and Subscription rest-hook real-time HTTP webhook delivery
+	customCS := `{
+		"resourceType": "CodeSystem",
+		"id": "cs-custom-oncology",
+		"url": "http://flint.health/fhir/CodeSystem/oncology-stage",
+		"name": "FlintOncologyStage",
+		"status": "active",
+		"content": "complete",
+		"concept": [
+			{"code": "STAGE-I", "display": "Stage I Carcinoma"},
+			{"code": "STAGE-II", "display": "Stage II Carcinoma"}
+		]
+	}`
+	respCS, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/CodeSystem", "application/fhir+json", strings.NewReader(customCS))
+	if err != nil || respCS.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /CodeSystem failed: %v / %d", err, respCS.StatusCode)
+	}
+	respCS.Body.Close()
+
+	customVS := `{
+		"resourceType": "ValueSet",
+		"id": "vs-custom-oncology",
+		"url": "http://flint.health/fhir/ValueSet/oncology-stage",
+		"name": "FlintOncologyStageVS",
+		"status": "active",
+		"compose": {
+			"include": [
+				{"system": "http://flint.health/fhir/CodeSystem/oncology-stage"}
+			]
+		}
+	}`
+	respVS, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/ValueSet", "application/fhir+json", strings.NewReader(customVS))
+	if err != nil || respVS.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /ValueSet failed: %v / %d", err, respVS.StatusCode)
+	}
+	respVS.Body.Close()
+
+	// Instance-level POST /ValueSet/vs-custom-oncology/$expand with Parameters body
+	expandParams := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "filter", "valueString": "Stage II"}
+		]
+	}`
+	respExpCustom, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/ValueSet/vs-custom-oncology/$expand", "application/fhir+json", strings.NewReader(expandParams))
+	if err != nil || respExpCustom.StatusCode != http.StatusOK {
+		t.Fatalf("POST /ValueSet/vs-custom-oncology/$expand failed: %v / %d", err, respExpCustom.StatusCode)
+	}
+	bExpCustom, _ := io.ReadAll(respExpCustom.Body)
+	respExpCustom.Body.Close()
+	if !strings.Contains(string(bExpCustom), `"STAGE-II"`) || strings.Contains(string(bExpCustom), `"STAGE-I"`) {
+		t.Errorf("expected filtered expansion to contain only STAGE-II, got %s", string(bExpCustom))
+	}
+
+	// Instance-level POST /ValueSet/vs-custom-oncology/$validate-code with coding Parameter
+	vcParams := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "coding", "valueCoding": {"system": "http://flint.health/fhir/CodeSystem/oncology-stage", "code": "STAGE-I"}}
+		]
+	}`
+	respVCCustom, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/ValueSet/vs-custom-oncology/$validate-code", "application/fhir+json", strings.NewReader(vcParams))
+	if err != nil || respVCCustom.StatusCode != http.StatusOK {
+		t.Fatalf("POST /ValueSet/vs-custom-oncology/$validate-code failed: %v / %d", err, respVCCustom.StatusCode)
+	}
+	bVCCustom, _ := io.ReadAll(respVCCustom.Body)
+	respVCCustom.Body.Close()
+	if !strings.Contains(string(bVCCustom), `"valueBoolean":true`) || !strings.Contains(string(bVCCustom), `"Stage I Carcinoma"`) {
+		t.Errorf("expected valueBoolean:true and Stage I Carcinoma, got %s", string(bVCCustom))
+	}
+
+	// Instance-level GET /CodeSystem/cs-custom-oncology/$lookup?code=STAGE-II
+	respLkpCustom, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/CodeSystem/cs-custom-oncology/$lookup?code=STAGE-II")
+	if err != nil || respLkpCustom.StatusCode != http.StatusOK {
+		t.Fatalf("GET /CodeSystem/cs-custom-oncology/$lookup failed: %v / %d", err, respLkpCustom.StatusCode)
+	}
+	bLkpCustom, _ := io.ReadAll(respLkpCustom.Body)
+	respLkpCustom.Body.Close()
+	if !strings.Contains(string(bLkpCustom), `"Stage II Carcinoma"`) {
+		t.Errorf("expected Stage II Carcinoma from stored CodeSystem/$lookup, got %s", string(bLkpCustom))
+	}
+
+	// Subscription rest-hook webhook delivery test
+	webhookCh := make(chan string, 2)
+	webhookHeaderCh := make(chan string, 2)
+	webhookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wb, _ := io.ReadAll(r.Body)
+		webhookHeaderCh <- r.Header.Get("X-Flint-Webhook-Secret")
+		webhookCh <- string(wb)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer webhookSrv.Close()
+
+	subCreate := fmt.Sprintf(`{
+		"resourceType": "Subscription",
+		"id": "sub-webhook-1",
+		"status": "requested",
+		"reason": "Notify webhook on new heart rate Observation",
+		"criteria": "Observation?code=8867-4&patient=Patient/hard-pat-1",
+		"channel": {
+			"type": "rest-hook",
+			"endpoint": %q,
+			"payload": "application/fhir+json",
+			"header": ["X-Flint-Webhook-Secret: s3cr3t-token"]
+		}
+	}`, webhookSrv.URL)
+	respSub, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/Subscription", "application/fhir+json", strings.NewReader(subCreate))
+	if err != nil || respSub.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /Subscription failed: %v / %d", err, respSub.StatusCode)
+	}
+	respSub.Body.Close()
+
+	// Create matching Observation -> should trigger webhook delivery
+	matchingObs := `{
+		"resourceType": "Observation",
+		"id": "obs-sub-trigger-1",
+		"status": "final",
+		"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+		"subject": {"reference": "Patient/hard-pat-1"}
+	}`
+	respTrig, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/Observation", "application/fhir+json", strings.NewReader(matchingObs))
+	if err != nil || respTrig.StatusCode != http.StatusCreated {
+		t.Fatalf("POST matching Observation failed: %v / %d", err, respTrig.StatusCode)
+	}
+	respTrig.Body.Close()
+
+	select {
+	case deliveredBody := <-webhookCh:
+		gotSecret := <-webhookHeaderCh
+		if !strings.Contains(deliveredBody, `"obs-sub-trigger-1"`) || gotSecret != "s3cr3t-token" {
+			t.Errorf("unexpected webhook payload or header: secret=%q body=%s", gotSecret, deliveredBody)
+		}
+	case <-time.After(2 * time.Second):
+		t.Errorf("timed out waiting for Subscription rest-hook webhook notification")
 	}
 }
