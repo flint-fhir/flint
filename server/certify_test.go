@@ -669,4 +669,70 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Errorf("timed out waiting for Subscription rest-hook webhook notification")
 	}
+
+	// 7. Track 3: Operational Probes (/healthz, /readyz, /metrics) & OpenAPI 3.1.0 Spec Synchronization
+	for _, probeURL := range []string{
+		ts.URL + "/healthz",
+		ts.URL + "/readyz",
+		ts.URL + "/fhir/r4/" + tenant + "/healthz",
+		ts.URL + "/fhir/r4/" + tenant + "/readyz",
+	} {
+		respProbe, err := http.Get(probeURL)
+		if err != nil || respProbe.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s failed: %v / %d", probeURL, err, respProbe.StatusCode)
+		}
+		respProbe.Body.Close()
+	}
+
+	respMetrics, err := http.Get(ts.URL + "/metrics")
+	if err != nil || respMetrics.StatusCode != http.StatusOK {
+		t.Fatalf("GET /metrics failed: %v / %d", err, respMetrics.StatusCode)
+	}
+	bMetrics, _ := io.ReadAll(respMetrics.Body)
+	respMetrics.Body.Close()
+	metricsText := string(bMetrics)
+	for _, wantMetric := range []string{
+		"flint_up 1",
+		"flint_registered_resource_types ",
+		"flint_http_requests_total{",
+		"flint_subscriptions_delivered_total 1",
+	} {
+		if !strings.Contains(metricsText, wantMetric) {
+			t.Errorf("expected /metrics to contain %q, got:\n%s", wantMetric, metricsText)
+		}
+	}
+
+	respOpenAPI, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/openapi.json")
+	if err != nil || respOpenAPI.StatusCode != http.StatusOK {
+		t.Fatalf("GET /openapi.json failed: %v / %d", err, respOpenAPI.StatusCode)
+	}
+	var openAPISpec map[string]any
+	if err := json.NewDecoder(respOpenAPI.Body).Decode(&openAPISpec); err != nil {
+		t.Fatalf("decode openapi.json: %v", err)
+	}
+	respOpenAPI.Body.Close()
+
+	conformanceEntries, _ := openAPISpec["x-flint-conformance"].([]any)
+	if len(conformanceEntries) != 12 {
+		t.Errorf("expected 12 x-flint-conformance entries in OpenAPI 3.1.0 spec, got %d", len(conformanceEntries))
+	}
+	specPaths, _ := openAPISpec["paths"].(map[string]any)
+	for _, requiredPath := range []string{
+		"/healthz",
+		"/readyz",
+		"/metrics",
+		"/_history",
+		"/$certify",
+		"/ValueSet/$expand",
+		"/ValueSet/{id}/$expand",
+		"/ValueSet/$validate-code",
+		"/CodeSystem/$lookup",
+		"/Patient/{id}/Observation",
+		"/Observation/_search",
+		"/Observation/_history",
+	} {
+		if _, ok := specPaths[requiredPath]; !ok {
+			t.Errorf("expected OpenAPI 3.1.0 spec paths to include %q", requiredPath)
+		}
+	}
 }

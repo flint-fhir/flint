@@ -44,6 +44,7 @@ tasks:
           --from-file=001_core_schema.sql=store/postgres/migrations/001_core_schema.sql
           --from-file=002_resource_history.sql=store/postgres/migrations/002_resource_history.sql
           --from-file=003_audit_event.sql=store/postgres/migrations/003_audit_event.sql
+          --from-file=004_oauth_and_export_jobs.sql=store/postgres/migrations/004_oauth_and_export_jobs.sql
           --dry-run=client -o yaml | kubectl apply -f -
       - kubectl apply -f deploy/k8s/postgres.yaml
       - echo "Waiting for Postgres..."
@@ -102,12 +103,12 @@ tasks:
       - go build -o bin/loadtest ./cmd/loadtest/
 
   seed:
-    desc: Seed a realistic 25-resource US Core v6.1.0 longitudinal clinical cohort into Flint (tenant=demo)
+    desc: Seed a realistic 25-resource US Core v6.1.0 & v7.0.0 longitudinal clinical cohort into Flint (tenant=demo)
     cmds:
       - go run ./cmd/seed {{.CLI_ARGS}}
 
   certify:
-    desc: Run automated FHIR R4, US Core v6.1.0 & ONC (g)(10) conformance certification suite
+    desc: Run automated 31-check FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) conformance certification suite
     cmds:
       - go run ./cmd/certify {{.CLI_ARGS}}
 
@@ -173,3 +174,4 @@ tasks:
       - psql "{{.PG_DSN}}" -f store/postgres/migrations/001_core_schema.sql
       - psql "{{.PG_DSN}}" -f store/postgres/migrations/002_resource_history.sql
       - psql "{{.PG_DSN}}" -f store/postgres/migrations/003_audit_event.sql
+      - psql "{{.PG_DSN}}" -f store/postgres/migrations/004_oauth_and_export_jobs.sql

@@ -270,10 +270,20 @@ func (s *Server) deliverRestHook(ctx context.Context, endpoint, payloadType stri
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
+		if s.metrics != nil {
+			s.metrics.subscriptionDeliveryErrorsTotal.Add(1)
+		}
 		if s.logger != nil {
 			s.logger.Warn("subscription rest-hook delivery failed", "endpoint", endpoint, "error", err)
 		}
 		return
 	}
 	resp.Body.Close()
+	if s.metrics != nil {
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			s.metrics.subscriptionsDeliveredTotal.Add(1)
+		} else {
+			s.metrics.subscriptionDeliveryErrorsTotal.Add(1)
+		}
+	}
 }

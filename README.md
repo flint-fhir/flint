@@ -336,6 +336,7 @@ Content-Type: application/fhir+json
 * **Proto-Compiled OpenAPI 3.1.0 Spec**: `GET /fhir/r4/{tenant}/openapi.json` and `GET /fhir/r4/openapi.json`
 * **Interactive API & Conformance Explorer (`$docs`)**: `GET /fhir/r4/{tenant}/$docs` and `GET /fhir/r4/$docs`
 * **SMART Discovery**: `GET /fhir/r4/{tenant}/.well-known/smart-configuration`
+* **Operational Probes & Prometheus Metrics**: `GET /healthz`, `GET /readyz`, and `GET /metrics` (also accessible under `/fhir/r4/{tenant}/healthz`, `/readyz`, `/metrics`)
 
 ### FHIR Conformance & Validation Engine (`pkg/validation`)
 Flint validates incoming FHIR resources prior to persistence and exposes standard validation operations:
@@ -435,7 +436,7 @@ Flint leverages [Hegel](https://hegel.dev) (`hegel.dev/go/hegel`) for type-drive
 
 ## Clinical Dimensional Lakehouse (`analytics/` — SQLMesh on DuckDB / Iceberg)
 
-Flint ships with an out-of-the-box **SQLMesh** analytical pipeline (`analytics/`) that transforms raw AutoMQ Table Topic Iceberg CDC streams (`fhir_raw.patient`, `fhir_raw.encounter`, `fhir_raw.condition`, `fhir_raw.observation`, `fhir_raw.medication_request`, `fhir_raw.allergy_intolerance`, `fhir_raw.procedure`, `fhir_raw.diagnostic_report`, `fhir_raw.immunization`, `fhir_raw.organization`, `fhir_raw.practitioner`) into a Kimball healthcare dimensional model:
+Flint ships with an out-of-the-box **SQLMesh** analytical pipeline (`analytics/`) that transforms raw AutoMQ Table Topic Iceberg CDC streams (`fhir_raw.patient`, `fhir_raw.encounter`, `fhir_raw.condition`, `fhir_raw.observation`, `fhir_raw.medication_request`, `fhir_raw.allergy_intolerance`, `fhir_raw.procedure`, `fhir_raw.diagnostic_report`, `fhir_raw.immunization`, `fhir_raw.organization`, `fhir_raw.care_plan`, `fhir_raw.coverage`, `fhir_raw.service_request`, `fhir_raw.document_reference`) into a Kimball healthcare dimensional model:
 
 * **Staging Layer (`flint_stg.stg_*`)**:
   * Deduplicates multi-tenant CDC events by `(tenant_id, res_id)` (normalizing `{tenant_id}/{res_id}` Kafka keys) using the latest `_kafka_offset`.
@@ -446,9 +447,9 @@ Flint ships with an out-of-the-box **SQLMesh** analytical pipeline (`analytics/`
   * `fct_encounter`: Encounter class (`AMB`, `IMP`), status, period timestamps, and calculated length-of-stay (`los_hours`).
   * `fct_condition`: SNOMED/ICD-10 condition codes, clinical/verification status, and onset date.
   * `fct_observation`: LOINC observation codes, status, numeric `value_quantity`, `value_unit`, and effective timestamps.
-  * `fct_medication_request`, `fct_allergy_intolerance`, `fct_procedure`, `fct_diagnostic_report`, `fct_immunization`: Full US Core v6.1.0 clinical fact tables.
+  * `fct_medication_request`, `fct_allergy_intolerance`, `fct_procedure`, `fct_diagnostic_report`, `fct_immunization`, `fct_care_plan`, `fct_coverage`, `fct_service_request`, `fct_document_reference`: Full US Core v6.1.0 & v7.0.0 clinical fact tables.
 * **Longitudinal Patient 360 Mart (`flint_marts.mart_patient_360`)**:
-  * Single-row-per-patient population health summary aggregating total encounters, latest encounter timestamp, total/active condition counts, and observation counts/timestamps.
+  * Single-row-per-patient population health summary aggregating total encounters, latest encounter timestamp, total/active condition counts, observation counts/timestamps, active medications, completed immunizations, active allergies, procedures, active care plans, and active coverage.
 
 Run the hermetic SQLMesh unit test suite locally via `uv` and DuckDB:
 ```bash
