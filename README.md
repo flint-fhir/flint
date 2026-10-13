@@ -32,7 +32,7 @@ Traditional FHIR servers (e.g. HAPI FHIR, Medplum) are optimized for transaction
 ```mermaid
 flowchart TD
     subgraph Ingestion ["Ingestion & Interoperability"]
-        EHR["EHR / HL7v2 / Synthea"] -->|FHIR Bundles| API["Flint HTTP API (flintd)"]
+        EHR["EHR / SMART Apps / Synthea"] -->|FHIR R4 Resources & Bundles| API["Flint HTTP API (flintd)"]
         API -->|Transaction| Temporal["Temporal Workflow (IngestFHIRBundle)"]
     end
 
@@ -43,9 +43,11 @@ flowchart TD
         PG --> Spidx["6x Covering spidx_* Tables\n(string, token, date, ref, quantity, uri)"]
     end
 
-    subgraph Streaming ["Real-Time Streaming"]
-        Temporal -->|Produce CDC| AMQ["AutoMQ (Kafka on S3)"]
+    subgraph Streaming ["Real-Time Streaming & Subscriptions"]
+        API -->|Produce CDC| AMQ["AutoMQ (Kafka on S3)"]
+        Temporal -->|Produce CDC| AMQ
         AMQ --> TT["AutoMQ Table Topic Engine"]
+        API -->|rest-hook Webhooks| Sub["FHIR R4 Subscriptions (rest-hook)"]
     end
 
     subgraph Lakehouse ["Analytical Plane (Apache Iceberg)"]
@@ -72,27 +74,31 @@ Flint includes a dedicated benchmarking harness ([`cmd/loadtest`](cmd/loadtest/)
 
 ---
 
-## Supported FHIR Resources (11 US Core v6.1.0 / USCDI v3) & Conformance Matrix
+## Supported FHIR Resources (All 146 FHIR R4 Types & 26 US Core v6.1.0 / v7.0.0 Profiles) & Conformance Matrix
 
-Flint implements full search index extraction, transactional persistence, SMART on FHIR v2 compartment isolation, **RFC 6902 JSON Patch / RFC 7396 Merge Patch**, **Conditional Create/Update/Delete**, and **Proto-compiled OpenAPI 3.1.0 schemas** (`protoreflect.MessageDescriptor` → OpenAPI 3.1 JSON Schema) for 11 US Core healthcare resources plus security `AuditEvent`s:
+Flint implements full search index extraction, transactional persistence, SMART on FHIR v2 compartment isolation & granular sub-resource scopes (`?category=`), **RFC 6902 JSON Patch / RFC 7396 Merge Patch**, **Conditional Create/Update/Delete**, **Terminology Services (`$expand`, `$validate-code`, `$lookup`)**, **`Subscription` (`rest-hook`)**, and **Proto-compiled OpenAPI 3.1.0 schemas** (`protoreflect.MessageDescriptor` → OpenAPI 3.1 JSON Schema) across **all 146 FHIR R4 resource types** and **all 26 US Core v6.1.0 / v7.0.0 (USCDI v3 & v4) profiles**:
 
-| Resource / Operation | US Core / ONC `(g)(10)` Profile | Interactions | Search Parameters (`spidx_*`) | SMART v2 Scopes | Status |
-|:---------------------|:--------------------------------|:-------------|:------------------------------|:----------------|:-------|
-| **`Patient`** | US Core Patient (`v6.1.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `create`, `search-type`, `conditional-create/update/delete`, `$everything`, `$export`, `$validate` | `_id`, `identifier`, `name`, `family`, `given`, `birthdate`, `gender`, `active`, `address-postalcode`, `_revinclude` | `patient/Patient.rs`, `user/Patient.cruds`, `system/Patient.rs` | ✅ Production Ready |
-| **`Encounter`** | US Core Encounter (`v6.1.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `date`, `patient`, `subject`, `status`, `class`, `type`, `_include` | `patient/Encounter.rs`, `user/Encounter.cruds`, `system/Encounter.rs` | ✅ Production Ready |
-| **`Condition`** | US Core Condition Problems & Health Concerns (`v6.1.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `patient`, `subject`, `code`, `clinical-status`, `verification-status`, `category`, `onset-date`, `_include` | `patient/Condition.rs`, `user/Condition.cruds`, `system/Condition.rs` | ✅ Production Ready |
-| **`Observation`** | US Core Vital Signs & Laboratory Result (`v6.1.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `patient`, `subject`, `code`, `category`, `status`, `date`, `value-quantity`, `component-code`, `component-value-quantity`, `_include` | `patient/Observation.rs`, `user/Observation.cruds`, `system/Observation.rs` | ✅ Production Ready |
-| **`MedicationRequest`** | US Core MedicationRequest (`v6.1.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `patient`, `subject`, `status`, `intent`, `code`, `authoredon`, `encounter`, `requester`, `_include` | `patient/MedicationRequest.rs`, `user/MedicationRequest.cruds`, `system/MedicationRequest.rs` | ✅ Production Ready |
-| **`AllergyIntolerance`** | US Core AllergyIntolerance (`v6.1.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `patient`, `subject`, `clinical-status`, `verification-status`, `code`, `criticality`, `date`, `_include` | `patient/AllergyIntolerance.rs`, `user/AllergyIntolerance.cruds`, `system/AllergyIntolerance.rs` | ✅ Production Ready |
-| **`Procedure`** | US Core Procedure (`v6.1.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `patient`, `subject`, `status`, `code`, `date`, `encounter`, `performer`, `_include` | `patient/Procedure.rs`, `user/Procedure.cruds`, `system/Procedure.rs` | ✅ Production Ready |
-| **`DiagnosticReport`** | US Core DiagnosticReport Lab & Note (`v6.1.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `patient`, `subject`, `status`, `category`, `code`, `date`, `issued`, `result`, `_include` | `patient/DiagnosticReport.rs`, `user/DiagnosticReport.cruds`, `system/DiagnosticReport.rs` | ✅ Production Ready |
-| **`Immunization`** | US Core Immunization (`v6.1.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `patient`, `subject`, `status`, `vaccine-code`, `date`, `lot-number`, `_include` | `patient/Immunization.rs`, `user/Immunization.cruds`, `system/Immunization.rs` | ✅ Production Ready |
-| **`Practitioner`** | US Core Practitioner (`v6.1.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `identifier`, `name`, `family`, `given`, `active` | `patient/Practitioner.rs`, `user/Practitioner.cruds`, `system/Practitioner.rs` | ✅ Production Ready |
-| **`Organization`** | US Core Organization (`v6.1.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `identifier`, `name`, `active`, `type`, `address`, `address-city`, `address-state`, `address-postalcode`, `partof` | `patient/Organization.rs`, `user/Organization.cruds`, `system/Organization.rs` | ✅ Production Ready |
+| Resource / Operation | US Core v6.1.0 / v7.0.0 / ONC `(g)(10)` Profile | Interactions | Search Parameters (`spidx_*`) | SMART v2 Scopes | Status |
+|:---------------------|:------------------------------------------------|:-------------|:------------------------------|:----------------|:-------|
+| **`Patient`** | US Core Patient (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `compartment-search`, `conditional-create/update/delete`, `$everything`, `$export`, `$validate` | `_id`, `_lastUpdated`, `identifier`, `name`, `family`, `given`, `birthdate`, `gender`, `active`, `address-city`, `address-state`, `address-postalcode`, `organization`, `_has`, `_revinclude` | `patient/Patient.rs`, `user/Patient.cruds`, `system/Patient.rs` | ✅ Production Ready |
+| **`Encounter`** | US Core Encounter (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `_lastUpdated`, `identifier`, `date`, `patient`, `subject`, `status`, `class`, `type`, `location`, `_include` | `patient/Encounter.rs`, `user/Encounter.cruds`, `system/Encounter.rs` | ✅ Production Ready |
+| **`Condition`** | US Core Condition Problems/Health Concerns & Encounter Diagnosis (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `_lastUpdated`, `patient`, `subject`, `code`, `clinical-status`, `verification-status`, `category`, `onset-date`, `recorded-date`, `encounter`, `_include` | `patient/Condition.rs`, `user/Condition.cruds`, `system/Condition.rs` | ✅ Production Ready |
+| **`Observation`** | US Core Vital Signs, Lab, Blood Pressure, Avg BP, Care/Treatment Preference, Simple & Screening (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `_lastUpdated`, `patient`, `subject`, `code`, `category`, `status`, `date`, `value-quantity`, `component-code`, `component-value-quantity`, `_include` | `patient/Observation.rs` (incl. `?category=`), `user/Observation.cruds`, `system/Observation.rs` | ✅ Production Ready |
+| **`MedicationRequest`** | US Core MedicationRequest (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `_lastUpdated`, `patient`, `subject`, `status`, `intent`, `code`, `authoredon`, `encounter`, `requester`, `medication`, `_include` | `patient/MedicationRequest.rs`, `user/MedicationRequest.cruds`, `system/MedicationRequest.rs` | ✅ Production Ready |
+| **`AllergyIntolerance`** | US Core AllergyIntolerance (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `_lastUpdated`, `patient`, `subject`, `clinical-status`, `verification-status`, `code`, `criticality`, `date`, `_include` | `patient/AllergyIntolerance.rs`, `user/AllergyIntolerance.cruds`, `system/AllergyIntolerance.rs` | ✅ Production Ready |
+| **`Procedure`** | US Core Procedure (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `_lastUpdated`, `patient`, `subject`, `status`, `code`, `date`, `encounter`, `performer`, `_include` | `patient/Procedure.rs`, `user/Procedure.cruds`, `system/Procedure.rs` | ✅ Production Ready |
+| **`DiagnosticReport`** | US Core DiagnosticReport Lab & Note (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `_lastUpdated`, `patient`, `subject`, `status`, `category`, `code`, `date`, `issued`, `result`, `_include` | `patient/DiagnosticReport.rs`, `user/DiagnosticReport.cruds`, `system/DiagnosticReport.rs` | ✅ Production Ready |
+| **`Immunization`** | US Core Immunization (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `_lastUpdated`, `patient`, `subject`, `status`, `vaccine-code`, `date`, `lot-number`, `_include` | `patient/Immunization.rs`, `user/Immunization.cruds`, `system/Immunization.rs` | ✅ Production Ready |
+| **`Specimen` & `Location`** | US Core Specimen & Location (`v7.0.0` / USCDI v4) | Full CRUD, `patch`, `vread`, `_history`, `search-type`, `conditional-*`, `$validate` | `_id`, `_lastUpdated`, `identifier`, `patient`, `subject`, `type`, `status`, `bodysite`, `collected`, `name`, `address`, `address-city`, `address-state`, `address-postalcode`, `organization` | `patient/Specimen.rs`, `user/Location.rs`, `system/*.rs` | ✅ Production Ready |
+| **`DocumentReference` & `Provenance`** | US Core DocumentReference & Provenance (`v6.1.0` & `v7.0.0`) | Full CRUD, `patch`, `vread`, `_history`, `search-type`, `conditional-*`, `$validate` | `_id`, `_lastUpdated`, `identifier`, `patient`, `subject`, `status`, `type`, `category`, `date`, `period`, `author`, `target`, `agent`, `recorded`, `_revinclude` | `patient/DocumentReference.rs`, `patient/Provenance.rs`, `system/*.rs` | ✅ Production Ready |
+| **Care Coordination & Coverage (`CarePlan`, `CareTeam`, `Goal`, `ServiceRequest`, `Coverage`, `QuestionnaireResponse`, `MedicationDispense`, `Medication`, `Device`, `Practitioner`, `PractitionerRole`, `Organization`, `RelatedPerson`)** | US Core `v6.1.0` & `v7.0.0` | Full CRUD, `patch`, `vread`, `_history`, `search-type`, `conditional-*`, `$validate` | `_id`, `_lastUpdated`, `identifier`, `patient`, `subject`, `status`, `category`, `code`, `date`, `intent`, `lifecycle-status`, `target-date`, `authored`, `questionnaire`, `whenhandedover`, `type`, `udi-di`, `practitioner`, `organization`, `specialty`, `role`, `name`, `address-*` | `patient/*.rs`, `user/*.cruds`, `system/*.rs` | ✅ Production Ready |
+| **All 146 FHIR R4 Resource Types** | HL7 FHIR R4.0.1 Base Specification | Full CRUD, `patch`, `vread`, `_history`, `search-type`, `conditional-*`, `$validate`, OpenAPI 3.1 | Dynamic `protoreflect` index extraction across `spidx_string`, `spidx_token`, `spidx_date`, `spidx_reference`, `spidx_quantity`, `spidx_uri` | `patient/*.rs`, `user/*.cruds`, `system/*.rs` | ✅ Production Ready |
+| **Terminology (`ValueSet`, `CodeSystem`)** | HL7 FHIR R4 Terminology Services & US Core ValueSets | `GET/POST ValueSet/$expand`, `ValueSet/{id}/$expand`, `ValueSet/$validate-code`, `ValueSet/{id}/$validate-code`, `CodeSystem/$lookup`, `CodeSystem/{id}/$lookup` | `url`, `filter`, `count`, `offset`, `code`, `system`, `display`, `coding` (`Parameters` or query) | `user/ValueSet.rs`, `system/ValueSet.rs`, `patient/*.rs` | ✅ Production Ready |
+| **`Subscription` (`rest-hook`)** | HL7 FHIR R4 Subscription Notification Framework | `POST/PUT/PATCH /Subscription` (`requested` → `active` lifecycle) + real-time HTTP `POST` webhook delivery | `status`, `criteria`, `type`, `payload`, `url` | `user/Subscription.cruds`, `system/Subscription.cruds` | ✅ Production Ready |
 | **`AuditEvent`** | ASTM E2147 / ONC `§170.315(d)(2)` Auditable Events | `read`, `search-type` | `_id`, `date`, `entity`, `patient`, `agent`, `action`, `subtype`, `outcome` | `user/AuditEvent.rs`, `system/AuditEvent.rs` | ✅ Production Ready |
 | **`Bundle`** | HL7 FHIR R4 Batch & ACID Transaction | `batch`, `transaction` (`POST`, `PUT`, `PATCH`, `DELETE`, `urn:uuid:` resolution, `ifNoneExist`, `ifMatch`, conditional `?searchParams` URLs) | N/A | Per-entry SMART scope & compartment validation | ✅ Production Ready |
-| **`$export` (Bulk Data)** | HL7 FHIR Bulk Data Access v2.0.0 / ONC `§170.315(g)(10)` | System (`/$export`), All-Patients (`/Patient/$export`), Group Cohort (`/Group/{id}/$export`), Single-Patient (`/Patient/{id}/$export`), Async Poll (`/$export-poll/{jobId}`), NDJSON Download (`/$export-file/{jobId}/{file}`) | `_type`, `_since`, `_outputFormat` (`application/fhir+ndjson`) | `system/*.rs` (System/Group), `patient/*.rs` (Single-Patient) | ✅ Production Ready |
-| **`$certify` (Conformance)** | HL7 FHIR R4 `TestReport` / US Core `v6.1.0` / ONC `(g)(10)` | `GET/POST /fhir/r4/{tenant}/$certify` & CLI (`task certify`) | 24-check automated conformance harness across 5 suites | Public / Admin | ✅ Production Ready |
+| **`$export` (Bulk Data)** | HL7 FHIR Bulk Data Access v2.0.0 / ONC `§170.315(g)(10)` | System (`/$export`), All-Patients (`/Patient/$export`), Group Cohort (`/Group/{id}/$export`), Single-Patient (`/Patient/{id}/$export`), Postgres-persisted Async Poll (`/$export-poll/{jobId}`), NDJSON Download (`/$export-file/{jobId}/{file}`) | `_type`, `_since`, `_outputFormat` (`application/fhir+ndjson`) | `system/*.rs` (System/Group), `patient/*.rs` (Single-Patient) | ✅ Production Ready |
+| **`$certify` (Conformance)** | HL7 FHIR R4 `TestReport` / US Core `v6.1.0` & `v7.0.0` / ONC `(g)(10)` & HTI-1 | `GET/POST /fhir/r4/{tenant}/$certify` & CLI (`task certify`) | 31-check automated conformance harness across 5 suites | Public / Admin | ✅ Production Ready |
 
 ---
 
@@ -135,13 +141,13 @@ task build
 # Run the Flint FHIR REST server (automatically applies SQL migrations on startup)
 task run
 
-# (In another terminal) Seed a longitudinal clinical cohort (25 FHIR R4 resources across all 11 US Core v6.1.0 profiles in tenant "demo")
+# (In another terminal) Seed a longitudinal clinical cohort across all 26 US Core v6.1.0 & v7.0.0 profiles in tenant "demo"
 task seed
 
-# Run the 24-check FHIR R4 / US Core v6.1.0 / ONC (g)(10) Certification Suite (outputs Scorecard + HL7 TestReport)
+# Run the 31-check FHIR R4 / US Core v6.1.0 & v7.0.0 / ONC (g)(10) Certification Suite (outputs Scorecard + HL7 TestReport)
 task certify
 
-# (Optional) Launch the official HL7 Inferno US Core v6.1.0 Test Kit on http://localhost:4567
+# (Optional) Launch the official HL7 Inferno US Core Test Kit on http://localhost:4567
 task certify-inferno
 
 # (Optional) Run the Temporal ingestion worker
@@ -158,7 +164,7 @@ task run-worker
 # Run Go unit, property, and integration tests
 task test
 
-# Run automated US Core v6.1.0 / ONC (g)(10) conformance certification suite
+# Run automated US Core v6.1.0 & v7.0.0 / ONC (g)(10) conformance certification suite
 task certify
 
 # Run SQLMesh clinical dimensional lakehouse tests (DuckDB)
@@ -302,23 +308,29 @@ Content-Type: application/fhir+json
 ```
 
 ### Resource Interactions
-* **Point Read**: `GET /fhir/r4/{tenant}/{resourceType}/{id}` (returns `ETag: W/"<version>"` and `Last-Modified`; `410 Gone` if deleted)
+* **Point Read**: `GET /fhir/r4/{tenant}/{resourceType}/{id}` (supports `_summary=true|text|data` and `_elements=...` with `SUBSETTED` tag; returns `ETag: W/"<version>"` and `Last-Modified`; `410 Gone` if deleted)
 * **Version Read (`vread`)**: `GET /fhir/r4/{tenant}/{resourceType}/{id}/_history/{vid}`
-* **Instance History (`_history`)**: `GET /fhir/r4/{tenant}/{resourceType}/{id}/_history?_count=100&_offset=0`
+* **History (`_history`)**: Instance (`GET /fhir/r4/{tenant}/{resourceType}/{id}/_history`), Type (`GET /fhir/r4/{tenant}/{resourceType}/_history`), and System (`GET /fhir/r4/{tenant}/_history`) with `_since`, `_count`, and `_offset`
 * **Create & Conditional Create (`If-None-Exist`)**: `POST /fhir/r4/{tenant}/{resourceType}` (`201 Created` + `Location` + `ETag`; when `If-None-Exist` header or Bundle `request.ifNoneExist` matches 1 existing resource, returns `200 OK` idempotently; returns `412 Precondition Failed` on multiple matches)
-* **Update / Create-on-Update**: `PUT /fhir/r4/{tenant}/{resourceType}/{id}` (supports optimistic concurrency via `If-Match: W/"<version>"`, returning `412 Precondition Failed` on version conflict)
-* **Soft Delete**: `DELETE /fhir/r4/{tenant}/{resourceType}/{id}` (`204 No Content` + tombstone version `ETag`)
-* **Patient Compartment (`$everything`)**: `GET /fhir/r4/{tenant}/Patient/{id}/$everything?_type=Encounter,Condition,Observation&_since=2025-01-01T00:00:00Z&_count=100&_offset=0` (returns a `searchset` Bundle containing the target `Patient` plus all compartment-linked resources via `spidx_reference` and referenced `Practitioner` records)
+* **Update / Create-on-Update & Conditional Update**: `PUT /fhir/r4/{tenant}/{resourceType}/{id}` and `PUT /fhir/r4/{tenant}/{resourceType}?{searchParams}` (supports optimistic concurrency via `If-Match: W/"<version>"`, returning `412 Precondition Failed` on version conflict)
+* **JSON Patch & Merge Patch**: `PATCH /fhir/r4/{tenant}/{resourceType}/{id}` (`application/json-patch+json` RFC 6902 and `application/merge-patch+json` RFC 7396)
+* **Soft Delete & Conditional Delete**: `DELETE /fhir/r4/{tenant}/{resourceType}/{id}` and `DELETE /fhir/r4/{tenant}/{resourceType}?{searchParams}` (`204 No Content` + tombstone version `ETag`)
+* **Patient Compartment (`$everything` & Compartment Search)**: `GET /fhir/r4/{tenant}/Patient/{id}/$everything` and `GET /fhir/r4/{tenant}/Patient/{id}/{resourceType}`
+* **Terminology Services (`$expand`, `$validate-code`, `$lookup`)**:
+  * `GET/POST /fhir/r4/{tenant}/ValueSet/$expand` & `/ValueSet/{id}/$expand`
+  * `GET/POST /fhir/r4/{tenant}/ValueSet/$validate-code` & `/ValueSet/{id}/$validate-code`
+  * `GET/POST /fhir/r4/{tenant}/CodeSystem/$lookup` & `/CodeSystem/{id}/$lookup`
+* **Subscriptions (`rest-hook`)**: `POST/PUT /fhir/r4/{tenant}/Subscription` (automatically activates `"requested"` → `"active"` and delivers HTTP `POST` webhooks on matching resource writes)
 * **Bulk Data Access (`$export` — ONC `(g)(10)`)**:
   * System-level: `GET /fhir/r4/{tenant}/$export?_type=Patient,Observation&_since=2025-01-01T00:00:00Z`
   * All-Patients Compartment: `GET /fhir/r4/{tenant}/Patient/$export`
   * Group Cohort Compartment: `GET /fhir/r4/{tenant}/Group/{id}/$export`
   * Single-Patient Compartment: `GET /fhir/r4/{tenant}/Patient/{id}/$export`
-  * Async Job Status Poll & Cancel: `GET /fhir/r4/{tenant}/$export-poll/{jobId}` & `DELETE /fhir/r4/{tenant}/$export-poll/{jobId}`
+  * Async Job Status Poll & Cancel (Postgres-persisted): `GET /fhir/r4/{tenant}/$export-poll/{jobId}` & `DELETE /fhir/r4/{tenant}/$export-poll/{jobId}`
   * NDJSON File Download: `GET /fhir/r4/{tenant}/$export-file/{jobId}/{ResourceType}.ndjson`
-* **Automated Conformance & Certification (`$certify`)**: `GET /fhir/r4/{tenant}/$certify` and `POST /fhir/r4/{tenant}/$certify` (executes 24 end-to-end conformance checks across FHIR R4, US Core v6.1.0, SMART v2, and ONC `(g)(10)` in an isolated sandbox and returns an HL7 FHIR R4 `TestReport` resource)
+* **Automated Conformance & Certification (`$certify`)**: `GET /fhir/r4/{tenant}/$certify` and `POST /fhir/r4/{tenant}/$certify` (executes 31 end-to-end conformance checks across FHIR R4, US Core v6.1.0 & v7.0.0, SMART v2, Terminology, Subscriptions, and ONC `(g)(10)` in an isolated sandbox and returns an HL7 FHIR R4 `TestReport` resource)
 * **Validate**: `POST /fhir/r4/{tenant}/{resourceType}/$validate` and `POST /fhir/r4/{tenant}/$validate`
-* **Search**: `GET /fhir/r4/{tenant}/{resourceType}?{searchParams}&_count=20&_offset=0`
+* **Search**: `GET /fhir/r4/{tenant}/{resourceType}?{searchParams}&_count=20&_offset=0` and `POST /fhir/r4/{tenant}/{resourceType}/_search` (includes `Bundle.link` `self`/`next`/`previous` pagination)
 * **Security Audit Log (`AuditEvent`)**: `GET /fhir/r4/{tenant}/AuditEvent?entity=Patient/123&outcome=0&agent=Practitioner/dr-smith` and `GET /fhir/r4/{tenant}/AuditEvent/{id}`
 * **CapabilityStatement**: `GET /fhir/r4/{tenant}/metadata`
 * **Proto-Compiled OpenAPI 3.1.0 Spec**: `GET /fhir/r4/{tenant}/openapi.json` and `GET /fhir/r4/openapi.json`
@@ -338,7 +350,7 @@ Flint validates incoming FHIR resources prior to persistence and exposes standar
 
 ### Advanced FHIR Search Engine
 Flint implements high-performance relational search against the covering `spidx_*` index tables:
-* **Date Range Queries**: Supports FHIR prefix comparators (`eq`, `ne`, `lt`, `le`, `gt`, `ge`, `sa`, `eb`, `ap`) and multi-value intersections over `spidx_date` timestamps:
+* **Date Range Queries (Precision-Aware Intervals)**: Supports FHIR prefix comparators (`eq`, `ne`, `lt`, `le`, `gt`, `ge`, `sa`, `eb`, `ap`) and precision-aware `YYYY` / `YYYY-MM` / `YYYY-MM-DD` intervals over `spidx_date`:
   ```http
   GET /fhir/r4/tenant-a/Patient?birthdate=ge1980-01-01&birthdate=le1995-12-31
   ```
@@ -346,27 +358,31 @@ Flint implements high-performance relational search against the covering `spidx_
   ```http
   GET /fhir/r4/tenant-a/Observation?value-quantity=gt70|http://unitsofmeasure.org|kg
   ```
-* **Include & Reverse Include**: Resolves target/source references across tables with bundle `"search": {"mode": "match" | "include"}` annotations:
+* **Search Modifiers (`:exact`, `:contains`, `:not`, `:missing`) & Multi-Field `_sort`**:
   ```http
-  GET /fhir/r4/tenant-a/Observation?code=29463-7&_include=Observation:patient
-  GET /fhir/r4/tenant-a/Patient?family=smith&_revinclude=Observation:patient
+  GET /fhir/r4/tenant-a/Patient?family:exact=Smith&given:contains=al&gender:not=male&_sort=-birthdate,family
   ```
-* **Chained Searches**: Joins reference indexes with target parameter tables across string, token, date, and quantity parameters:
+* **Include, Reverse Include (`:iterate`) & Reverse Chaining (`_has`)**:
   ```http
-  GET /fhir/r4/tenant-a/Observation?patient.name=smith
-  GET /fhir/r4/tenant-a/Observation?patient.identifier=http://hospital.example.org/mrn|MRN-1001
+  GET /fhir/r4/tenant-a/Observation?code=29463-7&_include=Observation:patient&_include:iterate=Patient:organization
+  GET /fhir/r4/tenant-a/Patient?_has:Observation:patient:code=8867-4&_revinclude=Observation:patient
+  ```
+* **Chained Searches & Result Projection (`_summary`, `_elements`, `_total=none`)**:
+  ```http
+  GET /fhir/r4/tenant-a/Observation?patient.name=smith&_summary=true
+  GET /fhir/r4/tenant-a/Patient?_elements=name,gender,birthDate&_total=none
   ```
 
 ---
 
 ## SMART on FHIR v2 & Identity Architecture
 
-Flint functions strictly as a high-performance **FHIR Resource Server (RS)**, delegating user authentication, password hashing, and login UI to OpenID Connect (OIDC) Identity Providers.
+Flint functions as a high-performance **FHIR Resource Server (RS)** with built-in SMART on FHIR v2 OAuth2/PKCE (`S256`), refresh token rotation/downscoping, and RFC 7009 token revocation, while also supporting external OpenID Connect (OIDC) Identity Providers.
 
 ```mermaid
 flowchart LR
     Client["SMART on FHIR App\n(EHR / Patient App)"]
-    IdP["Identity Provider / Auth Server\n(Zitadel / Keycloak / Okta / Azure AD)"]
+    IdP["Identity Provider / Auth Server\n(Built-in SMART v2 / Zitadel / Keycloak / Okta)"]
     Flint["Flint FHIR Server\n(Resource Server)"]
 
     Client -->|1. Authenticate & Request Scopes| IdP
@@ -383,7 +399,7 @@ Flint protects endpoints through a pluggable interface:
 * **`MockTokenValidator`**: In-memory ECDSA P-256 keypair signer and validator enabling sub-millisecond, zero-dependency unit tests.
 
 ### Security Guarantees
-1. **SMART v1 & v2 Scopes**: Granular action enforcement (`c`, `r`, `u`, `d`, `s`) across patient, user, and system tiers, including `_include`, `_revinclude`, and `Patient/$everything`.
+1. **SMART v1 & v2 Scopes (Including Granular Sub-Resource Filters)**: Enforces action permissions (`c`, `r`, `u`, `d`, `s`) and granular query constraints (e.g., `patient/Observation.rs?category=http://terminology.hl7.org/CodeSystem/observation-category|vital-signs`) across search, point reads, `vread`, `_history`, `PATCH`, `_include`, `_revinclude`, `_has`, `Patient/$everything`, and `$export`.
 2. **Tenant Boundary Enforcement**: Rejects cross-tenant token access with HTTP 403.
 3. **Patient Compartment Isolation**: When a token carries `patient/*` scopes or a `patient_id` launch claim:
    * Missing `patient_id` claims on `patient/*` tokens fail closed with `403 Forbidden`.
@@ -451,12 +467,12 @@ flint/
 ├── cmd/
 │   ├── flintd/           # FHIR REST HTTP server entrypoint
 │   ├── worker/           # Temporal ingestion worker entrypoint
-│   ├── seed/             # Deterministic 25-resource US Core v6.1.0 cohort seeder (task seed)
-│   ├── certify/          # Automated US Core v6.1.0 / ONC (g)(10) certification CLI (task certify)
+│   ├── seed/             # Deterministic US Core v6.1.0 & v7.0.0 cohort seeder (task seed)
+│   ├── certify/          # Automated 31-check US Core v6.1.0 & v7.0.0 / ONC (g)(10) certification CLI (task certify)
 │   ├── loadtest/         # High-throughput load testing harness
 │   └── e2e/              # End-to-end integration & restart recovery tests
 ├── deploy/
-│   ├── inferno/          # Official HL7 Inferno US Core v6.1.0 Test Kit Docker Compose (task certify-inferno)
+│   ├── inferno/          # Official HL7 Inferno US Core Test Kit Docker Compose (task certify-inferno)
 │   ├── k3d/              # Local k3d cluster configuration
 │   └── k8s/              # Kubernetes manifests (Postgres, Temporal, AutoMQ StatefulSet, Iceberg)
 ├── fhir/r4/              # Machine-readable HL7 FHIR R4 SearchParameter definitions
@@ -469,14 +485,14 @@ flint/
 ├── pkg/
 │   ├── audit/            # HIPAA/ONC FHIR R4 AuditEvent classification, serialization & recorders
 │   ├── auth/             # TokenValidator, OIDC/Zitadel, and Hegel property tests
-│   ├── certify/          # 24-check FHIR R4 / US Core v6.1.0 / ONC (g)(10) conformance engine & TestReport builder
+│   ├── certify/          # 31-check FHIR R4 / US Core v6.1.0 & v7.0.0 / ONC (g)(10) conformance engine & TestReport builder
 │   ├── fhirutil/         # Bidirectional flat FHIR R4 JSON <-> google/fhir protojson codec & helpers
 │   └── validation/       # FHIR StructureDefinition, ValueSet, and cardinality validator
 ├── proto/
 │   ├── flint/auth/v1/    # Canonical Protobuf schemas for auth & security context
 │   └── google/fhir/      # Vendored google/fhir R4 protocol buffers
-├── server/               # stdlib HTTP router, Bundle engine, SMART discovery, auth/audit middleware
-├── store/postgres/       # Operational store, Atlas SQL migrations, spidx_* tables
+├── server/               # stdlib HTTP router, Bundle engine, Terminology, Subscriptions, SMART v2 OAuth2, auth/audit middleware
+├── store/postgres/       # Operational store, Atlas SQL migrations, spidx_* tables, OAuth2 & $export job persistence
 ├── flake.nix             # Hermetic Nix development environment
 ├── lefthook.yml          # Git pre-commit & pre-push hooks
 └── Taskfile.yaml         # Project workflow automation tasks
