@@ -29,6 +29,8 @@ type SMARTConfig struct {
 	Issuer string `json:"issuer"`
 }
 
+const maxOAuthEntries = 4096
+
 // authCodeEntry stores an ephemeral OAuth2 authorization code and PKCE challenge.
 type authCodeEntry struct {
 	ClientID            string
@@ -40,6 +42,97 @@ type authCodeEntry struct {
 	EncounterID         string
 	Tenant              string
 	ExpiresAt           time.Time
+}
+
+// refreshTokenEntry stores an issued OAuth2 refresh token and its original grant context.
+type refreshTokenEntry struct {
+	Subject     string
+	PatientID   string
+	EncounterID string
+	Scope       string
+	ExpiresAt   time.Time
+}
+
+func (s *Server) storeAuthCode(code string, entry authCodeEntry) {
+	now := time.Now()
+	s.oauthMu.Lock()
+	defer s.oauthMu.Unlock()
+	if s.oauthCodes == nil {
+		s.oauthCodes = make(map[string]authCodeEntry)
+	}
+	for k, v := range s.oauthCodes {
+		if now.After(v.ExpiresAt) {
+			delete(s.oauthCodes, k)
+		}
+	}
+	if len(s.oauthCodes) >= maxOAuthEntries {
+		var oldestKey string
+		var oldestExp time.Time
+		for k, v := range s.oauthCodes {
+			if oldestKey == "" || v.ExpiresAt.Before(oldestExp) {
+				oldestKey = k
+				oldestExp = v.ExpiresAt
+			}
+		}
+		if oldestKey != "" {
+			delete(s.oauthCodes, oldestKey)
+		}
+	}
+	s.oauthCodes[code] = entry
+}
+
+func (s *Server) storeRefreshToken(token string, entry refreshTokenEntry) {
+	now := time.Now()
+	s.oauthMu.Lock()
+	defer s.oauthMu.Unlock()
+	if s.refreshTokens == nil {
+		s.refreshTokens = make(map[string]refreshTokenEntry)
+	}
+	for k, v := range s.refreshTokens {
+		if now.After(v.ExpiresAt) {
+			delete(s.refreshTokens, k)
+		}
+	}
+	if len(s.refreshTokens) >= maxOAuthEntries {
+		var oldestKey string
+		var oldestExp time.Time
+		for k, v := range s.refreshTokens {
+			if oldestKey == "" || v.ExpiresAt.Before(oldestExp) {
+				oldestKey = k
+				oldestExp = v.ExpiresAt
+			}
+		}
+		if oldestKey != "" {
+			delete(s.refreshTokens, oldestKey)
+		}
+	}
+	s.refreshTokens[token] = entry
+}
+
+func (s *Server) consumeRefreshToken(token string) (refreshTokenEntry, bool) {
+	s.oauthMu.Lock()
+	defer s.oauthMu.Unlock()
+	if s.refreshTokens == nil {
+		return refreshTokenEntry{}, false
+	}
+	entry, ok := s.refreshTokens[token]
+	if ok {
+		delete(s.refreshTokens, token)
+	}
+	return entry, ok
+}
+
+func isScopeSubset(requested, granted string) bool {
+	allowed := make(map[string]bool)
+	for tok := range strings.FieldsSeq(granted) {
+		allowed[tok] = true
+	}
+	for req := range strings.FieldsSeq(requested) {
+		if !allowed[req] {
+			return false
+		}
+	}
+	return true
 }
 
 // SetSMARTConfig configures the SMART App Launch endpoints.
@@ -258,8 +351,7 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	code := "flint-code-" + uuid.NewString()
-	s.oauthMu.Lock()
-	s.oauthCodes[code] = authCodeEntry{
+	s.storeAuthCode(code, authCodeEntry{
 		ClientID:            clientID,
 		RedirectURI:         redirectURI,
 		Scope:               scope,
@@ -268,8 +360,7 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 		PatientID:           patientID,
 		EncounterID:         encounterID,
 		ExpiresAt:           time.Now().Add(5 * time.Minute),
-	}
-	s.oauthMu.Unlock()
+	})
 
 	u, err := url.Parse(redirectURI)
 	if err != nil {
@@ -347,6 +438,15 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		refreshToken := "flint-rt-" + uuid.NewString()
+		s.storeRefreshToken(refreshToken, refreshTokenEntry{
+			Subject:     sub,
+			PatientID:   entry.PatientID,
+			EncounterID: entry.EncounterID,
+			Scope:       scope,
+			ExpiresAt:   time.Now().Add(24 * time.Hour),
+		})
+
 		resp := map[string]any{
 			"access_token":        accessToken,
 			"token_type":          "Bearer",
@@ -357,7 +457,7 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			"need_patient_banner": true,
 			"smart_style_url":     "https://hl7.org/fhir/smart-app-launch/smart-styles.json",
 			"id_token":            accessToken,
-			"refresh_token":       "flint-rt-" + uuid.NewString(),
+			"refresh_token":       refreshToken,
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -390,26 +490,53 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(resp)
 
 	case "refresh_token":
-		scope := r.FormValue("scope")
-		if scope == "" {
-			scope = "patient/*.rs openid fhirUser offline_access"
+		rawRT := strings.TrimSpace(r.FormValue("refresh_token"))
+		if rawRT == "" || s.isTokenRevoked(rawRT) {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "missing or revoked refresh_token")
+			return
 		}
-		accessToken, err := s.devAuth.IssueToken("Patient/pat-alice-001", scope, "pat-alice-001", time.Hour, map[string]any{
-			"fhirUser": "Patient/pat-alice-001",
-			"jti":      uuid.NewString(),
+		rtEntry, ok := s.consumeRefreshToken(rawRT)
+		if !ok || time.Now().After(rtEntry.ExpiresAt) {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "invalid or expired refresh_token")
+			return
+		}
+
+		reqScope := strings.TrimSpace(r.FormValue("scope"))
+		effectiveScope := rtEntry.Scope
+		if reqScope != "" {
+			if !isScopeSubset(reqScope, rtEntry.Scope) {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_scope", "requested scope exceeds original grant")
+				return
+			}
+			effectiveScope = reqScope
+		}
+
+		accessToken, err := s.devAuth.IssueToken(rtEntry.Subject, effectiveScope, rtEntry.PatientID, time.Hour, map[string]any{
+			"fhirUser":  rtEntry.Subject,
+			"encounter": rtEntry.EncounterID,
+			"jti":       uuid.NewString(),
 		})
 		if err != nil {
 			writeOAuthError(w, http.StatusInternalServerError, "server_error", err.Error())
 			return
 		}
+		nextRefreshToken := "flint-rt-" + uuid.NewString()
+		s.storeRefreshToken(nextRefreshToken, refreshTokenEntry{
+			Subject:     rtEntry.Subject,
+			PatientID:   rtEntry.PatientID,
+			EncounterID: rtEntry.EncounterID,
+			Scope:       rtEntry.Scope,
+			ExpiresAt:   time.Now().Add(24 * time.Hour),
+		})
 		resp := map[string]any{
 			"access_token":  accessToken,
 			"token_type":    "Bearer",
 			"expires_in":    3600,
-			"scope":         scope,
-			"patient":       "pat-alice-001",
+			"scope":         effectiveScope,
+			"patient":       rtEntry.PatientID,
+			"encounter":     rtEntry.EncounterID,
 			"id_token":      accessToken,
-			"refresh_token": "flint-rt-" + uuid.NewString(),
+			"refresh_token": nextRefreshToken,
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -470,11 +597,33 @@ func (s *Server) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	rawToken := strings.TrimSpace(r.FormValue("token"))
 	if rawToken != "" {
+		now := time.Now()
 		s.oauthMu.Lock()
 		if s.revokedTokens == nil {
-			s.revokedTokens = make(map[string]bool)
+			s.revokedTokens = make(map[string]time.Time)
 		}
-		s.revokedTokens[rawToken] = true
+		if s.refreshTokens != nil {
+			delete(s.refreshTokens, rawToken)
+		}
+		for k, ts := range s.revokedTokens {
+			if now.Sub(ts) > 24*time.Hour {
+				delete(s.revokedTokens, k)
+			}
+		}
+		if len(s.revokedTokens) >= maxOAuthEntries {
+			var oldestKey string
+			var oldestTime time.Time
+			for k, ts := range s.revokedTokens {
+				if oldestKey == "" || ts.Before(oldestTime) {
+					oldestKey = k
+					oldestTime = ts
+				}
+			}
+			if oldestKey != "" {
+				delete(s.revokedTokens, oldestKey)
+			}
+		}
+		s.revokedTokens[rawToken] = now
 		s.oauthMu.Unlock()
 	}
 	w.Header().Set("Cache-Control", "no-store")
@@ -487,7 +636,8 @@ func (s *Server) isTokenRevoked(rawToken string) bool {
 	}
 	s.oauthMu.Lock()
 	defer s.oauthMu.Unlock()
-	return s.revokedTokens[rawToken]
+	_, revoked := s.revokedTokens[rawToken]
+	return revoked
 }
 
 func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {

@@ -236,18 +236,18 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		return
 	}
 
-	// Filter patient-compartment resources on multi-patient / single-patient exports if secCtx is present
-	if hasSecCtx && auth.IsPatientRestricted(secCtx) && patientID != "" {
+	// Filter exported resources by patient compartment and SMART v2 granular sub-resource scopes when secCtx is present
+	if hasSecCtx {
+		patientRestricted := auth.IsPatientRestricted(secCtx)
 		allowedPat := cleanID(secCtx.GetPatientId())
 		filtered := make([]postgres.SearchResult, 0, len(results))
 		for _, res := range results {
-			if strings.EqualFold(res.ResType, "Patient") {
-				if cleanID(res.ResID) == allowedPat {
-					filtered = append(filtered, res)
+			if patientRestricted && patientID != "" && strings.EqualFold(res.ResType, "Patient") {
+				if cleanID(res.ResID) != allowedPat {
+					continue
 				}
-				continue
 			}
-			if !auth.Allows(secCtx, res.ResType, auth.ActionRead) && !auth.Allows(secCtx, res.ResType, auth.ActionSearch) {
+			if !s.resourceAllowedByGranularScope(secCtx, tenant, res.ResType, res.ResID, res.ResourceProto) {
 				continue
 			}
 			filtered = append(filtered, res)

@@ -24,16 +24,22 @@ import (
 func TestStore_Integration(t *testing.T) {
 	dsn := os.Getenv("FLINT_TEST_POSTGRES_DSN")
 	if dsn == "" {
-		t.Skip("FLINT_TEST_POSTGRES_DSN not set; skipping integration test")
+		dsn = "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
 	}
 
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Skipf("skipping Postgres integration test (open failed): %v", err)
 	}
 	defer db.Close()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		t.Skipf("skipping Postgres integration test (ping failed): %v", err)
+	}
+
+	ctx = context.Background()
 
 	// Run migrations
 	if err := postgres.RunMigrations(ctx, db); err != nil {
@@ -948,6 +954,86 @@ func TestStore_Integration(t *testing.T) {
 		}
 		if len(srRevSub.Includes) != 1 || srRevSub.Includes[0].ResID != "obs-range-1" {
 			t.Errorf("expected 1 revinclude (obs-range-1) for Observation:subject, got %+v", srRevSub.Includes)
+		}
+	})
+
+	t.Run("Date Interval Precision (YYYY, YYYY-MM, YYYY-MM-DD) and SQL LIKE Wildcard Escaping", func(t *testing.T) {
+		// obs-range-1 was indexed at 2025-03-15T10:00:00Z.
+		// Verify eq2025-03-15, eq2025-03, eq2025, le2025-03-15, and ge2025-03-15 all match obs-range-1,
+		// while gt2025-03-15 and ne2025-03-15 do NOT match obs-range-1.
+		for _, qStr := range []string{
+			"_id=obs-range-1&date=2025-03-15",
+			"_id=obs-range-1&date=eq2025-03-15",
+			"_id=obs-range-1&date=2025-03",
+			"_id=obs-range-1&date=2025",
+			"_id=obs-range-1&date=le2025-03-15",
+			"_id=obs-range-1&date=ge2025-03-15",
+		} {
+			vals, _ := url.ParseQuery(qStr)
+			sr, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Observation", vals))
+			if err != nil {
+				t.Fatalf("date precision search %s: %v", qStr, err)
+			}
+			if sr.Total != 1 {
+				t.Errorf("expected 1 match for %q on intra-day timestamp 2025-03-15T10:00:00Z, got %d", qStr, sr.Total)
+			}
+		}
+		for _, qNoMatch := range []string{
+			"_id=obs-range-1&date=gt2025-03-15",
+			"_id=obs-range-1&date=lt2025-03-15",
+			"_id=obs-range-1&date=ne2025-03-15",
+		} {
+			vals, _ := url.ParseQuery(qNoMatch)
+			sr, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Observation", vals))
+			if err != nil {
+				t.Fatalf("date precision non-match search %s: %v", qNoMatch, err)
+			}
+			if sr.Total != 0 {
+				t.Errorf("expected 0 matches for %q on intra-day timestamp 2025-03-15T10:00:00Z, got %d", qNoMatch, sr.Total)
+			}
+		}
+
+		// Verify SQL LIKE wildcard characters (% and _) are escaped as literals in prefix and :contains searches
+		if err := store.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Patient",
+			ResID:         "pat-like-literal",
+			ResourceProto: []byte("pat-like-literal"),
+			SearchIndexes: &postgres.SearchIndexes{
+				Strings: []postgres.SpidxString{
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "pat-like-literal", SpName: "family", SpValue: "100%_LiteralName"},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("write pat-like-literal: %v", err)
+		}
+
+		// Searching family=% or family=_ or family:contains=% must ONLY match pat-like-literal, not every patient in test-tenant!
+		valsPct, _ := url.ParseQuery("family=100%25_Literal")
+		srPct, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Patient", valsPct))
+		if err != nil {
+			t.Fatalf("search escaped %% and _: %v", err)
+		}
+		if srPct.Total != 1 || srPct.Matches[0].ResID != "pat-like-literal" {
+			t.Errorf("expected exactly pat-like-literal for family=100%%_Literal, got total=%d", srPct.Total)
+		}
+
+		valsWildOnly, _ := url.ParseQuery("family=%25")
+		srWildOnly, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Patient", valsWildOnly))
+		if err != nil {
+			t.Fatalf("search family=%%: %v", err)
+		}
+		if srWildOnly.Total != 0 {
+			t.Errorf("expected 0 matches for prefix family=%% (literal percent sign at start), got %d", srWildOnly.Total)
+		}
+
+		valsContainsPct, _ := url.ParseQuery("family:contains=%25_")
+		srContainsPct, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Patient", valsContainsPct))
+		if err != nil {
+			t.Fatalf("search family:contains=%%_: %v", err)
+		}
+		if srContainsPct.Total != 1 || srContainsPct.Matches[0].ResID != "pat-like-literal" {
+			t.Errorf("expected 1 match (pat-like-literal) for family:contains=%%_, got %d", srContainsPct.Total)
 		}
 	})
 

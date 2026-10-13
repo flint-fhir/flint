@@ -264,7 +264,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Resolve Conditional PUT / Conditional DELETE when urlQuery is present
+		// Parse Conditional PUT / Conditional DELETE when urlQuery is present
+		var entryCondParams *postgres.SearchParams
 		if urlQuery != "" && (method == "PUT" || method == "DELETE") && s.store != nil {
 			condParams, err := postgres.ParseIfNoneExist(tenant, resType, urlQuery)
 			if err != nil {
@@ -285,33 +286,29 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			condParams.Count = 2
-			sr, err := s.store.Search(r.Context(), condParams)
-			if err != nil {
-				if isTransaction {
-					writeOperationOutcome(w, http.StatusInternalServerError, "exception", fmt.Sprintf("entry[%d]: conditional search failed", i))
-					return
+			if isTransaction {
+				entryCondParams = &condParams
+			} else {
+				condParams.Count = 2
+				sr, err := s.store.Search(r.Context(), condParams)
+				if err != nil {
+					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, fmt.Sprintf("entry[%d]: conditional search failed", i)))
+					continue
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, fmt.Sprintf("entry[%d]: conditional search failed", i)))
-				continue
-			}
-			if sr.Total > 1 {
-				msg := fmt.Sprintf("entry[%d]: conditional %s matched %d resources (expected 0 or 1)", i, method, sr.Total)
-				if isTransaction {
-					writeOperationOutcome(w, http.StatusPreconditionFailed, "multiple-matches", msg)
-					return
+				if sr.Total > 1 {
+					msg := fmt.Sprintf("entry[%d]: conditional %s matched %d resources (expected 0 or 1)", i, method, sr.Total)
+					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusPreconditionFailed, msg))
+					continue
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusPreconditionFailed, msg))
-				continue
-			}
-			if sr.Total == 1 {
-				resID = sr.Matches[0].ResID
-			} else if method == "DELETE" {
-				// 0 matches on conditional DELETE is an idempotent 204 No Content
-				responseEntries = append(responseEntries, map[string]any{
-					"response": map[string]any{"status": "204 No Content"},
-				})
-				continue
+				if sr.Total == 1 {
+					resID = sr.Matches[0].ResID
+				} else if method == "DELETE" {
+					// 0 matches on conditional DELETE is an idempotent 204 No Content
+					responseEntries = append(responseEntries, map[string]any{
+						"response": map[string]any{"status": "204 No Content"},
+					})
+					continue
+				}
 			}
 		}
 
@@ -335,6 +332,27 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, msg))
 				continue
 			}
+			if hasSecCtx && auth.IsPatientRestricted(secCtx) {
+				exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), tenant, resType, resID, secCtx.GetPatientId())
+				if err != nil {
+					if isTransaction {
+						writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+						return
+					}
+					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, "internal security check error"))
+					continue
+				}
+				if exists && !allowed {
+					msg := fmt.Sprintf("entry[%d]: patient-scoped token (%s) cannot patch %s/%s outside patient compartment",
+						i, secCtx.GetPatientId(), resType, resID)
+					if isTransaction {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
+						return
+					}
+					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
+					continue
+				}
+			}
 			currentRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID)
 			if errors.Is(err, sql.ErrNoRows) {
 				msg := fmt.Sprintf("entry[%d]: %s/%s not found", i, resType, resID)
@@ -345,6 +363,15 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusNotFound, msg))
 				continue
 			}
+			if errors.Is(err, postgres.ErrResourceDeleted) {
+				msg := fmt.Sprintf("entry[%d]: %s/%s has been deleted", i, resType, resID)
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusGone, "deleted", msg)
+					return
+				}
+				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusGone, msg))
+				continue
+			}
 			if err != nil {
 				if isTransaction {
 					writeOperationOutcome(w, http.StatusInternalServerError, "exception", err.Error())
@@ -352,6 +379,19 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				}
 				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, err.Error()))
 				continue
+			}
+			if hasSecCtx {
+				if constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionUpdate); constrained {
+					if !s.resourceSatisfiesScopeConstraints(tenant, resType, resID, currentRec.ResourceProto, constraints) {
+						msg := fmt.Sprintf("entry[%d]: insufficient granular SMART v2 scope to patch %s/%s", i, resType, resID)
+						if isTransaction {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
+							return
+						}
+						responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
+						continue
+					}
+				}
 			}
 			if expectedVersion > 0 && currentRec.ResVersion != expectedVersion {
 				msg := fmt.Sprintf("entry[%d]: version conflict on %s/%s", i, resType, resID)
@@ -429,6 +469,30 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 
 		// Handle DELETE
 		if method == "DELETE" {
+			if isTransaction && entryCondParams != nil {
+				ops = append(ops, postgres.BundleOperation{
+					Method: "DELETE",
+					Input: postgres.ResourceInput{
+						TenantID: tenant,
+						ResType:  resType,
+					},
+					ConditionalParams: entryCondParams,
+					VerifyDeleteMatch: func(matchedID string) error {
+						if hasSecCtx && auth.IsPatientRestricted(secCtx) {
+							exists, allowed, cErr := s.checkExistingResourceCompartment(r.Context(), tenant, resType, matchedID, secCtx.GetPatientId())
+							if cErr != nil {
+								return cErr
+							}
+							if !exists || !allowed {
+								return fmt.Errorf("%w: %s/%s", errForbiddenCompartment, resType, matchedID)
+							}
+						}
+						return nil
+					},
+				})
+				continue
+			}
+
 			if resID == "" {
 				if isTransaction {
 					writeOperationOutcome(w, http.StatusBadRequest, "required",
@@ -676,11 +740,54 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if isTransaction {
-			ops = append(ops, postgres.BundleOperation{
-				Method:      method,
-				Input:       input,
-				IfNoneExist: condParams,
-			})
+			bundleOp := postgres.BundleOperation{
+				Method:            method,
+				Input:             input,
+				IfNoneExist:       condParams,
+				ConditionalParams: entryCondParams,
+			}
+			if method == "PUT" && entryCondParams != nil {
+				capturedBodyID := bodyID
+				capturedResID := resID
+				capturedResType := resType
+				capturedExpectedVersion := expectedVersion
+				capturedMsg := proto.Clone(msg).(*dynamicpb.Message)
+				bundleOp.BuildWriteInput = func(matchedID string, isExisting bool) (postgres.ResourceInput, error) {
+					targetID := capturedResID
+					if isExisting {
+						if capturedBodyID != "" && capturedBodyID != matchedID {
+							return postgres.ResourceInput{}, fmt.Errorf("%w: body id %q != matched id %q", errConditionalIDMismatch, capturedBodyID, matchedID)
+						}
+						targetID = matchedID
+					}
+					setProtoResourceID(capturedMsg, targetID)
+					pBytes, mErr := proto.Marshal(capturedMsg)
+					if mErr != nil {
+						return postgres.ResourceInput{}, mErr
+					}
+					var pIdx *postgres.SearchIndexes
+					if extractor, ok := s.extractors[capturedResType]; ok {
+						pIdx, _ = extractor(tenant, targetID, pBytes)
+					}
+					if hasSecCtx && auth.IsPatientRestricted(secCtx) {
+						allowedPat := cleanID(secCtx.GetPatientId())
+						if strings.EqualFold(capturedResType, "Patient") || postgres.IsPatientCompartmentResourceType(capturedResType) {
+							if !postgres.IndexesBelongToPatientCompartment(capturedResType, targetID, pIdx, allowedPat) {
+								return postgres.ResourceInput{}, fmt.Errorf("%w: %s/%s", errForbiddenCompartment, capturedResType, targetID)
+							}
+						}
+					}
+					return postgres.ResourceInput{
+						TenantID:        tenant,
+						ResType:         capturedResType,
+						ResID:           targetID,
+						ResourceProto:   pBytes,
+						SearchIndexes:   pIdx,
+						ExpectedVersion: capturedExpectedVersion,
+					}, nil
+				}
+			}
+			ops = append(ops, bundleOp)
 			continue
 		}
 
@@ -770,6 +877,14 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusConflict, "duplicate", err.Error())
 			return
 		}
+		if errors.Is(err, errConditionalIDMismatch) {
+			writeOperationOutcome(w, http.StatusBadRequest, "invariant", err.Error())
+			return
+		}
+		if errors.Is(err, errForbiddenCompartment) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", err.Error())
+			return
+		}
 		if err != nil {
 			s.logger.Error("bundle transaction failed", "error", err, "ops", len(ops))
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception",
@@ -785,10 +900,14 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				}
 				if res.Record != nil && res.Record.ResVersion > 0 {
 					respMap["etag"] = postgres.FormatETag(res.Record.ResVersion)
+					delID := res.ResID
+					if delID == "" {
+						delID = op.Input.ResID
+					}
 					s.publishCDC(r.Context(), automq.Message{
 						TenantID: tenant,
 						ResType:  op.Input.ResType,
-						ResID:    op.Input.ResID,
+						ResID:    delID,
 						Op:       "D",
 					})
 				}
