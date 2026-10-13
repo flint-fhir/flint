@@ -650,6 +650,13 @@ func (s *Store) ReadResourceVersion(ctx context.Context, tenantID, resType, resI
 
 // ListResourceHistory returns the version history of a resource ordered by version descending.
 func (s *Store) ListResourceHistory(ctx context.Context, tenantID, resType, resID string, limit, offset int) ([]ResourceRecord, int, error) {
+	return s.ListHistory(ctx, tenantID, resType, resID, nil, limit, offset)
+}
+
+// ListHistory returns version history records at the instance (resType != "" && resID != ""),
+// type (resType != "" && resID == ""), or system (resType == "" && resID == "") level,
+// with an optional _since filter on last_updated.
+func (s *Store) ListHistory(ctx context.Context, tenantID, resType, resID string, since *time.Time, limit, offset int) ([]ResourceRecord, int, error) {
 	if limit <= 0 {
 		limit = 100
 	}
@@ -660,21 +667,38 @@ func (s *Store) ListResourceHistory(ctx context.Context, tenantID, resType, resI
 		offset = 0
 	}
 
+	where := "WHERE tenant_id = $1"
+	args := []any{tenantID}
+	if resType != "" {
+		args = append(args, resType)
+		where += fmt.Sprintf(" AND res_type = $%d", len(args))
+	}
+	if resID != "" {
+		args = append(args, resID)
+		where += fmt.Sprintf(" AND res_id = $%d", len(args))
+	}
+	if since != nil && !since.IsZero() {
+		args = append(args, *since)
+		where += fmt.Sprintf(" AND last_updated >= $%d", len(args))
+	}
+
 	var total int
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM fhir_resource_history
-		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
-	`, tenantID, resType, resID).Scan(&total); err != nil {
+	countSQL := "SELECT COUNT(*) FROM fhir_resource_history " + where
+	if err := s.db.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count resource history: %w", err)
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT resource_proto, res_version, last_updated, is_deleted
-		FROM fhir_resource_history
-		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
-		ORDER BY res_version DESC
-		LIMIT $4 OFFSET $5
-	`, tenantID, resType, resID, limit, offset)
+	orderBy := "ORDER BY last_updated DESC, res_version DESC"
+	if resType != "" && resID != "" {
+		orderBy = "ORDER BY res_version DESC"
+	}
+	dataArgs := append(append([]any{}, args...), limit, offset)
+	dataSQL := fmt.Sprintf(
+		"SELECT res_type, res_id, resource_proto, res_version, last_updated, is_deleted FROM fhir_resource_history %s %s LIMIT $%d OFFSET $%d",
+		where, orderBy, len(args)+1, len(args)+2,
+	)
+
+	rows, err := s.db.QueryContext(ctx, dataSQL, dataArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("query resource history: %w", err)
 	}
@@ -684,10 +708,8 @@ func (s *Store) ListResourceHistory(ctx context.Context, tenantID, resType, resI
 	for rows.Next() {
 		rec := ResourceRecord{
 			TenantID: tenantID,
-			ResType:  resType,
-			ResID:    resID,
 		}
-		if err := rows.Scan(&rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted); err != nil {
+		if err := rows.Scan(&rec.ResType, &rec.ResID, &rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted); err != nil {
 			return nil, 0, fmt.Errorf("scan resource history: %w", err)
 		}
 		records = append(records, rec)

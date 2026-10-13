@@ -110,8 +110,40 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			if !isBulkExportOp {
 				switch r.Method {
 				case http.MethodGet:
-					if len(parts) >= 5 {
-						// Read / VRead / History / $everything / Patient/{id}/$export: GET /{tenant}/{resourceType}/{id}...
+					if resType == "_history" {
+						// System-level history: GET /{tenant}/_history
+						if len(secCtx.GetScopes()) == 0 {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for system _history")
+							return
+						}
+					} else if len(parts) == 5 && parts[4] == "_history" {
+						// Type-level history: GET /{tenant}/{resourceType}/_history
+						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("insufficient scope for _history on %s", resType))
+							return
+						}
+						if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("patient-scoped token (%s) cannot read _history of non-compartment resource %s",
+									secCtx.GetPatientId(), resType))
+							return
+						}
+					} else if len(parts) == 6 && strings.EqualFold(resType, "Patient") && parts[5] != "$everything" && parts[5] != "$export" && parts[5] != "_history" {
+						// Compartment search: GET /{tenant}/Patient/{patientId}/{compartmentType}
+						patientID := parts[4]
+						compartmentType := parts[5]
+						if auth.IsPatientRestricted(secCtx) && cleanID(patientID) != cleanID(secCtx.GetPatientId()) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("patient-scoped token (%s) cannot access patient %s",
+									secCtx.GetPatientId(), patientID))
+							return
+						}
+						if !s.enforceSearchScopeAndCompartment(w, r, secCtx, compartmentType) {
+							return
+						}
+					} else if len(parts) >= 5 {
+						// Read / VRead / Instance History / $everything / Patient/{id}/$export: GET /{tenant}/{resourceType}/{id}...
 						id := parts[4]
 						if !auth.Allows(secCtx, resType, auth.ActionRead) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",

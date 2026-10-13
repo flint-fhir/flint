@@ -1037,6 +1037,122 @@ func TestStore_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("_sort, _has Reverse Chaining, _summary=count, _total=none, _include:iterate, and ListHistory", func(t *testing.T) {
+		for _, badQ := range []string{
+			"_summary=invalid_mode",
+			"_total=invalid_mode",
+			"_sort=-",
+			"_has:Observation=val",
+			"_has:Observation:patient:code=",
+		} {
+			vals, _ := url.ParseQuery(badQ)
+			if err := postgres.ValidateSearchQuery(vals); err == nil {
+				t.Errorf("expected ValidateSearchQuery(%q) to fail", badQ)
+			}
+		}
+
+		// Seed Organization/org-iter-1 <- Patient/shared-id-99 <- Observation/obs-range-1 for _include:iterate
+		if err := store.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Organization",
+			ResID:         "org-iter-1",
+			ResourceProto: []byte("org-iter-1"),
+			SearchIndexes: &postgres.SearchIndexes{
+				Strings: []postgres.SpidxString{
+					{TenantID: "test-tenant", ResType: "Organization", ResID: "org-iter-1", SpName: "name", SpValue: "Iter Clinic"},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("write org-iter-1: %v", err)
+		}
+
+		if err := store.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Patient",
+			ResID:         "shared-id-99",
+			ResourceProto: []byte("patient-shared-99-v2"),
+			SearchIndexes: &postgres.SearchIndexes{
+				Strings: []postgres.SpidxString{
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "shared-id-99", SpName: "family", SpValue: "RangeTester"},
+				},
+				Tokens: []postgres.SpidxToken{
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "shared-id-99", SpName: "gender", SpValue: "female"},
+				},
+				References: []postgres.SpidxReference{
+					{TenantID: "test-tenant", ResType: "Patient", ResID: "shared-id-99", SpName: "organization", TargetType: "Organization", TargetID: "org-iter-1"},
+				},
+			},
+		}); err != nil {
+			t.Fatalf("update shared-id-99 with organization ref: %v", err)
+		}
+
+		// 1. Multi-field _sort on Observation (-date, -value-quantity, _lastUpdated, _id)
+		valsSortDesc, _ := url.ParseQuery("_id=obs-range-1,obs-range-2&_sort=-date,_id")
+		srSortDesc, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Observation", valsSortDesc))
+		if err != nil {
+			t.Fatalf("search _sort=-date: %v", err)
+		}
+		if len(srSortDesc.Matches) != 2 || srSortDesc.Matches[0].ResID != "obs-range-2" || srSortDesc.Matches[1].ResID != "obs-range-1" {
+			t.Errorf("expected [obs-range-2, obs-range-1] for _sort=-date, got %+v", srSortDesc.Matches)
+		}
+
+		valsSortQty, _ := url.ParseQuery("_id=obs-range-1,obs-range-2&_sort=value-quantity:asc,-_lastUpdated")
+		srSortQty, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Observation", valsSortQty))
+		if err != nil || len(srSortQty.Matches) != 2 || srSortQty.Matches[0].ResID != "obs-range-1" {
+			t.Errorf("expected obs-range-1 first for _sort=value-quantity:asc, got %+v (err=%v)", srSortQty, err)
+		}
+
+		// 2. _has reverse chaining across quantity, date, id, and reference
+		for _, hasQ := range []string{
+			"_has:Observation:patient:value-quantity=7.2|http://unitsofmeasure.org|mg/dL",
+			"_has:Observation:patient:date=2025-03-15",
+			"_has:Observation:patient:_id=obs-range-1",
+		} {
+			valsHas, _ := url.ParseQuery(hasQ)
+			srHas, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Patient", valsHas))
+			if err != nil {
+				t.Fatalf("_has search %s: %v", hasQ, err)
+			}
+			if srHas.Total != 1 || srHas.Matches[0].ResID != "shared-id-99" {
+				t.Errorf("expected shared-id-99 for %q, got total=%d", hasQ, srHas.Total)
+			}
+		}
+
+		// 3. _summary=count and _total=none
+		valsCnt, _ := url.ParseQuery("_id=obs-range-1,obs-range-2&_summary=count")
+		srCnt, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Observation", valsCnt))
+		if err != nil || srCnt.Total != 2 || len(srCnt.Matches) != 0 {
+			t.Errorf("expected Total=2 and 0 Matches for _summary=count, got %+v (err=%v)", srCnt, err)
+		}
+
+		valsTotNone, _ := url.ParseQuery("_id=obs-range-1&_total=none")
+		srTotNone, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Observation", valsTotNone))
+		if err != nil || srTotNone.Total != 0 || len(srTotNone.Matches) != 1 {
+			t.Errorf("expected Total=0 (skipped count) and 1 Match for _total=none, got %+v (err=%v)", srTotNone, err)
+		}
+
+		// 4. Multi-hop _include:iterate (Observation -> Patient -> Organization)
+		valsIter, _ := url.ParseQuery("_id=obs-range-1&_include=Observation:patient&_include:iterate=Patient:organization")
+		srIter, err := store.Search(ctx, postgres.BuildSearchParamsFromQuery("test-tenant", "Observation", valsIter))
+		if err != nil {
+			t.Fatalf("_include:iterate search: %v", err)
+		}
+		if len(srIter.Includes) != 2 {
+			t.Errorf("expected 2 included resources (Patient/shared-id-99 and Organization/org-iter-1) for _include:iterate, got %d: %+v", len(srIter.Includes), srIter.Includes)
+		}
+
+		// 5. Type and system ListHistory
+		typeHist, typeTotal, err := store.ListHistory(ctx, "test-tenant", "Patient", "", nil, 10, 0)
+		if err != nil || typeTotal < 2 || len(typeHist) == 0 {
+			t.Errorf("expected type history for Patient >= 2, got total=%d len=%d err=%v", typeTotal, len(typeHist), err)
+		}
+		sincePast := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+		sysHist, sysTotal, err := store.ListHistory(ctx, "test-tenant", "", "", &sincePast, 10, 0)
+		if err != nil || sysTotal < 2 || len(sysHist) == 0 {
+			t.Errorf("expected system history >= 2, got total=%d len=%d err=%v", sysTotal, len(sysHist), err)
+		}
+	})
+
 	// Clean up
 	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
 		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-tenant'")
