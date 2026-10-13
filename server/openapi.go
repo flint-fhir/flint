@@ -9,6 +9,7 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/pkg/validation"
+	"github.com/flint-fhir/flint/store/postgres"
 )
 
 // ConformanceMatrixEntry describes a verified capability in the Flint FHIR R4 Conformance Matrix.
@@ -25,56 +26,70 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 	return []ConformanceMatrixEntry{
 		{
 			Category:      "Core Storage",
-			Capability:    "Proto3 Wire Binary Store (Zero JSONB)",
+			Capability:    "Proto3 Wire Binary Store (Zero JSONB) — All 146 FHIR R4 Resource Types",
 			Specification: "Google FHIR R4 Protobuf + 6 HAPI spidx_* Covering Tables",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/{resourceType}",
 		},
 		{
 			Category:      "FHIR R4 CRUD, Versioning & Patch",
-			Capability:    "read, vread, create, update, patch (RFC 6902 & Merge Patch), delete, history-instance, ETag / If-Match CAS",
+			Capability:    "read, vread, create, update, patch (RFC 6902 & Merge Patch), delete, instance/type/system _history, ETag / If-Match CAS",
 			Specification: "HL7 FHIR R4 RESTful API (4.0.1) & RFC 6902 / RFC 7396",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/{resourceType}/{id}",
 		},
 		{
 			Category:      "Conditional Operations & Bundles",
-			Capability:    "Conditional Create (If-None-Exist), Conditional Update, Conditional Delete & ACID Transaction / Batch Bundles",
+			Capability:    "Conditional Create (If-None-Exist), Conditional Update, Conditional Delete & Atomic ACID Transaction / Batch Bundles",
 			Specification: "HL7 FHIR R4 Bundle & Conditional Operations",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/{resourceType}?identifier=...",
 		},
 		{
 			Category:      "Advanced Search Engine",
-			Capability:    "Date/Quantity Ranges, Chained Search, _include / _revinclude",
+			Capability:    "Date/Quantity Ranges, Chained Search, _has Reverse Chaining, _include / _revinclude (:iterate), Multi-field _sort, _summary / _elements (SUBSETTED), _total=none, Bundle.link Pagination, POST /_search",
 			Specification: "HL7 FHIR R4 Search",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/{resourceType}?_include=...",
 		},
 		{
 			Category:      "Patient Compartment Operations",
-			Capability:    "Patient/$everything Longitudinal Record Assembly",
-			Specification: "HL7 FHIR R4 OperationDefinition/Patient-everything",
+			Capability:    "Patient/$everything Longitudinal Record Assembly & RESTful Compartment Search (GET /Patient/{id}/{resourceType})",
+			Specification: "HL7 FHIR R4 OperationDefinition/Patient-everything & CompartmentDefinition",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/Patient/{id}/$everything",
 		},
 		{
+			Category:      "Terminology Services",
+			Capability:    "ValueSet/$expand, ValueSet/$validate-code & CodeSystem/$lookup",
+			Specification: "HL7 FHIR R4 Terminology Services (4.0.1)",
+			Status:        "Verified",
+			Endpoint:      "/fhir/r4/{tenant}/ValueSet/$expand",
+		},
+		{
+			Category:      "FHIR R4 Subscriptions",
+			Capability:    "Subscription Lifecycle (requested -> active) & Automated rest-hook Webhook Delivery",
+			Specification: "HL7 FHIR R4 Subscription (rest-hook)",
+			Status:        "Verified",
+			Endpoint:      "/fhir/r4/{tenant}/Subscription",
+		},
+		{
 			Category:      "Bulk Data Access",
-			Capability:    "System & Patient $export (NDJSON Stream + Async Polling)",
+			Capability:    "System & Patient $export (NDJSON Stream + Postgres-Persisted Async Polling)",
 			Specification: "HL7 FHIR Bulk Data Access IG STU2 / ONC (g)(10)",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/$export",
 		},
 		{
-			Category:      "Conformance & Validation",
-			Capability:    "StructureDefinition & ValueSet Validation ($validate)",
-			Specification: "HL7 FHIR R4 OperationDefinition/Resource-validate",
+			Category:      "Conformance, Validation & Certification",
+			Capability:    "StructureDefinition & ValueSet Validation ($validate, 26 US Core v6.1.0 & v7.0.0 Profiles) & 31-Check Automated Certification ($certify)",
+			Specification: "HL7 FHIR R4 OperationDefinition/Resource-validate & TestReport",
 			Status:        "Verified",
-			Endpoint:      "/fhir/r4/{tenant}/{resourceType}/$validate",
+			Endpoint:      "/fhir/r4/{tenant}/$certify",
 		},
 		{
 			Category:      "Security & Authorization",
-			Capability:    "SMART on FHIR v2 Scopes, OIDC/Zitadel JWT & Patient Compartment Isolation",
+			Capability:    "Built-in OAuth2 Server (PKCE S256, Postgres Refresh/Revocation), Granular SMART v2 Scopes, OIDC/Zitadel JWT & Patient Compartment Isolation",
 			Specification: "SMART App Launch 2.0.0",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/.well-known/smart-configuration",
@@ -387,6 +402,31 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "relationship", "type": "token"},
 			{"name": "identifier", "type": "token"},
 		},
+		"Subscription": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "status", "type": "token"},
+			{"name": "type", "type": "token"},
+			{"name": "criteria", "type": "string"},
+			{"name": "url", "type": "uri"},
+			{"name": "payload", "type": "token"},
+		},
+		"ValueSet": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "url", "type": "uri"},
+			{"name": "name", "type": "string"},
+			{"name": "status", "type": "token"},
+			{"name": "version", "type": "token"},
+		},
+		"CodeSystem": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "url", "type": "uri"},
+			{"name": "name", "type": "string"},
+			{"name": "status", "type": "token"},
+			{"name": "version", "type": "token"},
+		},
 	}
 }
 
@@ -492,7 +532,31 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			"resourceType": map[string]any{"type": "string", "enum": []string{"Bundle"}},
 			"type":         map[string]any{"type": "string", "enum": []string{"transaction", "batch", "searchset", "history"}},
 			"total":        map[string]any{"type": "integer"},
+			"link":         map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 			"entry":        map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+		},
+	}
+
+	schemas["Parameters"] = map[string]any{
+		"type":        "object",
+		"description": "HL7 FHIR R4 Parameters resource for terminology and operation inputs/outputs",
+		"required":    []string{"resourceType"},
+		"properties": map[string]any{
+			"resourceType": map[string]any{"type": "string", "enum": []string{"Parameters"}},
+			"parameter":    map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+		},
+	}
+
+	schemas["TestReport"] = map[string]any{
+		"type":        "object",
+		"description": "HL7 FHIR R4 TestReport generated by the 31-check automated certification suite ($certify)",
+		"required":    []string{"resourceType", "status", "result"},
+		"properties": map[string]any{
+			"resourceType": map[string]any{"type": "string", "enum": []string{"TestReport"}},
+			"status":       map[string]any{"type": "string", "enum": []string{"completed", "in-progress", "waiting", "stopped", "entered-in-error"}},
+			"result":       map[string]any{"type": "string", "enum": []string{"pass", "fail", "pending"}},
+			"score":        map[string]any{"type": "number"},
+			"test":         map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 		},
 	}
 
@@ -510,6 +574,37 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 	}
 
 	paths := map[string]any{
+		"/healthz": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Observability & Operations"},
+				"summary":     "Liveness probe (HTTP 200 OK)",
+				"operationId": "getHealthz",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Server process is alive"},
+				},
+			},
+		},
+		"/readyz": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Observability & Operations"},
+				"summary":     "Readiness probe verifying PostgreSQL operational store connectivity",
+				"operationId": "getReadyz",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Server and PostgreSQL store are ready"},
+					"503": map[string]any{"description": "Database connectivity check failed"},
+				},
+			},
+		},
+		"/metrics": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Observability & Operations"},
+				"summary":     "Prometheus exposition format operational metrics",
+				"operationId": "getPrometheusMetrics",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Prometheus text/plain 0.0.4 metrics"},
+				},
+			},
+		},
 		"/metadata": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Discovery & Docs"},
@@ -527,6 +622,26 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				"operationId": "getSMARTConfiguration",
 				"responses": map[string]any{
 					"200": map[string]any{"description": "SMART 2.0 Discovery Document"},
+				},
+			},
+		},
+		"/.well-known/openid-configuration": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Discovery & Docs"},
+				"summary":     "Get OpenID Connect 1.0 Discovery Configuration",
+				"operationId": "getOIDCConfiguration",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OIDC Discovery Document"},
+				},
+			},
+		},
+		"/.well-known/jwks.json": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Discovery & Docs"},
+				"summary":     "Get JSON Web Key Set (JWKS) for SMART JWT verification",
+				"operationId": "getJWKS",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "RFC 7517 JWKS Document"},
 				},
 			},
 		},
@@ -562,6 +677,21 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/_history": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"System Operations"},
+				"summary":     "System-level version history Bundle across all FHIR resource types",
+				"operationId": "systemHistory",
+				"parameters": []map[string]any{
+					{"name": "_count", "in": "query", "schema": map[string]any{"type": "integer"}},
+					{"name": "_offset", "in": "query", "schema": map[string]any{"type": "integer"}},
+					{"name": "_since", "in": "query", "description": "ISO-8601 lower bound timestamp", "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "History Bundle (type: history)"},
+				},
+			},
+		},
 		"/$validate": map[string]any{
 			"post": map[string]any{
 				"tags":        []string{"System Operations"},
@@ -569,6 +699,175 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				"operationId": "validateSystemResource",
 				"responses": map[string]any{
 					"200": map[string]any{"description": "OperationOutcome validation result"},
+				},
+			},
+		},
+		"/$certify": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"System Operations"},
+				"summary":     "Run 31-check automated FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) certification suite",
+				"operationId": "runCertificationSuiteGet",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "HL7 FHIR R4 TestReport resource"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"System Operations"},
+				"summary":     "Run 31-check automated FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) certification suite",
+				"operationId": "runCertificationSuitePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "HL7 FHIR R4 TestReport resource"},
+				},
+			},
+		},
+		"/ValueSet/$expand": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Expand a FHIR R4 ValueSet by canonical URL and optional text filter",
+				"operationId": "expandValueSetGet",
+				"parameters": []map[string]any{
+					{"name": "url", "in": "query", "required": false, "description": "Canonical ValueSet URL (e.g. http://hl7.org/fhir/ValueSet/administrative-gender)", "schema": map[string]any{"type": "string"}},
+					{"name": "filter", "in": "query", "required": false, "description": "Case-insensitive code or display substring filter", "schema": map[string]any{"type": "string"}},
+					{"name": "count", "in": "query", "required": false, "schema": map[string]any{"type": "integer"}},
+					{"name": "offset", "in": "query", "required": false, "schema": map[string]any{"type": "integer"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Expanded FHIR R4 ValueSet resource"},
+					"404": map[string]any{"description": "ValueSet not found"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Expand a FHIR R4 ValueSet via Parameters or ValueSet POST body",
+				"operationId": "expandValueSetPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Expanded FHIR R4 ValueSet resource"},
+				},
+			},
+		},
+		"/ValueSet/{id}/$expand": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Expand a FHIR R4 ValueSet by logical ID",
+				"operationId": "expandValueSetByIdGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "filter", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "count", "in": "query", "required": false, "schema": map[string]any{"type": "integer"}},
+					{"name": "offset", "in": "query", "required": false, "schema": map[string]any{"type": "integer"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Expanded FHIR R4 ValueSet resource"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Expand a FHIR R4 ValueSet by logical ID (POST)",
+				"operationId": "expandValueSetByIdPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Expanded FHIR R4 ValueSet resource"},
+				},
+			},
+		},
+		"/ValueSet/$validate-code": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Validate that a coded concept is a member of a FHIR R4 ValueSet",
+				"operationId": "validateCodeValueSetGet",
+				"parameters": []map[string]any{
+					{"name": "url", "in": "query", "required": false, "description": "Canonical ValueSet URL", "schema": map[string]any{"type": "string"}},
+					{"name": "code", "in": "query", "required": true, "description": "Code to validate", "schema": map[string]any{"type": "string"}},
+					{"name": "system", "in": "query", "required": false, "description": "CodeSystem URI", "schema": map[string]any{"type": "string"}},
+					{"name": "display", "in": "query", "required": false, "description": "Expected display string", "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (result, message, display)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Validate that a coded concept is a member of a FHIR R4 ValueSet (POST Parameters)",
+				"operationId": "validateCodeValueSetPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (result, message, display)"},
+				},
+			},
+		},
+		"/ValueSet/{id}/$validate-code": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Validate that a coded concept belongs to ValueSet/{id}",
+				"operationId": "validateCodeValueSetByIdGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "code", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "system", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "display", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (result, message, display)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Validate that a coded concept belongs to ValueSet/{id} (POST Parameters)",
+				"operationId": "validateCodeValueSetByIdPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (result, message, display)"},
+				},
+			},
+		},
+		"/CodeSystem/$lookup": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Look up concept display, definition, and designations in a FHIR R4 CodeSystem",
+				"operationId": "lookupCodeSystemGet",
+				"parameters": []map[string]any{
+					{"name": "system", "in": "query", "required": false, "description": "Canonical CodeSystem URL (e.g. http://loinc.org)", "schema": map[string]any{"type": "string"}},
+					{"name": "code", "in": "query", "required": true, "description": "Concept code to look up", "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (name, display, designation)"},
+					"404": map[string]any{"description": "Concept or CodeSystem not found"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Look up concept in a FHIR R4 CodeSystem (POST Parameters)",
+				"operationId": "lookupCodeSystemPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (name, display, designation)"},
+				},
+			},
+		},
+		"/CodeSystem/{id}/$lookup": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Look up concept in CodeSystem/{id}",
+				"operationId": "lookupCodeSystemByIdGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "code", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (name, display, designation)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Look up concept in CodeSystem/{id} (POST Parameters)",
+				"operationId": "lookupCodeSystemByIdPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (name, display, designation)"},
 				},
 			},
 		},
@@ -696,6 +995,16 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/AuditEvent/_search": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"AuditEvent"},
+				"summary":     "Search HIPAA / ONC Security AuditEvent Records (POST _search)",
+				"operationId": "postSearchAuditEvents",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle of FHIR AuditEvent resources"},
+				},
+			},
+		},
 		"/AuditEvent/{id}": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"AuditEvent"},
@@ -715,12 +1024,25 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 	for _, rt := range resOrder {
 		queryParams := []map[string]any{
 			{"name": "_id", "in": "query", "description": "Logical resource ID", "schema": map[string]any{"type": "string"}},
-			{"name": "_count", "in": "query", "description": "Page size (default 20, max 100)", "schema": map[string]any{"type": "integer"}},
+			{"name": "_lastUpdated", "in": "query", "description": "Last updated timestamp with optional FHIR comparator (ge, le, gt, lt)", "schema": map[string]any{"type": "string"}},
+			{"name": "_count", "in": "query", "description": "Page size (default 100)", "schema": map[string]any{"type": "integer"}},
 			{"name": "_offset", "in": "query", "description": "Pagination offset", "schema": map[string]any{"type": "integer"}},
+			{"name": "_sort", "in": "query", "description": "Comma-separated sort fields with optional '-' descending prefix (e.g. -date,_id)", "schema": map[string]any{"type": "string"}},
+			{"name": "_total", "in": "query", "description": "Total count mode (accurate or none)", "schema": map[string]any{"type": "string", "enum": []string{"accurate", "none"}}},
+			{"name": "_summary", "in": "query", "description": "Summary projection mode (true, text, data, count, false)", "schema": map[string]any{"type": "string", "enum": []string{"true", "text", "data", "count", "false"}}},
+			{"name": "_elements", "in": "query", "description": "Comma-separated top-level FHIR elements to project (adds SUBSETTED tag)", "schema": map[string]any{"type": "string"}},
 			{"name": "_include", "in": "query", "description": "Forward reference include (e.g. Observation:patient)", "schema": map[string]any{"type": "string"}},
 			{"name": "_revinclude", "in": "query", "description": "Reverse reference include (e.g. Observation:patient)", "schema": map[string]any{"type": "string"}},
+			{"name": "_include:iterate", "in": "query", "description": "Iterative multi-hop forward reference include", "schema": map[string]any{"type": "string"}},
+			{"name": "_revinclude:iterate", "in": "query", "description": "Iterative multi-hop reverse reference include", "schema": map[string]any{"type": "string"}},
+			{"name": "_has", "in": "query", "description": "Reverse chained search filter (e.g. _has:Observation:patient:code=8867-4)", "schema": map[string]any{"type": "string"}},
 		}
+		seenParam := map[string]bool{"_id": true, "_lastUpdated": true}
 		for _, sp := range spDefs[rt] {
+			if seenParam[sp["name"]] {
+				continue
+			}
+			seenParam[sp["name"]] = true
 			queryParams = append(queryParams, map[string]any{
 				"name":        sp["name"],
 				"in":          "query",
@@ -776,6 +1098,51 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			},
 		}
 
+		paths["/"+rt+"/_search"] = map[string]any{
+			"post": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Search %s resources via POST form body or query parameters", rt),
+				"operationId": "postSearch" + rt,
+				"parameters":  queryParams,
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of " + rt + " resources"},
+				},
+			},
+		}
+
+		paths["/"+rt+"/_history"] = map[string]any{
+			"get": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("List type-level version history for all %s resources", rt),
+				"operationId": "typeHistory" + rt,
+				"parameters": []map[string]any{
+					{"name": "_count", "in": "query", "schema": map[string]any{"type": "integer"}},
+					{"name": "_offset", "in": "query", "schema": map[string]any{"type": "integer"}},
+					{"name": "_since", "in": "query", "description": "ISO-8601 lower bound timestamp", "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "History Bundle (type: history)"},
+				},
+			},
+		}
+
+		if postgres.IsPatientCompartmentResourceType(rt) {
+			compParams := append([]map[string]any{
+				{"name": "id", "in": "path", "required": true, "description": "Patient logical ID", "schema": map[string]any{"type": "string"}},
+			}, queryParams...)
+			paths["/Patient/{id}/"+rt] = map[string]any{
+				"get": map[string]any{
+					"tags":        []string{"Patient", rt},
+					"summary":     fmt.Sprintf("Search %s resources within Patient/{id} compartment", rt),
+					"operationId": "searchPatientCompartment" + rt,
+					"parameters":  compParams,
+					"responses": map[string]any{
+						"200": map[string]any{"description": "Searchset Bundle of " + rt + " resources for Patient/{id}"},
+					},
+				},
+			}
+		}
+
 		paths["/"+rt+"/{id}"] = map[string]any{
 			"get": map[string]any{
 				"tags":        []string{rt},
@@ -783,6 +1150,8 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				"operationId": "read" + rt,
 				"parameters": []map[string]any{
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "_summary", "in": "query", "required": false, "description": "Summary projection mode (true, text, data, false)", "schema": map[string]any{"type": "string"}},
+					{"name": "_elements", "in": "query", "required": false, "description": "Comma-separated top-level elements to project", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": rt + " resource with weak ETag header"},
@@ -841,6 +1210,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 					{"name": "_count", "in": "query", "schema": map[string]any{"type": "integer"}},
 					{"name": "_offset", "in": "query", "schema": map[string]any{"type": "integer"}},
+					{"name": "_since", "in": "query", "description": "ISO-8601 lower bound timestamp", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "History Bundle"},
@@ -881,7 +1251,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		"info": map[string]any{
 			"title":       "Flint FHIR R4 Server & Lakehouse API",
 			"version":     "0.1.0",
-			"description": "Proto-native HL7 FHIR R4 operational store (Zero JSONB in Postgres) with HAPI covering search indexes, SMART on FHIR v2 authorization, HIPAA/ONC AuditEvent logging, Bulk Data ($export), and AutoMQ -> Iceberg -> SQLMesh lakehouse.",
+			"description": "Proto-native HL7 FHIR R4 operational store (Zero JSONB in Postgres) with HAPI covering search indexes, Terminology Services ($expand, $validate-code, $lookup), FHIR Subscriptions (rest-hook), SMART on FHIR v2 authorization, HIPAA/ONC AuditEvent logging, Bulk Data ($export), and AutoMQ -> Iceberg -> SQLMesh lakehouse.",
 			"contact": map[string]any{
 				"name": "Flint FHIR Engineering",
 				"url":  "https://github.com/flint-fhir/flint",
@@ -902,7 +1272,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					"type":         "http",
 					"scheme":       "bearer",
 					"bearerFormat": "JWT",
-					"description":  "SMART on FHIR v1/v2 OAuth2 JWT Bearer Token (e.g. system/*.read, user/*.*, patient/*.read)",
+					"description":  "SMART on FHIR v1/v2 OAuth2 JWT Bearer Token (e.g. system/*.rs, user/*.cruds, patient/Observation.rs?category=vital-signs)",
 				},
 			},
 			"schemas": schemas,
@@ -1040,6 +1410,7 @@ const docsHTMLTemplate = `<!DOCTYPE html>
     .method-GET { background: rgba(56, 189, 248, 0.15); color: var(--blue); }
     .method-POST { background: rgba(34, 197, 94, 0.15); color: var(--green); }
     .method-PUT { background: rgba(168, 85, 247, 0.15); color: var(--purple); }
+    .method-PATCH { background: rgba(234, 179, 8, 0.15); color: #eab308; }
     .method-DELETE { background: rgba(239, 68, 68, 0.15); color: var(--red); }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 0.85rem; }
     pre {
@@ -1060,6 +1431,7 @@ const docsHTMLTemplate = `<!DOCTYPE html>
       <span class="badge">FHIR R4 4.0.1</span>
       <span class="badge">google/fhir Proto3 BYTEA (0 JSONB)</span>
       <span class="badge">ONC (g)(10) Bulk $export</span>
+      <span class="badge">31-Check Certification ($certify)</span>
     </div>
     <div class="controls">
       <input type="text" id="bearerToken" placeholder="Optional SMART Bearer JWT..." />

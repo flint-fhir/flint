@@ -369,7 +369,7 @@ func isPublicEndpoint(parts []string) bool {
 	if len(parts) == 0 {
 		return false
 	}
-	if parts[0] == "oauth2" {
+	if parts[0] == "oauth2" || parts[0] == "healthz" || parts[0] == "readyz" || parts[0] == "metrics" {
 		return true
 	}
 	for _, p := range parts {
@@ -380,10 +380,10 @@ func isPublicEndpoint(parts []string) bool {
 	if len(parts) < 3 {
 		return false
 	}
-	if len(parts) == 3 && (parts[2] == "openapi.json" || parts[2] == "$docs") {
+	if len(parts) == 3 && (parts[2] == "openapi.json" || parts[2] == "$docs" || parts[2] == "healthz" || parts[2] == "readyz" || parts[2] == "metrics") {
 		return true
 	}
-	if len(parts) >= 4 && (parts[3] == "metadata" || parts[3] == "openapi.json" || parts[3] == "$docs") {
+	if len(parts) >= 4 && (parts[3] == "metadata" || parts[3] == "openapi.json" || parts[3] == "$docs" || parts[3] == "healthz" || parts[3] == "readyz" || parts[3] == "metrics") {
 		return true
 	}
 	return false

@@ -139,6 +139,14 @@ func New(db *sql.DB) *Store {
 	return &Store{db: db}
 }
 
+// Ping verifies connectivity to the underlying PostgreSQL database.
+func (s *Store) Ping(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	return s.db.PingContext(ctx)
+}
+
 // WriteResource writes a single resource in a single transaction:
 // 1. Upsert the resource blob (and append to fhir_resource_history)
 // 2. Delete old search indexes for this resource

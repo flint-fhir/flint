@@ -71,6 +71,7 @@ type Server struct {
 	cdcPublisher   automq.Publisher
 	exportMu       sync.RWMutex
 	exportJobs     map[string]*exportJob
+	metrics        *serverMetrics
 }
 
 // New creates a new FHIR server.
@@ -94,6 +95,7 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 		validator:     validation.NewEngine(validation.DefaultOptions()),
 		auditRecorder: auditRec,
 		exportJobs:    make(map[string]*exportJob),
+		metrics:       newServerMetrics(),
 	}
 }
 
@@ -132,8 +134,17 @@ func (s *Server) publishCDC(ctx context.Context, msgs ...automq.Message) {
 	if s.cdcPublisher == nil || len(msgs) == 0 {
 		return
 	}
-	if err := s.cdcPublisher.Publish(ctx, msgs); err != nil && s.logger != nil {
-		s.logger.Warn("failed to publish CDC event to AutoMQ", "error", err, "count", len(msgs))
+	if err := s.cdcPublisher.Publish(ctx, msgs); err != nil {
+		if s.metrics != nil {
+			s.metrics.cdcPublishErrorsTotal.Add(1)
+		}
+		if s.logger != nil {
+			s.logger.Warn("failed to publish CDC event to AutoMQ", "error", err, "count", len(msgs))
+		}
+		return
+	}
+	if s.metrics != nil {
+		s.metrics.cdcPublishedTotal.Add(uint64(len(msgs)))
 	}
 }
 
@@ -173,6 +184,17 @@ func (s *Server) RegisterIndexExtractor(resType string, fn postgres.IndexExtract
 // Handler returns the HTTP handler for the FHIR API.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+
+	// Operational Liveness, Readiness & Prometheus Metrics endpoints
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
+	mux.HandleFunc("GET /readyz", s.handleReadyz)
+	mux.HandleFunc("GET /metrics", s.handleMetrics)
+	mux.HandleFunc("GET /fhir/r4/healthz", s.handleHealthz)
+	mux.HandleFunc("GET /fhir/r4/readyz", s.handleReadyz)
+	mux.HandleFunc("GET /fhir/r4/metrics", s.handleMetrics)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/healthz", s.handleHealthz)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/readyz", s.handleReadyz)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/metrics", s.handleMetrics)
 
 	// Built-in SMART on FHIR v2.0.0 OAuth2 & OIDC Discovery endpoints
 	mux.HandleFunc("GET /oauth2/authorize", s.handleOAuthAuthorize)
@@ -287,7 +309,7 @@ func (s *Server) Handler() http.Handler {
 		mux.ServeHTTP(w, r)
 	})
 
-	return s.auditMiddleware(s.authMiddleware(router))
+	return s.metricsMiddleware(s.auditMiddleware(s.authMiddleware(router)))
 }
 
 // handleRead handles GET /{resourceType}/{id} — read a single resource.
@@ -2065,6 +2087,14 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					},
 				},
 				"resource": resEntries,
+				"interaction": []map[string]string{
+					{"code": "transaction"},
+					{"code": "batch"},
+					{"code": "history-system"},
+				},
+				"compartment": []string{
+					"http://hl7.org/fhir/CompartmentDefinition/patient",
+				},
 				"operation": []map[string]any{
 					{
 						"name":       "validate",
