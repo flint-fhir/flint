@@ -589,6 +589,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		entry.Resource = normalizeSubscriptionOnWrite(resType, entry.Resource)
+
 		normalizedEntry, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, entry.Resource)
 		if err != nil {
 			if isTransaction {
@@ -814,6 +816,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					ProtoData: rec.ResourceProto,
 					Op:        "U",
 				})
+				s.dispatchSubscriptions(r.Context(), tenant, resType, rec.ResID, rec.ResourceProto, rec.ResVersion, rec.LastUpdated, idx)
 			}
 			status := "200 OK"
 			if created {
@@ -851,6 +854,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				ProtoData: rec.ResourceProto,
 				Op:        "U",
 			})
+			s.dispatchSubscriptions(r.Context(), tenant, resType, rec.ResID, rec.ResourceProto, rec.ResVersion, rec.LastUpdated, idx)
 			status := "200 OK"
 			if method == "POST" || rec.Created {
 				status = "201 Created"
@@ -926,6 +930,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					ProtoData: rec.ResourceProto,
 					Op:        "U",
 				})
+				s.dispatchSubscriptions(r.Context(), tenant, rec.ResType, rec.ResID, rec.ResourceProto, rec.ResVersion, rec.LastUpdated, op.Input.SearchIndexes)
 			}
 			status := res.Status
 			if status == "" {

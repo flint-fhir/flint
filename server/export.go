@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,19 @@ type exportJob struct {
 }
 
 func (s *Server) storeExportJob(job *exportJob) {
+	if s.store != nil && job != nil {
+		_ = s.store.SaveExportJob(context.Background(), postgres.ExportJobRecord{
+			ID:         job.ID,
+			TenantID:   job.TenantID,
+			PatientID:  job.PatientID,
+			CreatedAt:  job.CreatedAt,
+			RequestURL: job.RequestURL,
+			TypesOrder: job.TypesOrder,
+			Files:      job.Files,
+			Counts:     job.Counts,
+			Combined:   job.Combined,
+		})
+	}
 	s.exportMu.Lock()
 	defer s.exportMu.Unlock()
 	if s.exportJobs == nil {
@@ -55,26 +69,45 @@ func (s *Server) storeExportJob(job *exportJob) {
 
 func (s *Server) getExportJob(tenant, jobID string) *exportJob {
 	s.exportMu.RLock()
-	defer s.exportMu.RUnlock()
-	if s.exportJobs == nil {
-		return nil
+	if s.exportJobs != nil {
+		if job, ok := s.exportJobs[jobID]; ok && job.TenantID == tenant {
+			s.exportMu.RUnlock()
+			return job
+		}
 	}
-	job, ok := s.exportJobs[jobID]
-	if !ok || job.TenantID != tenant {
-		return nil
+	s.exportMu.RUnlock()
+
+	if s.store != nil {
+		if rec, err := s.store.GetExportJob(context.Background(), tenant, jobID); err == nil && rec != nil {
+			return &exportJob{
+				ID:         rec.ID,
+				TenantID:   rec.TenantID,
+				PatientID:  rec.PatientID,
+				CreatedAt:  rec.CreatedAt,
+				RequestURL: rec.RequestURL,
+				TypesOrder: rec.TypesOrder,
+				Files:      rec.Files,
+				Counts:     rec.Counts,
+				Combined:   rec.Combined,
+			}
+		}
 	}
-	return job
+	return nil
 }
 
 func (s *Server) deleteExportJob(tenant, jobID string) bool {
+	deletedDB := false
+	if s.store != nil {
+		deletedDB, _ = s.store.DeleteExportJob(context.Background(), tenant, jobID)
+	}
 	s.exportMu.Lock()
 	defer s.exportMu.Unlock()
 	if s.exportJobs == nil {
-		return false
+		return deletedDB
 	}
 	job, ok := s.exportJobs[jobID]
 	if !ok || job.TenantID != tenant {
-		return false
+		return deletedDB
 	}
 	delete(s.exportJobs, jobID)
 	return true

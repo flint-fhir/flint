@@ -110,7 +110,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			if !isBulkExportOp {
 				switch r.Method {
 				case http.MethodGet:
-					if resType == "_history" {
+					if isTerminologyOp(parts) {
+						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("insufficient scope for terminology operation on %s", resType))
+							return
+						}
+					} else if resType == "_history" {
 						// System-level history: GET /{tenant}/_history
 						if len(secCtx.GetScopes()) == 0 {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for system _history")
@@ -182,7 +188,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 					}
 
 				case http.MethodPost:
-					if len(parts) >= 5 && parts[4] == "_search" {
+					if isTerminologyOp(parts) {
+						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("insufficient scope for terminology operation on %s", resType))
+							return
+						}
+					} else if len(parts) >= 5 && parts[4] == "_search" {
 						// POST-based search: POST /{tenant}/{resourceType}/_search
 						if !s.enforceSearchScopeAndCompartment(w, r, secCtx, resType) {
 							return
@@ -624,4 +636,16 @@ func extractClientIP(r *http.Request) string {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+func isTerminologyOp(parts []string) bool {
+	if len(parts) == 5 {
+		return (strings.EqualFold(parts[3], "ValueSet") && (parts[4] == "$expand" || parts[4] == "$validate-code")) ||
+			(strings.EqualFold(parts[3], "CodeSystem") && parts[4] == "$lookup")
+	}
+	if len(parts) == 6 {
+		return (strings.EqualFold(parts[3], "ValueSet") && (parts[5] == "$expand" || parts[5] == "$validate-code")) ||
+			(strings.EqualFold(parts[3], "CodeSystem") && parts[5] == "$lookup")
+	}
+	return false
 }

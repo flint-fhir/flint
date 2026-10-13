@@ -1,4 +1,5 @@
-h1:+S8Xmz37O3Qsb5lMAdAbRS9hf8itYHVvp4lyYngb9Ks=
+h1:5YpcGwqjp3xcAzJOiZ/Eh0fGW9DSBDpTGeyXPl8cZ2c=
 001_core_schema.sql h1:vX+mHKR2V7cxvjIqoNwgpWn28UQIviSdTQ0sri3ln9E=
 002_resource_history.sql h1:TQXGBe1BS4In2US9VVbpivfzOdixu4W+zv6fgy+JHIA=
 003_audit_event.sql h1:9KaShYwUNdrynKJRBihy8+XOKbJkWeNvroUe8KyxqiQ=
+004_oauth_and_export_jobs.sql h1:A9hvyBmun9D6xpw9HNy3ezdfxZn8utXvA7XpbH9123Q=

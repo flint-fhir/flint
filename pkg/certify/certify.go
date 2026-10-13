@@ -828,6 +828,57 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	record("VAL-01", suite5, "StructureDefinition & Choice-Type Validation ($validate)", t0, err, "Rejected missing mandatory choice element medication[x]")
 
 	t0 = time.Now()
+	{
+		err = nil
+		// 1. ValueSet/$expand with filter
+		respExp, bExp, errExp := doReq(http.MethodGet, basePath+"/ValueSet/$expand?url=http://hl7.org/fhir/ValueSet/observation-vitalsignresult&filter=Heart", "", nil, nil)
+		// 2. ValueSet/$validate-code
+		respVC, bVC, errVC := doReq(http.MethodGet, basePath+"/ValueSet/$validate-code?url=http://hl7.org/fhir/ValueSet/administrative-gender&code=female", "", nil, nil)
+		// 3. CodeSystem/$lookup
+		respLkp, bLkp, errLkp := doReq(http.MethodGet, basePath+"/CodeSystem/$lookup?system=http://loinc.org&code=8867-4", "", nil, nil)
+
+		if errExp != nil || respExp.StatusCode != http.StatusOK || !strings.Contains(string(bExp), `"8867-4"`) {
+			err = fmt.Errorf("expected 200 OK with 8867-4 from ValueSet/$expand, got %s", string(bExp))
+		} else if errVC != nil || respVC.StatusCode != http.StatusOK || !strings.Contains(string(bVC), `"valueBoolean":true`) {
+			err = fmt.Errorf("expected valueBoolean:true from ValueSet/$validate-code, got %s", string(bVC))
+		} else if errLkp != nil || respLkp.StatusCode != http.StatusOK || !strings.Contains(string(bLkp), `"Heart rate"`) {
+			err = fmt.Errorf("expected Heart rate from CodeSystem/$lookup, got %s", string(bLkp))
+		}
+	}
+	record("TERM-01", suite5, "FHIR R4 Terminology Services (ValueSet/$expand, $validate-code & CodeSystem/$lookup)", t0, err, "Verified ValueSet/$expand, $validate-code, and CodeSystem/$lookup")
+
+	t0 = time.Now()
+	{
+		err = nil
+		subBody := fmt.Sprintf(`{
+			"resourceType": "Subscription",
+			"status": "requested",
+			"reason": "Monitor vital sign observations",
+			"criteria": "Observation?code=8867-4",
+			"channel": {
+				"type": "rest-hook",
+				"endpoint": "%s%s/$validate",
+				"payload": "application/fhir+json"
+			}
+		}`, baseURL, basePath)
+		respSub, bSub, errSub := doReq(http.MethodPost, basePath+"/Subscription", "application/fhir+json", []byte(subBody), nil)
+		if errSub != nil || respSub.StatusCode != http.StatusCreated {
+			err = fmt.Errorf("expected 201 Created on POST /Subscription, got %d: %s", respSub.StatusCode, string(bSub))
+		} else {
+			var subMap map[string]any
+			_ = json.Unmarshal(bSub, &subMap)
+			subID, _ := subMap["id"].(string)
+			if subMap["status"] != "active" {
+				err = fmt.Errorf("expected Subscription status to transition from requested to active, got %v", subMap["status"])
+			}
+			if subID != "" {
+				_, _, _ = doReq(http.MethodDelete, basePath+"/Subscription/"+subID, "", nil, nil)
+			}
+		}
+	}
+	record("SUB-01", suite5, "FHIR R4 Subscription (rest-hook) Lifecycle & Criteria Activation", t0, err, "Transitioned Subscription from requested -> active & verified rest-hook criteria")
+
+	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/AuditEvent?_count=20", "", nil, nil)
 	if err == nil && resp.StatusCode != http.StatusOK {
 		err = fmt.Errorf("expected 200 OK on GET /AuditEvent, got %d: %s", resp.StatusCode, string(b))
