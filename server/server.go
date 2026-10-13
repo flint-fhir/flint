@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -63,6 +64,7 @@ type Server struct {
 	devAuth        *auth.MockTokenValidator
 	oauthMu        sync.Mutex
 	oauthCodes     map[string]authCodeEntry
+	revokedTokens  map[string]bool
 	validator      validation.Validator
 	auditRecorder  audit.Recorder
 	cdcPublisher   automq.Publisher
@@ -86,6 +88,7 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 		extractors:    postgres.DefaultIndexExtractors(),
 		devAuth:       devAuth,
 		oauthCodes:    make(map[string]authCodeEntry),
+		revokedTokens: make(map[string]bool),
 		validator:     validation.NewEngine(validation.DefaultOptions()),
 		auditRecorder: auditRec,
 		exportJobs:    make(map[string]*exportJob),
@@ -174,6 +177,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /oauth2/authorize", s.handleOAuthAuthorize)
 	mux.HandleFunc("POST /oauth2/token", s.handleOAuthToken)
 	mux.HandleFunc("POST /oauth2/introspect", s.handleOAuthIntrospect)
+	mux.HandleFunc("POST /oauth2/revoke", s.handleOAuthRevoke)
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCConfig)
 
@@ -195,9 +199,11 @@ func (s *Server) Handler() http.Handler {
 	// FHIR REST endpoints
 	mux.HandleFunc("GET /fhir/r4/{tenant}/AuditEvent/{id}", s.handleReadAuditEvent)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/AuditEvent", s.handleSearchAuditEvents)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/AuditEvent/_search", s.handleSearchAuditEvents)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/$everything", s.handlePatientEverything)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history/{vid}", s.handleVRead)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history", s.handleInstanceHistory)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/_search", s.handleSearch)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}", s.handleRead)
 	mux.HandleFunc("PUT /fhir/r4/{tenant}/{resourceType}/{id}", s.handleUpdate)
 	mux.HandleFunc("PATCH /fhir/r4/{tenant}/{resourceType}/{id}", s.handlePatch)
@@ -255,6 +261,16 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("read resource", "error", err, "type", resType, "id", resID)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal error")
 		return
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		if constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionRead); constrained {
+			if !s.resourceSatisfiesScopeConstraints(tenant, resType, resID, rec.ResourceProto, constraints) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient granular SMART v2 scope to read %s/%s", resType, resID))
+				return
+			}
+		}
 	}
 
 	// Convert proto bytes to JSON
@@ -1090,17 +1106,73 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 	s.writeSearchSetBundle(w, sr)
 }
 
-// handleSearch handles GET /{resourceType}?{params} — search resources.
+// mergedSearchQuery returns URL query parameters combined with application/x-www-form-urlencoded
+// body parameters when r.Method == POST (FHIR R4 §3.1.1.3 POST _search).
+func mergedSearchQuery(r *http.Request) url.Values {
+	q := make(url.Values)
+	for k, vals := range r.URL.Query() {
+		q[k] = append(q[k], vals...)
+	}
+	if r.Method == http.MethodPost {
+		_ = r.ParseForm()
+		for k, vals := range r.PostForm {
+			q[k] = append(q[k], vals...)
+		}
+	}
+	return q
+}
+
+func (s *Server) resourceSatisfiesScopeConstraints(tenant, resType, resID string, protoBytes []byte, constraints url.Values) bool {
+	if len(constraints) == 0 {
+		return true
+	}
+	extractor, ok := s.extractors[resType]
+	if !ok || len(protoBytes) == 0 {
+		return true
+	}
+	idx, err := extractor(tenant, resID, protoBytes)
+	if err != nil || idx == nil {
+		return false
+	}
+	for paramKey, allowedVals := range constraints {
+		if len(allowedVals) == 0 {
+			continue
+		}
+		allowedCSV := allowedVals[0]
+		matched := false
+		for _, tok := range idx.Tokens {
+			if !strings.EqualFold(tok.SpName, paramKey) {
+				continue
+			}
+			cand := tok.SpValue
+			if tok.SpSystem != "" {
+				cand = tok.SpSystem + "|" + tok.SpValue
+			}
+			if auth.TokenValueMatchesConstraint(cand, allowedCSV) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// handleSearch handles GET /{resourceType}?{params} and POST /{resourceType}/_search — search resources.
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	resType := r.PathValue("resourceType")
 
-	if err := postgres.ValidateSearchQuery(r.URL.Query()); err != nil {
+	q := mergedSearchQuery(r)
+
+	if err := postgres.ValidateSearchQuery(q); err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
 
-	params := postgres.BuildSearchParamsFromQuery(tenant, resType, r.URL.Query())
+	params := postgres.BuildSearchParamsFromQuery(tenant, resType, q)
 
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
 	if hasSecCtx {
@@ -1120,24 +1192,63 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Enforce SMART v2 granular sub-resource scope constraints (e.g. patient/Observation.rs?category=laboratory)
+		if constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionSearch); constrained {
+			if params.Tokens == nil {
+				params.Tokens = make(map[string]string)
+			}
+			if params.TokenFilters == nil {
+				params.TokenFilters = make(map[string][]string)
+			}
+			for paramKey, allowedVals := range constraints {
+				if len(allowedVals) == 0 {
+					continue
+				}
+				allowedCSV := allowedVals[0]
+				if reqVals, exists := q[paramKey]; exists && len(reqVals) > 0 {
+					for _, rawReq := range reqVals {
+						for reqPart := range strings.SplitSeq(rawReq, ",") {
+							if trimmed := strings.TrimSpace(reqPart); trimmed != "" && !auth.TokenValueMatchesConstraint(trimmed, allowedCSV) {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("insufficient granular SMART v2 scope for %s=%s (allowed: %s)", paramKey, trimmed, allowedCSV))
+								return
+							}
+						}
+					}
+				} else {
+					params.Tokens[paramKey] = allowedCSV
+					params.TokenFilters[paramKey] = append(params.TokenFilters[paramKey], allowedCSV)
+				}
+			}
+		}
+
 		// Enforce patient compartment scoping on searches when using a patient-restricted SMART token
 		if auth.IsPatientRestricted(secCtx) {
 			allowedPatientID := cleanID(secCtx.GetPatientId())
 			if strings.EqualFold(resType, "Patient") {
-				if params.ID != "" && cleanID(params.ID) != allowedPatientID {
-					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-						fmt.Sprintf("patient-scoped token (%s) cannot search patient %s",
-							secCtx.GetPatientId(), params.ID))
-					return
+				if params.ID != "" {
+					for part := range strings.SplitSeq(params.ID, ",") {
+						if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("patient-scoped token (%s) cannot search patient %s",
+									secCtx.GetPatientId(), trimmed))
+							return
+						}
+					}
 				}
 				params.ID = allowedPatientID
 			} else if postgres.IsPatientCompartmentResourceType(resType) {
 				if params.References == nil {
 					params.References = make(map[string]string)
 				}
+				if params.ReferenceFilters == nil {
+					params.ReferenceFilters = make(map[string][]string)
+				}
 				params.References["patient"] = "Patient/" + allowedPatientID
+				params.ReferenceFilters["patient"] = []string{"Patient/" + allowedPatientID}
 				if params.References["subject"] != "" {
 					params.References["subject"] = "Patient/" + allowedPatientID
+					params.ReferenceFilters["subject"] = []string{"Patient/" + allowedPatientID}
 				}
 			}
 		}

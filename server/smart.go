@@ -21,6 +21,8 @@ type SMARTConfig struct {
 	TokenEndpoint string `json:"token_endpoint"`
 	// IntrospectionEndpoint is the OAuth2 RFC 7662 token introspection URL
 	IntrospectionEndpoint string `json:"introspection_endpoint,omitempty"`
+	// RevocationEndpoint is the OAuth2 RFC 7009 token revocation URL
+	RevocationEndpoint string `json:"revocation_endpoint,omitempty"`
 	// JWKSURI is the JSON Web Key Set URL
 	JWKSURI string `json:"jwks_uri,omitempty"`
 	// Issuer is the FHIR server base URL
@@ -65,6 +67,7 @@ func (s *Server) resolveSMARTConfig(r *http.Request) SMARTConfig {
 		AuthorizationEndpoint: baseOrigin + "/oauth2/authorize",
 		TokenEndpoint:         baseOrigin + "/oauth2/token",
 		IntrospectionEndpoint: baseOrigin + "/oauth2/introspect",
+		RevocationEndpoint:    baseOrigin + "/oauth2/revoke",
 		JWKSURI:               baseOrigin + "/fhir/r4/" + tenant + "/.well-known/jwks.json",
 	}
 	if s.smartConfig == nil {
@@ -83,6 +86,9 @@ func (s *Server) resolveSMARTConfig(r *http.Request) SMARTConfig {
 	if out.IntrospectionEndpoint == "" {
 		out.IntrospectionEndpoint = defaultCfg.IntrospectionEndpoint
 	}
+	if out.RevocationEndpoint == "" {
+		out.RevocationEndpoint = defaultCfg.RevocationEndpoint
+	}
 	if out.JWKSURI == "" {
 		out.JWKSURI = defaultCfg.JWKSURI
 	}
@@ -100,6 +106,7 @@ func (s *Server) handleSMARTConfig(w http.ResponseWriter, r *http.Request) {
 		"authorization_endpoint": cfg.AuthorizationEndpoint,
 		"token_endpoint":         cfg.TokenEndpoint,
 		"introspection_endpoint": cfg.IntrospectionEndpoint,
+		"revocation_endpoint":    cfg.RevocationEndpoint,
 		"token_endpoint_auth_methods_supported": []string{
 			"client_secret_basic",
 			"client_secret_post",
@@ -108,6 +115,7 @@ func (s *Server) handleSMARTConfig(w http.ResponseWriter, r *http.Request) {
 		"grant_types_supported": []string{
 			"authorization_code",
 			"client_credentials",
+			"refresh_token",
 		},
 		"scopes_supported": []string{
 			// SMART v2 granular scopes
@@ -331,6 +339,7 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		extra := map[string]any{
 			"fhirUser":  sub,
 			"encounter": entry.EncounterID,
+			"jti":       uuid.NewString(),
 		}
 		accessToken, err := s.devAuth.IssueToken(sub, scope, entry.PatientID, time.Hour, extra)
 		if err != nil {
@@ -361,7 +370,9 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		if scope == "" {
 			scope = "system/*.rs"
 		}
-		accessToken, err := s.devAuth.IssueToken("system-bulk-client", scope, "", time.Hour, nil)
+		accessToken, err := s.devAuth.IssueToken("system-bulk-client", scope, "", time.Hour, map[string]any{
+			"jti": uuid.NewString(),
+		})
 		if err != nil {
 			writeOAuthError(w, http.StatusInternalServerError, "server_error", err.Error())
 			return
@@ -385,6 +396,7 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		}
 		accessToken, err := s.devAuth.IssueToken("Patient/pat-alice-001", scope, "pat-alice-001", time.Hour, map[string]any{
 			"fhirUser": "Patient/pat-alice-001",
+			"jti":      uuid.NewString(),
 		})
 		if err != nil {
 			writeOAuthError(w, http.StatusInternalServerError, "server_error", err.Error())
@@ -415,7 +427,7 @@ func (s *Server) handleOAuthIntrospect(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	rawToken := strings.TrimSpace(r.FormValue("token"))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if rawToken == "" {
+	if rawToken == "" || s.isTokenRevoked(rawToken) {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]any{"active": false})
 		return
@@ -451,6 +463,31 @@ func (s *Server) handleOAuthIntrospect(w http.ResponseWriter, r *http.Request) {
 		"encounter":  secCtx.GetEncounterId(),
 		"token_type": "Bearer",
 	})
+}
+
+// handleOAuthRevoke implements POST /oauth2/revoke (RFC 7009 OAuth 2.0 Token Revocation).
+func (s *Server) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	rawToken := strings.TrimSpace(r.FormValue("token"))
+	if rawToken != "" {
+		s.oauthMu.Lock()
+		if s.revokedTokens == nil {
+			s.revokedTokens = make(map[string]bool)
+		}
+		s.revokedTokens[rawToken] = true
+		s.oauthMu.Unlock()
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) isTokenRevoked(rawToken string) bool {
+	if rawToken == "" {
+		return false
+	}
+	s.oauthMu.Lock()
+	defer s.oauthMu.Unlock()
+	return s.revokedTokens[rawToken]
 }
 
 func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {

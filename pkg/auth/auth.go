@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"net/url"
 	"strings"
 
 	authv1 "github.com/flint-fhir/flint/gen/go/flint/auth/v1"
@@ -78,6 +79,82 @@ func ScopeMatches(s *authv1.SmartScope, resType string, action authv1.Action) bo
 		}
 	}
 	return false
+}
+
+// ScopeQueryConstraints inspects all scopes in sc that authorize (resType, action).
+// If at least one matching scope is unconstrained (no "?param=val" suffix), it returns (nil, false).
+// If all matching scopes carry SMART v2 granular sub-resource query constraints
+// (e.g., "patient/Observation.rs?category=http://terminology.hl7.org/CodeSystem/observation-category|laboratory"),
+// it returns the merged allowed parameter values (comma-joined per parameter for multipleOr) and true.
+func ScopeQueryConstraints(sc *authv1.SecurityContext, resType string, action authv1.Action) (url.Values, bool) {
+	if sc == nil {
+		return nil, false
+	}
+	var constrained []url.Values
+	for _, s := range sc.GetScopes() {
+		if !ScopeMatches(s, resType, action) {
+			continue
+		}
+		raw := s.GetRaw()
+		qIdx := strings.IndexByte(raw, '?')
+		if qIdx == -1 || qIdx == len(raw)-1 {
+			// Unconstrained scope grant covers the entire resource type.
+			return nil, false
+		}
+		parsed, err := url.ParseQuery(raw[qIdx+1:])
+		if err != nil || len(parsed) == 0 {
+			return nil, false
+		}
+		constrained = append(constrained, parsed)
+	}
+	if len(constrained) == 0 {
+		return nil, false
+	}
+	merged := make(url.Values)
+	for _, q := range constrained {
+		for k, vals := range q {
+			for _, v := range vals {
+				if trimmed := strings.TrimSpace(v); trimmed != "" {
+					merged.Add(k, trimmed)
+				}
+			}
+		}
+	}
+	if len(merged) == 0 {
+		return nil, false
+	}
+	// Collapse multiple allowed values per parameter into a single comma-separated multipleOr string.
+	out := make(url.Values, len(merged))
+	for k, vals := range merged {
+		out[k] = []string{strings.Join(vals, ",")}
+	}
+	return out, true
+}
+
+// TokenValueMatchesConstraint checks whether a requested or extracted token value
+// (e.g. "laboratory" or "http://terminology.hl7.org/CodeSystem/observation-category|laboratory")
+// is permitted by a comma-separated SMART v2 scope constraint string.
+func TokenValueMatchesConstraint(candidate, allowedCSV string) bool {
+	candSys, candCode := splitSystemCode(candidate)
+	for allowedPart := range strings.SplitSeq(allowedCSV, ",") {
+		allowSys, allowCode := splitSystemCode(strings.TrimSpace(allowedPart))
+		if allowCode == "" {
+			continue
+		}
+		if strings.EqualFold(candCode, allowCode) {
+			if allowSys == "" || candSys == "" || strings.EqualFold(candSys, allowSys) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func splitSystemCode(raw string) (string, string) {
+	if parts := strings.SplitN(strings.TrimSpace(raw), "|", 2); len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return "", strings.TrimSpace(raw)
 }
 
 // IsPatientRestricted returns true if the token is scoped to a specific patient compartment

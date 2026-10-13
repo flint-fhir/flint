@@ -269,6 +269,15 @@ var (
 	}
 )
 
+// splitParamModifier splits a search parameter key into its base parameter name
+// and optional modifier (e.g. "name:exact" -> "name", "exact"; "status:not" -> "status", "not").
+func splitParamModifier(key string) (string, string) {
+	if idx := strings.IndexByte(key, ':'); idx != -1 {
+		return key[:idx], key[idx+1:]
+	}
+	return key, ""
+}
+
 // ValidateSearchQuery validates that all date, quantity, pagination, chained, and include
 // query parameters in q are syntactically well-formed.
 func ValidateSearchQuery(q url.Values) error {
@@ -299,15 +308,27 @@ func ValidateSearchQuery(q url.Values) error {
 		}
 	}
 	for _, luVal := range q["_lastUpdated"] {
-		if _, err := ParseDateOp(luVal); err != nil {
-			return fmt.Errorf("invalid _lastUpdated parameter %q: %w", luVal, err)
+		for part := range strings.SplitSeq(luVal, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				if _, err := ParseDateOp(trimmed); err != nil {
+					return fmt.Errorf("invalid _lastUpdated parameter %q: %w", luVal, err)
+				}
+			}
 		}
 	}
 	for key, values := range q {
 		if strings.HasPrefix(key, "_") || len(values) == 0 {
 			continue
 		}
+		baseKey, mod := splitParamModifier(key)
 		for _, val := range values {
+			if mod == "missing" {
+				lower := strings.ToLower(strings.TrimSpace(val))
+				if lower != "true" && lower != "false" {
+					return fmt.Errorf("invalid :missing modifier value %s=%q: expected true or false", key, val)
+				}
+				continue
+			}
 			if chained, ok := ParseChainedParam(key, val); ok {
 				switch chained.ParamType {
 				case "date":
@@ -321,13 +342,17 @@ func ValidateSearchQuery(q url.Values) error {
 				}
 				continue
 			}
-			if knownDateSearchParams[key] {
-				if _, err := ParseDateOp(val); err != nil {
-					return fmt.Errorf("invalid date parameter %s=%q: %w", key, val, err)
+			if knownDateSearchParams[baseKey] {
+				for part := range strings.SplitSeq(val, ",") {
+					if _, err := ParseDateOp(part); err != nil {
+						return fmt.Errorf("invalid date parameter %s=%q: %w", key, val, err)
+					}
 				}
-			} else if knownQuantitySearchParams[key] {
-				if _, err := ParseQuantityOp(val); err != nil {
-					return fmt.Errorf("invalid quantity parameter %s=%q: %w", key, val, err)
+			} else if knownQuantitySearchParams[baseKey] {
+				for part := range strings.SplitSeq(val, ",") {
+					if _, err := ParseQuantityOp(part); err != nil {
+						return fmt.Errorf("invalid quantity parameter %s=%q: %w", key, val, err)
+					}
 				}
 			}
 		}
@@ -338,26 +363,42 @@ func ValidateSearchQuery(q url.Values) error {
 // BuildSearchParamsFromQuery converts URL query values into a typed SearchParams struct.
 func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchParams {
 	params := SearchParams{
-		TenantID:        tenant,
-		ResType:         resType,
-		Strings:         make(map[string]string),
-		Tokens:          make(map[string]string),
-		Dates:           make(map[string]DateOp),
-		DateFilters:     make(map[string][]DateOp),
-		Quantities:      make(map[string]QuantityOp),
-		QuantityFilters: make(map[string][]QuantityOp),
-		References:      make(map[string]string),
+		TenantID:         tenant,
+		ResType:          resType,
+		Strings:          make(map[string]string),
+		StringFilters:    make(map[string][]string),
+		Tokens:           make(map[string]string),
+		TokenFilters:     make(map[string][]string),
+		Dates:            make(map[string]DateOp),
+		DateFilters:      make(map[string][]DateOp),
+		Quantities:       make(map[string]QuantityOp),
+		QuantityFilters:  make(map[string][]QuantityOp),
+		References:       make(map[string]string),
+		ReferenceFilters: make(map[string][]string),
+		Missing:          make(map[string]bool),
 	}
 
-	if idVal := strings.TrimSpace(q.Get("_id")); idVal != "" {
-		if idx := strings.LastIndex(idVal, "/"); idx != -1 {
-			idVal = idVal[idx+1:]
+	if idVals := q["_id"]; len(idVals) > 0 {
+		var cleanedIDs []string
+		for _, rawID := range idVals {
+			for part := range strings.SplitSeq(rawID, ",") {
+				idVal := strings.TrimSpace(part)
+				if idVal == "" {
+					continue
+				}
+				if idx := strings.LastIndex(idVal, "/"); idx != -1 {
+					idVal = idVal[idx+1:]
+				}
+				cleanedIDs = append(cleanedIDs, idVal)
+			}
 		}
-		params.ID = idVal
+		params.ID = strings.Join(cleanedIDs, ",")
 	}
 	for _, luVal := range q["_lastUpdated"] {
-		if dOp, err := ParseDateOp(luVal); err == nil {
-			params.LastUpdated = append(params.LastUpdated, dOp)
+		for part := range strings.SplitSeq(luVal, ",") {
+			if dOp, err := ParseDateOp(part); err == nil {
+				params.LastUpdated = append(params.LastUpdated, dOp)
+			}
 		}
 	}
 	if v := q.Get("_count"); v != "" {
@@ -397,33 +438,47 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 			continue
 		}
 
+		baseKey, mod := splitParamModifier(key)
+		if mod == "missing" {
+			params.Missing[baseKey] = strings.EqualFold(strings.TrimSpace(value), "true")
+			continue
+		}
+
 		switch {
-		case knownStringSearchParams[key]:
+		case knownStringSearchParams[baseKey]:
 			params.Strings[key] = value
-		case knownTokenSearchParams[key]:
+			params.StringFilters[key] = append(params.StringFilters[key], values...)
+		case knownTokenSearchParams[baseKey]:
 			params.Tokens[key] = value
-		case knownRefSearchParams[key]:
+			params.TokenFilters[key] = append(params.TokenFilters[key], values...)
+		case knownRefSearchParams[baseKey]:
 			params.References[key] = value
-		case knownDateSearchParams[key]:
+			params.ReferenceFilters[key] = append(params.ReferenceFilters[key], values...)
+		case knownDateSearchParams[baseKey]:
 			for _, rawVal := range values {
-				if dOp, err := ParseDateOp(rawVal); err == nil {
-					if _, exists := params.Dates[key]; !exists {
-						params.Dates[key] = dOp
+				for part := range strings.SplitSeq(rawVal, ",") {
+					if dOp, err := ParseDateOp(part); err == nil {
+						if _, exists := params.Dates[baseKey]; !exists {
+							params.Dates[baseKey] = dOp
+						}
+						params.DateFilters[baseKey] = append(params.DateFilters[baseKey], dOp)
 					}
-					params.DateFilters[key] = append(params.DateFilters[key], dOp)
 				}
 			}
-		case knownQuantitySearchParams[key]:
+		case knownQuantitySearchParams[baseKey]:
 			for _, rawVal := range values {
-				if qOp, err := ParseQuantityOp(rawVal); err == nil {
-					if _, exists := params.Quantities[key]; !exists {
-						params.Quantities[key] = qOp
+				for part := range strings.SplitSeq(rawVal, ",") {
+					if qOp, err := ParseQuantityOp(part); err == nil {
+						if _, exists := params.Quantities[baseKey]; !exists {
+							params.Quantities[baseKey] = qOp
+						}
+						params.QuantityFilters[baseKey] = append(params.QuantityFilters[baseKey], qOp)
 					}
-					params.QuantityFilters[key] = append(params.QuantityFilters[key], qOp)
 				}
 			}
 		default:
 			params.Tokens[key] = value
+			params.TokenFilters[key] = append(params.TokenFilters[key], values...)
 		}
 	}
 
@@ -490,11 +545,15 @@ func HasSearchCriteria(p SearchParams) bool {
 	return p.ID != "" ||
 		len(p.LastUpdated) > 0 ||
 		len(p.Strings) > 0 ||
+		len(p.StringFilters) > 0 ||
 		len(p.Tokens) > 0 ||
+		len(p.TokenFilters) > 0 ||
 		len(p.Dates) > 0 ||
 		len(p.DateFilters) > 0 ||
 		len(p.Quantities) > 0 ||
 		len(p.QuantityFilters) > 0 ||
 		len(p.References) > 0 ||
+		len(p.ReferenceFilters) > 0 ||
+		len(p.Missing) > 0 ||
 		len(p.Chained) > 0
 }

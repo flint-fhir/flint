@@ -48,22 +48,26 @@ type PatientEverythingParams struct {
 
 // SearchParams holds parsed FHIR search parameters for a query.
 type SearchParams struct {
-	TenantID        string
-	ResType         string
-	ID              string                  // Optional _id filter
-	LastUpdated     []DateOp                // Optional _lastUpdated filter(s) (e.g. ge + le range)
-	Strings         map[string]string       // sp_name → value (prefix match)
-	Tokens          map[string]string       // sp_name → value (exact or system|value)
-	Dates           map[string]DateOp       // sp_name → first date operation
-	DateFilters     map[string][]DateOp     // sp_name → all date operations (e.g. ge + le range)
-	Quantities      map[string]QuantityOp   // sp_name → first quantity operation
-	QuantityFilters map[string][]QuantityOp // sp_name → all quantity operations (e.g. ge + le range)
-	References      map[string]string       // sp_name → targetType/targetId
-	Chained         []ChainedParam          // chained search parameters (e.g. patient.name=Smith)
-	Includes        []IncludeParam          // _include parameters
-	RevIncludes     []IncludeParam          // _revinclude parameters
-	Count           int                     // _count (default 20, max 1000)
-	Offset          int                     // _offset (default 0)
+	TenantID         string
+	ResType          string
+	ID               string                  // Optional _id filter (supports comma-separated multipleOr)
+	LastUpdated      []DateOp                // Optional _lastUpdated filter(s) (e.g. ge + le range)
+	Strings          map[string]string       // sp_name → value (prefix, :exact, or :contains)
+	StringFilters    map[string][]string     // sp_name → multipleAnd values (each may be comma-separated multipleOr)
+	Tokens           map[string]string       // sp_name → value (exact, system|value, or :not)
+	TokenFilters     map[string][]string     // sp_name → multipleAnd values (each may be comma-separated multipleOr)
+	Dates            map[string]DateOp       // sp_name → first date operation
+	DateFilters      map[string][]DateOp     // sp_name → all date operations (e.g. ge + le range)
+	Quantities       map[string]QuantityOp   // sp_name → first quantity operation
+	QuantityFilters  map[string][]QuantityOp // sp_name → all quantity operations (e.g. ge + le range)
+	References       map[string]string       // sp_name → targetType/targetId
+	ReferenceFilters map[string][]string     // sp_name → multipleAnd values (each may be comma-separated multipleOr)
+	Missing          map[string]bool         // sp_name → :missing=true/false
+	Chained          []ChainedParam          // chained search parameters (e.g. patient.name=Smith)
+	Includes         []IncludeParam          // _include parameters
+	RevIncludes      []IncludeParam          // _revinclude parameters
+	Count            int                     // _count (default 20, max 1000)
+	Offset           int                     // _offset (default 0)
 }
 
 // Search executes a FHIR search query using the covering spidx_* tables.
@@ -86,43 +90,115 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 
 	args := []any{params.TenantID, params.ResType}
 	joins := []string{}
+	whereExtra := ""
 	joinIdx := 0
 
-	// 1. String search parameters (spidx_string)
-	for spName, value := range params.Strings {
-		joinIdx++
-		alias := fmt.Sprintf("s%d", joinIdx)
-		joins = append(joins, fmt.Sprintf(
-			"JOIN spidx_string %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.sp_value LIKE $%d",
-			alias, alias, alias, alias, alias, len(args)+1, alias, len(args)+2,
-		))
-		args = append(args, spName, strings.ToLower(value)+"%")
+	// 1. String search parameters (spidx_string) — supports :exact, :contains, multipleOr (comma), and multipleAnd
+	stringFilters := params.StringFilters
+	if len(stringFilters) == 0 && len(params.Strings) > 0 {
+		stringFilters = make(map[string][]string, len(params.Strings))
+		for k, v := range params.Strings {
+			stringFilters[k] = []string{v}
+		}
+	}
+	for spKey, filterVals := range stringFilters {
+		baseName, modifier := splitParamModifier(spKey)
+		for _, rawVal := range filterVals {
+			var orConds []string
+			joinIdx++
+			alias := fmt.Sprintf("s%d", joinIdx)
+			spIdx := len(args) + 1
+			args = append(args, baseName)
+			for part := range strings.SplitSeq(rawVal, ",") {
+				v := strings.ToLower(strings.TrimSpace(part))
+				if v == "" {
+					continue
+				}
+				switch modifier {
+				case "exact":
+					orConds = append(orConds, fmt.Sprintf("%s.sp_value = $%d", alias, len(args)+1))
+					args = append(args, v)
+				case "contains":
+					orConds = append(orConds, fmt.Sprintf("%s.sp_value LIKE $%d", alias, len(args)+1))
+					args = append(args, "%"+v+"%")
+				default:
+					orConds = append(orConds, fmt.Sprintf("%s.sp_value LIKE $%d", alias, len(args)+1))
+					args = append(args, v+"%")
+				}
+			}
+			if len(orConds) > 0 {
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_string %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s)",
+					alias, alias, alias, alias, alias, spIdx, strings.Join(orConds, " OR "),
+				))
+			}
+		}
 	}
 
-	// 2. Token search parameters (spidx_token)
-	for spName, value := range params.Tokens {
-		joinIdx++
-		alias := fmt.Sprintf("t%d", joinIdx)
-		if parts := strings.SplitN(value, "|", 2); len(parts) == 2 {
-			joins = append(joins, fmt.Sprintf(
-				"JOIN spidx_token %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.sp_system = $%d AND %s.sp_value = $%d",
-				alias, alias, alias, alias, alias, len(args)+1, alias, len(args)+2, alias, len(args)+3,
-			))
-			args = append(args, spName, parts[0], parts[1])
-		} else if isEnumTokenParam(spName) {
-			normVal := strings.ToLower(strings.ReplaceAll(value, "_", "-"))
-			upperVal := strings.ToUpper(strings.ReplaceAll(value, "-", "_"))
-			joins = append(joins, fmt.Sprintf(
-				"JOIN spidx_token %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.sp_value IN ($%d, $%d, $%d)",
-				alias, alias, alias, alias, alias, len(args)+1, alias, len(args)+2, len(args)+3, len(args)+4,
-			))
-			args = append(args, spName, value, normVal, upperVal)
-		} else {
-			joins = append(joins, fmt.Sprintf(
-				"JOIN spidx_token %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.sp_value = $%d",
-				alias, alias, alias, alias, alias, len(args)+1, alias, len(args)+2,
-			))
-			args = append(args, spName, value)
+	// 2. Token search parameters (spidx_token) — supports system|code, :not, multipleOr (comma), and multipleAnd
+	tokenFilters := params.TokenFilters
+	if len(tokenFilters) == 0 && len(params.Tokens) > 0 {
+		tokenFilters = make(map[string][]string, len(params.Tokens))
+		for k, v := range params.Tokens {
+			tokenFilters[k] = []string{v}
+		}
+	}
+	for spKey, filterVals := range tokenFilters {
+		baseName, modifier := splitParamModifier(spKey)
+		for _, rawVal := range filterVals {
+			joinIdx++
+			alias := fmt.Sprintf("t%d", joinIdx)
+			spIdx := len(args) + 1
+			args = append(args, baseName)
+			var orConds []string
+			for part := range strings.SplitSeq(rawVal, ",") {
+				item := strings.TrimSpace(part)
+				if item == "" {
+					continue
+				}
+				if parts := strings.SplitN(item, "|", 2); len(parts) == 2 {
+					sys := parts[0]
+					code := parts[1]
+					if sys == "" {
+						orConds = append(orConds, fmt.Sprintf("(%s.sp_system = '' AND %s.sp_value = $%d)", alias, alias, len(args)+1))
+						args = append(args, code)
+					} else if code == "" {
+						orConds = append(orConds, fmt.Sprintf("(%s.sp_system = $%d)", alias, len(args)+1))
+						args = append(args, sys)
+					} else if isEnumTokenParam(baseName) {
+						normVal := strings.ToLower(strings.ReplaceAll(code, "_", "-"))
+						upperVal := strings.ToUpper(strings.ReplaceAll(code, "-", "_"))
+						orConds = append(orConds, fmt.Sprintf("((%s.sp_system = $%d OR %s.sp_system = '') AND %s.sp_value IN ($%d, $%d, $%d))",
+							alias, len(args)+1, alias, alias, len(args)+2, len(args)+3, len(args)+4))
+						args = append(args, sys, code, normVal, upperVal)
+					} else {
+						orConds = append(orConds, fmt.Sprintf("(%s.sp_system = $%d AND %s.sp_value = $%d)", alias, len(args)+1, alias, len(args)+2))
+						args = append(args, sys, code)
+					}
+				} else if isEnumTokenParam(baseName) {
+					normVal := strings.ToLower(strings.ReplaceAll(item, "_", "-"))
+					upperVal := strings.ToUpper(strings.ReplaceAll(item, "-", "_"))
+					orConds = append(orConds, fmt.Sprintf("(%s.sp_value IN ($%d, $%d, $%d))", alias, len(args)+1, len(args)+2, len(args)+3))
+					args = append(args, item, normVal, upperVal)
+				} else {
+					orConds = append(orConds, fmt.Sprintf("(%s.sp_value = $%d)", alias, len(args)+1))
+					args = append(args, item)
+				}
+			}
+			if len(orConds) == 0 {
+				continue
+			}
+			if modifier == "not" {
+				whereExtra += fmt.Sprintf(
+					" AND NOT EXISTS (SELECT 1 FROM spidx_token %s WHERE %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s))",
+					alias, alias, alias, alias, alias, spIdx, strings.Join(orConds, " OR "),
+				)
+			} else {
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_token %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s)",
+					alias, alias, alias, alias, alias, spIdx, strings.Join(orConds, " OR "),
+				))
+			}
 		}
 	}
 
@@ -182,23 +258,45 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		))
 	}
 
-	// 5. Reference search parameters (spidx_reference)
-	for spName, value := range params.References {
-		joinIdx++
-		alias := fmt.Sprintf("rf%d", joinIdx)
-		parts := strings.SplitN(value, "/", 2)
-		if len(parts) == 2 {
-			joins = append(joins, fmt.Sprintf(
-				"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.target_type = $%d AND %s.target_id = $%d",
-				alias, alias, alias, alias, alias, len(args)+1, alias, len(args)+2, alias, len(args)+3,
-			))
-			args = append(args, spName, parts[0], parts[1])
-		} else {
-			joins = append(joins, fmt.Sprintf(
-				"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.target_id = $%d",
-				alias, alias, alias, alias, alias, len(args)+1, alias, len(args)+2,
-			))
-			args = append(args, spName, value)
+	// 5. Reference search parameters (spidx_reference) — supports TargetType/id, :TargetType modifier, and multipleOr
+	referenceFilters := params.ReferenceFilters
+	if len(referenceFilters) == 0 && len(params.References) > 0 {
+		referenceFilters = make(map[string][]string, len(params.References))
+		for k, v := range params.References {
+			referenceFilters[k] = []string{v}
+		}
+	}
+	for spKey, filterVals := range referenceFilters {
+		baseName, modType := splitParamModifier(spKey)
+		for _, rawVal := range filterVals {
+			joinIdx++
+			alias := fmt.Sprintf("rf%d", joinIdx)
+			spIdx := len(args) + 1
+			args = append(args, baseName)
+			var orConds []string
+			for part := range strings.SplitSeq(rawVal, ",") {
+				item := strings.TrimSpace(part)
+				if item == "" {
+					continue
+				}
+				parts := strings.SplitN(item, "/", 2)
+				if len(parts) == 2 {
+					orConds = append(orConds, fmt.Sprintf("(%s.target_type = $%d AND %s.target_id = $%d)", alias, len(args)+1, alias, len(args)+2))
+					args = append(args, parts[0], parts[1])
+				} else if modType != "" {
+					orConds = append(orConds, fmt.Sprintf("(%s.target_type = $%d AND %s.target_id = $%d)", alias, len(args)+1, alias, len(args)+2))
+					args = append(args, modType, item)
+				} else {
+					orConds = append(orConds, fmt.Sprintf("(%s.target_id = $%d)", alias, len(args)+1))
+					args = append(args, item)
+				}
+			}
+			if len(orConds) > 0 {
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s)",
+					alias, alias, alias, alias, alias, spIdx, strings.Join(orConds, " OR "),
+				))
+			}
 		}
 	}
 
@@ -301,10 +399,47 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 
 	joinClause := strings.Join(joins, "\n")
 
-	whereExtra := ""
 	if params.ID != "" {
-		whereExtra = fmt.Sprintf(" AND r.res_id = $%d", len(args)+1)
-		args = append(args, params.ID)
+		var ids []string
+		for part := range strings.SplitSeq(params.ID, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				continue
+			}
+			if idx := strings.LastIndex(trimmed, "/"); idx != -1 {
+				trimmed = trimmed[idx+1:]
+			}
+			ids = append(ids, trimmed)
+		}
+		if len(ids) == 1 {
+			whereExtra += fmt.Sprintf(" AND r.res_id = $%d", len(args)+1)
+			args = append(args, ids[0])
+		} else if len(ids) > 1 {
+			whereExtra += fmt.Sprintf(" AND r.res_id = ANY($%d)", len(args)+1)
+			args = append(args, pq.Array(ids))
+		}
+	}
+	for spName, isMissing := range params.Missing {
+		tbl := "spidx_token"
+		switch {
+		case knownStringSearchParams[spName]:
+			tbl = "spidx_string"
+		case knownDateSearchParams[spName]:
+			tbl = "spidx_date"
+		case knownQuantitySearchParams[spName]:
+			tbl = "spidx_quantity"
+		case knownRefSearchParams[spName]:
+			tbl = "spidx_reference"
+		}
+		op := "EXISTS"
+		if isMissing {
+			op = "NOT EXISTS"
+		}
+		whereExtra += fmt.Sprintf(
+			" AND %s (SELECT 1 FROM %s m WHERE m.tenant_id = r.tenant_id AND m.res_type = r.res_type AND m.res_id = r.res_id AND m.sp_name = $%d)",
+			op, tbl, len(args)+1,
+		)
+		args = append(args, spName)
 	}
 	for _, luOp := range params.LastUpdated {
 		cond, luArgs := buildTimestampColumnCondition("r.last_updated", luOp, len(args))
