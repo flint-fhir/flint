@@ -79,12 +79,12 @@ const (
 // BundleOperation represents a single entry inside a FHIR Transaction or Batch Bundle.
 type BundleOperation struct {
 	OpType            BundleOperationType
-	Method            string                                                          // "POST", "PUT", "DELETE"
-	Input             ResourceInput                                                   // Resource input for WRITE or target identity for DELETE
-	IfNoneExist       *SearchParams                                                   // Optional conditional create criteria for POST
-	ConditionalParams *SearchParams                                                   // Optional conditional search criteria for PUT or DELETE
+	Method            string                                                         // "POST", "PUT", "DELETE"
+	Input             ResourceInput                                                  // Resource input for WRITE or target identity for DELETE
+	IfNoneExist       *SearchParams                                                  // Optional conditional create criteria for POST
+	ConditionalParams *SearchParams                                                  // Optional conditional search criteria for PUT or DELETE
 	BuildWriteInput   func(matchedID string, isExisting bool) (ResourceInput, error) // Optional callback for conditional PUT inside tx
-	VerifyDeleteMatch func(matchedID string) error                                    // Optional callback for conditional DELETE inside tx
+	VerifyDeleteMatch func(matchedID string) error                                   // Optional callback for conditional DELETE inside tx
 }
 
 // BundleOpResult holds the outcome of a single BundleOperation.

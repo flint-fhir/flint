@@ -476,4 +476,3 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 		t.Errorf("expected 2 Observations matching date=2026-01-15 (09:15Z and 14:30Z), got %v", dateBundle["total"])
 	}
 }
-

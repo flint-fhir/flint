@@ -7,7 +7,8 @@ pre-commit:
   commands:
     gofmt:
       glob: "*.go"
-      run: gofmt -l -w {staged_files}
+      run: gofmt -s -l -w {staged_files}
+      stage_fixed: true
     go-vet:
       glob: "*.go"
       run: go vet ./...
