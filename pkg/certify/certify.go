@@ -428,6 +428,65 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("SEARCH-03", suite2, "FHIR R4 Search Modifiers (:exact, :contains, :not, :missing)", t0, err, "Verified :exact, :contains, :not, and :missing modifiers")
 
+	// 2.22 FHIR R4 _sort, _has Reverse Chaining, _summary/_elements, Bundle.link & Compartment Search
+	t0 = time.Now()
+	{
+		// a) _has reverse chaining: Patient?_has:Observation:patient:code=8867-4
+		respHas, bHas, errHas := doReq(http.MethodGet, basePath+"/Patient?_has:Observation:patient:code=8867-4", "", nil, nil)
+		if errHas != nil || respHas.StatusCode != http.StatusOK {
+			err = fmt.Errorf("expected 200 OK on _has search, got %d: %s", respHas.StatusCode, string(bHas))
+		} else {
+			var hasBundle map[string]any
+			if uErr := json.Unmarshal(bHas, &hasBundle); uErr != nil {
+				err = uErr
+			} else if tot, _ := hasBundle["total"].(float64); tot < 1 {
+				err = fmt.Errorf("expected total >= 1 on Patient?_has:Observation:patient:code=8867-4, got %v", hasBundle["total"])
+			}
+		}
+
+		// b) _summary=count on Observation
+		if err == nil {
+			respCnt, bCnt, errCnt := doReq(http.MethodGet, basePath+"/Observation?patient=Patient/cert-pat-1&_summary=count", "", nil, nil)
+			if errCnt != nil || respCnt.StatusCode != http.StatusOK {
+				err = fmt.Errorf("expected 200 OK on _summary=count, got %d", respCnt.StatusCode)
+			} else {
+				var cntBundle map[string]any
+				_ = json.Unmarshal(bCnt, &cntBundle)
+				if tot, _ := cntBundle["total"].(float64); tot < 1 {
+					err = fmt.Errorf("expected total >= 1 on _summary=count, got %v", cntBundle["total"])
+				} else if _, hasEntry := cntBundle["entry"]; hasEntry {
+					err = fmt.Errorf("expected _summary=count Bundle to omit entry array")
+				}
+			}
+		}
+
+		// c) _sort=-date,_id + _elements=status,code + Bundle.link pagination + Compartment Search GET /Patient/cert-pat-1/Observation
+		if err == nil {
+			respComp, bComp, errComp := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/Observation?_sort=-date,_id&_elements=status,code&_count=1", "", nil, nil)
+			if errComp != nil || respComp.StatusCode != http.StatusOK {
+				err = fmt.Errorf("expected 200 OK on compartment search, got %d: %s", respComp.StatusCode, string(bComp))
+			} else {
+				var compBundle map[string]any
+				_ = json.Unmarshal(bComp, &compBundle)
+				if links, ok := compBundle["link"].([]any); !ok || len(links) == 0 {
+					err = fmt.Errorf("expected Bundle.link on compartment search")
+				}
+				if !strings.Contains(string(bComp), `"SUBSETTED"`) {
+					err = fmt.Errorf("expected SUBSETTED tag on _elements projection")
+				}
+			}
+		}
+
+		// d) Type-level and system-level _history
+		if err == nil {
+			respHist, bHist, errHist := doReq(http.MethodGet, basePath+"/Patient/_history?_count=5", "", nil, nil)
+			if errHist != nil || respHist.StatusCode != http.StatusOK || !strings.Contains(string(bHist), `"history"`) {
+				err = fmt.Errorf("expected 200 OK history Bundle on GET /Patient/_history")
+			}
+		}
+	}
+	record("SEARCH-04", suite2, "FHIR R4 _sort, _has Reverse Chaining, _summary/_elements, Bundle.link & Compartment Search", t0, err, "Verified _sort, _has, _summary=count, _elements SUBSETTED, Bundle.link, /Patient/{id}/{type}, and /_history")
+
 	// =========================================================================
 	// Suite 3: FHIR R4 Versioning, CAS (If-Match), Patch (RFC 6902/7396) & Conditional CRUD
 	// =========================================================================

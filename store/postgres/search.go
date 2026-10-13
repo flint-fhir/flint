@@ -64,8 +64,13 @@ type SearchParams struct {
 	ReferenceFilters map[string][]string     // sp_name → multipleAnd values (each may be comma-separated multipleOr)
 	Missing          map[string]bool         // sp_name → :missing=true/false
 	Chained          []ChainedParam          // chained search parameters (e.g. patient.name=Smith)
+	Has              []HasParam              // reverse-chained search parameters (e.g. _has:Observation:patient:code=8867-4)
 	Includes         []IncludeParam          // _include parameters
 	RevIncludes      []IncludeParam          // _revinclude parameters
+	Sort             []SortSpec              // _sort specifications
+	Summary          string                  // _summary mode (true, text, data, count, false)
+	Elements         []string                // _elements projection fields
+	TotalMode        string                  // _total mode (none, estimate, accurate)
 	Count            int                     // _count (default 20, max 1000)
 	Offset           int                     // _offset (default 0)
 }
@@ -397,6 +402,15 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		}
 	}
 
+	// 6b. Reverse chained search parameters (_has:<SourceType>:<RefParam>:<SearchParam>=<Value>)
+	for _, hp := range params.Has {
+		cond, hasArgs := buildHasExistsCondition(hp, len(args))
+		if cond != "" {
+			whereExtra += " AND " + cond
+			args = append(args, hasArgs...)
+		}
+	}
+
 	joinClause := strings.Join(joins, "\n")
 
 	if params.ID != "" {
@@ -448,20 +462,37 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 	}
 
 	// Count query
-	countSQL := fmt.Sprintf(
-		"SELECT COUNT(DISTINCT r.res_id) FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE%s",
-		joinClause, whereExtra,
-	)
 	var total int
-	if err := exec.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
-		return nil, fmt.Errorf("count query: %w", err)
+	if params.TotalMode != "none" || params.Summary == "count" {
+		countSQL := fmt.Sprintf(
+			"SELECT COUNT(DISTINCT r.res_id) FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE%s",
+			joinClause, whereExtra,
+		)
+		if err := exec.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
+			return nil, fmt.Errorf("count query: %w", err)
+		}
+	}
+	if params.Summary == "count" {
+		return &SearchResults{
+			Total: total,
+		}, nil
 	}
 
-	// Data query with pagination
-	dataSQL := fmt.Sprintf(
-		"SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE%s ORDER BY r.res_id LIMIT $%d OFFSET $%d",
-		joinClause, whereExtra, len(args)+1, len(args)+2,
-	)
+	// Data query with sorting and pagination
+	var dataSQL string
+	if len(params.Sort) == 0 {
+		dataSQL = fmt.Sprintf(
+			"SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE%s ORDER BY r.res_id LIMIT $%d OFFSET $%d",
+			joinClause, whereExtra, len(args)+1, len(args)+2,
+		)
+	} else {
+		orderClause, sortArgs := buildSortOrderClause(params.Sort, len(args))
+		args = append(args, sortArgs...)
+		dataSQL = fmt.Sprintf(
+			"SELECT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE%s GROUP BY r.tenant_id, r.res_type, r.res_id ORDER BY %s LIMIT $%d OFFSET $%d",
+			joinClause, whereExtra, orderClause, len(args)+1, len(args)+2,
+		)
+	}
 	args = append(args, params.Count, params.Offset)
 
 	rows, err := exec.QueryContext(ctx, dataSQL, args...)
@@ -498,6 +529,192 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 	}, nil
 }
 
+func buildSortOrderClause(sorts []SortSpec, startIdx int) (string, []any) {
+	var parts []string
+	var args []any
+	for _, s := range sorts {
+		dir := "ASC"
+		agg := "MIN"
+		if s.Desc {
+			dir = "DESC"
+			agg = "MAX"
+		}
+		switch {
+		case s.Param == "_id":
+			parts = append(parts, "r.res_id "+dir)
+		case s.Param == "_lastUpdated":
+			parts = append(parts, "r.last_updated "+dir)
+		case knownDateSearchParams[s.Param]:
+			col := "sp_low"
+			if s.Desc {
+				col = "sp_high"
+			}
+			idx := startIdx + len(args) + 1
+			args = append(args, s.Param)
+			parts = append(parts, fmt.Sprintf(
+				"(SELECT %s(sd.%s) FROM spidx_date sd WHERE sd.tenant_id = r.tenant_id AND sd.res_type = r.res_type AND sd.res_id = r.res_id AND sd.sp_name = $%d) %s NULLS LAST",
+				agg, col, idx, dir,
+			))
+		case knownQuantitySearchParams[s.Param]:
+			idx := startIdx + len(args) + 1
+			args = append(args, s.Param)
+			parts = append(parts, fmt.Sprintf(
+				"(SELECT %s(sq.sp_value) FROM spidx_quantity sq WHERE sq.tenant_id = r.tenant_id AND sq.res_type = r.res_type AND sq.res_id = r.res_id AND sq.sp_name = $%d) %s NULLS LAST",
+				agg, idx, dir,
+			))
+		case knownStringSearchParams[s.Param]:
+			idx := startIdx + len(args) + 1
+			args = append(args, s.Param)
+			parts = append(parts, fmt.Sprintf(
+				"(SELECT %s(ss.sp_value) FROM spidx_string ss WHERE ss.tenant_id = r.tenant_id AND ss.res_type = r.res_type AND ss.res_id = r.res_id AND ss.sp_name = $%d) %s NULLS LAST",
+				agg, idx, dir,
+			))
+		case knownRefSearchParams[s.Param]:
+			idx := startIdx + len(args) + 1
+			args = append(args, s.Param)
+			parts = append(parts, fmt.Sprintf(
+				"(SELECT %s(sr.target_id) FROM spidx_reference sr WHERE sr.tenant_id = r.tenant_id AND sr.res_type = r.res_type AND sr.res_id = r.res_id AND sr.sp_name = $%d) %s NULLS LAST",
+				agg, idx, dir,
+			))
+		default:
+			idx := startIdx + len(args) + 1
+			args = append(args, s.Param)
+			parts = append(parts, fmt.Sprintf(
+				"(SELECT %s(st.sp_value) FROM spidx_token st WHERE st.tenant_id = r.tenant_id AND st.res_type = r.res_type AND st.res_id = r.res_id AND st.sp_name = $%d) %s NULLS LAST",
+				agg, idx, dir,
+			))
+		}
+	}
+	parts = append(parts, "r.res_id ASC")
+	return strings.Join(parts, ", "), args
+}
+
+func buildHasExistsCondition(hp HasParam, startIdx int) (string, []any) {
+	paramType := hp.ParamType
+	if paramType == "" {
+		switch {
+		case hp.SearchParam == "_id":
+			paramType = "id"
+		case knownStringSearchParams[hp.SearchParam]:
+			paramType = "string"
+		case knownDateSearchParams[hp.SearchParam]:
+			paramType = "date"
+		case knownQuantitySearchParams[hp.SearchParam]:
+			paramType = "quantity"
+		case knownRefSearchParams[hp.SearchParam]:
+			paramType = "reference"
+		default:
+			paramType = "token"
+		}
+	}
+
+	args := []any{hp.SourceType, hp.RefParam}
+	srcIdx := startIdx + 1
+	refIdx := startIdx + 2
+
+	if paramType == "id" {
+		idVal := strings.TrimSpace(hp.Value)
+		if slashIdx := strings.LastIndex(idVal, "/"); slashIdx != -1 {
+			idVal = idVal[slashIdx+1:]
+		}
+		args = append(args, idVal)
+		idIdx := startIdx + len(args)
+		return fmt.Sprintf(
+			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.res_id = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
+			srcIdx, refIdx, idIdx,
+		), args
+	}
+
+	spIdx := startIdx + 3
+	args = append(args, hp.SearchParam)
+
+	switch paramType {
+	case "string":
+		args = append(args, escapeLikePattern(strings.ToLower(strings.TrimSpace(hp.Value)))+"%")
+		valIdx := startIdx + len(args)
+		return fmt.Sprintf(
+			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_string hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND hsp.sp_value LIKE $%d ESCAPE '\' WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
+			spIdx, valIdx, srcIdx, refIdx,
+		), args
+	case "date":
+		dOp, err := ParseDateOp(hp.Value)
+		if err != nil {
+			return "", nil
+		}
+		cond, dArgs := buildDateCondition("hsp", dOp, startIdx+len(args))
+		args = append(args, dArgs...)
+		return fmt.Sprintf(
+			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_date hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND %s WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
+			spIdx, cond, srcIdx, refIdx,
+		), args
+	case "quantity":
+		qOp, err := ParseQuantityOp(hp.Value)
+		if err != nil {
+			return "", nil
+		}
+		cond, qArgs := buildQuantityCondition("hsp", qOp, startIdx+len(args))
+		args = append(args, qArgs...)
+		return fmt.Sprintf(
+			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_quantity hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND %s WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
+			spIdx, cond, srcIdx, refIdx,
+		), args
+	case "reference":
+		refVal := strings.TrimSpace(hp.Value)
+		if parts := strings.SplitN(refVal, "/", 2); len(parts) == 2 {
+			args = append(args, parts[0], parts[1])
+			tTypeIdx := startIdx + len(args) - 1
+			tIDIdx := startIdx + len(args)
+			return fmt.Sprintf(
+				`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_reference hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND hsp.target_type = $%d AND hsp.target_id = $%d WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
+				spIdx, tTypeIdx, tIDIdx, srcIdx, refIdx,
+			), args
+		}
+		args = append(args, refVal)
+		tIDIdx := startIdx + len(args)
+		return fmt.Sprintf(
+			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_reference hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND hsp.target_id = $%d WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
+			spIdx, tIDIdx, srcIdx, refIdx,
+		), args
+	default: // token
+		var orConds []string
+		for part := range strings.SplitSeq(hp.Value, ",") {
+			item := strings.TrimSpace(part)
+			if item == "" {
+				continue
+			}
+			currIdx := startIdx + len(args)
+			if parts := strings.SplitN(item, "|", 2); len(parts) == 2 {
+				sys, code := parts[0], parts[1]
+				if sys == "" {
+					orConds = append(orConds, fmt.Sprintf("(hsp.sp_system = '' AND hsp.sp_value = $%d)", currIdx+1))
+					args = append(args, code)
+				} else if code == "" {
+					orConds = append(orConds, fmt.Sprintf("(hsp.sp_system = $%d)", currIdx+1))
+					args = append(args, sys)
+				} else {
+					orConds = append(orConds, fmt.Sprintf("(hsp.sp_system = $%d AND hsp.sp_value = $%d)", currIdx+1, currIdx+2))
+					args = append(args, sys, code)
+				}
+			} else if isEnumTokenParam(hp.SearchParam) {
+				normVal := strings.ToLower(strings.ReplaceAll(item, "_", "-"))
+				upperVal := strings.ToUpper(strings.ReplaceAll(item, "-", "_"))
+				orConds = append(orConds, fmt.Sprintf("(hsp.sp_value IN ($%d, $%d, $%d))", currIdx+1, currIdx+2, currIdx+3))
+				args = append(args, item, normVal, upperVal)
+			} else {
+				orConds = append(orConds, fmt.Sprintf("(hsp.sp_value = $%d)", currIdx+1))
+				args = append(args, item)
+			}
+		}
+		if len(orConds) == 0 {
+			return "", nil
+		}
+		return fmt.Sprintf(
+			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_token hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND (%s) WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
+			spIdx, strings.Join(orConds, " OR "), srcIdx, refIdx,
+		), args
+	}
+}
+
 // ResolveIncludes fetches referenced resources for _include and referring resources for _revinclude.
 func (s *Store) ResolveIncludes(ctx context.Context, tenantID string, matches []SearchResult, includes []IncludeParam, revIncludes []IncludeParam) ([]SearchResult, error) {
 	return s.resolveIncludesWithExecutor(ctx, s.db, tenantID, matches, includes, revIncludes)
@@ -508,87 +725,123 @@ func (s *Store) resolveIncludesWithExecutor(ctx context.Context, exec queryExece
 		return nil, nil
 	}
 
-	matchedIDs := make([]string, len(matches))
-	matchedSet := make(map[string]bool)
-	matchedTypeSet := make(map[string]bool)
-	var matchedTypes []string
-	for i, m := range matches {
-		matchedIDs[i] = m.ResID
+	matchedSet := make(map[string]bool, len(matches))
+	for _, m := range matches {
 		matchedSet[m.ResType+"/"+m.ResID] = true
-		if m.ResType != "" && !matchedTypeSet[m.ResType] {
-			matchedTypeSet[m.ResType] = true
-			matchedTypes = append(matchedTypes, m.ResType)
-		}
 	}
 
 	var includedResults []SearchResult
+	frontier := matches
 
-	// Handle _include (Source:param)
-	for _, inc := range includes {
-		query := `
-			SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto
-			FROM spidx_reference rf
-			JOIN fhir_resource r ON r.tenant_id = rf.tenant_id AND r.res_type = rf.target_type AND r.res_id = rf.target_id AND r.is_deleted = FALSE
-			WHERE rf.tenant_id = $1 AND rf.res_type = $2 AND rf.res_id = ANY($3) AND rf.sp_name = $4
-		`
-		args := []any{tenantID, inc.SourceType, pq.Array(matchedIDs), inc.ParamName}
-		if inc.TargetType != "" {
-			query += " AND rf.target_type = $5"
-			args = append(args, inc.TargetType)
+	const maxIncludePasses = 4
+	for pass := 0; pass < maxIncludePasses && len(frontier) > 0; pass++ {
+		var nextFrontier []SearchResult
+
+		// Group frontier IDs by resource type
+		idsByType := make(map[string][]string)
+		var allFrontierIDs []string
+		var frontierTypes []string
+		for _, m := range frontier {
+			allFrontierIDs = append(allFrontierIDs, m.ResID)
+			if m.ResType != "" {
+				if _, ok := idsByType[m.ResType]; !ok {
+					frontierTypes = append(frontierTypes, m.ResType)
+				}
+				idsByType[m.ResType] = append(idsByType[m.ResType], m.ResID)
+			}
 		}
 
-		rows, err := exec.QueryContext(ctx, query, args...)
-		if err != nil {
-			return nil, fmt.Errorf("query include %s:%s: %w", inc.SourceType, inc.ParamName, err)
-		}
-		for rows.Next() {
-			var r SearchResult
-			if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
-				rows.Close()
-				return nil, err
+		// Handle _include (Source:param[:Target])
+		for _, inc := range includes {
+			if pass > 0 && !inc.Iterate {
+				continue
 			}
-			key := r.ResType + "/" + r.ResID
-			if !matchedSet[key] {
-				matchedSet[key] = true
-				includedResults = append(includedResults, r)
+			sourceIDs := idsByType[inc.SourceType]
+			if inc.SourceType == "*" {
+				sourceIDs = allFrontierIDs
 			}
-		}
-		rows.Close()
-	}
+			if len(sourceIDs) == 0 {
+				continue
+			}
+			query := `
+				SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto
+				FROM spidx_reference rf
+				JOIN fhir_resource r ON r.tenant_id = rf.tenant_id AND r.res_type = rf.target_type AND r.res_id = rf.target_id AND r.is_deleted = FALSE
+				WHERE rf.tenant_id = $1 AND rf.res_type = $2 AND rf.res_id = ANY($3) AND rf.sp_name = $4
+			`
+			args := []any{tenantID, inc.SourceType, pq.Array(sourceIDs), inc.ParamName}
+			if inc.TargetType != "" {
+				query += " AND rf.target_type = $5"
+				args = append(args, inc.TargetType)
+			}
 
-	// Handle _revinclude (Source:param[:Target])
-	for _, rev := range revIncludes {
-		query := `
-			SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto
-			FROM spidx_reference rf
-			JOIN fhir_resource r ON r.tenant_id = rf.tenant_id AND r.res_type = rf.res_type AND r.res_id = rf.res_id AND r.is_deleted = FALSE
-			WHERE rf.tenant_id = $1 AND rf.target_id = ANY($2) AND rf.res_type = $3 AND rf.sp_name = $4
-		`
-		args := []any{tenantID, pq.Array(matchedIDs), rev.SourceType, rev.ParamName}
-		if rev.TargetType != "" {
-			query += fmt.Sprintf(" AND (rf.target_type = $%d OR rf.target_type = '')", len(args)+1)
-			args = append(args, rev.TargetType)
-		} else if len(matchedTypes) > 0 {
-			query += fmt.Sprintf(" AND (rf.target_type = ANY($%d) OR rf.target_type = '')", len(args)+1)
-			args = append(args, pq.Array(matchedTypes))
-		}
-		rows, err := exec.QueryContext(ctx, query, args...)
-		if err != nil {
-			return nil, fmt.Errorf("query revinclude %s:%s: %w", rev.SourceType, rev.ParamName, err)
-		}
-		for rows.Next() {
-			var r SearchResult
-			if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
-				rows.Close()
-				return nil, err
+			rows, err := exec.QueryContext(ctx, query, args...)
+			if err != nil {
+				return nil, fmt.Errorf("query include %s:%s: %w", inc.SourceType, inc.ParamName, err)
 			}
-			key := r.ResType + "/" + r.ResID
-			if !matchedSet[key] {
-				matchedSet[key] = true
-				includedResults = append(includedResults, r)
+			for rows.Next() {
+				var r SearchResult
+				if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
+					rows.Close()
+					return nil, err
+				}
+				key := r.ResType + "/" + r.ResID
+				if !matchedSet[key] {
+					matchedSet[key] = true
+					includedResults = append(includedResults, r)
+					nextFrontier = append(nextFrontier, r)
+				}
 			}
+			rows.Close()
 		}
-		rows.Close()
+
+		// Handle _revinclude (Source:param[:Target])
+		for _, rev := range revIncludes {
+			if pass > 0 && !rev.Iterate {
+				continue
+			}
+			targetIDs := allFrontierIDs
+			if rev.TargetType != "" {
+				targetIDs = idsByType[rev.TargetType]
+			}
+			if len(targetIDs) == 0 {
+				continue
+			}
+			query := `
+				SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto
+				FROM spidx_reference rf
+				JOIN fhir_resource r ON r.tenant_id = rf.tenant_id AND r.res_type = rf.res_type AND r.res_id = rf.res_id AND r.is_deleted = FALSE
+				WHERE rf.tenant_id = $1 AND rf.target_id = ANY($2) AND rf.res_type = $3 AND rf.sp_name = $4
+			`
+			args := []any{tenantID, pq.Array(targetIDs), rev.SourceType, rev.ParamName}
+			if rev.TargetType != "" {
+				query += fmt.Sprintf(" AND (rf.target_type = $%d OR rf.target_type = '')", len(args)+1)
+				args = append(args, rev.TargetType)
+			} else if len(frontierTypes) > 0 {
+				query += fmt.Sprintf(" AND (rf.target_type = ANY($%d) OR rf.target_type = '')", len(args)+1)
+				args = append(args, pq.Array(frontierTypes))
+			}
+			rows, err := exec.QueryContext(ctx, query, args...)
+			if err != nil {
+				return nil, fmt.Errorf("query revinclude %s:%s: %w", rev.SourceType, rev.ParamName, err)
+			}
+			for rows.Next() {
+				var r SearchResult
+				if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
+					rows.Close()
+					return nil, err
+				}
+				key := r.ResType + "/" + r.ResID
+				if !matchedSet[key] {
+					matchedSet[key] = true
+					includedResults = append(includedResults, r)
+					nextFrontier = append(nextFrontier, r)
+				}
+			}
+			rows.Close()
+		}
+
+		frontier = nextFrontier
 	}
 
 	return includedResults, nil

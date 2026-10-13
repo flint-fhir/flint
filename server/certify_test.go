@@ -475,4 +475,59 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 	if tot, _ := dateBundle["total"].(float64); tot != 2 {
 		t.Errorf("expected 2 Observations matching date=2026-01-15 (09:15Z and 14:30Z), got %v", dateBundle["total"])
 	}
+
+	// 5. Track 1: _sort, _has, _summary (true/data/text/count), _elements, _total=none, Bundle.link (self/next/previous),
+	// Compartment Search GET /Patient/{id}/Observation, and Type/System _history
+	// 5a. _has with insufficient scope -> 403 Forbidden (downscoped refreshed token only has patient/Patient.rs, missing Observation scope)
+	patOnlyToken, _ := refreshedMap["access_token"].(string)
+	reqHasForbidden, _ := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/"+tenant+"/Patient?_has:Observation:patient:code=8867-4", nil)
+	reqHasForbidden.Header.Set("Authorization", "Bearer "+patOnlyToken)
+	respHasForbidden, err := http.DefaultClient.Do(reqHasForbidden)
+	if err != nil {
+		t.Fatalf("GET _has with patOnlyToken: %v", err)
+	}
+	respHasForbidden.Body.Close()
+	if respHasForbidden.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on _has:Observation without Observation scope, got %d", respHasForbidden.StatusCode)
+	}
+
+	// 5b. Compartment search GET /Patient/hard-pat-2/Observation with token restricted to hard-pat-1 -> 403 Forbidden
+	if r, _ := doAuthed(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/hard-pat-2/Observation", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on cross-patient compartment search /Patient/hard-pat-2/Observation, got %d", r.StatusCode)
+	}
+
+	// 5c. Compartment search GET /Patient/hard-pat-1/Observation with pagination (_count=1&_offset=1) -> Bundle.link has self and previous
+	respPage2, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/Patient/hard-pat-1/Observation?_sort=-date&_count=1&_offset=1&_summary=true")
+	if err != nil || respPage2.StatusCode != http.StatusOK {
+		t.Fatalf("GET /Patient/hard-pat-1/Observation page 2 failed: %v", err)
+	}
+	bPage2, _ := io.ReadAll(respPage2.Body)
+	respPage2.Body.Close()
+	if !strings.Contains(string(bPage2), `"previous"`) || !strings.Contains(string(bPage2), `"SUBSETTED"`) {
+		t.Errorf("expected previous link and SUBSETTED tag on page 2 summary response, got %s", string(bPage2))
+	}
+
+	// 5d. Read with _summary=data, _summary=text, and _elements=gender,name
+	for _, qSuffix := range []string{"?_summary=data", "?_summary=text", "?_elements=gender,name"} {
+		respR, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/Patient/hard-pat-1" + qSuffix)
+		if err != nil || respR.StatusCode != http.StatusOK {
+			t.Fatalf("GET /Patient/hard-pat-1%s failed: %v", qSuffix, err)
+		}
+		bR, _ := io.ReadAll(respR.Body)
+		respR.Body.Close()
+		if !strings.Contains(string(bR), `"SUBSETTED"`) {
+			t.Errorf("expected SUBSETTED tag on GET /Patient/hard-pat-1%s, got %s", qSuffix, string(bR))
+		}
+	}
+
+	// 5e. System-level _history GET /fhir/r4/{tenant}/_history?_since=2020-01-01
+	respSysHist, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/_history?_since=2020-01-01&_count=5")
+	if err != nil || respSysHist.StatusCode != http.StatusOK {
+		t.Fatalf("GET /_history failed: %v", err)
+	}
+	bSysHist, _ := io.ReadAll(respSysHist.Body)
+	respSysHist.Body.Close()
+	if !strings.Contains(string(bSysHist), `"history"`) {
+		t.Errorf("expected history Bundle from GET /_history, got %s", string(bSysHist))
+	}
 }

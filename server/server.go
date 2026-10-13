@@ -205,6 +205,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/$everything", s.handlePatientEverything)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history/{vid}", s.handleVRead)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history", s.handleInstanceHistory)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/_history", s.handleInstanceHistory)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/_search", s.handleSearch)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}", s.handleRead)
 	mux.HandleFunc("PUT /fhir/r4/{tenant}/{resourceType}/{id}", s.handleUpdate)
@@ -225,12 +226,27 @@ func (s *Server) Handler() http.Handler {
 	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet {
 			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" && parts[3] == "$export-file" {
+			if len(parts) == 5 && parts[0] == "fhir" && parts[1] == "r4" && parts[4] == "_history" && !strings.HasPrefix(parts[3], "$") {
 				r.SetPathValue("tenant", parts[2])
-				r.SetPathValue("jobId", parts[4])
-				r.SetPathValue("fileName", parts[5])
-				s.handleExportFile(w, r)
+				r.SetPathValue("resourceType", parts[3])
+				s.handleInstanceHistory(w, r)
 				return
+			}
+			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if parts[3] == "$export-file" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("jobId", parts[4])
+					r.SetPathValue("fileName", parts[5])
+					s.handleExportFile(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] != "$everything" && parts[5] != "$export" && parts[5] != "_history" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("patientId", parts[4])
+					r.SetPathValue("resourceType", parts[5])
+					s.handleCompartmentSearch(w, r)
+					return
+				}
 			}
 		}
 		mux.ServeHTTP(w, r)
@@ -281,6 +297,25 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("proto to json", "error", err, "type", resType, "id", resID)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
 		return
+	}
+
+	summary := strings.TrimSpace(r.URL.Query().Get("_summary"))
+	var elements []string
+	for _, rawEl := range r.URL.Query()["_elements"] {
+		for el := range strings.SplitSeq(rawEl, ",") {
+			if trimmed := strings.TrimSpace(el); trimmed != "" {
+				elements = append(elements, trimmed)
+			}
+		}
+	}
+	if (summary != "" && summary != "false") || len(elements) > 0 {
+		var resourceMap map[string]any
+		if err := json.Unmarshal(jsonBytes, &resourceMap); err == nil {
+			projected := applySummaryOrElements(resourceMap, summary, elements)
+			if b, err := json.Marshal(projected); err == nil {
+				jsonBytes = b
+			}
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
@@ -348,7 +383,8 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 	w.Write(jsonBytes)
 }
 
-// handleInstanceHistory handles GET /{resourceType}/{id}/_history — list resource versions as a history Bundle.
+// handleInstanceHistory handles GET /{resourceType}/{id}/_history, GET /{resourceType}/_history,
+// and GET /_history — list resource versions as a history Bundle.
 func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	resType := r.PathValue("resourceType")
@@ -356,6 +392,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 
 	count := 100
 	offset := 0
+	var since *time.Time
 	if v := strings.TrimSpace(r.URL.Query().Get("_count")); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
@@ -374,8 +411,18 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		offset = n
 	}
+	if sinceRaw := strings.TrimSpace(r.URL.Query().Get("_since")); sinceRaw != "" {
+		dOp, err := postgres.ParseDateOp(sinceRaw)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _since parameter %q: %v", sinceRaw, err))
+			return
+		}
+		t := dOp.Value
+		since = &t
+	}
 
-	records, total, err := s.store.ListResourceHistory(r.Context(), tenant, resType, resID, count, offset)
+	records, total, err := s.store.ListHistory(r.Context(), tenant, resType, resID, since, count, offset)
 	if err != nil {
 		s.logger.Error("list resource history", "error", err, "type", resType, "id", resID)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to query resource history")
@@ -383,19 +430,69 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
-		if constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionRead); constrained {
-			for _, rec := range records {
-				if !rec.IsDeleted && len(rec.ResourceProto) > 0 && !s.resourceSatisfiesScopeConstraints(tenant, resType, resID, rec.ResourceProto, constraints) {
-					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-						fmt.Sprintf("insufficient granular SMART v2 scope to read history of %s/%s", resType, resID))
-					return
+		if resID != "" {
+			if constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionRead); constrained {
+				for _, rec := range records {
+					if !rec.IsDeleted && len(rec.ResourceProto) > 0 && !s.resourceSatisfiesScopeConstraints(tenant, resType, resID, rec.ResourceProto, constraints) {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							fmt.Sprintf("insufficient granular SMART v2 scope to read history of %s/%s", resType, resID))
+						return
+					}
 				}
+			}
+		} else {
+			patientRestricted := auth.IsPatientRestricted(secCtx)
+			allowedPatientID := cleanID(secCtx.GetPatientId())
+			filtered := make([]postgres.ResourceRecord, 0, len(records))
+			for _, rec := range records {
+				rt := rec.ResType
+				if rt == "" {
+					rt = resType
+				}
+				if !s.resourceAllowedByGranularScope(secCtx, tenant, rt, rec.ResID, rec.ResourceProto) {
+					continue
+				}
+				if patientRestricted {
+					if strings.EqualFold(rt, "Patient") {
+						if cleanID(rec.ResID) != allowedPatientID {
+							continue
+						}
+					} else if postgres.IsPatientCompartmentResourceType(rt) {
+						if extractor, ok := s.extractors[rt]; ok && len(rec.ResourceProto) > 0 {
+							idx, err := extractor(tenant, rec.ResID, rec.ResourceProto)
+							if err != nil || !postgres.IndexesBelongToPatientCompartment(rt, rec.ResID, idx, allowedPatientID) {
+								continue
+							}
+						} else if s.store != nil {
+							belongs, err := s.store.BelongsToPatientCompartment(r.Context(), tenant, rt, rec.ResID, allowedPatientID)
+							if err != nil || !belongs {
+								continue
+							}
+						}
+					} else {
+						continue
+					}
+				}
+				filtered = append(filtered, rec)
+			}
+			removed := len(records) - len(filtered)
+			records = filtered
+			if removed > 0 {
+				total = max(len(records), total-removed)
 			}
 		}
 	}
 
 	entries := make([]any, 0, len(records))
 	for _, rec := range records {
+		rt := rec.ResType
+		if rt == "" {
+			rt = resType
+		}
+		rid := rec.ResID
+		if rid == "" {
+			rid = resID
+		}
 		method := "PUT"
 		status := "200 OK"
 		if rec.IsDeleted {
@@ -407,10 +504,10 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		}
 
 		entry := map[string]any{
-			"fullUrl": fmt.Sprintf("%s/%s", resType, resID),
+			"fullUrl": fmt.Sprintf("%s/%s", rt, rid),
 			"request": map[string]any{
 				"method": method,
-				"url":    fmt.Sprintf("%s/%s", resType, resID),
+				"url":    fmt.Sprintf("%s/%s", rt, rid),
 			},
 			"response": map[string]any{
 				"status":       status,
@@ -420,7 +517,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if !rec.IsDeleted && len(rec.ResourceProto) > 0 {
-			if jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+			if jsonBytes, err := s.protoToJSONWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
 				var resource any
 				if err := json.Unmarshal(jsonBytes, &resource); err == nil {
 					entry["resource"] = resource
@@ -1184,6 +1281,35 @@ func (s *Server) resourceSatisfiesScopeConstraints(tenant, resType, resID string
 	return true
 }
 
+// handleCompartmentSearch handles GET /{tenant}/Patient/{patientId}/{resourceType} — compartment search.
+func (s *Server) handleCompartmentSearch(w http.ResponseWriter, r *http.Request) {
+	patientID := cleanID(r.PathValue("patientId"))
+	resType := r.PathValue("resourceType")
+
+	if resType == "AuditEvent" {
+		q := r.URL.Query()
+		q.Set("patient", patientID)
+		r.URL.RawQuery = q.Encode()
+		s.handleSearchAuditEvents(w, r)
+		return
+	}
+
+	if _, ok := s.protoRegistry[resType]; !ok {
+		writeOperationOutcome(w, http.StatusBadRequest, "not-supported",
+			fmt.Sprintf("resource type %s not registered", resType))
+		return
+	}
+
+	q := r.URL.Query()
+	if strings.EqualFold(resType, "Patient") {
+		q.Set("_id", patientID)
+	} else {
+		q.Set("patient", "Patient/"+patientID)
+	}
+	r.URL.RawQuery = q.Encode()
+	s.handleSearch(w, r)
+}
+
 // handleSearch handles GET /{resourceType}?{params} and POST /{resourceType}/_search — search resources.
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
@@ -1200,7 +1326,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
 	if hasSecCtx {
-		// Enforce SMART scopes on explicit _include target types and _revinclude source types
+		// Enforce SMART scopes on explicit _include target types, _revinclude source types, and _has source types
 		for _, inc := range params.Includes {
 			if inc.TargetType != "" && !auth.Allows(secCtx, inc.TargetType, auth.ActionRead) && !auth.Allows(secCtx, inc.TargetType, auth.ActionSearch) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
@@ -1212,6 +1338,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			if rev.SourceType != "" && !auth.Allows(secCtx, rev.SourceType, auth.ActionRead) && !auth.Allows(secCtx, rev.SourceType, auth.ActionSearch) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 					fmt.Sprintf("insufficient scope for _revinclude source %s", rev.SourceType))
+				return
+			}
+		}
+		for _, hp := range params.Has {
+			if hp.SourceType != "" && !auth.Allows(secCtx, hp.SourceType, auth.ActionRead) && !auth.Allows(secCtx, hp.SourceType, auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope for _has source %s", hp.SourceType))
 				return
 			}
 		}
@@ -1289,7 +1422,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		sr.Includes = s.filterAuthorizedIncludes(r, tenant, secCtx, sr.Includes)
 	}
 
-	s.writeSearchSetBundle(w, sr)
+	s.writeSearchSetBundleWithOpts(w, r, sr, params)
 }
 
 func (s *Server) resourceAllowedByGranularScope(secCtx *auth.SecurityContext, tenant, resType, resID string, protoBytes []byte) bool {
@@ -1348,58 +1481,274 @@ func (s *Server) filterAuthorizedIncludes(r *http.Request, tenant string, secCtx
 }
 
 func (s *Server) writeSearchSetBundle(w http.ResponseWriter, sr *postgres.SearchResults) {
-	entries := make([]any, 0, len(sr.Matches)+len(sr.Includes))
+	s.writeSearchSetBundleWithOpts(w, nil, sr, postgres.SearchParams{})
+}
 
-	// 1. Primary search matches
-	for _, res := range sr.Matches {
-		jsonBytes, err := s.protoToJSONWithMeta(res.ResType, res.ResourceProto, res.ResVersion, res.LastUpdated)
-		if err != nil {
-			s.logger.Error("proto to json in search", "error", err, "type", res.ResType, "id", res.ResID)
-			continue
-		}
-
-		var resource any
-		json.Unmarshal(jsonBytes, &resource)
-
-		entries = append(entries, map[string]any{
-			"fullUrl":  fmt.Sprintf("%s/%s", res.ResType, res.ResID),
-			"resource": resource,
-			"search": map[string]any{
-				"mode": "match",
-			},
-		})
-	}
-
-	// 2. Included resources (_include, _revinclude, and $everything compartment resources)
-	for _, inc := range sr.Includes {
-		jsonBytes, err := s.protoToJSONWithMeta(inc.ResType, inc.ResourceProto, inc.ResVersion, inc.LastUpdated)
-		if err != nil {
-			s.logger.Error("proto to json for included resource", "error", err, "type", inc.ResType, "id", inc.ResID)
-			continue
-		}
-
-		var resource any
-		json.Unmarshal(jsonBytes, &resource)
-
-		entries = append(entries, map[string]any{
-			"fullUrl":  fmt.Sprintf("%s/%s", inc.ResType, inc.ResID),
-			"resource": resource,
-			"search": map[string]any{
-				"mode": "include",
-			},
-		})
-	}
-
+func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Request, sr *postgres.SearchResults, params postgres.SearchParams) {
 	bundle := map[string]any{
 		"resourceType": "Bundle",
 		"type":         "searchset",
-		"total":        sr.Total,
-		"entry":        entries,
+	}
+
+	if params.TotalMode != "none" || params.Summary == "count" {
+		bundle["total"] = sr.Total
+	}
+
+	if r != nil {
+		bundle["link"] = s.buildSearchBundleLinks(r, sr, params)
+	}
+
+	if params.Summary != "count" {
+		entries := make([]any, 0, len(sr.Matches)+len(sr.Includes))
+		needsProjection := (params.Summary != "" && params.Summary != "false") || len(params.Elements) > 0
+
+		// 1. Primary search matches
+		for _, res := range sr.Matches {
+			jsonBytes, err := s.protoToJSONWithMeta(res.ResType, res.ResourceProto, res.ResVersion, res.LastUpdated)
+			if err != nil {
+				s.logger.Error("proto to json in search", "error", err, "type", res.ResType, "id", res.ResID)
+				continue
+			}
+
+			var resource map[string]any
+			if err := json.Unmarshal(jsonBytes, &resource); err != nil {
+				continue
+			}
+			if needsProjection {
+				resource = applySummaryOrElements(resource, params.Summary, params.Elements)
+			}
+
+			entries = append(entries, map[string]any{
+				"fullUrl":  fmt.Sprintf("%s/%s", res.ResType, res.ResID),
+				"resource": resource,
+				"search": map[string]any{
+					"mode": "match",
+				},
+			})
+		}
+
+		// 2. Included resources (_include, _revinclude, and $everything compartment resources)
+		for _, inc := range sr.Includes {
+			jsonBytes, err := s.protoToJSONWithMeta(inc.ResType, inc.ResourceProto, inc.ResVersion, inc.LastUpdated)
+			if err != nil {
+				s.logger.Error("proto to json for included resource", "error", err, "type", inc.ResType, "id", inc.ResID)
+				continue
+			}
+
+			var resource map[string]any
+			if err := json.Unmarshal(jsonBytes, &resource); err != nil {
+				continue
+			}
+
+			entries = append(entries, map[string]any{
+				"fullUrl":  fmt.Sprintf("%s/%s", inc.ResType, inc.ResID),
+				"resource": resource,
+				"search": map[string]any{
+					"mode": "include",
+				},
+			})
+		}
+
+		bundle["entry"] = entries
 	}
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(bundle)
+}
+
+func (s *Server) buildSearchBundleLinks(r *http.Request, sr *postgres.SearchResults, params postgres.SearchParams) []map[string]string {
+	basePath := strings.TrimSuffix(r.URL.Path, "/_search")
+	baseURL := requestBaseURL(r) + basePath
+	q := mergedSearchQuery(r)
+
+	makeURL := func(vals url.Values) string {
+		enc := vals.Encode()
+		if enc == "" {
+			return baseURL
+		}
+		return baseURL + "?" + enc
+	}
+
+	links := []map[string]string{
+		{
+			"relation": "self",
+			"url":      makeURL(q),
+		},
+	}
+
+	if params.Summary == "count" {
+		return links
+	}
+
+	count := params.Count
+	if count <= 0 {
+		count = 20
+	}
+	offset := max(params.Offset, 0)
+
+	if len(sr.Matches) > 0 && (params.TotalMode == "none" && len(sr.Matches) == count || offset+len(sr.Matches) < sr.Total) {
+		nextQ := cloneURLValues(q)
+		nextQ.Set("_count", strconv.Itoa(count))
+		nextQ.Set("_offset", strconv.Itoa(offset+count))
+		links = append(links, map[string]string{
+			"relation": "next",
+			"url":      makeURL(nextQ),
+		})
+	}
+
+	if offset > 0 {
+		prevQ := cloneURLValues(q)
+		prevQ.Set("_count", strconv.Itoa(count))
+		prevQ.Set("_offset", strconv.Itoa(max(0, offset-count)))
+		links = append(links, map[string]string{
+			"relation": "previous",
+			"url":      makeURL(prevQ),
+		})
+	}
+
+	return links
+}
+
+func cloneURLValues(in url.Values) url.Values {
+	out := make(url.Values, len(in))
+	for k, v := range in {
+		out[k] = append([]string(nil), v...)
+	}
+	return out
+}
+
+var fhirSummaryElements = map[string]bool{
+	"resourceType":              true,
+	"id":                        true,
+	"meta":                      true,
+	"identifier":                true,
+	"active":                    true,
+	"name":                      true,
+	"telecom":                   true,
+	"gender":                    true,
+	"birthDate":                 true,
+	"deceasedBoolean":           true,
+	"deceasedDateTime":          true,
+	"address":                   true,
+	"managingOrganization":      true,
+	"link":                      true,
+	"status":                    true,
+	"category":                  true,
+	"code":                      true,
+	"subject":                   true,
+	"patient":                   true,
+	"encounter":                 true,
+	"effectiveDateTime":         true,
+	"effectivePeriod":           true,
+	"effectiveInstant":          true,
+	"issued":                    true,
+	"performer":                 true,
+	"valueQuantity":             true,
+	"valueCodeableConcept":      true,
+	"valueString":               true,
+	"valueBoolean":              true,
+	"valueInteger":              true,
+	"clinicalStatus":            true,
+	"verificationStatus":        true,
+	"onsetDateTime":             true,
+	"recordedDate":              true,
+	"class":                     true,
+	"type":                      true,
+	"period":                    true,
+	"serviceProvider":           true,
+	"medicationCodeableConcept": true,
+	"medicationReference":       true,
+	"authoredOn":                true,
+	"requester":                 true,
+	"vaccineCode":               true,
+	"occurrenceDateTime":        true,
+}
+
+func applySummaryOrElements(resource map[string]any, summary string, elements []string) map[string]any {
+	if resource == nil {
+		return nil
+	}
+	out := make(map[string]any, len(resource))
+
+	switch {
+	case len(elements) > 0:
+		keep := map[string]bool{
+			"resourceType": true,
+			"id":           true,
+			"meta":         true,
+		}
+		var prefixes []string
+		for _, el := range elements {
+			keep[el] = true
+			prefixes = append(prefixes, el)
+		}
+		for k, v := range resource {
+			if keep[k] {
+				out[k] = v
+				continue
+			}
+			for _, p := range prefixes {
+				if strings.HasPrefix(k, p) && len(k) > len(p) && k[len(p)] >= 'A' && k[len(p)] <= 'Z' {
+					out[k] = v
+					break
+				}
+			}
+		}
+		addSubsettedTag(out)
+		return out
+
+	case summary == "text":
+		for _, k := range []string{"resourceType", "id", "meta", "text", "status"} {
+			if v, ok := resource[k]; ok {
+				out[k] = v
+			}
+		}
+		addSubsettedTag(out)
+		return out
+
+	case summary == "data":
+		for k, v := range resource {
+			if k == "text" {
+				continue
+			}
+			out[k] = v
+		}
+		addSubsettedTag(out)
+		return out
+
+	case summary == "true":
+		for k, v := range resource {
+			if fhirSummaryElements[k] {
+				out[k] = v
+			}
+		}
+		addSubsettedTag(out)
+		return out
+
+	default:
+		return resource
+	}
+}
+
+func addSubsettedTag(resource map[string]any) {
+	meta, _ := resource["meta"].(map[string]any)
+	if meta == nil {
+		meta = make(map[string]any)
+		resource["meta"] = meta
+	}
+	tags, _ := meta["tag"].([]any)
+	for _, t := range tags {
+		if tm, ok := t.(map[string]any); ok && tm["code"] == "SUBSETTED" {
+			return
+		}
+	}
+	tags = append(tags, map[string]any{
+		"system":  "http://terminology.hl7.org/CodeSystem/v3-ObservationValue",
+		"code":    "SUBSETTED",
+		"display": "Resource encoded in summary mode",
+	})
+	meta["tag"] = tags
 }
 
 func usCoreSupportedProfiles(rt string) []string {
@@ -1494,6 +1843,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		{"code": "patch"},
 		{"code": "delete"},
 		{"code": "history-instance"},
+		{"code": "history-type"},
 		{"code": "create"},
 		{"code": "search-type"},
 	}

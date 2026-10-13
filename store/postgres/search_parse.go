@@ -31,6 +31,7 @@ type IncludeParam struct {
 	SourceType string // e.g. "Observation"
 	ParamName  string // e.g. "patient"
 	TargetType string // e.g. "Patient" (optional)
+	Iterate    bool   // true when requested via _include:iterate or _revinclude:iterate
 }
 
 // ChainedParam represents a chained parameter like "patient.name=Smith".
@@ -40,6 +41,22 @@ type ChainedParam struct {
 	TargetParam string // e.g. "name", "family", "gender"
 	ParamType   string // "string", "token", "date", "quantity"
 	Value       string // Search value
+}
+
+// HasParam represents a FHIR R4 reverse-chaining parameter (_has:SourceType:refParam:searchParam=value).
+// Example: _has:Observation:patient:code=8867-4 on a Patient search.
+type HasParam struct {
+	SourceType  string // e.g. "Observation"
+	RefParam    string // e.g. "patient" or "subject"
+	SearchParam string // e.g. "code", "date", "value-quantity"
+	ParamType   string // "id", "string", "token", "date", "quantity", "reference"
+	Value       string // Search value
+}
+
+// SortSpec represents a single sort directive parsed from _sort.
+type SortSpec struct {
+	Param string // e.g. "_lastUpdated", "_id", "date", "family"
+	Desc  bool   // true when descending (-param or param:desc)
 }
 
 var knownDatePrefixes = map[string]bool{
@@ -232,6 +249,87 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 	}, true
 }
 
+// ParseHasParam parses a FHIR R4 reverse-chaining parameter (_has:SourceType:refParam:searchParam=value).
+func ParseHasParam(key, value string) (*HasParam, bool, error) {
+	if !strings.HasPrefix(key, "_has:") {
+		return nil, false, nil
+	}
+	rest := strings.TrimSpace(key[len("_has:"):])
+	parts := strings.Split(rest, ":")
+	if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
+		return nil, true, fmt.Errorf("invalid _has parameter %q: expected _has:{SourceType}:{refParam}:{searchParam}", key)
+	}
+	if strings.TrimSpace(value) == "" {
+		return nil, true, fmt.Errorf("invalid _has parameter %q: empty value", key)
+	}
+	sourceType := strings.TrimSpace(parts[0])
+	refParam := strings.TrimSpace(parts[1])
+	searchParam := strings.TrimSpace(parts[2])
+
+	paramType := "token"
+	switch {
+	case searchParam == "_id":
+		paramType = "id"
+	case knownStringSearchParams[searchParam]:
+		paramType = "string"
+	case knownDateSearchParams[searchParam]:
+		paramType = "date"
+		if _, err := ParseDateOp(value); err != nil {
+			return nil, true, fmt.Errorf("invalid _has date value %s=%q: %w", key, value, err)
+		}
+	case knownQuantitySearchParams[searchParam]:
+		paramType = "quantity"
+		if _, err := ParseQuantityOp(value); err != nil {
+			return nil, true, fmt.Errorf("invalid _has quantity value %s=%q: %w", key, value, err)
+		}
+	case knownRefSearchParams[searchParam]:
+		paramType = "reference"
+	}
+
+	return &HasParam{
+		SourceType:  sourceType,
+		RefParam:    refParam,
+		SearchParam: searchParam,
+		ParamType:   paramType,
+		Value:       value,
+	}, true, nil
+}
+
+// ParseSortSpecs parses comma-separated _sort directives (e.g. "-date,family,_lastUpdated:desc").
+func ParseSortSpecs(raw string) ([]SortSpec, error) {
+	var out []SortSpec
+	for part := range strings.SplitSeq(raw, ",") {
+		s := strings.TrimSpace(part)
+		if s == "" {
+			continue
+		}
+		desc := false
+		if strings.HasPrefix(s, "-") {
+			desc = true
+			s = strings.TrimSpace(s[1:])
+		} else if strings.HasPrefix(s, "+") {
+			s = strings.TrimSpace(s[1:])
+		}
+		if colonIdx := strings.IndexByte(s, ':'); colonIdx != -1 {
+			dir := strings.ToLower(strings.TrimSpace(s[colonIdx+1:]))
+			s = strings.TrimSpace(s[:colonIdx])
+			switch dir {
+			case "desc":
+				desc = true
+			case "asc":
+				desc = false
+			default:
+				return nil, fmt.Errorf("invalid _sort direction %q in %q (expected :asc or :desc)", dir, part)
+			}
+		}
+		if s == "" {
+			return nil, fmt.Errorf("invalid empty _sort field in %q", raw)
+		}
+		out = append(out, SortSpec{Param: s, Desc: desc})
+	}
+	return out, nil
+}
+
 var (
 	knownStringSearchParams = map[string]bool{
 		"family": true, "given": true, "name": true,
@@ -312,14 +410,37 @@ func ValidateSearchQuery(q url.Values) error {
 			}
 		}
 	}
-	for _, incVal := range q["_include"] {
-		if _, err := ParseInclude(incVal); err != nil {
+	for _, k := range []string{"_include", "_include:iterate", "_include:recurse"} {
+		for _, incVal := range q[k] {
+			if _, err := ParseInclude(incVal); err != nil {
+				return err
+			}
+		}
+	}
+	for _, k := range []string{"_revinclude", "_revinclude:iterate", "_revinclude:recurse"} {
+		for _, revVal := range q[k] {
+			if _, err := ParseInclude(revVal); err != nil {
+				return err
+			}
+		}
+	}
+	for _, sortVal := range q["_sort"] {
+		if _, err := ParseSortSpecs(sortVal); err != nil {
 			return err
 		}
 	}
-	for _, revVal := range q["_revinclude"] {
-		if _, err := ParseInclude(revVal); err != nil {
-			return err
+	for _, sumVal := range q["_summary"] {
+		switch strings.ToLower(strings.TrimSpace(sumVal)) {
+		case "", "true", "false", "text", "data", "count":
+		default:
+			return fmt.Errorf("invalid _summary parameter %q: expected true, false, text, data, or count", sumVal)
+		}
+	}
+	for _, totVal := range q["_total"] {
+		switch strings.ToLower(strings.TrimSpace(totVal)) {
+		case "", "none", "estimate", "accurate":
+		default:
+			return fmt.Errorf("invalid _total parameter %q: expected none, estimate, or accurate", totVal)
 		}
 	}
 	for _, luVal := range q["_lastUpdated"] {
@@ -332,6 +453,14 @@ func ValidateSearchQuery(q url.Values) error {
 		}
 	}
 	for key, values := range q {
+		if strings.HasPrefix(key, "_has:") {
+			for _, val := range values {
+				if _, _, err := ParseHasParam(key, val); err != nil {
+					return err
+				}
+			}
+			continue
+		}
 		if strings.HasPrefix(key, "_") || len(values) == 0 {
 			continue
 		}
@@ -391,6 +520,21 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 		References:       make(map[string]string),
 		ReferenceFilters: make(map[string][]string),
 		Missing:          make(map[string]bool),
+		Summary:          strings.ToLower(strings.TrimSpace(q.Get("_summary"))),
+		TotalMode:        strings.ToLower(strings.TrimSpace(q.Get("_total"))),
+	}
+
+	for _, elRaw := range q["_elements"] {
+		for part := range strings.SplitSeq(elRaw, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				params.Elements = append(params.Elements, trimmed)
+			}
+		}
+	}
+	for _, sortVal := range q["_sort"] {
+		if specs, err := ParseSortSpecs(sortVal); err == nil {
+			params.Sort = append(params.Sort, specs...)
+		}
 	}
 
 	if idVals := q["_id"]; len(idVals) > 0 {
@@ -432,13 +576,37 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 			params.Includes = append(params.Includes, inc)
 		}
 	}
+	for _, k := range []string{"_include:iterate", "_include:recurse"} {
+		for _, incVal := range q[k] {
+			if inc, err := ParseInclude(incVal); err == nil {
+				inc.Iterate = true
+				params.Includes = append(params.Includes, inc)
+			}
+		}
+	}
 	for _, revVal := range q["_revinclude"] {
 		if rev, err := ParseInclude(revVal); err == nil {
 			params.RevIncludes = append(params.RevIncludes, rev)
 		}
 	}
+	for _, k := range []string{"_revinclude:iterate", "_revinclude:recurse"} {
+		for _, revVal := range q[k] {
+			if rev, err := ParseInclude(revVal); err == nil {
+				rev.Iterate = true
+				params.RevIncludes = append(params.RevIncludes, rev)
+			}
+		}
+	}
 
 	for key, values := range q {
+		if strings.HasPrefix(key, "_has:") {
+			for _, rawVal := range values {
+				if hp, ok, err := ParseHasParam(key, rawVal); ok && err == nil && hp != nil {
+					params.Has = append(params.Has, *hp)
+				}
+			}
+			continue
+		}
 		if strings.HasPrefix(key, "_") || len(values) == 0 {
 			continue
 		}
@@ -570,5 +738,6 @@ func HasSearchCriteria(p SearchParams) bool {
 		len(p.References) > 0 ||
 		len(p.ReferenceFilters) > 0 ||
 		len(p.Missing) > 0 ||
-		len(p.Chained) > 0
+		len(p.Chained) > 0 ||
+		len(p.Has) > 0
 }
