@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/store/postgres"
 	"github.com/google/uuid"
 )
@@ -232,6 +233,11 @@ func (s *Server) handleSMARTConfig(w http.ResponseWriter, r *http.Request) {
 			"client_secret_post",
 			"private_key_jwt",
 		},
+		"token_endpoint_auth_signing_alg_values_supported": []string{
+			"RS256",
+			"RS384",
+			"ES384",
+		},
 		"grant_types_supported": []string{
 			"authorization_code",
 			"client_credentials",
@@ -312,19 +318,20 @@ func (s *Server) handleSMARTConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleOIDCConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.resolveSMARTConfig(r)
 	doc := map[string]any{
-		"issuer":                                cfg.Issuer,
-		"authorization_endpoint":                cfg.AuthorizationEndpoint,
-		"token_endpoint":                        cfg.TokenEndpoint,
-		"introspection_endpoint":                cfg.IntrospectionEndpoint,
-		"jwks_uri":                              cfg.JWKSURI,
-		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "client_credentials", "refresh_token"},
-		"subject_types_supported":               []string{"public"},
-		"id_token_signing_alg_values_supported": []string{"RS256"},
-		"scopes_supported":                      []string{"openid", "profile", "fhirUser", "launch", "launch/patient", "offline_access"},
-		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post", "private_key_jwt"},
-		"claims_supported":                      []string{"sub", "iss", "aud", "exp", "iat", "fhirUser", "patient"},
-		"code_challenge_methods_supported":      []string{"S256"},
+		"issuer":                                           cfg.Issuer,
+		"authorization_endpoint":                           cfg.AuthorizationEndpoint,
+		"token_endpoint":                                   cfg.TokenEndpoint,
+		"introspection_endpoint":                           cfg.IntrospectionEndpoint,
+		"jwks_uri":                                         cfg.JWKSURI,
+		"response_types_supported":                         []string{"code"},
+		"grant_types_supported":                            []string{"authorization_code", "client_credentials", "refresh_token"},
+		"subject_types_supported":                          []string{"public"},
+		"id_token_signing_alg_values_supported":            []string{"RS256"},
+		"scopes_supported":                                 []string{"openid", "profile", "fhirUser", "launch", "launch/patient", "offline_access"},
+		"token_endpoint_auth_methods_supported":            []string{"client_secret_basic", "client_secret_post", "private_key_jwt"},
+		"token_endpoint_auth_signing_alg_values_supported": []string{"RS256", "RS384", "ES384"},
+		"claims_supported":                                 []string{"sub", "iss", "aud", "exp", "iat", "fhirUser", "patient"},
+		"code_challenge_methods_supported":                 []string{"S256"},
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -493,11 +500,108 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(resp)
 
 	case "client_credentials":
+		subject := "system-bulk-client"
+		assertionType := strings.TrimSpace(r.FormValue("client_assertion_type"))
+		assertion := strings.TrimSpace(r.FormValue("client_assertion"))
+		if assertionType != "" || assertion != "" {
+			if assertionType != "urn:ietf:params:oauth:client-assertion-type:jwt-bearer" || assertion == "" {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_assertion_type must be urn:ietf:params:oauth:client-assertion-type:jwt-bearer with a non-empty client_assertion")
+				return
+			}
+			parsed, err := auth.ParseJWT(assertion)
+			if err != nil {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_client", "malformed client_assertion JWT: "+err.Error())
+				return
+			}
+			switch parsed.Header.Alg {
+			case "RS256", "RS384", "ES256", "ES384":
+			default:
+				writeOAuthError(w, http.StatusBadRequest, "invalid_client", "unsupported client_assertion signing algorithm: "+parsed.Header.Alg)
+				return
+			}
+			iss := strings.TrimSpace(parsed.Payload.Issuer)
+			sub := strings.TrimSpace(parsed.Payload.Subject)
+			if iss == "" || sub == "" || iss != sub {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_assertion iss and sub must be non-empty and identical")
+				return
+			}
+			if formClientID := strings.TrimSpace(r.FormValue("client_id")); formClientID != "" && formClientID != iss {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_id does not match client_assertion iss")
+				return
+			}
+			cfg := s.resolveSMARTConfig(r)
+			audValid := false
+			for _, aud := range parsed.Payload.Audience {
+				trimmedAud := strings.TrimRight(strings.TrimSpace(aud), "/")
+				if trimmedAud != "" && (trimmedAud == strings.TrimRight(cfg.TokenEndpoint, "/") ||
+					trimmedAud == strings.TrimRight(cfg.Issuer, "/") ||
+					strings.HasSuffix(trimmedAud, "/oauth2/token")) {
+					audValid = true
+					break
+				}
+			}
+			if !audValid {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_assertion aud must identify the OAuth2 token endpoint")
+				return
+			}
+			jti := strings.TrimSpace(parsed.Payload.JTI)
+			if jti == "" {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_assertion missing required jti claim")
+				return
+			}
+			nowUnix := time.Now().Unix()
+			if parsed.Payload.ExpiresAt <= nowUnix {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_assertion has expired")
+				return
+			}
+			if parsed.Payload.ExpiresAt-nowUnix > 300 {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_assertion exp must not exceed 5 minutes in the future")
+				return
+			}
+			if parsed.Payload.NotBefore != 0 && parsed.Payload.NotBefore > nowUnix+60 {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_assertion nbf is in the future")
+				return
+			}
+			if len(parsed.RawSignature) < 64 {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_client", "invalid client_assertion signature")
+				return
+			}
+			if parsed.Header.Jwk != nil {
+				pubKey, err := parsed.Header.Jwk.PublicKey()
+				if err != nil {
+					writeOAuthError(w, http.StatusBadRequest, "invalid_client", "invalid JWK in client_assertion header: "+err.Error())
+					return
+				}
+				if err := parsed.VerifySignature(pubKey); err != nil {
+					writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_assertion signature verification failed")
+					return
+				}
+			} else if s.devAuth != nil {
+				if jwk, err := s.devAuth.JWKS().FindKey(parsed.Header.Kid); err == nil {
+					if pubKey, err := jwk.PublicKey(); err == nil {
+						if err := parsed.VerifySignature(pubKey); err != nil {
+							writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_assertion signature verification failed")
+							return
+						}
+					}
+				}
+			}
+			jtiKey := "jti:" + jti
+			if s.isTokenRevoked(jtiKey) {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "client_assertion jti has already been used (replay detected)")
+				return
+			}
+			s.revokeTokenInternal(r.Context(), jtiKey, 10*time.Minute)
+			subject = sub
+		} else if formClientID := strings.TrimSpace(r.FormValue("client_id")); formClientID != "" {
+			subject = formClientID
+		}
+
 		scope := r.FormValue("scope")
 		if scope == "" {
 			scope = "system/*.rs"
 		}
-		accessToken, err := s.devAuth.IssueToken("system-bulk-client", scope, "", time.Hour, map[string]any{
+		accessToken, err := s.devAuth.IssueToken(subject, scope, "", time.Hour, map[string]any{
 			"jti": uuid.NewString(),
 		})
 		if err != nil {
@@ -624,40 +728,44 @@ func (s *Server) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
 	rawToken := strings.TrimSpace(r.FormValue("token"))
 	if rawToken != "" {
-		if s.store != nil {
-			_ = s.store.RevokeToken(r.Context(), rawToken, 24*time.Hour)
-		}
-		now := time.Now()
-		s.oauthMu.Lock()
-		if s.revokedTokens == nil {
-			s.revokedTokens = make(map[string]time.Time)
-		}
-		if s.refreshTokens != nil {
-			delete(s.refreshTokens, rawToken)
-		}
-		for k, ts := range s.revokedTokens {
-			if now.Sub(ts) > 24*time.Hour {
-				delete(s.revokedTokens, k)
-			}
-		}
-		if len(s.revokedTokens) >= maxOAuthEntries {
-			var oldestKey string
-			var oldestTime time.Time
-			for k, ts := range s.revokedTokens {
-				if oldestKey == "" || ts.Before(oldestTime) {
-					oldestKey = k
-					oldestTime = ts
-				}
-			}
-			if oldestKey != "" {
-				delete(s.revokedTokens, oldestKey)
-			}
-		}
-		s.revokedTokens[rawToken] = now
-		s.oauthMu.Unlock()
+		s.revokeTokenInternal(r.Context(), rawToken, 24*time.Hour)
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) revokeTokenInternal(ctx context.Context, rawToken string, ttl time.Duration) {
+	if s.store != nil {
+		_ = s.store.RevokeToken(ctx, rawToken, ttl)
+	}
+	now := time.Now()
+	s.oauthMu.Lock()
+	if s.revokedTokens == nil {
+		s.revokedTokens = make(map[string]time.Time)
+	}
+	if s.refreshTokens != nil {
+		delete(s.refreshTokens, rawToken)
+	}
+	for k, ts := range s.revokedTokens {
+		if now.Sub(ts) > 24*time.Hour {
+			delete(s.revokedTokens, k)
+		}
+	}
+	if len(s.revokedTokens) >= maxOAuthEntries {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, ts := range s.revokedTokens {
+			if oldestKey == "" || ts.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = ts
+			}
+		}
+		if oldestKey != "" {
+			delete(s.revokedTokens, oldestKey)
+		}
+	}
+	s.revokedTokens[rawToken] = now
+	s.oauthMu.Unlock()
 }
 
 func (s *Server) isTokenRevoked(rawToken string) bool {

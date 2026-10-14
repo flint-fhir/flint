@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -34,6 +35,7 @@ type JWTHeader struct {
 	Alg string `json:"alg"`
 	Kid string `json:"kid,omitempty"`
 	Typ string `json:"typ,omitempty"`
+	Jwk *JWK   `json:"jwk,omitempty"`
 }
 
 // JWTPayload holds standard OIDC / SMART claims.
@@ -44,6 +46,7 @@ type JWTPayload struct {
 	ExpiresAt int64          `json:"exp,omitempty"`
 	NotBefore int64          `json:"nbf,omitempty"`
 	IssuedAt  int64          `json:"iat,omitempty"`
+	JTI       string         `json:"jti,omitempty"`
 	Scope     string         `json:"scope,omitempty"`
 	Patient   string         `json:"patient,omitempty"`
 	Encounter string         `json:"encounter,omitempty"`
@@ -173,6 +176,17 @@ func (t *ParsedToken) VerifySignature(key any) error {
 		}
 		return nil
 
+	case "RS384":
+		rsaPub, ok := key.(*rsa.PublicKey)
+		if !ok {
+			return fmt.Errorf("%w: expected *rsa.PublicKey for RS384", ErrUnsupportedKeyType)
+		}
+		h384 := sha512.Sum384(t.SignedData)
+		if err := rsa.VerifyPKCS1v15(rsaPub, crypto.SHA384, h384[:], t.RawSignature); err != nil {
+			return ErrInvalidSignature
+		}
+		return nil
+
 	case "ES256":
 		ecdsaPub, ok := key.(*ecdsa.PublicKey)
 		if !ok {
@@ -184,6 +198,22 @@ func (t *ParsedToken) VerifySignature(key any) error {
 		r := new(big.Int).SetBytes(t.RawSignature[:32])
 		s := new(big.Int).SetBytes(t.RawSignature[32:])
 		if !ecdsa.Verify(ecdsaPub, hashed, r, s) {
+			return ErrInvalidSignature
+		}
+		return nil
+
+	case "ES384":
+		ecdsaPub, ok := key.(*ecdsa.PublicKey)
+		if !ok {
+			return fmt.Errorf("%w: expected *ecdsa.PublicKey for ES384", ErrUnsupportedKeyType)
+		}
+		if len(t.RawSignature) != 96 {
+			return ErrInvalidSignature
+		}
+		h384 := sha512.Sum384(t.SignedData)
+		r := new(big.Int).SetBytes(t.RawSignature[:48])
+		s := new(big.Int).SetBytes(t.RawSignature[48:])
+		if !ecdsa.Verify(ecdsaPub, h384[:], r, s) {
 			return ErrInvalidSignature
 		}
 		return nil
@@ -255,7 +285,16 @@ func (k *JWK) PublicKey() (crypto.PublicKey, error) {
 		}, nil
 
 	case "EC":
-		if k.Crv != "P-256" {
+		var curve elliptic.Curve
+		var coordLen int
+		switch k.Crv {
+		case "P-256":
+			curve = elliptic.P256()
+			coordLen = 32
+		case "P-384":
+			curve = elliptic.P384()
+			coordLen = 48
+		default:
 			return nil, fmt.Errorf("unsupported EC curve: %s", k.Crv)
 		}
 		xBytes, err := decodeBase64URL(k.X)
@@ -266,25 +305,25 @@ func (k *JWK) PublicKey() (crypto.PublicKey, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid EC y coordinate: %w", err)
 		}
-		if len(xBytes) == 33 && xBytes[0] == 0 {
+		if len(xBytes) == coordLen+1 && xBytes[0] == 0 {
 			xBytes = xBytes[1:]
 		}
-		if len(yBytes) == 33 && yBytes[0] == 0 {
+		if len(yBytes) == coordLen+1 && yBytes[0] == 0 {
 			yBytes = yBytes[1:]
 		}
-		if len(xBytes) == 0 || len(xBytes) > 32 {
+		if len(xBytes) == 0 || len(xBytes) > coordLen {
 			return nil, fmt.Errorf("invalid EC x coordinate length: %d", len(xBytes))
 		}
-		if len(yBytes) == 0 || len(yBytes) > 32 {
+		if len(yBytes) == 0 || len(yBytes) > coordLen {
 			return nil, fmt.Errorf("invalid EC y coordinate length: %d", len(yBytes))
 		}
-		// Uncompressed ANSI X9.62 format: 0x04 || 32-byte X || 32-byte Y
-		uncompressed := make([]byte, 65)
+		// Uncompressed ANSI X9.62 format: 0x04 || X || Y
+		uncompressed := make([]byte, 1+2*coordLen)
 		uncompressed[0] = 0x04
-		copy(uncompressed[1+32-len(xBytes):33], xBytes)
-		copy(uncompressed[33+32-len(yBytes):65], yBytes)
+		copy(uncompressed[1+coordLen-len(xBytes):1+coordLen], xBytes)
+		copy(uncompressed[1+2*coordLen-len(yBytes):1+2*coordLen], yBytes)
 
-		return ecdsa.ParseUncompressedPublicKey(elliptic.P256(), uncompressed)
+		return ecdsa.ParseUncompressedPublicKey(curve, uncompressed)
 
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrUnsupportedKeyType, k.Kty)

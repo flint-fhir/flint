@@ -108,9 +108,20 @@ tasks:
       - go run ./cmd/seed {{.CLI_ARGS}}
 
   certify:
-    desc: Run automated 31-check FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) conformance certification suite
+    desc: Run automated 34-check FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) conformance certification suite
     cmds:
       - go run ./cmd/certify {{.CLI_ARGS}}
+
+  docker-build:
+    desc: Build multi-stage production container image (flintd, worker, seed, certify)
+    cmds:
+      - docker build -t flint-fhir/flint:latest .
+
+  deploy-flintd:
+    desc: Deploy flintd server and worker to Kubernetes with /healthz, /readyz, and Prometheus /metrics
+    cmds:
+      - kubectl apply -f deploy/k8s/flintd.yaml
+      - kubectl rollout status deployment/flintd -n {{.NAMESPACE}} --timeout=120s
 
   certify-inferno:
     desc: Launch official HL7 Inferno US Core v6.1.0 / ONC (g)(10) test kit on http://localhost:4567

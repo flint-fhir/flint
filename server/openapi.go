@@ -53,11 +53,11 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 			Endpoint:      "/fhir/r4/{tenant}/{resourceType}?_include=...",
 		},
 		{
-			Category:      "Patient Compartment Operations",
-			Capability:    "Patient/$everything Longitudinal Record Assembly & RESTful Compartment Search (GET /Patient/{id}/{resourceType})",
-			Specification: "HL7 FHIR R4 OperationDefinition/Patient-everything & CompartmentDefinition",
+			Category:      "Patient Compartment & MPI Operations",
+			Capability:    "Patient/$everything Longitudinal Record Assembly, Patient/$match (MPI Matching), $meta / $meta-add / $meta-delete & RESTful Compartment Search (GET /Patient/{id}/{resourceType})",
+			Specification: "HL7 FHIR R4 OperationDefinition/Patient-everything, Patient-match, Resource-meta & CompartmentDefinition",
 			Status:        "Verified",
-			Endpoint:      "/fhir/r4/{tenant}/Patient/{id}/$everything",
+			Endpoint:      "/fhir/r4/{tenant}/Patient/$match",
 		},
 		{
 			Category:      "Terminology Services",
@@ -82,15 +82,15 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Conformance, Validation & Certification",
-			Capability:    "StructureDefinition & ValueSet Validation ($validate, 26 US Core v6.1.0 & v7.0.0 Profiles) & 31-Check Automated Certification ($certify)",
+			Capability:    "StructureDefinition & ValueSet Validation ($validate, 26 US Core v6.1.0 & v7.0.0 Profiles) & 34-Check Automated Certification ($certify)",
 			Specification: "HL7 FHIR R4 OperationDefinition/Resource-validate & TestReport",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/$certify",
 		},
 		{
 			Category:      "Security & Authorization",
-			Capability:    "Built-in OAuth2 Server (PKCE S256, Postgres Refresh/Revocation), Granular SMART v2 Scopes, OIDC/Zitadel JWT & Patient Compartment Isolation",
-			Specification: "SMART App Launch 2.0.0",
+			Capability:    "Built-in OAuth2 Server (PKCE S256, Backend Services private_key_jwt RFC 7523, Postgres Refresh/Revocation), Granular SMART v2 Scopes, OIDC/Zitadel JWT & Patient Compartment Isolation",
+			Specification: "SMART App Launch 2.0.0 & Backend Services IG",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/.well-known/smart-configuration",
 		},
@@ -702,10 +702,20 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/$meta": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"System Operations"},
+				"summary":     "System-level summary of profiles, tags, and security labels across the server ($meta)",
+				"operationId": "getSystemMeta",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (return.valueMeta)"},
+				},
+			},
+		},
 		"/$certify": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"System Operations"},
-				"summary":     "Run 31-check automated FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) certification suite",
+				"summary":     "Run 34-check automated FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) certification suite",
 				"operationId": "runCertificationSuiteGet",
 				"responses": map[string]any{
 					"200": map[string]any{"description": "HL7 FHIR R4 TestReport resource"},
@@ -713,7 +723,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			},
 			"post": map[string]any{
 				"tags":        []string{"System Operations"},
-				"summary":     "Run 31-check automated FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) certification suite",
+				"summary":     "Run 34-check automated FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) certification suite",
 				"operationId": "runCertificationSuitePost",
 				"responses": map[string]any{
 					"200": map[string]any{"description": "HL7 FHIR R4 TestReport resource"},
@@ -954,6 +964,17 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "application/fhir+ndjson stream"},
+				},
+			},
+		},
+		"/Patient/$match": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "Master Patient Index (MPI) probabilistic & deterministic patient matching ($match)",
+				"operationId": "patientMatch",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: searchset) with match-grade and score"},
+					"400": map[string]any{"description": "Invalid Parameters input"},
 				},
 			},
 		},
@@ -1241,6 +1262,59 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				"operationId": "validate" + rt,
 				"responses": map[string]any{
 					"200": map[string]any{"description": "OperationOutcome validation result"},
+				},
+			},
+		}
+
+		paths["/"+rt+"/$meta"] = map[string]any{
+			"get": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Type-level summary of profiles, tags, and security labels for %s ($meta)", rt),
+				"operationId": "typeMeta" + rt,
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (return.valueMeta)"},
+				},
+			},
+		}
+
+		paths["/"+rt+"/{id}/$meta"] = map[string]any{
+			"get": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Retrieve profile, tag, and security metadata for %s/{id} ($meta)", rt),
+				"operationId": "instanceMeta" + rt,
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (return.valueMeta)"},
+				},
+			},
+		}
+
+		paths["/"+rt+"/{id}/$meta-add"] = map[string]any{
+			"post": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Add profile, tag, or security labels to %s/{id} ($meta-add)", rt),
+				"operationId": "metaAdd" + rt,
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Updated FHIR Parameters (return.valueMeta)"},
+				},
+			},
+		}
+
+		paths["/"+rt+"/{id}/$meta-delete"] = map[string]any{
+			"post": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Remove profile, tag, or security labels from %s/{id} ($meta-delete)", rt),
+				"operationId": "metaDelete" + rt,
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Updated FHIR Parameters (return.valueMeta)"},
 				},
 			},
 		}

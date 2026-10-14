@@ -116,26 +116,26 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								fmt.Sprintf("insufficient scope for terminology operation on %s", resType))
 							return
 						}
-					} else if resType == "_history" {
-						// System-level history: GET /{tenant}/_history
+					} else if resType == "_history" || resType == "$meta" {
+						// System-level history or $meta: GET /{tenant}/_history or GET /{tenant}/$meta
 						if len(secCtx.GetScopes()) == 0 {
-							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for system _history")
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for system operation "+resType)
 							return
 						}
-					} else if len(parts) == 5 && parts[4] == "_history" {
-						// Type-level history: GET /{tenant}/{resourceType}/_history
+					} else if len(parts) == 5 && (parts[4] == "_history" || parts[4] == "$meta") {
+						// Type-level history or $meta: GET /{tenant}/{resourceType}/_history or GET /{tenant}/{resourceType}/$meta
 						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionSearch) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-								fmt.Sprintf("insufficient scope for _history on %s", resType))
+								fmt.Sprintf("insufficient scope for %s on %s", parts[4], resType))
 							return
 						}
 						if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-								fmt.Sprintf("patient-scoped token (%s) cannot read _history of non-compartment resource %s",
-									secCtx.GetPatientId(), resType))
+								fmt.Sprintf("patient-scoped token (%s) cannot read %s of non-compartment resource %s",
+									secCtx.GetPatientId(), parts[4], resType))
 							return
 						}
-					} else if len(parts) == 6 && strings.EqualFold(resType, "Patient") && parts[5] != "$everything" && parts[5] != "$export" && parts[5] != "_history" {
+					} else if len(parts) == 6 && strings.EqualFold(resType, "Patient") && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" {
 						// Compartment search: GET /{tenant}/Patient/{patientId}/{compartmentType}
 						patientID := parts[4]
 						compartmentType := parts[5]
@@ -149,7 +149,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							return
 						}
 					} else if len(parts) >= 5 {
-						// Read / VRead / Instance History / $everything / Patient/{id}/$export: GET /{tenant}/{resourceType}/{id}...
+						// Read / VRead / Instance History / $everything / $meta / Patient/{id}/$export: GET /{tenant}/{resourceType}/{id}...
 						id := parts[4]
 						if !auth.Allows(secCtx, resType, auth.ActionRead) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
@@ -157,7 +157,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							return
 						}
 
-						// Patient compartment enforcement on point reads, vread, _history, $everything, and $export
+						// Patient compartment enforcement on point reads, vread, _history, $everything, $meta, and $export
 						if auth.IsPatientRestricted(secCtx) {
 							if strings.EqualFold(resType, "Patient") && cleanID(id) != cleanID(secCtx.GetPatientId()) {
 								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
@@ -193,6 +193,40 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("insufficient scope for terminology operation on %s", resType))
 							return
+						}
+					} else if len(parts) == 5 && strings.EqualFold(resType, "Patient") && parts[4] == "$match" {
+						if !auth.Allows(secCtx, "Patient", auth.ActionSearch) && !auth.Allows(secCtx, "Patient", auth.ActionRead) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Patient/$match")
+							return
+						}
+					} else if len(parts) == 6 && (parts[5] == "$meta-add" || parts[5] == "$meta-delete") {
+						id := parts[4]
+						if !auth.Allows(secCtx, resType, auth.ActionUpdate) && !auth.Allows(secCtx, resType, auth.ActionCreate) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("insufficient scope for %s on %s", parts[5], resType))
+							return
+						}
+						if auth.IsPatientRestricted(secCtx) {
+							if strings.EqualFold(resType, "Patient") && cleanID(id) != cleanID(secCtx.GetPatientId()) {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("patient-scoped token (%s) cannot mutate meta of patient %s",
+										secCtx.GetPatientId(), id))
+								return
+							}
+							if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+								exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
+								if err != nil {
+									writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+									return
+								}
+								if exists && !allowed {
+									writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+										fmt.Sprintf("patient-scoped token (%s) cannot mutate meta of %s/%s outside patient compartment",
+											secCtx.GetPatientId(), resType, id))
+									return
+								}
+							}
 						}
 					} else if len(parts) >= 5 && parts[4] == "_search" {
 						// POST-based search: POST /{tenant}/{resourceType}/_search

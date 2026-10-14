@@ -1,6 +1,6 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), and ONC §170.315(g)(10) / HTI-1 Standardized API conformance
-// & certification runner. It executes 5 structured test suites (29 checks) against
+// & certification runner. It executes 5 structured test suites (34 checks) against
 // a target Flint server and produces both a standard FHIR R4 TestReport resource
 // and a human-readable scorecard.
 package certify
@@ -9,7 +9,11 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -487,6 +491,42 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("SEARCH-04", suite2, "FHIR R4 _sort, _has Reverse Chaining, _summary/_elements, Bundle.link & Compartment Search", t0, err, "Verified _sort, _has, _summary=count, _elements SUBSETTED, Bundle.link, /Patient/{id}/{type}, and /_history")
 
+	// 2.23 Patient/$match (MPI) Probabilistic & Deterministic Matching
+	t0 = time.Now()
+	{
+		err = nil
+		matchBody := []byte(`{
+			"resourceType": "Parameters",
+			"parameter": [
+				{
+					"name": "resource",
+					"resource": {
+						"resourceType": "Patient",
+						"name": [{"family": "Certify", "given": ["Alice"]}],
+						"birthDate": "1985-04-12",
+						"gender": "female",
+						"identifier": [{"system": "http://hospital.example.org/mrn", "value": "CERT-MRN-1"}]
+					}
+				},
+				{
+					"name": "onlyCertainMatches",
+					"valueBoolean": true
+				},
+				{
+					"name": "count",
+					"valueInteger": 5
+				}
+			]
+		}`)
+		respMatch, bMatch, errMatch := doReq(http.MethodPost, basePath+"/Patient/$match", "application/fhir+json", matchBody, nil)
+		if errMatch != nil || respMatch.StatusCode != http.StatusOK {
+			err = fmt.Errorf("expected 200 OK on POST /Patient/$match, got %d: %s", respMatch.StatusCode, string(bMatch))
+		} else if !strings.Contains(string(bMatch), `"cert-pat-1"`) || !strings.Contains(string(bMatch), `"certain"`) {
+			err = fmt.Errorf("expected Patient/$match Bundle to include cert-pat-1 with match-grade=certain, got %s", string(bMatch))
+		}
+	}
+	record("MPI-01", suite2, "Patient/$match (MPI) Probabilistic & Deterministic Matching (score & match-grade)", t0, err, "Matched Patient/cert-pat-1 with match-grade=certain and score >= 0.80")
+
 	// =========================================================================
 	// Suite 3: FHIR R4 Versioning, CAS (If-Match), Patch (RFC 6902/7396) & Conditional CRUD
 	// =========================================================================
@@ -587,6 +627,53 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("CRUD-04", suite3, "RFC 7396 Merge Patch, _history, Conditional DELETE & 410 Gone", t0, err, "Merge patch, version history, and 410 tombstone verified")
+
+	// 3.5 FHIR R4 $meta, $meta-add & $meta-delete Operations
+	t0 = time.Now()
+	{
+		err = nil
+		metaAddBody := []byte(`{
+			"resourceType": "Parameters",
+			"parameter": [
+				{
+					"name": "meta",
+					"valueMeta": {
+						"profile": ["http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"],
+						"tag": [{"system": "http://example.org/tags", "code": "vip-cohort", "display": "VIP Cohort"}],
+						"security": [{"system": "http://terminology.hl7.org/CodeSystem/v3-Confidentiality", "code": "R", "display": "restricted"}]
+					}
+				}
+			]
+		}`)
+		respAdd, bAdd, errAdd := doReq(http.MethodPost, basePath+"/Patient/cert-pat-1/$meta-add", "application/fhir+json", metaAddBody, nil)
+		if errAdd != nil || respAdd.StatusCode != http.StatusOK || !strings.Contains(string(bAdd), `"vip-cohort"`) {
+			err = fmt.Errorf("expected 200 OK with vip-cohort tag on POST $meta-add, got %s", string(bAdd))
+		}
+		if err == nil {
+			respMeta, bMeta, errMeta := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$meta", "", nil, nil)
+			if errMeta != nil || respMeta.StatusCode != http.StatusOK || !strings.Contains(string(bMeta), `"vip-cohort"`) {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$meta to contain vip-cohort, got %s", string(bMeta))
+			}
+		}
+		if err == nil {
+			metaDelBody := []byte(`{
+				"resourceType": "Parameters",
+				"parameter": [
+					{
+						"name": "meta",
+						"valueMeta": {
+							"tag": [{"system": "http://example.org/tags", "code": "vip-cohort"}]
+						}
+					}
+				]
+			}`)
+			respDelMeta, bDelMeta, errDelMeta := doReq(http.MethodPost, basePath+"/Patient/cert-pat-1/$meta-delete", "application/fhir+json", metaDelBody, nil)
+			if errDelMeta != nil || respDelMeta.StatusCode != http.StatusOK || strings.Contains(string(bDelMeta), `"vip-cohort"`) {
+				err = fmt.Errorf("expected vip-cohort tag to be removed after $meta-delete, got %s", string(bDelMeta))
+			}
+		}
+	}
+	record("META-01", suite3, "FHIR R4 $meta, $meta-add & $meta-delete Profile/Tag/Security Lifecycle", t0, err, "Added, queried, and deleted profile/tag/security metadata on Patient/cert-pat-1")
 
 	// =========================================================================
 	// Suite 4: Patient $everything & ONC (g)(10) Bulk Data $export
@@ -818,6 +905,31 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("SMART-03", suite5, "SMART v2 Granular Sub-Resource Scopes (?category=) & RFC 7009 Revocation", t0, err, "Enforced ?category=vital-signs scope filter & RFC 7009 /oauth2/revoke")
+
+	t0 = time.Now()
+	{
+		err = nil
+		assertion, signErr := signES384ClientAssertion("inferno-bulk-client", baseURL+"/oauth2/token", fmt.Sprintf("jti-%d", time.Now().UnixNano()))
+		if signErr != nil {
+			err = signErr
+		} else {
+			jwtForm := url.Values{
+				"grant_type":            {"client_credentials"},
+				"scope":                 {"system/*.rs"},
+				"client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
+				"client_assertion":      {assertion},
+			}
+			respJWT, bJWT, errJWT := doReq(http.MethodPost, "/oauth2/token", "application/x-www-form-urlencoded", []byte(jwtForm.Encode()), nil)
+			// Replaying the exact same client_assertion (jti) must fail with 400 Bad Request
+			respReplay, _, errReplay := doReq(http.MethodPost, "/oauth2/token", "application/x-www-form-urlencoded", []byte(jwtForm.Encode()), nil)
+			if errJWT != nil || respJWT.StatusCode != http.StatusOK {
+				err = fmt.Errorf("expected 200 OK from private_key_jwt /oauth2/token, got %d: %s", respJWT.StatusCode, string(bJWT))
+			} else if errReplay != nil || respReplay.StatusCode != http.StatusBadRequest {
+				err = fmt.Errorf("expected 400 Bad Request on replayed client_assertion jti, got %d", respReplay.StatusCode)
+			}
+		}
+	}
+	record("SMART-04", suite5, "SMART Backend Services Asymmetric JWT (private_key_jwt ES384 & jti Replay Protection)", t0, err, "Verified ES384 private_key_jwt signature & rejected replayed jti")
 
 	t0 = time.Now()
 	resp, _, err = doReq(http.MethodPost, basePath+"/MedicationRequest/$validate", "application/fhir+json",
@@ -1305,4 +1417,56 @@ func defaultCertifyCohortBundle() []byte {
 			}
 		]
 	}`)
+}
+
+func signES384ClientAssertion(clientID, tokenEndpoint, jti string) (string, error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		return "", err
+	}
+	pubBytes, err := priv.PublicKey.Bytes()
+	if err != nil || len(pubBytes) != 97 {
+		return "", fmt.Errorf("encode P-384 public key: %w", err)
+	}
+	header := map[string]any{
+		"alg": "ES384",
+		"typ": "JWT",
+		"kid": "bulk-es384-1",
+		"jwk": map[string]any{
+			"kty": "EC",
+			"crv": "P-384",
+			"kid": "bulk-es384-1",
+			"use": "sig",
+			"alg": "ES384",
+			"x":   base64.RawURLEncoding.EncodeToString(pubBytes[1:49]),
+			"y":   base64.RawURLEncoding.EncodeToString(pubBytes[49:97]),
+		},
+	}
+	now := time.Now().Unix()
+	payload := map[string]any{
+		"iss": clientID,
+		"sub": clientID,
+		"aud": tokenEndpoint,
+		"jti": jti,
+		"iat": now,
+		"exp": now + 180,
+	}
+	hb, err := json.Marshal(header)
+	if err != nil {
+		return "", err
+	}
+	pb, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	signedData := base64.RawURLEncoding.EncodeToString(hb) + "." + base64.RawURLEncoding.EncodeToString(pb)
+	h384 := sha512.Sum384([]byte(signedData))
+	r, s, err := ecdsa.Sign(rand.Reader, priv, h384[:])
+	if err != nil {
+		return "", err
+	}
+	rawSig := make([]byte, 96)
+	r.FillBytes(rawSig[:48])
+	s.FillBytes(rawSig[48:])
+	return signedData + "." + base64.RawURLEncoding.EncodeToString(rawSig), nil
 }
