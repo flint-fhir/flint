@@ -16,6 +16,7 @@ import (
 	condpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/condition_go_proto"
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 
+	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/ingest/activity"
 	"github.com/flint-fhir/flint/store/postgres"
 )
@@ -37,9 +38,9 @@ func TestWritePostgresBatch_WithExtractors(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	activities := &activity.Activities{
-		Store:           store,
-		Logger:          logger,
-		IndexExtractors: postgres.DefaultIndexExtractors(),
+		Store:  store,
+		Logger: logger,
+		// Omit IndexExtractors to verify automatic fallback to DefaultIndexExtractors (all 146 R4 types)
 	}
 
 	// Create test Patient and Condition protos
@@ -107,14 +108,45 @@ func TestWritePostgresBatch_WithExtractors(t *testing.T) {
 	}
 }
 
-func TestPublishToAutoMQ_NilProducer(t *testing.T) {
+func TestPublishToAutoMQ_NilAndMemoryPublisher(t *testing.T) {
+	var typedNilProducer *automq.Producer
 	activities := &activity.Activities{
-		Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		Producer: typedNilProducer,
+		Logger:   slog.New(slog.NewTextHandler(os.Stderr, nil)),
 	}
 	err := activities.PublishToAutoMQ(context.Background(), activity.PublishToAutoMQInput{
-		TenantID: "test-tenant",
+		TenantID:       "test-tenant",
+		ResourceProtos: [][]byte{{1, 2, 3}},
+		ResourceTypes:  []string{"Patient"},
+		ResourceIDs:    []string{"pat-1"},
+		Op:             "U",
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
+
+	memPub := automq.NewMemoryPublisher()
+	activities.Producer = memPub
+	err = activities.PublishToAutoMQ(context.Background(), activity.PublishToAutoMQInput{
+		TenantID:       "test-tenant",
+		ResourceProtos: [][]byte{{1, 2, 3}},
+		ResourceTypes:  []string{"Patient"},
+		ResourceIDs:    []string{"pat-1"},
+		Op:             "U",
+	})
+	require.NoError(t, err)
+	msgs := memPub.Messages()
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "test-tenant", msgs[0].TenantID)
+	assert.Equal(t, "Patient", msgs[0].ResType)
+	assert.Equal(t, "pat-1", msgs[0].ResID)
+	assert.Equal(t, "U", msgs[0].Op)
+
+	err = activities.WriteMedplumBatch(context.Background(), activity.WriteMedplumBatchInput{
+		TenantID:       "test-tenant",
+		ResourceProtos: [][]byte{{1, 2, 3}},
+		ResourceTypes:  []string{"Patient"},
+		ResourceIDs:    []string{"pat-1"},
+	})
+	require.NoError(t, err)
 }
 
 func TestActivities_SliceBoundsAndNilStoreValidation(t *testing.T) {

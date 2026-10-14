@@ -81,7 +81,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		// Ensure path is /fhir/r4/{tenant}/...
 		if len(parts) < 3 || parts[0] != "fhir" || parts[1] != "r4" {
-			next.ServeHTTP(w, r)
+			ctx := auth.WithSecurityContext(r.Context(), secCtx)
+			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
@@ -114,6 +115,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionSearch) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("insufficient scope for terminology operation on %s", resType))
+							return
+						}
+					} else if isMeasureOp(parts) {
+						if !auth.Allows(secCtx, "Measure", auth.ActionRead) && !auth.Allows(secCtx, "Measure", auth.ActionSearch) &&
+							!auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Measure/$evaluate-measure")
 							return
 						}
 					} else if resType == "_history" || resType == "$meta" {
@@ -192,6 +200,19 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionSearch) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("insufficient scope for terminology operation on %s", resType))
+							return
+						}
+					} else if isMeasureOp(parts) {
+						if !auth.Allows(secCtx, "Measure", auth.ActionRead) && !auth.Allows(secCtx, "Measure", auth.ActionSearch) &&
+							!auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Measure/$evaluate-measure")
+							return
+						}
+					} else if len(parts) == 5 && resType == "cds-services" {
+						if !auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for CDS Hooks service invocation")
 							return
 						}
 					} else if len(parts) == 5 && strings.EqualFold(resType, "Patient") && parts[4] == "$match" {
@@ -406,6 +427,9 @@ func isPublicEndpoint(parts []string) bool {
 	if parts[0] == "oauth2" || parts[0] == "healthz" || parts[0] == "readyz" || parts[0] == "metrics" {
 		return true
 	}
+	if len(parts) == 1 && parts[0] == "cds-services" {
+		return true
+	}
 	for _, p := range parts {
 		if strings.HasPrefix(p, ".well-known") {
 			return true
@@ -414,7 +438,10 @@ func isPublicEndpoint(parts []string) bool {
 	if len(parts) < 3 {
 		return false
 	}
-	if len(parts) == 3 && (parts[2] == "openapi.json" || parts[2] == "$docs" || parts[2] == "healthz" || parts[2] == "readyz" || parts[2] == "metrics") {
+	if len(parts) == 3 && (parts[2] == "openapi.json" || parts[2] == "$docs" || parts[2] == "cds-services" || parts[2] == "healthz" || parts[2] == "readyz" || parts[2] == "metrics") {
+		return true
+	}
+	if len(parts) == 4 && parts[3] == "cds-services" {
 		return true
 	}
 	if len(parts) >= 4 && (parts[3] == "metadata" || parts[3] == "openapi.json" || parts[3] == "$docs" || parts[3] == "healthz" || parts[3] == "readyz" || parts[3] == "metrics") {
@@ -680,6 +707,16 @@ func isTerminologyOp(parts []string) bool {
 	if len(parts) == 6 {
 		return (strings.EqualFold(parts[3], "ValueSet") && (parts[5] == "$expand" || parts[5] == "$validate-code")) ||
 			(strings.EqualFold(parts[3], "CodeSystem") && parts[5] == "$lookup")
+	}
+	return false
+}
+
+func isMeasureOp(parts []string) bool {
+	if len(parts) == 5 {
+		return strings.EqualFold(parts[3], "Measure") && parts[4] == "$evaluate-measure"
+	}
+	if len(parts) == 6 {
+		return strings.EqualFold(parts[3], "Measure") && parts[5] == "$evaluate-measure"
 	}
 	return false
 }

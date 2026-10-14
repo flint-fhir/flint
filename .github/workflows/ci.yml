@@ -87,3 +87,11 @@ jobs:
       - name: SQLMesh Lakehouse Unit Tests (DuckDB)
         run: uv run --project analytics sqlmesh --paths analytics test
 
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build production Docker image
+        run: docker build -t flint-fhir/flint:ci .
+

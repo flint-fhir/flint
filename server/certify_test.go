@@ -724,6 +724,10 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 		"/_history",
 		"/$meta",
 		"/$certify",
+		"/Measure/$evaluate-measure",
+		"/Measure/{id}/$evaluate-measure",
+		"/cds-services",
+		"/cds-services/{serviceId}",
 		"/Patient/$match",
 		"/Patient/$meta",
 		"/Patient/{id}/$meta",
@@ -764,5 +768,61 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 	respBadAssert.Body.Close()
 	if respBadAssert.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected 400 Bad Request for malformed client_assertion, got %d", respBadAssert.StatusCode)
+	}
+
+	// 9. Track 5: Clinical Quality Measures (Measure/$evaluate-measure) & CDS Hooks v2.0 (patient-view care gap)
+	cqmParams := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "measure", "valueUri": "http://hl7.org/fhir/us/cqfmeasures/Measure/CMS122"},
+			{"name": "periodStart", "valueDate": "2025-01-01"},
+			{"name": "periodEnd", "valueDate": "2027-01-01"},
+			{"name": "reportType", "valueCode": "summary"}
+		]
+	}`
+	respCQM, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/Measure/$evaluate-measure", "application/fhir+json", strings.NewReader(cqmParams))
+	if err != nil || respCQM.StatusCode != http.StatusOK {
+		t.Fatalf("POST /Measure/$evaluate-measure failed: %v / %d", err, respCQM.StatusCode)
+	}
+	var cqmReport map[string]any
+	_ = json.NewDecoder(respCQM.Body).Decode(&cqmReport)
+	respCQM.Body.Close()
+	if cqmReport["resourceType"] != "MeasureReport" || cqmReport["type"] != "summary" {
+		t.Errorf("expected summary MeasureReport, got %v", cqmReport)
+	}
+
+	// CDS Hooks patient-view care gap on patient with hypertension in inline prefetch
+	cdsViewReq := `{
+		"hook": "patient-view",
+		"hookInstance": "test-htn-view-1",
+		"fhirServer": "` + ts.URL + `/fhir/r4/` + tenant + `",
+		"context": {"userId": "Practitioner/prac-1", "patientId": "hard-pat-1"},
+		"prefetch": {
+			"conditions": {
+				"resourceType": "Bundle",
+				"type": "searchset",
+				"entry": [
+					{
+						"resource": {
+							"resourceType": "Condition",
+							"id": "cond-htn-inline",
+							"code": {"coding": [{"system": "http://snomed.info/sct", "code": "59621000", "display": "Essential hypertension"}]},
+							"subject": {"reference": "Patient/hard-pat-1"}
+						}
+					}
+				]
+			}
+		}
+	}`
+	respCDSView, err := http.Post(ts.URL+"/cds-services/flint-hypertension-care-gap", "application/json", strings.NewReader(cdsViewReq))
+	if err != nil || respCDSView.StatusCode != http.StatusOK {
+		t.Fatalf("POST /cds-services/flint-hypertension-care-gap failed: %v / %d", err, respCDSView.StatusCode)
+	}
+	var cdsViewOut map[string]any
+	_ = json.NewDecoder(respCDSView.Body).Decode(&cdsViewOut)
+	respCDSView.Body.Close()
+	viewCards, _ := cdsViewOut["cards"].([]any)
+	if len(viewCards) != 1 {
+		t.Errorf("expected 1 warning card from flint-hypertension-care-gap, got %d", len(viewCards))
 	}
 }

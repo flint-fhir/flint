@@ -715,7 +715,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		"/$certify": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"System Operations"},
-				"summary":     "Run 34-check automated FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) certification suite",
+				"summary":     "Run 36-check automated FHIR R4, US Core v6.1.0 & v7.0.0, CQM, CDS Hooks, and ONC (g)(10) certification suite",
 				"operationId": "runCertificationSuiteGet",
 				"responses": map[string]any{
 					"200": map[string]any{"description": "HL7 FHIR R4 TestReport resource"},
@@ -723,10 +723,85 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			},
 			"post": map[string]any{
 				"tags":        []string{"System Operations"},
-				"summary":     "Run 34-check automated FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) certification suite",
+				"summary":     "Run 36-check automated FHIR R4, US Core v6.1.0 & v7.0.0, CQM, CDS Hooks, and ONC (g)(10) certification suite",
 				"operationId": "runCertificationSuitePost",
 				"responses": map[string]any{
 					"200": map[string]any{"description": "HL7 FHIR R4 TestReport resource"},
+				},
+			},
+		},
+		"/Measure/$evaluate-measure": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Clinical Quality Measures (eCQM)"},
+				"summary":     "Evaluate a Clinical Quality Measure (e.g. CMS165, CMS122) across a cohort or individual patient",
+				"operationId": "evaluateMeasureGet",
+				"parameters": []map[string]any{
+					{"name": "measure", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "periodStart", "in": "query", "required": false, "schema": map[string]any{"type": "string", "format": "date"}},
+					{"name": "periodEnd", "in": "query", "required": false, "schema": map[string]any{"type": "string", "format": "date"}},
+					{"name": "subject", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "reportType", "in": "query", "required": false, "schema": map[string]any{"type": "string", "enum": []string{"individual", "summary", "subject-list"}}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "HL7 FHIR R4 MeasureReport resource"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Clinical Quality Measures (eCQM)"},
+				"summary":     "Evaluate a Clinical Quality Measure via FHIR Parameters POST body",
+				"operationId": "evaluateMeasurePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "HL7 FHIR R4 MeasureReport resource"},
+				},
+			},
+		},
+		"/Measure/{id}/$evaluate-measure": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Clinical Quality Measures (eCQM)"},
+				"summary":     "Evaluate a Clinical Quality Measure by Measure ID (e.g. cms165-bp-control, cms122-diabetes-hba1c)",
+				"operationId": "evaluateMeasureByIdGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "periodStart", "in": "query", "required": false, "schema": map[string]any{"type": "string", "format": "date"}},
+					{"name": "periodEnd", "in": "query", "required": false, "schema": map[string]any{"type": "string", "format": "date"}},
+					{"name": "subject", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "HL7 FHIR R4 MeasureReport resource"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Clinical Quality Measures (eCQM)"},
+				"summary":     "Evaluate a Clinical Quality Measure by Measure ID via Parameters POST body",
+				"operationId": "evaluateMeasureByIdPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "HL7 FHIR R4 MeasureReport resource"},
+				},
+			},
+		},
+		"/cds-services": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"CDS Hooks v2.0"},
+				"summary":     "Discover built-in HL7 CDS Hooks v2.0 Clinical Decision Support services",
+				"operationId": "discoverCDSServices",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "CDS Hooks v2.0 Service Discovery List"},
+				},
+			},
+		},
+		"/cds-services/{serviceId}": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"CDS Hooks v2.0"},
+				"summary":     "Invoke an HL7 CDS Hooks v2.0 service (patient-view, order-select) with automatic prefetch hydration",
+				"operationId": "invokeCDSService",
+				"parameters": []map[string]any{
+					{"name": "serviceId", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "CDS Hooks v2.0 Cards response"},
 				},
 			},
 		},
