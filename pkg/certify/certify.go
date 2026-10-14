@@ -991,6 +991,84 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	record("SUB-01", suite5, "FHIR R4 Subscription (rest-hook) Lifecycle & Criteria Activation", t0, err, "Transitioned Subscription from requested -> active & verified rest-hook criteria")
 
 	t0 = time.Now()
+	resp, b, err = doReq(http.MethodGet, basePath+"/Measure/cms165-bp-control/$evaluate-measure?periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/cert-pat-1", "", nil, nil)
+	if err == nil && resp.StatusCode != http.StatusOK {
+		err = fmt.Errorf("expected 200 OK on GET /Measure/cms165-bp-control/$evaluate-measure, got %d: %s", resp.StatusCode, string(b))
+	}
+	if err == nil {
+		var mr map[string]any
+		_ = json.Unmarshal(b, &mr)
+		if mr["resourceType"] != "MeasureReport" || mr["status"] != "complete" || mr["type"] != "individual" {
+			err = fmt.Errorf("expected complete individual MeasureReport, got %s", string(b))
+		} else if groups, ok := mr["group"].([]any); !ok || len(groups) == 0 {
+			err = fmt.Errorf("expected non-empty group in MeasureReport: %s", string(b))
+		} else if gm, ok := groups[0].(map[string]any); ok {
+			if ms, ok := gm["measureScore"].(map[string]any); !ok || ms["value"] != 1.0 {
+				err = fmt.Errorf("expected CMS165 measureScore.value == 1.0 for controlled BP patient cert-pat-1, got %v", gm["measureScore"])
+			}
+		}
+	}
+	record("CQM-01", suite5, "Clinical Quality Measures (Measure/$evaluate-measure CMS165 eCQM)", t0, err, "Evaluated CMS165 Controlling High Blood Pressure MeasureReport (score=1.0)")
+
+	t0 = time.Now()
+	resp, b, err = doReq(http.MethodGet, basePath+"/cds-services", "", nil, nil)
+	if err == nil && resp.StatusCode != http.StatusOK {
+		err = fmt.Errorf("expected 200 OK on GET /cds-services, got %d: %s", resp.StatusCode, string(b))
+	}
+	if err == nil {
+		var disc map[string]any
+		_ = json.Unmarshal(b, &disc)
+		svcs, _ := disc["services"].([]any)
+		if len(svcs) < 3 {
+			err = fmt.Errorf("expected at least 3 CDS Hooks services, got %d", len(svcs))
+		}
+	}
+	if err == nil {
+		cdsReq := []byte(`{
+			"hook": "order-select",
+			"hookInstance": "cert-cds-inst-1",
+			"context": {
+				"userId": "Practitioner/cert-prac-1",
+				"patientId": "cert-pat-1",
+				"draftOrders": {
+					"resourceType": "Bundle",
+					"type": "collection",
+					"entry": [
+						{
+							"resource": {
+								"resourceType": "MedicationRequest",
+								"id": "draft-penicillin-1",
+								"status": "draft",
+								"intent": "order",
+								"subject": {"reference": "Patient/cert-pat-1"},
+								"medicationCodeableConcept": {
+									"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "7980", "display": "Penicillin G"}]
+								}
+							}
+						}
+					]
+				}
+			}
+		}`)
+		respCDS, bCDS, errCDS := doReq(http.MethodPost, basePath+"/cds-services/flint-medication-allergy-check", "application/json", cdsReq, nil)
+		if errCDS != nil {
+			err = errCDS
+		} else if respCDS.StatusCode != http.StatusOK {
+			err = fmt.Errorf("expected 200 OK on POST /cds-services/flint-medication-allergy-check, got %d: %s", respCDS.StatusCode, string(bCDS))
+		} else {
+			var cardsResp map[string]any
+			_ = json.Unmarshal(bCDS, &cardsResp)
+			cards, _ := cardsResp["cards"].([]any)
+			if len(cards) == 0 {
+				err = fmt.Errorf("expected critical allergy conflict card from CDS Hook, got 0 cards")
+			} else if cm, ok := cards[0].(map[string]any); !ok || cm["indicator"] != "critical" {
+				err = fmt.Errorf("expected critical indicator on allergy conflict card, got %v", cards[0])
+			}
+		}
+	}
+	record("CDS-01", suite5, "HL7 CDS Hooks v2.0 Discovery & Medication-Allergy Safety Check", t0, err, "Verified /cds-services discovery & critical allergy contraindication card")
+
+	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/AuditEvent?_count=20", "", nil, nil)
 	if err == nil && resp.StatusCode != http.StatusOK {
 		err = fmt.Errorf("expected 200 OK on GET /AuditEvent, got %d: %s", resp.StatusCode, string(b))

@@ -205,11 +205,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCConfig)
 
-	// Discovery & OpenAPI 3.1 / Interactive Explorer endpoints
+	// Discovery & OpenAPI 3.1 / Interactive Explorer / CDS Hooks v2.0 endpoints
 	mux.HandleFunc("GET /fhir/r4/openapi.json", s.handleOpenAPI)
 	mux.HandleFunc("GET /fhir/r4/$docs", s.handleDocsUI)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/openapi.json", s.handleOpenAPI)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$docs", s.handleDocsUI)
+	mux.HandleFunc("GET /cds-services", s.handleCDSServicesDiscovery)
+	mux.HandleFunc("POST /cds-services/{serviceId}", s.handleCDSServiceInvoke)
+	mux.HandleFunc("GET /fhir/r4/cds-services", s.handleCDSServicesDiscovery)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/cds-services", s.handleCDSServicesDiscovery)
 
 	// FHIR Bulk Data Access ($export — ONC (g)(10)) & Automated Conformance Certification ($certify)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$export", s.handleSystemExport)
@@ -253,6 +257,11 @@ func (s *Server) Handler() http.Handler {
 	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet || r.Method == http.MethodPost {
 			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			if len(parts) == 4 && parts[0] == "fhir" && parts[1] == "r4" && parts[2] == "cds-services" && r.Method == http.MethodPost {
+				r.SetPathValue("serviceId", parts[3])
+				s.handleCDSServiceInvoke(w, r)
+				return
+			}
 			if len(parts) == 5 && parts[0] == "fhir" && parts[1] == "r4" {
 				if r.Method == http.MethodGet && parts[4] == "_history" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
@@ -264,6 +273,17 @@ func (s *Server) Handler() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
 					s.handleMeta(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && parts[3] == "cds-services" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("serviceId", parts[4])
+					s.handleCDSServiceInvoke(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Measure") && parts[4] == "$evaluate-measure" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleEvaluateMeasure(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "ValueSet") && parts[4] == "$expand" {
@@ -283,6 +303,12 @@ func (s *Server) Handler() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Measure") && parts[5] == "$evaluate-measure" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleEvaluateMeasure(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "ValueSet") && parts[5] == "$expand" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -2034,6 +2060,13 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			"searchParam":       sp,
 		}
 		switch rt {
+		case "Measure":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "evaluate-measure",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Measure-evaluate-measure",
+				},
+			}
 		case "ValueSet":
 			entry["operation"] = []map[string]string{
 				{
@@ -2122,6 +2155,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "match",
 						"definition": "http://hl7.org/fhir/OperationDefinition/Patient-match",
+					},
+					{
+						"name":       "evaluate-measure",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Measure-evaluate-measure",
 					},
 					{
 						"name":       "meta",

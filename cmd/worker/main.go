@@ -4,10 +4,12 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"log/slog"
 	"os"
+	"strings"
 
 	_ "github.com/lib/pq"
 	"go.temporal.io/sdk/client"
@@ -23,7 +25,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	// Connect to Temporal
-	temporalAddr := envOrDefault("TEMPORAL_ADDRESS", "localhost:7233")
+	temporalAddr := firstEnvOrDefault([]string{"FLINT_TEMPORAL_ADDR", "TEMPORAL_ADDRESS"}, "localhost:7233")
 	c, err := client.Dial(client.Options{HostPort: temporalAddr})
 	if err != nil {
 		log.Fatalf("temporal connect %s: %v", temporalAddr, err)
@@ -31,40 +33,50 @@ func main() {
 	defer c.Close()
 	logger.Info("connected to temporal", "addr", temporalAddr)
 
-	// Connect to Postgres
-	pgDSN := envOrDefault("FLINT_POSTGRES_DSN", "postgres://flint:flint@localhost:5432/flint?sslmode=disable")
+	// Connect to Postgres and run migrations
+	pgDSN := firstEnvOrDefault([]string{"FLINT_POSTGRES_DSN"}, "postgres://flint:flint@localhost:5432/flint?sslmode=disable")
 	db, err := sql.Open("postgres", pgDSN)
 	if err != nil {
 		log.Fatalf("postgres open: %v", err)
 	}
 	defer db.Close()
+	if err := postgres.RunMigrations(context.Background(), db); err != nil {
+		log.Fatalf("postgres migrations: %v", err)
+	}
 	store := postgres.New(db)
 	logger.Info("connected to postgres")
 
 	// Connect to AutoMQ (optional)
 	var producer *automq.Producer
-	brokers := os.Getenv("AUTOMQ_BROKERS")
-	if brokers != "" {
-		producer, err = automq.NewProducer(automq.Config{
-			Brokers:     []string{brokers},
-			TopicPrefix: envOrDefault("AUTOMQ_TOPIC_PREFIX", "fhir."),
-			Logger:      logger,
-		})
-		if err != nil {
-			log.Fatalf("automq connect %s: %v", brokers, err)
+	rawBrokers := firstEnvOrDefault([]string{"FLINT_AUTOMQ_BROKERS", "AUTOMQ_BROKERS"}, "")
+	if rawBrokers != "" {
+		var brokers []string
+		for b := range strings.SplitSeq(rawBrokers, ",") {
+			if trimmed := strings.TrimSpace(b); trimmed != "" {
+				brokers = append(brokers, trimmed)
+			}
 		}
-		defer producer.Close()
-		logger.Info("connected to automq", "brokers", brokers)
+		if len(brokers) > 0 {
+			producer, err = automq.NewProducer(automq.Config{
+				Brokers:     brokers,
+				TopicPrefix: firstEnvOrDefault([]string{"FLINT_AUTOMQ_TOPIC_PREFIX", "AUTOMQ_TOPIC_PREFIX"}, "fhir."),
+				Logger:      logger,
+			})
+			if err != nil {
+				log.Fatalf("automq connect %v: %v", brokers, err)
+			}
+			defer producer.Close()
+			logger.Info("connected to automq", "brokers", brokers)
+		}
 	} else {
 		logger.Warn("AUTOMQ_BROKERS not set, AutoMQ publishing disabled")
 	}
 
-	// Create activities with all dependencies
+	// Create activities with all dependencies (all 146 FHIR R4 resource types indexed)
 	activities := &activity.Activities{
-		Store:    store,
-		Producer: producer,
-		Logger:   logger,
-		// IndexExtractors populated with Big 5 proto2type extractors
+		Store:           store,
+		Producer:        producer,
+		Logger:          logger,
 		IndexExtractors: postgres.DefaultIndexExtractors(),
 	}
 
@@ -79,9 +91,11 @@ func main() {
 	}
 }
 
-func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
+func firstEnvOrDefault(keys []string, def string) string {
+	for _, key := range keys {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
 	}
 	return def
 }
