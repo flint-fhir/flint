@@ -65,6 +65,7 @@ type SearchParams struct {
 	Missing          map[string]bool         // sp_name → :missing=true/false
 	Chained          []ChainedParam          // chained search parameters (e.g. patient.name=Smith)
 	Has              []HasParam              // reverse-chained search parameters (e.g. _has:Observation:patient:code=8867-4)
+	List             []string                // _list cohort membership filters (e.g. _list=list-1)
 	Includes         []IncludeParam          // _include parameters
 	RevIncludes      []IncludeParam          // _revinclude parameters
 	Sort             []SortSpec              // _sort specifications
@@ -305,100 +306,204 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		}
 	}
 
-	// 6. Chained search parameters (e.g. Observation?patient.name=Smith, Observation?patient.identifier=MRN|123, Observation?patient.gender=female)
+	// 6. Chained search parameters (e.g. Observation?patient.name=Smith, Observation?subject:Patient.name:exact=Smith, Observation?patient.organization=Organization/org-1)
 	for _, chained := range params.Chained {
 		joinIdx++
 		refAlias := fmt.Sprintf("crf%d", joinIdx)
 		targetAlias := fmt.Sprintf("ctg%d", joinIdx)
 
+		targetParam, targetMod := splitParamModifier(chained.TargetParam)
+		if chained.TargetModifier != "" {
+			targetMod = chained.TargetModifier
+		}
+
 		paramType := chained.ParamType
 		if paramType == "" {
 			switch {
-			case chained.TargetParam == "_id":
+			case targetParam == "_id":
 				paramType = "id"
-			case knownStringSearchParams[chained.TargetParam]:
+			case knownStringSearchParams[targetParam]:
 				paramType = "string"
-			case knownDateSearchParams[chained.TargetParam]:
+			case knownDateSearchParams[targetParam]:
 				paramType = "date"
-			case knownQuantitySearchParams[chained.TargetParam]:
+			case knownQuantitySearchParams[targetParam]:
 				paramType = "quantity"
+			case knownRefSearchParams[targetParam]:
+				paramType = "reference"
 			default:
 				paramType = "token"
 			}
 		}
 
 		if paramType == "id" {
-			targetID := chained.Value
-			if slashIdx := strings.LastIndex(targetID, "/"); slashIdx != -1 {
-				targetID = targetID[slashIdx+1:]
+			var targetIDs []string
+			for part := range strings.SplitSeq(chained.Value, ",") {
+				tid := strings.TrimSpace(part)
+				if tid == "" {
+					continue
+				}
+				if slashIdx := strings.LastIndex(tid, "/"); slashIdx != -1 {
+					tid = tid[slashIdx+1:]
+				}
+				targetIDs = append(targetIDs, tid)
 			}
-			joins = append(joins, fmt.Sprintf(
-				"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.target_type = $%d AND %s.target_id = $%d",
-				refAlias, refAlias, refAlias, refAlias, refAlias, len(args)+1, refAlias, len(args)+2, refAlias, len(args)+3,
-			))
-			args = append(args, chained.RefParam, chained.TargetType, targetID)
+			if len(targetIDs) == 0 {
+				continue
+			}
+			if chained.TargetType != "" {
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s.target_type = $%d OR %s.target_type = '') AND %s.target_id = ANY($%d)",
+					refAlias, refAlias, refAlias, refAlias, refAlias, len(args)+1, refAlias, len(args)+2, refAlias, refAlias, len(args)+3,
+				))
+				args = append(args, chained.RefParam, chained.TargetType, pq.Array(targetIDs))
+			} else {
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.target_id = ANY($%d)",
+					refAlias, refAlias, refAlias, refAlias, refAlias, len(args)+1, refAlias, len(args)+2,
+				))
+				args = append(args, chained.RefParam, pq.Array(targetIDs))
+			}
 			continue
 		}
 
-		joins = append(joins, fmt.Sprintf(
-			"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.target_type = $%d",
-			refAlias, refAlias, refAlias, refAlias, refAlias, len(args)+1, refAlias, len(args)+2,
-		))
-		args = append(args, chained.RefParam, chained.TargetType)
+		var targetTypeCond string
+		if chained.TargetType != "" {
+			joins = append(joins, fmt.Sprintf(
+				"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s.target_type = $%d OR %s.target_type = '')",
+				refAlias, refAlias, refAlias, refAlias, refAlias, len(args)+1, refAlias, len(args)+2, refAlias,
+			))
+			args = append(args, chained.RefParam, chained.TargetType)
+			targetTypeCond = fmt.Sprintf("%s.res_type = $%d", targetAlias, len(args))
+		} else {
+			joins = append(joins, fmt.Sprintf(
+				"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d",
+				refAlias, refAlias, refAlias, refAlias, refAlias, len(args)+1,
+			))
+			args = append(args, chained.RefParam)
+			targetTypeCond = fmt.Sprintf("%s.res_type = %s.target_type", targetAlias, refAlias)
+		}
 
 		switch paramType {
 		case "token":
-			if parts := strings.SplitN(chained.Value, "|", 2); len(parts) == 2 {
-				joins = append(joins, fmt.Sprintf(
-					"JOIN spidx_token %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s.sp_system = $%d AND %s.sp_value = $%d",
-					targetAlias, targetAlias, targetAlias, len(args)+1, targetAlias, refAlias, targetAlias, len(args)+2, targetAlias, len(args)+3, targetAlias, len(args)+4,
-				))
-				args = append(args, chained.TargetType, chained.TargetParam, parts[0], parts[1])
-			} else if isEnumTokenParam(chained.TargetParam) {
-				normVal := strings.ToLower(strings.ReplaceAll(chained.Value, "_", "-"))
-				upperVal := strings.ToUpper(strings.ReplaceAll(chained.Value, "-", "_"))
-				joins = append(joins, fmt.Sprintf(
-					"JOIN spidx_token %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s.sp_value IN ($%d, $%d, $%d)",
-					targetAlias, targetAlias, targetAlias, len(args)+1, targetAlias, refAlias, targetAlias, len(args)+2, targetAlias, len(args)+3, len(args)+4, len(args)+5,
-				))
-				args = append(args, chained.TargetType, chained.TargetParam, chained.Value, normVal, upperVal)
+			spIdx := len(args) + 1
+			args = append(args, targetParam)
+			var orConds []string
+			for part := range strings.SplitSeq(chained.Value, ",") {
+				item := strings.TrimSpace(part)
+				if item == "" {
+					continue
+				}
+				if parts := strings.SplitN(item, "|", 2); len(parts) == 2 {
+					sys, code := parts[0], parts[1]
+					if sys == "" {
+						orConds = append(orConds, fmt.Sprintf("(%s.sp_system = '' AND %s.sp_value = $%d)", targetAlias, targetAlias, len(args)+1))
+						args = append(args, code)
+					} else if code == "" {
+						orConds = append(orConds, fmt.Sprintf("(%s.sp_system = $%d)", targetAlias, len(args)+1))
+						args = append(args, sys)
+					} else {
+						orConds = append(orConds, fmt.Sprintf("(%s.sp_system = $%d AND %s.sp_value = $%d)", targetAlias, len(args)+1, targetAlias, len(args)+2))
+						args = append(args, sys, code)
+					}
+				} else if isEnumTokenParam(targetParam) {
+					normVal := strings.ToLower(strings.ReplaceAll(item, "_", "-"))
+					upperVal := strings.ToUpper(strings.ReplaceAll(item, "-", "_"))
+					orConds = append(orConds, fmt.Sprintf("(%s.sp_value IN ($%d, $%d, $%d))", targetAlias, len(args)+1, len(args)+2, len(args)+3))
+					args = append(args, item, normVal, upperVal)
+				} else {
+					orConds = append(orConds, fmt.Sprintf("(%s.sp_value = $%d)", targetAlias, len(args)+1))
+					args = append(args, item)
+				}
+			}
+			if len(orConds) == 0 {
+				continue
+			}
+			if targetMod == "not" {
+				whereExtra += fmt.Sprintf(
+					" AND NOT EXISTS (SELECT 1 FROM spidx_token %s WHERE %s.tenant_id = r.tenant_id AND %s AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND (%s))",
+					targetAlias, targetAlias, targetTypeCond, targetAlias, refAlias, targetAlias, spIdx, strings.Join(orConds, " OR "),
+				)
 			} else {
 				joins = append(joins, fmt.Sprintf(
-					"JOIN spidx_token %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s.sp_value = $%d",
-					targetAlias, targetAlias, targetAlias, len(args)+1, targetAlias, refAlias, targetAlias, len(args)+2, targetAlias, len(args)+3,
+					"JOIN spidx_token %s ON %s.tenant_id = r.tenant_id AND %s AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND (%s)",
+					targetAlias, targetAlias, targetTypeCond, targetAlias, refAlias, targetAlias, spIdx, strings.Join(orConds, " OR "),
 				))
-				args = append(args, chained.TargetType, chained.TargetParam, chained.Value)
 			}
 		case "date":
 			if dOp, err := ParseDateOp(chained.Value); err == nil {
-				tTypeIdx := len(args) + 1
-				spIdx := len(args) + 2
-				args = append(args, chained.TargetType, chained.TargetParam)
+				spIdx := len(args) + 1
+				args = append(args, targetParam)
 				cond, dateArgs := buildDateCondition(targetAlias, dOp, len(args))
 				args = append(args, dateArgs...)
 				joins = append(joins, fmt.Sprintf(
-					"JOIN spidx_date %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s",
-					targetAlias, targetAlias, targetAlias, tTypeIdx, targetAlias, refAlias, targetAlias, spIdx, cond,
+					"JOIN spidx_date %s ON %s.tenant_id = r.tenant_id AND %s AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s",
+					targetAlias, targetAlias, targetTypeCond, targetAlias, refAlias, targetAlias, spIdx, cond,
 				))
 			}
 		case "quantity":
 			if qOp, err := ParseQuantityOp(chained.Value); err == nil {
-				tTypeIdx := len(args) + 1
-				spIdx := len(args) + 2
-				args = append(args, chained.TargetType, chained.TargetParam)
+				spIdx := len(args) + 1
+				args = append(args, targetParam)
 				cond, qArgs := buildQuantityCondition(targetAlias, qOp, len(args))
 				args = append(args, qArgs...)
 				joins = append(joins, fmt.Sprintf(
-					"JOIN spidx_quantity %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s",
-					targetAlias, targetAlias, targetAlias, tTypeIdx, targetAlias, refAlias, targetAlias, spIdx, cond,
+					"JOIN spidx_quantity %s ON %s.tenant_id = r.tenant_id AND %s AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s",
+					targetAlias, targetAlias, targetTypeCond, targetAlias, refAlias, targetAlias, spIdx, cond,
 				))
 			}
-		default:
-			joins = append(joins, fmt.Sprintf(
-				`JOIN spidx_string %s ON %s.tenant_id = r.tenant_id AND %s.res_type = $%d AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND %s.sp_value LIKE $%d ESCAPE '\'`,
-				targetAlias, targetAlias, targetAlias, len(args)+1, targetAlias, refAlias, targetAlias, len(args)+2, targetAlias, len(args)+3,
-			))
-			args = append(args, chained.TargetType, chained.TargetParam, escapeLikePattern(strings.ToLower(chained.Value))+"%")
+		case "reference":
+			spIdx := len(args) + 1
+			args = append(args, targetParam)
+			var orConds []string
+			for part := range strings.SplitSeq(chained.Value, ",") {
+				item := strings.TrimSpace(part)
+				if item == "" {
+					continue
+				}
+				if parts := strings.SplitN(item, "/", 2); len(parts) == 2 {
+					orConds = append(orConds, fmt.Sprintf("(%s.target_type = $%d AND %s.target_id = $%d)", targetAlias, len(args)+1, targetAlias, len(args)+2))
+					args = append(args, parts[0], parts[1])
+				} else if targetMod != "" {
+					orConds = append(orConds, fmt.Sprintf("(%s.target_type = $%d AND %s.target_id = $%d)", targetAlias, len(args)+1, targetAlias, len(args)+2))
+					args = append(args, targetMod, item)
+				} else {
+					orConds = append(orConds, fmt.Sprintf("(%s.target_id = $%d)", targetAlias, len(args)+1))
+					args = append(args, item)
+				}
+			}
+			if len(orConds) > 0 {
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND (%s)",
+					targetAlias, targetAlias, targetTypeCond, targetAlias, refAlias, targetAlias, spIdx, strings.Join(orConds, " OR "),
+				))
+			}
+		default: // string
+			spIdx := len(args) + 1
+			args = append(args, targetParam)
+			var orConds []string
+			for part := range strings.SplitSeq(chained.Value, ",") {
+				v := strings.ToLower(strings.TrimSpace(part))
+				if v == "" {
+					continue
+				}
+				switch targetMod {
+				case "exact":
+					orConds = append(orConds, fmt.Sprintf("%s.sp_value = $%d", targetAlias, len(args)+1))
+					args = append(args, v)
+				case "contains":
+					orConds = append(orConds, fmt.Sprintf(`%s.sp_value LIKE $%d ESCAPE '\'`, targetAlias, len(args)+1))
+					args = append(args, "%"+escapeLikePattern(v)+"%")
+				default:
+					orConds = append(orConds, fmt.Sprintf(`%s.sp_value LIKE $%d ESCAPE '\'`, targetAlias, len(args)+1))
+					args = append(args, escapeLikePattern(v)+"%")
+				}
+			}
+			if len(orConds) > 0 {
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_string %s ON %s.tenant_id = r.tenant_id AND %s AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND (%s)",
+					targetAlias, targetAlias, targetTypeCond, targetAlias, refAlias, targetAlias, spIdx, strings.Join(orConds, " OR "),
+				))
+			}
 		}
 	}
 
@@ -409,6 +514,30 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 			whereExtra += " AND " + cond
 			args = append(args, hasArgs...)
 		}
+	}
+
+	// 6c. Cohort membership search (_list=<listId>)
+	for _, rawListVal := range params.List {
+		var listIDs []string
+		for part := range strings.SplitSeq(rawListVal, ",") {
+			lid := strings.TrimSpace(part)
+			if lid == "" {
+				continue
+			}
+			if slashIdx := strings.LastIndex(lid, "/"); slashIdx != -1 {
+				lid = lid[slashIdx+1:]
+			}
+			listIDs = append(listIDs, lid)
+		}
+		if len(listIDs) == 0 {
+			continue
+		}
+		listIdx := len(args) + 1
+		args = append(args, pq.Array(listIDs))
+		whereExtra += fmt.Sprintf(
+			" AND EXISTS (SELECT 1 FROM spidx_reference lrf JOIN fhir_resource lr ON lr.tenant_id = lrf.tenant_id AND lr.res_type = lrf.res_type AND lr.res_id = lrf.res_id AND lr.is_deleted = FALSE WHERE lrf.tenant_id = r.tenant_id AND lrf.res_type IN ('List', 'Group') AND lrf.res_id = ANY($%d) AND lrf.sp_name IN ('item', 'member', 'entity') AND lrf.target_id = r.res_id AND (lrf.target_type = r.res_type OR lrf.target_type = ''))",
+			listIdx,
+		)
 	}
 
 	joinClause := strings.Join(joins, "\n")

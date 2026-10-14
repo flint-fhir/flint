@@ -1069,6 +1069,107 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	record("CDS-01", suite5, "HL7 CDS Hooks v2.0 Discovery & Medication-Allergy Safety Check", t0, err, "Verified /cds-services discovery & critical allergy contraindication card")
 
 	t0 = time.Now()
+	resp, b, err = doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$summary", "", nil, nil)
+	if err == nil && resp.StatusCode != http.StatusOK {
+		err = fmt.Errorf("expected 200 OK on GET /Patient/cert-pat-1/$summary, got %d: %s", resp.StatusCode, string(b))
+	}
+	if err == nil {
+		var ipsBundle map[string]any
+		_ = json.Unmarshal(b, &ipsBundle)
+		if ipsBundle["resourceType"] != "Bundle" || ipsBundle["type"] != "document" {
+			err = fmt.Errorf("expected Bundle of type document from $summary, got %v", ipsBundle["type"])
+		} else if entries, ok := ipsBundle["entry"].([]any); !ok || len(entries) < 5 {
+			err = fmt.Errorf("expected >= 5 entries in IPS document Bundle, got %d", len(entries))
+		} else if firstEntry, ok := entries[0].(map[string]any); ok {
+			res, _ := firstEntry["resource"].(map[string]any)
+			if res["resourceType"] != "Composition" || !strings.Contains(string(b), `"60591-5"`) {
+				err = fmt.Errorf("expected first entry in IPS Bundle to be LOINC 60591-5 Composition, got %v", res["resourceType"])
+			}
+		}
+	}
+	record("IPS-01", suite5, "HL7 International Patient Summary (Patient/{id}/$summary Document Bundle)", t0, err, "Assembled LOINC 60591-5 IPS Composition & clinical sections")
+
+	t0 = time.Now()
+	{
+		err = nil
+		// 1. Da Vinci PDex/HRex $member-match
+		mmReq := []byte(`{
+			"resourceType": "Parameters",
+			"parameter": [
+				{
+					"name": "MemberPatient",
+					"resource": {
+						"resourceType": "Patient",
+						"name": [{"family": "Certify", "given": ["Alice"]}],
+						"birthDate": "1985-04-12",
+						"gender": "female"
+					}
+				},
+				{
+					"name": "CoverageToMatch",
+					"resource": {
+						"resourceType": "Coverage",
+						"status": "active",
+						"subscriberId": "SUB-CERT-1",
+						"beneficiary": {"reference": "Patient/cert-pat-1"},
+						"payor": [{"reference": "Organization/cert-org-1"}]
+					}
+				}
+			]
+		}`)
+		respMM, bMM, errMM := doReq(http.MethodPost, basePath+"/Patient/$member-match", "application/fhir+json", mmReq, nil)
+		if errMM != nil || respMM.StatusCode != http.StatusOK || !strings.Contains(string(bMM), `"MemberIdentifier"`) || !strings.Contains(string(bMM), `"Patient/cert-pat-1"`) {
+			err = fmt.Errorf("expected 200 OK with MemberIdentifier and Patient/cert-pat-1 from $member-match, got %d: %s", respMM.StatusCode, string(bMM))
+		}
+
+		// 2. Da Vinci PAS Claim/$submit
+		if err == nil {
+			claimBody := []byte(`{
+				"resourceType": "Claim",
+				"id": "cert-claim-1",
+				"status": "active",
+				"type": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/claim-type", "code": "professional"}]},
+				"use": "preauthorization",
+				"patient": {"reference": "Patient/cert-pat-1"},
+				"created": "2026-01-15",
+				"provider": {"reference": "Practitioner/cert-prac-1"},
+				"priority": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/processpriority", "code": "normal"}]},
+				"insurance": [{"sequence": 1, "focal": true, "coverage": {"reference": "Coverage/cert-cov-1"}}]
+			}`)
+			respClm, bClm, errClm := doReq(http.MethodPost, basePath+"/Claim/$submit", "application/fhir+json", claimBody, nil)
+			if errClm != nil || respClm.StatusCode != http.StatusOK || !strings.Contains(string(bClm), `"ClaimResponse"`) || !strings.Contains(string(bClm), `"complete"`) {
+				err = fmt.Errorf("expected 200 OK ClaimResponse with outcome=complete from Claim/$submit, got %d: %s", respClm.StatusCode, string(bClm))
+			}
+		}
+
+		// 3. Cohort _list search & Forward Chaining (:exact, :not, reference chaining)
+		if err == nil {
+			listBody := []byte(`{
+				"resourceType": "List",
+				"id": "cert-list-1",
+				"status": "current",
+				"mode": "working",
+				"entry": [
+					{"item": {"reference": "Patient/cert-pat-1"}}
+				]
+			}`)
+			respLst, bLst, errLst := doReq(http.MethodPut, basePath+"/List/cert-list-1", "application/fhir+json", listBody, nil)
+			if errLst != nil || (respLst.StatusCode != http.StatusOK && respLst.StatusCode != http.StatusCreated) {
+				err = fmt.Errorf("failed creating List/cert-list-1: %d %s", respLst.StatusCode, string(bLst))
+			} else {
+				respQList, bQList, errQList := doReq(http.MethodGet, basePath+"/Patient?_list=cert-list-1", "", nil, nil)
+				respChain, bChain, errChain := doReq(http.MethodGet, basePath+"/Observation?subject:Patient.name:exact=Certify&patient.organization=Organization/cert-org-1&patient.gender:not=male", "", nil, nil)
+				if errQList != nil || respQList.StatusCode != http.StatusOK || !strings.Contains(string(bQList), `"cert-pat-1"`) {
+					err = fmt.Errorf("expected Patient?_list=cert-list-1 to return cert-pat-1, got %s", string(bQList))
+				} else if errChain != nil || respChain.StatusCode != http.StatusOK || !strings.Contains(string(bChain), `"cert-obs-1"`) {
+					err = fmt.Errorf("expected chained Observation search (:exact, reference, :not) to return cert-obs-1, got %s", string(bChain))
+				}
+			}
+		}
+	}
+	record("DAVINCI-01", suite5, "Da Vinci ($member-match, Claim/$submit), _list Cohort & Enhanced Forward Chaining", t0, err, "Verified $member-match, Claim/$submit ClaimResponse, _list=cert-list-1 & chained modifiers")
+
+	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/AuditEvent?_count=20", "", nil, nil)
 	if err == nil && resp.StatusCode != http.StatusOK {
 		err = fmt.Errorf("expected 200 OK on GET /AuditEvent, got %d: %s", resp.StatusCode, string(b))
@@ -1442,6 +1543,8 @@ func defaultCertifyCohortBundle() []byte {
 					"resourceType": "Coverage",
 					"id": "cert-cov-1",
 					"status": "active",
+					"subscriberId": "SUB-CERT-1",
+					"identifier": [{"system": "http://hospital.example.org/coverage", "value": "SUB-CERT-1"}],
 					"type": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "HIP"}]},
 					"beneficiary": {"reference": "Patient/cert-pat-1"},
 					"payor": [{"reference": "Organization/cert-org-1"}]

@@ -215,10 +215,30 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								"insufficient scope for CDS Hooks service invocation")
 							return
 						}
-					} else if len(parts) == 5 && strings.EqualFold(resType, "Patient") && parts[4] == "$match" {
+					} else if len(parts) == 5 && strings.EqualFold(resType, "Patient") && (parts[4] == "$match" || parts[4] == "$member-match") {
 						if !auth.Allows(secCtx, "Patient", auth.ActionSearch) && !auth.Allows(secCtx, "Patient", auth.ActionRead) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-								"insufficient scope for Patient/$match")
+								"insufficient scope for Patient/"+parts[4])
+							return
+						}
+					} else if len(parts) == 5 && strings.EqualFold(resType, "Claim") && parts[4] == "$submit" {
+						if !auth.Allows(secCtx, "Claim", auth.ActionCreate) && !auth.Allows(secCtx, "Claim", auth.ActionUpdate) &&
+							!auth.Allows(secCtx, "Claim", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionRead) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Claim/$submit")
+							return
+						}
+					} else if len(parts) == 6 && strings.EqualFold(resType, "Patient") && parts[5] == "$summary" {
+						id := parts[4]
+						if !auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Patient/$summary")
+							return
+						}
+						if auth.IsPatientRestricted(secCtx) && cleanID(id) != cleanID(secCtx.GetPatientId()) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("patient-scoped token (%s) cannot access $summary for patient %s",
+									secCtx.GetPatientId(), id))
 							return
 						}
 					} else if len(parts) == 6 && (parts[5] == "$meta-add" || parts[5] == "$meta-delete") {

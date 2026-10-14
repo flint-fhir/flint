@@ -47,17 +47,17 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Advanced Search Engine",
-			Capability:    "Date/Quantity Ranges, Chained Search, _has Reverse Chaining, _include / _revinclude (:iterate), Multi-field _sort, _summary / _elements (SUBSETTED), _total=none, Bundle.link Pagination, POST /_search",
+			Capability:    "Date/Quantity Ranges, Chained Search (:exact/:contains/:not & reference), _has Reverse Chaining, _list Cohort Search, _include / _revinclude (:iterate), Multi-field _sort, _summary / _elements (SUBSETTED), _total=none, Bundle.link Pagination, POST /_search",
 			Specification: "HL7 FHIR R4 Search",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/{resourceType}?_include=...",
 		},
 		{
-			Category:      "Patient Compartment & MPI Operations",
-			Capability:    "Patient/$everything Longitudinal Record Assembly, Patient/$match (MPI Matching), $meta / $meta-add / $meta-delete & RESTful Compartment Search (GET /Patient/{id}/{resourceType})",
-			Specification: "HL7 FHIR R4 OperationDefinition/Patient-everything, Patient-match, Resource-meta & CompartmentDefinition",
+			Category:      "Patient Compartment, IPS & Da Vinci Operations",
+			Capability:    "Patient/$everything, Patient/{id}/$summary (HL7 IPS), Patient/$match (MPI), Patient/$member-match (Da Vinci HRex), Claim/$submit (Da Vinci PAS), $meta / $meta-add / $meta-delete & RESTful Compartment Search",
+			Specification: "HL7 FHIR R4, International Patient Summary (IPS) & Da Vinci HRex/PDex/PAS",
 			Status:        "Verified",
-			Endpoint:      "/fhir/r4/{tenant}/Patient/$match",
+			Endpoint:      "/fhir/r4/{tenant}/Patient/{id}/$summary",
 		},
 		{
 			Category:      "Terminology Services",
@@ -82,7 +82,7 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Conformance, Validation & Certification",
-			Capability:    "StructureDefinition & ValueSet Validation ($validate, 26 US Core v6.1.0 & v7.0.0 Profiles) & 34-Check Automated Certification ($certify)",
+			Capability:    "StructureDefinition & ValueSet Validation ($validate, 26 US Core v6.1.0 & v7.0.0 Profiles) & 38-Check Automated Certification ($certify)",
 			Specification: "HL7 FHIR R4 OperationDefinition/Resource-validate & TestReport",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/$certify",
@@ -103,7 +103,7 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Analytical Lakehouse",
-			Capability:    "AutoMQ CDC -> Iceberg Table Topics -> SQLMesh Patient 360 Marts",
+			Capability:    "AutoMQ CDC -> Iceberg Table Topics -> SQLMesh Patient 360 & CMS165 / CMS122 eCQM Marts",
 			Specification: "Apache Iceberg + SQLMesh (DuckDB)",
 			Status:        "Verified",
 			Endpoint:      "analytics/models/mart_patient_360.sql",
@@ -1053,6 +1053,52 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Patient/$member-match": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "HL7 Da Vinci PDex/HRex $member-match operation matching MemberPatient and CoverageToMatch",
+				"operationId": "patientMemberMatch",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing matched MemberIdentifier and Patient reference"},
+					"422": map[string]any{"description": "Zero or multiple ambiguous member matches"},
+				},
+			},
+		},
+		"/Patient/{id}/$summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "Generate HL7 International Patient Summary (IPS) document Bundle ($summary, LOINC 60591-5)",
+				"operationId": "patientSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: document) starting with IPS Composition"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "Generate HL7 International Patient Summary (IPS) document Bundle ($summary, POST)",
+				"operationId": "patientSummaryPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: document) starting with IPS Composition"},
+				},
+			},
+		},
+		"/Claim/$submit": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Claim"},
+				"summary":     "HL7 Da Vinci PAS / FHIR R4 Claim/$submit real-time claim & prior authorization adjudication",
+				"operationId": "claimSubmit",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Adjudicated FHIR R4 ClaimResponse resource"},
+					"400": map[string]any{"description": "Validation error OperationOutcome"},
+				},
+			},
+		},
 		"/Patient/{id}/$everything": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Patient"},
@@ -1132,6 +1178,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			{"name": "_include:iterate", "in": "query", "description": "Iterative multi-hop forward reference include", "schema": map[string]any{"type": "string"}},
 			{"name": "_revinclude:iterate", "in": "query", "description": "Iterative multi-hop reverse reference include", "schema": map[string]any{"type": "string"}},
 			{"name": "_has", "in": "query", "description": "Reverse chained search filter (e.g. _has:Observation:patient:code=8867-4)", "schema": map[string]any{"type": "string"}},
+			{"name": "_list", "in": "query", "description": "Cohort membership search against a FHIR List or Group ID", "schema": map[string]any{"type": "string"}},
 		}
 		seenParam := map[string]bool{"_id": true, "_lastUpdated": true}
 		for _, sp := range spDefs[rt] {

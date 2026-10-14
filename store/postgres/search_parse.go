@@ -34,13 +34,14 @@ type IncludeParam struct {
 	Iterate    bool   // true when requested via _include:iterate or _revinclude:iterate
 }
 
-// ChainedParam represents a chained parameter like "patient.name=Smith".
+// ChainedParam represents a chained parameter like "patient.name=Smith" or "subject:Patient.name:exact=Smith".
 type ChainedParam struct {
-	RefParam    string // e.g. "patient" or "subject"
-	TargetType  string // Inferred or known target type, e.g. "Patient"
-	TargetParam string // e.g. "name", "family", "gender"
-	ParamType   string // "string", "token", "date", "quantity"
-	Value       string // Search value
+	RefParam       string // e.g. "patient" or "subject"
+	TargetType     string // Inferred or explicit target type, e.g. "Patient" (empty when polymorphic without :TargetType)
+	TargetParam    string // Base target search parameter, e.g. "name", "family", "gender", "organization"
+	TargetModifier string // Optional modifier on targetParam, e.g. "exact", "contains", "not"
+	ParamType      string // "id", "string", "token", "date", "quantity", "reference"
+	Value          string // Search value
 }
 
 // HasParam represents a FHIR R4 reverse-chaining parameter (_has:SourceType:refParam:searchParam=value).
@@ -192,7 +193,7 @@ func ParseInclude(raw string) (IncludeParam, error) {
 }
 
 // ParseChainedParam checks if a query parameter key represents a chained search.
-// Format: "refParam.targetParam" or "refParam:TargetType.targetParam"
+// Format: "refParam.targetParam", "refParam:TargetType.targetParam", or "refParam:TargetType.targetParam:modifier"
 func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 	dotIdx := strings.IndexByte(key, '.')
 	if dotIdx == -1 {
@@ -200,7 +201,11 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 	}
 
 	left := key[:dotIdx]
-	targetParam := key[dotIdx+1:]
+	targetParamRaw := key[dotIdx+1:]
+	if strings.TrimSpace(left) == "" || strings.TrimSpace(targetParamRaw) == "" {
+		return nil, false
+	}
+	targetParam, targetMod := splitParamModifier(targetParamRaw)
 
 	refParam := left
 	targetType := ""
@@ -213,18 +218,22 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 	// Default inferred target types for standard FHIR references if not explicit
 	if targetType == "" {
 		switch refParam {
-		case "patient", "subject", "beneficiary":
+		case "patient", "subject", "beneficiary", "subscriber":
 			targetType = "Patient"
 		case "encounter":
 			targetType = "Encounter"
 		case "performer", "general-practitioner", "requester", "asserter", "recorder", "results-interpreter", "collector", "practitioner", "author", "agent":
 			targetType = "Practitioner"
-		case "organization", "partof", "manufacturer", "intended-dispenser", "payor", "custodian":
+		case "organization", "partof", "part-of", "manufacturer", "intended-dispenser", "payor", "custodian":
 			targetType = "Organization"
 		case "location":
 			targetType = "Location"
 		case "medication":
 			targetType = "Medication"
+		case "device":
+			targetType = "Device"
+		case "questionnaire":
+			targetType = "Questionnaire"
 		}
 	}
 
@@ -238,14 +247,17 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 		paramType = "date"
 	case knownQuantitySearchParams[targetParam]:
 		paramType = "quantity"
+	case knownRefSearchParams[targetParam]:
+		paramType = "reference"
 	}
 
 	return &ChainedParam{
-		RefParam:    refParam,
-		TargetType:  targetType,
-		TargetParam: targetParam,
-		ParamType:   paramType,
-		Value:       value,
+		RefParam:       refParam,
+		TargetType:     targetType,
+		TargetParam:    targetParam,
+		TargetModifier: targetMod,
+		ParamType:      paramType,
+		Value:          value,
 	}, true
 }
 
@@ -367,6 +379,7 @@ var (
 		"payor": true, "subscriber": true, "practitioner": true, "device": true,
 		"questionnaire": true, "source": true, "care-team": true, "goal": true,
 		"focus": true, "owner": true, "for": true, "actor": true,
+		"item": true, "member": true, "entity": true,
 	}
 	knownDateSearchParams = map[string]bool{
 		"birthdate": true, "date": true, "onset-date": true,
@@ -408,6 +421,11 @@ func ValidateSearchQuery(q url.Values) error {
 			if err != nil || n < 0 {
 				return fmt.Errorf("invalid _offset parameter %q: must be a non-negative integer", v)
 			}
+		}
+	}
+	for _, listVal := range q["_list"] {
+		if strings.TrimSpace(listVal) == "" {
+			return fmt.Errorf("invalid _list parameter: empty value")
 		}
 	}
 	for _, k := range []string{"_include", "_include:iterate", "_include:recurse"} {
@@ -524,6 +542,11 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 		TotalMode:        strings.ToLower(strings.TrimSpace(q.Get("_total"))),
 	}
 
+	for _, listRaw := range q["_list"] {
+		if trimmed := strings.TrimSpace(listRaw); trimmed != "" {
+			params.List = append(params.List, trimmed)
+		}
+	}
 	for _, elRaw := range q["_elements"] {
 		for part := range strings.SplitSeq(elRaw, ",") {
 			if trimmed := strings.TrimSpace(part); trimmed != "" {
@@ -739,5 +762,6 @@ func HasSearchCriteria(p SearchParams) bool {
 		len(p.ReferenceFilters) > 0 ||
 		len(p.Missing) > 0 ||
 		len(p.Chained) > 0 ||
-		len(p.Has) > 0
+		len(p.Has) > 0 ||
+		len(p.List) > 0
 }
