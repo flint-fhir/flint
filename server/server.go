@@ -281,6 +281,16 @@ func (s *Server) Handler() http.Handler {
 					s.handleCDSServiceInvoke(w, r)
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$member-match" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientMemberMatch(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Claim") && parts[4] == "$submit" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleClaimSubmit(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Measure") && parts[4] == "$evaluate-measure" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleEvaluateMeasure(w, r)
@@ -303,6 +313,12 @@ func (s *Server) Handler() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientSummary(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Measure") && parts[5] == "$evaluate-measure" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -1449,6 +1465,18 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		for _, ch := range params.Chained {
+			if ch.TargetType != "" && !auth.Allows(secCtx, ch.TargetType, auth.ActionRead) && !auth.Allows(secCtx, ch.TargetType, auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope for chained search target %s", ch.TargetType))
+				return
+			}
+		}
+		if len(params.List) > 0 && !auth.Allows(secCtx, "List", auth.ActionRead) && !auth.Allows(secCtx, "List", auth.ActionSearch) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				"insufficient scope for _list cohort search (requires List read/search scope)")
+			return
+		}
 
 		// Enforce SMART v2 granular sub-resource scope constraints (e.g. patient/Observation.rs?category=laboratory)
 		if constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionSearch); constrained {
@@ -2153,8 +2181,20 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 						"definition": "http://hl7.org/fhir/OperationDefinition/Patient-everything",
 					},
 					{
+						"name":       "summary",
+						"definition": "http://hl7.org/fhir/uv/ips/OperationDefinition/summary",
+					},
+					{
 						"name":       "match",
 						"definition": "http://hl7.org/fhir/OperationDefinition/Patient-match",
+					},
+					{
+						"name":       "member-match",
+						"definition": "http://hl7.org/fhir/us/davinci-hrex/OperationDefinition/member-match",
+					},
+					{
+						"name":       "submit",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Claim-submit",
 					},
 					{
 						"name":       "evaluate-measure",

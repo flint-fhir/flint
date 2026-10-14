@@ -729,6 +729,9 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 		"/cds-services",
 		"/cds-services/{serviceId}",
 		"/Patient/$match",
+		"/Patient/$member-match",
+		"/Patient/{id}/$summary",
+		"/Claim/$submit",
 		"/Patient/$meta",
 		"/Patient/{id}/$meta",
 		"/Patient/{id}/$meta-add",
@@ -824,5 +827,72 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 	viewCards, _ := cdsViewOut["cards"].([]any)
 	if len(viewCards) != 1 {
 		t.Errorf("expected 1 warning card from flint-hypertension-care-gap, got %d", len(viewCards))
+	}
+
+	// 10. Track 6: IPS Patient/{id}/$summary, Da Vinci $member-match, Claim/$submit, _list Cohort, & Forward Chaining
+	// Cross-patient $summary with token restricted to hard-pat-1 -> 403 Forbidden
+	if r, _ := doAuthed(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/hard-pat-2/$summary", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on cross-patient /Patient/hard-pat-2/$summary, got %d", r.StatusCode)
+	}
+	// Own-patient $summary with granular Vital Signs scope -> 200 OK, strips social-history obs-social-1 and keeps obs-vital-1
+	if r, b := doAuthed(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/hard-pat-1/$summary", ""); r.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK on /Patient/hard-pat-1/$summary, got %d: %s", r.StatusCode, b)
+	} else if strings.Contains(string(b), "obs-social-1") || !strings.Contains(string(b), "obs-vital-1") {
+		t.Errorf("expected IPS $summary to include obs-vital-1 and exclude obs-social-1 under granular scope, got: %s", b)
+	}
+
+	// Da Vinci $member-match negative case (no matching patient) -> 422 Unprocessable Entity
+	mmNoMatch := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{
+				"name": "MemberPatient",
+				"resource": {"resourceType": "Patient", "name": [{"family": "NonExistentMember999"}]}
+			},
+			{
+				"name": "CoverageToMatch",
+				"resource": {"resourceType": "Coverage", "status": "active", "subscriberId": "NO-SUCH-SUB"}
+			}
+		]
+	}`
+	respMMNo, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/Patient/$member-match", "application/fhir+json", strings.NewReader(mmNoMatch))
+	if err != nil {
+		t.Fatalf("POST /Patient/$member-match no-match: %v", err)
+	}
+	respMMNo.Body.Close()
+	if respMMNo.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("expected 422 Unprocessable Entity on unmatched $member-match, got %d", respMMNo.StatusCode)
+	}
+
+	// Da Vinci PAS Claim/$submit with Bundle payload -> 200 OK ClaimResponse
+	pasBundle := `{
+		"resourceType": "Bundle",
+		"type": "collection",
+		"entry": [
+			{
+				"resource": {
+					"resourceType": "Claim",
+					"id": "hard-claim-pas-1",
+					"status": "active",
+					"type": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/claim-type", "code": "institutional"}]},
+					"use": "preauthorization",
+					"patient": {"reference": "Patient/hard-pat-1"},
+					"created": "2026-01-15",
+					"provider": {"reference": "Organization/bnd-org-1"},
+					"priority": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/processpriority", "code": "normal"}]},
+					"insurance": [{"sequence": 1, "focal": true, "coverage": {"reference": "Coverage/cov-1"}}],
+					"item": [{"sequence": 1, "productOrService": {"coding": [{"system": "http://www.ama-assn.org/go/cpt", "code": "99213"}]}, "net": {"value": 150.0, "currency": "USD"}}]
+				}
+			}
+		]
+	}`
+	respPAS, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/Claim/$submit", "application/fhir+json", strings.NewReader(pasBundle))
+	if err != nil || respPAS.StatusCode != http.StatusOK {
+		t.Fatalf("POST /Claim/$submit Bundle failed: %v / %d", err, respPAS.StatusCode)
+	}
+	bPAS, _ := io.ReadAll(respPAS.Body)
+	respPAS.Body.Close()
+	if !strings.Contains(string(bPAS), `"ClaimResponse"`) || !strings.Contains(string(bPAS), `"PA-HARD-CLAIM-PAS-1"`) {
+		t.Errorf("expected ClaimResponse with preAuthRef PA-HARD-CLAIM-PAS-1, got %s", string(bPAS))
 	}
 }

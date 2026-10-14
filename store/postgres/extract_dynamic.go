@@ -539,6 +539,13 @@ func mapReferenceSpNames(resType, fieldName, parentField string) []string {
 		return []string{"partof"}
 	case "based_on":
 		return []string{"based-on"}
+	case "item":
+		return []string{"item"}
+	case "entity":
+		if resType == "Group" {
+			return []string{"member", "entity"}
+		}
+		return []string{"entity"}
 	default:
 		return []string{strings.ReplaceAll(effective, "_", "-")}
 	}

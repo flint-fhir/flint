@@ -1,0 +1,116 @@
+test_mart_ecqm_cms165_bp_control_cohort:
+  model: flint_marts.mart_ecqm_cms165_bp_control
+  inputs:
+    flint_marts.dim_patient:
+      rows:
+        - tenant_id: "tenant-a"
+          patient_id: "pat-controlled"
+          full_name: "Alice Controlled"
+          family_name: "Controlled"
+          given_name: "Alice"
+          gender: "female"
+          birth_date: "1975-03-10"
+          active: true
+          postal_code: "94105"
+          updated_at: "2026-10-01 10:00:00+00:00"
+        - tenant_id: "tenant-a"
+          patient_id: "pat-uncontrolled"
+          full_name: "Bob Uncontrolled"
+          family_name: "Uncontrolled"
+          given_name: "Bob"
+          gender: "male"
+          birth_date: "1968-07-22"
+          active: true
+          postal_code: "94107"
+          updated_at: "2026-10-01 10:00:00+00:00"
+    flint_marts.fct_condition:
+      rows:
+        - tenant_id: "tenant-a"
+          condition_id: "cond-htn-1"
+          patient_id: "pat-controlled"
+          code_system: "http://snomed.info/sct"
+          code: "59621000"
+          clinical_status: "active"
+          verification_status: "confirmed"
+          onset_date: "2024-01-15"
+          updated_at: "2026-10-01 10:00:00+00:00"
+        - tenant_id: "tenant-a"
+          condition_id: "cond-htn-2"
+          patient_id: "pat-uncontrolled"
+          code_system: "http://snomed.info/sct"
+          code: "59621000"
+          clinical_status: "active"
+          verification_status: "confirmed"
+          onset_date: "2023-05-20"
+          updated_at: "2026-10-01 10:00:00+00:00"
+    flint_marts.fct_observation:
+      rows:
+        - tenant_id: "tenant-a"
+          observation_id: "obs-sys-1"
+          patient_id: "pat-controlled"
+          status: "final"
+          code_system: "http://loinc.org"
+          code: "8480-6"
+          value_quantity: 126.0
+          value_unit: "mm[Hg]"
+          effective_datetime: "2026-10-05 09:00:00+00:00"
+          updated_at: "2026-10-05 09:00:00+00:00"
+        - tenant_id: "tenant-a"
+          observation_id: "obs-dia-1"
+          patient_id: "pat-controlled"
+          status: "final"
+          code_system: "http://loinc.org"
+          code: "8462-4"
+          value_quantity: 82.0
+          value_unit: "mm[Hg]"
+          effective_datetime: "2026-10-05 09:00:00+00:00"
+          updated_at: "2026-10-05 09:00:00+00:00"
+        - tenant_id: "tenant-a"
+          observation_id: "obs-sys-2"
+          patient_id: "pat-uncontrolled"
+          status: "final"
+          code_system: "http://loinc.org"
+          code: "96608-5"
+          value_quantity: 154.0
+          value_unit: "mm[Hg]"
+          effective_datetime: "2026-10-06 10:00:00+00:00"
+          updated_at: "2026-10-06 10:00:00+00:00"
+        - tenant_id: "tenant-a"
+          observation_id: "obs-dia-2"
+          patient_id: "pat-uncontrolled"
+          status: "final"
+          code_system: "http://loinc.org"
+          code: "96609-3"
+          value_quantity: 96.0
+          value_unit: "mm[Hg]"
+          effective_datetime: "2026-10-06 10:00:00+00:00"
+          updated_at: "2026-10-06 10:00:00+00:00"
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          patient_id: "pat-controlled"
+          full_name: "Alice Controlled"
+          gender: "female"
+          birth_date: "1975-03-10"
+          initial_population: true
+          denominator: true
+          denominator_exclusion: false
+          latest_systolic_mmhg: 126.0
+          latest_diastolic_mmhg: 82.0
+          latest_bp_datetime: "2026-10-05 09:00:00+00:00"
+          numerator: true
+          care_gap_status: "CONTROLLED"
+        - tenant_id: "tenant-a"
+          patient_id: "pat-uncontrolled"
+          full_name: "Bob Uncontrolled"
+          gender: "male"
+          birth_date: "1968-07-22"
+          initial_population: true
+          denominator: true
+          denominator_exclusion: false
+          latest_systolic_mmhg: 154.0
+          latest_diastolic_mmhg: 96.0
+          latest_bp_datetime: "2026-10-06 10:00:00+00:00"
+          numerator: false
+          care_gap_status: "UNCONTROLLED_BP"

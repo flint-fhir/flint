@@ -1,0 +1,94 @@
+test_mart_ecqm_cms122_diabetes_a1c_cohort:
+  model: flint_marts.mart_ecqm_cms122_diabetes_a1c
+  inputs:
+    flint_marts.dim_patient:
+      rows:
+        - tenant_id: "tenant-a"
+          patient_id: "pat-dm-good"
+          full_name: "Carol Controlled"
+          family_name: "Controlled"
+          given_name: "Carol"
+          gender: "female"
+          birth_date: "1980-11-04"
+          active: true
+          postal_code: "94105"
+          updated_at: "2026-10-01 10:00:00+00:00"
+        - tenant_id: "tenant-a"
+          patient_id: "pat-dm-poor"
+          full_name: "Dan PoorControl"
+          family_name: "PoorControl"
+          given_name: "Dan"
+          gender: "male"
+          birth_date: "1972-02-18"
+          active: true
+          postal_code: "94107"
+          updated_at: "2026-10-01 10:00:00+00:00"
+    flint_marts.fct_condition:
+      rows:
+        - tenant_id: "tenant-a"
+          condition_id: "cond-dm-1"
+          patient_id: "pat-dm-good"
+          code_system: "http://snomed.info/sct"
+          code: "44054006"
+          clinical_status: "active"
+          verification_status: "confirmed"
+          onset_date: "2022-04-01"
+          updated_at: "2026-10-01 10:00:00+00:00"
+        - tenant_id: "tenant-a"
+          condition_id: "cond-dm-2"
+          patient_id: "pat-dm-poor"
+          code_system: "http://snomed.info/sct"
+          code: "44054006"
+          clinical_status: "active"
+          verification_status: "confirmed"
+          onset_date: "2021-08-12"
+          updated_at: "2026-10-01 10:00:00+00:00"
+    flint_marts.fct_observation:
+      rows:
+        - tenant_id: "tenant-a"
+          observation_id: "obs-a1c-1"
+          patient_id: "pat-dm-good"
+          status: "final"
+          code_system: "http://loinc.org"
+          code: "4548-4"
+          value_quantity: 6.8
+          value_unit: "%"
+          effective_datetime: "2026-10-05 09:00:00+00:00"
+          updated_at: "2026-10-05 09:00:00+00:00"
+        - tenant_id: "tenant-a"
+          observation_id: "obs-a1c-2"
+          patient_id: "pat-dm-poor"
+          status: "final"
+          code_system: "http://loinc.org"
+          code: "4548-4"
+          value_quantity: 9.6
+          value_unit: "%"
+          effective_datetime: "2026-10-06 10:00:00+00:00"
+          updated_at: "2026-10-06 10:00:00+00:00"
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          patient_id: "pat-dm-good"
+          full_name: "Carol Controlled"
+          gender: "female"
+          birth_date: "1980-11-04"
+          initial_population: true
+          denominator: true
+          denominator_exclusion: false
+          latest_hba1c_pct: 6.8
+          latest_hba1c_datetime: "2026-10-05 09:00:00+00:00"
+          numerator_poor_control: false
+          care_gap_status: "WELL_CONTROLLED"
+        - tenant_id: "tenant-a"
+          patient_id: "pat-dm-poor"
+          full_name: "Dan PoorControl"
+          gender: "male"
+          birth_date: "1972-02-18"
+          initial_population: true
+          denominator: true
+          denominator_exclusion: false
+          latest_hba1c_pct: 9.6
+          latest_hba1c_datetime: "2026-10-06 10:00:00+00:00"
+          numerator_poor_control: true
+          care_gap_status: "POOR_CONTROL_GT_9"
