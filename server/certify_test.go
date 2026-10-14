@@ -722,7 +722,13 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 		"/readyz",
 		"/metrics",
 		"/_history",
+		"/$meta",
 		"/$certify",
+		"/Patient/$match",
+		"/Patient/$meta",
+		"/Patient/{id}/$meta",
+		"/Patient/{id}/$meta-add",
+		"/Patient/{id}/$meta-delete",
 		"/ValueSet/$expand",
 		"/ValueSet/{id}/$expand",
 		"/ValueSet/$validate-code",
@@ -734,5 +740,29 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 		if _, ok := specPaths[requiredPath]; !ok {
 			t.Errorf("expected OpenAPI 3.1.0 spec paths to include %q", requiredPath)
 		}
+	}
+
+	// 8. Track 4: System/Type $meta & private_key_jwt negative validation checks
+	for _, metaURL := range []string{
+		ts.URL + "/fhir/r4/" + tenant + "/$meta",
+		ts.URL + "/fhir/r4/" + tenant + "/Patient/$meta",
+		ts.URL + "/fhir/r4/" + tenant + "/Patient/hard-pat-1/$meta",
+	} {
+		respMeta, err := http.Get(metaURL)
+		if err != nil || respMeta.StatusCode != http.StatusOK {
+			t.Fatalf("GET %s failed: %v / %d", metaURL, err, respMeta.StatusCode)
+		}
+		respMeta.Body.Close()
+	}
+
+	// Reject malformed client_assertion_type or invalid client_assertion JWT on /oauth2/token
+	respBadAssert, err := http.Post(ts.URL+"/oauth2/token", "application/x-www-form-urlencoded",
+		strings.NewReader("grant_type=client_credentials&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer&client_assertion=not.a.jwt"))
+	if err != nil {
+		t.Fatalf("POST /oauth2/token invalid client_assertion: %v", err)
+	}
+	respBadAssert.Body.Close()
+	if respBadAssert.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for malformed client_assertion, got %d", respBadAssert.StatusCode)
 	}
 }

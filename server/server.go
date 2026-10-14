@@ -224,6 +224,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/AuditEvent/{id}", s.handleReadAuditEvent)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/AuditEvent", s.handleSearchAuditEvents)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/AuditEvent/_search", s.handleSearchAuditEvents)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/Patient/$match", s.handlePatientMatch)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$meta", s.handleMeta)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/$meta", s.handleMeta)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/{id}/$meta-add", s.handleMetaAdd)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/{id}/$meta-delete", s.handleMetaDelete)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/$everything", s.handlePatientEverything)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history/{vid}", s.handleVRead)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history", s.handleInstanceHistory)
@@ -253,6 +258,12 @@ func (s *Server) Handler() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
 					s.handleInstanceHistory(w, r)
+					return
+				}
+				if r.Method == http.MethodGet && parts[4] == "$meta" && !strings.HasPrefix(parts[3], "$") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					s.handleMeta(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "ValueSet") && parts[4] == "$expand" {
@@ -297,7 +308,7 @@ func (s *Server) Handler() http.Handler {
 					s.handleExportFile(w, r)
 					return
 				}
-				if r.Method == http.MethodGet && strings.EqualFold(parts[3], "Patient") && parts[5] != "$everything" && parts[5] != "$export" && parts[5] != "_history" {
+				if r.Method == http.MethodGet && strings.EqualFold(parts[3], "Patient") && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("patientId", parts[4])
 					r.SetPathValue("resourceType", parts[5])
@@ -1953,6 +1964,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					"definition": "http://hl7.org/fhir/OperationDefinition/Patient-everything",
 				},
 				{
+					"name":       "match",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Patient-match",
+				},
+				{
 					"name":       "export",
 					"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/patient-export",
 				},
@@ -2103,6 +2118,22 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "everything",
 						"definition": "http://hl7.org/fhir/OperationDefinition/Patient-everything",
+					},
+					{
+						"name":       "match",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Patient-match",
+					},
+					{
+						"name":       "meta",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Resource-meta",
+					},
+					{
+						"name":       "meta-add",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Resource-meta-add",
+					},
+					{
+						"name":       "meta-delete",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Resource-meta-delete",
 					},
 					{
 						"name":       "export",

@@ -1,0 +1,845 @@
+package server
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"sort"
+	"strings"
+
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/dynamicpb"
+
+	"github.com/flint-fhir/flint/automq"
+	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/pkg/fhirutil"
+	"github.com/flint-fhir/flint/store/postgres"
+)
+
+type patientDemographics struct {
+	identifiers []codingKey
+	families    []string
+	givens      []string
+	birthDate   string
+	gender      string
+	postalCodes []string
+	telecoms    []string
+}
+
+type codingKey struct {
+	system string
+	code   string
+}
+
+func extractPatientDemographics(pat map[string]any) patientDemographics {
+	var d patientDemographics
+	if rawIDs, ok := pat["identifier"].([]any); ok {
+		for _, item := range rawIDs {
+			if m, ok := item.(map[string]any); ok {
+				sys := strings.ToLower(strings.TrimSpace(stringField(m, "system")))
+				val := strings.ToLower(strings.TrimSpace(stringField(m, "value")))
+				if val != "" {
+					d.identifiers = append(d.identifiers, codingKey{system: sys, code: val})
+				}
+			}
+		}
+	}
+	if rawNames, ok := pat["name"].([]any); ok {
+		for _, item := range rawNames {
+			if m, ok := item.(map[string]any); ok {
+				if fam := strings.ToLower(strings.TrimSpace(stringField(m, "family"))); fam != "" {
+					d.families = append(d.families, fam)
+				}
+				if givs, ok := m["given"].([]any); ok {
+					for _, g := range givs {
+						if gs, ok := g.(string); ok {
+							if trimmed := strings.ToLower(strings.TrimSpace(gs)); trimmed != "" {
+								d.givens = append(d.givens, trimmed)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	d.birthDate = strings.TrimSpace(stringField(pat, "birthDate"))
+	d.gender = strings.ToLower(strings.TrimSpace(stringField(pat, "gender")))
+	if rawAddrs, ok := pat["address"].([]any); ok {
+		for _, item := range rawAddrs {
+			if m, ok := item.(map[string]any); ok {
+				if pc := strings.ToLower(strings.TrimSpace(stringField(m, "postalCode"))); pc != "" {
+					d.postalCodes = append(d.postalCodes, pc)
+				}
+			}
+		}
+	}
+	if rawTel, ok := pat["telecom"].([]any); ok {
+		for _, item := range rawTel {
+			if m, ok := item.(map[string]any); ok {
+				if v := normalizeTelecomValue(stringField(m, "value")); v != "" {
+					d.telecoms = append(d.telecoms, v)
+				}
+			}
+		}
+	}
+	return d
+}
+
+func (d patientDemographics) isEmpty() bool {
+	return len(d.identifiers) == 0 &&
+		len(d.families) == 0 &&
+		len(d.givens) == 0 &&
+		d.birthDate == "" &&
+		d.gender == "" &&
+		len(d.postalCodes) == 0 &&
+		len(d.telecoms) == 0
+}
+
+func normalizeTelecomValue(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if strings.Contains(s, "@") {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func stringField(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	if s, ok := m[key].(string); ok {
+		return s
+	}
+	return ""
+}
+
+func scorePatientCandidate(target, cand patientDemographics) float64 {
+	score := 0.0
+
+	// 1. Identifier match (+0.50)
+	idMatched := false
+	for _, tid := range target.identifiers {
+		for _, cid := range cand.identifiers {
+			if tid.code == cid.code && (tid.system == "" || cid.system == "" || tid.system == cid.system) {
+				idMatched = true
+				break
+			}
+		}
+		if idMatched {
+			break
+		}
+	}
+	if idMatched {
+		score += 0.50
+	}
+
+	// 2. Family name match (+0.15)
+	famMatched := false
+	for _, tf := range target.families {
+		for _, cf := range cand.families {
+			if tf == cf {
+				famMatched = true
+				break
+			}
+		}
+		if famMatched {
+			break
+		}
+	}
+	if famMatched {
+		score += 0.15
+	}
+
+	// 3. Given name match (+0.10 exact, +0.05 prefix/initial)
+	givenScore := 0.0
+	for _, tg := range target.givens {
+		for _, cg := range cand.givens {
+			if tg == cg {
+				givenScore = 0.10
+				break
+			}
+			if strings.HasPrefix(tg, cg) || strings.HasPrefix(cg, tg) {
+				if givenScore < 0.05 {
+					givenScore = 0.05
+				}
+			}
+		}
+		if givenScore == 0.10 {
+			break
+		}
+	}
+	score += givenScore
+
+	// 4. BirthDate match (+0.15 exact, -0.10 mismatch if both present)
+	if target.birthDate != "" && cand.birthDate != "" {
+		if target.birthDate == cand.birthDate {
+			score += 0.15
+		}
+	}
+
+	// 5. Gender match (+0.05)
+	if target.gender != "" && cand.gender != "" && target.gender == cand.gender {
+		score += 0.05
+	}
+
+	// 6. PostalCode or Telecom match (+0.05)
+	contactMatched := false
+	for _, tpc := range target.postalCodes {
+		for _, cpc := range cand.postalCodes {
+			if tpc == cpc {
+				contactMatched = true
+				break
+			}
+		}
+	}
+	if !contactMatched {
+		for _, tt := range target.telecoms {
+			for _, ct := range cand.telecoms {
+				if tt != "" && tt == ct {
+					contactMatched = true
+					break
+				}
+			}
+		}
+	}
+	if contactMatched {
+		score += 0.05
+	}
+
+	// Bonus when deterministic demographics (family + given + birthDate) all align
+	// even if MRN/identifier was not supplied in the query template:
+	if !idMatched && famMatched && givenScore == 0.10 && target.birthDate != "" && target.birthDate == cand.birthDate {
+		score += 0.40
+	}
+
+	if score > 0.99 {
+		score = 0.99
+	}
+	return math.Round(score*100) / 100
+}
+
+func matchGradeForScore(score float64) string {
+	switch {
+	case score >= 0.80:
+		return "certain"
+	case score >= 0.50:
+		return "probable"
+	default:
+		return "possible"
+	}
+}
+
+// handlePatientMatch implements POST /fhir/r4/{tenant}/Patient/$match
+// per HL7 FHIR R4 OperationDefinition/Patient-match (MPI probabilistic/deterministic matching).
+func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "operational store is not configured")
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 5*1024*1024))
+	if err != nil || len(body) == 0 {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "Patient/$match requires a non-empty Parameters JSON body")
+		return
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "structure", "invalid JSON in Patient/$match body")
+		return
+	}
+
+	var templatePatient map[string]any
+	onlyCertain := false
+	maxCount := 20
+
+	switch payload["resourceType"] {
+	case "Parameters":
+		if params, ok := payload["parameter"].([]any); ok {
+			for _, rawParam := range params {
+				pm, ok := rawParam.(map[string]any)
+				if !ok {
+					continue
+				}
+				switch pm["name"] {
+				case "resource":
+					if res, ok := pm["resource"].(map[string]any); ok {
+						templatePatient = res
+					}
+				case "onlyCertainMatches":
+					if b, ok := pm["valueBoolean"].(bool); ok {
+						onlyCertain = b
+					}
+				case "count":
+					if n, ok := pm["valueInteger"].(float64); ok && int(n) > 0 {
+						maxCount = int(n)
+					}
+				}
+			}
+		}
+	case "Patient":
+		templatePatient = payload
+	default:
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "Patient/$match body must be a FHIR Parameters resource")
+		return
+	}
+
+	if templatePatient == nil || templatePatient["resourceType"] != "Patient" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Patient/$match requires a parameter named 'resource' containing a Patient resource")
+		return
+	}
+
+	targetDemo := extractPatientDemographics(templatePatient)
+	if targetDemo.isEmpty() {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Patient/$match template Patient must contain at least one demographic attribute (identifier, name, birthDate, gender, address, or telecom)")
+		return
+	}
+
+	searchParams := postgres.SearchParams{
+		TenantID: tenant,
+		ResType:  "Patient",
+		Count:    500,
+	}
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		searchParams.ID = cleanID(secCtx.GetPatientId())
+	}
+
+	sr, err := s.store.Search(r.Context(), searchParams)
+	if err != nil {
+		s.logger.Error("patient $match search failed", "error", err, "tenant", tenant)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to evaluate Patient/$match candidates")
+		return
+	}
+
+	type scoredCandidate struct {
+		id       string
+		score    float64
+		grade    string
+		resource map[string]any
+	}
+	var matches []scoredCandidate
+
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	for _, rec := range sr.Matches {
+		if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, "Patient", rec.ResID, rec.ResourceProto) {
+			continue
+		}
+		jsonBytes, err := s.protoToJSONWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if err != nil {
+			continue
+		}
+		var candMap map[string]any
+		if err := json.Unmarshal(jsonBytes, &candMap); err != nil {
+			continue
+		}
+		candDemo := extractPatientDemographics(candMap)
+		score := scorePatientCandidate(targetDemo, candDemo)
+		if score < 0.20 {
+			continue
+		}
+		if onlyCertain && score < 0.80 {
+			continue
+		}
+		matches = append(matches, scoredCandidate{
+			id:       rec.ResID,
+			score:    score,
+			grade:    matchGradeForScore(score),
+			resource: candMap,
+		})
+	}
+
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].score != matches[j].score {
+			return matches[i].score > matches[j].score
+		}
+		return matches[i].id < matches[j].id
+	})
+
+	if len(matches) > maxCount {
+		matches = matches[:maxCount]
+	}
+
+	entries := make([]map[string]any, 0, len(matches))
+	for _, m := range matches {
+		entries = append(entries, map[string]any{
+			"fullUrl":  "Patient/" + m.id,
+			"resource": m.resource,
+			"search": map[string]any{
+				"mode":  "match",
+				"score": m.score,
+				"extension": []map[string]any{
+					{
+						"url":       "http://hl7.org/fhir/StructureDefinition/match-grade",
+						"valueCode": m.grade,
+					},
+				},
+			},
+		})
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"type":         "searchset",
+		"total":        len(entries),
+		"entry":        entries,
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(bundle)
+}
+
+// handleMeta implements GET /{tenant}/$meta, GET /{tenant}/{resourceType}/$meta,
+// and GET /{tenant}/{resourceType}/{id}/$meta per HL7 FHIR R4 OperationDefinition/Resource-meta.
+func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resType := r.PathValue("resourceType")
+	resID := r.PathValue("id")
+
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "operational store is not configured")
+		return
+	}
+
+	// 1. Instance-level: GET /{tenant}/{resourceType}/{id}/$meta
+	if resType != "" && resID != "" {
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("%s/%s not found", resType, resID))
+			return
+		}
+		if errors.Is(err, postgres.ErrResourceDeleted) {
+			writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("%s/%s has been deleted", resType, resID))
+			return
+		}
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read resource meta")
+			return
+		}
+		jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize resource meta")
+			return
+		}
+		var resMap map[string]any
+		_ = json.Unmarshal(jsonBytes, &resMap)
+		metaObj, _ := resMap["meta"].(map[string]any)
+		if metaObj == nil {
+			metaObj = make(map[string]any)
+		}
+		writeMetaParametersResponse(w, metaObj)
+		return
+	}
+
+	// 2. Type-level or System-level $meta: aggregate distinct profiles, security labels, and tags
+	var targetTypes []string
+	if resType != "" {
+		if _, ok := s.protoRegistry[resType]; !ok {
+			writeOperationOutcome(w, http.StatusBadRequest, "not-supported", fmt.Sprintf("resource type %s not registered", resType))
+			return
+		}
+		targetTypes = []string{resType}
+	} else {
+		targetTypes = fhirutil.USCoreResourceTypes()
+	}
+
+	seenProfiles := make(map[string]bool)
+	var profiles []string
+	seenSecurity := make(map[string]bool)
+	var securities []map[string]any
+	seenTags := make(map[string]bool)
+	var tags []map[string]any
+
+	for _, rt := range targetTypes {
+		for _, prof := range usCoreSupportedProfiles(rt) {
+			if !seenProfiles[prof] {
+				seenProfiles[prof] = true
+				profiles = append(profiles, prof)
+			}
+		}
+		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID: tenant,
+			ResType:  rt,
+			Count:    100,
+		})
+		if err != nil {
+			continue
+		}
+		for _, rec := range sr.Matches {
+			jsonBytes, err := s.protoToJSONWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+			if err != nil {
+				continue
+			}
+			var resMap map[string]any
+			if err := json.Unmarshal(jsonBytes, &resMap); err != nil {
+				continue
+			}
+			metaMap, _ := resMap["meta"].(map[string]any)
+			if metaMap == nil {
+				continue
+			}
+			if rawProfs, ok := metaMap["profile"].([]any); ok {
+				for _, p := range rawProfs {
+					if ps, ok := p.(string); ok && ps != "" && !seenProfiles[ps] {
+						seenProfiles[ps] = true
+						profiles = append(profiles, ps)
+					}
+				}
+			}
+			if rawSecs, ok := metaMap["security"].([]any); ok {
+				for _, sec := range rawSecs {
+					if sm, ok := sec.(map[string]any); ok {
+						key := codingDedupeKey(sm)
+						if key != "|" && !seenSecurity[key] {
+							seenSecurity[key] = true
+							securities = append(securities, sm)
+						}
+					}
+				}
+			}
+			if rawTags, ok := metaMap["tag"].([]any); ok {
+				for _, tg := range rawTags {
+					if tm, ok := tg.(map[string]any); ok {
+						key := codingDedupeKey(tm)
+						if key != "|" && !seenTags[key] {
+							seenTags[key] = true
+							tags = append(tags, tm)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	metaOut := make(map[string]any)
+	if len(profiles) > 0 {
+		metaOut["profile"] = profiles
+	}
+	if len(securities) > 0 {
+		metaOut["security"] = securities
+	}
+	if len(tags) > 0 {
+		metaOut["tag"] = tags
+	}
+	writeMetaParametersResponse(w, metaOut)
+}
+
+// handleMetaAdd implements POST /fhir/r4/{tenant}/{resourceType}/{id}/$meta-add.
+func (s *Server) handleMetaAdd(w http.ResponseWriter, r *http.Request) {
+	s.mutateInstanceMeta(w, r, false)
+}
+
+// handleMetaDelete implements POST /fhir/r4/{tenant}/{resourceType}/{id}/$meta-delete.
+func (s *Server) handleMetaDelete(w http.ResponseWriter, r *http.Request) {
+	s.mutateInstanceMeta(w, r, true)
+}
+
+func (s *Server) mutateInstanceMeta(w http.ResponseWriter, r *http.Request, isDelete bool) {
+	tenant := r.PathValue("tenant")
+	resType := r.PathValue("resourceType")
+	resID := r.PathValue("id")
+
+	md, ok := s.protoRegistry[resType]
+	if !ok {
+		writeOperationOutcome(w, http.StatusBadRequest, "not-supported", fmt.Sprintf("resource type %s not registered", resType))
+		return
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r.Body, 2*1024*1024))
+	if err != nil || len(body) == 0 {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "non-empty Parameters body required for $meta operation")
+		return
+	}
+
+	deltaMeta, err := extractInputValueMeta(body)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", err.Error())
+		return
+	}
+
+	rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("%s/%s not found", resType, resID))
+		return
+	}
+	if errors.Is(err, postgres.ErrResourceDeleted) {
+		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("%s/%s has been deleted", resType, resID))
+		return
+	}
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read resource")
+		return
+	}
+
+	jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to deserialize current resource")
+		return
+	}
+
+	var resMap map[string]any
+	if err := json.Unmarshal(jsonBytes, &resMap); err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode current resource JSON")
+		return
+	}
+
+	curMeta, _ := resMap["meta"].(map[string]any)
+	if curMeta == nil {
+		curMeta = make(map[string]any)
+	}
+
+	if isDelete {
+		applyMetaDelete(curMeta, deltaMeta)
+	} else {
+		applyMetaAdd(curMeta, deltaMeta)
+	}
+	resMap["meta"] = curMeta
+
+	updatedRawJSON, err := json.Marshal(resMap)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to marshal updated resource")
+		return
+	}
+
+	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, updatedRawJSON)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid meta update: %v", err))
+		return
+	}
+
+	msg := dynamicpb.NewMessage(md)
+	unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+	if err := unmarshaler.Unmarshal(normalizedBody, msg); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid meta proto: %v", err))
+		return
+	}
+
+	protoBytes, err := proto.Marshal(msg)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to marshal updated proto")
+		return
+	}
+
+	var idx *postgres.SearchIndexes
+	if extractor, hasExtractor := s.extractors[resType]; hasExtractor {
+		idx, _ = extractor(tenant, resID, protoBytes)
+	}
+
+	newRec, err := s.store.WriteResourceWithMeta(r.Context(), postgres.ResourceInput{
+		TenantID:      tenant,
+		ResType:       resType,
+		ResID:         resID,
+		ResourceProto: protoBytes,
+		SearchIndexes: idx,
+	})
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to persist updated resource meta")
+		return
+	}
+
+	s.publishCDC(r.Context(), automq.Message{
+		TenantID:  tenant,
+		ResType:   resType,
+		ResID:     resID,
+		ProtoData: protoBytes,
+		Op:        "U",
+	})
+
+	finalJSON, err := s.protoToJSONWithMeta(resType, protoBytes, newRec.ResVersion, newRec.LastUpdated)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize updated resource meta")
+		return
+	}
+	var finalMap map[string]any
+	_ = json.Unmarshal(finalJSON, &finalMap)
+	finalMeta, _ := finalMap["meta"].(map[string]any)
+	if finalMeta == nil {
+		finalMeta = curMeta
+	}
+
+	w.Header().Set("ETag", postgres.FormatETag(newRec.ResVersion))
+	w.Header().Set("Last-Modified", newRec.LastUpdated.UTC().Format(http.TimeFormat))
+	writeMetaParametersResponse(w, finalMeta)
+}
+
+func extractInputValueMeta(body []byte) (map[string]any, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("invalid JSON body: %w", err)
+	}
+	if payload["resourceType"] == "Parameters" {
+		if params, ok := payload["parameter"].([]any); ok {
+			for _, rawParam := range params {
+				if pm, ok := rawParam.(map[string]any); ok && pm["name"] == "meta" {
+					if vm, ok := pm["valueMeta"].(map[string]any); ok {
+						return vm, nil
+					}
+				}
+			}
+		}
+		return nil, fmt.Errorf("parameters resource must contain a parameter with name='meta' and a valueMeta object")
+	}
+	if vm, ok := payload["meta"].(map[string]any); ok {
+		return vm, nil
+	}
+	return nil, fmt.Errorf("request body must be a FHIR Parameters resource with valueMeta")
+}
+
+func applyMetaAdd(curMeta, addMeta map[string]any) {
+	// 1. Merge profile array
+	if addProfs, ok := addMeta["profile"].([]any); ok && len(addProfs) > 0 {
+		existing, _ := curMeta["profile"].([]any)
+		seen := make(map[string]bool, len(existing))
+		for _, p := range existing {
+			if ps, ok := p.(string); ok {
+				seen[ps] = true
+			}
+		}
+		for _, p := range addProfs {
+			if ps, ok := p.(string); ok && ps != "" && !seen[ps] {
+				seen[ps] = true
+				existing = append(existing, ps)
+			}
+		}
+		curMeta["profile"] = existing
+	}
+
+	// 2. Merge security array
+	if addSec, ok := addMeta["security"].([]any); ok && len(addSec) > 0 {
+		curMeta["security"] = mergeCodingSlices(curMeta["security"], addSec)
+	}
+
+	// 3. Merge tag array
+	if addTag, ok := addMeta["tag"].([]any); ok && len(addTag) > 0 {
+		curMeta["tag"] = mergeCodingSlices(curMeta["tag"], addTag)
+	}
+}
+
+func applyMetaDelete(curMeta, delMeta map[string]any) {
+	// 1. Remove matching profile URIs
+	if delProfs, ok := delMeta["profile"].([]any); ok && len(delProfs) > 0 {
+		removeSet := make(map[string]bool, len(delProfs))
+		for _, p := range delProfs {
+			if ps, ok := p.(string); ok && ps != "" {
+				removeSet[ps] = true
+			}
+		}
+		if existing, ok := curMeta["profile"].([]any); ok {
+			kept := make([]any, 0, len(existing))
+			for _, p := range existing {
+				if ps, ok := p.(string); ok && !removeSet[ps] {
+					kept = append(kept, ps)
+				}
+			}
+			if len(kept) > 0 {
+				curMeta["profile"] = kept
+			} else {
+				delete(curMeta, "profile")
+			}
+		}
+	}
+
+	// 2. Remove matching security codings
+	if delSec, ok := delMeta["security"].([]any); ok && len(delSec) > 0 {
+		kept := removeCodingSlices(curMeta["security"], delSec)
+		if len(kept) > 0 {
+			curMeta["security"] = kept
+		} else {
+			delete(curMeta, "security")
+		}
+	}
+
+	// 3. Remove matching tag codings
+	if delTag, ok := delMeta["tag"].([]any); ok && len(delTag) > 0 {
+		kept := removeCodingSlices(curMeta["tag"], delTag)
+		if len(kept) > 0 {
+			curMeta["tag"] = kept
+		} else {
+			delete(curMeta, "tag")
+		}
+	}
+}
+
+func mergeCodingSlices(existingRaw any, additions []any) []any {
+	existing, _ := existingRaw.([]any)
+	seen := make(map[string]bool, len(existing))
+	for _, item := range existing {
+		if m, ok := item.(map[string]any); ok {
+			seen[codingDedupeKey(m)] = true
+		}
+	}
+	for _, item := range additions {
+		if m, ok := item.(map[string]any); ok {
+			key := codingDedupeKey(m)
+			if key != "|" && !seen[key] {
+				seen[key] = true
+				existing = append(existing, m)
+			}
+		}
+	}
+	return existing
+}
+
+func removeCodingSlices(existingRaw any, removals []any) []any {
+	existing, _ := existingRaw.([]any)
+	if len(existing) == 0 {
+		return nil
+	}
+	removeKeys := make(map[string]bool, len(removals))
+	removeCodesOnly := make(map[string]bool, len(removals))
+	for _, item := range removals {
+		if m, ok := item.(map[string]any); ok {
+			sys := strings.TrimSpace(stringField(m, "system"))
+			code := strings.TrimSpace(stringField(m, "code"))
+			if sys == "" && code != "" {
+				removeCodesOnly[code] = true
+			} else if code != "" {
+				removeKeys[sys+"|"+code] = true
+			}
+		}
+	}
+	kept := make([]any, 0, len(existing))
+	for _, item := range existing {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		code := strings.TrimSpace(stringField(m, "code"))
+		if removeKeys[codingDedupeKey(m)] || removeCodesOnly[code] {
+			continue
+		}
+		kept = append(kept, m)
+	}
+	return kept
+}
+
+func codingDedupeKey(m map[string]any) string {
+	return strings.TrimSpace(stringField(m, "system")) + "|" + strings.TrimSpace(stringField(m, "code"))
+}
+
+func writeMetaParametersResponse(w http.ResponseWriter, metaObj map[string]any) {
+	resp := map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{
+				"name":      "return",
+				"valueMeta": metaObj,
+			},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(resp)
+}
