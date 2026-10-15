@@ -109,6 +109,10 @@ func (s *Server) handleQuestionnairePopulate(w http.ResponseWriter, r *http.Requ
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read Patient for $populate")
 		return
 	}
+	if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, "Patient", patientID, patRec.ResourceProto) {
+		writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope to read Patient for Questionnaire/$populate")
+		return
+	}
 	patJSON, err := s.protoToJSONWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize Patient for $populate")
@@ -440,6 +444,7 @@ func hasCodingCode(res map[string]any, field, wantCode string) bool {
 func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	qrID := r.PathValue("id")
+	persist := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("persist")), "true")
 
 	var qrMap map[string]any
 	if r.Body != nil {
@@ -458,9 +463,16 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 								continue
 							}
 							name, _ := pm["name"].(string)
-							if name == "questionnaire-response" || name == "questionnaireResponse" || name == "resource" {
+							switch name {
+							case "questionnaire-response", "questionnaireResponse", "resource":
 								if resMap, ok := pm["resource"].(map[string]any); ok && resMap["resourceType"] == "QuestionnaireResponse" {
 									qrMap = resMap
+								}
+							case "persist":
+								if bVal, ok := pm["valueBoolean"].(bool); ok {
+									persist = bVal
+								} else if sVal, ok := pm["valueString"].(string); ok {
+									persist = strings.EqualFold(sVal, "true")
 								}
 							}
 						}
@@ -470,6 +482,8 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 		}
 	}
 
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+
 	if qrMap == nil && qrID != "" && s.store != nil {
 		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "QuestionnaireResponse", qrID)
 		if err != nil {
@@ -478,6 +492,10 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 				return
 			}
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read QuestionnaireResponse")
+			return
+		}
+		if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, "QuestionnaireResponse", qrID, rec.ResourceProto) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope to read QuestionnaireResponse for $extract")
 			return
 		}
 		if jb, err := s.protoToJSONWithMeta("QuestionnaireResponse", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
@@ -501,12 +519,26 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 	if subjectRef == nil {
 		subjectRef = map[string]any{"reference": "Patient/unknown"}
 	}
+	if hasSecCtx && auth.IsPatientRestricted(secCtx) {
+		refStr, _ := subjectRef["reference"].(string)
+		subjPatientID := ""
+		if strings.HasPrefix(refStr, "Patient/") || (!strings.Contains(refStr, "/") && refStr != "" && refStr != "unknown") {
+			subjPatientID = cleanID(refStr)
+		}
+		if subjPatientID == "" || subjPatientID != cleanID(secCtx.GetPatientId()) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				"access denied: QuestionnaireResponse subject does not match restricted patient compartment")
+			return
+		}
+	}
+
 	authored, _ := qrMap["authored"].(string)
 	if authored == "" {
 		authored = time.Now().UTC().Format(time.RFC3339)
 	}
 
 	var entries []any
+	var extractedResources []map[string]any
 	seq := 0
 	var walkExtract func(items []any)
 	walkExtract = func(items []any) {
@@ -554,6 +586,7 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 							"code":    map[string]any{"coding": []any{vc}},
 							"subject": subjectRef,
 						}
+						extractedResources = append(extractedResources, condRes)
 						entries = append(entries, map[string]any{
 							"fullUrl":  "urn:uuid:" + uuid.NewString(),
 							"resource": condRes,
@@ -574,6 +607,7 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 							"code":    map[string]any{"coding": []any{vc}},
 							"patient": subjectRef,
 						}
+						extractedResources = append(extractedResources, allRes)
 						entries = append(entries, map[string]any{
 							"fullUrl":  "urn:uuid:" + uuid.NewString(),
 							"resource": allRes,
@@ -624,6 +658,7 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 					} else {
 						continue
 					}
+					extractedResources = append(extractedResources, obsRes)
 					entries = append(entries, map[string]any{
 						"fullUrl":  "urn:uuid:" + uuid.NewString(),
 						"resource": obsRes,
@@ -636,6 +671,33 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 
 	if items, ok := qrMap["item"].([]any); ok {
 		walkExtract(items)
+	}
+
+	if persist {
+		for _, resMap := range extractedResources {
+			targetType, _ := resMap["resourceType"].(string)
+			if hasSecCtx && !auth.Allows(secCtx, targetType, auth.ActionCreate) && !auth.Allows(secCtx, targetType, auth.ActionUpdate) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope to persist extracted %s resource", targetType))
+				return
+			}
+		}
+		if s.store == nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "operational store is not configured")
+			return
+		}
+		for _, resMap := range extractedResources {
+			targetType, _ := resMap["resourceType"].(string)
+			if _, err := s.persistFHIRMapResource(r, tenant, targetType, resMap); err != nil {
+				if errors.Is(err, errForbiddenCompartment) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden", err.Error())
+					return
+				}
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+					fmt.Sprintf("failed to persist extracted %s: %v", targetType, err))
+				return
+			}
+		}
 	}
 
 	bundle := map[string]any{
@@ -708,6 +770,12 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	if hasSecCtx && persist && !auth.Allows(secCtx, "Bundle", auth.ActionCreate) && !auth.Allows(secCtx, "Bundle", auth.ActionUpdate) {
+		writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope to persist Composition/$document Bundle")
+		return
+	}
+
 	compRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Composition", compID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, postgres.ErrResourceDeleted) {
@@ -715,6 +783,10 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read Composition")
+		return
+	}
+	if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, "Composition", compID, compRec.ResourceProto) {
+		writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope to read Composition for $document")
 		return
 	}
 	compJSON, err := s.protoToJSONWithMeta("Composition", compRec.ResourceProto, compRec.ResVersion, compRec.LastUpdated)
@@ -729,7 +801,6 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Enforce patient compartment isolation if Composition.subject is a Patient
-	secCtx, hasSecCtx := auth.FromContext(r.Context())
 	if hasSecCtx && auth.IsPatientRestricted(secCtx) {
 		subjPatientID := ""
 		if subj, ok := compMap["subject"].(map[string]any); ok {
@@ -819,16 +890,34 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 			continue
 		}
 		resType, resID := parts[0], parts[1]
+		if hasSecCtx && auth.IsPatientRestricted(secCtx) {
+			allowedPatientID := cleanID(secCtx.GetPatientId())
+			if strings.EqualFold(resType, "Patient") && cleanID(resID) != allowedPatientID {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("patient-scoped token (%s) cannot assemble document referencing Patient/%s outside patient compartment",
+						secCtx.GetPatientId(), resID))
+				return
+			}
+			if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) {
+				exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), tenant, resType, resID, allowedPatientID)
+				if err != nil {
+					writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+					return
+				}
+				if exists && !allowed {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+						fmt.Sprintf("patient-scoped token (%s) cannot assemble document referencing %s/%s outside patient compartment",
+							secCtx.GetPatientId(), resType, resID))
+					return
+				}
+			}
+		}
 		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID)
 		if err != nil {
 			continue
 		}
-		if hasSecCtx {
-			if constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionRead); constrained {
-				if !s.resourceSatisfiesScopeConstraints(tenant, resType, resID, rec.ResourceProto, constraints) {
-					continue
-				}
-			}
+		if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, resType, resID, rec.ResourceProto) {
+			continue
 		}
 		jb, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if err != nil {
@@ -859,7 +948,14 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 	}
 
 	if persist {
-		_, _ = s.persistFHIRMapResource(r, tenant, "Bundle", docBundle)
+		if _, err := s.persistFHIRMapResource(r, tenant, "Bundle", docBundle); err != nil {
+			if errors.Is(err, errForbiddenCompartment) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", err.Error())
+				return
+			}
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("failed to persist document Bundle: %v", err))
+			return
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")

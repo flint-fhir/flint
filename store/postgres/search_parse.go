@@ -471,8 +471,15 @@ func ValidateSearchQuery(q url.Values) error {
 		}
 	}
 	for _, listVal := range q["_list"] {
-		if strings.TrimSpace(listVal) == "" {
-			return fmt.Errorf("invalid _list parameter: empty value")
+		hasNonEmpty := false
+		for part := range strings.SplitSeq(listVal, ",") {
+			if strings.TrimSpace(part) != "" {
+				hasNonEmpty = true
+				break
+			}
+		}
+		if !hasNonEmpty {
+			return fmt.Errorf("invalid _list parameter %q: empty value", listVal)
 		}
 	}
 	for _, k := range []string{"_include", "_include:iterate", "_include:recurse"} {
