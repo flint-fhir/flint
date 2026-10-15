@@ -1,0 +1,129 @@
+test_stg_claim_cdc:
+  model: flint_stg.stg_claim
+  inputs:
+    fhir_raw.claim:
+      rows:
+        - tenant_id: "tenant-a"
+          _kafka_key: "tenant-a/clm-100"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-14 10:00:00+00:00"
+          op: "I"
+          _kafka_value: '{"status":{"value":"active"},"use":{"value":"preauthorization"},"type":{"coding":[{"code":{"value":"institutional"}}]},"patient":{"reference":{"value":"Patient/pat-001"}},"insurer":{"reference":{"value":"Organization/org-payor-1"}},"provider":{"reference":{"value":"Practitioner/prac-1"}},"total":{"value":500.0,"currency":"USD"},"created":{"value":"2026-10-14T10:00:00Z"}}'
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          claim_id: "clm-100"
+          patient_id: "pat-001"
+          status: "active"
+          claim_use: "preauthorization"
+          claim_type_code: "institutional"
+          insurer_reference: "Organization/org-payor-1"
+          provider_reference: "Practitioner/prac-1"
+          total_submitted_amount: 500.0
+          currency: "USD"
+          created_at: "2026-10-14 10:00:00+00:00"
+          updated_at: "2026-10-14 10:00:00+00:00"
+
+test_stg_claim_response_cdc:
+  model: flint_stg.stg_claim_response
+  inputs:
+    fhir_raw.claim_response:
+      rows:
+        - tenant_id: "tenant-a"
+          _kafka_key: "tenant-a/clmresp-clm-100"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-14 10:00:05+00:00"
+          op: "I"
+          _kafka_value: '{"status":{"value":"active"},"outcome":{"value":"complete"},"disposition":{"value":"Prior authorization approved in real time."},"preAuthRef":{"value":"PA-CLM-100"},"request":{"reference":{"value":"Claim/clm-100"}},"patient":{"reference":{"value":"Patient/pat-001"}},"total":[{"category":{"coding":[{"code":"submitted"}]},"amount":{"value":500.0,"currency":"USD"}},{"category":{"coding":[{"code":"benefit"}]},"amount":{"value":400.0,"currency":"USD"}}]}'
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          claim_response_id: "clmresp-clm-100"
+          claim_id: "clm-100"
+          patient_id: "pat-001"
+          status: "active"
+          outcome: "complete"
+          disposition: "Prior authorization approved in real time."
+          pre_auth_ref: "PA-CLM-100"
+          adjudicated_benefit_amount: 400.0
+          updated_at: "2026-10-14 10:00:05+00:00"
+
+test_mart_claims_utilization_aggregation:
+  model: flint_marts.mart_claims_utilization
+  inputs:
+    flint_marts.dim_patient:
+      rows:
+        - tenant_id: "tenant-a"
+          patient_id: "pat-001"
+          full_name: "Alice Wonderland"
+          family_name: "Wonderland"
+          given_name: "Alice"
+          gender: "female"
+          birth_date: "1990-05-15"
+          active: true
+          postal_code: "94105"
+          updated_at: "2026-10-01 11:00:00+00:00"
+    flint_marts.fct_coverage:
+      rows:
+        - tenant_id: "tenant-a"
+          coverage_id: "cov-1"
+          patient_id: "pat-001"
+          status: "active"
+          type_system: "http://terminology.hl7.org/CodeSystem/v3-ActCode"
+          type_code: "HIP"
+          payor_reference: "Organization/org-payor-1"
+          updated_at: "2026-10-05 08:00:00+00:00"
+    flint_marts.fct_claim:
+      rows:
+        - tenant_id: "tenant-a"
+          claim_id: "clm-100"
+          patient_id: "pat-001"
+          status: "active"
+          claim_use: "preauthorization"
+          claim_type_code: "institutional"
+          insurer_reference: "Organization/org-payor-1"
+          provider_reference: "Practitioner/prac-1"
+          total_submitted_amount: 500.0
+          currency: "USD"
+          created_at: "2026-10-14 10:00:00+00:00"
+          claim_response_id: "clmresp-clm-100"
+          adjudication_outcome: "complete"
+          adjudication_disposition: "Prior authorization approved in real time."
+          pre_auth_ref: "PA-CLM-100"
+          adjudicated_benefit_amount: 400.0
+          updated_at: "2026-10-14 10:00:05+00:00"
+        - tenant_id: "tenant-a"
+          claim_id: "clm-101"
+          patient_id: "pat-001"
+          status: "active"
+          claim_use: "claim"
+          claim_type_code: "professional"
+          insurer_reference: "Organization/org-payor-1"
+          provider_reference: "Practitioner/prac-1"
+          total_submitted_amount: 250.0
+          currency: "USD"
+          created_at: "2026-10-15 12:00:00+00:00"
+          claim_response_id: "clmresp-clm-101"
+          adjudication_outcome: "complete"
+          adjudication_disposition: "Claim adjudicated and approved for payment."
+          pre_auth_ref: null
+          adjudicated_benefit_amount: 200.0
+          updated_at: "2026-10-15 12:00:05+00:00"
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-a"
+          patient_id: "pat-001"
+          full_name: "Alice Wonderland"
+          gender: "female"
+          birth_date: "1990-05-15"
+          active_coverage_count: 1
+          primary_payor_reference: "Organization/org-payor-1"
+          total_claim_count: 2
+          prior_auth_count: 1
+          approved_claim_count: 2
+          total_submitted_amount: 750.0
+          total_adjudicated_benefit_amount: 600.0
+          latest_claim_created_at: "2026-10-15 12:00:00+00:00"

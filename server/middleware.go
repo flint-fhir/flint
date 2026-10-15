@@ -124,6 +124,19 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								"insufficient scope for Measure/$evaluate-measure")
 							return
 						}
+					} else if isQuestionnairePopulateOp(parts) {
+						if !auth.Allows(secCtx, "Questionnaire", auth.ActionRead) && !auth.Allows(secCtx, "Questionnaire", auth.ActionSearch) &&
+							!auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Questionnaire/$populate")
+							return
+						}
+					} else if len(parts) == 6 && strings.EqualFold(resType, "Composition") && parts[5] == "$document" {
+						if !auth.Allows(secCtx, "Composition", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionRead) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Composition/$document")
+							return
+						}
 					} else if resType == "_history" || resType == "$meta" {
 						// System-level history or $meta: GET /{tenant}/_history or GET /{tenant}/$meta
 						if len(secCtx.GetScopes()) == 0 {
@@ -207,6 +220,26 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							!auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								"insufficient scope for Measure/$evaluate-measure")
+							return
+						}
+					} else if isQuestionnairePopulateOp(parts) {
+						if !auth.Allows(secCtx, "Questionnaire", auth.ActionRead) && !auth.Allows(secCtx, "Questionnaire", auth.ActionSearch) &&
+							!auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Questionnaire/$populate")
+							return
+						}
+					} else if isQuestionnaireExtractOp(parts) {
+						if !auth.Allows(secCtx, "QuestionnaireResponse", auth.ActionRead) && !auth.Allows(secCtx, "QuestionnaireResponse", auth.ActionCreate) &&
+							!auth.Allows(secCtx, "Observation", auth.ActionCreate) && !auth.Allows(secCtx, "Patient", auth.ActionRead) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for QuestionnaireResponse/$extract")
+							return
+						}
+					} else if len(parts) == 6 && strings.EqualFold(resType, "Composition") && parts[5] == "$document" {
+						if !auth.Allows(secCtx, "Composition", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionRead) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Composition/$document")
 							return
 						}
 					} else if len(parts) == 5 && resType == "cds-services" {
@@ -722,11 +755,13 @@ func extractClientIP(r *http.Request) string {
 func isTerminologyOp(parts []string) bool {
 	if len(parts) == 5 {
 		return (strings.EqualFold(parts[3], "ValueSet") && (parts[4] == "$expand" || parts[4] == "$validate-code")) ||
-			(strings.EqualFold(parts[3], "CodeSystem") && parts[4] == "$lookup")
+			(strings.EqualFold(parts[3], "CodeSystem") && parts[4] == "$lookup") ||
+			(strings.EqualFold(parts[3], "ConceptMap") && parts[4] == "$translate")
 	}
 	if len(parts) == 6 {
 		return (strings.EqualFold(parts[3], "ValueSet") && (parts[5] == "$expand" || parts[5] == "$validate-code")) ||
-			(strings.EqualFold(parts[3], "CodeSystem") && parts[5] == "$lookup")
+			(strings.EqualFold(parts[3], "CodeSystem") && parts[5] == "$lookup") ||
+			(strings.EqualFold(parts[3], "ConceptMap") && parts[5] == "$translate")
 	}
 	return false
 }
@@ -737,6 +772,26 @@ func isMeasureOp(parts []string) bool {
 	}
 	if len(parts) == 6 {
 		return strings.EqualFold(parts[3], "Measure") && parts[5] == "$evaluate-measure"
+	}
+	return false
+}
+
+func isQuestionnairePopulateOp(parts []string) bool {
+	if len(parts) == 5 {
+		return strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$populate"
+	}
+	if len(parts) == 6 {
+		return strings.EqualFold(parts[3], "Questionnaire") && parts[5] == "$populate"
+	}
+	return false
+}
+
+func isQuestionnaireExtractOp(parts []string) bool {
+	if len(parts) == 5 {
+		return strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[4] == "$extract"
+	}
+	if len(parts) == 6 {
+		return strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[5] == "$extract"
 	}
 	return false
 }
