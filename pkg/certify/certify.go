@@ -962,6 +962,30 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	t0 = time.Now()
 	{
 		err = nil
+		// 1. ConceptMap/$translate forward (SNOMED CT 38341003 -> ICD-10-CM I10)
+		respTr, bTr, errTr := doReq(http.MethodGet, basePath+"/ConceptMap/$translate?system=http://snomed.info/sct&code=38341003", "", nil, nil)
+		// 2. ConceptMap/$translate reverse (ICD-10-CM I10 -> SNOMED CT 38341003)
+		respRevTr, bRevTr, errRevTr := doReq(http.MethodGet, basePath+"/ConceptMap/$translate?system=http://hl7.org/fhir/sid/icd-10-cm&code=I10&reverse=true", "", nil, nil)
+		// 3. Composite search: code-value-quantity
+		respCVQ, bCVQ, errCVQ := doReq(http.MethodGet, basePath+"/Observation?code-value-quantity=http://loinc.org|8867-4$gt70", "", nil, nil)
+		// 4. Composite search: component-code-value-quantity
+		respCCVQ, bCCVQ, errCCVQ := doReq(http.MethodGet, basePath+"/Observation?component-code-value-quantity=http://loinc.org|96608-5$le130", "", nil, nil)
+
+		if errTr != nil || respTr.StatusCode != http.StatusOK || !strings.Contains(string(bTr), `"I10"`) {
+			err = fmt.Errorf("expected 200 OK with ICD-10-CM I10 from ConceptMap/$translate, got %s", string(bTr))
+		} else if errRevTr != nil || respRevTr.StatusCode != http.StatusOK || !strings.Contains(string(bRevTr), `"38341003"`) {
+			err = fmt.Errorf("expected 200 OK with SNOMED 38341003 from reverse ConceptMap/$translate, got %s", string(bRevTr))
+		} else if errCVQ != nil || respCVQ.StatusCode != http.StatusOK || !strings.Contains(string(bCVQ), `"cert-obs-1"`) {
+			err = fmt.Errorf("expected Observation?code-value-quantity=http://loinc.org|8867-4$gt70 to return cert-obs-1, got %s", string(bCVQ))
+		} else if errCCVQ != nil || respCCVQ.StatusCode != http.StatusOK || !strings.Contains(string(bCCVQ), `"cert-obs-avg-bp"`) {
+			err = fmt.Errorf("expected Observation?component-code-value-quantity=http://loinc.org|96608-5$le130 to return cert-obs-avg-bp, got %s", string(bCCVQ))
+		}
+	}
+	record("TERM-02", suite5, "ConceptMap/$translate & Composite Search (code-value-quantity, component-code-value-quantity)", t0, err, "Verified SNOMED<->ICD-10 ConceptMap/$translate & paired composite search")
+
+	t0 = time.Now()
+	{
+		err = nil
 		subBody := fmt.Sprintf(`{
 			"resourceType": "Subscription",
 			"status": "requested",
@@ -1168,6 +1192,68 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("DAVINCI-01", suite5, "Da Vinci ($member-match, Claim/$submit), _list Cohort & Enhanced Forward Chaining", t0, err, "Verified $member-match, Claim/$submit ClaimResponse, _list=cert-list-1 & chained modifiers")
+
+	t0 = time.Now()
+	{
+		err = nil
+		// 1. Questionnaire/$populate
+		respPop, bPop, errPop := doReq(http.MethodGet, basePath+"/Questionnaire/phq-9/$populate?subject=Patient/cert-pat-1", "", nil, nil)
+		if errPop != nil || respPop.StatusCode != http.StatusOK || !strings.Contains(string(bPop), `"QuestionnaireResponse"`) || !strings.Contains(string(bPop), `"Alice Certify"`) {
+			err = fmt.Errorf("expected pre-populated QuestionnaireResponse with Alice Certify from Questionnaire/phq-9/$populate, got %d: %s", respPop.StatusCode, string(bPop))
+		}
+
+		// 2. QuestionnaireResponse/$extract
+		if err == nil {
+			extBody := []byte(`{
+				"resourceType": "QuestionnaireResponse",
+				"id": "cert-qr-extract-1",
+				"status": "completed",
+				"subject": {"reference": "Patient/cert-pat-1"},
+				"authored": "2026-01-15T10:30:00Z",
+				"item": [
+					{
+						"linkId": "vitals-hr",
+						"text": "Heart rate",
+						"answer": [{"valueQuantity": {"value": 74.0, "unit": "/min"}}]
+					}
+				]
+			}`)
+			respExt, bExt, errExt := doReq(http.MethodPost, basePath+"/QuestionnaireResponse/$extract", "application/fhir+json", extBody, nil)
+			if errExt != nil || respExt.StatusCode != http.StatusOK || !strings.Contains(string(bExt), `"transaction"`) || !strings.Contains(string(bExt), `"Observation"`) {
+				err = fmt.Errorf("expected transaction Bundle with extracted Observation from QuestionnaireResponse/$extract, got %d: %s", respExt.StatusCode, string(bExt))
+			}
+		}
+
+		// 3. Composition/{id}/$document
+		if err == nil {
+			compBody := []byte(`{
+				"resourceType": "Composition",
+				"id": "cert-comp-1",
+				"status": "final",
+				"type": {"coding": [{"system": "http://loinc.org", "code": "11506-3", "display": "Progress note"}]},
+				"subject": {"reference": "Patient/cert-pat-1"},
+				"date": "2026-01-15T10:35:00Z",
+				"author": [{"reference": "Practitioner/cert-prac-1"}],
+				"title": "Cardiology Progress Note",
+				"section": [
+					{
+						"title": "Active Problems",
+						"entry": [{"reference": "Condition/cert-cond-1"}]
+					}
+				]
+			}`)
+			respComp, bComp, errComp := doReq(http.MethodPut, basePath+"/Composition/cert-comp-1", "application/fhir+json", compBody, nil)
+			if errComp != nil || (respComp.StatusCode != http.StatusOK && respComp.StatusCode != http.StatusCreated) {
+				err = fmt.Errorf("failed creating Composition/cert-comp-1: %d %s", respComp.StatusCode, string(bComp))
+			} else {
+				respDoc, bDoc, errDoc := doReq(http.MethodGet, basePath+"/Composition/cert-comp-1/$document", "", nil, nil)
+				if errDoc != nil || respDoc.StatusCode != http.StatusOK || !strings.Contains(string(bDoc), `"type":"document"`) || !strings.Contains(string(bDoc), `"cert-cond-1"`) {
+					err = fmt.Errorf("expected document Bundle containing Composition and cert-cond-1 from Composition/cert-comp-1/$document, got %d: %s", respDoc.StatusCode, string(bDoc))
+				}
+			}
+		}
+	}
+	record("SDC-01", suite5, "HL7 Da Vinci SDC ($populate, $extract) & Composition/{id}/$document Generation", t0, err, "Verified Questionnaire/$populate, QuestionnaireResponse/$extract & Composition/$document")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/AuditEvent?_count=20", "", nil, nil)

@@ -172,9 +172,16 @@ func extractTerminologyParams(r *http.Request) (map[string]string, map[string]an
 							if iVal, ok := pm["valueInteger"].(float64); ok {
 								out[name] = strconv.Itoa(int(iVal))
 							}
-							if name == "valueSet" {
+							if name == "valueSet" || name == "conceptMap" {
 								if resMap, ok := pm["resource"].(map[string]any); ok {
 									inlineResource = resMap
+								}
+							}
+							if bVal, ok := pm["valueBoolean"].(bool); ok {
+								if bVal {
+									out[name] = "true"
+								} else {
+									out[name] = "false"
 								}
 							}
 							if name == "coding" {
@@ -192,7 +199,7 @@ func extractTerminologyParams(r *http.Request) (map[string]string, map[string]an
 							}
 						}
 					}
-				case "ValueSet":
+				case "ValueSet", "ConceptMap":
 					inlineResource = root
 				}
 			}
@@ -579,4 +586,287 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+type conceptMapEntry struct {
+	SourceSystem string
+	SourceCode   string
+	SourceDisp   string
+	TargetSystem string
+	TargetCode   string
+	TargetDisp   string
+	Equivalence  string
+	MapURL       string
+}
+
+var builtInConceptMaps = []conceptMapEntry{
+	{
+		SourceSystem: "http://snomed.info/sct",
+		SourceCode:   "38341003",
+		SourceDisp:   "Hypertensive disorder, systemic arterial",
+		TargetSystem: "http://hl7.org/fhir/sid/icd-10-cm",
+		TargetCode:   "I10",
+		TargetDisp:   "Essential (primary) hypertension",
+		Equivalence:  "equivalent",
+		MapURL:       "http://hl7.org/fhir/ConceptMap/cm-snomed-to-icd10",
+	},
+	{
+		SourceSystem: "http://snomed.info/sct",
+		SourceCode:   "59621000",
+		SourceDisp:   "Essential hypertension",
+		TargetSystem: "http://hl7.org/fhir/sid/icd-10-cm",
+		TargetCode:   "I10",
+		TargetDisp:   "Essential (primary) hypertension",
+		Equivalence:  "equivalent",
+		MapURL:       "http://hl7.org/fhir/ConceptMap/cm-snomed-to-icd10",
+	},
+	{
+		SourceSystem: "http://snomed.info/sct",
+		SourceCode:   "44054006",
+		SourceDisp:   "Diabetes mellitus type 2",
+		TargetSystem: "http://hl7.org/fhir/sid/icd-10-cm",
+		TargetCode:   "E11.9",
+		TargetDisp:   "Type 2 diabetes mellitus without complications",
+		Equivalence:  "equivalent",
+		MapURL:       "http://hl7.org/fhir/ConceptMap/cm-snomed-to-icd10",
+	},
+	{
+		SourceSystem: "http://snomed.info/sct",
+		SourceCode:   "73211009",
+		SourceDisp:   "Diabetes mellitus",
+		TargetSystem: "http://hl7.org/fhir/sid/icd-10-cm",
+		TargetCode:   "E11.9",
+		TargetDisp:   "Type 2 diabetes mellitus without complications",
+		Equivalence:  "wider",
+		MapURL:       "http://hl7.org/fhir/ConceptMap/cm-snomed-to-icd10",
+	},
+	{
+		SourceSystem: "http://snomed.info/sct",
+		SourceCode:   "195967001",
+		SourceDisp:   "Asthma",
+		TargetSystem: "http://hl7.org/fhir/sid/icd-10-cm",
+		TargetCode:   "J45.909",
+		TargetDisp:   "Unspecified asthma, uncomplicated",
+		Equivalence:  "equivalent",
+		MapURL:       "http://hl7.org/fhir/ConceptMap/cm-snomed-to-icd10",
+	},
+	{
+		SourceSystem: "http://loinc.org",
+		SourceCode:   "8867-4",
+		SourceDisp:   "Heart rate",
+		TargetSystem: "http://snomed.info/sct",
+		TargetCode:   "364075005",
+		TargetDisp:   "Heart rate",
+		Equivalence:  "equivalent",
+		MapURL:       "http://hl7.org/fhir/ConceptMap/cm-loinc-to-snomed",
+	},
+	{
+		SourceSystem: "http://loinc.org",
+		SourceCode:   "85354-9",
+		SourceDisp:   "Blood pressure panel with all children optional",
+		TargetSystem: "http://snomed.info/sct",
+		TargetCode:   "75367002",
+		TargetDisp:   "Blood pressure",
+		Equivalence:  "equivalent",
+		MapURL:       "http://hl7.org/fhir/ConceptMap/cm-loinc-to-snomed",
+	},
+	{
+		SourceSystem: "http://loinc.org",
+		SourceCode:   "4548-4",
+		SourceDisp:   "Hemoglobin A1c/Hemoglobin.total in Blood",
+		TargetSystem: "http://snomed.info/sct",
+		TargetCode:   "43396009",
+		TargetDisp:   "Hemoglobin A1c measurement",
+		Equivalence:  "equivalent",
+		MapURL:       "http://hl7.org/fhir/ConceptMap/cm-loinc-to-snomed",
+	},
+}
+
+func extractEntriesFromConceptMapJSON(cmMap map[string]any) []conceptMapEntry {
+	var out []conceptMapEntry
+	mapURL, _ := cmMap["url"].(string)
+	groups, _ := cmMap["group"].([]any)
+	for _, rawG := range groups {
+		gm, ok := rawG.(map[string]any)
+		if !ok {
+			continue
+		}
+		srcSys, _ := gm["source"].(string)
+		tgtSys, _ := gm["target"].(string)
+		elements, _ := gm["element"].([]any)
+		for _, rawEl := range elements {
+			elm, ok := rawEl.(map[string]any)
+			if !ok {
+				continue
+			}
+			srcCode, _ := elm["code"].(string)
+			srcDisp, _ := elm["display"].(string)
+			targets, _ := elm["target"].([]any)
+			for _, rawTgt := range targets {
+				tm, ok := rawTgt.(map[string]any)
+				if !ok {
+					continue
+				}
+				tgtCode, _ := tm["code"].(string)
+				tgtDisp, _ := tm["display"].(string)
+				eq, _ := tm["equivalence"].(string)
+				if eq == "" {
+					eq = "equivalent"
+				}
+				if srcCode != "" && tgtCode != "" {
+					out = append(out, conceptMapEntry{
+						SourceSystem: srcSys,
+						SourceCode:   srcCode,
+						SourceDisp:   srcDisp,
+						TargetSystem: tgtSys,
+						TargetCode:   tgtCode,
+						TargetDisp:   tgtDisp,
+						Equivalence:  eq,
+						MapURL:       mapURL,
+					})
+				}
+			}
+		}
+	}
+	return out
+}
+
+// handleConceptMapTranslate handles GET/POST /fhir/r4/{tenant}/ConceptMap/$translate and /ConceptMap/{id}/$translate
+// per HL7 FHIR R4 OperationDefinition/ConceptMap-translate.
+func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	cmID := r.PathValue("id")
+	params, inlineCM := extractTerminologyParams(r)
+
+	cmURL := params["url"]
+	code := params["code"]
+	system := params["system"]
+	targetSystem := firstNonEmpty(params["targetsystem"], params["targetSystem"])
+	reverse := strings.EqualFold(params["reverse"], "true")
+
+	if code == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "ConceptMap/$translate requires 'code' (or 'coding') parameter")
+		return
+	}
+
+	var candidateEntries []conceptMapEntry
+	foundExplicitMap := false
+
+	if inlineCM != nil {
+		candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(inlineCM)...)
+		foundExplicitMap = true
+	} else if cmID != "" && s.store != nil {
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "ConceptMap", cmID)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("ConceptMap/%s not found", cmID))
+			return
+		}
+		if jb, err := s.protoToJSONWithMeta("ConceptMap", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+			var cmMap map[string]any
+			if json.Unmarshal(jb, &cmMap) == nil {
+				candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
+				foundExplicitMap = true
+			}
+		}
+	} else if cmURL != "" && s.store != nil {
+		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID: tenant,
+			ResType:  "ConceptMap",
+			Tokens:   map[string]string{"url": cmURL},
+			Count:    10,
+		})
+		if err == nil && len(sr.Matches) > 0 {
+			for _, m := range sr.Matches {
+				if jb, err := s.protoToJSONWithMeta("ConceptMap", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
+					var cmMap map[string]any
+					if json.Unmarshal(jb, &cmMap) == nil {
+						candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
+						foundExplicitMap = true
+					}
+				}
+			}
+		}
+	}
+
+	if !foundExplicitMap {
+		// Also include any stored ConceptMaps in the tenant when translating by system/targetsystem
+		if cmURL == "" && s.store != nil {
+			if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+				TenantID: tenant,
+				ResType:  "ConceptMap",
+				Count:    100,
+			}); err == nil {
+				for _, m := range sr.Matches {
+					if jb, err := s.protoToJSONWithMeta("ConceptMap", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
+						var cmMap map[string]any
+						if json.Unmarshal(jb, &cmMap) == nil {
+							candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
+						}
+					}
+				}
+			}
+		}
+		for _, b := range builtInConceptMaps {
+			if cmURL == "" || strings.EqualFold(b.MapURL, cmURL) {
+				candidateEntries = append(candidateEntries, b)
+			}
+		}
+	}
+
+	var matchParts []map[string]any
+	for _, entry := range candidateEntries {
+		srcSys, srcCode := entry.SourceSystem, entry.SourceCode
+		tgtSys, tgtCode, tgtDisp := entry.TargetSystem, entry.TargetCode, entry.TargetDisp
+		if reverse {
+			srcSys, srcCode = entry.TargetSystem, entry.TargetCode
+			tgtSys, tgtCode, tgtDisp = entry.SourceSystem, entry.SourceCode, entry.SourceDisp
+		}
+		if !strings.EqualFold(srcCode, code) {
+			continue
+		}
+		if system != "" && srcSys != "" && !strings.EqualFold(srcSys, system) {
+			continue
+		}
+		if targetSystem != "" && tgtSys != "" && !strings.EqualFold(tgtSys, targetSystem) {
+			continue
+		}
+		conceptCoding := map[string]any{
+			"code": tgtCode,
+		}
+		if tgtSys != "" {
+			conceptCoding["system"] = tgtSys
+		}
+		if tgtDisp != "" {
+			conceptCoding["display"] = tgtDisp
+		}
+		parts := []map[string]any{
+			{"name": "equivalence", "valueCode": entry.Equivalence},
+			{"name": "concept", "valueCoding": conceptCoding},
+		}
+		if entry.MapURL != "" {
+			parts = append(parts, map[string]any{"name": "source", "valueUri": entry.MapURL})
+		}
+		matchParts = append(matchParts, map[string]any{
+			"name": "match",
+			"part": parts,
+		})
+	}
+
+	hasResult := len(matchParts) > 0
+	msg := fmt.Sprintf("No translation found for code %q", code)
+	if hasResult {
+		msg = fmt.Sprintf("%d match(es) found", len(matchParts))
+	}
+	outParams := []map[string]any{
+		{"name": "result", "valueBoolean": hasResult},
+		{"name": "message", "valueString": msg},
+	}
+	outParams = append(outParams, matchParts...)
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    outParams,
+	})
 }

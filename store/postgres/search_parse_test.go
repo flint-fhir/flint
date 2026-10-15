@@ -228,3 +228,50 @@ func TestBuildSearchParamsFromQuery_LastUpdated(t *testing.T) {
 	err := postgres.ValidateSearchQuery(badQ)
 	assert.Error(t, err, "expected invalid _lastUpdated date to return an error")
 }
+
+func TestParseCompositeTokenQuantity(t *testing.T) {
+	t.Run("Valid code-value-quantity with system|code and UCUM quantity", func(t *testing.T) {
+		p, err := postgres.ParseCompositeTokenQuantity("code-value-quantity", "http://loinc.org|4548-4$ge8.0|http://unitsofmeasure.org|%")
+		require.NoError(t, err)
+		assert.Equal(t, "code-value-quantity", p.ParamName)
+		assert.Equal(t, "http://loinc.org", p.TokenSystem)
+		assert.Equal(t, "4548-4", p.TokenCode)
+		assert.Equal(t, "ge", p.Quantity.Prefix)
+		assert.Equal(t, 8.0, p.Quantity.Value)
+		assert.Equal(t, "http://unitsofmeasure.org", p.Quantity.System)
+		assert.Equal(t, "%", p.Quantity.Code)
+	})
+
+	t.Run("Valid component-code-value-quantity with code-only token", func(t *testing.T) {
+		p, err := postgres.ParseCompositeTokenQuantity("component-code-value-quantity", "8480-6$ge140")
+		require.NoError(t, err)
+		assert.Equal(t, "component-code-value-quantity", p.ParamName)
+		assert.Empty(t, p.TokenSystem)
+		assert.Equal(t, "8480-6", p.TokenCode)
+		assert.Equal(t, "ge", p.Quantity.Prefix)
+		assert.Equal(t, 140.0, p.Quantity.Value)
+	})
+
+	t.Run("Rejects invalid composite format", func(t *testing.T) {
+		_, err := postgres.ParseCompositeTokenQuantity("code-value-quantity", "no-dollar-separator")
+		assert.Error(t, err)
+
+		_, err = postgres.ParseCompositeTokenQuantity("code-value-quantity", "8480-6$not-a-number")
+		assert.Error(t, err)
+	})
+
+	t.Run("BuildSearchParamsFromQuery parses AND/OR composite groups", func(t *testing.T) {
+		q := map[string][]string{
+			"component-code-value-quantity": {
+				"8480-6$ge140,8480-6$ge160",
+				"8462-4$ge90",
+			},
+		}
+		require.NoError(t, postgres.ValidateSearchQuery(q))
+		sp := postgres.BuildSearchParamsFromQuery("t1", "Observation", q)
+		require.Len(t, sp.CompositeTokenQuantities, 2)
+		require.Len(t, sp.CompositeTokenQuantities[0], 2)
+		require.Len(t, sp.CompositeTokenQuantities[1], 1)
+		assert.True(t, postgres.HasSearchCriteria(sp))
+	})
+}

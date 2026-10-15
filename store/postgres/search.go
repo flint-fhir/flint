@@ -48,32 +48,33 @@ type PatientEverythingParams struct {
 
 // SearchParams holds parsed FHIR search parameters for a query.
 type SearchParams struct {
-	TenantID         string
-	ResType          string
-	ID               string                  // Optional _id filter (supports comma-separated multipleOr)
-	LastUpdated      []DateOp                // Optional _lastUpdated filter(s) (e.g. ge + le range)
-	Strings          map[string]string       // sp_name → value (prefix, :exact, or :contains)
-	StringFilters    map[string][]string     // sp_name → multipleAnd values (each may be comma-separated multipleOr)
-	Tokens           map[string]string       // sp_name → value (exact, system|value, or :not)
-	TokenFilters     map[string][]string     // sp_name → multipleAnd values (each may be comma-separated multipleOr)
-	Dates            map[string]DateOp       // sp_name → first date operation
-	DateFilters      map[string][]DateOp     // sp_name → all date operations (e.g. ge + le range)
-	Quantities       map[string]QuantityOp   // sp_name → first quantity operation
-	QuantityFilters  map[string][]QuantityOp // sp_name → all quantity operations (e.g. ge + le range)
-	References       map[string]string       // sp_name → targetType/targetId
-	ReferenceFilters map[string][]string     // sp_name → multipleAnd values (each may be comma-separated multipleOr)
-	Missing          map[string]bool         // sp_name → :missing=true/false
-	Chained          []ChainedParam          // chained search parameters (e.g. patient.name=Smith)
-	Has              []HasParam              // reverse-chained search parameters (e.g. _has:Observation:patient:code=8867-4)
-	List             []string                // _list cohort membership filters (e.g. _list=list-1)
-	Includes         []IncludeParam          // _include parameters
-	RevIncludes      []IncludeParam          // _revinclude parameters
-	Sort             []SortSpec              // _sort specifications
-	Summary          string                  // _summary mode (true, text, data, count, false)
-	Elements         []string                // _elements projection fields
-	TotalMode        string                  // _total mode (none, estimate, accurate)
-	Count            int                     // _count (default 20, max 1000)
-	Offset           int                     // _offset (default 0)
+	TenantID                 string
+	ResType                  string
+	ID                       string                          // Optional _id filter (supports comma-separated multipleOr)
+	LastUpdated              []DateOp                        // Optional _lastUpdated filter(s) (e.g. ge + le range)
+	Strings                  map[string]string               // sp_name → value (prefix, :exact, or :contains)
+	StringFilters            map[string][]string             // sp_name → multipleAnd values (each may be comma-separated multipleOr)
+	Tokens                   map[string]string               // sp_name → value (exact, system|value, or :not)
+	TokenFilters             map[string][]string             // sp_name → multipleAnd values (each may be comma-separated multipleOr)
+	Dates                    map[string]DateOp               // sp_name → first date operation
+	DateFilters              map[string][]DateOp             // sp_name → all date operations (e.g. ge + le range)
+	Quantities               map[string]QuantityOp           // sp_name → first quantity operation
+	QuantityFilters          map[string][]QuantityOp         // sp_name → all quantity operations (e.g. ge + le range)
+	References               map[string]string               // sp_name → targetType/targetId
+	ReferenceFilters         map[string][]string             // sp_name → multipleAnd values (each may be comma-separated multipleOr)
+	Missing                  map[string]bool                 // sp_name → :missing=true/false
+	Chained                  []ChainedParam                  // chained search parameters (e.g. patient.name=Smith)
+	Has                      []HasParam                      // reverse-chained search parameters (e.g. _has:Observation:patient:code=8867-4)
+	List                     []string                        // _list cohort membership filters (e.g. _list=list-1)
+	CompositeTokenQuantities [][]CompositeTokenQuantityParam // token$quantity composite filters (e.g. code-value-quantity, component-code-value-quantity)
+	Includes                 []IncludeParam                  // _include parameters
+	RevIncludes              []IncludeParam                  // _revinclude parameters
+	Sort                     []SortSpec                      // _sort specifications
+	Summary                  string                          // _summary mode (true, text, data, count, false)
+	Elements                 []string                        // _elements projection fields
+	TotalMode                string                          // _total mode (none, estimate, accurate)
+	Count                    int                             // _count (default 20, max 1000)
+	Offset                   int                             // _offset (default 0)
 }
 
 // Search executes a FHIR search query using the covering spidx_* tables.
@@ -538,6 +539,70 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 			" AND EXISTS (SELECT 1 FROM spidx_reference lrf JOIN fhir_resource lr ON lr.tenant_id = lrf.tenant_id AND lr.res_type = lrf.res_type AND lr.res_id = lrf.res_id AND lr.is_deleted = FALSE WHERE lrf.tenant_id = r.tenant_id AND lrf.res_type IN ('List', 'Group') AND lrf.res_id = ANY($%d) AND lrf.sp_name IN ('item', 'member', 'entity') AND lrf.target_id = r.res_id AND (lrf.target_type = r.res_type OR lrf.target_type = ''))",
 			listIdx,
 		)
+	}
+
+	// 6d. Composite token$quantity search parameters (code-value-quantity, component-code-value-quantity, combo-code-value-quantity)
+	for _, orGroup := range params.CompositeTokenQuantities {
+		var orParts []string
+		for _, cp := range orGroup {
+			switch cp.ParamName {
+			case "component-code-value-quantity":
+				compKey := "comp-cvq:" + cp.TokenCode
+				if cp.TokenSystem != "" {
+					compKey = "comp-cvq:" + cp.TokenSystem + "|" + cp.TokenCode
+				}
+				spIdx := len(args) + 1
+				args = append(args, compKey)
+				qCond, qArgs := buildQuantityCondition("cq", cp.Quantity, len(args))
+				args = append(args, qArgs...)
+				orParts = append(orParts, fmt.Sprintf(
+					"EXISTS (SELECT 1 FROM spidx_quantity cq WHERE cq.tenant_id = r.tenant_id AND cq.res_type = r.res_type AND cq.res_id = r.res_id AND cq.sp_name = $%d AND %s)",
+					spIdx, qCond,
+				))
+			case "combo-code-value-quantity":
+				compKey := "comp-cvq:" + cp.TokenCode
+				if cp.TokenSystem != "" {
+					compKey = "comp-cvq:" + cp.TokenSystem + "|" + cp.TokenCode
+				}
+				spCompIdx := len(args) + 1
+				args = append(args, compKey)
+				qCompCond, qCompArgs := buildQuantityCondition("cq1", cp.Quantity, len(args))
+				args = append(args, qCompArgs...)
+
+				var tokCond string
+				if cp.TokenSystem != "" {
+					tokCond = fmt.Sprintf("(ct.sp_system = $%d AND ct.sp_value = $%d)", len(args)+1, len(args)+2)
+					args = append(args, cp.TokenSystem, cp.TokenCode)
+				} else {
+					tokCond = fmt.Sprintf("(ct.sp_value = $%d)", len(args)+1)
+					args = append(args, cp.TokenCode)
+				}
+				qTopCond, qTopArgs := buildQuantityCondition("cq2", cp.Quantity, len(args))
+				args = append(args, qTopArgs...)
+				orParts = append(orParts, fmt.Sprintf(
+					"(EXISTS (SELECT 1 FROM spidx_quantity cq1 WHERE cq1.tenant_id = r.tenant_id AND cq1.res_type = r.res_type AND cq1.res_id = r.res_id AND cq1.sp_name = $%d AND %s) OR EXISTS (SELECT 1 FROM spidx_token ct JOIN spidx_quantity cq2 ON cq2.tenant_id = ct.tenant_id AND cq2.res_type = ct.res_type AND cq2.res_id = ct.res_id WHERE ct.tenant_id = r.tenant_id AND ct.res_type = r.res_type AND ct.res_id = r.res_id AND ct.sp_name = 'code' AND %s AND cq2.sp_name = 'value-quantity' AND %s))",
+					spCompIdx, qCompCond, tokCond, qTopCond,
+				))
+			default: // code-value-quantity
+				var tokCond string
+				if cp.TokenSystem != "" {
+					tokCond = fmt.Sprintf("(ct.sp_system = $%d AND ct.sp_value = $%d)", len(args)+1, len(args)+2)
+					args = append(args, cp.TokenSystem, cp.TokenCode)
+				} else {
+					tokCond = fmt.Sprintf("(ct.sp_value = $%d)", len(args)+1)
+					args = append(args, cp.TokenCode)
+				}
+				qCond, qArgs := buildQuantityCondition("cq", cp.Quantity, len(args))
+				args = append(args, qArgs...)
+				orParts = append(orParts, fmt.Sprintf(
+					"EXISTS (SELECT 1 FROM spidx_token ct JOIN spidx_quantity cq ON cq.tenant_id = ct.tenant_id AND cq.res_type = ct.res_type AND cq.res_id = ct.res_id WHERE ct.tenant_id = r.tenant_id AND ct.res_type = r.res_type AND ct.res_id = r.res_id AND ct.sp_name = 'code' AND %s AND cq.sp_name = 'value-quantity' AND %s)",
+					tokCond, qCond,
+				))
+			}
+		}
+		if len(orParts) > 0 {
+			whereExtra += " AND (" + strings.Join(orParts, " OR ") + ")"
+		}
 	}
 
 	joinClause := strings.Join(joins, "\n")

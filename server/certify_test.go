@@ -57,8 +57,8 @@ func TestServer_CertifyEndpointAndRunner(t *testing.T) {
 		t.Fatalf("expected 100%% certification pass, got result=%s score=%.1f failed=%d:\n%s",
 			rep.Result, rep.Score, rep.Failed, rep.FormatScorecard())
 	}
-	if rep.TotalChecks < 20 {
-		t.Errorf("expected >= 20 certification checks, got %d", rep.TotalChecks)
+	if rep.TotalChecks != 40 {
+		t.Errorf("expected 40 certification checks, got %d", rep.TotalChecks)
 	}
 	scorecard := rep.FormatScorecard()
 	if !strings.Contains(scorecard, "OVERALL RESULT: PASS (100.0%") && !strings.Contains(scorecard, "Overall Result: PASS (100.0%") {
@@ -731,6 +731,11 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 		"/Patient/$match",
 		"/Patient/$member-match",
 		"/Patient/{id}/$summary",
+		"/Composition/{id}/$document",
+		"/Questionnaire/$populate",
+		"/Questionnaire/{id}/$populate",
+		"/QuestionnaireResponse/$extract",
+		"/QuestionnaireResponse/{id}/$extract",
 		"/Claim/$submit",
 		"/Patient/$meta",
 		"/Patient/{id}/$meta",
@@ -740,6 +745,8 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 		"/ValueSet/{id}/$expand",
 		"/ValueSet/$validate-code",
 		"/CodeSystem/$lookup",
+		"/ConceptMap/$translate",
+		"/ConceptMap/{id}/$translate",
 		"/Patient/{id}/Observation",
 		"/Observation/_search",
 		"/Observation/_history",
@@ -894,5 +901,96 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 	respPAS.Body.Close()
 	if !strings.Contains(string(bPAS), `"ClaimResponse"`) || !strings.Contains(string(bPAS), `"PA-HARD-CLAIM-PAS-1"`) {
 		t.Errorf("expected ClaimResponse with preAuthRef PA-HARD-CLAIM-PAS-1, got %s", string(bPAS))
+	}
+
+	// 11. Track 7: ConceptMap/$translate, Paired Composite Search, Questionnaire/$populate, QuestionnaireResponse/$extract, & Composition/$document
+	customCM := `{
+		"resourceType": "ConceptMap",
+		"id": "cm-custom-1",
+		"url": "http://flint.health/fhir/ConceptMap/local-to-loinc",
+		"status": "active",
+		"group": [
+			{
+				"source": "http://flint.health/fhir/CodeSystem/local-labs",
+				"target": "http://loinc.org",
+				"element": [
+					{
+						"code": "LOC-A1C",
+						"display": "Local Hemoglobin A1c",
+						"target": [
+							{"code": "4548-4", "display": "Hemoglobin A1c/Hemoglobin.total in Blood", "equivalence": "equivalent"}
+						]
+					}
+				]
+			}
+		]
+	}`
+	respCMCreate, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/ConceptMap", "application/fhir+json", strings.NewReader(customCM))
+	if err != nil || respCMCreate.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /ConceptMap failed: %v / %d", err, respCMCreate.StatusCode)
+	}
+	respCMCreate.Body.Close()
+
+	// Translate via stored ConceptMap/{id}/$translate POST Parameters
+	trParams := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "system", "valueUri": "http://flint.health/fhir/CodeSystem/local-labs"},
+			{"name": "code", "valueCode": "LOC-A1C"}
+		]
+	}`
+	respTrCustom, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/ConceptMap/cm-custom-1/$translate", "application/fhir+json", strings.NewReader(trParams))
+	if err != nil || respTrCustom.StatusCode != http.StatusOK {
+		t.Fatalf("POST /ConceptMap/cm-custom-1/$translate failed: %v / %d", err, respTrCustom.StatusCode)
+	}
+	bTrCustom, _ := io.ReadAll(respTrCustom.Body)
+	respTrCustom.Body.Close()
+	if !strings.Contains(string(bTrCustom), `"4548-4"`) || !strings.Contains(string(bTrCustom), `"valueBoolean":true`) {
+		t.Errorf("expected translated LOINC 4548-4 from stored ConceptMap, got %s", string(bTrCustom))
+	}
+
+	// Paired component-code-value-quantity test: Systolic (8480-6) = 125 mmHg, Diastolic (8462-4) = 82 mmHg.
+	// Querying systolic <= 85 MUST NOT match (even though diastolic is 82 <= 85), proving per-component pairing!
+	bpObs := `{
+		"resourceType": "Observation",
+		"id": "obs-bp-paired-1",
+		"status": "final",
+		"code": {"coding": [{"system": "http://loinc.org", "code": "85354-9"}]},
+		"subject": {"reference": "Patient/hard-pat-1"},
+		"component": [
+			{
+				"code": {"coding": [{"system": "http://loinc.org", "code": "8480-6"}]},
+				"valueQuantity": {"value": 125.0, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+			},
+			{
+				"code": {"coding": [{"system": "http://loinc.org", "code": "8462-4"}]},
+				"valueQuantity": {"value": 82.0, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+			}
+		]
+	}`
+	respBPCreate, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/Observation", "application/fhir+json", strings.NewReader(bpObs))
+	if err != nil || respBPCreate.StatusCode != http.StatusCreated {
+		t.Fatalf("POST BP Observation failed: %v / %d", err, respBPCreate.StatusCode)
+	}
+	respBPCreate.Body.Close()
+
+	respBPHit, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/Observation?component-code-value-quantity=http://loinc.org|8480-6$le130")
+	if err != nil || respBPHit.StatusCode != http.StatusOK {
+		t.Fatalf("GET component-code-value-quantity hit failed: %v", err)
+	}
+	bBPHit, _ := io.ReadAll(respBPHit.Body)
+	respBPHit.Body.Close()
+	if !strings.Contains(string(bBPHit), `"obs-bp-paired-1"`) {
+		t.Errorf("expected obs-bp-paired-1 to match systolic <= 130, got %s", string(bBPHit))
+	}
+
+	respBPMiss, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/Observation?component-code-value-quantity=http://loinc.org|8480-6$le85")
+	if err != nil || respBPMiss.StatusCode != http.StatusOK {
+		t.Fatalf("GET component-code-value-quantity miss failed: %v", err)
+	}
+	bBPMiss, _ := io.ReadAll(respBPMiss.Body)
+	respBPMiss.Body.Close()
+	if strings.Contains(string(bBPMiss), `"obs-bp-paired-1"`) {
+		t.Errorf("expected obs-bp-paired-1 NOT to match systolic <= 85 (no cross-component false positive), got %s", string(bBPMiss))
 	}
 }

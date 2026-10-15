@@ -47,21 +47,21 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Advanced Search Engine",
-			Capability:    "Date/Quantity Ranges, Chained Search (:exact/:contains/:not & reference), _has Reverse Chaining, _list Cohort Search, _include / _revinclude (:iterate), Multi-field _sort, _summary / _elements (SUBSETTED), _total=none, Bundle.link Pagination, POST /_search",
+			Capability:    "Date/Quantity Ranges, Composite Search (code-value-quantity, component-code-value-quantity), Chained Search (:exact/:contains/:not & reference), _has Reverse Chaining, _list Cohort Search, _include / _revinclude (:iterate), Multi-field _sort, _summary / _elements (SUBSETTED), _total=none, Bundle.link Pagination, POST /_search",
 			Specification: "HL7 FHIR R4 Search",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/{resourceType}?_include=...",
 		},
 		{
-			Category:      "Patient Compartment, IPS & Da Vinci Operations",
-			Capability:    "Patient/$everything, Patient/{id}/$summary (HL7 IPS), Patient/$match (MPI), Patient/$member-match (Da Vinci HRex), Claim/$submit (Da Vinci PAS), $meta / $meta-add / $meta-delete & RESTful Compartment Search",
-			Specification: "HL7 FHIR R4, International Patient Summary (IPS) & Da Vinci HRex/PDex/PAS",
+			Category:      "Patient Compartment, IPS, SDC & Da Vinci Operations",
+			Capability:    "Patient/$everything, Patient/{id}/$summary (HL7 IPS), Composition/{id}/$document, Questionnaire/$populate & QuestionnaireResponse/$extract (HL7 SDC), Patient/$match (MPI), Patient/$member-match (Da Vinci HRex), Claim/$submit (Da Vinci PAS), $meta / $meta-add / $meta-delete & RESTful Compartment Search",
+			Specification: "HL7 FHIR R4, IPS, SDC & Da Vinci HRex/PDex/PAS",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/Patient/{id}/$summary",
 		},
 		{
 			Category:      "Terminology Services",
-			Capability:    "ValueSet/$expand, ValueSet/$validate-code & CodeSystem/$lookup",
+			Capability:    "ValueSet/$expand, ValueSet/$validate-code, CodeSystem/$lookup & ConceptMap/$translate",
 			Specification: "HL7 FHIR R4 Terminology Services (4.0.1)",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/ValueSet/$expand",
@@ -82,7 +82,7 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Conformance, Validation & Certification",
-			Capability:    "StructureDefinition & ValueSet Validation ($validate, 26 US Core v6.1.0 & v7.0.0 Profiles) & 38-Check Automated Certification ($certify)",
+			Capability:    "StructureDefinition & ValueSet Validation ($validate, 26 US Core v6.1.0 & v7.0.0 Profiles) & 40-Check Automated Certification ($certify)",
 			Specification: "HL7 FHIR R4 OperationDefinition/Resource-validate & TestReport",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/$certify",
@@ -103,7 +103,7 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Analytical Lakehouse",
-			Capability:    "AutoMQ CDC -> Iceberg Table Topics -> SQLMesh Patient 360 & CMS165 / CMS122 eCQM Marts",
+			Capability:    "AutoMQ CDC -> Iceberg Table Topics -> SQLMesh Patient 360, CMS165 / CMS122 eCQM & Claims Utilization Marts",
 			Specification: "Apache Iceberg + SQLMesh (DuckDB)",
 			Status:        "Verified",
 			Endpoint:      "analytics/models/mart_patient_360.sql",
@@ -152,6 +152,8 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "_id", "type": "token"},
 			{"name": "_lastUpdated", "type": "date"},
 			{"name": "code", "type": "token"},
+			{"name": "component-code", "type": "token"},
+			{"name": "combo-code", "type": "token"},
 			{"name": "status", "type": "token"},
 			{"name": "category", "type": "token"},
 			{"name": "patient", "type": "reference"},
@@ -161,6 +163,9 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "value-quantity", "type": "quantity"},
 			{"name": "component-value-quantity", "type": "quantity"},
 			{"name": "combo-value-quantity", "type": "quantity"},
+			{"name": "code-value-quantity", "type": "composite"},
+			{"name": "component-code-value-quantity", "type": "composite"},
+			{"name": "combo-code-value-quantity", "type": "composite"},
 		},
 		"Practitioner": {
 			{"name": "_id", "type": "token"},
@@ -715,7 +720,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		"/$certify": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"System Operations"},
-				"summary":     "Run 36-check automated FHIR R4, US Core v6.1.0 & v7.0.0, CQM, CDS Hooks, and ONC (g)(10) certification suite",
+				"summary":     "Run 40-check automated FHIR R4, US Core v6.1.0 & v7.0.0, CQM, CDS Hooks, SDC, IPS, Da Vinci, and ONC (g)(10) certification suite",
 				"operationId": "runCertificationSuiteGet",
 				"responses": map[string]any{
 					"200": map[string]any{"description": "HL7 FHIR R4 TestReport resource"},
@@ -723,7 +728,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			},
 			"post": map[string]any{
 				"tags":        []string{"System Operations"},
-				"summary":     "Run 36-check automated FHIR R4, US Core v6.1.0 & v7.0.0, CQM, CDS Hooks, and ONC (g)(10) certification suite",
+				"summary":     "Run 40-check automated FHIR R4, US Core v6.1.0 & v7.0.0, CQM, CDS Hooks, SDC, IPS, Da Vinci, and ONC (g)(10) certification suite",
 				"operationId": "runCertificationSuitePost",
 				"responses": map[string]any{
 					"200": map[string]any{"description": "HL7 FHIR R4 TestReport resource"},
@@ -956,6 +961,58 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/ConceptMap/$translate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Translate a coded concept across terminology systems (e.g. SNOMED CT <-> ICD-10-CM, LOINC <-> SNOMED CT)",
+				"operationId": "translateConceptMapGet",
+				"parameters": []map[string]any{
+					{"name": "url", "in": "query", "required": false, "description": "Canonical ConceptMap URL", "schema": map[string]any{"type": "string"}},
+					{"name": "system", "in": "query", "required": false, "description": "Source CodeSystem URI", "schema": map[string]any{"type": "string"}},
+					{"name": "code", "in": "query", "required": true, "description": "Source concept code", "schema": map[string]any{"type": "string"}},
+					{"name": "targetsystem", "in": "query", "required": false, "description": "Target CodeSystem URI", "schema": map[string]any{"type": "string"}},
+					{"name": "reverse", "in": "query", "required": false, "schema": map[string]any{"type": "boolean"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (result, message, match)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Translate a coded concept across terminology systems (POST Parameters)",
+				"operationId": "translateConceptMapPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (result, message, match)"},
+				},
+			},
+		},
+		"/ConceptMap/{id}/$translate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Translate a coded concept using ConceptMap/{id}",
+				"operationId": "translateConceptMapByIdGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "code", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "system", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "reverse", "in": "query", "required": false, "schema": map[string]any{"type": "boolean"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (result, message, match)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Translate a coded concept using ConceptMap/{id} (POST Parameters)",
+				"operationId": "translateConceptMapByIdPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (result, message, match)"},
+				},
+			},
+		},
 		"/$export": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Bulk Data ($export)"},
@@ -1085,6 +1142,101 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "Bundle (type: document) starting with IPS Composition"},
+				},
+			},
+		},
+		"/Composition/{id}/$document": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Composition"},
+				"summary":     "Generate FHIR R4 clinical document Bundle ($document) from a Composition and its referenced resources",
+				"operationId": "compositionDocumentGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "persist", "in": "query", "required": false, "schema": map[string]any{"type": "boolean"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: document) starting with Composition"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Composition"},
+				"summary":     "Generate FHIR R4 clinical document Bundle ($document, POST)",
+				"operationId": "compositionDocumentPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: document) starting with Composition"},
+				},
+			},
+		},
+		"/Questionnaire/$populate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Questionnaire"},
+				"summary":     "HL7 Da Vinci SDC / DTR Questionnaire/$populate pre-populating a QuestionnaireResponse from patient context",
+				"operationId": "questionnairePopulateGet",
+				"parameters": []map[string]any{
+					{"name": "identifier", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "subject", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Pre-populated FHIR R4 QuestionnaireResponse"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Questionnaire"},
+				"summary":     "HL7 Da Vinci SDC / DTR Questionnaire/$populate (POST Parameters)",
+				"operationId": "questionnairePopulatePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Pre-populated FHIR R4 QuestionnaireResponse"},
+				},
+			},
+		},
+		"/Questionnaire/{id}/$populate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Questionnaire"},
+				"summary":     "HL7 Da Vinci SDC / DTR Questionnaire/{id}/$populate",
+				"operationId": "questionnairePopulateByIdGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "subject", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Pre-populated FHIR R4 QuestionnaireResponse"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Questionnaire"},
+				"summary":     "HL7 Da Vinci SDC / DTR Questionnaire/{id}/$populate (POST Parameters)",
+				"operationId": "questionnairePopulateByIdPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Pre-populated FHIR R4 QuestionnaireResponse"},
+				},
+			},
+		},
+		"/QuestionnaireResponse/$extract": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"QuestionnaireResponse"},
+				"summary":     "HL7 SDC QuestionnaireResponse/$extract converting coded answers into FHIR Observation / Condition transaction Bundle",
+				"operationId": "questionnaireResponseExtractPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Extracted FHIR R4 Bundle (type: transaction)"},
+				},
+			},
+		},
+		"/QuestionnaireResponse/{id}/$extract": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"QuestionnaireResponse"},
+				"summary":     "HL7 SDC QuestionnaireResponse/{id}/$extract",
+				"operationId": "questionnaireResponseExtractByIdPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Extracted FHIR R4 Bundle (type: transaction)"},
 				},
 			},
 		},

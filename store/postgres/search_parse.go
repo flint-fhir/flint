@@ -60,6 +60,15 @@ type SortSpec struct {
 	Desc  bool   // true when descending (-param or param:desc)
 }
 
+// CompositeTokenQuantityParam represents a FHIR R4 token$quantity composite search parameter
+// (e.g., code-value-quantity=http://loinc.org|8867-4$gt70 or component-code-value-quantity=http://loinc.org|8480-6$lt140).
+type CompositeTokenQuantityParam struct {
+	ParamName   string     // "code-value-quantity", "component-code-value-quantity", or "combo-code-value-quantity"
+	TokenSystem string     // Optional coding system before '|'
+	TokenCode   string     // Coding code
+	Quantity    QuantityOp // Parsed quantity operation after '$'
+}
+
 var knownDatePrefixes = map[string]bool{
 	"eq": true, "ne": true, "lt": true, "le": true,
 	"gt": true, "ge": true, "sa": true, "eb": true, "ap": true,
@@ -342,6 +351,38 @@ func ParseSortSpecs(raw string) ([]SortSpec, error) {
 	return out, nil
 }
 
+// ParseCompositeTokenQuantity parses a single FHIR R4 token$quantity composite search parameter item.
+func ParseCompositeTokenQuantity(paramName, raw string) (CompositeTokenQuantityParam, error) {
+	s := strings.TrimSpace(raw)
+	parts := strings.SplitN(s, "$", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return CompositeTokenQuantityParam{}, fmt.Errorf("invalid composite parameter %s=%q: expected <token>$<quantity>", paramName, raw)
+	}
+	tokenPart := strings.TrimSpace(parts[0])
+	qtyPart := strings.TrimSpace(parts[1])
+
+	var sys, code string
+	if tParts := strings.SplitN(tokenPart, "|", 2); len(tParts) == 2 {
+		sys = strings.TrimSpace(tParts[0])
+		code = strings.TrimSpace(tParts[1])
+	} else {
+		code = tokenPart
+	}
+	if code == "" {
+		return CompositeTokenQuantityParam{}, fmt.Errorf("invalid composite parameter %s=%q: missing token code", paramName, raw)
+	}
+	qOp, err := ParseQuantityOp(qtyPart)
+	if err != nil {
+		return CompositeTokenQuantityParam{}, fmt.Errorf("invalid composite quantity in %s=%q: %w", paramName, raw, err)
+	}
+	return CompositeTokenQuantityParam{
+		ParamName:   paramName,
+		TokenSystem: sys,
+		TokenCode:   code,
+		Quantity:    qOp,
+	}, nil
+}
+
 var (
 	knownStringSearchParams = map[string]bool{
 		"family": true, "given": true, "name": true,
@@ -354,6 +395,7 @@ var (
 		"identifier": true, "gender": true, "active": true,
 		"email": true, "phone": true, "language": true,
 		"deceased": true, "status": true, "code": true,
+		"component-code": true, "combo-code": true,
 		"category": true, "type": true, "class": true,
 		"clinical-status": true, "verification-status": true,
 		"lifecycle-status": true, "docstatus": true, "mode": true,
@@ -392,6 +434,11 @@ var (
 		"value-quantity":           true,
 		"component-value-quantity": true,
 		"combo-value-quantity":     true,
+	}
+	knownCompositeTokenQuantityParams = map[string]bool{
+		"code-value-quantity":           true,
+		"component-code-value-quantity": true,
+		"combo-code-value-quantity":     true,
 	}
 )
 
@@ -500,6 +547,14 @@ func ValidateSearchQuery(q url.Values) error {
 				case "quantity":
 					if _, err := ParseQuantityOp(chained.Value); err != nil {
 						return fmt.Errorf("invalid chained quantity parameter %s=%q: %w", key, val, err)
+					}
+				}
+				continue
+			}
+			if knownCompositeTokenQuantityParams[baseKey] {
+				for part := range strings.SplitSeq(val, ",") {
+					if _, err := ParseCompositeTokenQuantity(baseKey, part); err != nil {
+						return err
 					}
 				}
 				continue
@@ -651,6 +706,18 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 		}
 
 		switch {
+		case knownCompositeTokenQuantityParams[baseKey]:
+			for _, rawVal := range values {
+				var orGroup []CompositeTokenQuantityParam
+				for part := range strings.SplitSeq(rawVal, ",") {
+					if cp, err := ParseCompositeTokenQuantity(baseKey, part); err == nil {
+						orGroup = append(orGroup, cp)
+					}
+				}
+				if len(orGroup) > 0 {
+					params.CompositeTokenQuantities = append(params.CompositeTokenQuantities, orGroup)
+				}
+			}
 		case knownStringSearchParams[baseKey]:
 			params.Strings[key] = value
 			params.StringFilters[key] = append(params.StringFilters[key], values...)
@@ -727,7 +794,7 @@ func ParseIfNoneExist(tenant, resType, rawHeader string) (SearchParams, error) {
 				return SearchParams{}, fmt.Errorf("If-None-Exist query %q contains empty parameter value for %q", rawHeader, k)
 			}
 		}
-		if len(vals) > 1 && k != "_lastUpdated" && !knownDateSearchParams[k] && !knownQuantitySearchParams[k] {
+		if len(vals) > 1 && k != "_lastUpdated" && !knownDateSearchParams[k] && !knownQuantitySearchParams[k] && !knownCompositeTokenQuantityParams[k] {
 			if ch, ok := ParseChainedParam(k, vals[0]); !ok || (ch.ParamType != "date" && ch.ParamType != "quantity") {
 				return SearchParams{}, fmt.Errorf("If-None-Exist query %q contains multiple values for non-range parameter %q", rawHeader, k)
 			}
@@ -763,5 +830,6 @@ func HasSearchCriteria(p SearchParams) bool {
 		len(p.Missing) > 0 ||
 		len(p.Chained) > 0 ||
 		len(p.Has) > 0 ||
-		len(p.List) > 0
+		len(p.List) > 0 ||
+		len(p.CompositeTokenQuantities) > 0
 }

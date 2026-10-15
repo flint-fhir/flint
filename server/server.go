@@ -311,12 +311,45 @@ func (s *Server) Handler() http.Handler {
 					s.handleCodeSystemLookup(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "ConceptMap") && parts[4] == "$translate" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleConceptMapTranslate(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$populate" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleQuestionnairePopulate(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[4] == "$extract" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleQuestionnaireResponseExtract(w, r)
+					return
+				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
 				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$summary" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handlePatientSummary(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Composition") && parts[5] == "$document" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCompositionDocument(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Questionnaire") && parts[5] == "$populate" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleQuestionnairePopulate(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[5] == "$extract" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleQuestionnaireResponseExtract(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "Measure") && parts[5] == "$evaluate-measure" {
@@ -341,6 +374,12 @@ func (s *Server) Handler() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleCodeSystemLookup(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ConceptMap") && parts[5] == "$translate" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleConceptMapTranslate(w, r)
 					return
 				}
 				if r.Method == http.MethodGet && parts[3] == "$export-file" {
@@ -2011,19 +2050,35 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			"interaction":       interactions,
 			"searchParam":       sp,
 		}
-		if rt == "Patient" {
+		switch rt {
+		case "Patient":
 			entry["operation"] = []map[string]string{
 				{
 					"name":       "everything",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Patient-everything",
 				},
 				{
+					"name":       "summary",
+					"definition": "http://hl7.org/fhir/uv/ips/OperationDefinition/summary",
+				},
+				{
 					"name":       "match",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Patient-match",
 				},
 				{
+					"name":       "member-match",
+					"definition": "http://hl7.org/fhir/us/davinci-hrex/OperationDefinition/member-match",
+				},
+				{
 					"name":       "export",
 					"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/patient-export",
+				},
+			}
+		case "QuestionnaireResponse":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "extract",
+					"definition": "http://hl7.org/fhir/uv/sdc/OperationDefinition/QuestionnaireResponse-extract",
 				},
 			}
 		}
@@ -2088,6 +2143,27 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			"searchParam":       sp,
 		}
 		switch rt {
+		case "Claim":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "submit",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Claim-submit",
+				},
+			}
+		case "Composition":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "document",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Composition-document",
+				},
+			}
+		case "Questionnaire":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "populate",
+					"definition": "http://hl7.org/fhir/uv/sdc/OperationDefinition/Questionnaire-populate",
+				},
+			}
 		case "Measure":
 			entry["operation"] = []map[string]string{
 				{
@@ -2111,6 +2187,13 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 				{
 					"name":       "lookup",
 					"definition": "http://hl7.org/fhir/OperationDefinition/CodeSystem-lookup",
+				},
+			}
+		case "ConceptMap":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "translate",
+					"definition": "http://hl7.org/fhir/OperationDefinition/ConceptMap-translate",
 				},
 			}
 		}
@@ -2185,6 +2268,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 						"definition": "http://hl7.org/fhir/uv/ips/OperationDefinition/summary",
 					},
 					{
+						"name":       "document",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Composition-document",
+					},
+					{
 						"name":       "match",
 						"definition": "http://hl7.org/fhir/OperationDefinition/Patient-match",
 					},
@@ -2195,6 +2282,14 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "submit",
 						"definition": "http://hl7.org/fhir/OperationDefinition/Claim-submit",
+					},
+					{
+						"name":       "populate",
+						"definition": "http://hl7.org/fhir/uv/sdc/OperationDefinition/Questionnaire-populate",
+					},
+					{
+						"name":       "extract",
+						"definition": "http://hl7.org/fhir/uv/sdc/OperationDefinition/QuestionnaireResponse-extract",
 					},
 					{
 						"name":       "evaluate-measure",
@@ -2227,6 +2322,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "lookup",
 						"definition": "http://hl7.org/fhir/OperationDefinition/CodeSystem-lookup",
+					},
+					{
+						"name":       "translate",
+						"definition": "http://hl7.org/fhir/OperationDefinition/ConceptMap-translate",
 					},
 				},
 			},

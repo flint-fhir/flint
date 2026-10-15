@@ -174,9 +174,33 @@ func ExtractObservation(tenantID string, resID string, protoBytes []byte) (*Sear
 		appendQuantityIndexes(idx, tenantID, "Observation", effectiveID, "combo-value-quantity", q)
 	}
 	for _, comp := range r.GetComponent() {
+		var compCodes []string
+		for _, coding := range comp.GetCode().GetCoding() {
+			sys := ""
+			if coding.GetSystem() != nil {
+				sys = coding.GetSystem().GetValue()
+			}
+			code := ""
+			if coding.GetCode() != nil {
+				code = coding.GetCode().GetValue()
+			}
+			if code != "" {
+				idx.Tokens = append(idx.Tokens,
+					SpidxToken{TenantID: tenantID, ResType: "Observation", ResID: effectiveID, SpName: "component-code", SpSystem: sys, SpValue: code},
+					SpidxToken{TenantID: tenantID, ResType: "Observation", ResID: effectiveID, SpName: "combo-code", SpSystem: sys, SpValue: code},
+				)
+				compCodes = append(compCodes, code)
+				if sys != "" {
+					compCodes = append(compCodes, sys+"|"+code)
+				}
+			}
+		}
 		if q := comp.GetValue().GetQuantity(); q != nil {
 			appendQuantityIndexes(idx, tenantID, "Observation", effectiveID, "component-value-quantity", q)
 			appendQuantityIndexes(idx, tenantID, "Observation", effectiveID, "combo-value-quantity", q)
+			for _, ck := range compCodes {
+				appendQuantityIndexes(idx, tenantID, "Observation", effectiveID, "comp-cvq:"+ck, q)
+			}
 		}
 	}
 	return idx, nil
