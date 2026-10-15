@@ -1081,7 +1081,7 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 	if r, b := doSec(http.MethodPost, "/fhir/r4/"+tenant+"/QuestionnaireResponse/$extract?persist=true", qrExtractPersist); r.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 OK on QuestionnaireResponse/$extract?persist=true, got %d: %s", r.StatusCode, b)
 	}
-	if r, b := doSec(http.MethodGet, "/fhir/r4/"+tenant+"/Observation/ext-obs-qr-sec-persist-1-1", ""); r.StatusCode != http.StatusOK || !strings.Contains(string(b), `"68"`) {
+	if r, b := doSec(http.MethodGet, "/fhir/r4/"+tenant+"/Observation/ext-obs-qr-sec-persist-1-1", ""); r.StatusCode != http.StatusOK || !strings.Contains(string(b), `"value":68`) {
 		t.Errorf("expected persisted Observation/ext-obs-qr-sec-persist-1-1 to be readable after $extract?persist=true, got %d: %s", r.StatusCode, b)
 	}
 
