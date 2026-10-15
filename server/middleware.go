@@ -125,17 +125,34 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							return
 						}
 					} else if isQuestionnairePopulateOp(parts) {
-						if !auth.Allows(secCtx, "Questionnaire", auth.ActionRead) && !auth.Allows(secCtx, "Questionnaire", auth.ActionSearch) &&
-							!auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+						hasQScope := auth.Allows(secCtx, "Questionnaire", auth.ActionRead) ||
+							auth.Allows(secCtx, "Questionnaire", auth.ActionSearch) ||
+							auth.Allows(secCtx, "QuestionnaireResponse", auth.ActionCreate)
+						hasPatScope := auth.Allows(secCtx, "Patient", auth.ActionRead) ||
+							auth.Allows(secCtx, "Patient", auth.ActionSearch)
+						if !hasQScope || !hasPatScope {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-								"insufficient scope for Questionnaire/$populate")
+								"insufficient scope for Questionnaire/$populate (requires Questionnaire and Patient read/search scope)")
 							return
 						}
 					} else if len(parts) == 6 && strings.EqualFold(resType, "Composition") && parts[5] == "$document" {
-						if !auth.Allows(secCtx, "Composition", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionRead) {
+						if !auth.Allows(secCtx, "Composition", auth.ActionRead) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								"insufficient scope for Composition/$document")
 							return
+						}
+						if auth.IsPatientRestricted(secCtx) && s.store != nil {
+							exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, "Composition", parts[4], secCtx.GetPatientId())
+							if err != nil {
+								writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+								return
+							}
+							if exists && !allowed {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("patient-scoped token (%s) cannot access Composition/%s outside patient compartment",
+										secCtx.GetPatientId(), parts[4]))
+								return
+							}
 						}
 					} else if resType == "_history" || resType == "$meta" {
 						// System-level history or $meta: GET /{tenant}/_history or GET /{tenant}/$meta
@@ -223,24 +240,53 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							return
 						}
 					} else if isQuestionnairePopulateOp(parts) {
-						if !auth.Allows(secCtx, "Questionnaire", auth.ActionRead) && !auth.Allows(secCtx, "Questionnaire", auth.ActionSearch) &&
-							!auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+						hasQScope := auth.Allows(secCtx, "Questionnaire", auth.ActionRead) ||
+							auth.Allows(secCtx, "Questionnaire", auth.ActionSearch) ||
+							auth.Allows(secCtx, "QuestionnaireResponse", auth.ActionCreate)
+						hasPatScope := auth.Allows(secCtx, "Patient", auth.ActionRead) ||
+							auth.Allows(secCtx, "Patient", auth.ActionSearch)
+						if !hasQScope || !hasPatScope {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-								"insufficient scope for Questionnaire/$populate")
+								"insufficient scope for Questionnaire/$populate (requires Questionnaire and Patient read/search scope)")
 							return
 						}
 					} else if isQuestionnaireExtractOp(parts) {
-						if !auth.Allows(secCtx, "QuestionnaireResponse", auth.ActionRead) && !auth.Allows(secCtx, "QuestionnaireResponse", auth.ActionCreate) &&
-							!auth.Allows(secCtx, "Observation", auth.ActionCreate) && !auth.Allows(secCtx, "Patient", auth.ActionRead) {
+						if !auth.Allows(secCtx, "QuestionnaireResponse", auth.ActionRead) && !auth.Allows(secCtx, "QuestionnaireResponse", auth.ActionCreate) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								"insufficient scope for QuestionnaireResponse/$extract")
 							return
 						}
+						if len(parts) == 6 && auth.IsPatientRestricted(secCtx) && s.store != nil {
+							exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, "QuestionnaireResponse", parts[4], secCtx.GetPatientId())
+							if err != nil {
+								writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+								return
+							}
+							if exists && !allowed {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("patient-scoped token (%s) cannot access QuestionnaireResponse/%s outside patient compartment",
+										secCtx.GetPatientId(), parts[4]))
+								return
+							}
+						}
 					} else if len(parts) == 6 && strings.EqualFold(resType, "Composition") && parts[5] == "$document" {
-						if !auth.Allows(secCtx, "Composition", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionRead) {
+						if !auth.Allows(secCtx, "Composition", auth.ActionRead) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								"insufficient scope for Composition/$document")
 							return
+						}
+						if auth.IsPatientRestricted(secCtx) && s.store != nil {
+							exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, "Composition", parts[4], secCtx.GetPatientId())
+							if err != nil {
+								writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+								return
+							}
+							if exists && !allowed {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("patient-scoped token (%s) cannot access Composition/%s outside patient compartment",
+										secCtx.GetPatientId(), parts[4]))
+								return
+							}
 						}
 					} else if len(parts) == 5 && resType == "cds-services" {
 						if !auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
@@ -255,10 +301,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							return
 						}
 					} else if len(parts) == 5 && strings.EqualFold(resType, "Claim") && parts[4] == "$submit" {
-						if !auth.Allows(secCtx, "Claim", auth.ActionCreate) && !auth.Allows(secCtx, "Claim", auth.ActionUpdate) &&
-							!auth.Allows(secCtx, "Claim", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionRead) {
+						if !auth.Allows(secCtx, "Claim", auth.ActionCreate) && !auth.Allows(secCtx, "Claim", auth.ActionUpdate) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-								"insufficient scope for Claim/$submit")
+								"insufficient scope for Claim/$submit (requires Claim create or update scope)")
 							return
 						}
 					} else if len(parts) == 6 && strings.EqualFold(resType, "Patient") && parts[5] == "$summary" {

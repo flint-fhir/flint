@@ -993,4 +993,290 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 	if strings.Contains(string(bBPMiss), `"obs-bp-paired-1"`) {
 		t.Errorf("expected obs-bp-paired-1 NOT to match systolic <= 85 (no cross-component false positive), got %s", string(bBPMiss))
 	}
+
+	// 12. Track 8: Adversarial Security & Compartment Isolation for $document, $extract, Claim/$submit, and $member-match
+	// Issue a patient-scoped token for hard-pat-1 that includes Composition, Questionnaire, QuestionnaireResponse, Claim, Observation, and Patient scopes
+	authURLSec := fmt.Sprintf("%s/oauth2/authorize?response_type=code&client_id=test-app&redirect_uri=https://app.example/cb&scope=%s&state=sec1&patient=hard-pat-1",
+		ts.URL,
+		"patient/Patient.rs+patient/Observation.crus+patient/Composition.crus+patient/Questionnaire.rs+patient/QuestionnaireResponse.crus+patient/Claim.crus",
+	)
+	respAuthSec, err := noRedirect.Get(authURLSec)
+	if err != nil || respAuthSec.StatusCode != http.StatusFound {
+		t.Fatalf("authorize sec token failed: %v", err)
+	}
+	codeSec := respAuthSec.Header.Get("Location")
+	respAuthSec.Body.Close()
+	if idx := strings.Index(codeSec, "code="); idx != -1 {
+		codeSec = strings.Split(codeSec[idx+5:], "&")[0]
+	}
+	respTokSec, err := http.Post(ts.URL+"/oauth2/token", "application/x-www-form-urlencoded",
+		strings.NewReader(fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri=https://app.example/cb", codeSec)))
+	if err != nil || respTokSec.StatusCode != http.StatusOK {
+		t.Fatalf("token exchange sec failed: %v", err)
+	}
+	var tokSecMap map[string]any
+	_ = json.NewDecoder(respTokSec.Body).Decode(&tokSecMap)
+	respTokSec.Body.Close()
+	secToken, _ := tokSecMap["access_token"].(string)
+
+	doSec := func(method, path, body string) (*http.Response, []byte) {
+		req, err := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+secToken)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/fhir+json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("doSec %s %s: %v", method, path, err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, b
+	}
+
+	// (a) Cross-patient Composition.section.entry exfiltration attempt:
+	// Composition subject is hard-pat-1, but section.entry references obs-pat2-vital (belonging to hard-pat-2).
+	// Calling $document with hard-pat-1's token MUST return 403 Forbidden!
+	evilComp := `{
+		"resourceType": "Composition",
+		"id": "comp-cross-pat-evil",
+		"status": "final",
+		"type": {"coding": [{"system": "http://loinc.org", "code": "11506-3"}]},
+		"subject": {"reference": "Patient/hard-pat-1"},
+		"date": "2026-01-15T10:35:00Z",
+		"author": [{"reference": "Practitioner/prac-1"}],
+		"title": "Cross-Patient Exfiltration Attempt",
+		"section": [
+			{
+				"title": "Stolen Vitals",
+				"entry": [{"reference": "Observation/obs-pat2-vital"}]
+			}
+		]
+	}`
+	if r, b := doSec(http.MethodPut, "/fhir/r4/"+tenant+"/Composition/comp-cross-pat-evil", evilComp); r.StatusCode != http.StatusCreated && r.StatusCode != http.StatusOK {
+		t.Fatalf("PUT Composition/comp-cross-pat-evil failed: %d %s", r.StatusCode, b)
+	}
+	if r, _ := doSec(http.MethodGet, "/fhir/r4/"+tenant+"/Composition/comp-cross-pat-evil/$document", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden when Composition/$document references another patient's Observation, got %d", r.StatusCode)
+	}
+
+	// (b) QuestionnaireResponse/$extract?persist=true persists extracted Observation into Postgres
+	qrExtractPersist := `{
+		"resourceType": "QuestionnaireResponse",
+		"id": "qr-sec-persist-1",
+		"status": "completed",
+		"subject": {"reference": "Patient/hard-pat-1"},
+		"authored": "2026-01-15T11:00:00Z",
+		"item": [
+			{
+				"linkId": "heart-rate",
+				"text": "Heart rate",
+				"answer": [{"valueQuantity": {"value": 68.0, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}}]
+			}
+		]
+	}`
+	if r, b := doSec(http.MethodPost, "/fhir/r4/"+tenant+"/QuestionnaireResponse/$extract?persist=true", qrExtractPersist); r.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK on QuestionnaireResponse/$extract?persist=true, got %d: %s", r.StatusCode, b)
+	}
+	if r, b := doSec(http.MethodGet, "/fhir/r4/"+tenant+"/Observation/ext-obs-qr-sec-persist-1-1", ""); r.StatusCode != http.StatusOK || !strings.Contains(string(b), `"68"`) {
+		t.Errorf("expected persisted Observation/ext-obs-qr-sec-persist-1-1 to be readable after $extract?persist=true, got %d: %s", r.StatusCode, b)
+	}
+
+	// (c) Cross-patient Claim/$submit PAS Bundle attempting to overwrite Patient/hard-pat-2 -> 403 Forbidden
+	evilPASBundle := `{
+		"resourceType": "Bundle",
+		"type": "collection",
+		"entry": [
+			{
+				"resource": {
+					"resourceType": "Claim",
+					"id": "claim-evil-1",
+					"status": "active",
+					"type": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/claim-type", "code": "institutional"}]},
+					"use": "preauthorization",
+					"patient": {"reference": "Patient/hard-pat-1"},
+					"created": "2026-01-15",
+					"provider": {"reference": "Organization/bnd-org-1"},
+					"priority": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/processpriority", "code": "normal"}]},
+					"insurance": [{"sequence": 1, "focal": true, "coverage": {"reference": "Coverage/cov-1"}}]
+				}
+			},
+			{
+				"resource": {
+					"resourceType": "Patient",
+					"id": "hard-pat-2",
+					"name": [{"family": "HijackedVictim"}]
+				}
+			}
+		]
+	}`
+	if r, _ := doSec(http.MethodPost, "/fhir/r4/"+tenant+"/Claim/$submit", evilPASBundle); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden when PAS Bundle attempts to overwrite Patient/hard-pat-2, got %d", r.StatusCode)
+	}
+
+	// (d) Patient/$member-match with patient-restricted token for hard-pat-1 attempting to match hard-pat-2 -> 422 Unprocessable Entity (not found in compartment)
+	mmOtherPat := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{
+				"name": "MemberPatient",
+				"resource": {"resourceType": "Patient", "name": [{"family": "HardeningTwo"}]}
+			},
+			{
+				"name": "CoverageToMatch",
+				"resource": {"resourceType": "Coverage", "status": "active", "subscriberId": "ANY"}
+			}
+		]
+	}`
+	if r, _ := doSec(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/$member-match", mmOtherPat); r.StatusCode != http.StatusUnprocessableEntity {
+		t.Errorf("expected 422 Unprocessable Entity when patient-scoped token for hard-pat-1 attempts $member-match on hard-pat-2, got %d", r.StatusCode)
+	}
+}
+
+// TestServer_CriticalSecurityUnitSuite runs without requiring FLINT_TEST_POSTGRES_DSN,
+// verifying SMART v2 scopes, patient compartment enforcement, and query validation across
+// $populate, $extract, $document, Claim/$submit, $member-match, $translate, and _list.
+func TestServer_CriticalSecurityUnitSuite(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := server.New(nil, logger)
+	server.RegisterDefaultResourceTypes(srv)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	noRedirect := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	issuePatientToken := func(patientID, scopeStr string) string {
+		authURL := fmt.Sprintf("%s/oauth2/authorize?response_type=code&client_id=unit-app&redirect_uri=https://app.example/cb&scope=%s&state=st1&patient=%s",
+			ts.URL, strings.ReplaceAll(scopeStr, " ", "+"), patientID)
+		respAuth, err := noRedirect.Get(authURL)
+		if err != nil || respAuth.StatusCode != http.StatusFound {
+			t.Fatalf("authorize failed: %v", err)
+		}
+		loc := respAuth.Header.Get("Location")
+		respAuth.Body.Close()
+		code := ""
+		if idx := strings.Index(loc, "code="); idx != -1 {
+			code = strings.Split(loc[idx+5:], "&")[0]
+		}
+		respTok, err := http.Post(ts.URL+"/oauth2/token", "application/x-www-form-urlencoded",
+			strings.NewReader(fmt.Sprintf("grant_type=authorization_code&code=%s&redirect_uri=https://app.example/cb", code)))
+		if err != nil || respTok.StatusCode != http.StatusOK {
+			t.Fatalf("token exchange failed: %v", err)
+		}
+		var m map[string]any
+		_ = json.NewDecoder(respTok.Body).Decode(&m)
+		respTok.Body.Close()
+		tok, _ := m["access_token"].(string)
+		return tok
+	}
+
+	doWithToken := func(tok, method, path, body string) (*http.Response, []byte) {
+		req, err := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatalf("new req: %v", err)
+		}
+		if tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		if body != "" {
+			req.Header.Set("Content-Type", "application/fhir+json")
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("do req: %v", err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, b
+	}
+
+	// 1. Composition/{id}/$document requires Composition.r scope (Patient.r alone is 403 Forbidden)
+	patOnlyTok := issuePatientToken("pat-1", "patient/Patient.rs")
+	if r, _ := doWithToken(patOnlyTok, http.MethodGet, "/fhir/r4/acme/Composition/comp-1/$document", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on GET /Composition/comp-1/$document with only Patient.rs scope, got %d", r.StatusCode)
+	}
+	if r, _ := doWithToken(patOnlyTok, http.MethodPost, "/fhir/r4/acme/Composition/comp-1/$document", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on POST /Composition/comp-1/$document with only Patient.rs scope, got %d", r.StatusCode)
+	}
+
+	// 2. Questionnaire/$populate requires BOTH Questionnaire scope AND Patient read/search scope
+	qOnlyTok := issuePatientToken("pat-1", "patient/Questionnaire.rs")
+	if r, _ := doWithToken(qOnlyTok, http.MethodGet, "/fhir/r4/acme/Questionnaire/phq-9/$populate?subject=Patient/pat-1", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on Questionnaire/$populate without Patient read/search scope, got %d", r.StatusCode)
+	}
+	if r, _ := doWithToken(patOnlyTok, http.MethodGet, "/fhir/r4/acme/Questionnaire/phq-9/$populate?subject=Patient/pat-1", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on Questionnaire/$populate without Questionnaire scope, got %d", r.StatusCode)
+	}
+
+	// 3. QuestionnaireResponse/$extract enforces patient compartment isolation & persist=true scope check
+	qrReadTok := issuePatientToken("pat-1", "patient/QuestionnaireResponse.rs")
+	qrCrossPat := `{
+		"resourceType": "QuestionnaireResponse",
+		"id": "qr-other-pat",
+		"status": "completed",
+		"subject": {"reference": "Patient/pat-2"},
+		"item": [{"linkId": "heart-rate", "answer": [{"valueQuantity": {"value": 80.0}}]}]
+	}`
+	if r, _ := doWithToken(qrReadTok, http.MethodPost, "/fhir/r4/acme/QuestionnaireResponse/$extract", qrCrossPat); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on cross-patient QuestionnaireResponse/$extract, got %d", r.StatusCode)
+	}
+	qrOwnPat := `{
+		"resourceType": "QuestionnaireResponse",
+		"id": "qr-own-pat",
+		"status": "completed",
+		"subject": {"reference": "Patient/pat-1"},
+		"item": [{"linkId": "heart-rate", "answer": [{"valueQuantity": {"value": 80.0}}]}]
+	}`
+	if r, b := doWithToken(qrReadTok, http.MethodPost, "/fhir/r4/acme/QuestionnaireResponse/$extract", qrOwnPat); r.StatusCode != http.StatusOK || !strings.Contains(string(b), `"Observation"`) {
+		t.Errorf("expected 200 OK on own-patient QuestionnaireResponse/$extract (persist=false), got %d: %s", r.StatusCode, b)
+	}
+	if r, _ := doWithToken(qrReadTok, http.MethodPost, "/fhir/r4/acme/QuestionnaireResponse/$extract?persist=true", qrOwnPat); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on QuestionnaireResponse/$extract?persist=true without Observation.c scope, got %d", r.StatusCode)
+	}
+
+	// 4. Claim/$submit requires Claim.c or Claim.u, enforces patient compartment, and checks supporting resource scopes
+	claimReadOnlyTok := issuePatientToken("pat-1", "patient/Claim.rs patient/Patient.rs")
+	if r, _ := doWithToken(claimReadOnlyTok, http.MethodPost, "/fhir/r4/acme/Claim/$submit", `{"resourceType":"Claim"}`); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on Claim/$submit with read-only Claim.rs scope, got %d", r.StatusCode)
+	}
+	claimWriteTok := issuePatientToken("pat-1", "patient/Claim.c")
+	if r, _ := doWithToken(claimWriteTok, http.MethodPost, "/fhir/r4/acme/Claim/$submit", `{"resourceType":"Claim","patient":{"reference":"Patient/pat-2"}}`); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on cross-patient Claim/$submit, got %d", r.StatusCode)
+	}
+	pasWithUnauthSupporting := `{
+		"resourceType": "Bundle",
+		"type": "collection",
+		"entry": [
+			{"resource": {"resourceType": "Claim", "patient": {"reference": "Patient/pat-1"}}},
+			{"resource": {"resourceType": "Practitioner", "id": "prac-inject", "name": [{"family": "Evil"}]}}
+		]
+	}`
+	if r, _ := doWithToken(claimWriteTok, http.MethodPost, "/fhir/r4/acme/Claim/$submit", pasWithUnauthSupporting); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on Claim/$submit Bundle containing unauthorized supporting Practitioner resource, got %d", r.StatusCode)
+	}
+
+	// 5. _list cohort search requires List read/search scope and rejects empty _list=,
+	if r, _ := doWithToken(patOnlyTok, http.MethodGet, "/fhir/r4/acme/Patient?_list=cohort-1", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on _list search without List read/search scope, got %d", r.StatusCode)
+	}
+	if r, _ := doWithToken("", http.MethodGet, "/fhir/r4/acme/Patient?_list=,", ""); r.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on empty _list=, query, got %d", r.StatusCode)
+	}
+
+	// 6. ConceptMap/$translate enforces ConceptMap.r/s scope and translates built-in SNOMED -> ICD-10-CM
+	if r, _ := doWithToken(patOnlyTok, http.MethodGet, "/fhir/r4/acme/ConceptMap/$translate?system=http://snomed.info/sct&code=38341003", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on ConceptMap/$translate without ConceptMap scope, got %d", r.StatusCode)
+	}
+	cmTok := issuePatientToken("pat-1", "patient/ConceptMap.rs")
+	if r, b := doWithToken(cmTok, http.MethodGet, "/fhir/r4/acme/ConceptMap/$translate?system=http://snomed.info/sct&code=38341003", ""); r.StatusCode != http.StatusOK || !strings.Contains(string(b), `"I10"`) {
+		t.Errorf("expected 200 OK with ICD-10-CM I10 from ConceptMap/$translate, got %d: %s", r.StatusCode, b)
+	}
 }

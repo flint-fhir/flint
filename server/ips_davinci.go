@@ -380,12 +380,23 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	patientRestricted := hasSecCtx && auth.IsPatientRestricted(secCtx)
+	allowedPatientID := ""
+	if patientRestricted {
+		allowedPatientID = cleanID(secCtx.GetPatientId())
+	}
+
 	// Fetch active Coverage resources in the tenant to check subscriberId / identifier links
-	covSR, _ := s.store.Search(r.Context(), postgres.SearchParams{
+	covSearchParams := postgres.SearchParams{
 		TenantID: tenant,
 		ResType:  "Coverage",
 		Count:    1000,
-	})
+	}
+	if patientRestricted {
+		covSearchParams.References = map[string]string{"patient": "Patient/" + allowedPatientID}
+	}
+	covSR, _ := s.store.Search(r.Context(), covSearchParams)
 	coveragePatients := make(map[string]string) // patientID -> memberIdentifierValue
 	if covSR != nil {
 		for _, m := range covSR.Matches {
@@ -398,7 +409,7 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 				continue
 			}
 			patID := extractCoverageBeneficiaryPatientID(cov)
-			if patID == "" {
+			if patID == "" || (patientRestricted && cleanID(patID) != allowedPatientID) {
 				continue
 			}
 			subID, _ := cov["subscriberId"].(string)
@@ -436,12 +447,16 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Fetch candidate Patients in the tenant
-	patSR, err := s.store.Search(r.Context(), postgres.SearchParams{
+	// Fetch candidate Patients in the tenant (restricted to patient compartment when patient-scoped)
+	patSearchParams := postgres.SearchParams{
 		TenantID: tenant,
 		ResType:  "Patient",
 		Count:    1000,
-	})
+	}
+	if patientRestricted {
+		patSearchParams.ID = allowedPatientID
+	}
+	patSR, err := s.store.Search(r.Context(), patSearchParams)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to search Patients for $member-match")
 		return
@@ -456,6 +471,12 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 	var matches []matchedMember
 
 	for _, m := range patSR.Matches {
+		if patientRestricted && cleanID(m.ResID) != allowedPatientID {
+			continue
+		}
+		if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, "Patient", m.ResID, m.ResourceProto) {
+			continue
+		}
 		jb, err := s.protoToJSONWithMeta("Patient", m.ResourceProto, m.ResVersion, m.LastUpdated)
 		if err != nil {
 			continue
@@ -585,10 +606,6 @@ func extractCoverageBeneficiaryPatientID(cov map[string]any) string {
 // and generates, persists, and returns a ClaimResponse.
 func (s *Server) handleClaimSubmit(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
-	if s.store == nil {
-		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
-		return
-	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
 	if err != nil || len(body) == 0 {
@@ -637,18 +654,70 @@ func (s *Server) handleClaimSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	if hasSecCtx && auth.IsPatientRestricted(secCtx) {
+		claimPatientID := ""
+		if patRef, ok := claimMap["patient"].(map[string]any); ok {
+			if refStr, _ := patRef["reference"].(string); refStr != "" {
+				claimPatientID = cleanID(refStr)
+			}
+		}
+		if claimPatientID == "" || claimPatientID != cleanID(secCtx.GetPatientId()) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				"access denied: Claim patient does not match restricted patient compartment")
+			return
+		}
+	}
+
+	// Verify scopes and compartment rules on any supporting resources from a PAS Bundle before writing
+	for _, supRes := range supportingResources {
+		supType, _ := supRes["resourceType"].(string)
+		if supType == "" || supType == "Claim" {
+			continue
+		}
+		if hasSecCtx {
+			if !auth.Allows(secCtx, supType, auth.ActionCreate) && !auth.Allows(secCtx, supType, auth.ActionUpdate) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope to persist supporting %s resource in Claim/$submit Bundle", supType))
+				return
+			}
+			if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(supType, "Patient") && !postgres.IsPatientCompartmentResourceType(supType) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("patient-scoped token (%s) cannot create non-compartment supporting resource %s in Claim/$submit",
+						secCtx.GetPatientId(), supType))
+				return
+			}
+		}
+	}
+
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		return
+	}
+
 	// Persist any supporting resources from a PAS Bundle first
 	for _, supRes := range supportingResources {
 		supType, _ := supRes["resourceType"].(string)
 		if supType == "" || supType == "Claim" {
 			continue
 		}
-		_, _ = s.persistFHIRMapResource(r, tenant, supType, supRes)
+		if _, err := s.persistFHIRMapResource(r, tenant, supType, supRes); err != nil {
+			if errors.Is(err, errForbiddenCompartment) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", err.Error())
+				return
+			}
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid supporting %s resource: %v", supType, err))
+			return
+		}
 	}
 
 	// Persist the submitted Claim
 	claimID, err := s.persistFHIRMapResource(r, tenant, "Claim", claimMap)
 	if err != nil {
+		if errors.Is(err, errForbiddenCompartment) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", err.Error())
+			return
+		}
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid Claim resource: %v", err))
 		return
 	}
@@ -808,6 +877,12 @@ func (s *Server) persistFHIRMapResource(r *http.Request, tenant, resType string,
 	if err != nil {
 		return "", err
 	}
+	if s.validator != nil {
+		outcome := s.validator.ValidateJSON(resType, rawJSON)
+		if !outcome.IsValid() {
+			return "", fmt.Errorf("validation failed for %s/%s", resType, resID)
+		}
+	}
 	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, rawJSON)
 	if err != nil {
 		return "", err
@@ -826,6 +901,38 @@ func (s *Server) persistFHIRMapResource(r *http.Request, tenant, resType string,
 	if extractor, ok := s.extractors[resType]; ok {
 		idx, _ = extractor(tenant, resID, protoBytes)
 	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		if auth.IsPatientRestricted(secCtx) {
+			allowedPatientID := cleanID(secCtx.GetPatientId())
+			if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
+				if !postgres.IndexesBelongToPatientCompartment(resType, resID, idx, allowedPatientID) {
+					return "", fmt.Errorf("%w: %s/%s does not belong to restricted patient compartment %s",
+						errForbiddenCompartment, resType, resID, allowedPatientID)
+				}
+				if s.store != nil {
+					exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), tenant, resType, resID, allowedPatientID)
+					if err != nil {
+						return "", err
+					}
+					if exists && !allowed {
+						return "", fmt.Errorf("%w: cannot overwrite existing %s/%s belonging to another patient",
+							errForbiddenCompartment, resType, resID)
+					}
+				}
+			} else if resType != "Bundle" {
+				return "", fmt.Errorf("%w: patient-scoped token (%s) cannot persist non-compartment resource %s/%s",
+					errForbiddenCompartment, secCtx.GetPatientId(), resType, resID)
+			}
+		}
+		if resType != "ClaimResponse" && !auth.Allows(secCtx, resType, auth.ActionUpdate) && s.store != nil {
+			if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID); err == nil && rec != nil && !rec.IsDeleted {
+				return "", fmt.Errorf("%w: cannot overwrite existing %s/%s without update scope",
+					errForbiddenCompartment, resType, resID)
+			}
+		}
+	}
+
 	rec, err := s.store.WriteResourceWithMeta(r.Context(), postgres.ResourceInput{
 		TenantID:      tenant,
 		ResType:       resType,

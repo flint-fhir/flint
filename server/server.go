@@ -1579,6 +1579,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		return
+	}
+
 	sr, err := s.store.Search(r.Context(), params)
 	if err != nil {
 		s.logger.Error("search", "error", err, "type", resType)
