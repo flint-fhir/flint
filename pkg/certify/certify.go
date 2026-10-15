@@ -1,6 +1,6 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), and ONC §170.315(g)(10) / HTI-1 Standardized API conformance
-// & certification runner. It executes 5 structured test suites (34 checks) against
+// & certification runner. It executes 5 structured test suites (49 checks) against
 // a target Flint server and produces both a standard FHIR R4 TestReport resource
 // and a human-readable scorecard.
 package certify
