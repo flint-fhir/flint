@@ -57,8 +57,8 @@ func TestServer_CertifyEndpointAndRunner(t *testing.T) {
 		t.Fatalf("expected 100%% certification pass, got result=%s score=%.1f failed=%d:\n%s",
 			rep.Result, rep.Score, rep.Failed, rep.FormatScorecard())
 	}
-	if rep.TotalChecks != 49 {
-		t.Errorf("expected 49 certification checks, got %d", rep.TotalChecks)
+	if rep.TotalChecks != 50 {
+		t.Errorf("expected 50 certification checks, got %d", rep.TotalChecks)
 	}
 	scorecard := rep.FormatScorecard()
 	if !strings.Contains(scorecard, "OVERALL RESULT: PASS (100.0%") && !strings.Contains(scorecard, "Overall Result: PASS (100.0%") {
@@ -732,6 +732,7 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 		"/Patient/$member-match",
 		"/Patient/{id}/$summary",
 		"/Composition/{id}/$document",
+		"/DocumentReference/$docref",
 		"/Questionnaire/$populate",
 		"/Questionnaire/{id}/$populate",
 		"/QuestionnaireResponse/$extract",
@@ -741,6 +742,7 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 		"/Patient/{id}/$meta",
 		"/Patient/{id}/$meta-add",
 		"/Patient/{id}/$meta-delete",
+		"/Patient/{id}/$provenance",
 		"/ValueSet/$expand",
 		"/ValueSet/{id}/$expand",
 		"/ValueSet/$validate-code",
@@ -1080,6 +1082,8 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 	}`
 	if r, b := doSec(http.MethodPost, "/fhir/r4/"+tenant+"/QuestionnaireResponse/$extract?persist=true", qrExtractPersist); r.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 OK on QuestionnaireResponse/$extract?persist=true, got %d: %s", r.StatusCode, b)
+	} else if !strings.Contains(string(b), `"prov-extract-qr-sec-persist-1"`) {
+		t.Errorf("expected QuestionnaireResponse/$extract Bundle to include automatic Provenance resource prov-extract-qr-sec-persist-1, got: %s", b)
 	}
 	if r, b := doSec(http.MethodGet, "/fhir/r4/"+tenant+"/Observation/ext-obs-qr-sec-persist-1-1", ""); r.StatusCode != http.StatusOK || !strings.Contains(string(b), `"value":68`) {
 		t.Errorf("expected persisted Observation/ext-obs-qr-sec-persist-1-1 to be readable after $extract?persist=true, got %d: %s", r.StatusCode, b)
@@ -1134,11 +1138,117 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 	if r, _ := doSec(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/$member-match", mmOtherPat); r.StatusCode != http.StatusUnprocessableEntity {
 		t.Errorf("expected 422 Unprocessable Entity when patient-scoped token for hard-pat-1 attempts $member-match on hard-pat-2, got %d", r.StatusCode)
 	}
+
+	// 13. Track 9: DocumentReference/$docref, X-Provenance Header & $provenance Lineage, and POST Patient/{id}/$everything
+	// (a) Verify Observation/ext-obs-qr-sec-persist-1-1/$provenance returns the persisted Provenance from $extract?persist=true
+	respExtProv, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/Observation/ext-obs-qr-sec-persist-1-1/$provenance")
+	if err != nil || respExtProv.StatusCode != http.StatusOK {
+		t.Fatalf("GET /Observation/ext-obs-qr-sec-persist-1-1/$provenance failed: %v / %d", err, respExtProv.StatusCode)
+	}
+	bExtProv, _ := io.ReadAll(respExtProv.Body)
+	respExtProv.Body.Close()
+	if !strings.Contains(string(bExtProv), `"prov-extract-qr-sec-persist-1"`) {
+		t.Errorf("expected $provenance on extracted Observation to contain prov-extract-qr-sec-persist-1, got: %s", string(bExtProv))
+	}
+
+	// (b) Create a stored DocumentReference with X-Provenance: true and context.period
+	docRefCreate := `{
+		"resourceType": "DocumentReference",
+		"id": "docref-hard-1",
+		"status": "current",
+		"type": {"coding": [{"system": "http://loinc.org", "code": "34133-9", "display": "Summary of episode note"}]},
+		"subject": {"reference": "Patient/hard-pat-1"},
+		"date": "2026-01-15T10:00:00Z",
+		"content": [{"attachment": {"contentType": "text/plain", "title": "Episode Summary"}}],
+		"context": {"period": {"start": "2026-01-10T00:00:00Z", "end": "2026-01-20T00:00:00Z"}}
+	}`
+	reqDocCreate, _ := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/"+tenant+"/DocumentReference/docref-hard-1", strings.NewReader(docRefCreate))
+	reqDocCreate.Header.Set("Content-Type", "application/fhir+json")
+	reqDocCreate.Header.Set("X-Provenance", "true")
+	respDocCreate, err := http.DefaultClient.Do(reqDocCreate)
+	if err != nil || (respDocCreate.StatusCode != http.StatusCreated && respDocCreate.StatusCode != http.StatusOK) {
+		t.Fatalf("PUT DocumentReference/docref-hard-1 with X-Provenance: true failed: %v / %d", err, respDocCreate.StatusCode)
+	}
+	respDocCreate.Body.Close()
+	if provLoc := respDocCreate.Header.Get("X-Provenance-Location"); !strings.Contains(provLoc, "/Provenance/") {
+		t.Errorf("expected X-Provenance-Location header containing /Provenance/, got %q", provLoc)
+	}
+
+	// Patch DocumentReference/docref-hard-1 with an inline X-Provenance JSON template -> records a second UPDATE Provenance
+	reqDocPatch, _ := http.NewRequest(http.MethodPatch, ts.URL+"/fhir/r4/"+tenant+"/DocumentReference/docref-hard-1",
+		strings.NewReader(`[{"op":"replace","path":"/description","value":"Patched Episode Summary"}]`))
+	reqDocPatch.Header.Set("Content-Type", "application/json-patch+json")
+	reqDocPatch.Header.Set("X-Provenance", `{"agent":[{"who":{"display":"Dr. Patch Lineage"}}]}`)
+	respDocPatch, err := http.DefaultClient.Do(reqDocPatch)
+	if err != nil || respDocPatch.StatusCode != http.StatusOK {
+		t.Fatalf("PATCH DocumentReference/docref-hard-1 with X-Provenance failed: %v / %d", err, respDocPatch.StatusCode)
+	}
+	respDocPatch.Body.Close()
+
+	// Verify GET /DocumentReference/docref-hard-1/$provenance returns 2 Provenance entries (v1 CREATE + v2 UPDATE)
+	respDocProv, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/DocumentReference/docref-hard-1/$provenance")
+	if err != nil || respDocProv.StatusCode != http.StatusOK {
+		t.Fatalf("GET /DocumentReference/docref-hard-1/$provenance failed: %v / %d", err, respDocProv.StatusCode)
+	}
+	var docProvBundle map[string]any
+	_ = json.NewDecoder(respDocProv.Body).Decode(&docProvBundle)
+	respDocProv.Body.Close()
+	if tot, _ := docProvBundle["total"].(float64); tot != 2 {
+		t.Errorf("expected 2 Provenance records for DocumentReference/docref-hard-1, got %v", docProvBundle["total"])
+	}
+
+	// (c) DocumentReference/$docref via GET (on-demand=true + matching stored docref) and POST Parameters (type=34133-9, on-demand=false)
+	respDocrefGet, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/DocumentReference/$docref?patient=Patient/hard-pat-1&start=2026-01-01&end=2026-02-01")
+	if err != nil || respDocrefGet.StatusCode != http.StatusOK {
+		t.Fatalf("GET /DocumentReference/$docref failed: %v / %d", err, respDocrefGet.StatusCode)
+	}
+	bDocrefGet, _ := io.ReadAll(respDocrefGet.Body)
+	respDocrefGet.Body.Close()
+	if !strings.Contains(string(bDocrefGet), `"docref-hard-1"`) || !strings.Contains(string(bDocrefGet), `"docref-ips-hard-pat-1"`) {
+		t.Errorf("expected $docref GET to include stored docref-hard-1 and on-demand docref-ips-hard-pat-1, got: %s", string(bDocrefGet))
+	}
+
+	docrefPostParams := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueReference": {"reference": "Patient/hard-pat-1"}},
+			{"name": "type", "valueCodeableConcept": {"coding": [{"system": "http://loinc.org", "code": "34133-9"}]}},
+			{"name": "on-demand", "valueBoolean": false}
+		]
+	}`
+	respDocrefPost, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/DocumentReference/$docref", "application/fhir+json", strings.NewReader(docrefPostParams))
+	if err != nil || respDocrefPost.StatusCode != http.StatusOK {
+		t.Fatalf("POST /DocumentReference/$docref failed: %v / %d", err, respDocrefPost.StatusCode)
+	}
+	bDocrefPost, _ := io.ReadAll(respDocrefPost.Body)
+	respDocrefPost.Body.Close()
+	if !strings.Contains(string(bDocrefPost), `"docref-hard-1"`) || strings.Contains(string(bDocrefPost), `"docref-ips-hard-pat-1"`) {
+		t.Errorf("expected $docref POST with on-demand=false and type=34133-9 to return only docref-hard-1, got: %s", string(bDocrefPost))
+	}
+
+	// (d) POST /Patient/hard-pat-1/$everything with Parameters body (_type=Patient,Observation&_count=2&_offset=0)
+	everythingParams := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "_type", "valueString": "Patient,Observation"},
+			{"name": "_count", "valueInteger": 2},
+			{"name": "_offset", "valueInteger": 0}
+		]
+	}`
+	respEvPost, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/Patient/hard-pat-1/$everything", "application/fhir+json", strings.NewReader(everythingParams))
+	if err != nil || respEvPost.StatusCode != http.StatusOK {
+		t.Fatalf("POST /Patient/hard-pat-1/$everything failed: %v / %d", err, respEvPost.StatusCode)
+	}
+	bEvPost, _ := io.ReadAll(respEvPost.Body)
+	respEvPost.Body.Close()
+	if !strings.Contains(string(bEvPost), `"next"`) || !strings.Contains(string(bEvPost), `"self"`) {
+		t.Errorf("expected POST /Patient/hard-pat-1/$everything with _count=2 to include self and next pagination links, got: %s", string(bEvPost))
+	}
 }
 
 // TestServer_CriticalSecurityUnitSuite runs without requiring FLINT_TEST_POSTGRES_DSN,
 // verifying SMART v2 scopes, patient compartment enforcement, and query validation across
-// $populate, $extract, $document, Claim/$submit, $member-match, $translate, and _list.
+// $populate, $extract, $document, Claim/$submit, $member-match, $translate, _list, $docref, $provenance, and $everything.
 func TestServer_CriticalSecurityUnitSuite(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := server.New(nil, logger)
@@ -1235,8 +1345,8 @@ func TestServer_CriticalSecurityUnitSuite(t *testing.T) {
 		"subject": {"reference": "Patient/pat-1"},
 		"item": [{"linkId": "heart-rate", "answer": [{"valueQuantity": {"value": 80.0}}]}]
 	}`
-	if r, b := doWithToken(qrReadTok, http.MethodPost, "/fhir/r4/acme/QuestionnaireResponse/$extract", qrOwnPat); r.StatusCode != http.StatusOK || !strings.Contains(string(b), `"Observation"`) {
-		t.Errorf("expected 200 OK on own-patient QuestionnaireResponse/$extract (persist=false), got %d: %s", r.StatusCode, b)
+	if r, b := doWithToken(qrReadTok, http.MethodPost, "/fhir/r4/acme/QuestionnaireResponse/$extract", qrOwnPat); r.StatusCode != http.StatusOK || !strings.Contains(string(b), `"Observation"`) || !strings.Contains(string(b), `"Provenance"`) {
+		t.Errorf("expected 200 OK with Observation and Provenance on own-patient QuestionnaireResponse/$extract (persist=false), got %d: %s", r.StatusCode, b)
 	}
 	if r, _ := doWithToken(qrReadTok, http.MethodPost, "/fhir/r4/acme/QuestionnaireResponse/$extract?persist=true", qrOwnPat); r.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403 Forbidden on QuestionnaireResponse/$extract?persist=true without Observation.c scope, got %d", r.StatusCode)
@@ -1278,5 +1388,47 @@ func TestServer_CriticalSecurityUnitSuite(t *testing.T) {
 	cmTok := issuePatientToken("pat-1", "patient/ConceptMap.rs")
 	if r, b := doWithToken(cmTok, http.MethodGet, "/fhir/r4/acme/ConceptMap/$translate?system=http://snomed.info/sct&code=38341003", ""); r.StatusCode != http.StatusOK || !strings.Contains(string(b), `"I10"`) {
 		t.Errorf("expected 200 OK with ICD-10-CM I10 from ConceptMap/$translate, got %d: %s", r.StatusCode, b)
+	}
+
+	// 7. DocumentReference/$docref requires DocumentReference.r/s scope, requires patient parameter, and enforces patient compartment
+	if r, _ := doWithToken(patOnlyTok, http.MethodGet, "/fhir/r4/acme/DocumentReference/$docref?patient=Patient/pat-1", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on DocumentReference/$docref without DocumentReference scope, got %d", r.StatusCode)
+	}
+	docRefTok := issuePatientToken("pat-1", "patient/DocumentReference.rs patient/Patient.rs")
+	if r, _ := doWithToken(docRefTok, http.MethodGet, "/fhir/r4/acme/DocumentReference/$docref", ""); r.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on DocumentReference/$docref without patient parameter, got %d", r.StatusCode)
+	}
+	if r, _ := doWithToken(docRefTok, http.MethodGet, "/fhir/r4/acme/DocumentReference/$docref?patient=Patient/pat-2", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on cross-patient DocumentReference/$docref, got %d", r.StatusCode)
+	}
+
+	// 8. {resourceType}/{id}/$provenance requires BOTH target resource read scope AND Provenance read/search scope, plus patient compartment check
+	if r, _ := doWithToken(patOnlyTok, http.MethodGet, "/fhir/r4/acme/Patient/pat-1/$provenance", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on /Patient/pat-1/$provenance without Provenance.rs scope, got %d", r.StatusCode)
+	}
+	provTok := issuePatientToken("pat-1", "patient/Patient.rs patient/Provenance.rs")
+	if r, _ := doWithToken(provTok, http.MethodGet, "/fhir/r4/acme/Patient/pat-2/$provenance", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on cross-patient /Patient/pat-2/$provenance, got %d", r.StatusCode)
+	}
+
+	// 9. POST Patient/{id}/$everything enforces patient compartment and validates _type parameter
+	if r, _ := doWithToken(patOnlyTok, http.MethodPost, "/fhir/r4/acme/Patient/pat-2/$everything", ""); r.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on cross-patient POST /Patient/pat-2/$everything, got %d", r.StatusCode)
+	}
+	if r, _ := doWithToken("", http.MethodGet, "/fhir/r4/acme/Patient/pat-1/$everything?_type=NotAResource", ""); r.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on Patient/$everything with unknown _type=NotAResource, got %d", r.StatusCode)
+	}
+
+	// 10. /oauth2/token client_credentials supports optional patient form parameter for $docs SMART v2 Token Minter
+	respCCPat, err := http.Post(ts.URL+"/oauth2/token", "application/x-www-form-urlencoded",
+		strings.NewReader("grant_type=client_credentials&scope=patient/*.rs&patient=example-patient-1"))
+	if err != nil || respCCPat.StatusCode != http.StatusOK {
+		t.Fatalf("POST /oauth2/token client_credentials with patient failed: %v / %d", err, respCCPat.StatusCode)
+	}
+	var ccPatMap map[string]any
+	_ = json.NewDecoder(respCCPat.Body).Decode(&ccPatMap)
+	respCCPat.Body.Close()
+	if ccPatMap["patient"] != "example-patient-1" {
+		t.Errorf("expected client_credentials token response to include patient=example-patient-1, got %+v", ccPatMap)
 	}
 }

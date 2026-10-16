@@ -316,6 +316,11 @@ func (s *Server) Handler() http.Handler {
 					s.handleConceptMapTranslate(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "DocumentReference") && parts[4] == "$docref" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDocumentReferenceDocref(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$populate" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleQuestionnairePopulate(w, r)
@@ -328,6 +333,20 @@ func (s *Server) Handler() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if parts[5] == "$everything" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientEverything(w, r)
+					return
+				}
+				if r.Method == http.MethodGet && parts[5] == "$provenance" && !strings.HasPrefix(parts[3], "$") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					r.SetPathValue("id", parts[4])
+					s.handleResourceProvenance(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$summary" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -702,6 +721,12 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	provSpec, err := parseXProvenanceHeader(r)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+
 	// Read request body
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // 10MB max
 	if err != nil {
@@ -763,6 +788,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 				"type", resType, "id", resID, "error", extractErr)
 		}
 	}
+	if strings.EqualFold(resType, "Provenance") {
+		s.enrichProvenancePatientIndex(r.Context(), tenant, resID, idx)
+	}
 	setAuditPatientID(r.Context(), extractPatientIDFromIndexes(resType, resID, idx))
 
 	// Enforce patient compartment isolation on incoming resource payload
@@ -823,6 +851,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 				Op:        "U",
 			})
 			s.dispatchSubscriptions(r.Context(), tenant, resType, rec.ResID, rec.ResourceProto, rec.ResVersion, rec.LastUpdated, idx)
+			s.recordAutoProvenance(r, w, tenant, resType, rec.ResID, rec.ResVersion, idx, provSpec)
 		}
 		jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if err != nil {
@@ -863,6 +892,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Op:        "U",
 	})
 	s.dispatchSubscriptions(r.Context(), tenant, resType, resID, rec.ResourceProto, rec.ResVersion, rec.LastUpdated, idx)
+	s.recordAutoProvenance(r, w, tenant, resType, resID, rec.ResVersion, idx, provSpec)
 
 	jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
@@ -943,6 +973,12 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	provSpec, err := parseXProvenanceHeader(r)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+
 	expectedVersion := 0
 	if ifMatch := strings.TrimSpace(r.Header.Get("If-Match")); ifMatch != "" {
 		v, err := postgres.ParseETagVersion(ifMatch)
@@ -1010,6 +1046,9 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 				"type", resType, "id", resID, "error", extractErr)
 		}
 	}
+	if strings.EqualFold(resType, "Provenance") {
+		s.enrichProvenancePatientIndex(r.Context(), tenant, resID, idx)
+	}
 	setAuditPatientID(r.Context(), extractPatientIDFromIndexes(resType, resID, idx))
 
 	// Enforce patient compartment isolation on incoming resource payload
@@ -1050,6 +1089,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		Op:        "U",
 	})
 	s.dispatchSubscriptions(r.Context(), tenant, resType, resID, protoBytes, rec.ResVersion, rec.LastUpdated, idx)
+	s.recordAutoProvenance(r, w, tenant, resType, resID, rec.ResVersion, idx, provSpec)
 
 	jsonBytes, err := s.protoToJSONWithMeta(resType, protoBytes, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
@@ -1294,11 +1334,82 @@ func (s *Server) handleSearchAuditEvents(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(bundle)
 }
 
-// handlePatientEverything handles GET /{tenant}/Patient/{id}/$everything — assemble full patient compartment Bundle.
+// handlePatientEverything handles GET/POST /{tenant}/Patient/{id}/$everything — assemble full patient compartment Bundle.
 func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	patientID := r.PathValue("id")
-	q := r.URL.Query()
+	q := mergedSearchQuery(r)
+
+	typeRaw := strings.TrimSpace(q.Get("_type"))
+	sinceRaw := strings.TrimSpace(q.Get("_since"))
+	countRaw := strings.TrimSpace(q.Get("_count"))
+	offsetRaw := strings.TrimSpace(q.Get("_offset"))
+
+	if r.Method == http.MethodPost && r.ContentLength != 0 {
+		ct := strings.ToLower(r.Header.Get("Content-Type"))
+		if !strings.Contains(ct, "application/x-www-form-urlencoded") {
+			body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
+			if err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read request body")
+				return
+			}
+			if strings.TrimSpace(string(body)) != "" {
+				var raw map[string]any
+				if err := json.Unmarshal(body, &raw); err != nil {
+					writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+						fmt.Sprintf("invalid JSON in $everything request: %v", err))
+					return
+				}
+				if rt, _ := raw["resourceType"].(string); rt != "" && rt != "Parameters" {
+					writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+						fmt.Sprintf("$everything POST body must be a Parameters resource (got %q)", rt))
+					return
+				}
+				if paramsArr, ok := raw["parameter"].([]any); ok {
+					for _, p := range paramsArr {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						val := ""
+						for _, k := range []string{"valueString", "valueCode", "valueUri", "valueInstant", "valueDateTime", "valueDate"} {
+							if sVal, ok := pm[k].(string); ok && strings.TrimSpace(sVal) != "" {
+								val = strings.TrimSpace(sVal)
+								break
+							}
+						}
+						if val == "" {
+							for _, k := range []string{"valueInteger", "valuePositiveInt", "valueUnsignedInt"} {
+								if fVal, ok := pm[k].(float64); ok {
+									val = strconv.Itoa(int(fVal))
+									break
+								}
+							}
+						}
+						switch name {
+						case "_type":
+							if val != "" && typeRaw == "" {
+								typeRaw = val
+							}
+						case "_since":
+							if val != "" && sinceRaw == "" {
+								sinceRaw = val
+							}
+						case "_count":
+							if val != "" && countRaw == "" {
+								countRaw = val
+							}
+						case "_offset":
+							if val != "" && offsetRaw == "" {
+								offsetRaw = val
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 
 	params := postgres.PatientEverythingParams{
 		TenantID:  tenant,
@@ -1306,9 +1417,14 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		Count:     100,
 	}
 
-	if typeRaw := strings.TrimSpace(q.Get("_type")); typeRaw != "" {
+	if typeRaw != "" {
 		for part := range strings.SplitSeq(typeRaw, ",") {
 			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				if _, ok := s.protoRegistry[trimmed]; !ok {
+					writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+						fmt.Sprintf("unknown or unsupported resource type %q in _type parameter", trimmed))
+					return
+				}
 				params.ResourceTypes = append(params.ResourceTypes, trimmed)
 			}
 		}
@@ -1325,7 +1441,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if sinceRaw := strings.TrimSpace(q.Get("_since")); sinceRaw != "" {
+	if sinceRaw != "" {
 		dOp, err := postgres.ParseDateOp(sinceRaw)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
@@ -1336,20 +1452,20 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		params.Since = &t
 	}
 
-	if v := strings.TrimSpace(q.Get("_count")); v != "" {
-		n, err := strconv.Atoi(v)
+	if countRaw != "" {
+		n, err := strconv.Atoi(countRaw)
 		if err != nil || n <= 0 {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
-				fmt.Sprintf("invalid _count parameter %q: must be a positive integer", v))
+				fmt.Sprintf("invalid _count parameter %q: must be a positive integer", countRaw))
 			return
 		}
 		params.Count = n
 	}
-	if v := strings.TrimSpace(q.Get("_offset")); v != "" {
-		n, err := strconv.Atoi(v)
+	if offsetRaw != "" {
+		n, err := strconv.Atoi(offsetRaw)
 		if err != nil || n < 0 {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
-				fmt.Sprintf("invalid _offset parameter %q: must be a non-negative integer", v))
+				fmt.Sprintf("invalid _offset parameter %q: must be a non-negative integer", offsetRaw))
 			return
 		}
 		params.Offset = n
@@ -1380,7 +1496,11 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	s.writeSearchSetBundle(w, sr)
+	s.writeSearchSetBundleWithOpts(w, r, sr, postgres.SearchParams{
+		Count:   params.Count,
+		Offset:  params.Offset,
+		ResType: "$everything",
+	})
 }
 
 // mergedSearchQuery returns URL query parameters combined with application/x-www-form-urlencoded
@@ -1638,7 +1758,14 @@ func (s *Server) filterAuthorizedIncludes(r *http.Request, tenant string, secCtx
 				if extractor, ok := s.extractors[inc.ResType]; ok && len(inc.ResourceProto) > 0 {
 					idx, err := extractor(tenant, inc.ResID, inc.ResourceProto)
 					if err != nil || !postgres.IndexesBelongToPatientCompartment(inc.ResType, inc.ResID, idx, allowedPatientID) {
-						continue
+						if inc.ResType == "Provenance" && s.store != nil {
+							belongs, bErr := s.store.BelongsToPatientCompartment(r.Context(), tenant, inc.ResType, inc.ResID, allowedPatientID)
+							if bErr != nil || !belongs {
+								continue
+							}
+						} else {
+							continue
+						}
 					}
 				} else if s.store != nil {
 					belongs, err := s.store.BelongsToPatientCompartment(r.Context(), tenant, inc.ResType, inc.ResID, allowedPatientID)
@@ -1651,10 +1778,6 @@ func (s *Server) filterAuthorizedIncludes(r *http.Request, tenant string, secCtx
 		filtered = append(filtered, inc)
 	}
 	return filtered
-}
-
-func (s *Server) writeSearchSetBundle(w http.ResponseWriter, sr *postgres.SearchResults) {
-	s.writeSearchSetBundleWithOpts(w, nil, sr, postgres.SearchParams{})
 }
 
 func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Request, sr *postgres.SearchResults, params postgres.SearchParams) {
@@ -1760,7 +1883,12 @@ func (s *Server) buildSearchBundleLinks(r *http.Request, sr *postgres.SearchResu
 	}
 	offset := max(params.Offset, 0)
 
-	if len(sr.Matches) > 0 && (params.TotalMode == "none" && len(sr.Matches) == count || offset+len(sr.Matches) < sr.Total) {
+	pageItems := len(sr.Matches)
+	if params.ResType == "$everything" {
+		pageItems = len(sr.Matches) + len(sr.Includes)
+	}
+
+	if pageItems > 0 && (params.TotalMode == "none" && pageItems == count || offset+pageItems < sr.Total) {
 		nextQ := cloneURLValues(q)
 		nextQ.Set("_count", strconv.Itoa(count))
 		nextQ.Set("_offset", strconv.Itoa(offset+count))
@@ -2079,6 +2207,13 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/patient-export",
 				},
 			}
+		case "DocumentReference":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "docref",
+					"definition": "http://hl7.org/fhir/us/core/OperationDefinition/docref",
+				},
+			}
 		case "QuestionnaireResponse":
 			entry["operation"] = []map[string]string{
 				{
@@ -2160,6 +2295,13 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 				{
 					"name":       "document",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Composition-document",
+				},
+			}
+		case "DocumentReference":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "docref",
+					"definition": "http://hl7.org/fhir/us/core/OperationDefinition/docref",
 				},
 			}
 		case "Questionnaire":
@@ -2271,6 +2413,14 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "summary",
 						"definition": "http://hl7.org/fhir/uv/ips/OperationDefinition/summary",
+					},
+					{
+						"name":       "docref",
+						"definition": "http://hl7.org/fhir/us/core/OperationDefinition/docref",
+					},
+					{
+						"name":       "provenance",
+						"definition": "http://flint.fhir.org/OperationDefinition/Resource-provenance",
 					},
 					{
 						"name":       "document",

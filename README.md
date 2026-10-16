@@ -76,11 +76,11 @@ Flint includes a dedicated benchmarking harness ([`cmd/loadtest`](cmd/loadtest/)
 
 ## Supported FHIR Resources (All 146 FHIR R4 Types & 26 US Core v6.1.0 / v7.0.0 Profiles) & Conformance Matrix
 
-Flint implements full search index extraction, transactional persistence, SMART on FHIR v2 compartment isolation, granular sub-resource scopes (`?category=`) & **Backend Services asymmetric `private_key_jwt` (`RS256`/`RS384`/`ES384`, RFC 7523)**, **RFC 6902 JSON Patch / RFC 7396 Merge Patch**, **Conditional Create/Update/Delete**, **`Patient/$everything` & `Patient/{id}/$summary` (HL7 IPS)**, **`Composition/{id}/$document`**, **`Questionnaire/$populate` & `QuestionnaireResponse/$extract` (HL7 Da Vinci SDC)**, **`Patient/$match` (MPI) & `Patient/$member-match` (Da Vinci HRex/PDex)**, **`Claim/$submit` (Da Vinci PAS)**, **Composite Search (`code-value-quantity`, `component-code-value-quantity`, `combo-code-value-quantity`), `_list` Cohort Search & Enhanced Forward Chaining (`:exact`, `:not`, reference)**, **`$meta` / `$meta-add` / `$meta-delete`**, **Clinical Quality Measures (`Measure/$evaluate-measure` — CMS165 / CMS122 eCQM)**, **HL7 CDS Hooks v2.0 (`/cds-services`)**, **Terminology Services (`$expand`, `$validate-code`, `$lookup`, `ConceptMap/$translate`)**, **`Subscription` (`rest-hook`)**, and **Proto-compiled OpenAPI 3.1.0 schemas** (`protoreflect.MessageDescriptor` → OpenAPI 3.1 JSON Schema) across **all 146 FHIR R4 resource types** and **all 26 US Core v6.1.0 / v7.0.0 (USCDI v3 & v4) profiles**:
+Flint implements full search index extraction, transactional persistence, SMART on FHIR v2 compartment isolation, granular sub-resource scopes (`?category=`) & **Backend Services asymmetric `private_key_jwt` (`RS256`/`RS384`/`ES384`, RFC 7523)**, **RFC 6902 JSON Patch / RFC 7396 Merge Patch**, **Conditional Create/Update/Delete**, **`Patient/$everything` (GET & POST with `_type`/`_since`/`_count`/`_offset` pagination) & `Patient/{id}/$summary` (HL7 IPS)**, **`DocumentReference/$docref` (US Core / Argonaut Clinical Notes + On-Demand IPS)**, **`X-Provenance` Header & `/{resourceType}/{id}/$provenance` Lineage**, **`Composition/{id}/$document`**, **`Questionnaire/$populate` & `QuestionnaireResponse/$extract` (HL7 Da Vinci SDC + Auto-Provenance)**, **`Patient/$match` (MPI) & `Patient/$member-match` (Da Vinci HRex/PDex)**, **`Claim/$submit` (Da Vinci PAS)**, **Composite Search (`code-value-quantity`, `component-code-value-quantity`, `combo-code-value-quantity`), `_list` Cohort Search & Enhanced Forward Chaining (`:exact`, `:not`, reference)**, **`$meta` / `$meta-add` / `$meta-delete`**, **Clinical Quality Measures (`Measure/$evaluate-measure` — CMS165 / CMS122 eCQM)**, **HL7 CDS Hooks v2.0 (`/cds-services`)**, **Terminology Services (`$expand`, `$validate-code`, `$lookup`, `ConceptMap/$translate`)**, **`Subscription` (`rest-hook`)**, and **Proto-compiled OpenAPI 3.1.0 schemas** (`protoreflect.MessageDescriptor` → OpenAPI 3.1 JSON Schema) across **all 146 FHIR R4 resource types** and **all 26 US Core v6.1.0 / v7.0.0 (USCDI v3 & v4) profiles**:
 
 | Resource / Operation | US Core v6.1.0 / v7.0.0 / ONC `(g)(10)` Profile | Interactions | Search Parameters (`spidx_*`) | SMART v2 Scopes | Status |
 |:---------------------|:------------------------------------------------|:-------------|:------------------------------|:----------------|:-------|
-| **`Patient`** | US Core Patient (`v6.1.0` & `v7.0.0`), HL7 IPS (`$summary`), MPI (`$match`), Da Vinci HRex (`$member-match`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `compartment-search`, `conditional-create/update/delete`, `$everything`, `$summary`, `$match`, `$member-match`, `$meta`, `$meta-add`, `$meta-delete`, `$export`, `$validate` | `_id`, `_lastUpdated`, `identifier`, `name`, `family`, `given`, `birthdate`, `gender`, `active`, `address-city`, `address-state`, `address-postalcode`, `organization`, `_has`, `_list`, `_revinclude` | `patient/Patient.rs`, `user/Patient.cruds`, `system/Patient.rs` | ✅ Production Ready |
+| **`Patient`** | US Core Patient (`v6.1.0` & `v7.0.0`), HL7 IPS (`$summary`), MPI (`$match`), Da Vinci HRex (`$member-match`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `compartment-search`, `conditional-create/update/delete`, `$everything` (`GET`/`POST`), `$summary`, `$match`, `$member-match`, `$meta`, `$meta-add`, `$meta-delete`, `$export`, `$validate` | `_id`, `_lastUpdated`, `identifier`, `name`, `family`, `given`, `birthdate`, `gender`, `active`, `address-city`, `address-state`, `address-postalcode`, `organization`, `_has`, `_list`, `_revinclude` | `patient/Patient.rs`, `user/Patient.cruds`, `system/Patient.rs` | ✅ Production Ready |
 | **`Encounter`** | US Core Encounter (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `_lastUpdated`, `identifier`, `date`, `patient`, `subject`, `status`, `class`, `type`, `location`, `_include` | `patient/Encounter.rs`, `user/Encounter.cruds`, `system/Encounter.rs` | ✅ Production Ready |
 | **`Condition`** | US Core Condition Problems/Health Concerns & Encounter Diagnosis (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `_lastUpdated`, `patient`, `subject`, `code`, `clinical-status`, `verification-status`, `category`, `onset-date`, `recorded-date`, `encounter`, `_include` | `patient/Condition.rs`, `user/Condition.cruds`, `system/Condition.rs` | ✅ Production Ready |
 | **`Observation`** | US Core Vital Signs, Lab, Blood Pressure, Avg BP, Care/Treatment Preference, Simple & Screening (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `_lastUpdated`, `patient`, `subject`, `code`, `category`, `status`, `date`, `value-quantity`, `component-code`, `combo-code`, `component-value-quantity`, `combo-value-quantity`, `code-value-quantity`, `component-code-value-quantity`, `combo-code-value-quantity`, `_include` | `patient/Observation.rs` (incl. `?category=`), `user/Observation.cruds`, `system/Observation.rs` | ✅ Production Ready |
@@ -90,10 +90,10 @@ Flint implements full search index extraction, transactional persistence, SMART 
 | **`DiagnosticReport`** | US Core DiagnosticReport Lab & Note (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `_lastUpdated`, `patient`, `subject`, `status`, `category`, `code`, `date`, `issued`, `result`, `_include` | `patient/DiagnosticReport.rs`, `user/DiagnosticReport.cruds`, `system/DiagnosticReport.rs` | ✅ Production Ready |
 | **`Immunization`** | US Core Immunization (`v6.1.0` & `v7.0.0`) | `read`, `vread`, `update`, `patch`, `delete`, `history-instance`, `history-type`, `create`, `search-type`, `conditional-create/update/delete`, `$validate` | `_id`, `_lastUpdated`, `patient`, `subject`, `status`, `vaccine-code`, `date`, `lot-number`, `_include` | `patient/Immunization.rs`, `user/Immunization.cruds`, `system/Immunization.rs` | ✅ Production Ready |
 | **`Specimen` & `Location`** | US Core Specimen & Location (`v7.0.0` / USCDI v4) | Full CRUD, `patch`, `vread`, `_history`, `search-type`, `conditional-*`, `$validate` | `_id`, `_lastUpdated`, `identifier`, `patient`, `subject`, `type`, `status`, `bodysite`, `collected`, `name`, `address`, `address-city`, `address-state`, `address-postalcode`, `organization` | `patient/Specimen.rs`, `user/Location.rs`, `system/*.rs` | ✅ Production Ready |
-| **`DocumentReference` & `Provenance`** | US Core DocumentReference & Provenance (`v6.1.0` & `v7.0.0`) | Full CRUD, `patch`, `vread`, `_history`, `search-type`, `conditional-*`, `$validate` | `_id`, `_lastUpdated`, `identifier`, `patient`, `subject`, `status`, `type`, `category`, `date`, `period`, `author`, `target`, `agent`, `recorded`, `_revinclude` | `patient/DocumentReference.rs`, `patient/Provenance.rs`, `system/*.rs` | ✅ Production Ready |
+| **`DocumentReference` & `Provenance`** | US Core DocumentReference, Clinical Notes (`$docref`) & Provenance (`v6.1.0` & `v7.0.0`) | Full CRUD, `patch`, `vread`, `_history`, `search-type`, `conditional-*`, `DocumentReference/$docref` (`GET`/`POST`), `X-Provenance` header, `/{resourceType}/{id}/$provenance`, `$validate` | `_id`, `_lastUpdated`, `identifier`, `patient`, `subject`, `status`, `type`, `category`, `date`, `period`, `author`, `target`, `agent`, `recorded`, `_revinclude` | `patient/DocumentReference.rs`, `patient/Provenance.rs`, `system/*.rs` | ✅ Production Ready |
 | **Care Coordination & Coverage (`CarePlan`, `CareTeam`, `Goal`, `ServiceRequest`, `Coverage`, `QuestionnaireResponse`, `MedicationDispense`, `Medication`, `Device`, `Practitioner`, `PractitionerRole`, `Organization`, `RelatedPerson`)** | US Core `v6.1.0` & `v7.0.0` | Full CRUD, `patch`, `vread`, `_history`, `search-type`, `conditional-*`, `$validate` | `_id`, `_lastUpdated`, `identifier`, `patient`, `subject`, `status`, `category`, `code`, `date`, `intent`, `lifecycle-status`, `target-date`, `authored`, `questionnaire`, `whenhandedover`, `type`, `udi-di`, `practitioner`, `organization`, `specialty`, `role`, `name`, `address-*` | `patient/*.rs`, `user/*.cruds`, `system/*.rs` | ✅ Production Ready |
 | **All 146 FHIR R4 Resource Types** | HL7 FHIR R4.0.1 Base Specification | Full CRUD, `patch`, `vread`, `_history`, `search-type`, `conditional-*`, `$meta`, `$meta-add`, `$meta-delete`, `$validate`, OpenAPI 3.1 | Dynamic `protoreflect` index extraction across `spidx_string`, `spidx_token`, `spidx_date`, `spidx_reference`, `spidx_quantity`, `spidx_uri` | `patient/*.rs`, `user/*.cruds`, `system/*.rs` | ✅ Production Ready |
-| **`Questionnaire`, `QuestionnaireResponse` & `Composition` (HL7 SDC & Document)** | HL7 Da Vinci DTR / Structured Data Capture (SDC) & Clinical Document Assembly | `GET/POST /Questionnaire/$populate`, `/Questionnaire/{id}/$populate`, `POST /QuestionnaireResponse/$extract`, `/QuestionnaireResponse/{id}/$extract`, `GET/POST /Composition/{id}/$document` | `subject`, `identifier`, `persist` | `user/Questionnaire.rs`, `user/QuestionnaireResponse.cruds`, `patient/*.rs` | ✅ Production Ready |
+| **`Questionnaire`, `QuestionnaireResponse` & `Composition` (HL7 SDC & Document)** | HL7 Da Vinci DTR / Structured Data Capture (SDC) & Clinical Document Assembly | `GET/POST /Questionnaire/$populate`, `/Questionnaire/{id}/$populate`, `POST /QuestionnaireResponse/$extract`, `/QuestionnaireResponse/{id}/$extract` (with automatic `Provenance` lineage), `GET/POST /Composition/{id}/$document` | `subject`, `identifier`, `persist` | `user/Questionnaire.rs`, `user/QuestionnaireResponse.cruds`, `patient/*.rs` | ✅ Production Ready |
 | **`Claim` & `Claim/$submit` (Da Vinci PAS)** | HL7 Da Vinci Prior Authorization Support (PAS) & FHIR R4 Financial | `POST /Claim/$submit` (accepts `Claim`, `Bundle`, or `Parameters`; persists & returns adjudicated `ClaimResponse` with `preAuthRef`) | `_id`, `patient`, `provider`, `status`, `use`, `created` | `user/Claim.cruds`, `system/Claim.cruds`, `patient/Claim.rs` | ✅ Production Ready |
 | **`Measure` & `$evaluate-measure` (eCQM)** | HL7 FHIR R4 Clinical Quality Measures / CMS eCQM (`CMS165`, `CMS122`) | `GET/POST /Measure/$evaluate-measure`, `/Measure/{id}/$evaluate-measure` (`MeasureReport` `individual` & `summary`) | `measure`, `periodStart`, `periodEnd`, `subject`, `reportType` | `user/Measure.rs`, `system/Measure.rs`, `patient/*.rs` | ✅ Production Ready |
 | **HL7 CDS Hooks v2.0 (`/cds-services`)** | HL7 CDS Hooks v2.0 Clinical Decision Support (`patient-view`, `order-select`) | `GET /cds-services`, `POST /cds-services/{serviceId}` (auto-hydrating FHIR prefetch + actionable Cards/Suggestions) | `flint-hypertension-care-gap`, `flint-diabetes-a1c-care-gap`, `flint-medication-allergy-check` | Public Discovery / SMART Bearer Token | ✅ Production Ready |
@@ -102,7 +102,7 @@ Flint implements full search index extraction, transactional persistence, SMART 
 | **`AuditEvent`** | ASTM E2147 / ONC `§170.315(d)(2)` Auditable Events | `read`, `search-type` | `_id`, `date`, `entity`, `patient`, `agent`, `action`, `subtype`, `outcome` | `user/AuditEvent.rs`, `system/AuditEvent.rs` | ✅ Production Ready |
 | **`Bundle`** | HL7 FHIR R4 Batch & ACID Transaction | `batch`, `transaction` (`POST`, `PUT`, `PATCH`, `DELETE`, `urn:uuid:` resolution, `ifNoneExist`, `ifMatch`, conditional `?searchParams` URLs) | N/A | Per-entry SMART scope & compartment validation | ✅ Production Ready |
 | **`$export` (Bulk Data)** | HL7 FHIR Bulk Data Access v2.0.0 / ONC `§170.315(g)(10)` | System (`/$export`), All-Patients (`/Patient/$export`), Group Cohort (`/Group/{id}/$export`), Single-Patient (`/Patient/{id}/$export`), Postgres-persisted Async Poll (`/$export-poll/{jobId}`), NDJSON Download (`/$export-file/{jobId}/{file}`) | `_type`, `_since`, `_outputFormat` (`application/fhir+ndjson`) | `system/*.rs` (System/Group), `patient/*.rs` (Single-Patient) | ✅ Production Ready |
-| **`$certify` (Conformance)** | HL7 FHIR R4 `TestReport` / US Core `v6.1.0` & `v7.0.0` / ONC `(g)(10)` & HTI-1 | `GET/POST /fhir/r4/{tenant}/$certify` & CLI (`task certify`) | 49-check automated conformance harness across 5 suites | Public / Admin | ✅ Production Ready |
+| **`$certify` (Conformance)** | HL7 FHIR R4 `TestReport` / US Core `v6.1.0` & `v7.0.0` / ONC `(g)(10)` & HTI-1 | `GET/POST /fhir/r4/{tenant}/$certify` & CLI (`task certify`) | 50-check automated conformance harness across 5 suites | Public / Admin | ✅ Production Ready |
 
 ---
 
@@ -121,9 +121,17 @@ cd flint
 direnv allow
 ```
 
-### 2. Launch Local Dev Stack (k3d)
+### 2. Option A: 1-Command Full-Stack Kubernetes Deployment (`k3d`)
 
-Spin up the local containerized stack (Postgres, Temporal, AutoMQ StatefulSet, Garage S3, Iceberg REST catalog):
+Bring up the entire Kubernetes cluster (`k3d`), stateful infrastructure (Postgres, Temporal, AutoMQ, Garage S3, Iceberg REST), build and import `flint-fhir/flint:latest`, deploy `flintd` (exposed via `NodePort 30080 → localhost:8080`) and `flint-worker`, and automatically seed the 25-resource US Core `demo` clinical cohort:
+
+```bash
+task k3d-up
+```
+
+### 3. Option B: Local Binary Development with `k3d` Infrastructure
+
+Spin up the local containerized backing services (Postgres, Temporal, AutoMQ StatefulSet, Garage S3, Iceberg REST catalog):
 
 ```bash
 task dev
@@ -136,7 +144,7 @@ Inspect service endpoints:
 * **Garage S3 Console**: [http://localhost:9001](http://localhost:9001)
 * **Iceberg REST Catalog**: [http://localhost:8181](http://localhost:8181)
 
-### 3. Build, Run, Seed & Certify
+Then build, run, seed, and certify locally:
 
 ```bash
 # Build flintd, worker, seed, certify, and loadtest binaries
@@ -148,7 +156,7 @@ task run
 # (In another terminal) Seed a longitudinal clinical cohort across all 26 US Core v6.1.0 & v7.0.0 profiles in tenant "demo"
 task seed
 
-# Run the 49-check FHIR R4 / US Core v6.1.0 & v7.0.0 / ONC (g)(10) Certification Suite (outputs Scorecard + HL7 TestReport)
+# Run the 50-check FHIR R4 / US Core v6.1.0 & v7.0.0 / ONC (g)(10) Certification Suite (outputs Scorecard + HL7 TestReport)
 task certify
 
 # (Optional) Launch the official HL7 Inferno US Core Test Kit on http://localhost:4567
@@ -158,7 +166,7 @@ task certify-inferno
 task run-worker
 ```
 
-* **Interactive API & Conformance Explorer (`$docs`)**: [http://localhost:8080/fhir/r4/demo/$docs](http://localhost:8080/fhir/r4/demo/$docs)
+* **Interactive SMART v2 Sandbox & Clinical Recipe Runner (`$docs`)**: [http://localhost:8080/fhir/r4/demo/$docs](http://localhost:8080/fhir/r4/demo/$docs)
 * **Live Conformance `TestReport` (`$certify`)**: [http://localhost:8080/fhir/r4/demo/$certify](http://localhost:8080/fhir/r4/demo/$certify)
 * **Proto-Compiled OpenAPI 3.1.0 Spec**: [http://localhost:8080/fhir/r4/demo/openapi.json](http://localhost:8080/fhir/r4/demo/openapi.json)
 

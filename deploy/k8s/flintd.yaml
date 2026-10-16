@@ -66,13 +66,14 @@ metadata:
   labels:
     app: flintd
 spec:
-  type: ClusterIP
+  type: NodePort
   selector:
     app: flintd
   ports:
     - name: http
       port: 8080
       targetPort: http
+      nodePort: 30080
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -110,3 +111,25 @@ spec:
             limits:
               cpu: "1"
               memory: 512Mi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: flint-seed
+  namespace: flint
+  labels:
+    app: flint-seed
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app: flint-seed
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: seed
+          image: flint-fhir/flint:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/seed", "-url", "http://flintd.flint.svc.cluster.local:8080", "-tenant", "demo"]
+

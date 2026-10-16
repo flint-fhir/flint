@@ -1,18 +1,26 @@
 package server
 
 import (
+	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/dynamicpb"
 
+	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -673,6 +681,54 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 		walkExtract(items)
 	}
 
+	var extractProvMap map[string]any
+	if len(extractedResources) > 0 {
+		var targets []any
+		for _, resMap := range extractedResources {
+			rt, _ := resMap["resourceType"].(string)
+			rid, _ := resMap["id"].(string)
+			if rt != "" && rid != "" {
+				targets = append(targets, map[string]any{
+					"reference": fmt.Sprintf("%s/%s", rt, rid),
+				})
+			}
+		}
+		extractProvMap = map[string]any{
+			"resourceType": "Provenance",
+			"id":           "prov-extract-" + qrID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-provenance"},
+			},
+			"target":   targets,
+			"recorded": time.Now().UTC().Format(time.RFC3339),
+			"activity": map[string]any{
+				"coding": []any{
+					map[string]any{
+						"system":  "http://terminology.hl7.org/CodeSystem/v3-DataOperation",
+						"code":    "CREATE",
+						"display": "create",
+					},
+				},
+			},
+			"agent": []any{
+				buildDefaultProvenanceAgent(secCtx, "assembler", "Assembler"),
+			},
+			"entity": []any{
+				map[string]any{
+					"role": "source",
+					"what": map[string]any{
+						"reference": "QuestionnaireResponse/" + qrID,
+					},
+				},
+			},
+		}
+		entries = append(entries, map[string]any{
+			"fullUrl":  "urn:uuid:" + uuid.NewString(),
+			"resource": extractProvMap,
+			"request":  map[string]any{"method": "POST", "url": "Provenance"},
+		})
+	}
+
 	if persist {
 		for _, resMap := range extractedResources {
 			targetType, _ := resMap["resourceType"].(string)
@@ -697,6 +753,14 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 					fmt.Sprintf("failed to persist extracted %s: %v", targetType, err))
 				return
 			}
+		}
+		if extractProvMap != nil {
+			refStr, _ := subjectRef["reference"].(string)
+			subjPatID := ""
+			if strings.HasPrefix(refStr, "Patient/") {
+				subjPatID = cleanID(refStr)
+			}
+			_, _ = s.persistSystemProvenanceMap(r.Context(), tenant, extractProvMap, subjPatID)
 		}
 	}
 
@@ -961,4 +1025,711 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(docBundle)
+}
+
+// handleDocumentReferenceDocref implements GET|POST /fhir/r4/{tenant}/DocumentReference/$docref
+// per HL7 US Core / Argonaut Clinical Notes OperationDefinition/docref.
+// It queries stored DocumentReference resources for the patient (filtered by optional start, end,
+// and type parameters) and synthesizes an on-demand CCD / International Patient Summary (IPS,
+// LOINC 60591-5) DocumentReference containing the base64-encoded IPS document Bundle when
+// on-demand=true (or when no stored documents exist and on-demand is not explicitly false).
+func (s *Server) handleDocumentReferenceDocref(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	q := r.URL.Query()
+
+	patientParam := strings.TrimSpace(q.Get("patient"))
+	startParam := strings.TrimSpace(q.Get("start"))
+	endParam := strings.TrimSpace(q.Get("end"))
+	typeParam := strings.TrimSpace(q.Get("type"))
+	onDemandParam := strings.TrimSpace(q.Get("on-demand"))
+	countParam := strings.TrimSpace(q.Get("_count"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 2*1024*1024))
+		if err == nil && len(bodyBytes) > 0 {
+			var root map[string]any
+			if err := json.Unmarshal(bodyBytes, &root); err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed JSON in DocumentReference/$docref: %v", err))
+				return
+			}
+			if rt, _ := root["resourceType"].(string); rt == "Parameters" {
+				if params, ok := root["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "patient":
+							if v, _ := pm["valueId"].(string); v != "" {
+								patientParam = strings.TrimSpace(v)
+							} else if v, _ := pm["valueString"].(string); v != "" {
+								patientParam = strings.TrimSpace(v)
+							} else if refMap, ok := pm["valueReference"].(map[string]any); ok {
+								if refStr, _ := refMap["reference"].(string); refStr != "" {
+									patientParam = strings.TrimSpace(refStr)
+								}
+							}
+						case "start":
+							if v, _ := pm["valueDateTime"].(string); v != "" {
+								startParam = strings.TrimSpace(v)
+							} else if v, _ := pm["valueDate"].(string); v != "" {
+								startParam = strings.TrimSpace(v)
+							} else if v, _ := pm["valueString"].(string); v != "" {
+								startParam = strings.TrimSpace(v)
+							}
+						case "end":
+							if v, _ := pm["valueDateTime"].(string); v != "" {
+								endParam = strings.TrimSpace(v)
+							} else if v, _ := pm["valueDate"].(string); v != "" {
+								endParam = strings.TrimSpace(v)
+							} else if v, _ := pm["valueString"].(string); v != "" {
+								endParam = strings.TrimSpace(v)
+							}
+						case "type":
+							if ccMap, ok := pm["valueCodeableConcept"].(map[string]any); ok {
+								if codings, ok := ccMap["coding"].([]any); ok && len(codings) > 0 {
+									if cm, ok := codings[0].(map[string]any); ok {
+										sys, _ := cm["system"].(string)
+										code, _ := cm["code"].(string)
+										if sys != "" && code != "" {
+											typeParam = sys + "|" + code
+										} else if code != "" {
+											typeParam = code
+										}
+									}
+								}
+							} else if cMap, ok := pm["valueCoding"].(map[string]any); ok {
+								sys, _ := cMap["system"].(string)
+								code, _ := cMap["code"].(string)
+								if sys != "" && code != "" {
+									typeParam = sys + "|" + code
+								} else if code != "" {
+									typeParam = code
+								}
+							} else if v, _ := pm["valueString"].(string); v != "" {
+								typeParam = strings.TrimSpace(v)
+							} else if v, _ := pm["valueCode"].(string); v != "" {
+								typeParam = strings.TrimSpace(v)
+							}
+						case "on-demand":
+							if bVal, ok := pm["valueBoolean"].(bool); ok {
+								if bVal {
+									onDemandParam = "true"
+								} else {
+									onDemandParam = "false"
+								}
+							} else if sVal, _ := pm["valueString"].(string); sVal != "" {
+								onDemandParam = strings.TrimSpace(sVal)
+							}
+						case "_count":
+							if fVal, ok := pm["valueInteger"].(float64); ok {
+								countParam = strconv.Itoa(int(fVal))
+							} else if fVal, ok := pm["valuePositiveInt"].(float64); ok {
+								countParam = strconv.Itoa(int(fVal))
+							} else if sVal, _ := pm["valueString"].(string); sVal != "" {
+								countParam = strings.TrimSpace(sVal)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patientID := cleanID(patientParam)
+	if patientID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "DocumentReference/$docref requires a 'patient' parameter")
+		return
+	}
+
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	if hasSecCtx && auth.IsPatientRestricted(secCtx) && cleanID(secCtx.GetPatientId()) != patientID {
+		writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+			fmt.Sprintf("patient-scoped token (%s) cannot access DocumentReference/$docref for Patient/%s",
+				secCtx.GetPatientId(), patientID))
+		return
+	}
+
+	count := 100
+	if countParam != "" {
+		n, err := strconv.Atoi(countParam)
+		if err != nil || n <= 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _count parameter %q: must be a positive integer", countParam))
+			return
+		}
+		count = n
+	}
+
+	var dateOps []postgres.DateOp
+	var startOp, endOp *postgres.DateOp
+	if startParam != "" {
+		op, err := postgres.ParseDateOp("ge" + strings.TrimPrefix(startParam, "ge"))
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid start date parameter %q: %v", startParam, err))
+			return
+		}
+		startOp = &op
+		dateOps = append(dateOps, op)
+	}
+	if endParam != "" {
+		op, err := postgres.ParseDateOp("le" + strings.TrimPrefix(endParam, "le"))
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid end date parameter %q: %v", endParam, err))
+			return
+		}
+		endOp = &op
+		dateOps = append(dateOps, op)
+	}
+
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		return
+	}
+
+	// Verify the target Patient exists and is accessible
+	patRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patientID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patientID))
+		return
+	}
+	if errors.Is(err, postgres.ErrResourceDeleted) {
+		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("Patient/%s has been deleted", patientID))
+		return
+	}
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read Patient for DocumentReference/$docref")
+		return
+	}
+	if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, "Patient", patientID, patRec.ResourceProto) {
+		writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient granular scope to read Patient for DocumentReference/$docref")
+		return
+	}
+
+	// 1. Search stored DocumentReference resources in the patient's compartment
+	sp := postgres.SearchParams{
+		TenantID:   tenant,
+		ResType:    "DocumentReference",
+		References: map[string]string{"patient": "Patient/" + patientID},
+		Count:      count,
+	}
+	if typeParam != "" {
+		sp.Tokens = map[string]string{"type": typeParam}
+		sp.TokenFilters = map[string][]string{"type": {typeParam}}
+	}
+	if len(dateOps) > 0 {
+		sp.DateFilters = map[string][]postgres.DateOp{"date": dateOps}
+	}
+
+	sr, err := s.store.Search(r.Context(), sp)
+	if err != nil {
+		s.logger.Error("DocumentReference/$docref search", "error", err, "patient", patientID)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to search DocumentReference resources")
+		return
+	}
+
+	var entries []any
+	for _, m := range sr.Matches {
+		if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, "DocumentReference", m.ResID, m.ResourceProto) {
+			continue
+		}
+		jb, err := s.protoToJSONWithMeta("DocumentReference", m.ResourceProto, m.ResVersion, m.LastUpdated)
+		if err != nil {
+			continue
+		}
+		var docMap map[string]any
+		if json.Unmarshal(jb, &docMap) != nil {
+			continue
+		}
+		entries = append(entries, map[string]any{
+			"fullUrl":  "DocumentReference/" + m.ResID,
+			"resource": docMap,
+			"search":   map[string]any{"mode": "match"},
+		})
+	}
+
+	// 2. Synthesize on-demand IPS DocumentReference when requested (on-demand=true) or when on-demand
+	// is not explicitly false and type matches IPS / is omitted.
+	onDemandExplicitFalse := strings.EqualFold(onDemandParam, "false") || onDemandParam == "0"
+	now := time.Now().UTC()
+	_ = startOp
+	_ = endOp
+	typeMatchesIPS := typeParam == "" || docrefTypeMatchesSummary(typeParam)
+
+	if !onDemandExplicitFalse && typeMatchesIPS {
+		ipsBundle, status, _, _ := s.assembleIPSSummaryBundle(r, tenant, patientID)
+		if status == http.StatusOK && ipsBundle != nil {
+			ipsBytes, _ := json.Marshal(ipsBundle)
+			nowStr := now.Format(time.RFC3339)
+			docID := "docref-ips-" + patientID
+			onDemandDoc := map[string]any{
+				"resourceType": "DocumentReference",
+				"id":           docID,
+				"meta": map[string]any{
+					"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-documentreference"},
+				},
+				"status":    "current",
+				"docStatus": "final",
+				"type": map[string]any{
+					"coding": []any{
+						map[string]any{
+							"system":  "http://loinc.org",
+							"code":    "60591-5",
+							"display": "Patient summary Document",
+						},
+					},
+					"text": "Patient summary Document",
+				},
+				"category": []any{
+					map[string]any{
+						"coding": []any{
+							map[string]any{
+								"system":  "http://hl7.org/fhir/us/core/CodeSystem/us-core-documentreference-category",
+								"code":    "clinical-note",
+								"display": "Clinical Note",
+							},
+						},
+					},
+				},
+				"subject": map[string]any{
+					"reference": "Patient/" + patientID,
+				},
+				"date": nowStr,
+				"author": []any{
+					map[string]any{
+						"display": "Flint FHIR Server (On-Demand IPS Generator)",
+					},
+				},
+				"description": fmt.Sprintf("On-Demand International Patient Summary (IPS) for Patient/%s", patientID),
+				"content": []any{
+					map[string]any{
+						"attachment": map[string]any{
+							"contentType": "application/fhir+json",
+							"data":        base64.StdEncoding.EncodeToString(ipsBytes),
+							"title":       "International Patient Summary Bundle",
+							"creation":    nowStr,
+						},
+						"format": map[string]any{
+							"system":  "http://ihe.net/fhir/ihe.formatcode.fhir/CodeSystem/formatcode",
+							"code":    "urn:ihe:iti:xds:2017:mimeTypeSufficient",
+							"display": "mimeType Sufficient",
+						},
+					},
+				},
+				"context": map[string]any{
+					"period": map[string]any{
+						"start": nowStr,
+						"end":   nowStr,
+					},
+				},
+			}
+			entries = append(entries, map[string]any{
+				"fullUrl":  "DocumentReference/" + docID,
+				"resource": onDemandDoc,
+				"search":   map[string]any{"mode": "match"},
+			})
+		}
+	}
+
+	selfURL := requestBaseURL(r) + r.URL.Path
+	if r.URL.RawQuery != "" {
+		selfURL += "?" + r.URL.RawQuery
+	}
+
+	outBundle := map[string]any{
+		"resourceType": "Bundle",
+		"type":         "searchset",
+		"total":        len(entries),
+		"link": []map[string]string{
+			{"relation": "self", "url": selfURL},
+		},
+		"entry": entries,
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(outBundle)
+}
+
+func docrefTypeMatchesSummary(typeParam string) bool {
+	for part := range strings.SplitSeq(typeParam, ",") {
+		item := strings.TrimSpace(part)
+		if idx := strings.LastIndex(item, "|"); idx != -1 {
+			item = item[idx+1:]
+		}
+		switch strings.ToLower(item) {
+		case "60591-5", "34133-9", "11506-3":
+			return true
+		}
+	}
+	return false
+}
+
+// xProvenanceSpec holds parsed configuration from an incoming X-Provenance HTTP header.
+type xProvenanceSpec struct {
+	enabled  bool
+	template map[string]any
+}
+
+// parseXProvenanceHeader parses and validates the optional X-Provenance request header.
+// Supports "true" / "1" / "auto", inline JSON object, or base64-encoded JSON object.
+func parseXProvenanceHeader(r *http.Request) (*xProvenanceSpec, error) {
+	raw := strings.TrimSpace(r.Header.Get("X-Provenance"))
+	if raw == "" {
+		return nil, nil
+	}
+	lower := strings.ToLower(raw)
+	if lower == "false" || lower == "0" {
+		return nil, nil
+	}
+	if lower == "true" || lower == "1" || lower == "auto" {
+		return &xProvenanceSpec{enabled: true}, nil
+	}
+
+	jsonBytes := []byte(raw)
+	if !strings.HasPrefix(raw, "{") {
+		decoded, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			decoded, err = base64.RawStdEncoding.DecodeString(raw)
+		}
+		if err != nil || !strings.HasPrefix(strings.TrimSpace(string(decoded)), "{") {
+			return nil, fmt.Errorf("X-Provenance header must be 'true', JSON object, or base64-encoded JSON")
+		}
+		jsonBytes = decoded
+	}
+
+	var tmpl map[string]any
+	if err := json.Unmarshal(jsonBytes, &tmpl); err != nil {
+		return nil, fmt.Errorf("malformed JSON in X-Provenance header: %w", err)
+	}
+	if rt, ok := tmpl["resourceType"].(string); ok && rt != "" && rt != "Provenance" {
+		return nil, fmt.Errorf("X-Provenance resourceType must be 'Provenance', got %q", rt)
+	}
+	return &xProvenanceSpec{
+		enabled:  true,
+		template: tmpl,
+	}, nil
+}
+
+func buildDefaultProvenanceAgent(secCtx *auth.SecurityContext, roleCode, roleDisplay string) map[string]any {
+	if roleCode == "" {
+		roleCode = "author"
+		roleDisplay = "Author"
+	}
+	who := map[string]any{
+		"display": "Flint FHIR System Agent",
+	}
+	if secCtx != nil {
+		if patID := cleanID(secCtx.GetPatientId()); patID != "" && auth.IsPatientRestricted(secCtx) {
+			who = map[string]any{"reference": "Patient/" + patID}
+		} else if sub := strings.TrimSpace(secCtx.GetSubject()); sub != "" {
+			if strings.Contains(sub, "/") {
+				who = map[string]any{"reference": sub}
+			} else {
+				who = map[string]any{"display": sub}
+			}
+		}
+	}
+	return map[string]any{
+		"type": map[string]any{
+			"coding": []any{
+				map[string]any{
+					"system":  "http://terminology.hl7.org/CodeSystem/provenance-participant-type",
+					"code":    roleCode,
+					"display": roleDisplay,
+				},
+			},
+		},
+		"who": who,
+	}
+}
+
+// recordAutoProvenance creates and indexes a US Core Provenance resource for a newly created
+// or updated resource when requested via the X-Provenance HTTP header.
+func (s *Server) recordAutoProvenance(
+	r *http.Request,
+	w http.ResponseWriter,
+	tenant, resType, resID string,
+	resVersion int,
+	targetIdx *postgres.SearchIndexes,
+	spec *xProvenanceSpec,
+) {
+	if spec == nil || !spec.enabled || s.store == nil {
+		return
+	}
+	if strings.EqualFold(resType, "Provenance") || strings.EqualFold(resType, "AuditEvent") {
+		return
+	}
+
+	secCtx, _ := auth.FromContext(r.Context())
+	provID := fmt.Sprintf("prov-%s-%s-v%d", strings.ToLower(resType), resID, max(resVersion, 1))
+	if spec.template != nil {
+		if customID, _ := spec.template["id"].(string); strings.TrimSpace(customID) != "" {
+			provID = strings.TrimSpace(customID)
+		}
+	}
+
+	actCode := "CREATE"
+	actDisplay := "create"
+	if resVersion > 1 {
+		actCode = "UPDATE"
+		actDisplay = "revise"
+	}
+
+	provMap := map[string]any{
+		"resourceType": "Provenance",
+		"id":           provID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-provenance"},
+		},
+		"target": []any{
+			map[string]any{
+				"reference": fmt.Sprintf("%s/%s", resType, resID),
+			},
+		},
+		"recorded": time.Now().UTC().Format(time.RFC3339),
+		"activity": map[string]any{
+			"coding": []any{
+				map[string]any{
+					"system":  "http://terminology.hl7.org/CodeSystem/v3-DataOperation",
+					"code":    actCode,
+					"display": actDisplay,
+				},
+			},
+		},
+		"agent": []any{
+			buildDefaultProvenanceAgent(secCtx, "author", "Author"),
+		},
+	}
+
+	if spec.template != nil {
+		if agents, ok := spec.template["agent"].([]any); ok && len(agents) > 0 {
+			provMap["agent"] = agents
+		}
+		for _, field := range []string{"reason", "activity", "entity", "occurredDateTime", "recorded", "location", "policy"} {
+			if val, exists := spec.template[field]; exists && val != nil {
+				provMap[field] = val
+			}
+		}
+	}
+
+	patientID := extractPatientIDFromIndexes(resType, resID, targetIdx)
+	if persistedID, err := s.persistSystemProvenanceMap(r.Context(), tenant, provMap, patientID); err == nil && persistedID != "" {
+		w.Header().Set("X-Provenance-Location", fmt.Sprintf("/fhir/r4/%s/Provenance/%s", tenant, persistedID))
+	}
+}
+
+func (s *Server) persistSystemProvenanceMap(ctx context.Context, tenant string, provMap map[string]any, patientID string) (string, error) {
+	if s.store == nil {
+		return "", fmt.Errorf("store not configured")
+	}
+	md, ok := s.protoRegistry["Provenance"]
+	if !ok {
+		return "", fmt.Errorf("provenance descriptor not registered")
+	}
+	provID, _ := provMap["id"].(string)
+	if provID == "" {
+		provID = "prov-" + generateID()
+		provMap["id"] = provID
+	}
+	rawJSON, err := json.Marshal(provMap)
+	if err != nil {
+		return "", err
+	}
+	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, rawJSON)
+	if err != nil {
+		return "", err
+	}
+	msg := dynamicpb.NewMessage(md)
+	unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+	if err := unmarshaler.Unmarshal(normalizedBody, msg); err != nil {
+		return "", err
+	}
+	setProtoResourceID(msg, provID)
+	protoBytes, err := proto.Marshal(msg)
+	if err != nil {
+		return "", err
+	}
+	var idx *postgres.SearchIndexes
+	if extractor, ok := s.extractors["Provenance"]; ok {
+		idx, _ = extractor(tenant, provID, protoBytes)
+	}
+	if idx == nil {
+		idx = &postgres.SearchIndexes{}
+	}
+	if patientID != "" {
+		appendProvenancePatientRef(idx, tenant, provID, cleanID(patientID))
+	} else {
+		s.enrichProvenancePatientIndex(ctx, tenant, provID, idx)
+	}
+
+	rec, err := s.store.WriteResourceWithMeta(ctx, postgres.ResourceInput{
+		TenantID:      tenant,
+		ResType:       "Provenance",
+		ResID:         provID,
+		ResourceProto: protoBytes,
+		SearchIndexes: idx,
+	})
+	if err != nil {
+		return "", err
+	}
+	s.publishCDC(ctx, automq.Message{
+		TenantID:  tenant,
+		ResType:   "Provenance",
+		ResID:     provID,
+		ProtoData: rec.ResourceProto,
+		Op:        "U",
+	})
+	return provID, nil
+}
+
+func appendProvenancePatientRef(idx *postgres.SearchIndexes, tenant, provID, patientID string) {
+	if idx == nil || patientID == "" {
+		return
+	}
+	for _, ref := range idx.References {
+		if (ref.SpName == "patient" || ref.SpName == "subject") && ref.TargetID == patientID {
+			return
+		}
+	}
+	idx.References = append(idx.References,
+		postgres.SpidxReference{
+			TenantID:   tenant,
+			ResType:    "Provenance",
+			ResID:      provID,
+			SpName:     "patient",
+			TargetType: "Patient",
+			TargetID:   patientID,
+		},
+		postgres.SpidxReference{
+			TenantID:   tenant,
+			ResType:    "Provenance",
+			ResID:      provID,
+			SpName:     "subject",
+			TargetType: "Patient",
+			TargetID:   patientID,
+		},
+	)
+}
+
+// enrichProvenancePatientIndex resolves the Patient compartment for a Provenance resource
+// whose target references a clinical compartment resource (e.g. Observation/obs-1) so that
+// patient-compartment queries and SMART patient-scoped tokens work uniformly on Provenance.
+func (s *Server) enrichProvenancePatientIndex(ctx context.Context, tenant, provID string, idx *postgres.SearchIndexes) {
+	if idx == nil {
+		return
+	}
+	for _, ref := range idx.References {
+		if ref.TargetType == "Patient" && ref.TargetID != "" {
+			appendProvenancePatientRef(idx, tenant, provID, ref.TargetID)
+			return
+		}
+	}
+	if s.store == nil {
+		return
+	}
+	for _, ref := range idx.References {
+		if ref.SpName != "target" || ref.TargetType == "" || ref.TargetID == "" {
+			continue
+		}
+		if strings.EqualFold(ref.TargetType, "Patient") {
+			appendProvenancePatientRef(idx, tenant, provID, ref.TargetID)
+			return
+		}
+		if postgres.IsPatientCompartmentResourceType(ref.TargetType) {
+			rec, err := s.store.ReadResourceWithMeta(ctx, tenant, ref.TargetType, ref.TargetID)
+			if err != nil || rec == nil {
+				continue
+			}
+			if extractor, ok := s.extractors[ref.TargetType]; ok && len(rec.ResourceProto) > 0 {
+				tIdx, err := extractor(tenant, ref.TargetID, rec.ResourceProto)
+				if err == nil {
+					if patID := extractPatientIDFromIndexes(ref.TargetType, ref.TargetID, tIdx); patID != "" {
+						appendProvenancePatientRef(idx, tenant, provID, patID)
+						return
+					}
+				}
+			}
+		}
+	}
+}
+
+// handleResourceProvenance implements GET /fhir/r4/{tenant}/{resourceType}/{id}/$provenance,
+// returning a searchset Bundle of all Provenance records targeting {resourceType}/{id}.
+func (s *Server) handleResourceProvenance(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resType := r.PathValue("resourceType")
+	resID := r.PathValue("id")
+
+	if _, ok := s.protoRegistry[resType]; !ok {
+		writeOperationOutcome(w, http.StatusBadRequest, "not-supported",
+			fmt.Sprintf("resource type %s not registered", resType))
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		return
+	}
+
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	if hasSecCtx {
+		if !auth.Allows(secCtx, "Provenance", auth.ActionRead) && !auth.Allows(secCtx, "Provenance", auth.ActionSearch) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("insufficient scope to read Provenance for %s/%s", resType, resID))
+			return
+		}
+	}
+
+	// Verify target resource exists and caller is allowed to read it
+	targetRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found",
+			fmt.Sprintf("%s/%s not found", resType, resID))
+		return
+	}
+	if errors.Is(err, postgres.ErrResourceDeleted) {
+		writeOperationOutcome(w, http.StatusGone, "deleted",
+			fmt.Sprintf("%s/%s has been deleted", resType, resID))
+		return
+	}
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read target resource for $provenance")
+		return
+	}
+	if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, resType, resID, targetRec.ResourceProto) {
+		writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+			fmt.Sprintf("insufficient granular scope to read %s/%s for $provenance", resType, resID))
+		return
+	}
+
+	sp := postgres.SearchParams{
+		TenantID:         tenant,
+		ResType:          "Provenance",
+		References:       map[string]string{"target": resType + "/" + resID},
+		ReferenceFilters: map[string][]string{"target": {resType + "/" + resID}},
+		Count:            100,
+	}
+	sr, err := s.store.Search(r.Context(), sp)
+	if err != nil {
+		s.logger.Error("$provenance search failed", "error", err, "type", resType, "id", resID)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to query Provenance records")
+		return
+	}
+
+	if hasSecCtx && len(sr.Matches) > 0 {
+		filtered := make([]postgres.SearchResult, 0, len(sr.Matches))
+		for _, m := range sr.Matches {
+			if s.resourceAllowedByGranularScope(secCtx, tenant, "Provenance", m.ResID, m.ResourceProto) {
+				filtered = append(filtered, m)
+			}
+		}
+		sr.Matches = filtered
+		sr.Total = len(filtered)
+	}
+
+	s.writeSearchSetBundleWithOpts(w, r, sr, sp)
 }

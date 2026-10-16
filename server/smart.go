@@ -601,7 +601,8 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		if scope == "" {
 			scope = "system/*.rs"
 		}
-		accessToken, err := s.devAuth.IssueToken(subject, scope, "", time.Hour, map[string]any{
+		patientID := strings.TrimSpace(r.FormValue("patient"))
+		accessToken, err := s.devAuth.IssueToken(subject, scope, patientID, time.Hour, map[string]any{
 			"jti": uuid.NewString(),
 		})
 		if err != nil {
@@ -613,6 +614,9 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			"token_type":   "Bearer",
 			"expires_in":   3600,
 			"scope":        scope,
+		}
+		if patientID != "" {
+			resp["patient"] = patientID
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")

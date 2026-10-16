@@ -108,7 +108,7 @@ tasks:
       - go run ./cmd/seed {{.CLI_ARGS}}
 
   certify:
-    desc: Run automated 34-check FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) conformance certification suite
+    desc: Run automated 50-check FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) conformance certification suite
     cmds:
       - go run ./cmd/certify {{.CLI_ARGS}}
 
@@ -118,10 +118,25 @@ tasks:
       - docker build -t flint-fhir/flint:latest .
 
   deploy-flintd:
-    desc: Deploy flintd server and worker to Kubernetes with /healthz, /readyz, and Prometheus /metrics
+    desc: Import flint-fhir/flint:latest into k3d, deploy flintd + worker (NodePort 30080 -> localhost:8080), and seed demo cohort
     cmds:
+      - k3d image import flint-fhir/flint:latest -c {{.CLUSTER_NAME}}
+      - kubectl delete job flint-seed -n {{.NAMESPACE}} --ignore-not-found
       - kubectl apply -f deploy/k8s/flintd.yaml
       - kubectl rollout status deployment/flintd -n {{.NAMESPACE}} --timeout=120s
+      - kubectl wait --for=condition=complete job/flint-seed -n {{.NAMESPACE}} --timeout=120s
+
+  k3d-up:
+    desc: 1-command full-stack k3d deployment (cluster + infra + docker build + flintd + worker + seeded US Core demo cohort on localhost:8080)
+    cmds:
+      - task: dev
+      - task: docker-build
+      - task: deploy-flintd
+      - echo "🔥 Flint Full-Stack k3d Cluster Ready!"
+      - echo "  Interactive SMART v2 Sandbox ($docs) → http://localhost:8080/fhir/r4/demo/$docs"
+      - echo "  50-Check Conformance ($certify)      → http://localhost:8080/fhir/r4/demo/$certify"
+      - echo "  Patient IPS Summary ($summary)       → http://localhost:8080/fhir/r4/demo/Patient/example-patient-1/$summary"
+      - echo "  US Core Clinical Notes ($docref)     → http://localhost:8080/fhir/r4/demo/DocumentReference/$docref?patient=example-patient-1"
 
   certify-inferno:
     desc: Launch official HL7 Inferno US Core v6.1.0 / ONC (g)(10) test kit on http://localhost:4567
