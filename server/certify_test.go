@@ -1159,6 +1159,7 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 		"type": {"coding": [{"system": "http://loinc.org", "code": "34133-9", "display": "Summary of episode note"}]},
 		"subject": {"reference": "Patient/hard-pat-1"},
 		"date": "2026-01-15T10:00:00Z",
+		"description": "Initial Episode Summary",
 		"content": [{"attachment": {"contentType": "text/plain", "title": "Episode Summary"}}],
 		"context": {"period": {"start": "2026-01-10T00:00:00Z", "end": "2026-01-20T00:00:00Z"}}
 	}`

@@ -1260,8 +1260,8 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		// 1. DocumentReference/$docref with on-demand=true
 		respDocref, bDocref, errDocref := doReq(http.MethodGet, basePath+"/DocumentReference/$docref?patient=cert-pat-1&on-demand=true", "", nil, nil)
 		err = errDocref
-		if err == nil && (respDocref.StatusCode != http.StatusOK || !strings.Contains(string(bDocref), `"docref-ips-cert-pat-1"`) || !strings.Contains(string(bDocref), `"cert-docref-1"`)) {
-			err = fmt.Errorf("expected DocumentReference/$docref Bundle with stored cert-docref-1 and on-demand docref-ips-cert-pat-1, got %d: %s", respDocref.StatusCode, string(bDocref))
+		if err == nil && (respDocref.StatusCode != http.StatusOK || !strings.Contains(string(bDocref), `"docref-ips-cert-pat-1"`) || !strings.Contains(string(bDocref), `"cert-doc-1"`)) {
+			err = fmt.Errorf("expected DocumentReference/$docref Bundle with stored cert-doc-1 and on-demand docref-ips-cert-pat-1, got %d: %s", respDocref.StatusCode, string(bDocref))
 		}
 
 		// 2. X-Provenance header + /{resourceType}/{id}/$provenance
