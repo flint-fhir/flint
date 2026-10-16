@@ -1256,6 +1256,52 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	record("SDC-01", suite5, "HL7 Da Vinci SDC ($populate, $extract) & Composition/{id}/$document Generation", t0, err, "Verified Questionnaire/$populate, QuestionnaireResponse/$extract & Composition/$document")
 
 	t0 = time.Now()
+	{
+		// 1. DocumentReference/$docref with on-demand=true
+		respDocref, bDocref, errDocref := doReq(http.MethodGet, basePath+"/DocumentReference/$docref?patient=cert-pat-1&on-demand=true", "", nil, nil)
+		err = errDocref
+		if err == nil && (respDocref.StatusCode != http.StatusOK || !strings.Contains(string(bDocref), `"docref-ips-cert-pat-1"`) || !strings.Contains(string(bDocref), `"cert-doc-1"`)) {
+			err = fmt.Errorf("expected DocumentReference/$docref Bundle with stored cert-doc-1 and on-demand docref-ips-cert-pat-1, got %d: %s", respDocref.StatusCode, string(bDocref))
+		}
+
+		// 2. X-Provenance header + /{resourceType}/{id}/$provenance
+		if err == nil {
+			obsProvBody := []byte(`{
+				"resourceType": "Observation",
+				"id": "cert-obs-prov-1",
+				"status": "final",
+				"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+				"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+				"subject": {"reference": "Patient/cert-pat-1"},
+				"effectiveDateTime": "2026-01-15T11:00:00Z",
+				"valueQuantity": {"value": 70.0, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+			}`)
+			respPutProv, bPutProv, errPutProv := doReq(http.MethodPut, basePath+"/Observation/cert-obs-prov-1", "application/fhir+json", obsProvBody, map[string]string{
+				"X-Provenance": "true",
+			})
+			if errPutProv != nil || (respPutProv.StatusCode != http.StatusOK && respPutProv.StatusCode != http.StatusCreated) {
+				err = fmt.Errorf("failed PUT Observation/cert-obs-prov-1 with X-Provenance: %d %s", respPutProv.StatusCode, string(bPutProv))
+			} else if respPutProv.Header.Get("X-Provenance-Location") == "" {
+				err = fmt.Errorf("expected X-Provenance-Location header on PUT with X-Provenance: true")
+			} else {
+				respGetProv, bGetProv, errGetProv := doReq(http.MethodGet, basePath+"/Observation/cert-obs-prov-1/$provenance", "", nil, nil)
+				if errGetProv != nil || respGetProv.StatusCode != http.StatusOK || !strings.Contains(string(bGetProv), `"Observation/cert-obs-prov-1"`) {
+					err = fmt.Errorf("expected Provenance targeting Observation/cert-obs-prov-1 from $provenance, got %d: %s", respGetProv.StatusCode, string(bGetProv))
+				}
+			}
+		}
+
+		// 3. Patient/{id}/$everything pagination links & POST Parameters
+		if err == nil {
+			respEv, bEv, errEv := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$everything?_type=Observation&_count=1", "", nil, nil)
+			if errEv != nil || respEv.StatusCode != http.StatusOK || !strings.Contains(string(bEv), `"relation":"next"`) {
+				err = fmt.Errorf("expected next pagination link in Patient/cert-pat-1/$everything?_type=Observation&_count=1, got %d: %s", respEv.StatusCode, string(bEv))
+			}
+		}
+	}
+	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), X-Provenance / $provenance Lineage & $everything Pagination", t0, err, "Verified DocumentReference/$docref, X-Provenance + $provenance & $everything pagination")
+
+	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/AuditEvent?_count=20", "", nil, nil)
 	if err == nil && resp.StatusCode != http.StatusOK {
 		err = fmt.Errorf("expected 200 OK on GET /AuditEvent, got %d: %s", resp.StatusCode, string(b))

@@ -32,18 +32,28 @@ func (s *Server) handlePatientSummary(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusBadRequest, "required", "Patient ID is required for $summary")
 		return
 	}
-	if s.store == nil {
-		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+	bundle, status, code, msg := s.assembleIPSSummaryBundle(r, tenant, patientID)
+	if status != http.StatusOK {
+		writeOperationOutcome(w, status, code, msg)
 		return
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+func (s *Server) assembleIPSSummaryBundle(r *http.Request, tenant, patientID string) (map[string]any, int, string, string) {
+	if s.store == nil {
+		return nil, http.StatusServiceUnavailable, "exception", "store not configured"
 	}
 
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
 	if hasSecCtx && auth.IsPatientRestricted(secCtx) {
 		if cleanID(secCtx.GetPatientId()) != patientID {
-			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+			return nil, http.StatusForbidden, "forbidden",
 				fmt.Sprintf("patient-scoped token (%s) cannot access $summary for Patient/%s",
-					secCtx.GetPatientId(), patientID))
-			return
+					secCtx.GetPatientId(), patientID)
 		}
 	}
 
@@ -53,19 +63,14 @@ func (s *Server) handlePatientSummary(w http.ResponseWriter, r *http.Request) {
 		Count:     500,
 	})
 	if errors.Is(err, sql.ErrNoRows) {
-		writeOperationOutcome(w, http.StatusNotFound, "not-found",
-			fmt.Sprintf("Patient/%s not found", patientID))
-		return
+		return nil, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patientID)
 	}
 	if errors.Is(err, postgres.ErrResourceDeleted) {
-		writeOperationOutcome(w, http.StatusGone, "deleted",
-			fmt.Sprintf("Patient/%s has been deleted", patientID))
-		return
+		return nil, http.StatusGone, "deleted", fmt.Sprintf("Patient/%s has been deleted", patientID)
 	}
 	if err != nil {
 		s.logger.Error("patient $summary everything query", "error", err, "patient", patientID)
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to assemble Patient/$summary")
-		return
+		return nil, http.StatusInternalServerError, "exception", "failed to assemble Patient/$summary"
 	}
 
 	if hasSecCtx && len(sr.Includes) > 0 {
@@ -269,10 +274,7 @@ func (s *Server) handlePatientSummary(w http.ResponseWriter, r *http.Request) {
 		"timestamp": nowStr,
 		"entry":     entries,
 	}
-
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	return bundle, http.StatusOK, "", ""
 }
 
 func isVitalSignObservation(obs map[string]any) bool {

@@ -51,6 +51,12 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	xProvTemplate, err := parseXProvenanceHeader(r)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+
 	expectedVersion := 0
 	if ifMatch := strings.TrimSpace(r.Header.Get("If-Match")); ifMatch != "" {
 		v, err := postgres.ParseETagVersion(ifMatch)
@@ -188,6 +194,7 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 	if extractor, ok := s.extractors[resType]; ok {
 		idx, _ = extractor(tenant, resID, protoBytes)
 	}
+	s.enrichProvenancePatientIndex(r.Context(), tenant, resType, idx)
 	setAuditPatientID(r.Context(), extractPatientIDFromIndexes(resType, resID, idx))
 
 	if secCtx, ok := auth.FromContext(r.Context()); ok {
@@ -237,6 +244,7 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 		Op:        "U",
 	})
 	s.dispatchSubscriptions(r.Context(), tenant, resType, resID, protoBytes, rec.ResVersion, rec.LastUpdated, idx)
+	s.recordAutoProvenance(r, w, tenant, resType, resID, rec.ResVersion, idx, xProvTemplate)
 
 	outJSON, err := s.protoToJSONWithMeta(resType, protoBytes, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
@@ -259,6 +267,12 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		writeOperationOutcome(w, http.StatusBadRequest, "not-supported",
 			fmt.Sprintf("resource type %s not registered", resType))
+		return
+	}
+
+	xProvTemplate, err := parseXProvenanceHeader(r)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
 
@@ -358,6 +372,7 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 			if extractor, ok := s.extractors[resType]; ok {
 				finalIdx, _ = extractor(tenant, finalResID, finalProtoBytes)
 			}
+			s.enrichProvenancePatientIndex(r.Context(), tenant, resType, finalIdx)
 
 			if hasSecCtx && auth.IsPatientRestricted(secCtx) {
 				if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
@@ -395,7 +410,8 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	setAuditPatientID(r.Context(), extractPatientIDFromIndexes(resType, rec.ResID, finalIdx))
+	patID := extractPatientIDFromIndexes(resType, rec.ResID, finalIdx)
+	setAuditPatientID(r.Context(), patID)
 
 	s.publishCDC(r.Context(), automq.Message{
 		TenantID:  tenant,
@@ -405,6 +421,7 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 		Op:        "U",
 	})
 	s.dispatchSubscriptions(r.Context(), tenant, resType, rec.ResID, finalProtoBytes, rec.ResVersion, rec.LastUpdated, finalIdx)
+	s.recordAutoProvenance(r, w, tenant, resType, rec.ResID, rec.ResVersion, finalIdx, xProvTemplate)
 
 	jsonBytes, err := s.protoToJSONWithMeta(resType, finalProtoBytes, rec.ResVersion, rec.LastUpdated)
 	if err != nil {

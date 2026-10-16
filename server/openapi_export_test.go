@@ -119,6 +119,8 @@ func TestServer_OpenAPIAndDocs(t *testing.T) {
 			"/$export-poll/{jobId}",
 			"/$export-file/{jobId}/{fileName}",
 			"/Patient/{id}/$everything",
+			"/DocumentReference/$docref",
+			"/Patient/{id}/$provenance",
 			"/Patient",
 			"/Patient/{id}",
 			"/Observation",
@@ -148,6 +150,11 @@ func TestServer_OpenAPIAndDocs(t *testing.T) {
 			"google/fhir",
 			"$export",
 			"openapi.json",
+			"smart-token-minter",
+			"request-workbench",
+			"recipe-runner",
+			"DocumentReference/$docref",
+			"$provenance",
 		} {
 			if !strings.Contains(htmlStr, expectedSubstr) {
 				t.Errorf("expected $docs HTML from %s to contain %q", path, expectedSubstr)

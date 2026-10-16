@@ -54,10 +54,10 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Patient Compartment, IPS, SDC & Da Vinci Operations",
-			Capability:    "Patient/$everything, Patient/{id}/$summary (HL7 IPS), Composition/{id}/$document, Questionnaire/$populate & QuestionnaireResponse/$extract (HL7 SDC), Patient/$match (MPI), Patient/$member-match (Da Vinci HRex), Claim/$submit (Da Vinci PAS), $meta / $meta-add / $meta-delete & RESTful Compartment Search",
-			Specification: "HL7 FHIR R4, IPS, SDC & Da Vinci HRex/PDex/PAS",
+			Capability:    "Patient/$everything (GET/POST + _type/_since/_count/_offset pagination), Patient/{id}/$summary (HL7 IPS), DocumentReference/$docref (US Core / Argonaut Clinical Notes + On-Demand IPS), Composition/{id}/$document, Questionnaire/$populate & QuestionnaireResponse/$extract (HL7 SDC + Auto-Provenance), X-Provenance Header & /{resourceType}/{id}/$provenance, Patient/$match (MPI), Patient/$member-match (Da Vinci HRex), Claim/$submit (Da Vinci PAS), $meta / $meta-add / $meta-delete & RESTful Compartment Search",
+			Specification: "HL7 FHIR R4, US Core, IPS, SDC & Da Vinci HRex/PDex/PAS",
 			Status:        "Verified",
-			Endpoint:      "/fhir/r4/{tenant}/Patient/{id}/$summary",
+			Endpoint:      "/fhir/r4/{tenant}/DocumentReference/$docref",
 		},
 		{
 			Category:      "Terminology Services",
@@ -82,7 +82,7 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Conformance, Validation & Certification",
-			Capability:    "StructureDefinition & ValueSet Validation ($validate, 26 US Core v6.1.0 & v7.0.0 Profiles) & 40-Check Automated Certification ($certify)",
+			Capability:    "StructureDefinition & ValueSet Validation ($validate, 26 US Core v6.1.0 & v7.0.0 Profiles) & 50-Check Automated Certification ($certify)",
 			Specification: "HL7 FHIR R4 OperationDefinition/Resource-validate & TestReport",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/$certify",
@@ -1145,6 +1145,32 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/DocumentReference/$docref": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"DocumentReference"},
+				"summary":     "US Core / Argonaut Clinical Notes $docref operation returning matching DocumentReferences and optional on-demand IPS summary",
+				"operationId": "documentReferenceDocrefGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "start", "in": "query", "required": false, "schema": map[string]any{"type": "string", "format": "date"}},
+					{"name": "end", "in": "query", "required": false, "schema": map[string]any{"type": "string", "format": "date"}},
+					{"name": "type", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "on-demand", "in": "query", "required": false, "schema": map[string]any{"type": "boolean"}},
+					{"name": "_count", "in": "query", "required": false, "schema": map[string]any{"type": "integer"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of DocumentReference resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"DocumentReference"},
+				"summary":     "US Core / Argonaut Clinical Notes $docref operation (POST Parameters)",
+				"operationId": "documentReferenceDocrefPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of DocumentReference resources"},
+				},
+			},
+		},
 		"/Composition/{id}/$document": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Composition"},
@@ -1220,7 +1246,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		"/QuestionnaireResponse/$extract": map[string]any{
 			"post": map[string]any{
 				"tags":        []string{"QuestionnaireResponse"},
-				"summary":     "HL7 SDC QuestionnaireResponse/$extract converting coded answers into FHIR Observation / Condition transaction Bundle",
+				"summary":     "HL7 SDC QuestionnaireResponse/$extract converting coded answers into FHIR Observation / Condition / Provenance transaction Bundle",
 				"operationId": "questionnaireResponseExtractPost",
 				"responses": map[string]any{
 					"200": map[string]any{"description": "Extracted FHIR R4 Bundle (type: transaction)"},
@@ -1262,6 +1288,17 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
 					{"name": "_count", "in": "query", "schema": map[string]any{"type": "integer"}},
 					{"name": "_offset", "in": "query", "schema": map[string]any{"type": "integer"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: searchset) containing Patient and compartment resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "Assemble full Patient compartment longitudinal Bundle ($everything, POST Parameters)",
+				"operationId": "patientEverythingPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "Bundle (type: searchset) containing Patient and compartment resources"},
@@ -1358,13 +1395,14 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			},
 			"post": map[string]any{
 				"tags":        []string{rt},
-				"summary":     fmt.Sprintf("Create %s resource (supports If-None-Exist conditional create)", rt),
+				"summary":     fmt.Sprintf("Create %s resource (supports If-None-Exist conditional create and X-Provenance header)", rt),
 				"operationId": "create" + rt,
 				"parameters": []map[string]any{
 					{"name": "If-None-Exist", "in": "header", "required": false, "description": "FHIR conditional create search query (e.g. identifier=http://hospital.example.org/mrn|MRN-001)", "schema": map[string]any{"type": "string"}},
+					{"name": "X-Provenance", "in": "header", "required": false, "description": "Automatically record US Core Provenance (true or JSON/base64 Provenance template)", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
-					"201": map[string]any{"description": "Created " + rt + " (with ETag and Location headers)"},
+					"201": map[string]any{"description": "Created " + rt + " (with ETag, Location, and optional X-Provenance-Location headers)"},
 					"200": map[string]any{"description": "Idempotent match via If-None-Exist"},
 					"400": map[string]any{"description": "Validation failure OperationOutcome"},
 					"412": map[string]any{"description": "Multiple matches for If-None-Exist"},
@@ -1456,11 +1494,12 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			},
 			"put": map[string]any{
 				"tags":        []string{rt},
-				"summary":     fmt.Sprintf("Update or Create-on-Update %s (supports If-Match CAS)", rt),
+				"summary":     fmt.Sprintf("Update or Create-on-Update %s (supports If-Match CAS and X-Provenance)", rt),
 				"operationId": "update" + rt,
 				"parameters": []map[string]any{
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 					{"name": "If-Match", "in": "header", "required": false, "description": `Expected version ETag (e.g. W/"1") for optimistic concurrency control`, "schema": map[string]any{"type": "string"}},
+					{"name": "X-Provenance", "in": "header", "required": false, "description": "Automatically record US Core Provenance (true or JSON/base64 Provenance template)", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "Updated " + rt},
@@ -1475,6 +1514,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				"parameters": []map[string]any{
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 					{"name": "If-Match", "in": "header", "required": false, "description": `Expected version ETag (e.g. W/"1") for optimistic concurrency control`, "schema": map[string]any{"type": "string"}},
+					{"name": "X-Provenance", "in": "header", "required": false, "description": "Automatically record US Core Provenance (true or JSON/base64 Provenance template)", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "Patched " + rt},
@@ -1592,6 +1632,20 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		}
+
+		paths["/"+rt+"/{id}/$provenance"] = map[string]any{
+			"get": map[string]any{
+				"tags":        []string{rt, "Provenance"},
+				"summary":     fmt.Sprintf("Retrieve US Core Provenance lineage Bundle targeting %s/{id} ($provenance)", rt),
+				"operationId": "instanceProvenance" + rt,
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of Provenance resources targeting " + rt + "/{id}"},
+				},
+			},
+		}
 	}
 
 	return map[string]any{
@@ -1668,7 +1722,7 @@ const docsHTMLTemplate = `<!DOCTYPE html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Flint FHIR R4 API &amp; Conformance Explorer ({{TENANT}})</title>
+  <title>Flint FHIR R4 API, SMART v2 Sandbox &amp; Conformance Explorer ({{TENANT}})</title>
   <style>
     :root {
       --bg: #0f172a;
@@ -1700,7 +1754,7 @@ const docsHTMLTemplate = `<!DOCTYPE html>
       flex-wrap: wrap;
       gap: 1rem;
     }
-    .brand { display: flex; align-items: center; gap: 0.75rem; }
+    .brand { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
     .brand h1 { margin: 0; font-size: 1.35rem; font-weight: 700; }
     .badge {
       background: rgba(249, 115, 22, 0.15);
@@ -1711,33 +1765,80 @@ const docsHTMLTemplate = `<!DOCTYPE html>
       font-size: 0.75rem;
       font-weight: 600;
     }
-    .controls { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
-    input[type="text"] {
+    .controls { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+    input[type="text"], select, textarea {
       background: var(--panel);
       border: 1px solid var(--border);
       color: var(--text);
       padding: 0.45rem 0.75rem;
       border-radius: 0.375rem;
       font-size: 0.85rem;
-      min-width: 240px;
+    }
+    input[type="text"] { min-width: 240px; }
+    textarea {
+      width: 100%;
+      min-height: 130px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.8rem;
+      background: #020617;
     }
     .btn {
       background: var(--accent);
       color: #fff;
       border: none;
-      padding: 0.45rem 0.9rem;
+      padding: 0.45rem 0.85rem;
       border-radius: 0.375rem;
       font-weight: 600;
-      font-size: 0.85rem;
+      font-size: 0.82rem;
       cursor: pointer;
       text-decoration: none;
     }
-    main { max-width: 1280px; margin: 0 auto; padding: 1.5rem 2rem; }
+    .btn-secondary {
+      background: #334155;
+      color: var(--text);
+    }
+    .btn-green {
+      background: #16a34a;
+      color: #fff;
+    }
+    main { max-width: 1320px; margin: 0 auto; padding: 1.5rem 2rem; }
     h2 { font-size: 1.15rem; margin-top: 2rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
     table { width: 100%; border-collapse: collapse; background: var(--panel); border-radius: 0.5rem; overflow: hidden; font-size: 0.875rem; }
     th, td { text-align: left; padding: 0.65rem 0.9rem; border-bottom: 1px solid var(--border); }
     th { background: rgba(15, 23, 42, 0.6); color: var(--muted); font-weight: 600; }
     .status-ok { color: var(--green); font-weight: 600; }
+    .workbench-panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      padding: 1rem;
+      margin-bottom: 1.25rem;
+    }
+    .workbench-row {
+      display: flex;
+      gap: 0.6rem;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 0.75rem;
+    }
+    .recipes-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+    .recipe-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      padding: 0.85rem 1rem;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 0.5rem;
+    }
+    .recipe-title { font-weight: 700; font-size: 0.9rem; color: var(--text); }
+    .recipe-desc { font-size: 0.78rem; color: var(--muted); }
     .endpoint-card {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -1769,26 +1870,52 @@ const docsHTMLTemplate = `<!DOCTYPE html>
       overflow-x: auto;
       font-size: 0.8rem;
       margin-top: 0.6rem;
+      max-height: 520px;
     }
   </style>
 </head>
 <body>
   <header>
     <div class="brand">
-      <h1>🔥 Flint FHIR R4 API &amp; Conformance Explorer</h1>
+      <h1>🔥 Flint FHIR R4 API &amp; SMART v2 Sandbox</h1>
       <span class="badge">FHIR R4 4.0.1</span>
       <span class="badge">google/fhir Proto3 BYTEA (0 JSONB)</span>
-      <span class="badge">ONC (g)(10) Bulk $export</span>
-      <span class="badge">31-Check Certification ($certify)</span>
+      <span class="badge">US Core $docref, $provenance &amp; $export</span>
+      <span class="badge">50-Check Certification ($certify)</span>
     </div>
-    <div class="controls">
-      <input type="text" id="bearerToken" placeholder="Optional SMART Bearer JWT..." />
+    <div class="controls" id="smart-token-minter">
+      <input type="text" id="bearerToken" placeholder="SMART v2 Bearer JWT (or click Mint below)..." />
+      <button class="btn btn-secondary" onclick="mintToken('system/*.cruds', '')">Mint System Admin Token</button>
+      <button class="btn btn-secondary" onclick="mintToken('patient/*.rs', 'example-patient-1')">Mint Patient Token (example-patient-1)</button>
+      <button class="btn btn-secondary" onclick="mintToken('patient/Observation.rs?category=vital-signs', 'example-patient-1')">Mint Granular Vital-Signs Token</button>
       <a class="btn" href="/fhir/r4/{{TENANT}}/openapi.json" target="_blank">OpenAPI 3.1 JSON</a>
       <a class="btn" href="/fhir/r4/{{TENANT}}/metadata" target="_blank">CapabilityStatement</a>
     </div>
   </header>
   <main>
-    <h2>1. FHIR R4 / US Core / ONC (g)(10) Conformance Matrix</h2>
+    <h2 id="recipe-runner">1. 1-Click Clinical Recipe Runner</h2>
+    <div class="recipes-grid" id="recipesGrid"></div>
+
+    <h2>2. Interactive FHIR R4 Request Workbench &amp; Live Response Inspector</h2>
+    <div class="workbench-panel" id="request-workbench">
+      <div class="workbench-row">
+        <select id="reqMethod">
+          <option value="GET">GET</option>
+          <option value="POST">POST</option>
+          <option value="PUT">PUT</option>
+          <option value="PATCH">PATCH</option>
+          <option value="DELETE">DELETE</option>
+        </select>
+        <input type="text" id="reqPath" value="/Patient/example-patient-1/$summary" style="flex: 1; min-width: 320px;" />
+        <input type="text" id="reqXProvenance" placeholder="Optional X-Provenance header (e.g. true)" style="min-width: 240px;" />
+        <button class="btn btn-green" onclick="executeWorkbench()">Execute Request</button>
+        <button class="btn btn-secondary" onclick="copyAsCurl()">Copy as curl</button>
+      </div>
+      <textarea id="reqBody" placeholder="Optional JSON Request Body (for POST / PUT / PATCH)..."></textarea>
+      <pre id="liveOutput">Select a Clinical Recipe above or click "Execute Request" to inspect live FHIR R4 JSON / NDJSON output.</pre>
+    </div>
+
+    <h2>3. FHIR R4 / US Core / ONC (g)(10) Conformance Matrix</h2>
     <table>
       <thead>
         <tr>
@@ -1802,31 +1929,269 @@ const docsHTMLTemplate = `<!DOCTYPE html>
       <tbody id="matrixBody"></tbody>
     </table>
 
-    <h2>2. Interactive FHIR R4 Endpoint Explorer</h2>
+    <h2>4. Interactive OpenAPI 3.1 Endpoint Catalog</h2>
     <div id="endpointsContainer">Loading OpenAPI 3.1 specification...</div>
-
-    <h2>3. Live Response Inspector</h2>
-    <pre id="liveOutput">Click "Try GET" on any GET endpoint above to inspect live FHIR R4 JSON / NDJSON output.</pre>
   </main>
   <script>
     const tenant = "{{TENANT}}";
     const specUrl = "/fhir/r4/" + tenant + "/openapi.json";
 
-    async function runTryIt(path) {
+    const clinicalRecipes = [
+      {
+        title: "1. International Patient Summary ($summary)",
+        desc: "Assemble an HL7 IPS document Bundle (LOINC 60591-5) for example-patient-1.",
+        method: "GET",
+        path: "/Patient/example-patient-1/$summary",
+        xProv: "",
+        body: ""
+      },
+      {
+        title: "2. US Core Clinical Notes ($docref)",
+        desc: "Fetch stored clinical notes + on-demand base64 IPS DocumentReference for example-patient-1.",
+        method: "GET",
+        path: "/DocumentReference/$docref?patient=example-patient-1&on-demand=true",
+        xProv: "",
+        body: ""
+      },
+      {
+        title: "3. Longitudinal Patient Compartment ($everything)",
+        desc: "Retrieve Patient/example-patient-1 compartment filtered by _type with pagination links.",
+        method: "GET",
+        path: "/Patient/example-patient-1/$everything?_type=Patient,Condition,Observation&_count=10",
+        xProv: "",
+        body: ""
+      },
+      {
+        title: "4. SDC Form Pre-Population ($populate)",
+        desc: "Pre-populate a PHQ-9 QuestionnaireResponse from Patient/example-patient-1 demographics & vitals.",
+        method: "POST",
+        path: "/Questionnaire/$populate",
+        xProv: "",
+        body: JSON.stringify({
+          resourceType: "Parameters",
+          parameter: [
+            { name: "subject", valueReference: { reference: "Patient/example-patient-1" } },
+            {
+              name: "questionnaire",
+              resource: {
+                resourceType: "Questionnaire",
+                id: "sandbox-phq2",
+                status: "active",
+                item: [
+                  { linkId: "pat-name", text: "Patient Name", type: "string" },
+                  { linkId: "pat-dob", text: "Birth Date", type: "date" }
+                ]
+              }
+            }
+          ]
+        }, null, 2)
+      },
+      {
+        title: "5. SDC Clinical Extraction + Auto-Provenance ($extract)",
+        desc: "Extract coded Observations from a QuestionnaireResponse and automatically generate US Core Provenance.",
+        method: "POST",
+        path: "/QuestionnaireResponse/$extract",
+        xProv: "",
+        body: JSON.stringify({
+          resourceType: "QuestionnaireResponse",
+          id: "qr-sandbox-1",
+          status: "completed",
+          subject: { reference: "Patient/example-patient-1" },
+          item: [
+            {
+              linkId: "heart-rate",
+              text: "Heart Rate",
+              code: [{ system: "http://loinc.org", code: "8867-4", display: "Heart rate" }],
+              answer: [{ valueQuantity: { value: 72, unit: "/min", system: "http://unitsofmeasure.org", code: "/min" } }]
+            }
+          ]
+        }, null, 2)
+      },
+      {
+        title: "6. Write Observation with X-Provenance Lineage",
+        desc: "Create a US Core Vital Signs Observation with X-Provenance: true to auto-record Provenance.",
+        method: "POST",
+        path: "/Observation",
+        xProv: "true",
+        body: JSON.stringify({
+          resourceType: "Observation",
+          status: "final",
+          category: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/observation-category", code: "vital-signs" }] }],
+          code: { coding: [{ system: "http://loinc.org", code: "8867-4", display: "Heart rate" }] },
+          subject: { reference: "Patient/example-patient-1" },
+          effectiveDateTime: "2025-02-01T10:00:00Z",
+          valueQuantity: { value: 74, unit: "/min", system: "http://unitsofmeasure.org", code: "/min" }
+        }, null, 2)
+      },
+      {
+        title: "7. Da Vinci PAS Prior Authorization (Claim/$submit)",
+        desc: "Submit a FHIR R4 Claim for real-time adjudication and persistence of ClaimResponse.",
+        method: "POST",
+        path: "/Claim/$submit",
+        xProv: "",
+        body: JSON.stringify({
+          resourceType: "Parameters",
+          parameter: [
+            {
+              name: "resource",
+              resource: {
+                resourceType: "Claim",
+                status: "active",
+                type: { coding: [{ system: "http://terminology.hl7.org/CodeSystem/claim-type", code: "professional" }] },
+                use: "preauthorization",
+                patient: { reference: "Patient/example-patient-1" },
+                created: "2025-02-01",
+                provider: { reference: "Practitioner/example-practitioner-1" },
+                priority: { coding: [{ code: "normal" }] },
+                insurance: [{ sequence: 1, focal: true, coverage: { reference: "Coverage/example-coverage-1" } }],
+                total: { value: 250.0, currency: "USD" }
+              }
+            }
+          ]
+        }, null, 2)
+      },
+      {
+        title: "8. CMS165 Blood Pressure eCQM ($evaluate-measure)",
+        desc: "Evaluate CMS165 Controlling High Blood Pressure across the tenant cohort.",
+        method: "GET",
+        path: "/Measure/cms165-bp-control/$evaluate-measure?periodStart=2020-01-01&periodEnd=2030-12-31",
+        xProv: "",
+        body: ""
+      },
+      {
+        title: "9. CDS Hooks v2.0 Patient View",
+        desc: "Invoke the built-in flint-patient-view CDS Hook for example-patient-1.",
+        method: "POST",
+        path: "/cds-services/flint-patient-view",
+        xProv: "",
+        body: JSON.stringify({
+          hook: "patient-view",
+          hookInstance: "sandbox-hook-001",
+          context: { userId: "Practitioner/example-practitioner-1", patientId: "example-patient-1" }
+        }, null, 2)
+      },
+      {
+        title: "10. 50-Check Automated Certification ($certify)",
+        desc: "Execute the 50-check FHIR R4, US Core, CQM, CDS Hooks, SDC, IPS, Da Vinci, $docref & Provenance suite.",
+        method: "GET",
+        path: "/$certify",
+        xProv: "",
+        body: ""
+      }
+    ];
+
+    function renderRecipes() {
+      const grid = document.getElementById("recipesGrid");
+      grid.innerHTML = clinicalRecipes.map((r, i) => ` + "`" + `
+        <div class="recipe-card">
+          <div>
+            <div class="recipe-title">${r.title}</div>
+            <div class="recipe-desc">${r.desc}</div>
+          </div>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-top:0.4rem;">
+            <span class="method method-${r.method}">${r.method}</span>
+            <button class="btn" onclick="loadAndRunRecipe(${i})">Load &amp; Run</button>
+          </div>
+        </div>
+      ` + "`" + `).join("");
+    }
+
+    function loadAndRunRecipe(idx) {
+      const r = clinicalRecipes[idx];
+      document.getElementById("reqMethod").value = r.method;
+      document.getElementById("reqPath").value = r.path;
+      document.getElementById("reqXProvenance").value = r.xProv || "";
+      document.getElementById("reqBody").value = r.body || "";
+      executeWorkbench();
+    }
+
+    async function mintToken(scope, patient) {
       const out = document.getElementById("liveOutput");
+      const form = new URLSearchParams();
+      form.set("grant_type", "client_credentials");
+      form.set("client_id", "flint-sandbox");
+      form.set("scope", scope);
+      if (patient) form.set("patient", patient);
+      try {
+        const resp = await fetch("/oauth2/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: form.toString()
+        });
+        const data = await resp.json();
+        if (data.access_token) {
+          document.getElementById("bearerToken").value = data.access_token;
+          out.textContent = "Minted SMART v2 Bearer Token (scope: " + scope + (patient ? ", patient: " + patient : "") + ")\n\n" + JSON.stringify(data, null, 2);
+        } else {
+          out.textContent = "Token error:\n" + JSON.stringify(data, null, 2);
+        }
+      } catch (err) {
+        out.textContent = "Token mint error: " + err;
+      }
+    }
+
+    async function executeWorkbench() {
+      const out = document.getElementById("liveOutput");
+      const method = document.getElementById("reqMethod").value;
+      const path = document.getElementById("reqPath").value.trim();
+      const xProv = document.getElementById("reqXProvenance").value.trim();
+      const body = document.getElementById("reqBody").value.trim();
       const token = document.getElementById("bearerToken").value.trim();
+
       const headers = {};
       if (token) headers["Authorization"] = "Bearer " + token;
-      const fullUrl = "/fhir/r4/" + tenant + (path === "/" ? "" : path);
-      out.textContent = "Requesting GET " + fullUrl + " ...";
+      if (xProv) headers["X-Provenance"] = xProv;
+      if (method === "POST" || method === "PUT" || method === "PATCH") {
+        headers["Content-Type"] = method === "PATCH" && body.startsWith("[")
+          ? "application/json-patch+json"
+          : "application/fhir+json";
+      }
+
+      const fullUrl = path.startsWith("/fhir/r4") ? path : "/fhir/r4/" + tenant + (path === "/" ? "" : path);
+      out.textContent = "Requesting " + method + " " + fullUrl + " ...";
       try {
-        const resp = await fetch(fullUrl, { headers });
+        const opts = { method, headers };
+        if ((method === "POST" || method === "PUT" || method === "PATCH") && body) {
+          opts.body = body;
+        }
+        const resp = await fetch(fullUrl, opts);
         const text = await resp.text();
-        out.textContent = "HTTP " + resp.status + " (" + (resp.headers.get("Content-Type") || "") + ")\n\n" + text;
+        let headerInfo = "HTTP " + resp.status + " (" + (resp.headers.get("Content-Type") || "") + ")";
+        const loc = resp.headers.get("Location");
+        const provLoc = resp.headers.get("X-Provenance-Location");
+        if (loc) headerInfo += "\nLocation: " + loc;
+        if (provLoc) headerInfo += "\nX-Provenance-Location: " + provLoc;
+        out.textContent = headerInfo + "\n\n" + text;
       } catch (err) {
         out.textContent = "Error: " + err;
       }
     }
+
+    function copyAsCurl() {
+      const method = document.getElementById("reqMethod").value;
+      const path = document.getElementById("reqPath").value.trim();
+      const xProv = document.getElementById("reqXProvenance").value.trim();
+      const body = document.getElementById("reqBody").value.trim();
+      const token = document.getElementById("bearerToken").value.trim();
+      const fullUrl = window.location.origin + (path.startsWith("/fhir/r4") ? path : "/fhir/r4/" + tenant + (path === "/" ? "" : path));
+
+      let cmd = "curl -i -X " + method + " '" + fullUrl + "'";
+      if (token) cmd += " \\\n  -H 'Authorization: Bearer " + token + "'";
+      if (xProv) cmd += " \\\n  -H 'X-Provenance: " + xProv.replace(/'/g, "'\\''") + "'";
+      if ((method === "POST" || method === "PUT" || method === "PATCH") && body) {
+        cmd += " \\\n  -H 'Content-Type: application/fhir+json' \\\n  -d '" + body.replace(/'/g, "'\\''") + "'";
+      }
+      navigator.clipboard.writeText(cmd);
+      document.getElementById("liveOutput").textContent = "Copied curl command to clipboard:\n\n" + cmd;
+    }
+
+    function runTryIt(path, method) {
+      document.getElementById("reqMethod").value = method || "GET";
+      document.getElementById("reqPath").value = path;
+      executeWorkbench();
+    }
+
+    renderRecipes();
 
     fetch(specUrl)
       .then(r => r.json())
@@ -1849,8 +2214,8 @@ const docsHTMLTemplate = `<!DOCTYPE html>
           for (const [method, details] of Object.entries(methods)) {
             const upper = method.toUpperCase();
             const tryBtn = (upper === "GET" && !path.includes("{"))
-              ? ` + "`" + `<button class="btn" onclick="runTryIt('${path}')">Try GET</button>` + "`" + `
-              : "";
+              ? ` + "`" + `<button class="btn" onclick="runTryIt('${path}', 'GET')">Try GET</button>` + "`" + `
+              : ` + "`" + `<button class="btn btn-secondary" onclick="runTryIt('${path.replace("{id}", "example-patient-1")}', '${upper}')">Load in Workbench</button>` + "`" + `;
             cards.push(` + "`" + `
               <div class="endpoint-card">
                 <div class="endpoint-header">

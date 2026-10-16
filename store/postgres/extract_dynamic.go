@@ -565,7 +565,7 @@ func mapDateSpNames(resType, fieldName, parentField string) []string {
 		return []string{"recorded", "date"}
 	case "issued", "created", "indexed":
 		return []string{"date", effective}
-	case "period", "effective", "performed", "occurrence", "onset":
+	case "period", "effective", "performed", "occurrence", "onset", "context":
 		return []string{"date", "period"}
 	case "due":
 		if resType == "Goal" {
