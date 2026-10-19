@@ -1,0 +1,60 @@
+# Standalone Flint FHIR R4 Server + PostgreSQL
+#
+# Run just the FHIR server + Postgres:
+#   docker compose up -d
+#
+# Run and automatically seed the 25-resource US Core "demo" cohort:
+#   docker compose --profile seed up -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: flint
+      POSTGRES_USER: flint
+      POSTGRES_PASSWORD: flint
+    ports:
+      - "5432:5432"
+    volumes:
+      - flint_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flint -d flint"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  flintd:
+    image: ghcr.io/flint-fhir/flint:latest
+    build:
+      context: .
+      target: flint
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      FLINT_ADDR: ":8080"
+      FLINT_POSTGRES_DSN: "postgres://flint:flint@postgres:5432/flint?sslmode=disable"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  seed:
+    image: ghcr.io/flint-fhir/flint:latest
+    build:
+      context: .
+      target: flint
+    profiles: ["seed"]
+    depends_on:
+      flintd:
+        condition: service_healthy
+    entrypoint: ["/usr/local/bin/seed"]
+    command: ["-url", "http://flintd:8080", "-tenant", "demo"]
+    restart: "no"
+
+volumes:
+  flint_pgdata:

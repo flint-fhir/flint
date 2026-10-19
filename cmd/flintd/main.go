@@ -9,6 +9,8 @@ package main
 import (
 	"context"
 	"database/sql"
+	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -22,7 +24,17 @@ import (
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
+var version = "dev"
+
 func main() {
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "Print flintd version and exit")
+	flag.Parse()
+	if showVersion {
+		fmt.Printf("flintd %s\n", version)
+		return
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	dsn := os.Getenv("FLINT_POSTGRES_DSN")

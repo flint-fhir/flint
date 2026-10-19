@@ -96,64 +96,96 @@ Flint implements full search index extraction, transactional persistence, SMART 
 
 ---
 
-## Quickstart
+## Installation & Quickstart (Standalone FHIR R4 Server)
 
-### 1. Development Environment (Hermetic Nix Shell)
+`flintd` is a **single, self-contained binary and OCI container** that embeds all SQL schema migrations and requires **only PostgreSQL 15+**.
 
-Flint provides a hermetic development environment with Nix and direnv:
+### Option 1: Docker Compose (Fastest — Postgres + FHIR Server + Demo Cohort)
 
-```bash
-# Clone the repository
-git clone https://github.com/flint-fhir/flint.git
-cd flint
-
-# Allow direnv (or run nix develop)
-direnv allow
-```
-
-### 2. Option A: 1-Command Kubernetes Deployment (`k3d`)
-
-Bring up the local Kubernetes cluster (`k3d`), deploy PostgreSQL, build and import `flint-fhir/flint:latest`, deploy `flintd` (exposed via `NodePort 30080 → localhost:8080`), and automatically seed the 25-resource US Core `demo` clinical cohort:
+Run the standalone FHIR R4 server and PostgreSQL (and seed the 25-resource US Core `"demo"` cohort) with a single command — no Go, Nix, or Kubernetes required:
 
 ```bash
-task k3d-up
+curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/docker-compose.yml -o docker-compose.yml
+docker compose --profile seed up -d
 ```
 
-### 3. Option B: Local Binary Development with `k3d` Postgres
+*(Or from a cloned repository: `docker compose --profile seed up -d --build` or `task compose-up`)*
 
-Spin up the local containerized PostgreSQL service:
-
-```bash
-task dev
-```
-
-Inspect service endpoint:
-* **Flint Postgres**: `localhost:5432`
-
-Then build, run, seed, and certify locally:
-
-```bash
-# Build flintd, seed, certify, and loadtest binaries
-task build
-
-# Run the Flint FHIR REST server (automatically applies SQL migrations on startup)
-task run
-
-# (In another terminal) Seed a longitudinal clinical cohort across all 26 US Core v6.1.0 & v7.0.0 profiles in tenant "demo"
-task seed
-
-# Run the 50-check FHIR R4 / US Core v6.1.0 & v7.0.0 / ONC (g)(10) Certification Suite (outputs Scorecard + HL7 TestReport)
-task certify
-
-# (Optional) Launch the official HL7 Inferno US Core Test Kit on http://localhost:4567
-task certify-inferno
-```
-
+Once running, open:
 * **Interactive SMART v2 Sandbox & Clinical Recipe Runner (`$docs`)**: [http://localhost:8080/fhir/r4/demo/$docs](http://localhost:8080/fhir/r4/demo/$docs)
-* **Live Conformance `TestReport` (`$certify`)**: [http://localhost:8080/fhir/r4/demo/$certify](http://localhost:8080/fhir/r4/demo/$certify)
+* **Live 50-Check Conformance `TestReport` (`$certify`)**: [http://localhost:8080/fhir/r4/demo/$certify](http://localhost:8080/fhir/r4/demo/$certify)
 * **Proto-Compiled OpenAPI 3.1.0 Spec**: [http://localhost:8080/fhir/r4/demo/openapi.json](http://localhost:8080/fhir/r4/demo/openapi.json)
 
-### 4. Run Benchmarks & Tests
+### Option 2: Container Image (`ghcr.io/flint-fhir/flint`)
+
+Run the prebuilt multi-arch container (`linux/amd64`, `linux/arm64`) against any existing PostgreSQL instance. SQL migrations are applied automatically on startup:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \
+  ghcr.io/flint-fhir/flint:latest
+```
+
+Seed the US Core `"demo"` cohort or run the 50-check certification CLI using the same container image:
+
+```bash
+# Seed the 25-resource US Core v6.1.0 & v7.0.0 cohort into tenant "demo"
+docker run --rm --entrypoint /usr/local/bin/seed \
+  ghcr.io/flint-fhir/flint:latest -url http://host.docker.internal:8080 -tenant demo
+
+# Run the 50-check conformance certification suite
+docker run --rm --entrypoint /usr/local/bin/certify \
+  ghcr.io/flint-fhir/flint:latest -url http://host.docker.internal:8080 -tenant demo
+```
+
+### Option 3: Single Binary (`go install` or GitHub Releases)
+
+Download a prebuilt archive from [GitHub Releases](https://github.com/flint-fhir/flint/releases) or install directly with Go 1.25+:
+
+```bash
+go install github.com/flint-fhir/flint/cmd/flintd@latest
+
+# Run against any PostgreSQL database (auto-migrates on boot)
+FLINT_POSTGRES_DSN="postgres://flint:flint@localhost:5432/flint?sslmode=disable" \
+FLINT_ADDR=":8080" \
+  flintd
+```
+
+### Runtime Configuration (`flintd`)
+
+| Environment Variable | Default | Required | Description |
+|:---------------------|:--------|:---------|:------------|
+| `FLINT_POSTGRES_DSN` | `postgres://flint:flint@localhost:5432/flint?sslmode=disable` | **Yes** | PostgreSQL connection string (auto-runs embedded migrations on boot) |
+| `FLINT_ADDR` | `:8080` | No | HTTP listen address |
+| `FLINT_OIDC_ISSUER` | *(empty — dev mode)* | No | Enable external OIDC / SMART v2 token validation |
+| `FLINT_OIDC_AUDIENCE` | *(empty)* | No | Expected JWT audience claim |
+| `FLINT_AUTH_PROVIDER` | `oidc` (`oidc` \| `zitadel`) | No | OIDC identity provider adapter |
+| `FLINT_AUTOMQ_BROKERS` | *(empty — disabled)* | No | **[Add-On]** Comma-separated Kafka/AutoMQ brokers for CDC streaming |
+
+---
+
+### Option 4: Contributor Development Environment (Nix + `k3d` Kubernetes)
+
+Flint also provides a hermetic contributor environment with Nix, direnv, and `k3d`:
+
+```bash
+# Clone the repository & enter hermetic Nix shell
+git clone https://github.com/flint-fhir/flint.git
+cd flint
+direnv allow # or: nix develop
+
+# Option A: 1-command Kubernetes deployment (k3d + Postgres + flintd + demo cohort)
+task k3d-up
+
+# Option B: Local binary development against k3d Postgres
+task dev
+task build
+task run
+task seed
+task certify
+```
+
+### Run Benchmarks & Tests
 
 ```bash
 # Run Go unit, property, and integration tests
