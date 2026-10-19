@@ -12,6 +12,19 @@ vars:
   PG_DSN: "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
 
 tasks:
+  compose-up:
+    desc: Start standalone FHIR R4 server + Postgres via Docker Compose (no k3d/kubectl needed)
+    cmds:
+      - docker compose --profile seed up -d --build
+      - echo "🔥 Flint FHIR R4 Server running on http://localhost:8080"
+      - echo "  Interactive SMART v2 Sandbox ($docs) → http://localhost:8080/fhir/r4/demo/$docs"
+      - echo "  50-Check Conformance ($certify)      → http://localhost:8080/fhir/r4/demo/$certify"
+
+  compose-down:
+    desc: Stop standalone Docker Compose stack
+    cmds:
+      - docker compose --profile seed down
+
   dev:
     desc: Create k3d cluster and deploy Postgres
     cmds:
@@ -70,9 +83,14 @@ tasks:
       - go run ./cmd/certify {{.CLI_ARGS}}
 
   docker-build:
-    desc: Build multi-stage production container image (flintd, seed, certify)
+    desc: Build multi-stage production container image for current host architecture (flintd, seed, certify)
     cmds:
-      - docker build -t flint-fhir/flint:latest .
+      - docker build --target flint -t flint-fhir/flint:latest .
+
+  docker-build-multiarch:
+    desc: Build multi-arch (linux/amd64,linux/arm64) production container image via Docker Buildx
+    cmds:
+      - docker buildx build --platform linux/amd64,linux/arm64 --target flint -t flint-fhir/flint:latest .
 
   deploy-flintd:
     desc: Import flint-fhir/flint:latest into k3d, deploy flintd (NodePort 30080 -> localhost:8080), and seed demo cohort

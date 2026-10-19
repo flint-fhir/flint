@@ -92,6 +92,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build production Docker image
-        run: docker build -t flint-fhir/flint:ci .
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build multi-arch (linux/amd64, linux/arm64) production Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: flint
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: flint-fhir/flint:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
