@@ -7,35 +7,30 @@ metadata:
 servers: 1
 agents: 0
 ports:
-  # Postgres (via NodePort)
+  # Core: Postgres (via NodePort)
   - port: 5432:30432
     nodeFilters:
       - loadbalancer
-  # Temporal (via NodePort)
-  - port: 7233:30733
-    nodeFilters:
-      - loadbalancer
-  # Temporal UI (via NodePort)
-  - port: 8088:30088
-    nodeFilters:
-      - loadbalancer
-  # Flint FHIR API (via NodePort)
+  # Core: Flint FHIR API (via NodePort)
   - port: 8080:30080
     nodeFilters:
       - loadbalancer
-  # AutoMQ/Kafka (via NodePort)
+  # Optional Add-On: Temporal UI (via NodePort)
+  - port: 8088:30088
+    nodeFilters:
+      - loadbalancer
+  # Optional Add-On: AutoMQ Kafka (via NodePort)
   - port: 9092:30092
     nodeFilters:
       - loadbalancer
-  # MinIO API (via NodePort)
+  # Optional Add-On: Garage S3 API & Web UI (via NodePort)
   - port: 9000:30900
     nodeFilters:
       - loadbalancer
-  # MinIO Console (via NodePort)
   - port: 9001:30901
     nodeFilters:
       - loadbalancer
-  # Iceberg REST catalog (via NodePort)
+  # Optional Add-On: Iceberg REST Catalog (via NodePort)
   - port: 8181:30181
     nodeFilters:
       - loadbalancer

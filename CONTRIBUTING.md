@@ -1,6 +1,6 @@
 # Contributing to Flint
 
-Thank you for your interest in contributing to **Flint**! Flint is an open-source, high-throughput FHIR R4 server and data lakehouse engine built on Postgres, AutoMQ, and Apache Iceberg.
+Thank you for your interest in contributing to **Flint**! Flint is an open-source, high-throughput FHIR R4 server built on Go, Protocol Buffers, and PostgreSQL.
 
 Please take a moment to review this guide before submitting issues or pull requests.
 
@@ -47,26 +47,29 @@ Flint provides a hermetic development environment using **Nix flakes** and **dir
 
 ## Local Development Stack
 
-Flint uses `k3d` to run local dependencies (Postgres, Temporal, AutoMQ StatefulSet, Garage S3, and Iceberg REST catalog):
+By default, Flint uses `k3d` to run only PostgreSQL for the core FHIR R4 server:
 
 ```bash
-# Spin up local cluster with all services
+# Spin up local cluster with Postgres only
 task dev
 
 # Inspect status of running pods
 task status
 
-# Build binaries (bin/flintd, bin/worker, bin/loadtest)
+# Build core binaries (bin/flintd, bin/seed, bin/certify, bin/loadtest)
 task build
 
 # Run flintd FHIR server locally
 task run
 
-# Run Temporal worker locally
-task run-worker
-
 # Run integration tests against local Postgres
 task test
+
+# (Optional Add-Ons) Deploy Temporal, Garage S3, Iceberg REST, and AutoMQ CDC services
+task addons-up
+
+# (Optional Add-On) Build and run the Temporal ingestion worker locally
+task run-worker
 
 # Tear down local cluster
 task down
@@ -97,7 +100,7 @@ Before opening a pull request, ensure all tests and linters pass:
 
 ```bash
 # Run unit tests
-go test ./...
+go test -short ./...
 
 # Run integration tests against real Postgres
 FLINT_TEST_POSTGRES_DSN="postgres://flint:flint@localhost:5432/flint?sslmode=disable" go test ./...
@@ -105,12 +108,13 @@ FLINT_TEST_POSTGRES_DSN="postgres://flint:flint@localhost:5432/flint?sslmode=dis
 # Run linter
 golangci-lint run
 
-# Run AutoMQ restart recovery verification
-task test-recovery
-
 # Run high-throughput load tests
 task bench-http
 task bench-store
+
+# (Optional Add-Ons) Run SQLMesh analytics unit tests & AutoMQ recovery verification
+task test-analytics
+task test-recovery
 ```
 
 ---

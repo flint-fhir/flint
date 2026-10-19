@@ -11,56 +11,23 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/flint-fhir/flint/pkg/cdc"
 )
 
-// Publisher publishes FHIR resource CDC messages to AutoMQ/Kafka or an in-memory test sink.
-type Publisher interface {
-	Publish(ctx context.Context, messages []Message) error
-}
+// Publisher is an alias for cdc.Publisher so automq.Producer satisfies the server's generic CDC interface.
+type Publisher = cdc.Publisher
 
-// MemoryPublisher is a thread-safe in-memory Publisher for unit and integration testing.
-type MemoryPublisher struct {
-	mu       sync.RWMutex
-	messages []Message
-}
+// Message is an alias for cdc.Message.
+type Message = cdc.Message
+
+// MemoryPublisher is an alias for cdc.MemoryPublisher.
+type MemoryPublisher = cdc.MemoryPublisher
 
 // NewMemoryPublisher creates a new in-memory CDC publisher.
-func NewMemoryPublisher() *MemoryPublisher {
-	return &MemoryPublisher{}
-}
-
-// Publish records CDC messages in memory.
-func (m *MemoryPublisher) Publish(_ context.Context, messages []Message) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, msg := range messages {
-		cp := msg
-		if len(msg.ProtoData) > 0 {
-			cp.ProtoData = append([]byte(nil), msg.ProtoData...)
-		}
-		m.messages = append(m.messages, cp)
-	}
-	return nil
-}
-
-// Messages returns a snapshot of all published CDC messages.
-func (m *MemoryPublisher) Messages() []Message {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	out := make([]Message, len(m.messages))
-	copy(out, m.messages)
-	return out
-}
-
-// Reset clears all recorded CDC messages.
-func (m *MemoryPublisher) Reset() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.messages = nil
-}
+var NewMemoryPublisher = cdc.NewMemoryPublisher
 
 // Producer publishes FHIR resource protos to AutoMQ/Kafka topics.
 type Producer struct {
@@ -101,15 +68,6 @@ func NewProducer(cfg Config) (*Producer, error) {
 		logger:      logger,
 		TopicPrefix: cfg.TopicPrefix,
 	}, nil
-}
-
-// Message represents a single FHIR resource to publish.
-type Message struct {
-	TenantID  string
-	ResType   string // e.g., "Patient"
-	ResID     string // used as partition key
-	ProtoData []byte // proto-encoded resource
-	Op        string // "U" (upsert) or "D" (delete)
 }
 
 // BuildRecord creates a kafka Record from a Message, attaching CDC headers and tenant-scoped partition key.

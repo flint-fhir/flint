@@ -27,7 +27,7 @@ Please report security issues via email to:
 To help us triage and resolve the issue quickly, please include:
 * A detailed description of the vulnerability and its potential impact.
 * Step-by-step instructions or proof-of-concept code to reproduce the issue.
-* Affected components (`flintd`, Postgres store, AutoMQ producer, Temporal worker, or generated extractors).
+* Affected components (`flintd`, Postgres store, SMART on FHIR auth, or search index extractors).
 * Any mitigations you have identified.
 
 ### Response Timeline
@@ -42,7 +42,7 @@ To help us triage and resolve the issue quickly, please include:
 
 Flint incorporates several security architectural guarantees by design:
 
-* **Physical Multi-Tenant Isolation**: Schema-per-tenant isolation at the Postgres level ensures queries and transactions can never cross tenant boundaries.
-* **Lossless Protobuf Storage**: FHIR resources are stored in native Protocol Buffer format rather than parsed JSON strings, mitigating injection attacks and schema drift.
-* **Audit Trail**: Temporal workflow history and AutoMQ CDC change streams provide cryptographically timestamped, immutable audit trails for every resource creation, update, and deletion.
-* **HIPAA Compliance**: Production deployments should ensure TLS 1.3 in-transit encryption and KMS customer-managed encryption keys for object storage (S3/Garage) and operational databases.
+* **Physical Multi-Tenant Isolation**: Tenant-isolated storage and search indexes at the Postgres level ensure queries and transactions never cross tenant boundaries.
+* **Lossless Protobuf Storage**: FHIR resources are stored in native Protocol Buffer (`BYTEA`) format rather than parsed JSON strings, mitigating injection attacks and schema drift.
+* **Audit Trail**: Built-in HIPAA / ONC `§170.315(d)(2)` `AuditEvent` recording and append-only `fhir_resource_history` provide immutable audit trails for clinical reads, searches, creations, updates, and deletions.
+* **HIPAA Compliance**: Production deployments should ensure TLS 1.3 in-transit encryption and KMS customer-managed encryption keys for operational PostgreSQL databases.

@@ -1,4 +1,4 @@
-# Flint — High-Performance FHIR R4 Server on a Data Lakehouse
+# Flint — High-Performance Open Source FHIR R4 Server
 
 [![CI](https://github.com/flint-fhir/flint/actions/workflows/ci.yml/badge.svg)](https://github.com/flint-fhir/flint/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go)](go.mod)
@@ -6,7 +6,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Code of Conduct](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
-**Flint** is an open-source, cloud-agnostic **FHIR R4 server** and **real-time clinical data lakehouse** engine. It combines high-throughput transactional EHR ingestion with instant analytical querying on **Apache Iceberg**, bridging the operational-analytical divide in healthcare data infrastructure.
+**Flint** is an open-source, cloud-agnostic **FHIR R4 server** built in Go on PostgreSQL. It provides high-throughput transactional EHR persistence, sub-10ms covering-index search, SMART on FHIR v2 authorization, US Core v6.1.0 & v7.0.0 conformance, and ONC `(g)(10)` Bulk Data capabilities.
 
 All domain models, search index extractors, and storage structures are compiled directly from `google/fhir` Protocol Buffers using [proto2type](https://github.com/protocgen/proto2type).
 
@@ -14,13 +14,12 @@ All domain models, search index extractors, and storage structures are compiled 
 
 ## Why Flint?
 
-Traditional FHIR servers (e.g. HAPI FHIR, Medplum) are optimized for transactional EHR exchange but create massive architectural bottlenecks when analytics, population health, and machine learning are needed:
+Traditional FHIR servers (e.g. HAPI FHIR, Medplum) often incur heavy runtime overhead and complex schema maintenance:
 
 | Dimension | Traditional FHIR Servers | Flint |
 |:----------|:-------------------------|:------|
 | **Data Format** | Heavy JSON / relational table sprawl | Compact Protocol Buffers (**16× wire reduction**, 124B vs ~2KB) |
 | **Search Indexing** | Deep relational joins or Elasticsearch sync | **6 static covering index tables** per tenant (HAPI pattern), sub-10ms queries |
-| **Analytics (OLAP)** | Nightly batch ETL / Flink JVM pipelines | **Zero-copy streaming CDC** to **Apache Iceberg** via AutoMQ Table Topics |
 | **Schema Maintenance** | Manual migrations across hundreds of FHIR types | **100% generated** via `proto2type` from official HL7 SearchParameter JSON |
 | **Multi-Tenancy** | Soft tenancy (`tenant_id` column filters) | **Schema-per-tenant physical isolation** for HIPAA compliance |
 | **Throughput** | Bottlenecked by JVM garbage collection | **>1,400 resources/sec** transactional store, **>1,000 resources/sec** HTTP |
@@ -31,30 +30,22 @@ Traditional FHIR servers (e.g. HAPI FHIR, Medplum) are optimized for transaction
 
 ```mermaid
 flowchart TD
-    subgraph Ingestion ["Ingestion & Interoperability"]
+    subgraph Clients ["Interoperability Clients"]
         EHR["EHR / SMART Apps / Synthea"] -->|FHIR R4 Resources & Bundles| API["Flint HTTP API (flintd)"]
-        API -->|Transaction| Temporal["Temporal Workflow (IngestFHIRBundle)"]
     end
 
-    subgraph OLTP ["Operational Plane (Postgres)"]
-        API -->|Sync Direct| PG["PostgreSQL (Multi-Tenant)"]
-        Temporal -->|Orchestrated Batch| PG
-        PG --> RProto["fhir_resource (Proto Blobs)"]
+    subgraph Server ["Flint FHIR R4 Server"]
+        API --> Auth["SMART on FHIR v2 Auth & Scope Enforcer"]
+        Auth --> Val["StructureDefinition & ValueSet Validator"]
+        Val --> Engine["REST / Bundle / Terminology / CDS Hooks / eCQM Engine"]
+        Engine -->|rest-hook Webhooks| Sub["FHIR R4 Subscriptions (rest-hook)"]
+    end
+
+    subgraph OLTP ["Operational Plane (PostgreSQL)"]
+        Engine -->|ACID Transactions| PG["PostgreSQL (Schema-per-Tenant)"]
+        PG --> RProto["fhir_resource & fhir_resource_history (Proto Blobs)"]
         PG --> Spidx["6x Covering spidx_* Tables\n(string, token, date, ref, quantity, uri)"]
-    end
-
-    subgraph Streaming ["Real-Time Streaming & Subscriptions"]
-        API -->|Produce CDC| AMQ["AutoMQ (Kafka on S3)"]
-        Temporal -->|Produce CDC| AMQ
-        AMQ --> TT["AutoMQ Table Topic Engine"]
-        API -->|rest-hook Webhooks| Sub["FHIR R4 Subscriptions (rest-hook)"]
-    end
-
-    subgraph Lakehouse ["Analytical Plane (Apache Iceberg)"]
-        TT -->|Auto-Sink Parquet| S3["Object Storage (Garage / MinIO / AWS S3)"]
-        TT -->|Commit Snapshots| Catalog["Iceberg REST Catalog"]
-        Catalog --> Query["Analytical Engines\n(DuckDB, Apache Doris, StarRocks, Trino)"]
-        Query --> Models["SQLMesh Healthcare Dimensional Models"]
+        PG --> Audit["fhir_audit_event & OAuth2 / $export State"]
     end
 ```
 
@@ -66,7 +57,6 @@ Flint includes a dedicated benchmarking harness ([`cmd/loadtest`](cmd/loadtest/)
 
 * **Direct Postgres Store Ingestion**: **1,410+ resources/sec** (282+ bundles/sec) sustained with transactional ACID upserts and index extraction across Big 5 resources.
 * **HTTP REST API Transaction Bundles**: **1,024+ resources/sec** (205+ bundles/sec) sustained with 100 concurrent workers and **100% 2xx success rate**.
-* **AutoMQ Restart Recovery**: **Zero data loss** validated across broker container crash/restart with automatic offset resumption in Apache Iceberg.
 * **Latency Profile**:
   * $p50 < 250\text{ms}$
   * $p90 < 360\text{ms}$
@@ -121,33 +111,29 @@ cd flint
 direnv allow
 ```
 
-### 2. Option A: 1-Command Full-Stack Kubernetes Deployment (`k3d`)
+### 2. Option A: 1-Command Kubernetes Deployment (`k3d`)
 
-Bring up the entire Kubernetes cluster (`k3d`), stateful infrastructure (Postgres, Temporal, AutoMQ, Garage S3, Iceberg REST), build and import `flint-fhir/flint:latest`, deploy `flintd` (exposed via `NodePort 30080 → localhost:8080`) and `flint-worker`, and automatically seed the 25-resource US Core `demo` clinical cohort:
+Bring up the local Kubernetes cluster (`k3d`), deploy PostgreSQL, build and import `flint-fhir/flint:latest`, deploy `flintd` (exposed via `NodePort 30080 → localhost:8080`), and automatically seed the 25-resource US Core `demo` clinical cohort:
 
 ```bash
 task k3d-up
 ```
 
-### 3. Option B: Local Binary Development with `k3d` Infrastructure
+### 3. Option B: Local Binary Development with `k3d` Postgres
 
-Spin up the local containerized backing services (Postgres, Temporal, AutoMQ StatefulSet, Garage S3, Iceberg REST catalog):
+Spin up the local containerized PostgreSQL service:
 
 ```bash
 task dev
 ```
 
-Inspect service endpoints:
+Inspect service endpoint:
 * **Flint Postgres**: `localhost:5432`
-* **Temporal UI**: [http://localhost:8088](http://localhost:8088)
-* **AutoMQ (Kafka)**: `localhost:9092`
-* **Garage S3 Console**: [http://localhost:9001](http://localhost:9001)
-* **Iceberg REST Catalog**: [http://localhost:8181](http://localhost:8181)
 
 Then build, run, seed, and certify locally:
 
 ```bash
-# Build flintd, worker, seed, certify, and loadtest binaries
+# Build flintd, seed, certify, and loadtest binaries
 task build
 
 # Run the Flint FHIR REST server (automatically applies SQL migrations on startup)
@@ -161,9 +147,6 @@ task certify
 
 # (Optional) Launch the official HL7 Inferno US Core Test Kit on http://localhost:4567
 task certify-inferno
-
-# (Optional) Run the Temporal ingestion worker
-task run-worker
 ```
 
 * **Interactive SMART v2 Sandbox & Clinical Recipe Runner (`$docs`)**: [http://localhost:8080/fhir/r4/demo/$docs](http://localhost:8080/fhir/r4/demo/$docs)
@@ -179,36 +162,11 @@ task test
 # Run automated US Core v6.1.0 & v7.0.0 / ONC (g)(10) conformance certification suite
 task certify
 
-# Run SQLMesh clinical dimensional lakehouse tests (DuckDB)
-task test-analytics
-
 # Run high-throughput HTTP load test
 task bench-http
 
 # Run direct Postgres store load test
 task bench-store
-
-# Run AutoMQ Table Topic restart recovery test
-task test-recovery
-```
-
-### 5. Query Analytical Iceberg Table with DuckDB
-
-Query the Iceberg lakehouse table populated by AutoMQ Table Topic:
-
-```bash
-uv run --with duckdb --with "pyiceberg[s3fs]" --with pyarrow cmd/e2e/query_duckdb.py
-```
-
-Output:
-```
-=== DuckDB SQL Query on Iceberg Table ===
-       patient_id  partition  offset                                                               raw_json
-e2e-recovery-post          3       0 {"gender":{"value":"male"},"id":{"value":"e2e-recovery-post"},"name":[...]}
- e2e-recovery-pre          0       0 {"gender":{"value":"male"},"id":{"value":"e2e-recovery-pre"},"name":[...]}
-      e2e-wf-001          5       1 {"gender":{"value":"female"},"id":{"value":"e2e-wf-001"},"name":[{"family":"Wonderland"...}]}
-      e2e-wf-002          3       0 {"gender":{"value":"male"},"id":{"value":"e2e-wf-002"},"name":[...]}
-      e2e-wf-003          2       1 [tombstone]
 ```
 
 ---
@@ -446,31 +404,39 @@ Flint leverages [Hegel](https://hegel.dev) (`hegel.dev/go/hegel`) for type-drive
 
 ---
 
-## Clinical Dimensional Lakehouse (`analytics/` — SQLMesh on DuckDB / Iceberg)
+## Optional Add-Ons (Streaming CDC, Temporal Workflows & Clinical Lakehouse)
 
-Flint ships with an out-of-the-box **SQLMesh** analytical pipeline (`analytics/`) that transforms raw AutoMQ Table Topic Iceberg CDC streams (`fhir_raw.patient`, `fhir_raw.encounter`, `fhir_raw.condition`, `fhir_raw.observation`, `fhir_raw.medication_request`, `fhir_raw.allergy_intolerance`, `fhir_raw.procedure`, `fhir_raw.diagnostic_report`, `fhir_raw.immunization`, `fhir_raw.organization`, `fhir_raw.care_plan`, `fhir_raw.coverage`, `fhir_raw.service_request`, `fhir_raw.document_reference`, `fhir_raw.claim`, `fhir_raw.claim_response`) into a Kimball healthcare dimensional model:
+By default, Flint builds, deploys, and runs **strictly as a standalone FHIR R4 server backed by PostgreSQL**. When needed, three opt-in add-on modules can be enabled via environment variables and `task` targets:
 
-* **Staging Layer (`flint_stg.stg_*`)**:
-  * Deduplicates multi-tenant CDC events by `(tenant_id, res_id)` (normalizing `{tenant_id}/{res_id}` Kafka keys) using the latest `_kafka_offset`.
-  * Filters out hard/soft delete tombstones (`op = 'D'` or `[tombstone]`).
-  * Supports dual extraction across `google/fhir` wrapped JSON (`{"value": "..."}`) and standard flat HL7 FHIR R4 JSON.
-* **Dimensional & Fact Layer (`flint_marts.dim_*`, `flint_marts.fct_*`)**:
-  * `dim_patient`, `dim_organization`: Demographics, full name, birth date, gender, postal code, NPI/TIN identifiers, and active flags.
-  * `fct_encounter`: Encounter class (`AMB`, `IMP`), status, period timestamps, and calculated length-of-stay (`los_hours`).
-  * `fct_condition`: SNOMED/ICD-10 condition codes, clinical/verification status, and onset date.
-  * `fct_observation`: LOINC observation codes, status, numeric `value_quantity`, `value_unit`, and effective timestamps.
-  * `fct_medication_request`, `fct_allergy_intolerance`, `fct_procedure`, `fct_diagnostic_report`, `fct_immunization`, `fct_care_plan`, `fct_coverage`, `fct_service_request`, `fct_document_reference`, `fct_claim`: Full US Core v6.1.0 & v7.0.0 and Da Vinci PAS clinical & financial fact tables.
-* **Longitudinal Patient 360 Mart (`flint_marts.mart_patient_360`)**:
-  * Single-row-per-patient population health summary aggregating total encounters, latest encounter timestamp, total/active condition counts, observation counts/timestamps, active medications, completed immunizations, active allergies, procedures, active care plans, and active coverage.
-* **Clinical Quality Measure (eCQM) Gold Marts (`flint_marts.mart_ecqm_cms165_bp_control`, `flint_marts.mart_ecqm_cms122_diabetes_a1c`)**:
-  * **CMS165 Controlling High Blood Pressure**: Evaluates initial population, denominator, and numerator (`latest_systolic < 140 AND latest_diastolic < 90` across single-code and multi-component `85354-9`/`96607-7` BP panels) with care-gap flags (`missing-bp`, `uncontrolled-bp`, `controlled`).
-  * **CMS122 Diabetes HbA1c Poor Control (>9%)**: Evaluates diabetic cohort denominator and inverse numerator (`latest_hba1c_pct > 9.0` or missing HbA1c) with care-gap flags (`missing-hba1c`, `poor-control-gt-9`, `controlled-le-9`).
-* **Financial & Prior Authorization Utilization Mart (`flint_marts.mart_claims_utilization`)**:
-  * Combines patient demographics, active payer coverage (`primary_payor_reference`), submitted claims, Da Vinci PAS prior authorizations (`prior_auth_count`), adjudicated approvals (`approved_claim_count`), total submitted dollars, and total adjudicated benefit dollars.
+### 1. Streaming CDC Add-On (`pkg/cdc` + `automq/`)
+The core FHIR server exposes a generic, zero-dependency [`cdc.Publisher`](pkg/cdc/cdc.go) interface (`srv.SetCDCPublisher(...)`). Setting `FLINT_AUTOMQ_BROKERS` on `flintd` activates the [`automq`](automq/) Kafka/AutoMQ producer adapter, streaming every FHIR resource upsert (`op=U`) and soft delete (`op=D`) to tenant-keyed Kafka/AutoMQ topics (`fhir.<ResourceType>`):
 
-Run the hermetic SQLMesh unit test suite (22/22 DuckDB tests) locally via `uv`:
 ```bash
+FLINT_POSTGRES_DSN="postgres://flint:flint@localhost:5432/flint?sslmode=disable" \
+FLINT_AUTOMQ_BROKERS="localhost:9092" \
+  bin/flintd
+```
+
+### 2. Temporal Ingestion Worker Add-On (`ingest/`, `cmd/worker/`)
+For asynchronous, retryable batch bundle ingestion (`IngestFHIRBundle`), build and run the optional Temporal worker:
+
+```bash
+# Deploy optional backing services (Temporal, Garage S3, Iceberg REST, AutoMQ)
+task addons-up
+
+# Build and run the Temporal ingestion worker locally (or deploy via `task deploy-worker`)
+task run-worker
+```
+
+### 3. Clinical Dimensional Lakehouse Add-On (`analytics/` — SQLMesh on DuckDB / Iceberg)
+The optional [`analytics/`](analytics/) module provides an out-of-the-box **SQLMesh** analytical pipeline that transforms raw AutoMQ Table Topic Iceberg CDC streams (`fhir_raw.*`) into a Kimball healthcare dimensional model (`flint_stg.stg_*`, `flint_marts.dim_*`, `flint_marts.fct_*`, `mart_patient_360`, `mart_ecqm_cms165_bp_control`, `mart_ecqm_cms122_diabetes_a1c`, and `mart_claims_utilization`):
+
+```bash
+# Run the hermetic SQLMesh unit test suite (22/22 DuckDB tests)
 task test-analytics
+
+# Verify AutoMQ Table Topic restart recovery
+task test-recovery
 ```
 
 ---
@@ -479,31 +445,27 @@ task test-analytics
 
 ```
 flint/
-├── analytics/            # SQLMesh clinical dimensional lakehouse models & DuckDB unit tests
-├── automq/               # Franz-go Kafka producer with tenant-scoped CDC keys & headers
-├── bin/                  # Compiled binaries (flintd, worker, seed, certify, loadtest)
+├── bin/                  # Compiled binaries (flintd, seed, certify, loadtest; optional: worker)
 ├── cmd/
-│   ├── flintd/           # FHIR REST HTTP server entrypoint
-│   ├── worker/           # Temporal ingestion worker entrypoint
+│   ├── flintd/           # Core FHIR REST HTTP server entrypoint
 │   ├── seed/             # Deterministic US Core v6.1.0 & v7.0.0 cohort seeder (task seed)
-│   ├── certify/          # Automated 31-check US Core v6.1.0 & v7.0.0 / ONC (g)(10) certification CLI (task certify)
-│   ├── loadtest/         # High-throughput load testing harness
-│   └── e2e/              # End-to-end integration & restart recovery tests
+│   ├── certify/          # Automated 50-check US Core v6.1.0 & v7.0.0 / ONC (g)(10) certification CLI (task certify)
+│   ├── loadtest/         # High-throughput HTTP & Postgres store load testing harness
+│   ├── worker/           # [Add-On] Temporal ingestion worker entrypoint (task build-worker)
+│   └── e2e/              # [Add-On] Lakehouse E2E & restart recovery verification
 ├── deploy/
 │   ├── inferno/          # Official HL7 Inferno US Core Test Kit Docker Compose (task certify-inferno)
 │   ├── k3d/              # Local k3d cluster configuration
-│   └── k8s/              # Kubernetes manifests (Postgres, Temporal, AutoMQ StatefulSet, Iceberg)
+│   └── k8s/              # Kubernetes manifests (Core: postgres.yaml, flintd.yaml; Add-Ons: worker, temporal, automq, garage, iceberg-rest)
 ├── fhir/r4/              # Machine-readable HL7 FHIR R4 SearchParameter definitions
 ├── gen/go/
 │   ├── flint/auth/v1/    # Protobuf-generated security context and discovery types
 │   └── store/postgres/   # proto2type generated search index extractors
-├── ingest/
-│   ├── activity/         # Temporal activities (WritePostgresBatch, AutoMQ CDC)
-│   └── workflow/         # Temporal IngestFHIRBundle workflow
 ├── pkg/
 │   ├── audit/            # HIPAA/ONC FHIR R4 AuditEvent classification, serialization & recorders
 │   ├── auth/             # TokenValidator, OIDC/Zitadel, and Hegel property tests
-│   ├── certify/          # 31-check FHIR R4 / US Core v6.1.0 & v7.0.0 / ONC (g)(10) conformance engine & TestReport builder
+│   ├── cdc/              # Generic, zero-dependency CDC Publisher interface & in-memory sink
+│   ├── certify/          # 50-check FHIR R4 / US Core v6.1.0 & v7.0.0 / ONC (g)(10) conformance engine & TestReport builder
 │   ├── fhirutil/         # Bidirectional flat FHIR R4 JSON <-> google/fhir protojson codec & helpers
 │   └── validation/       # FHIR StructureDefinition, ValueSet, and cardinality validator
 ├── proto/
@@ -511,6 +473,9 @@ flint/
 │   └── google/fhir/      # Vendored google/fhir R4 protocol buffers
 ├── server/               # stdlib HTTP router, Bundle engine, Terminology, Subscriptions, SMART v2 OAuth2, auth/audit middleware
 ├── store/postgres/       # Operational store, Atlas SQL migrations, spidx_* tables, OAuth2 & $export job persistence
+├── automq/               # [Add-On] Franz-go Kafka/AutoMQ CDC adapter implementing pkg/cdc.Publisher
+├── ingest/               # [Add-On] Temporal IngestFHIRBundle workflow & activities
+├── analytics/            # [Add-On] SQLMesh clinical dimensional lakehouse models & DuckDB unit tests
 ├── flake.nix             # Hermetic Nix development environment
 ├── lefthook.yml          # Git pre-commit & pre-push hooks
 └── Taskfile.yaml         # Project workflow automation tasks

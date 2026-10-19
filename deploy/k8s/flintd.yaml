@@ -1,4 +1,4 @@
-# Flint FHIR R4 Server & Temporal Worker — Kubernetes Deployment & Service
+# Flint FHIR R4 Server — Kubernetes Deployment & Service
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -34,8 +34,6 @@ spec:
               value: ":8080"
             - name: FLINT_POSTGRES_DSN
               value: "postgres://flint:flint@postgres.flint.svc.cluster.local:5432/flint?sslmode=disable"
-            - name: FLINT_AUTOMQ_BROKERS
-              value: "automq.flint.svc.cluster.local:9092"
           livenessProbe:
             httpGet:
               path: /healthz
@@ -74,43 +72,6 @@ spec:
       port: 8080
       targetPort: http
       nodePort: 30080
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: flint-worker
-  namespace: flint
-  labels:
-    app: flint-worker
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: flint-worker
-  template:
-    metadata:
-      labels:
-        app: flint-worker
-    spec:
-      containers:
-        - name: worker
-          image: flint-fhir/flint:latest
-          imagePullPolicy: IfNotPresent
-          command: ["/usr/local/bin/worker"]
-          env:
-            - name: FLINT_POSTGRES_DSN
-              value: "postgres://flint:flint@postgres.flint.svc.cluster.local:5432/flint?sslmode=disable"
-            - name: TEMPORAL_ADDRESS
-              value: "temporal.flint.svc.cluster.local:7233"
-            - name: AUTOMQ_BROKERS
-              value: "automq.flint.svc.cluster.local:9092"
-          resources:
-            requests:
-              cpu: 100m
-              memory: 128Mi
-            limits:
-              cpu: "1"
-              memory: 512Mi
 ---
 apiVersion: batch/v1
 kind: Job

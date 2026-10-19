@@ -13,21 +13,12 @@ vars:
 
 tasks:
   dev:
-    desc: Create k3d cluster and deploy all services
+    desc: Create k3d cluster and deploy Postgres
     cmds:
       - task: cluster-create
       - task: deploy-postgres
-      - task: deploy-temporal
-      - task: deploy-garage
-      - task: deploy-iceberg
-      - task: deploy-automq
       - echo "✅ Flint dev environment ready"
       - echo "  Postgres      → localhost:5432"
-      - echo "  Temporal      → localhost:7233"
-      - echo "  Temporal UI   → http://localhost:8088"
-      - echo "  AutoMQ        → localhost:9092"
-      - echo "  Garage (S3)   → http://localhost:9000"
-      - echo "  Iceberg REST  → http://localhost:8181"
 
   cluster-create:
     desc: Create k3d cluster (idempotent)
@@ -50,60 +41,26 @@ tasks:
       - echo "Waiting for Postgres..."
       - kubectl wait --for=condition=ready pod -l app=postgres -n {{.NAMESPACE}} --timeout=120s
 
-  deploy-temporal:
-    desc: Deploy Temporal with auto-setup
-    cmds:
-      - kubectl apply -f deploy/k8s/temporal.yaml
-      - echo "Waiting for Temporal (this takes ~60s)..."
-      - kubectl wait --for=condition=ready pod -l app=temporal -n {{.NAMESPACE}} --timeout=180s
-
-  deploy-garage:
-    desc: Deploy Garage S3-compatible object storage
-    cmds:
-      - kubectl apply -f deploy/k8s/garage.yaml
-      - echo "Waiting for Garage..."
-      - kubectl wait --for=condition=ready pod -l app=garage -n {{.NAMESPACE}} --timeout=120s
-
-  deploy-iceberg:
-    desc: Deploy Iceberg REST catalog
-    cmds:
-      - kubectl apply -f deploy/k8s/iceberg-rest.yaml
-      - echo "Waiting for Iceberg REST catalog..."
-      - kubectl wait --for=condition=ready pod -l app=iceberg-rest -n {{.NAMESPACE}} --timeout=120s
-
-  deploy-automq:
-    desc: Deploy AutoMQ with Table Topic → Iceberg
-    cmds:
-      - kubectl apply -f deploy/k8s/automq.yaml
-      - echo "Waiting for AutoMQ..."
-      - kubectl wait --for=condition=ready pod -l app=automq -n {{.NAMESPACE}} --timeout=120s
-
   test:
     desc: Run all Go tests (Postgres integration tests need FLINT_TEST_POSTGRES_DSN)
     cmds:
       - FLINT_TEST_POSTGRES_DSN="{{.PG_DSN}}" go test -race ./... -v -count=1
 
-  test-analytics:
-    desc: Run SQLMesh lakehouse dimensional model unit tests on DuckDB
-    cmds:
-      - uv run --project analytics sqlmesh --paths analytics test
-
   test-unit:
     desc: Run unit tests only (no Postgres needed)
     cmds:
-      - go test ./ingest/workflow/ -v -count=1
+      - go test -short ./... -v -count=1
 
   build:
-    desc: Build flintd server, worker, seed, certify, and loadtest binaries
+    desc: Build flintd server, seed, certify, and loadtest binaries
     cmds:
       - go build -o bin/flintd ./cmd/flintd/
-      - go build -o bin/worker ./cmd/worker/
       - go build -o bin/seed ./cmd/seed/
       - go build -o bin/certify ./cmd/certify/
       - go build -o bin/loadtest ./cmd/loadtest/
 
   seed:
-    desc: Seed a realistic 25-resource US Core v6.1.0 & v7.0.0 longitudinal clinical cohort into Flint (tenant=demo)
+    desc: Seed a realistic 29-resource US Core v6.1.0 & v7.0.0 longitudinal clinical cohort into Flint (tenant=demo)
     cmds:
       - go run ./cmd/seed {{.CLI_ARGS}}
 
@@ -113,12 +70,12 @@ tasks:
       - go run ./cmd/certify {{.CLI_ARGS}}
 
   docker-build:
-    desc: Build multi-stage production container image (flintd, worker, seed, certify)
+    desc: Build multi-stage production container image (flintd, seed, certify)
     cmds:
       - docker build -t flint-fhir/flint:latest .
 
   deploy-flintd:
-    desc: Import flint-fhir/flint:latest into k3d, deploy flintd + worker (NodePort 30080 -> localhost:8080), and seed demo cohort
+    desc: Import flint-fhir/flint:latest into k3d, deploy flintd (NodePort 30080 -> localhost:8080), and seed demo cohort
     cmds:
       - k3d image import flint-fhir/flint:latest -c {{.CLUSTER_NAME}}
       - kubectl delete job flint-seed -n {{.NAMESPACE}} --ignore-not-found
@@ -127,12 +84,12 @@ tasks:
       - kubectl wait --for=condition=complete job/flint-seed -n {{.NAMESPACE}} --timeout=120s
 
   k3d-up:
-    desc: 1-command full-stack k3d deployment (cluster + infra + docker build + flintd + worker + seeded US Core demo cohort on localhost:8080)
+    desc: 1-command full-stack k3d deployment (cluster + Postgres + docker build + flintd + seeded US Core demo cohort on localhost:8080)
     cmds:
       - task: dev
       - task: docker-build
       - task: deploy-flintd
-      - echo "🔥 Flint Full-Stack k3d Cluster Ready!"
+      - echo "🔥 Flint FHIR R4 k3d Cluster Ready!"
       - echo "  Interactive SMART v2 Sandbox ($docs) → http://localhost:8080/fhir/r4/demo/$docs"
       - echo "  50-Check Conformance ($certify)      → http://localhost:8080/fhir/r4/demo/$certify"
       - echo "  Patient IPS Summary ($summary)       → http://localhost:8080/fhir/r4/demo/Patient/example-patient-1/$summary"
@@ -157,22 +114,11 @@ tasks:
     cmds:
       - ./bin/loadtest -target=http -url=http://localhost:8082/fhir/r4/loadtest -duration=30s -workers=50 -bundle-size=5
 
-  test-recovery:
-    desc: Run AutoMQ Table Topic restart recovery E2E test
-    cmds:
-      - go run ./cmd/e2e recovery
-
   run:
     desc: Run flintd locally (connect to k3d Postgres)
     deps: [build]
     cmds:
       - FLINT_POSTGRES_DSN="{{.PG_DSN}}" bin/flintd
-
-  run-worker:
-    desc: Run Temporal worker locally (connect to k3d services)
-    deps: [build]
-    cmds:
-      - FLINT_POSTGRES_DSN="{{.PG_DSN}}" TEMPORAL_ADDRESS=localhost:7233 AUTOMQ_BROKERS=localhost:9092 bin/worker
 
   down:
     desc: Tear down k3d cluster
@@ -201,3 +147,86 @@ tasks:
       - psql "{{.PG_DSN}}" -f store/postgres/migrations/002_resource_history.sql
       - psql "{{.PG_DSN}}" -f store/postgres/migrations/003_audit_event.sql
       - psql "{{.PG_DSN}}" -f store/postgres/migrations/004_oauth_and_export_jobs.sql
+
+  # ─── Optional Add-Ons (Streaming CDC, Temporal Ingestion Worker, Clinical Lakehouse) ───
+
+  addons-up:
+    desc: "[Add-On] Deploy optional Temporal, Garage S3, Iceberg REST catalog, and AutoMQ CDC services into k3d"
+    cmds:
+      - task: cluster-create
+      - task: deploy-postgres
+      - task: deploy-temporal
+      - task: deploy-garage
+      - task: deploy-iceberg
+      - task: deploy-automq
+      - echo "✅ Flint optional add-on services ready"
+      - echo "  Temporal UI   → http://localhost:8088"
+      - echo "  AutoMQ Kafka  → localhost:9092"
+      - echo "  Garage S3     → http://localhost:9000 (API) / http://localhost:9001 (Web)"
+      - echo "  Iceberg REST  → http://localhost:8181"
+
+  build-worker:
+    desc: "[Add-On] Build Temporal ingestion worker binary (bin/worker)"
+    cmds:
+      - go build -o bin/worker ./cmd/worker/
+
+  run-worker:
+    desc: "[Add-On] Run Temporal ingestion worker locally"
+    deps: [build-worker]
+    cmds:
+      - FLINT_POSTGRES_DSN="{{.PG_DSN}}" bin/worker
+
+  deploy-worker:
+    desc: "[Add-On] Deploy Temporal ingestion worker (flint-worker) to k3d"
+    cmds:
+      - kubectl apply -f deploy/k8s/worker.yaml
+      - kubectl rollout status deployment/flint-worker -n {{.NAMESPACE}} --timeout=120s
+
+  deploy-temporal:
+    desc: "[Add-On] Deploy Temporal server + UI"
+    cmds:
+      - kubectl apply -f deploy/k8s/temporal.yaml
+      - echo "Waiting for Temporal..."
+      - kubectl wait --for=condition=ready pod -l app=temporal -n {{.NAMESPACE}} --timeout=180s
+
+  deploy-garage:
+    desc: "[Add-On] Deploy Garage S3-compatible object storage"
+    cmds:
+      - kubectl apply -f deploy/k8s/garage.yaml
+      - echo "Waiting for Garage..."
+      - kubectl wait --for=condition=ready pod -l app=garage -n {{.NAMESPACE}} --timeout=120s
+      - echo "Initializing Garage layout and bucket..."
+      - kubectl delete job garage-init -n {{.NAMESPACE}} --ignore-not-found
+      - kubectl apply -f deploy/k8s/garage.yaml
+      - kubectl wait --for=condition=complete job/garage-init -n {{.NAMESPACE}} --timeout=120s
+
+  deploy-iceberg:
+    desc: "[Add-On] Deploy Iceberg REST catalog (backed by Garage S3)"
+    cmds:
+      - kubectl apply -f deploy/k8s/iceberg-rest.yaml
+      - echo "Waiting for Iceberg REST catalog..."
+      - kubectl wait --for=condition=ready pod -l app=iceberg-rest -n {{.NAMESPACE}} --timeout=120s
+
+  deploy-automq:
+    desc: "[Add-On] Deploy AutoMQ (Kafka on S3 + Table Topic -> Iceberg)"
+    cmds:
+      - kubectl apply -f deploy/k8s/automq.yaml
+      - echo "Waiting for AutoMQ..."
+      - kubectl wait --for=condition=ready pod -l app=automq -n {{.NAMESPACE}} --timeout=180s
+
+  test-analytics:
+    desc: "[Add-On] Run SQLMesh healthcare dimensional lakehouse unit tests (DuckDB)"
+    cmds:
+      - cd analytics && uv run sqlmesh test
+
+  test-recovery:
+    desc: "[Add-On] Verify AutoMQ Table Topic restart recovery (zero data loss)"
+    cmds:
+      - go run ./cmd/e2e/recovery.go
+
+  bench-temporal:
+    desc: "[Add-On] Run load test via Temporal workflow orchestration"
+    deps: [build]
+    cmds:
+      - ./bin/loadtest -target=temporal -duration=30s -workers=30 -bundle-size=5
+

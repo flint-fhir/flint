@@ -22,7 +22,7 @@ import (
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
 
-	"github.com/flint-fhir/flint/automq"
+	automq "github.com/flint-fhir/flint/pkg/cdc"
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store/postgres"
 )

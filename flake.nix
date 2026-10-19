@@ -1,5 +1,5 @@
 {
-  description = "Flint — Open Source FHIR Server on a Data Lake";
+  description = "Flint — High-Performance Open Source FHIR R4 Server";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
