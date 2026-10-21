@@ -28,9 +28,7 @@ func TestServer_CertifyEndpointAndRunner(t *testing.T) {
 
 	tenant := "test-certify-suite"
 	cleanup := func() {
-		for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
-			_, _ = db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = $1", tenant)
-		}
+		_ = postgres.PurgeTenant(ctx, db, tenant)
 	}
 	cleanup()
 	defer cleanup()
@@ -102,9 +100,7 @@ func TestServer_BundlePatchAndConditionalCRUD(t *testing.T) {
 
 	tenant := "test-bundle-patch-cond"
 	cleanup := func() {
-		for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
-			_, _ = db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = $1", tenant)
-		}
+		_ = postgres.PurgeTenant(ctx, db, tenant)
 	}
 	cleanup()
 	defer cleanup()
@@ -201,9 +197,7 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 
 	tenant := "test-hardening-suite"
 	cleanup := func() {
-		for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
-			_, _ = db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = $1", tenant)
-		}
+		_ = postgres.PurgeTenant(ctx, db, tenant)
 	}
 	cleanup()
 	defer cleanup()

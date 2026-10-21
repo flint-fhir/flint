@@ -188,9 +188,7 @@ func TestServer_BulkExport(t *testing.T) {
 
 	tenant := "test-export"
 	cleanup := func() {
-		for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
-			db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = $1", tenant)
-		}
+		_ = postgres.PurgeTenant(ctx, db, tenant)
 	}
 	cleanup()
 	defer cleanup()

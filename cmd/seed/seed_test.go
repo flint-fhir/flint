@@ -129,9 +129,7 @@ func TestSeedRun_EndToEndIntegration(t *testing.T) {
 
 	ctx := t.Context()
 	defer func() {
-		for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
-			db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-seed'")
-		}
+		_ = postgres.PurgeTenant(ctx, db, "test-seed")
 	}()
 
 	var buf bytes.Buffer

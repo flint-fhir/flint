@@ -89,27 +89,27 @@ func TestStore_Integration(t *testing.T) {
 		}
 		t.Logf("Read %d bytes of proto", len(proto))
 
-		// Verify search indexes
+		// Verify search indexes inside the physical tenant schema ("tenant_test_tenant")
 		var count int
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_string WHERE tenant_id = $1 AND res_id = $2",
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM tenant_test_tenant.spidx_string WHERE tenant_id = $1 AND res_id = $2",
 			"test-tenant", "pat-001").Scan(&count)
 		if count != 2 {
 			t.Errorf("expected 2 string indexes, got %d", count)
 		}
 
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_token WHERE tenant_id = $1 AND res_id = $2",
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM tenant_test_tenant.spidx_token WHERE tenant_id = $1 AND res_id = $2",
 			"test-tenant", "pat-001").Scan(&count)
 		if count != 2 {
 			t.Errorf("expected 2 token indexes, got %d", count)
 		}
 
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_date WHERE tenant_id = $1 AND res_id = $2",
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM tenant_test_tenant.spidx_date WHERE tenant_id = $1 AND res_id = $2",
 			"test-tenant", "pat-001").Scan(&count)
 		if count != 1 {
 			t.Errorf("expected 1 date index, got %d", count)
 		}
 
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_reference WHERE tenant_id = $1 AND res_id = $2",
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM tenant_test_tenant.spidx_reference WHERE tenant_id = $1 AND res_id = $2",
 			"test-tenant", "pat-001").Scan(&count)
 		if count != 1 {
 			t.Errorf("expected 1 reference index, got %d", count)
@@ -135,14 +135,14 @@ func TestStore_Integration(t *testing.T) {
 
 		// Old "smith" should be gone, only "smith-jones" now
 		var count int
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_string WHERE tenant_id = $1 AND res_id = $2",
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM tenant_test_tenant.spidx_string WHERE tenant_id = $1 AND res_id = $2",
 			"test-tenant", "pat-001").Scan(&count)
 		if count != 1 {
 			t.Errorf("expected 1 string index after update, got %d", count)
 		}
 
 		// Old tokens should also be gone
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_token WHERE tenant_id = $1 AND res_id = $2",
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM tenant_test_tenant.spidx_token WHERE tenant_id = $1 AND res_id = $2",
 			"test-tenant", "pat-001").Scan(&count)
 		if count != 0 {
 			t.Errorf("expected 0 token indexes after update, got %d", count)
@@ -162,7 +162,7 @@ func TestStore_Integration(t *testing.T) {
 
 		// Search indexes should be gone
 		var count int
-		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM spidx_string WHERE tenant_id = $1 AND res_id = $2",
+		db.QueryRowContext(ctx, "SELECT COUNT(*) FROM tenant_test_tenant.spidx_string WHERE tenant_id = $1 AND res_id = $2",
 			"test-tenant", "pat-001").Scan(&count)
 		if count != 0 {
 			t.Errorf("expected 0 string indexes after delete, got %d", count)
@@ -1209,9 +1209,7 @@ func TestStore_Integration(t *testing.T) {
 	})
 
 	// Clean up
-	for _, table := range []string{"fhir_export_job", "spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
-		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-tenant'")
-	}
+	_ = postgres.PurgeTenant(ctx, db, "test-tenant")
 	db.ExecContext(ctx, "DELETE FROM fhir_oauth_refresh_token WHERE subject = 'inferno-client'")
 	db.ExecContext(ctx, "DELETE FROM fhir_oauth_revoked_token")
 }

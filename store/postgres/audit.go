@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -50,43 +51,47 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec AuditRecord) error {
 		rec.AgentSubject = "anonymous"
 	}
 
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO fhir_audit_event (
-			tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc,
-			http_method, http_status, request_uri, agent_subject, agent_patient,
-			client_ip, entity_type, entity_id, entity_version
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7,
-			$8, $9, $10, $11, $12,
-			$13, $14, $15, $16
+	return s.withTenantTx(ctx, rec.TenantID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO fhir_audit_event (
+				tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc,
+				http_method, http_status, request_uri, agent_subject, agent_patient,
+				client_ip, entity_type, entity_id, entity_version
+			) VALUES (
+				$1, $2, $3, $4, $5, $6, $7,
+				$8, $9, $10, $11, $12,
+				$13, $14, $15, $16
+			)
+			ON CONFLICT (tenant_id, audit_id) DO NOTHING
+		`,
+			rec.TenantID, rec.AuditID, rec.Recorded, rec.Action, rec.SubtypeCode, rec.Outcome, rec.OutcomeDesc,
+			rec.HTTPMethod, rec.HTTPStatus, rec.RequestURI, rec.AgentSubject, rec.AgentPatient,
+			rec.ClientIP, rec.EntityType, rec.EntityID, rec.EntityVersion,
 		)
-		ON CONFLICT (tenant_id, audit_id) DO NOTHING
-	`,
-		rec.TenantID, rec.AuditID, rec.Recorded, rec.Action, rec.SubtypeCode, rec.Outcome, rec.OutcomeDesc,
-		rec.HTTPMethod, rec.HTTPStatus, rec.RequestURI, rec.AgentSubject, rec.AgentPatient,
-		rec.ClientIP, rec.EntityType, rec.EntityID, rec.EntityVersion,
-	)
-	if err != nil {
-		return fmt.Errorf("insert audit event: %w", err)
-	}
-	return nil
+		if err != nil {
+			return fmt.Errorf("insert audit event: %w", err)
+		}
+		return nil
+	})
 }
 
 // ReadAuditEvent reads a single AuditRecord by (tenant_id, audit_id).
 func (s *Store) ReadAuditEvent(ctx context.Context, tenantID, auditID string) (*AuditRecord, error) {
 	var rec AuditRecord
-	err := s.db.QueryRowContext(ctx, `
-		SELECT
-			tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc,
-			http_method, http_status, request_uri, agent_subject, agent_patient,
-			client_ip, entity_type, entity_id, entity_version
-		FROM fhir_audit_event
-		WHERE tenant_id = $1 AND audit_id = $2
-	`, tenantID, auditID).Scan(
-		&rec.TenantID, &rec.AuditID, &rec.Recorded, &rec.Action, &rec.SubtypeCode, &rec.Outcome, &rec.OutcomeDesc,
-		&rec.HTTPMethod, &rec.HTTPStatus, &rec.RequestURI, &rec.AgentSubject, &rec.AgentPatient,
-		&rec.ClientIP, &rec.EntityType, &rec.EntityID, &rec.EntityVersion,
-	)
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT
+				tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc,
+				http_method, http_status, request_uri, agent_subject, agent_patient,
+				client_ip, entity_type, entity_id, entity_version
+			FROM fhir_audit_event
+			WHERE tenant_id = $1 AND audit_id = $2
+		`, tenantID, auditID).Scan(
+			&rec.TenantID, &rec.AuditID, &rec.Recorded, &rec.Action, &rec.SubtypeCode, &rec.Outcome, &rec.OutcomeDesc,
+			&rec.HTTPMethod, &rec.HTTPStatus, &rec.RequestURI, &rec.AgentSubject, &rec.AgentPatient,
+			&rec.ClientIP, &rec.EntityType, &rec.EntityID, &rec.EntityVersion,
+		)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -129,44 +134,47 @@ func (s *Store) QueryAuditEvents(ctx context.Context, params AuditQueryParams) (
 	}
 
 	var total int
-	countQuery := "SELECT COUNT(*) FROM fhir_audit_event " + whereSQL
-	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("count audit events: %w", err)
-	}
-
-	limitPos := len(args) + 1
-	offsetPos := len(args) + 2
-	queryArgs := append(append([]any{}, args...), count, offset)
-	selectQuery := fmt.Sprintf(`
-		SELECT
-			tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc,
-			http_method, http_status, request_uri, agent_subject, agent_patient,
-			client_ip, entity_type, entity_id, entity_version
-		FROM fhir_audit_event
-		%s
-		ORDER BY recorded DESC, audit_id DESC
-		LIMIT $%d OFFSET $%d
-	`, whereSQL, limitPos, offsetPos)
-
-	rows, err := s.db.QueryContext(ctx, selectQuery, queryArgs...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("query audit events: %w", err)
-	}
-	defer rows.Close()
-
 	var records []AuditRecord
-	for rows.Next() {
-		var rec AuditRecord
-		if err := rows.Scan(
-			&rec.TenantID, &rec.AuditID, &rec.Recorded, &rec.Action, &rec.SubtypeCode, &rec.Outcome, &rec.OutcomeDesc,
-			&rec.HTTPMethod, &rec.HTTPStatus, &rec.RequestURI, &rec.AgentSubject, &rec.AgentPatient,
-			&rec.ClientIP, &rec.EntityType, &rec.EntityID, &rec.EntityVersion,
-		); err != nil {
-			return nil, 0, fmt.Errorf("scan audit event: %w", err)
+	err := s.withTenantTx(ctx, params.TenantID, func(tx *sql.Tx) error {
+		countQuery := "SELECT COUNT(*) FROM fhir_audit_event " + whereSQL
+		if err := tx.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+			return fmt.Errorf("count audit events: %w", err)
 		}
-		records = append(records, rec)
-	}
-	if err := rows.Err(); err != nil {
+
+		limitPos := len(args) + 1
+		offsetPos := len(args) + 2
+		queryArgs := append(append([]any{}, args...), count, offset)
+		selectQuery := fmt.Sprintf(`
+			SELECT
+				tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc,
+				http_method, http_status, request_uri, agent_subject, agent_patient,
+				client_ip, entity_type, entity_id, entity_version
+			FROM fhir_audit_event
+			%s
+			ORDER BY recorded DESC, audit_id DESC
+			LIMIT $%d OFFSET $%d
+		`, whereSQL, limitPos, offsetPos)
+
+		rows, err := tx.QueryContext(ctx, selectQuery, queryArgs...)
+		if err != nil {
+			return fmt.Errorf("query audit events: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var rec AuditRecord
+			if err := rows.Scan(
+				&rec.TenantID, &rec.AuditID, &rec.Recorded, &rec.Action, &rec.SubtypeCode, &rec.Outcome, &rec.OutcomeDesc,
+				&rec.HTTPMethod, &rec.HTTPStatus, &rec.RequestURI, &rec.AgentSubject, &rec.AgentPatient,
+				&rec.ClientIP, &rec.EntityType, &rec.EntityID, &rec.EntityVersion,
+			); err != nil {
+				return fmt.Errorf("scan audit event: %w", err)
+			}
+			records = append(records, rec)
+		}
+		return rows.Err()
+	})
+	if err != nil {
 		return nil, 0, err
 	}
 	return records, total, nil

@@ -59,7 +59,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	store := postgres.New(db)
+	var storeOpts []postgres.Option
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("FLINT_TENANT_ROLE_SWITCH")), "true") {
+		storeOpts = append(storeOpts, postgres.WithTenantRoleSwitch(true))
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("FLINT_TENANT_AUTO_PROVISION")), "false") {
+		storeOpts = append(storeOpts, postgres.WithAutoProvision(false))
+	}
+	store := postgres.New(db, storeOpts...)
 	srv := server.New(store, logger)
 
 	// Register all supported US Core / USCDI v3 FHIR R4 resource types

@@ -1780,7 +1780,5 @@ func TestServer_Integration(t *testing.T) {
 	})
 
 	// Clean up
-	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
-		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-api'")
-	}
+	_ = postgres.PurgeTenant(ctx, db, "test-api")
 }

@@ -103,9 +103,7 @@ func TestWritePostgresBatch_WithExtractors(t *testing.T) {
 	assert.Equal(t, "act-cond-1", condRes.Matches[0].ResID)
 
 	// Cleanup
-	for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_resource_history", "fhir_resource"} {
-		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-act'")
-	}
+	_ = postgres.PurgeTenant(ctx, db, "test-act")
 }
 
 func TestPublishToAutoMQ_NilAndMemoryPublisher(t *testing.T) {

@@ -145,19 +145,21 @@ func (s *Store) SaveExportJob(ctx context.Context, job ExportJobRecord) error {
 		combinedBytes = []byte{}
 	}
 
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO fhir_export_job (job_id, tenant_id, patient_id, request_url, created_at, types_order, counts, files_json, combined)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		ON CONFLICT (job_id) DO UPDATE SET
-			tenant_id   = EXCLUDED.tenant_id,
-			patient_id  = EXCLUDED.patient_id,
-			request_url = EXCLUDED.request_url,
-			types_order = EXCLUDED.types_order,
-			counts      = EXCLUDED.counts,
-			files_json  = EXCLUDED.files_json,
-			combined    = EXCLUDED.combined
-	`, job.ID, job.TenantID, job.PatientID, job.RequestURL, job.CreatedAt.UTC(), string(typesJSON), string(countsJSON), string(filesJSON), combinedBytes)
-	return err
+	return s.withTenantTx(ctx, job.TenantID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			INSERT INTO fhir_export_job (job_id, tenant_id, patient_id, request_url, created_at, types_order, counts, files_json, combined)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			ON CONFLICT (job_id) DO UPDATE SET
+				tenant_id   = EXCLUDED.tenant_id,
+				patient_id  = EXCLUDED.patient_id,
+				request_url = EXCLUDED.request_url,
+				types_order = EXCLUDED.types_order,
+				counts      = EXCLUDED.counts,
+				files_json  = EXCLUDED.files_json,
+				combined    = EXCLUDED.combined
+		`, job.ID, job.TenantID, job.PatientID, job.RequestURL, job.CreatedAt.UTC(), string(typesJSON), string(countsJSON), string(filesJSON), combinedBytes)
+		return err
+	})
 }
 
 // GetExportJob retrieves a persisted Bulk Data ($export) job by tenant and job ID.
@@ -167,14 +169,16 @@ func (s *Store) GetExportJob(ctx context.Context, tenantID, jobID string) (*Expo
 	}
 	var rec ExportJobRecord
 	var typesRaw, countsRaw, filesRaw string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT job_id, tenant_id, patient_id, request_url, created_at, types_order, counts, files_json, combined
-		FROM fhir_export_job
-		WHERE tenant_id = $1 AND job_id = $2
-	`, tenantID, jobID).Scan(
-		&rec.ID, &rec.TenantID, &rec.PatientID, &rec.RequestURL, &rec.CreatedAt,
-		&typesRaw, &countsRaw, &filesRaw, &rec.Combined,
-	)
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
+			SELECT job_id, tenant_id, patient_id, request_url, created_at, types_order, counts, files_json, combined
+			FROM fhir_export_job
+			WHERE tenant_id = $1 AND job_id = $2
+		`, tenantID, jobID).Scan(
+			&rec.ID, &rec.TenantID, &rec.PatientID, &rec.RequestURL, &rec.CreatedAt,
+			&typesRaw, &countsRaw, &filesRaw, &rec.Combined,
+		)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -197,12 +201,19 @@ func (s *Store) DeleteExportJob(ctx context.Context, tenantID, jobID string) (bo
 	if s == nil || s.db == nil || jobID == "" {
 		return false, nil
 	}
-	res, err := s.db.ExecContext(ctx, `
-		DELETE FROM fhir_export_job WHERE tenant_id = $1 AND job_id = $2
-	`, tenantID, jobID)
+	var n int64
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `
+			DELETE FROM fhir_export_job WHERE tenant_id = $1 AND job_id = $2
+		`, tenantID, jobID)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
 	if err != nil {
 		return false, err
 	}
-	n, _ := res.RowsAffected()
 	return n > 0, nil
 }

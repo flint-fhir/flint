@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -113,21 +114,24 @@ func (s *Store) ExportResources(ctx context.Context, params ExportParams) ([]Sea
 		strings.Join(whereConds, " AND "),
 	)
 
-	rows, err := s.db.QueryContext(ctx, querySQL, args...)
-	if err != nil {
-		return nil, fmt.Errorf("export resources query: %w", err)
-	}
-	defer rows.Close()
-
 	var out []SearchResult
-	for rows.Next() {
-		var r SearchResult
-		if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
-			return nil, fmt.Errorf("scan export resource: %w", err)
+	err := s.withTenantTx(ctx, params.TenantID, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx, querySQL, args...)
+		if err != nil {
+			return fmt.Errorf("export resources query: %w", err)
 		}
-		out = append(out, r)
-	}
-	if err := rows.Err(); err != nil {
+		defer rows.Close()
+
+		for rows.Next() {
+			var r SearchResult
+			if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
+				return fmt.Errorf("scan export resource: %w", err)
+			}
+			out = append(out, r)
+		}
+		return rows.Err()
+	})
+	if err != nil {
 		return nil, err
 	}
 	return out, nil

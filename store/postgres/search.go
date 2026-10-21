@@ -81,7 +81,16 @@ type SearchParams struct {
 // It performs an intersection (AND) of all provided search parameters,
 // and resolves any requested _include or _revinclude resources.
 func (s *Store) Search(ctx context.Context, params SearchParams) (*SearchResults, error) {
-	return s.searchWithExecutor(ctx, s.db, params)
+	var res *SearchResults
+	err := s.withTenantTx(ctx, params.TenantID, func(tx *sql.Tx) error {
+		var txErr error
+		res, txErr = s.searchWithExecutor(ctx, tx, params)
+		return txErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params SearchParams) (*SearchResults, error) {
@@ -911,7 +920,16 @@ func buildHasExistsCondition(hp HasParam, startIdx int) (string, []any) {
 
 // ResolveIncludes fetches referenced resources for _include and referring resources for _revinclude.
 func (s *Store) ResolveIncludes(ctx context.Context, tenantID string, matches []SearchResult, includes []IncludeParam, revIncludes []IncludeParam) ([]SearchResult, error) {
-	return s.resolveIncludesWithExecutor(ctx, s.db, tenantID, matches, includes, revIncludes)
+	var res []SearchResult
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		var txErr error
+		res, txErr = s.resolveIncludesWithExecutor(ctx, tx, tenantID, matches, includes, revIncludes)
+		return txErr
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 func (s *Store) resolveIncludesWithExecutor(ctx context.Context, exec queryExecer, tenantID string, matches []SearchResult, includes []IncludeParam, revIncludes []IncludeParam) ([]SearchResult, error) {
@@ -1170,142 +1188,150 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 	}
 	offset := max(params.Offset, 0)
 
-	patRec, err := s.ReadResourceWithMeta(ctx, params.TenantID, "Patient", params.PatientID)
+	var out *SearchResults
+	err := s.withTenantTx(ctx, params.TenantID, func(tx *sql.Tx) error {
+		patRec, err := s.readResourceWithMetaInTx(ctx, tx, params.TenantID, "Patient", params.PatientID)
+		if err != nil {
+			return err
+		}
+
+		includePatient := true
+		if len(params.ResourceTypes) > 0 {
+			includePatient = false
+			for _, rt := range params.ResourceTypes {
+				if strings.EqualFold(rt, "Patient") {
+					includePatient = true
+					break
+				}
+			}
+		}
+		if params.Since != nil && patRec.LastUpdated.Before(*params.Since) {
+			includePatient = false
+		}
+
+		var matches []SearchResult
+		if includePatient {
+			matches = append(matches, SearchResult{
+				ResType:       "Patient",
+				ResID:         params.PatientID,
+				ResVersion:    patRec.ResVersion,
+				LastUpdated:   patRec.LastUpdated,
+				ResourceProto: patRec.ResourceProto,
+			})
+		}
+
+		// Build compartment query against spidx_reference:
+		// 1. Resources referencing this Patient (e.g., Condition, Encounter, Observation)
+		// 2. Resources directly referenced by this Patient (e.g., generalPractitioner, managingOrganization)
+		// 3. Resources referenced by clinical resources in this Patient's compartment (e.g., Encounter participant Practitioner)
+		whereConds := []string{
+			"r.tenant_id = $1",
+			"r.is_deleted = FALSE",
+			"r.res_type != 'Patient'",
+			`(
+				EXISTS (
+					SELECT 1 FROM spidx_reference rf
+					WHERE rf.tenant_id = r.tenant_id
+					  AND rf.res_type = r.res_type
+					  AND rf.res_id = r.res_id
+					  AND rf.target_id = $2
+					  AND (rf.target_type = 'Patient' OR rf.target_type = '')
+				)
+				OR EXISTS (
+					SELECT 1 FROM spidx_reference rf
+					WHERE rf.tenant_id = r.tenant_id
+					  AND rf.res_type = 'Patient'
+					  AND rf.res_id = $2
+					  AND rf.target_type = r.res_type
+					  AND rf.target_id = r.res_id
+				)
+				OR (
+					r.res_type IN ('Organization', 'Practitioner', 'PractitionerRole', 'Location', 'Medication', 'HealthcareService', 'Endpoint', 'Substance')
+					AND EXISTS (
+						SELECT 1 FROM spidx_reference rf_clin
+						JOIN spidx_reference rf_pat
+						  ON rf_pat.tenant_id = rf_clin.tenant_id
+						 AND rf_pat.res_type = rf_clin.res_type
+						 AND rf_pat.res_id = rf_clin.res_id
+						WHERE rf_clin.tenant_id = r.tenant_id
+						  AND rf_clin.target_type = r.res_type
+						  AND rf_clin.target_id = r.res_id
+						  AND rf_pat.target_id = $2
+						  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+					)
+				)
+				OR (
+					r.res_type = 'Provenance'
+					AND EXISTS (
+						SELECT 1 FROM spidx_reference rf_prov
+						JOIN spidx_reference rf_pat
+						  ON rf_pat.tenant_id = rf_prov.tenant_id
+						 AND rf_pat.res_type = rf_prov.target_type
+						 AND rf_pat.res_id = rf_prov.target_id
+						WHERE rf_prov.tenant_id = r.tenant_id
+						  AND rf_prov.res_type = 'Provenance'
+						  AND rf_prov.res_id = r.res_id
+						  AND rf_prov.sp_name = 'target'
+						  AND rf_pat.target_id = $2
+						  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+					)
+				)
+			)`,
+		}
+		args := []any{params.TenantID, params.PatientID}
+
+		if len(params.ResourceTypes) > 0 {
+			whereConds = append(whereConds, fmt.Sprintf("r.res_type = ANY($%d)", len(args)+1))
+			args = append(args, pq.Array(params.ResourceTypes))
+		}
+		if params.Since != nil {
+			whereConds = append(whereConds, fmt.Sprintf("r.last_updated >= $%d", len(args)+1))
+			args = append(args, *params.Since)
+		}
+
+		whereClause := strings.Join(whereConds, " AND ")
+
+		var compTotal int
+		countSQL := "SELECT COUNT(*) FROM fhir_resource r WHERE " + whereClause
+		if err := tx.QueryRowContext(ctx, countSQL, args...).Scan(&compTotal); err != nil {
+			return fmt.Errorf("patient everything count: %w", err)
+		}
+
+		dataSQL := fmt.Sprintf(
+			"SELECT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r WHERE %s ORDER BY r.res_type ASC, r.res_id ASC LIMIT $%d OFFSET $%d",
+			whereClause, len(args)+1, len(args)+2,
+		)
+		args = append(args, params.Count, offset)
+
+		rows, err := tx.QueryContext(ctx, dataSQL, args...)
+		if err != nil {
+			return fmt.Errorf("patient everything query: %w", err)
+		}
+		defer rows.Close()
+
+		var includes []SearchResult
+		for rows.Next() {
+			var r SearchResult
+			if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
+				return fmt.Errorf("scan patient everything row: %w", err)
+			}
+			includes = append(includes, r)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("patient everything rows: %w", err)
+		}
+
+		out = &SearchResults{
+			Matches:  matches,
+			Includes: includes,
+			Total:    len(matches) + compTotal,
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-
-	includePatient := true
-	if len(params.ResourceTypes) > 0 {
-		includePatient = false
-		for _, rt := range params.ResourceTypes {
-			if strings.EqualFold(rt, "Patient") {
-				includePatient = true
-				break
-			}
-		}
-	}
-	if params.Since != nil && patRec.LastUpdated.Before(*params.Since) {
-		includePatient = false
-	}
-
-	var matches []SearchResult
-	if includePatient {
-		matches = append(matches, SearchResult{
-			ResType:       "Patient",
-			ResID:         params.PatientID,
-			ResVersion:    patRec.ResVersion,
-			LastUpdated:   patRec.LastUpdated,
-			ResourceProto: patRec.ResourceProto,
-		})
-	}
-
-	// Build compartment query against spidx_reference:
-	// 1. Resources referencing this Patient (e.g., Condition, Encounter, Observation)
-	// 2. Resources directly referenced by this Patient (e.g., generalPractitioner, managingOrganization)
-	// 3. Resources referenced by clinical resources in this Patient's compartment (e.g., Encounter participant Practitioner)
-	whereConds := []string{
-		"r.tenant_id = $1",
-		"r.is_deleted = FALSE",
-		"r.res_type != 'Patient'",
-		`(
-			EXISTS (
-				SELECT 1 FROM spidx_reference rf
-				WHERE rf.tenant_id = r.tenant_id
-				  AND rf.res_type = r.res_type
-				  AND rf.res_id = r.res_id
-				  AND rf.target_id = $2
-				  AND (rf.target_type = 'Patient' OR rf.target_type = '')
-			)
-			OR EXISTS (
-				SELECT 1 FROM spidx_reference rf
-				WHERE rf.tenant_id = r.tenant_id
-				  AND rf.res_type = 'Patient'
-				  AND rf.res_id = $2
-				  AND rf.target_type = r.res_type
-				  AND rf.target_id = r.res_id
-			)
-			OR (
-				r.res_type IN ('Organization', 'Practitioner', 'PractitionerRole', 'Location', 'Medication', 'HealthcareService', 'Endpoint', 'Substance')
-				AND EXISTS (
-					SELECT 1 FROM spidx_reference rf_clin
-					JOIN spidx_reference rf_pat
-					  ON rf_pat.tenant_id = rf_clin.tenant_id
-					 AND rf_pat.res_type = rf_clin.res_type
-					 AND rf_pat.res_id = rf_clin.res_id
-					WHERE rf_clin.tenant_id = r.tenant_id
-					  AND rf_clin.target_type = r.res_type
-					  AND rf_clin.target_id = r.res_id
-					  AND rf_pat.target_id = $2
-					  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
-				)
-			)
-			OR (
-				r.res_type = 'Provenance'
-				AND EXISTS (
-					SELECT 1 FROM spidx_reference rf_prov
-					JOIN spidx_reference rf_pat
-					  ON rf_pat.tenant_id = rf_prov.tenant_id
-					 AND rf_pat.res_type = rf_prov.target_type
-					 AND rf_pat.res_id = rf_prov.target_id
-					WHERE rf_prov.tenant_id = r.tenant_id
-					  AND rf_prov.res_type = 'Provenance'
-					  AND rf_prov.res_id = r.res_id
-					  AND rf_prov.sp_name = 'target'
-					  AND rf_pat.target_id = $2
-					  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
-				)
-			)
-		)`,
-	}
-	args := []any{params.TenantID, params.PatientID}
-
-	if len(params.ResourceTypes) > 0 {
-		whereConds = append(whereConds, fmt.Sprintf("r.res_type = ANY($%d)", len(args)+1))
-		args = append(args, pq.Array(params.ResourceTypes))
-	}
-	if params.Since != nil {
-		whereConds = append(whereConds, fmt.Sprintf("r.last_updated >= $%d", len(args)+1))
-		args = append(args, *params.Since)
-	}
-
-	whereClause := strings.Join(whereConds, " AND ")
-
-	var compTotal int
-	countSQL := "SELECT COUNT(*) FROM fhir_resource r WHERE " + whereClause
-	if err := s.db.QueryRowContext(ctx, countSQL, args...).Scan(&compTotal); err != nil {
-		return nil, fmt.Errorf("patient everything count: %w", err)
-	}
-
-	dataSQL := fmt.Sprintf(
-		"SELECT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r WHERE %s ORDER BY r.res_type ASC, r.res_id ASC LIMIT $%d OFFSET $%d",
-		whereClause, len(args)+1, len(args)+2,
-	)
-	args = append(args, params.Count, offset)
-
-	rows, err := s.db.QueryContext(ctx, dataSQL, args...)
-	if err != nil {
-		return nil, fmt.Errorf("patient everything query: %w", err)
-	}
-	defer rows.Close()
-
-	var includes []SearchResult
-	for rows.Next() {
-		var r SearchResult
-		if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
-			return nil, fmt.Errorf("scan patient everything row: %w", err)
-		}
-		includes = append(includes, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("patient everything rows: %w", err)
-	}
-
-	return &SearchResults{
-		Matches:  matches,
-		Includes: includes,
-		Total:    len(matches) + compTotal,
-	}, nil
+	return out, nil
 }
 
 var patientCompartmentTypes = map[string]bool{
@@ -1396,44 +1422,47 @@ func (s *Store) BelongsToPatientCompartment(ctx context.Context, tenantID, resTy
 		return true, nil
 	}
 
-	var isDeleted bool
-	err := s.db.QueryRowContext(ctx, `
-		SELECT is_deleted FROM fhir_resource
-		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
-	`, tenantID, resType, resID).Scan(&isDeleted)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-
 	var inCompartment bool
-	err = s.db.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM spidx_reference
-			WHERE tenant_id = $1
-			  AND res_type = $2
-			  AND res_id = $3
-			  AND target_id = $4
-			  AND (target_type = 'Patient' OR target_type = '')
-		) OR (
-			$2 = 'Provenance'
-			AND EXISTS (
-				SELECT 1 FROM spidx_reference rf_prov
-				JOIN spidx_reference rf_pat
-				  ON rf_pat.tenant_id = rf_prov.tenant_id
-				 AND rf_pat.res_type = rf_prov.target_type
-				 AND rf_pat.res_id = rf_prov.target_id
-				WHERE rf_prov.tenant_id = $1
-				  AND rf_prov.res_type = 'Provenance'
-				  AND rf_prov.res_id = $3
-				  AND rf_prov.sp_name = 'target'
-				  AND rf_pat.target_id = $4
-				  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		var isDeleted bool
+		err := tx.QueryRowContext(ctx, `
+			SELECT is_deleted FROM fhir_resource
+			WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
+		`, tenantID, resType, resID).Scan(&isDeleted)
+		if errors.Is(err, sql.ErrNoRows) {
+			inCompartment = false
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		return tx.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM spidx_reference
+				WHERE tenant_id = $1
+				  AND res_type = $2
+				  AND res_id = $3
+				  AND target_id = $4
+				  AND (target_type = 'Patient' OR target_type = '')
+			) OR (
+				$2 = 'Provenance'
+				AND EXISTS (
+					SELECT 1 FROM spidx_reference rf_prov
+					JOIN spidx_reference rf_pat
+					  ON rf_pat.tenant_id = rf_prov.tenant_id
+					 AND rf_pat.res_type = rf_prov.target_type
+					 AND rf_pat.res_id = rf_prov.target_id
+					WHERE rf_prov.tenant_id = $1
+					  AND rf_prov.res_type = 'Provenance'
+					  AND rf_prov.res_id = $3
+					  AND rf_prov.sp_name = 'target'
+					  AND rf_pat.target_id = $4
+					  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+				)
 			)
-		)
-	`, tenantID, resType, resID, patientID).Scan(&inCompartment)
+		`, tenantID, resType, resID, patientID).Scan(&inCompartment)
+	})
 	if err != nil {
 		return false, err
 	}
