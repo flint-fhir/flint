@@ -146,6 +146,9 @@ spec:
         - name: wait-for-automq
           image: busybox:1.36
           command: ['sh', '-c', 'until nc -z automq 9094; do echo waiting for automq; sleep 5; done']
+        - name: wait-for-apicurio
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z apicurio 8080; do echo waiting for apicurio; sleep 3; done']
       containers:
         - name: create-topics
           image: automqinc/automq:latest
@@ -153,7 +156,14 @@ spec:
             - /bin/bash
             - -c
             - |
+              SCHEMA_PAYLOAD='{"schemaType":"PROTOBUF","schema":"syntax = \"proto3\";\npackage flint.fhir;\n\nmessage ResourceEnvelope {\n  string res_id = 1;\n  string res_type = 2;\n  string tenant_id = 3;\n  string payload = 4;\n  string op = 5;\n}\n"}'
               for topic in fhir.Patient fhir.Encounter fhir.Observation fhir.Condition fhir.MedicationRequest; do
+                curl -fsS -X POST \
+                  -H "Content-Type: application/vnd.schemaregistry.v1+json" \
+                  --data "$SCHEMA_PAYLOAD" \
+                  "http://apicurio:8080/apis/ccompat/v7/subjects/${topic}-value/versions"
+                echo "Registered Protobuf schema in Apicurio for subject: ${topic}-value"
+
                 /opt/kafka/kafka/bin/kafka-topics.sh \
                   --bootstrap-server automq:9094 \
                   --create \
@@ -166,6 +176,6 @@ spec:
                   --entity-type topics \
                   --entity-name "$topic" \
                   --alter \
-                  --add-config "automq.table.topic.enable=true,automq.table.topic.convert.value.type=raw,automq.table.topic.transform.value.type=none,automq.table.topic.namespace=flint,automq.table.topic.commit.interval.ms=10000"
-                echo "Created and configured Table Topic: $topic"
+                  --add-config "automq.table.topic.enable=true,automq.table.topic.convert.value.type=by_schema_id,automq.table.topic.transform.value.type=flatten,automq.table.topic.namespace=flint,automq.table.topic.commit.interval.ms=10000"
+                echo "Created and configured Table Topic (by_schema_id + flatten): $topic"
               done

@@ -25,8 +25,10 @@ func runRecovery() {
 	// Step 1: Produce Pre-Restart Event
 	fmt.Println("\n[1/5] 📤 Publishing pre-restart message to AutoMQ...")
 	p1, err := automq.NewProducer(automq.Config{
-		Brokers:     brokers,
-		TopicPrefix: "fhir.",
+		Brokers:           brokers,
+		TopicPrefix:       "fhir.",
+		SchemaRegistryURL: envOrDefault("FLINT_SCHEMA_REGISTRY_URL", ""),
+		DefaultSchemaID:   1,
 	})
 	if err != nil {
 		log.Fatalf("pre-restart producer: %v", err)
@@ -82,8 +84,10 @@ func runRecovery() {
 	// Step 4: Produce Post-Restart Event
 	fmt.Println("\n[4/5] 📤 Publishing post-restart message to AutoMQ...")
 	p2, err := automq.NewProducer(automq.Config{
-		Brokers:     brokers,
-		TopicPrefix: "fhir.",
+		Brokers:           brokers,
+		TopicPrefix:       "fhir.",
+		SchemaRegistryURL: envOrDefault("FLINT_SCHEMA_REGISTRY_URL", ""),
+		DefaultSchemaID:   1,
 	})
 	if err != nil {
 		log.Fatalf("post-restart producer: %v", err)

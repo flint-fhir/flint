@@ -169,19 +169,21 @@ tasks:
   # ─── Optional Add-Ons (Streaming CDC, Temporal Ingestion Worker, Clinical Lakehouse) ───
 
   addons-up:
-    desc: "[Add-On] Deploy optional Temporal, Garage S3, Iceberg REST catalog, and AutoMQ CDC services into k3d"
+    desc: "[Add-On] Deploy optional Temporal, Garage S3, Iceberg REST catalog, Apicurio Schema Registry, and AutoMQ CDC services into k3d"
     cmds:
       - task: cluster-create
       - task: deploy-postgres
       - task: deploy-temporal
       - task: deploy-garage
       - task: deploy-iceberg
+      - task: deploy-apicurio
       - task: deploy-automq
       - echo "✅ Flint optional add-on services ready"
       - echo "  Temporal UI   → http://localhost:8088"
       - echo "  AutoMQ Kafka  → localhost:9092"
       - echo "  Garage S3     → http://localhost:9000 (API) / http://localhost:9001 (Web)"
       - echo "  Iceberg REST  → http://localhost:8181"
+      - echo "  Apicurio v7   → http://apicurio:8080/apis/ccompat/v7 (in-cluster)"
 
   build-worker:
     desc: "[Add-On] Build Temporal ingestion worker binary (bin/worker)"
@@ -213,10 +215,16 @@ tasks:
       - kubectl apply -f deploy/k8s/garage.yaml
       - echo "Waiting for Garage..."
       - kubectl wait --for=condition=ready pod -l app=garage -n {{.NAMESPACE}} --timeout=120s
-      - echo "Initializing Garage layout and bucket..."
-      - kubectl delete job garage-init -n {{.NAMESPACE}} --ignore-not-found
-      - kubectl apply -f deploy/k8s/garage.yaml
-      - kubectl wait --for=condition=complete job/garage-init -n {{.NAMESPACE}} --timeout=120s
+      - echo "Initializing Garage layout, S3 keys, and buckets..."
+      - |
+        NODE_ID=$(kubectl exec -n {{.NAMESPACE}} deploy/garage -- /garage status | awk '/^[0-9a-f]{16}/ {print $1; exit}')
+        kubectl exec -n {{.NAMESPACE}} deploy/garage -- /garage layout assign -z dc1 -c 1G "$NODE_ID"
+        kubectl exec -n {{.NAMESPACE}} deploy/garage -- /garage layout apply --version 1 || true
+        kubectl exec -n {{.NAMESPACE}} deploy/garage -- /garage key import --yes -n flint-dev GK1e8391735937d6afcd2dd84c e9249c7fd2bbce0600a196bc6bc97f069b8948f20bf54fcaaefa924256b01e6c || true
+        for b in warehouse automq-data automq-ops; do
+          kubectl exec -n {{.NAMESPACE}} deploy/garage -- /garage bucket create "$b" || true
+          kubectl exec -n {{.NAMESPACE}} deploy/garage -- /garage bucket allow --read --write --owner "$b" --key GK1e8391735937d6afcd2dd84c
+        done
 
   deploy-iceberg:
     desc: "[Add-On] Deploy Iceberg REST catalog (backed by Garage S3)"
@@ -224,6 +232,13 @@ tasks:
       - kubectl apply -f deploy/k8s/iceberg-rest.yaml
       - echo "Waiting for Iceberg REST catalog..."
       - kubectl wait --for=condition=ready pod -l app=iceberg-rest -n {{.NAMESPACE}} --timeout=120s
+
+  deploy-apicurio:
+    desc: "[Add-On] Deploy Apicurio Schema Registry (Confluent compat v7 API)"
+    cmds:
+      - kubectl apply -f deploy/k8s/apicurio.yaml
+      - echo "Waiting for Apicurio Schema Registry..."
+      - kubectl wait --for=condition=ready pod -l app=apicurio -n {{.NAMESPACE}} --timeout=120s
 
   deploy-automq:
     desc: "[Add-On] Deploy AutoMQ (Kafka on S3 + Table Topic -> Iceberg)"

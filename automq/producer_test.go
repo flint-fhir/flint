@@ -2,8 +2,12 @@ package automq_test
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -89,6 +93,53 @@ func TestProducer_BuildRecord(t *testing.T) {
 			assert.Equal(t, tt.wantOp, headerMap["op"])
 		})
 	}
+}
+
+func TestProducer_ApicurioSchemaRegistryAndFraming(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		assert.Equal(t, http.MethodPost, r.Method)
+		assert.Equal(t, "/apis/ccompat/v7/subjects/fhir.Patient-value/versions", r.URL.Path)
+		assert.Equal(t, "application/vnd.schemaregistry.v1+json", r.Header.Get("Content-Type"))
+
+		var reqBody map[string]string
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&reqBody))
+		assert.Equal(t, "PROTOBUF", reqBody["schemaType"])
+		assert.Equal(t, automq.ResourceEnvelopeProtoSchema, reqBody["schema"])
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":7}`))
+	}))
+	defer srv.Close()
+
+	p := &automq.Producer{
+		TopicPrefix:       "fhir.",
+		SchemaRegistryURL: srv.URL + "/apis/ccompat/v7",
+	}
+
+	id1, err := p.EnsureSchemaID(context.Background(), "fhir.Patient")
+	require.NoError(t, err)
+	assert.Equal(t, uint32(7), id1)
+
+	// Second call hits in-memory cache without another HTTP request
+	id2, err := p.EnsureSchemaID(context.Background(), "fhir.Patient")
+	require.NoError(t, err)
+	assert.Equal(t, uint32(7), id2)
+	assert.Equal(t, int32(1), calls.Load())
+
+	msg := automq.Message{
+		TenantID:  "tenant_a",
+		ResType:   "Patient",
+		ResID:     "pat-001",
+		ProtoData: []byte(`{"resourceType":"Patient","id":"pat-001"}`),
+		Op:        "U",
+	}
+	rec := p.BuildRecord(msg)
+	gotID, rawProto, err := automq.UnwrapConfluentProtobuf(rec.Value)
+	require.NoError(t, err)
+	assert.Equal(t, uint32(7), gotID)
+	assert.Equal(t, automq.EncodeResourceEnvelopeProto(msg), rawProto)
 }
 
 func TestTopicSet(t *testing.T) {

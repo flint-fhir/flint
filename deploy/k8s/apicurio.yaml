@@ -20,6 +20,7 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
+            - containerPort: 9000
           env:
             # Enable CORS for local dev
             - name: APICURIO_REST_MUTABILITY_ARTIFACT__VERSION_CONTENT_ENABLED
@@ -33,7 +34,7 @@ spec:
           readinessProbe:
             httpGet:
               path: /health/ready
-              port: 8080
+              port: 9000
             initialDelaySeconds: 10
             periodSeconds: 5
 ---

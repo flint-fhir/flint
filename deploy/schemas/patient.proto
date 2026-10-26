@@ -1,11 +1,12 @@
 syntax = "proto3";
 package flint.fhir;
 
-// Simplified FHIR Patient for Iceberg Table Topic.
-// Fields match the JSON structure our producer sends.
+// FHIR Resource CDC Envelope for AutoMQ Iceberg Table Topics (by_schema_id + flatten).
+// Registered in Apicurio Schema Registry (/apis/ccompat/v7) per <topic>-value subject.
 message Patient {
   string res_id = 1;
   string res_type = 2;
   string tenant_id = 3;
   string payload = 4;
+  string op = 5;
 }
