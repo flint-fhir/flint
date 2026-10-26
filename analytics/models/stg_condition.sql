@@ -8,13 +8,21 @@ MODEL (
 WITH ranked AS (
   SELECT
     COALESCE(tenant_id, 'default') AS tenant_id,
-    regexp_replace(_kafka_key, '^(' || COALESCE(tenant_id, 'default') || '/|Condition/)', '') AS condition_id,
+    COALESCE(
+      NULLIF(res_id, ''),
+      regexp_replace(_kafka_key, '^(' || COALESCE(tenant_id, 'default') || '/|Condition/)', '')
+    ) AS condition_id,
     _kafka_offset AS kafka_offset,
     _kafka_timestamp AS updated_at,
     COALESCE(op, 'U') AS op,
-    CAST(_kafka_value AS VARCHAR) AS raw_json,
+    COALESCE(payload, CAST(_kafka_value AS VARCHAR)) AS raw_json,
     ROW_NUMBER() OVER (
-      PARTITION BY COALESCE(tenant_id, 'default'), regexp_replace(_kafka_key, '^(' || COALESCE(tenant_id, 'default') || '/|Condition/)', '')
+      PARTITION BY
+        COALESCE(tenant_id, 'default'),
+        COALESCE(
+          NULLIF(res_id, ''),
+          regexp_replace(_kafka_key, '^(' || COALESCE(tenant_id, 'default') || '/|Condition/)', '')
+        )
       ORDER BY _kafka_offset DESC
     ) AS rn
   FROM fhir_raw.condition
