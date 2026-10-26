@@ -170,6 +170,9 @@ type ResourceSchema struct {
 	RequiredFields []string
 	CodeBindings   map[string]map[string]bool // field -> valid code set
 	ValueSetURIs   map[string]string          // field -> ValueSet canonical URI
+	DateFields     map[string]bool            // primitive Date fields derived from proto descriptor
+	DateTimeFields map[string]bool            // primitive DateTime fields derived from proto descriptor
+	InstantFields  map[string]bool            // primitive Instant fields derived from proto descriptor
 }
 
 var commonResourceFields = []string{
@@ -187,33 +190,100 @@ func buildFieldMap(fields ...[]string) map[string]bool {
 	return m
 }
 
-func allowedFieldsFromDescriptor(md protoreflect.MessageDescriptor) map[string]bool {
-	m := buildFieldMap(commonResourceFields)
-	if md == nil {
-		return m
+type protoSchemaDetails struct {
+	allowedFields  map[string]bool
+	codeBindings   map[string]map[string]bool
+	valueSetURIs   map[string]string
+	dateFields     map[string]bool
+	dateTimeFields map[string]bool
+	instantFields  map[string]bool
+}
+
+func deriveProtoSchemaDetails(md protoreflect.MessageDescriptor) protoSchemaDetails {
+	det := protoSchemaDetails{
+		allowedFields:  buildFieldMap(commonResourceFields),
+		codeBindings:   make(map[string]map[string]bool),
+		valueSetURIs:   make(map[string]string),
+		dateFields:     make(map[string]bool),
+		dateTimeFields: make(map[string]bool),
+		instantFields:  make(map[string]bool),
 	}
+	if md == nil {
+		return det
+	}
+	resTypeLower := strings.ToLower(string(md.Name()))
 	fields := md.Fields()
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
 		jsonName := fd.JSONName()
-		m[jsonName] = true
+		det.allowedFields[jsonName] = true
 		if jsonName == "classValue" {
-			m["class"] = true
+			det.allowedFields["class"] = true
 		}
-		if fd.Kind() == protoreflect.MessageKind && fd.Message() != nil && fd.Message().Oneofs().ByName("choice") != nil {
-			choiceFields := fd.Message().Fields()
+		if fd.Kind() != protoreflect.MessageKind || fd.Message() == nil {
+			continue
+		}
+		fmd := fd.Message()
+		if fmd.Oneofs().ByName("choice") != nil {
+			choiceFields := fmd.Fields()
 			for j := 0; j < choiceFields.Len(); j++ {
-				optJSON := choiceFields.Get(j).JSONName()
+				cfd := choiceFields.Get(j)
+				optJSON := cfd.JSONName()
 				if optJSON == "stringValue" {
 					optJSON = "string"
 				}
-				if len(optJSON) > 0 {
-					m[jsonName+strings.ToUpper(optJSON[:1])+optJSON[1:]] = true
+				if len(optJSON) == 0 {
+					continue
+				}
+				choiceFieldName := jsonName + strings.ToUpper(optJSON[:1]) + optJSON[1:]
+				det.allowedFields[choiceFieldName] = true
+				if cfd.Kind() == protoreflect.MessageKind && cfd.Message() != nil {
+					switch string(cfd.Message().FullName()) {
+					case "google.fhir.r4.core.Date":
+						det.dateFields[choiceFieldName] = true
+					case "google.fhir.r4.core.DateTime":
+						det.dateTimeFields[choiceFieldName] = true
+					case "google.fhir.r4.core.Instant":
+						det.instantFields[choiceFieldName] = true
+					}
+				}
+			}
+			continue
+		}
+		if !fd.IsList() {
+			switch string(fmd.FullName()) {
+			case "google.fhir.r4.core.Date":
+				det.dateFields[jsonName] = true
+			case "google.fhir.r4.core.DateTime":
+				det.dateTimeFields[jsonName] = true
+			case "google.fhir.r4.core.Instant":
+				if jsonName == "date" {
+					det.dateTimeFields[jsonName] = true
+				} else {
+					det.instantFields[jsonName] = true
+				}
+			}
+			if valFD := fmd.Fields().ByName("value"); valFD != nil && valFD.Kind() == protoreflect.EnumKind && valFD.Enum() != nil {
+				enumVals := valFD.Enum().Values()
+				codes := make(map[string]bool, enumVals.Len())
+				for k := 0; k < enumVals.Len(); k++ {
+					ev := enumVals.Get(k)
+					if ev.Number() == 0 || string(ev.Name()) == "INVALID_UNINITIALIZED" {
+						continue
+					}
+					rawName := strings.ToLower(string(ev.Name()))
+					kebab := strings.ReplaceAll(rawName, "_", "-")
+					codes[kebab] = true
+					codes[rawName] = true
+				}
+				if len(codes) > 0 {
+					det.codeBindings[jsonName] = codes
+					det.valueSetURIs[jsonName] = "http://hl7.org/fhir/valueset/" + resTypeLower + "-" + strings.ToLower(jsonName)
 				}
 			}
 		}
 	}
-	return m
+	return det
 }
 
 // DefaultSchemas returns StructureDefinition validation schemas for all ~146 official
@@ -611,20 +681,34 @@ func DefaultSchemas() map[string]ResourceSchema {
 	allDescs := fhirutil.AllR4ResourceDescriptors()
 	schemas := make(map[string]ResourceSchema, len(allDescs))
 	for resType, md := range allDescs {
-		allowed := allowedFieldsFromDescriptor(md)
+		det := deriveProtoSchemaDetails(md)
 		if override, ok := usCoreOverrides[resType]; ok {
 			for k := range override.AllowedFields {
-				allowed[k] = true
+				det.allowedFields[k] = true
 			}
-			override.AllowedFields = allowed
+			for k, v := range override.CodeBindings {
+				det.codeBindings[k] = v
+			}
+			for k, v := range override.ValueSetURIs {
+				det.valueSetURIs[k] = v
+			}
+			override.AllowedFields = det.allowedFields
+			override.CodeBindings = det.codeBindings
+			override.ValueSetURIs = det.valueSetURIs
+			override.DateFields = det.dateFields
+			override.DateTimeFields = det.dateTimeFields
+			override.InstantFields = det.instantFields
 			schemas[resType] = override
 		} else {
 			schemas[resType] = ResourceSchema{
 				ResourceType:   resType,
-				AllowedFields:  allowed,
+				AllowedFields:  det.allowedFields,
 				RequiredFields: []string{},
-				CodeBindings:   map[string]map[string]bool{},
-				ValueSetURIs:   map[string]string{},
+				CodeBindings:   det.codeBindings,
+				ValueSetURIs:   det.valueSetURIs,
+				DateFields:     det.dateFields,
+				DateTimeFields: det.dateTimeFields,
+				InstantFields:  det.instantFields,
 			}
 		}
 	}

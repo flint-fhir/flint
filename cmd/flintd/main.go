@@ -28,7 +28,9 @@ var version = "dev"
 
 func main() {
 	var showVersion bool
+	var tenantIsolationFlag string
 	flag.BoolVar(&showVersion, "version", false, "Print flintd version and exit")
+	flag.StringVar(&tenantIsolationFlag, "tenant-isolation", "", "Multi-tenant PostgreSQL isolation mode: 'shared' (default) or 'schema' (schema-per-tenant)")
 	flag.Parse()
 	if showVersion {
 		fmt.Printf("flintd %s\n", version)
@@ -36,6 +38,16 @@ func main() {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	rawIsolation := strings.TrimSpace(tenantIsolationFlag)
+	if rawIsolation == "" {
+		rawIsolation = strings.TrimSpace(os.Getenv("FLINT_TENANT_ISOLATION"))
+	}
+	isolationMode, err := postgres.ParseTenantIsolationMode(rawIsolation)
+	if err != nil {
+		logger.Error("invalid tenant isolation mode", "error", err)
+		os.Exit(1)
+	}
 
 	dsn := os.Getenv("FLINT_POSTGRES_DSN")
 	if dsn == "" {
@@ -59,7 +71,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	store := postgres.New(db)
+	store := postgres.New(db, postgres.WithTenantIsolation(isolationMode))
+	logger.Info("PostgreSQL store initialized", "tenant_isolation", string(isolationMode))
 	srv := server.New(store, logger)
 
 	// Register all supported US Core / USCDI v3 FHIR R4 resource types

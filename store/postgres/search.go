@@ -15,6 +15,7 @@ import (
 const MaxSearchCount = 1000
 
 type queryExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
@@ -62,6 +63,8 @@ type SearchParams struct {
 	QuantityFilters          map[string][]QuantityOp         // sp_name → all quantity operations (e.g. ge + le range)
 	References               map[string]string               // sp_name → targetType/targetId
 	ReferenceFilters         map[string][]string             // sp_name → multipleAnd values (each may be comma-separated multipleOr)
+	URIs                     map[string]string               // sp_name → URI value (exact, :below, or :above)
+	URIFilters               map[string][]string             // sp_name → multipleAnd values (each may be comma-separated multipleOr)
 	Missing                  map[string]bool                 // sp_name → :missing=true/false
 	Chained                  []ChainedParam                  // chained search parameters (e.g. patient.name=Smith)
 	Has                      []HasParam                      // reverse-chained search parameters (e.g. _has:Observation:patient:code=8867-4)
@@ -81,7 +84,13 @@ type SearchParams struct {
 // It performs an intersection (AND) of all provided search parameters,
 // and resolves any requested _include or _revinclude resources.
 func (s *Store) Search(ctx context.Context, params SearchParams) (*SearchResults, error) {
-	return s.searchWithExecutor(ctx, s.db, params)
+	var res *SearchResults
+	err := s.withTenantExec(ctx, params.TenantID, func(exec queryExecer) error {
+		var sErr error
+		res, sErr = s.searchWithExecutor(ctx, exec, params)
+		return sErr
+	})
+	return res, err
 }
 
 func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params SearchParams) (*SearchResults, error) {
@@ -303,6 +312,61 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 					"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s)",
 					alias, alias, alias, alias, alias, spIdx, strings.Join(orConds, " OR "),
 				))
+			}
+		}
+	}
+
+	// 5b. URI search parameters (spidx_uri with spidx_token fallback) — supports exact match, :below, :above, multipleOr, and multipleAnd
+	uriFilters := params.URIFilters
+	if len(uriFilters) == 0 && len(params.URIs) > 0 {
+		uriFilters = make(map[string][]string, len(params.URIs))
+		for k, v := range params.URIs {
+			uriFilters[k] = []string{v}
+		}
+	}
+	for spKey, filterVals := range uriFilters {
+		baseName, modifier := splitParamModifier(spKey)
+		for _, rawVal := range filterVals {
+			joinIdx++
+			uAlias := fmt.Sprintf("u%d", joinIdx)
+			utAlias := fmt.Sprintf("ut%d", joinIdx)
+			spIdx := len(args) + 1
+			args = append(args, baseName)
+			var uConds []string
+			var utConds []string
+			for part := range strings.SplitSeq(rawVal, ",") {
+				v := strings.TrimSpace(part)
+				if v == "" {
+					continue
+				}
+				switch modifier {
+				case "below":
+					baseURI := strings.TrimSuffix(v, "/")
+					p1 := len(args) + 1
+					p2 := len(args) + 2
+					p3 := len(args) + 3
+					args = append(args, v, baseURI, escapeLikePattern(baseURI)+"/%")
+					uConds = append(uConds, fmt.Sprintf(`(%s.sp_value = $%d OR %s.sp_value = $%d OR %s.sp_value LIKE $%d ESCAPE '\')`, uAlias, p1, uAlias, p2, uAlias, p3))
+					utConds = append(utConds, fmt.Sprintf(`(%s.sp_value = $%d OR %s.sp_value = $%d OR %s.sp_value LIKE $%d ESCAPE '\')`, utAlias, p1, utAlias, p2, utAlias, p3))
+				case "above":
+					ancestors := uriHierarchyAncestors(v)
+					p1 := len(args) + 1
+					args = append(args, pq.Array(ancestors))
+					uConds = append(uConds, fmt.Sprintf("(%s.sp_value = ANY($%d))", uAlias, p1))
+					utConds = append(utConds, fmt.Sprintf("(%s.sp_value = ANY($%d))", utAlias, p1))
+				default:
+					p1 := len(args) + 1
+					args = append(args, v)
+					uConds = append(uConds, fmt.Sprintf("(%s.sp_value = $%d)", uAlias, p1))
+					utConds = append(utConds, fmt.Sprintf("(%s.sp_value = $%d)", utAlias, p1))
+				}
+			}
+			if len(uConds) > 0 {
+				whereExtra += fmt.Sprintf(
+					" AND (EXISTS (SELECT 1 FROM spidx_uri %s WHERE %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s)) OR EXISTS (SELECT 1 FROM spidx_token %s WHERE %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s)))",
+					uAlias, uAlias, uAlias, uAlias, uAlias, spIdx, strings.Join(uConds, " OR "),
+					utAlias, utAlias, utAlias, utAlias, utAlias, spIdx, strings.Join(utConds, " OR "),
+				)
 			}
 		}
 	}
@@ -628,26 +692,22 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		}
 	}
 	for spName, isMissing := range params.Missing {
-		tbl := "spidx_token"
-		switch {
-		case knownStringSearchParams[spName]:
-			tbl = "spidx_string"
-		case knownDateSearchParams[spName]:
-			tbl = "spidx_date"
-		case knownQuantitySearchParams[spName]:
-			tbl = "spidx_quantity"
-		case knownRefSearchParams[spName]:
-			tbl = "spidx_reference"
-		}
-		op := "EXISTS"
-		if isMissing {
-			op = "NOT EXISTS"
-		}
-		whereExtra += fmt.Sprintf(
-			" AND %s (SELECT 1 FROM %s m WHERE m.tenant_id = r.tenant_id AND m.res_type = r.res_type AND m.res_id = r.res_id AND m.sp_name = $%d)",
-			op, tbl, len(args)+1,
-		)
+		tables := missingTablesForParam(spName)
+		spIdx := len(args) + 1
 		args = append(args, spName)
+		existsParts := make([]string, 0, len(tables))
+		for _, tbl := range tables {
+			existsParts = append(existsParts, fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM %s m WHERE m.tenant_id = r.tenant_id AND m.res_type = r.res_type AND m.res_id = r.res_id AND m.sp_name = $%d)",
+				tbl, spIdx,
+			))
+		}
+		combinedExists := "(" + strings.Join(existsParts, " OR ") + ")"
+		if isMissing {
+			whereExtra += " AND NOT " + combinedExists
+		} else {
+			whereExtra += " AND " + combinedExists
+		}
 	}
 	for _, luOp := range params.LastUpdated {
 		cond, luArgs := buildTimestampColumnCondition("r.last_updated", luOp, len(args))
@@ -770,6 +830,13 @@ func buildSortOrderClause(sorts []SortSpec, startIdx int) (string, []any) {
 				"(SELECT %s(sr.target_id) FROM spidx_reference sr WHERE sr.tenant_id = r.tenant_id AND sr.res_type = r.res_type AND sr.res_id = r.res_id AND sr.sp_name = $%d) %s NULLS LAST",
 				agg, idx, dir,
 			))
+		case knownURISearchParams[s.Param]:
+			idx := startIdx + len(args) + 1
+			args = append(args, s.Param)
+			parts = append(parts, fmt.Sprintf(
+				"(SELECT %s(su.sp_value) FROM spidx_uri su WHERE su.tenant_id = r.tenant_id AND su.res_type = r.res_type AND su.res_id = r.res_id AND su.sp_name = $%d) %s NULLS LAST",
+				agg, idx, dir,
+			))
 		default:
 			idx := startIdx + len(args) + 1
 			args = append(args, s.Param)
@@ -869,6 +936,13 @@ func buildHasExistsCondition(hp HasParam, startIdx int) (string, []any) {
 			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_reference hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND hsp.target_id = $%d WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
 			spIdx, tIDIdx, srcIdx, refIdx,
 		), args
+	case "uri":
+		args = append(args, strings.TrimSpace(hp.Value))
+		valIdx := startIdx + len(args)
+		return fmt.Sprintf(
+			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_uri hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND hsp.sp_value = $%d WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
+			spIdx, valIdx, srcIdx, refIdx,
+		), args
 	default: // token
 		var orConds []string
 		for part := range strings.SplitSeq(hp.Value, ",") {
@@ -911,7 +985,13 @@ func buildHasExistsCondition(hp HasParam, startIdx int) (string, []any) {
 
 // ResolveIncludes fetches referenced resources for _include and referring resources for _revinclude.
 func (s *Store) ResolveIncludes(ctx context.Context, tenantID string, matches []SearchResult, includes []IncludeParam, revIncludes []IncludeParam) ([]SearchResult, error) {
-	return s.resolveIncludesWithExecutor(ctx, s.db, tenantID, matches, includes, revIncludes)
+	var res []SearchResult
+	err := s.withTenantExec(ctx, tenantID, func(exec queryExecer) error {
+		var rErr error
+		res, rErr = s.resolveIncludesWithExecutor(ctx, exec, tenantID, matches, includes, revIncludes)
+		return rErr
+	})
+	return res, err
 }
 
 func (s *Store) resolveIncludesWithExecutor(ctx context.Context, exec queryExecer, tenantID string, matches []SearchResult, includes []IncludeParam, revIncludes []IncludeParam) ([]SearchResult, error) {
@@ -1272,33 +1352,39 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 	whereClause := strings.Join(whereConds, " AND ")
 
 	var compTotal int
-	countSQL := "SELECT COUNT(*) FROM fhir_resource r WHERE " + whereClause
-	if err := s.db.QueryRowContext(ctx, countSQL, args...).Scan(&compTotal); err != nil {
-		return nil, fmt.Errorf("patient everything count: %w", err)
-	}
-
-	dataSQL := fmt.Sprintf(
-		"SELECT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r WHERE %s ORDER BY r.res_type ASC, r.res_id ASC LIMIT $%d OFFSET $%d",
-		whereClause, len(args)+1, len(args)+2,
-	)
-	args = append(args, params.Count, offset)
-
-	rows, err := s.db.QueryContext(ctx, dataSQL, args...)
-	if err != nil {
-		return nil, fmt.Errorf("patient everything query: %w", err)
-	}
-	defer rows.Close()
-
 	var includes []SearchResult
-	for rows.Next() {
-		var r SearchResult
-		if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
-			return nil, fmt.Errorf("scan patient everything row: %w", err)
+	err = s.withTenantExec(ctx, params.TenantID, func(exec queryExecer) error {
+		countSQL := "SELECT COUNT(*) FROM fhir_resource r WHERE " + whereClause
+		if err := exec.QueryRowContext(ctx, countSQL, args...).Scan(&compTotal); err != nil {
+			return fmt.Errorf("patient everything count: %w", err)
 		}
-		includes = append(includes, r)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("patient everything rows: %w", err)
+
+		dataSQL := fmt.Sprintf(
+			"SELECT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r WHERE %s ORDER BY r.res_type ASC, r.res_id ASC LIMIT $%d OFFSET $%d",
+			whereClause, len(args)+1, len(args)+2,
+		)
+		qArgs := append(append([]any{}, args...), params.Count, offset)
+
+		rows, err := exec.QueryContext(ctx, dataSQL, qArgs...)
+		if err != nil {
+			return fmt.Errorf("patient everything query: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var r SearchResult
+			if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
+				return fmt.Errorf("scan patient everything row: %w", err)
+			}
+			includes = append(includes, r)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("patient everything rows: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return &SearchResults{
@@ -1396,46 +1482,52 @@ func (s *Store) BelongsToPatientCompartment(ctx context.Context, tenantID, resTy
 		return true, nil
 	}
 
-	var isDeleted bool
-	err := s.db.QueryRowContext(ctx, `
-		SELECT is_deleted FROM fhir_resource
-		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
-	`, tenantID, resType, resID).Scan(&isDeleted)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-
 	var inCompartment bool
-	err = s.db.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM spidx_reference
-			WHERE tenant_id = $1
-			  AND res_type = $2
-			  AND res_id = $3
-			  AND target_id = $4
-			  AND (target_type = 'Patient' OR target_type = '')
-		) OR (
-			$2 = 'Provenance'
-			AND EXISTS (
-				SELECT 1 FROM spidx_reference rf_prov
-				JOIN spidx_reference rf_pat
-				  ON rf_pat.tenant_id = rf_prov.tenant_id
-				 AND rf_pat.res_type = rf_prov.target_type
-				 AND rf_pat.res_id = rf_prov.target_id
-				WHERE rf_prov.tenant_id = $1
-				  AND rf_prov.res_type = 'Provenance'
-				  AND rf_prov.res_id = $3
-				  AND rf_prov.sp_name = 'target'
-				  AND rf_pat.target_id = $4
-				  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+	var exists bool
+	err := s.withTenantExec(ctx, tenantID, func(exec queryExecer) error {
+		var isDeleted bool
+		qErr := exec.QueryRowContext(ctx, `
+			SELECT is_deleted FROM fhir_resource
+			WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3
+		`, tenantID, resType, resID).Scan(&isDeleted)
+		if errors.Is(qErr, sql.ErrNoRows) {
+			return nil
+		}
+		if qErr != nil {
+			return qErr
+		}
+		exists = true
+		return exec.QueryRowContext(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM spidx_reference
+				WHERE tenant_id = $1
+				  AND res_type = $2
+				  AND res_id = $3
+				  AND target_id = $4
+				  AND (target_type = 'Patient' OR target_type = '')
+			) OR (
+				$2 = 'Provenance'
+				AND EXISTS (
+					SELECT 1 FROM spidx_reference rf_prov
+					JOIN spidx_reference rf_pat
+					  ON rf_pat.tenant_id = rf_prov.tenant_id
+					 AND rf_pat.res_type = rf_prov.target_type
+					 AND rf_pat.res_id = rf_prov.target_id
+					WHERE rf_prov.tenant_id = $1
+					  AND rf_prov.res_type = 'Provenance'
+					  AND rf_prov.res_id = $3
+					  AND rf_prov.sp_name = 'target'
+					  AND rf_pat.target_id = $4
+					  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+				)
 			)
-		)
-	`, tenantID, resType, resID, patientID).Scan(&inCompartment)
+		`, tenantID, resType, resID, patientID).Scan(&inCompartment)
+	})
 	if err != nil {
 		return false, err
+	}
+	if !exists {
+		return false, nil
 	}
 	return inCompartment, nil
 }
@@ -1464,4 +1556,204 @@ func IndexesBelongToPatientCompartment(resType, resID string, idx *SearchIndexes
 		}
 	}
 	return matchedOwnPatient
+}
+
+// uriHierarchyAncestors computes all hierarchical ancestor URI strings for the FHIR :above modifier.
+// For example, "http://example.org/fhir/ValueSet/vs-1" returns:
+//   - "http://example.org/fhir/ValueSet/vs-1"
+//   - "http://example.org/fhir/ValueSet/"
+//   - "http://example.org/fhir/ValueSet"
+//   - "http://example.org/fhir/"
+//   - "http://example.org/fhir"
+//   - "http://example.org/"
+//   - "http://example.org"
+func uriHierarchyAncestors(rawURI string) []string {
+	u := strings.TrimSpace(rawURI)
+	if u == "" {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	add := func(s string) {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	add(u)
+	add(strings.TrimSuffix(u, "/"))
+
+	schemeEnd := 0
+	if idx := strings.Index(u, "://"); idx != -1 {
+		schemeEnd = idx + 3
+	}
+	curr := strings.TrimSuffix(u, "/")
+	for {
+		slashIdx := strings.LastIndexByte(curr, '/')
+		if slashIdx == -1 || slashIdx < schemeEnd {
+			break
+		}
+		prefix := curr[:slashIdx]
+		add(prefix + "/")
+		add(prefix)
+		curr = prefix
+	}
+	return out
+}
+
+// missingTablesForParam returns the covering spidx_* table(s) where spName may be indexed.
+// Choice-type [x] and multi-representation parameters check across all candidate tables so
+// :missing=true only matches resources where the parameter is absent from every candidate index.
+func missingTablesForParam(spName string) []string {
+	switch spName {
+	case "deceased", "onset", "abatement", "effective", "performed", "occurrence":
+		return []string{"spidx_token", "spidx_date", "spidx_string", "spidx_quantity"}
+	case "value":
+		return []string{"spidx_quantity", "spidx_token", "spidx_string", "spidx_date"}
+	case "medication", "code":
+		return []string{"spidx_token", "spidx_reference"}
+	case "questionnaire", "instantiates-canonical":
+		return []string{"spidx_reference", "spidx_uri", "spidx_token"}
+	}
+	switch {
+	case knownURISearchParams[spName]:
+		return []string{"spidx_uri", "spidx_token"}
+	case knownStringSearchParams[spName]:
+		return []string{"spidx_string"}
+	case knownDateSearchParams[spName]:
+		return []string{"spidx_date"}
+	case knownQuantitySearchParams[spName]:
+		return []string{"spidx_quantity"}
+	case knownRefSearchParams[spName]:
+		return []string{"spidx_reference"}
+	case knownTokenSearchParams[spName]:
+		return []string{"spidx_token"}
+	default:
+		return []string{"spidx_token", "spidx_string", "spidx_date", "spidx_quantity", "spidx_reference", "spidx_uri"}
+	}
+}
+
+// PatientMatchCandidateParams specifies index-backed pre-filtering parameters
+// for Patient/$match and Patient/$member-match candidate retrieval.
+type PatientMatchCandidateParams struct {
+	TenantID            string
+	RestrictedPatientID string   // Optional: restricts to a single Patient ID when patient-scoped
+	ExtraCandidateIDs   []string // Optional: additional candidate Patient IDs (e.g. from matched Coverage beneficiaries)
+	Identifiers         []string // Optional: identifier values (case-insensitive)
+	Families            []string // Optional: normalized lowercase family names
+	Givens              []string // Optional: normalized lowercase given names (matched by prefix)
+	BirthDate           string   // Optional: YYYY-MM-DD birthDate
+	Limit               int
+}
+
+// SearchPatientMatchCandidates pre-filters Patient resources in SQL using spidx_token (identifier),
+// spidx_string (family, given), and spidx_date (birthdate) before scoring in Go.
+func (s *Store) SearchPatientMatchCandidates(ctx context.Context, params PatientMatchCandidateParams) ([]SearchResult, error) {
+	limit := params.Limit
+	if limit <= 0 || limit > MaxSearchCount {
+		limit = 500
+	}
+
+	whereConds := []string{
+		"r.tenant_id = $1",
+		"r.res_type = 'Patient'",
+		"r.is_deleted = FALSE",
+	}
+	args := []any{params.TenantID}
+
+	if params.RestrictedPatientID != "" {
+		args = append(args, params.RestrictedPatientID)
+		whereConds = append(whereConds, fmt.Sprintf("r.res_id = $%d", len(args)))
+	}
+
+	var orPreds []string
+	if len(params.ExtraCandidateIDs) > 0 {
+		args = append(args, pq.Array(params.ExtraCandidateIDs))
+		orPreds = append(orPreds, fmt.Sprintf("r.res_id = ANY($%d)", len(args)))
+	}
+	if len(params.Identifiers) > 0 {
+		lowerIDs := make([]string, 0, len(params.Identifiers))
+		for _, id := range params.Identifiers {
+			if trimmed := strings.ToLower(strings.TrimSpace(id)); trimmed != "" {
+				lowerIDs = append(lowerIDs, trimmed)
+			}
+		}
+		if len(lowerIDs) > 0 {
+			args = append(args, pq.Array(lowerIDs))
+			orPreds = append(orPreds, fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM spidx_token st WHERE st.tenant_id = r.tenant_id AND st.res_type = 'Patient' AND st.res_id = r.res_id AND st.sp_name = 'identifier' AND LOWER(st.sp_value) = ANY($%d))",
+				len(args),
+			))
+		}
+	}
+	if len(params.Families) > 0 {
+		lowerFams := make([]string, 0, len(params.Families))
+		for _, fam := range params.Families {
+			if trimmed := strings.ToLower(strings.TrimSpace(fam)); trimmed != "" {
+				lowerFams = append(lowerFams, trimmed)
+			}
+		}
+		if len(lowerFams) > 0 {
+			args = append(args, pq.Array(lowerFams))
+			orPreds = append(orPreds, fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM spidx_string sf WHERE sf.tenant_id = r.tenant_id AND sf.res_type = 'Patient' AND sf.res_id = r.res_id AND sf.sp_name = 'family' AND sf.sp_value = ANY($%d))",
+				len(args),
+			))
+		}
+	}
+	for _, giv := range params.Givens {
+		trimmed := strings.ToLower(strings.TrimSpace(giv))
+		if trimmed == "" {
+			continue
+		}
+		p1 := len(args) + 1
+		p2 := len(args) + 2
+		args = append(args, escapeLikePattern(trimmed)+"%", trimmed)
+		orPreds = append(orPreds, fmt.Sprintf(
+			`EXISTS (SELECT 1 FROM spidx_string sg WHERE sg.tenant_id = r.tenant_id AND sg.res_type = 'Patient' AND sg.res_id = r.res_id AND sg.sp_name = 'given' AND (sg.sp_value LIKE $%d ESCAPE '\' OR $%d LIKE sg.sp_value || '%%'))`,
+			p1, p2,
+		))
+	}
+	if params.BirthDate != "" {
+		if dOp, err := ParseDateOp(params.BirthDate); err == nil {
+			cond, dArgs := buildDateCondition("sd", dOp, len(args))
+			args = append(args, dArgs...)
+			orPreds = append(orPreds, fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM spidx_date sd WHERE sd.tenant_id = r.tenant_id AND sd.res_type = 'Patient' AND sd.res_id = r.res_id AND sd.sp_name = 'birthdate' AND %s)",
+				cond,
+			))
+		}
+	}
+
+	if len(orPreds) > 0 {
+		whereConds = append(whereConds, "("+strings.Join(orPreds, " OR ")+")")
+	}
+
+	args = append(args, limit)
+	querySQL := fmt.Sprintf(
+		"SELECT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r WHERE %s ORDER BY r.res_id ASC LIMIT $%d",
+		strings.Join(whereConds, " AND "), len(args),
+	)
+
+	var matches []SearchResult
+	err := s.withTenantExec(ctx, params.TenantID, func(exec queryExecer) error {
+		rows, err := exec.QueryContext(ctx, querySQL, args...)
+		if err != nil {
+			return fmt.Errorf("patient match candidate query: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var r SearchResult
+			if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
+				return fmt.Errorf("scan patient match candidate: %w", err)
+			}
+			matches = append(matches, r)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return matches, nil
 }

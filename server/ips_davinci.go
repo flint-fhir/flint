@@ -449,16 +449,33 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// Fetch candidate Patients in the tenant (restricted to patient compartment when patient-scoped)
-	patSearchParams := postgres.SearchParams{
-		TenantID: tenant,
-		ResType:  "Patient",
-		Count:    1000,
+	// Fetch candidate Patients in the tenant pre-filtered via spidx_* indexes
+	var candIdentifiers []string
+	for _, idKey := range inDemo.identifiers {
+		if idKey.code != "" {
+			candIdentifiers = append(candIdentifiers, idKey.code)
+		}
+	}
+	if covSubscriberID != "" {
+		candIdentifiers = append(candIdentifiers, covSubscriberID)
+	}
+	var extraPatIDs []string
+	for patID := range coveragePatients {
+		extraPatIDs = append(extraPatIDs, patID)
+	}
+	patCandParams := postgres.PatientMatchCandidateParams{
+		TenantID:          tenant,
+		ExtraCandidateIDs: extraPatIDs,
+		Identifiers:       candIdentifiers,
+		Families:          inDemo.families,
+		Givens:            inDemo.givens,
+		BirthDate:         inDemo.birthDate,
+		Limit:             1000,
 	}
 	if patientRestricted {
-		patSearchParams.ID = allowedPatientID
+		patCandParams.RestrictedPatientID = allowedPatientID
 	}
-	patSR, err := s.store.Search(r.Context(), patSearchParams)
+	patCandidates, err := s.store.SearchPatientMatchCandidates(r.Context(), patCandParams)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to search Patients for $member-match")
 		return
@@ -472,7 +489,7 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 	}
 	var matches []matchedMember
 
-	for _, m := range patSR.Matches {
+	for _, m := range patCandidates {
 		if patientRestricted && cleanID(m.ResID) != allowedPatientID {
 			continue
 		}

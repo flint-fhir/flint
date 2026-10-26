@@ -842,5 +842,47 @@ func TestDynamicResourceExtractor_USCoreAndR4Resources(t *testing.T) {
 		}
 		assert.True(t, foundTaskStatus, "expected Task status=requested")
 		assert.True(t, foundTaskPatient, "expected Task patient reference from Task.for")
+
+		// Questionnaire with canonical url -> SpidxURI
+		qJSON := []byte(`{
+			"resourceType": "Questionnaire",
+			"id": "q-test-1",
+			"status": "active",
+			"url": "http://hl7.org/fhir/Questionnaire/phq-9"
+		}`)
+		qBytes := jsonToProtoBytes(t, descriptors["Questionnaire"], qJSON)
+		qIdx, err := extractors["Questionnaire"]("tenant-1", "q-test-1", qBytes)
+		require.NoError(t, err)
+		var foundURI bool
+		for _, u := range qIdx.URIs {
+			if u.SpName == "url" && u.SpValue == "http://hl7.org/fhir/Questionnaire/phq-9" {
+				foundURI = true
+			}
+		}
+		assert.True(t, foundURI, "expected Questionnaire.url to be indexed in SpidxURI")
+
+		// QuestionnaireResponse with canonical questionnaire -> SpidxURI + SpidxReference
+		qrJSON := []byte(`{
+			"resourceType": "QuestionnaireResponse",
+			"id": "qr-test-1",
+			"status": "completed",
+			"questionnaire": "http://hl7.org/fhir/Questionnaire/phq-9"
+		}`)
+		qrBytes := jsonToProtoBytes(t, descriptors["QuestionnaireResponse"], qrJSON)
+		qrIdx, err := extractors["QuestionnaireResponse"]("tenant-1", "qr-test-1", qrBytes)
+		require.NoError(t, err)
+		var foundQRURI, foundQRRef bool
+		for _, u := range qrIdx.URIs {
+			if u.SpName == "questionnaire" && u.SpValue == "http://hl7.org/fhir/Questionnaire/phq-9" {
+				foundQRURI = true
+			}
+		}
+		for _, ref := range qrIdx.References {
+			if ref.SpName == "questionnaire" && ref.TargetType == "Questionnaire" && ref.TargetID == "phq-9" {
+				foundQRRef = true
+			}
+		}
+		assert.True(t, foundQRURI, "expected QuestionnaireResponse.questionnaire URI index")
+		assert.True(t, foundQRRef, "expected QuestionnaireResponse.questionnaire Reference index")
 	})
 }

@@ -274,4 +274,50 @@ func TestParseCompositeTokenQuantity(t *testing.T) {
 		require.Len(t, sp.CompositeTokenQuantities[1], 1)
 		assert.True(t, postgres.HasSearchCriteria(sp))
 	})
+
+	t.Run("BuildSearchParamsFromQuery parses URI params and :below/:above modifiers", func(t *testing.T) {
+		q := map[string][]string{
+			"url:below": {"http://hl7.org/fhir/ValueSet"},
+			"system":    {"http://loinc.org"},
+		}
+		require.NoError(t, postgres.ValidateSearchQuery(q))
+		sp := postgres.BuildSearchParamsFromQuery("t1", "ValueSet", q)
+		require.Len(t, sp.URIFilters["url:below"], 1)
+		assert.Equal(t, "http://hl7.org/fhir/ValueSet", sp.URIFilters["url:below"][0])
+		assert.Equal(t, "http://loinc.org", sp.URIs["system"])
+		assert.True(t, postgres.HasSearchCriteria(sp))
+	})
+}
+
+func TestTenantIsolationConfiguration(t *testing.T) {
+	mode, err := postgres.ParseTenantIsolationMode("")
+	require.NoError(t, err)
+	assert.Equal(t, postgres.TenantIsolationShared, mode)
+
+	mode, err = postgres.ParseTenantIsolationMode("shared")
+	require.NoError(t, err)
+	assert.Equal(t, postgres.TenantIsolationShared, mode)
+
+	mode, err = postgres.ParseTenantIsolationMode("schema")
+	require.NoError(t, err)
+	assert.Equal(t, postgres.TenantIsolationSchema, mode)
+
+	mode, err = postgres.ParseTenantIsolationMode("schema-per-tenant")
+	require.NoError(t, err)
+	assert.Equal(t, postgres.TenantIsolationSchema, mode)
+
+	_, err = postgres.ParseTenantIsolationMode("invalid-mode")
+	assert.Error(t, err)
+
+	schemaName, err := postgres.TenantSchemaName("HCA-West.01")
+	require.NoError(t, err)
+	assert.Equal(t, "tenant_hca_west_01", schemaName)
+
+	_, err = postgres.TenantSchemaName("   ")
+	assert.Error(t, err)
+
+	st := postgres.New(nil, postgres.WithTenantIsolation(postgres.TenantIsolationSchema))
+	assert.Equal(t, postgres.TenantIsolationSchema, st.TenantIsolation())
+	st.SetTenantIsolation(postgres.TenantIsolationShared)
+	assert.Equal(t, postgres.TenantIsolationShared, st.TenantIsolation())
 }

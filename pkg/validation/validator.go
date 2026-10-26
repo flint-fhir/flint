@@ -145,7 +145,7 @@ func (e *Engine) ValidateResource(expectedResType string, resMap map[string]any)
 
 	// 5. Primitive type format checks
 	if e.opts.EnforcePrimitiveFormats {
-		e.validatePrimitiveFormats(resTypeStr, resMap, outcome)
+		e.validatePrimitiveFormats(resTypeStr, schema, resMap, outcome)
 	}
 
 	// 6. ValueSet code bindings check
@@ -156,7 +156,7 @@ func (e *Engine) ValidateResource(expectedResType string, resMap map[string]any)
 	return outcome
 }
 
-func (e *Engine) validatePrimitiveFormats(resType string, resMap map[string]any, outcome *Outcome) {
+func (e *Engine) validatePrimitiveFormats(resType string, schema ResourceSchema, resMap map[string]any, outcome *Outcome) {
 	// id format
 	if idVal, ok := resMap["id"]; ok && idVal != nil {
 		idStr := extractStringOrWrapped(idVal)
@@ -167,18 +167,45 @@ func (e *Engine) validatePrimitiveFormats(resType string, resMap map[string]any,
 		}
 	}
 
-	// birthDate format
-	if bVal, ok := resMap["birthDate"]; ok && bVal != nil {
-		bStr := extractStringOrWrapped(bVal)
-		if bStr != "" && !DateRegex.MatchString(bStr) {
-			outcome.AddError(CodeValue,
-				fmt.Sprintf("Invalid birthDate format %q (must be YYYY, YYYY-MM, or YYYY-MM-DD)", bStr),
-				resType+".birthDate")
+	checkedDate := make(map[string]bool)
+	for dField := range schema.DateFields {
+		checkedDate[dField] = true
+		if dVal, ok := resMap[dField]; ok && dVal != nil {
+			dStr := extractStringOrWrapped(dVal)
+			if dStr != "" && !DateRegex.MatchString(dStr) {
+				outcome.AddError(CodeValue,
+					fmt.Sprintf("Invalid %s format %q (must be YYYY, YYYY-MM, or YYYY-MM-DD)", dField, dStr),
+					resType+"."+dField)
+			}
+		}
+	}
+	if !checkedDate["birthDate"] {
+		if bVal, ok := resMap["birthDate"]; ok && bVal != nil {
+			bStr := extractStringOrWrapped(bVal)
+			if bStr != "" && !DateRegex.MatchString(bStr) {
+				outcome.AddError(CodeValue,
+					fmt.Sprintf("Invalid birthDate format %q (must be YYYY, YYYY-MM, or YYYY-MM-DD)", bStr),
+					resType+".birthDate")
+			}
 		}
 	}
 
-	// dateTime fields format
+	checkedDateTime := make(map[string]bool)
+	for dtField := range schema.DateTimeFields {
+		checkedDateTime[dtField] = true
+		if dtVal, ok := resMap[dtField]; ok && dtVal != nil {
+			dtStr := extractStringOrWrapped(dtVal)
+			if dtStr != "" && !DateTimeRegex.MatchString(dtStr) {
+				outcome.AddError(CodeValue,
+					fmt.Sprintf("Invalid %s format %q", dtField, dtStr),
+					resType+"."+dtField)
+			}
+		}
+	}
 	for _, dtField := range []string{"effectiveDateTime", "authoredOn", "recordedDate", "occurrenceDateTime", "performedDateTime", "receivedTime"} {
+		if checkedDateTime[dtField] {
+			continue
+		}
 		if dtVal, ok := resMap[dtField]; ok && dtVal != nil {
 			dtStr := extractStringOrWrapped(dtVal)
 			if dtStr != "" && !DateTimeRegex.MatchString(dtStr) {
@@ -189,13 +216,26 @@ func (e *Engine) validatePrimitiveFormats(resType string, resMap map[string]any,
 		}
 	}
 
-	// issued format (instant)
-	if instVal, ok := resMap["issued"]; ok && instVal != nil {
-		instStr := extractStringOrWrapped(instVal)
-		if instStr != "" && !InstantRegex.MatchString(instStr) {
-			outcome.AddError(CodeValue,
-				fmt.Sprintf("Invalid issued instant format %q (requires full timestamp with timezone)", instStr),
-				resType+".issued")
+	checkedInstant := make(map[string]bool)
+	for instField := range schema.InstantFields {
+		checkedInstant[instField] = true
+		if instVal, ok := resMap[instField]; ok && instVal != nil {
+			instStr := extractStringOrWrapped(instVal)
+			if instStr != "" && !InstantRegex.MatchString(instStr) {
+				outcome.AddError(CodeValue,
+					fmt.Sprintf("Invalid %s instant format %q (requires full timestamp with timezone)", instField, instStr),
+					resType+"."+instField)
+			}
+		}
+	}
+	if !checkedInstant["issued"] {
+		if instVal, ok := resMap["issued"]; ok && instVal != nil {
+			instStr := extractStringOrWrapped(instVal)
+			if instStr != "" && !InstantRegex.MatchString(instStr) {
+				outcome.AddError(CodeValue,
+					fmt.Sprintf("Invalid issued instant format %q (requires full timestamp with timezone)", instStr),
+					resType+".issued")
+			}
 		}
 	}
 }
@@ -220,7 +260,7 @@ func (e *Engine) validateCodeBindings(resType string, schema ResourceSchema, res
 
 		switch v := val.(type) {
 		case string:
-			if !validCodes[v] {
+			if !isValidCodeInSet(validCodes, v) {
 				outcome.AddError(CodeInvalid,
 					fmt.Sprintf("Code %q is not in required ValueSet %s", v, uri),
 					path)

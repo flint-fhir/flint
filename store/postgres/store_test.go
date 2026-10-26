@@ -1208,6 +1208,52 @@ func TestStore_Integration(t *testing.T) {
 		}
 	})
 
+	t.Run("SchemaPerTenantIsolation", func(t *testing.T) {
+		schemaStore := postgres.New(db, postgres.WithTenantIsolation(postgres.TenantIsolationSchema))
+		tenantID := "schema-iso-test"
+		defer func() {
+			_, _ = db.ExecContext(ctx, "DROP SCHEMA IF EXISTS tenant_schema_iso_test CASCADE")
+		}()
+
+		err := schemaStore.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      tenantID,
+			ResType:       "Patient",
+			ResID:         "pat-schema-1",
+			ResourceProto: []byte("schema-isolated-proto"),
+			SearchIndexes: &postgres.SearchIndexes{
+				Strings: []postgres.SpidxString{
+					{TenantID: tenantID, ResType: "Patient", ResID: "pat-schema-1", SpName: "family", SpValue: "schematest"},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("schemaStore.WriteResource: %v", err)
+		}
+
+		// Verify read & search through schemaStore
+		gotProto, err := schemaStore.ReadResource(ctx, tenantID, "Patient", "pat-schema-1")
+		if err != nil || string(gotProto) != "schema-isolated-proto" {
+			t.Fatalf("schemaStore.ReadResource: got %q err=%v", string(gotProto), err)
+		}
+		sr, err := schemaStore.Search(ctx, postgres.SearchParams{
+			TenantID: tenantID,
+			ResType:  "Patient",
+			Strings:  map[string]string{"family": "schematest"},
+		})
+		if err != nil || sr.Total != 1 {
+			t.Fatalf("schemaStore.Search: total=%v err=%v", sr, err)
+		}
+
+		// Verify physical isolation: row lives in tenant_schema_iso_test.fhir_resource, NOT public.fhir_resource
+		var inTenantSchema, inPublicSchema int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM tenant_schema_iso_test.fhir_resource WHERE res_id = 'pat-schema-1'").Scan(&inTenantSchema); err != nil || inTenantSchema != 1 {
+			t.Fatalf("expected 1 row in tenant_schema_iso_test.fhir_resource, got %d (err=%v)", inTenantSchema, err)
+		}
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM public.fhir_resource WHERE tenant_id = $1 AND res_id = 'pat-schema-1'", tenantID).Scan(&inPublicSchema); err != nil || inPublicSchema != 0 {
+			t.Fatalf("expected 0 rows in public.fhir_resource for schema-isolated tenant, got %d (err=%v)", inPublicSchema, err)
+		}
+	})
+
 	// Clean up
 	for _, table := range []string{"fhir_export_job", "spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
 		db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-tenant'")

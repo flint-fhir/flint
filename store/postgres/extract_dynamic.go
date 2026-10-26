@@ -157,10 +157,20 @@ func extractSingleFieldValue(
 			}
 		}
 
-	case "google.fhir.r4.core.Canonical", "google.fhir.r4.core.Uri":
+	case "google.fhir.r4.core.Canonical", "google.fhir.r4.core.Uri", "google.fhir.r4.core.Url", "google.fhir.r4.core.Oid", "google.fhir.r4.core.Uuid":
 		s := strings.TrimSpace(extractWrappedString(subMsg))
 		if s != "" {
 			spName := strings.ReplaceAll(fieldName, "_", "-")
+			if (fieldName == "uri" || fieldName == "canonical" || fieldName == "url") && parentField != "" {
+				spName = strings.ReplaceAll(parentField, "_", "-")
+			}
+			idx.URIs = append(idx.URIs, SpidxURI{
+				TenantID: tenantID,
+				ResType:  resType,
+				ResID:    resID,
+				SpName:   spName,
+				SpValue:  s,
+			})
 			idx.Tokens = append(idx.Tokens, SpidxToken{
 				TenantID: tenantID,
 				ResType:  resType,
@@ -168,10 +178,49 @@ func extractSingleFieldValue(
 				SpName:   spName,
 				SpValue:  s,
 			})
+			if spName == "questionnaire" || spName == "instantiates-canonical" {
+				targetType := ""
+				targetID := s
+				if spName == "questionnaire" {
+					targetType = "Questionnaire"
+				}
+				if slashIdx := strings.LastIndex(s, "/"); slashIdx != -1 && slashIdx+1 < len(s) {
+					tailID := s[slashIdx+1:]
+					prefix := s[:slashIdx]
+					if prevSlash := strings.LastIndex(prefix, "/"); prevSlash != -1 {
+						targetType = prefix[prevSlash+1:]
+					} else if prefix != "" && !strings.Contains(prefix, ":") {
+						targetType = prefix
+					}
+					idx.References = append(idx.References, SpidxReference{
+						TenantID:   tenantID,
+						ResType:    resType,
+						ResID:      resID,
+						SpName:     spName,
+						TargetType: targetType,
+						TargetID:   tailID,
+					})
+				}
+				idx.References = append(idx.References, SpidxReference{
+					TenantID:   tenantID,
+					ResType:    resType,
+					ResID:      resID,
+					SpName:     spName,
+					TargetType: targetType,
+					TargetID:   targetID,
+				})
+			}
 		}
 
 	case "google.fhir.r4.core.Boolean":
-		if fieldName == "active" {
+		boolSpName := ""
+		switch {
+		case fieldName == "active":
+			boolSpName = "active"
+		case fieldName == "deceased" || parentField == "deceased":
+			boolSpName = "deceased"
+		}
+		if boolSpName != "" {
 			if valFD := subMsg.Descriptor().Fields().ByName("value"); valFD != nil && subMsg.Has(valFD) && valFD.Kind() == protoreflect.BoolKind {
 				bVal := "false"
 				if subMsg.Get(valFD).Bool() {
@@ -181,7 +230,7 @@ func extractSingleFieldValue(
 					TenantID: tenantID,
 					ResType:  resType,
 					ResID:    resID,
-					SpName:   "active",
+					SpName:   boolSpName,
 					SpValue:  bVal,
 				})
 			}

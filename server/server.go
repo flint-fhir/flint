@@ -57,21 +57,23 @@ type Server struct {
 	logger *slog.Logger
 	// protoRegistry maps FHIR resource type names to proto message descriptors.
 	// Used to unmarshal proto bytes back to proto messages for JSON conversion.
-	protoRegistry  map[string]protoreflect.MessageDescriptor
-	extractors     map[string]postgres.IndexExtractorFunc
-	smartConfig    *SMARTConfig
-	tokenValidator auth.TokenValidator
-	devAuth        *auth.MockTokenValidator
-	oauthMu        sync.Mutex
-	oauthCodes     map[string]authCodeEntry
-	refreshTokens  map[string]refreshTokenEntry
-	revokedTokens  map[string]time.Time
-	validator      validation.Validator
-	auditRecorder  audit.Recorder
-	cdcPublisher   automq.Publisher
-	exportMu       sync.RWMutex
-	exportJobs     map[string]*exportJob
-	metrics        *serverMetrics
+	protoRegistry           map[string]protoreflect.MessageDescriptor
+	extractors              map[string]postgres.IndexExtractorFunc
+	smartConfig             *SMARTConfig
+	tokenValidator          auth.TokenValidator
+	devAuth                 *auth.MockTokenValidator
+	oauthMu                 sync.Mutex
+	oauthCodes              map[string]authCodeEntry
+	refreshTokens           map[string]refreshTokenEntry
+	revokedTokens           map[string]time.Time
+	validator               validation.Validator
+	auditRecorder           audit.Recorder
+	cdcPublisher            automq.Publisher
+	exportMu                sync.RWMutex
+	exportJobs              map[string]*exportJob
+	subSem                  chan struct{}
+	disallowPrivateWebhooks bool
+	metrics                 *serverMetrics
 }
 
 // New creates a new FHIR server.
@@ -95,6 +97,7 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 		validator:     validation.NewEngine(validation.DefaultOptions()),
 		auditRecorder: auditRec,
 		exportJobs:    make(map[string]*exportJob),
+		subSem:        make(chan struct{}, 32),
 		metrics:       newServerMetrics(),
 	}
 }
@@ -743,6 +746,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if err := s.validateSubscriptionResourceJSON(resType, body); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "security", err.Error())
+		return
+	}
 	body = normalizeSubscriptionOnWrite(resType, body)
 
 	// Normalize standard flat HL7 FHIR R4 JSON to google/fhir protojson shape
@@ -1004,6 +1011,10 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if err := s.validateSubscriptionResourceJSON(resType, body); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "security", err.Error())
+		return
+	}
 	body = normalizeSubscriptionOnWrite(resType, body)
 
 	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, body)

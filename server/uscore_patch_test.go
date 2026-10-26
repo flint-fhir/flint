@@ -213,6 +213,26 @@ func TestRegisterDefaultResourceTypesAndOpenAPISchemas(t *testing.T) {
 			t.Errorf("%s: expected status %d, got %d", tc.name, tc.wantStatus, res.StatusCode)
 		}
 	}
+
+	// 4. Verify Subscription SSRF endpoint validation
+	if err := server.ValidateSubscriptionEndpoint("http://169.254.169.254/latest/meta-data/", false); err == nil {
+		t.Errorf("expected link-local cloud metadata IP 169.254.169.254 to be blocked")
+	}
+	if err := server.ValidateSubscriptionEndpoint("http://metadata.google.internal/computeMetadata/v1/", false); err == nil {
+		t.Errorf("expected metadata.google.internal to be blocked")
+	}
+	if err := server.ValidateSubscriptionEndpoint("ftp://example.org/hook", false); err == nil {
+		t.Errorf("expected non-http(s) scheme ftp:// to be blocked")
+	}
+	if err := server.ValidateSubscriptionEndpoint("http://127.0.0.1:8080/hook", false); err != nil {
+		t.Errorf("expected loopback webhook to be allowed by default for local testing, got %v", err)
+	}
+	if err := server.ValidateSubscriptionEndpoint("http://127.0.0.1:8080/hook", true); err == nil {
+		t.Errorf("expected loopback webhook to be blocked when disallowPrivate is true")
+	}
+	if err := server.ValidateSubscriptionEndpoint("http://10.0.0.1/hook", true); err == nil {
+		t.Errorf("expected RFC1918 private IP webhook to be blocked when disallowPrivate is true")
+	}
 }
 
 func openTestPostgres(t *testing.T) *sql.DB {

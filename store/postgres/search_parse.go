@@ -258,6 +258,8 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 		paramType = "quantity"
 	case knownRefSearchParams[targetParam]:
 		paramType = "reference"
+	case knownURISearchParams[targetParam] || targetMod == "below" || targetMod == "above":
+		paramType = "uri"
 	}
 
 	return &ChainedParam{
@@ -305,6 +307,8 @@ func ParseHasParam(key, value string) (*HasParam, bool, error) {
 		}
 	case knownRefSearchParams[searchParam]:
 		paramType = "reference"
+	case knownURISearchParams[searchParam]:
+		paramType = "uri"
 	}
 
 	return &HasParam{
@@ -439,6 +443,14 @@ var (
 		"code-value-quantity":           true,
 		"component-code-value-quantity": true,
 		"combo-code-value-quantity":     true,
+	}
+	knownURISearchParams = map[string]bool{
+		"url":              true,
+		"system":           true,
+		"source-uri":       true,
+		"target-uri":       true,
+		"instantiates-uri": true,
+		"definition":       true,
 	}
 )
 
@@ -599,6 +611,8 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 		QuantityFilters:  make(map[string][]QuantityOp),
 		References:       make(map[string]string),
 		ReferenceFilters: make(map[string][]string),
+		URIs:             make(map[string]string),
+		URIFilters:       make(map[string][]string),
 		Missing:          make(map[string]bool),
 		Summary:          strings.ToLower(strings.TrimSpace(q.Get("_summary"))),
 		TotalMode:        strings.ToLower(strings.TrimSpace(q.Get("_total"))),
@@ -725,6 +739,9 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 					params.CompositeTokenQuantities = append(params.CompositeTokenQuantities, orGroup)
 				}
 			}
+		case knownURISearchParams[baseKey] || mod == "below" || mod == "above":
+			params.URIs[key] = value
+			params.URIFilters[key] = append(params.URIFilters[key], values...)
 		case knownStringSearchParams[baseKey]:
 			params.Strings[key] = value
 			params.StringFilters[key] = append(params.StringFilters[key], values...)
@@ -834,6 +851,8 @@ func HasSearchCriteria(p SearchParams) bool {
 		len(p.QuantityFilters) > 0 ||
 		len(p.References) > 0 ||
 		len(p.ReferenceFilters) > 0 ||
+		len(p.URIs) > 0 ||
+		len(p.URIFilters) > 0 ||
 		len(p.Missing) > 0 ||
 		len(p.Chained) > 0 ||
 		len(p.Has) > 0 ||

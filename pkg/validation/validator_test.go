@@ -302,4 +302,38 @@ func TestValidationEngine_StrictUnknownAndTypes(t *testing.T) {
 			t.Fatal("expected missing mandatoryField on CustomResource to fail")
 		}
 	})
+
+	t.Run("Proto-derived CodeBindings and primitive date/dateTime/instant checks on non-US-Core R4 types", func(t *testing.T) {
+		// Valid RiskAssessment with proto-derived status enum and occurrenceDateTime
+		validRA := strictEngine.ValidateJSON("RiskAssessment", []byte(`{
+			"resourceType": "RiskAssessment",
+			"id": "ra-valid",
+			"status": "final",
+			"occurrenceDateTime": "2026-01-15T10:00:00Z"
+		}`))
+		if !validRA.IsValid() {
+			t.Fatalf("expected valid RiskAssessment, got %+v", validRA.Issues)
+		}
+
+		// Invalid RiskAssessment status enum and occurrenceDateTime
+		invalidRA := strictEngine.ValidateJSON("RiskAssessment", []byte(`{
+			"resourceType": "RiskAssessment",
+			"id": "ra-invalid",
+			"status": "not-a-valid-status",
+			"occurrenceDateTime": "not-a-datetime"
+		}`))
+		if invalidRA.IsValid() || len(invalidRA.Issues) < 2 {
+			t.Fatalf("expected invalid RiskAssessment status and occurrenceDateTime to fail with >=2 errors, got %+v", invalidRA.Issues)
+		}
+
+		// Invalid Subscription status and end instant
+		invalidSub := strictEngine.ValidateJSON("Subscription", []byte(`{
+			"resourceType": "Subscription",
+			"status": "invalid-sub-status",
+			"end": "2026-01-15"
+		}`))
+		if invalidSub.IsValid() || len(invalidSub.Issues) < 2 {
+			t.Fatalf("expected invalid Subscription status and end instant to fail with >=2 errors, got %+v", invalidSub.Issues)
+		}
+	})
 }

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	genpostgres "github.com/flint-fhir/flint/gen/go/store/postgres"
@@ -131,12 +132,23 @@ func ParseETagVersion(etag string) (int, error) {
 
 // Store provides FHIR resource storage operations on Postgres.
 type Store struct {
-	db *sql.DB
+	db                 *sql.DB
+	isolationMode      TenantIsolationMode
+	provisionedTenants sync.Map
 }
 
 // New creates a new Postgres FHIR resource store.
-func New(db *sql.DB) *Store {
-	return &Store{db: db}
+func New(db *sql.DB, opts ...StoreOption) *Store {
+	s := &Store{
+		db:            db,
+		isolationMode: TenantIsolationShared,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
+	}
+	return s
 }
 
 // Ping verifies connectivity to the underlying PostgreSQL database.
@@ -162,9 +174,9 @@ func (s *Store) WriteResource(ctx context.Context, input ResourceInput) error {
 // ExpectedVersion if > 0, recording a snapshot in fhir_resource_history, and
 // returning the resulting version metadata.
 func (s *Store) WriteResourceWithMeta(ctx context.Context, input ResourceInput) (*ResourceRecord, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTenantTx(ctx, input.TenantID)
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+		return nil, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -183,9 +195,9 @@ func (s *Store) WriteResourceWithMeta(ctx context.Context, input ResourceInput) 
 // inside a single transaction guarded by a transaction-scoped advisory lock, preventing TOCTOU
 // duplicate creation races. Returns (record, created, error).
 func (s *Store) ConditionalCreateResource(ctx context.Context, input ResourceInput, condParams SearchParams) (*ResourceRecord, bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTenantTx(ctx, input.TenantID)
 	if err != nil {
-		return nil, false, fmt.Errorf("begin tx: %w", err)
+		return nil, false, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -240,9 +252,9 @@ func (s *Store) ConditionalUpdateResource(
 	condParams SearchParams,
 	buildInput func(matchedID string, isExisting bool) (ResourceInput, error),
 ) (*ResourceRecord, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTenantTx(ctx, tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+		return nil, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -294,9 +306,9 @@ func (s *Store) ConditionalDeleteResource(
 	condParams SearchParams,
 	verifyMatch func(matchedID string) error,
 ) (*ResourceRecord, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTenantTx(ctx, tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+		return nil, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -342,7 +354,14 @@ func (s *Store) ConditionalDeleteResource(
 // including If-Match, If-None-Exist, and conditional PUT/DELETE) atomically within a single SQL transaction.
 // If any entry fails, all prior writes and deletes in the Bundle are rolled back.
 func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []BundleOperation) ([]BundleOpResult, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	var tenantID string
+	for _, op := range ops {
+		if op.Input.TenantID != "" {
+			tenantID = op.Input.TenantID
+			break
+		}
+	}
+	tx, err := s.beginTenantTx(ctx, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("begin bundle tx: %w", err)
 	}
@@ -482,9 +501,16 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []BundleOperat
 // WriteBatch writes multiple resources in a single transaction.
 // This is the hot path for FHIR Bundle ingestion (R8: batch per Bundle).
 func (s *Store) WriteBatch(ctx context.Context, inputs []ResourceInput) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	var tenantID string
+	for _, in := range inputs {
+		if in.TenantID != "" {
+			tenantID = in.TenantID
+			break
+		}
+	}
+	tx, err := s.beginTenantTx(ctx, tenantID)
 	if err != nil {
-		return fmt.Errorf("begin tx: %w", err)
+		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
@@ -584,10 +610,12 @@ func writeResourceInTx(ctx context.Context, tx *sql.Tx, input ResourceInput) (*R
 // Returns the proto-encoded resource bytes, or sql.ErrNoRows if not found or deleted.
 func (s *Store) ReadResource(ctx context.Context, tenantID, resType, resID string) ([]byte, error) {
 	var proto []byte
-	err := s.db.QueryRowContext(ctx, `
-		SELECT resource_proto FROM fhir_resource
-		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3 AND is_deleted = FALSE
-	`, tenantID, resType, resID).Scan(&proto)
+	err := s.withTenantExec(ctx, tenantID, func(exec queryExecer) error {
+		return exec.QueryRowContext(ctx, `
+			SELECT resource_proto FROM fhir_resource
+			WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3 AND is_deleted = FALSE
+		`, tenantID, resType, resID).Scan(&proto)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -598,7 +626,13 @@ func (s *Store) ReadResource(ctx context.Context, tenantID, resType, resID strin
 // Returns sql.ErrNoRows if the resource never existed, or ErrResourceDeleted
 // (alongside the tombstone ResourceRecord) if the resource was soft-deleted.
 func (s *Store) ReadResourceWithMeta(ctx context.Context, tenantID, resType, resID string) (*ResourceRecord, error) {
-	return s.readResourceWithMetaWithExec(ctx, s.db, tenantID, resType, resID)
+	var rec *ResourceRecord
+	err := s.withTenantExec(ctx, tenantID, func(exec queryExecer) error {
+		var rErr error
+		rec, rErr = s.readResourceWithMetaWithExec(ctx, exec, tenantID, resType, resID)
+		return rErr
+	})
+	return rec, err
 }
 
 func (s *Store) readResourceWithMetaInTx(ctx context.Context, tx *sql.Tx, tenantID, resType, resID string) (*ResourceRecord, error) {
@@ -634,19 +668,22 @@ func (s *Store) ReadResourceVersion(ctx context.Context, tenantID, resType, resI
 		ResType:  resType,
 		ResID:    resID,
 	}
-	err := s.db.QueryRowContext(ctx, `
-		SELECT resource_proto, res_version, last_updated, is_deleted
-		FROM fhir_resource_history
-		WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3 AND res_version = $4
-	`, tenantID, resType, resID, version).Scan(&rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted)
-	if errors.Is(err, sql.ErrNoRows) {
-		// Fallback to fhir_resource if row was seeded directly without history table entry.
-		err = s.db.QueryRowContext(ctx, `
+	err := s.withTenantExec(ctx, tenantID, func(exec queryExecer) error {
+		qErr := exec.QueryRowContext(ctx, `
 			SELECT resource_proto, res_version, last_updated, is_deleted
-			FROM fhir_resource
+			FROM fhir_resource_history
 			WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3 AND res_version = $4
 		`, tenantID, resType, resID, version).Scan(&rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted)
-	}
+		if errors.Is(qErr, sql.ErrNoRows) {
+			// Fallback to fhir_resource if row was seeded directly without history table entry.
+			qErr = exec.QueryRowContext(ctx, `
+				SELECT resource_proto, res_version, last_updated, is_deleted
+				FROM fhir_resource
+				WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3 AND res_version = $4
+			`, tenantID, resType, resID, version).Scan(&rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted)
+		}
+		return qErr
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -691,38 +728,41 @@ func (s *Store) ListHistory(ctx context.Context, tenantID, resType, resID string
 	}
 
 	var total int
-	countSQL := "SELECT COUNT(*) FROM fhir_resource_history " + where
-	if err := s.db.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("count resource history: %w", err)
-	}
-
-	orderBy := "ORDER BY last_updated DESC, res_version DESC"
-	if resType != "" && resID != "" {
-		orderBy = "ORDER BY res_version DESC"
-	}
-	dataArgs := append(append([]any{}, args...), limit, offset)
-	dataSQL := fmt.Sprintf(
-		"SELECT res_type, res_id, resource_proto, res_version, last_updated, is_deleted FROM fhir_resource_history %s %s LIMIT $%d OFFSET $%d",
-		where, orderBy, len(args)+1, len(args)+2,
-	)
-
-	rows, err := s.db.QueryContext(ctx, dataSQL, dataArgs...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("query resource history: %w", err)
-	}
-	defer rows.Close()
-
 	var records []ResourceRecord
-	for rows.Next() {
-		rec := ResourceRecord{
-			TenantID: tenantID,
+	err := s.withTenantExec(ctx, tenantID, func(exec queryExecer) error {
+		countSQL := "SELECT COUNT(*) FROM fhir_resource_history " + where
+		if err := exec.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
+			return fmt.Errorf("count resource history: %w", err)
 		}
-		if err := rows.Scan(&rec.ResType, &rec.ResID, &rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted); err != nil {
-			return nil, 0, fmt.Errorf("scan resource history: %w", err)
+
+		orderBy := "ORDER BY last_updated DESC, res_version DESC"
+		if resType != "" && resID != "" {
+			orderBy = "ORDER BY res_version DESC"
 		}
-		records = append(records, rec)
-	}
-	if err := rows.Err(); err != nil {
+		dataArgs := append(append([]any{}, args...), limit, offset)
+		dataSQL := fmt.Sprintf(
+			"SELECT res_type, res_id, resource_proto, res_version, last_updated, is_deleted FROM fhir_resource_history %s %s LIMIT $%d OFFSET $%d",
+			where, orderBy, len(args)+1, len(args)+2,
+		)
+
+		rows, err := exec.QueryContext(ctx, dataSQL, dataArgs...)
+		if err != nil {
+			return fmt.Errorf("query resource history: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			rec := ResourceRecord{
+				TenantID: tenantID,
+			}
+			if err := rows.Scan(&rec.ResType, &rec.ResID, &rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted); err != nil {
+				return fmt.Errorf("scan resource history: %w", err)
+			}
+			records = append(records, rec)
+		}
+		return rows.Err()
+	})
+	if err != nil {
 		return nil, 0, err
 	}
 	return records, total, nil
@@ -741,9 +781,9 @@ func (s *Store) DeleteResource(ctx context.Context, tenantID, resType, resID str
 // records a deletion tombstone in fhir_resource_history, and clears search indexes.
 // Returns sql.ErrNoRows if the resource does not exist.
 func (s *Store) DeleteResourceWithMeta(ctx context.Context, tenantID, resType, resID string) (*ResourceRecord, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginTenantTx(ctx, tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+		return nil, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 
