@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -16,9 +17,11 @@ import (
 )
 
 type terminologyConcept struct {
-	System  string `json:"system"`
-	Code    string `json:"code"`
-	Display string `json:"display,omitempty"`
+	System     string            `json:"system"`
+	Code       string            `json:"code"`
+	Display    string            `json:"display,omitempty"`
+	Parents    []string          `json:"-"`
+	Properties map[string]string `json:"-"`
 }
 
 type builtInCodeSystemDef struct {
@@ -57,11 +60,11 @@ var builtInCodeSystems = map[string]builtInCodeSystemDef{
 		URL:  "http://terminology.hl7.org/CodeSystem/condition-clinical",
 		Concepts: []terminologyConcept{
 			{System: "http://terminology.hl7.org/CodeSystem/condition-clinical", Code: "active", Display: "Active"},
-			{System: "http://terminology.hl7.org/CodeSystem/condition-clinical", Code: "recurrence", Display: "Recurrence"},
-			{System: "http://terminology.hl7.org/CodeSystem/condition-clinical", Code: "relapse", Display: "Relapse"},
+			{System: "http://terminology.hl7.org/CodeSystem/condition-clinical", Code: "recurrence", Display: "Recurrence", Parents: []string{"active"}},
+			{System: "http://terminology.hl7.org/CodeSystem/condition-clinical", Code: "relapse", Display: "Relapse", Parents: []string{"active"}},
 			{System: "http://terminology.hl7.org/CodeSystem/condition-clinical", Code: "inactive", Display: "Inactive"},
-			{System: "http://terminology.hl7.org/CodeSystem/condition-clinical", Code: "remission", Display: "Remission"},
-			{System: "http://terminology.hl7.org/CodeSystem/condition-clinical", Code: "resolved", Display: "Resolved"},
+			{System: "http://terminology.hl7.org/CodeSystem/condition-clinical", Code: "remission", Display: "Remission", Parents: []string{"inactive"}},
+			{System: "http://terminology.hl7.org/CodeSystem/condition-clinical", Code: "resolved", Display: "Resolved", Parents: []string{"inactive"}},
 		},
 	},
 	"http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical": {
@@ -70,7 +73,7 @@ var builtInCodeSystems = map[string]builtInCodeSystemDef{
 		Concepts: []terminologyConcept{
 			{System: "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical", Code: "active", Display: "Active"},
 			{System: "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical", Code: "inactive", Display: "Inactive"},
-			{System: "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical", Code: "resolved", Display: "Resolved"},
+			{System: "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical", Code: "resolved", Display: "Resolved", Parents: []string{"inactive"}},
 		},
 	},
 	"http://terminology.hl7.org/CodeSystem/observation-category": {
@@ -90,8 +93,8 @@ var builtInCodeSystems = map[string]builtInCodeSystemDef{
 		Concepts: []terminologyConcept{
 			{System: "http://loinc.org", Code: "8867-4", Display: "Heart rate"},
 			{System: "http://loinc.org", Code: "85354-9", Display: "Blood pressure panel with all children optional"},
-			{System: "http://loinc.org", Code: "8480-6", Display: "Systolic blood pressure"},
-			{System: "http://loinc.org", Code: "8462-4", Display: "Diastolic blood pressure"},
+			{System: "http://loinc.org", Code: "8480-6", Display: "Systolic blood pressure", Parents: []string{"85354-9"}},
+			{System: "http://loinc.org", Code: "8462-4", Display: "Diastolic blood pressure", Parents: []string{"85354-9"}},
 			{System: "http://loinc.org", Code: "9279-1", Display: "Respiratory rate"},
 			{System: "http://loinc.org", Code: "8310-5", Display: "Body temperature"},
 			{System: "http://loinc.org", Code: "29463-7", Display: "Body weight"},
@@ -110,11 +113,14 @@ var builtInCodeSystems = map[string]builtInCodeSystemDef{
 		Name: "SNOMED_CT",
 		URL:  "http://snomed.info/sct",
 		Concepts: []terminologyConcept{
-			{System: "http://snomed.info/sct", Code: "44054006", Display: "Diabetes mellitus type 2"},
+			{System: "http://snomed.info/sct", Code: "73211009", Display: "Diabetes mellitus"},
+			{System: "http://snomed.info/sct", Code: "44054006", Display: "Diabetes mellitus type 2", Parents: []string{"73211009"}},
 			{System: "http://snomed.info/sct", Code: "38341003", Display: "Hypertensive disorder, systemic arterial"},
-			{System: "http://snomed.info/sct", Code: "29303009", Display: "Electrocardiographic procedure"},
+			{System: "http://snomed.info/sct", Code: "59621000", Display: "Essential hypertension", Parents: []string{"38341003"}},
+			{System: "http://snomed.info/sct", Code: "71388002", Display: "Procedure"},
+			{System: "http://snomed.info/sct", Code: "29303009", Display: "Electrocardiographic procedure", Parents: []string{"71388002"}},
 			{System: "http://snomed.info/sct", Code: "119297000", Display: "Blood specimen"},
-			{System: "http://snomed.info/sct", Code: "108252007", Display: "Laboratory procedure"},
+			{System: "http://snomed.info/sct", Code: "108252007", Display: "Laboratory procedure", Parents: []string{"71388002"}},
 		},
 	},
 	"http://www.nlm.nih.gov/research/umls/rxnorm": {
@@ -172,7 +178,7 @@ func extractTerminologyParams(r *http.Request) (map[string]string, map[string]an
 							if iVal, ok := pm["valueInteger"].(float64); ok {
 								out[name] = strconv.Itoa(int(iVal))
 							}
-							if name == "valueSet" || name == "conceptMap" {
+							if name == "valueSet" || name == "conceptMap" || name == "codeSystem" {
 								if resMap, ok := pm["resource"].(map[string]any); ok {
 									inlineResource = resMap
 								}
@@ -197,9 +203,40 @@ func extractTerminologyParams(r *http.Request) (map[string]string, map[string]an
 									}
 								}
 							}
+							if name == "codeableConcept" {
+								if ccMap, ok := pm["valueCodeableConcept"].(map[string]any); ok {
+									if codings, ok := ccMap["coding"].([]any); ok && len(codings) > 0 {
+										if codingMap, ok := codings[0].(map[string]any); ok {
+											if sys, _ := codingMap["system"].(string); sys != "" && out["system"] == "" {
+												out["system"] = sys
+											}
+											if code, _ := codingMap["code"].(string); code != "" && out["code"] == "" {
+												out["code"] = code
+											}
+											if disp, _ := codingMap["display"].(string); disp != "" && out["display"] == "" {
+												out["display"] = disp
+											}
+										}
+									}
+								}
+							}
+							if name == "codingA" || name == "codingB" {
+								if codingMap, ok := pm["valueCoding"].(map[string]any); ok {
+									if sys, _ := codingMap["system"].(string); sys != "" && out["system"] == "" {
+										out["system"] = sys
+									}
+									if code, _ := codingMap["code"].(string); code != "" {
+										if name == "codingA" && out["codeA"] == "" {
+											out["codeA"] = code
+										} else if name == "codingB" && out["codeB"] == "" {
+											out["codeB"] = code
+										}
+									}
+								}
+							}
 						}
 					}
-				case "ValueSet", "ConceptMap":
+				case "ValueSet", "ConceptMap", "CodeSystem":
 					inlineResource = root
 				}
 			}
@@ -209,6 +246,13 @@ func extractTerminologyParams(r *http.Request) (map[string]string, map[string]an
 }
 
 func (s *Server) resolveValueSetConcepts(ctx context.Context, tenant, vsID, vsURL string, inlineVS map[string]any) (string, string, []terminologyConcept, error) {
+	return s.resolveValueSetConceptsWithDepth(ctx, tenant, vsID, vsURL, inlineVS, 0)
+}
+
+func (s *Server) resolveValueSetConceptsWithDepth(ctx context.Context, tenant, vsID, vsURL string, inlineVS map[string]any, depth int) (string, string, []terminologyConcept, error) {
+	if depth > 5 {
+		return "", "", nil, fmt.Errorf("maximum ValueSet nesting depth exceeded")
+	}
 	var vsMap map[string]any
 	if inlineVS != nil {
 		vsMap = inlineVS
@@ -273,31 +317,38 @@ func (s *Server) resolveValueSetConcepts(ctx context.Context, tenant, vsID, vsUR
 						if !ok {
 							continue
 						}
-						sys, _ := incMap["system"].(string)
-						if rawConcepts, ok := incMap["concept"].([]any); ok && len(rawConcepts) > 0 {
-							for _, rc := range rawConcepts {
-								if cm, ok := rc.(map[string]any); ok {
-									code, _ := cm["code"].(string)
-									disp, _ := cm["display"].(string)
-									if disp == "" && sys != "" {
-										if lookedUp, _, ok := s.lookupCodeInSystem(ctx, tenant, "", sys, code); ok {
-											disp = lookedUp.Display
-										}
-									}
-									if code != "" {
-										concepts = append(concepts, terminologyConcept{System: sys, Code: code, Display: disp})
-									}
+						concepts = append(concepts, s.evaluateComposeConceptSet(ctx, tenant, incMap, depth)...)
+					}
+				}
+				if excludes, ok := compose["exclude"].([]any); ok && len(excludes) > 0 {
+					var excluded []terminologyConcept
+					for _, exc := range excludes {
+						excMap, ok := exc.(map[string]any)
+						if !ok {
+							continue
+						}
+						excluded = append(excluded, s.evaluateComposeConceptSet(ctx, tenant, excMap, depth)...)
+					}
+					if len(excluded) > 0 {
+						kept := make([]terminologyConcept, 0, len(concepts))
+						for _, c := range concepts {
+							isExcl := false
+							for _, ex := range excluded {
+								if ex.Code == c.Code && (ex.System == "" || c.System == "" || strings.EqualFold(ex.System, c.System)) {
+									isExcl = true
+									break
 								}
 							}
-						} else if sys != "" {
-							csConcepts, _, _ := s.resolveCodeSystemConcepts(ctx, tenant, "", sys)
-							concepts = append(concepts, csConcepts...)
+							if !isExcl {
+								kept = append(kept, c)
+							}
 						}
+						concepts = kept
 					}
 				}
 			}
 		}
-		return resolvedURL, resolvedName, concepts, nil
+		return resolvedURL, resolvedName, deduplicateTerminologyConcepts(concepts), nil
 	}
 
 	// Fallback to built-in ValueSet or CodeSystem URL
@@ -312,9 +363,221 @@ func (s *Server) resolveValueSetConcepts(ctx context.Context, tenant, vsID, vsUR
 	return "", "", nil, fmt.Errorf("ValueSet %q not found", firstNonEmpty(vsURL, vsID))
 }
 
+func deduplicateTerminologyConcepts(in []terminologyConcept) []terminologyConcept {
+	seen := make(map[string]bool, len(in))
+	out := make([]terminologyConcept, 0, len(in))
+	for _, c := range in {
+		if c.Code == "" {
+			continue
+		}
+		key := strings.ToLower(c.System) + "|" + c.Code
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (s *Server) evaluateComposeConceptSet(ctx context.Context, tenant string, setMap map[string]any, depth int) []terminologyConcept {
+	sys, _ := setMap["system"].(string)
+	var sysConcepts []terminologyConcept
+	hasSysCriteria := false
+
+	if rawConcepts, ok := setMap["concept"].([]any); ok && len(rawConcepts) > 0 {
+		hasSysCriteria = true
+		for _, rc := range rawConcepts {
+			if cm, ok := rc.(map[string]any); ok {
+				code, _ := cm["code"].(string)
+				disp, _ := cm["display"].(string)
+				if disp == "" && sys != "" {
+					if lookedUp, _, ok := s.lookupCodeInSystem(ctx, tenant, "", sys, code); ok {
+						disp = lookedUp.Display
+					}
+				}
+				if code != "" {
+					sysConcepts = append(sysConcepts, terminologyConcept{System: sys, Code: code, Display: disp})
+				}
+			}
+		}
+	} else if rawFilters, ok := setMap["filter"].([]any); ok && len(rawFilters) > 0 && sys != "" {
+		hasSysCriteria = true
+		csConcepts, _, _ := s.resolveCodeSystemConcepts(ctx, tenant, "", sys)
+		parentsByCode := buildCodeSystemParentsMap(csConcepts)
+		for _, c := range csConcepts {
+			matchedAll := true
+			for _, rf := range rawFilters {
+				fm, ok := rf.(map[string]any)
+				if !ok {
+					continue
+				}
+				if !matchesCodeSystemFilter(c, fm, parentsByCode) {
+					matchedAll = false
+					break
+				}
+			}
+			if matchedAll {
+				sysConcepts = append(sysConcepts, c)
+			}
+		}
+	} else if sys != "" {
+		hasSysCriteria = true
+		csConcepts, _, _ := s.resolveCodeSystemConcepts(ctx, tenant, "", sys)
+		sysConcepts = append(sysConcepts, csConcepts...)
+	}
+
+	var vsConcepts []terminologyConcept
+	hasVSCriteria := false
+	if rawVSList, ok := setMap["valueSet"].([]any); ok && len(rawVSList) > 0 {
+		for idx, rawVS := range rawVSList {
+			vsCanon, _ := rawVS.(string)
+			vsCanon = strings.TrimSpace(vsCanon)
+			if vsCanon == "" {
+				continue
+			}
+			_, _, nested, err := s.resolveValueSetConceptsWithDepth(ctx, tenant, "", vsCanon, nil, depth+1)
+			if err != nil {
+				continue
+			}
+			if !hasVSCriteria || idx == 0 {
+				vsConcepts = nested
+				hasVSCriteria = true
+			} else {
+				vsConcepts = intersectTerminologyConcepts(vsConcepts, nested)
+			}
+		}
+	}
+
+	if hasSysCriteria && hasVSCriteria {
+		return intersectTerminologyConcepts(sysConcepts, vsConcepts)
+	}
+	if hasSysCriteria {
+		return sysConcepts
+	}
+	return vsConcepts
+}
+
+func intersectTerminologyConcepts(a, b []terminologyConcept) []terminologyConcept {
+	var out []terminologyConcept
+	for _, ca := range a {
+		for _, cb := range b {
+			if ca.Code == cb.Code && (ca.System == "" || cb.System == "" || strings.EqualFold(ca.System, cb.System)) {
+				merged := ca
+				if merged.Display == "" {
+					merged.Display = cb.Display
+				}
+				if merged.System == "" {
+					merged.System = cb.System
+				}
+				out = append(out, merged)
+				break
+			}
+		}
+	}
+	return out
+}
+
+func buildCodeSystemParentsMap(concepts []terminologyConcept) map[string][]string {
+	parents := make(map[string][]string, len(concepts))
+	for _, c := range concepts {
+		if len(c.Parents) > 0 {
+			parents[c.Code] = append(parents[c.Code], c.Parents...)
+		}
+	}
+	return parents
+}
+
+// codeIsAncestorOrEqual returns true if ancestorCode == code (when allowEqual is true)
+// or if ancestorCode is a direct or transitive parent of code in parentsByCode.
+func codeIsAncestorOrEqual(ancestorCode, code string, parentsByCode map[string][]string, allowEqual bool) bool {
+	if ancestorCode == "" || code == "" {
+		return false
+	}
+	if ancestorCode == code {
+		return allowEqual
+	}
+	visited := map[string]bool{code: true}
+	queue := append([]string(nil), parentsByCode[code]...)
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+		if curr == ancestorCode {
+			return true
+		}
+		if visited[curr] {
+			continue
+		}
+		visited[curr] = true
+		queue = append(queue, parentsByCode[curr]...)
+	}
+	return false
+}
+
+func matchesCodeSystemFilter(c terminologyConcept, fm map[string]any, parentsByCode map[string][]string) bool {
+	prop, _ := fm["property"].(string)
+	op, _ := fm["op"].(string)
+	val, _ := fm["value"].(string)
+	prop = strings.TrimSpace(prop)
+	op = strings.ToLower(strings.TrimSpace(op))
+
+	targetVal := c.Code
+	if prop != "" && !strings.EqualFold(prop, "code") && !strings.EqualFold(prop, "concept") {
+		if strings.EqualFold(prop, "display") {
+			targetVal = c.Display
+		} else if c.Properties != nil {
+			targetVal = c.Properties[prop]
+		} else {
+			targetVal = ""
+		}
+	}
+
+	switch op {
+	case "=":
+		return strings.EqualFold(targetVal, val) || c.Code == val
+	case "in":
+		for part := range strings.SplitSeq(val, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" && (strings.EqualFold(targetVal, trimmed) || c.Code == trimmed) {
+				return true
+			}
+		}
+		return false
+	case "not-in":
+		for part := range strings.SplitSeq(val, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" && (strings.EqualFold(targetVal, trimmed) || c.Code == trimmed) {
+				return false
+			}
+		}
+		return true
+	case "is-a":
+		return codeIsAncestorOrEqual(val, c.Code, parentsByCode, true)
+	case "descendent-of", "descendant-of":
+		return codeIsAncestorOrEqual(val, c.Code, parentsByCode, false)
+	case "is-not-a":
+		return !codeIsAncestorOrEqual(val, c.Code, parentsByCode, true)
+	case "regex":
+		re, err := regexp.Compile(val)
+		if err != nil {
+			return false
+		}
+		return re.MatchString(targetVal)
+	case "exists":
+		wantExists := strings.EqualFold(strings.TrimSpace(val), "true")
+		hasVal := strings.TrimSpace(targetVal) != ""
+		return wantExists == hasVal
+	default:
+		return false
+	}
+}
+
 func (s *Server) resolveCodeSystemConcepts(ctx context.Context, tenant, csID, csURL string) ([]terminologyConcept, string, error) {
+	return s.resolveCodeSystemConceptsWithInline(ctx, tenant, csID, csURL, nil)
+}
+
+func (s *Server) resolveCodeSystemConceptsWithInline(ctx context.Context, tenant, csID, csURL string, inlineCS map[string]any) ([]terminologyConcept, string, error) {
 	var csMap map[string]any
-	if csID != "" && s.store != nil {
+	if inlineCS != nil && inlineCS["resourceType"] == "CodeSystem" {
+		csMap = inlineCS
+	} else if csID != "" && s.store != nil {
 		rec, err := s.store.ReadResourceWithMeta(ctx, tenant, "CodeSystem", csID)
 		if err != nil {
 			return nil, "", err
@@ -355,8 +618,9 @@ func (s *Server) resolveCodeSystemConcepts(ctx context.Context, tenant, csID, cs
 			csName, _ = csMap["title"].(string)
 		}
 		var concepts []terminologyConcept
-		var walkConcepts func(list []any)
-		walkConcepts = func(list []any) {
+		childToParents := make(map[string][]string)
+		var walkConcepts func(list []any, parentCode string)
+		walkConcepts = func(list []any, parentCode string) {
 			for _, item := range list {
 				cm, ok := item.(map[string]any)
 				if !ok {
@@ -364,20 +628,71 @@ func (s *Server) resolveCodeSystemConcepts(ctx context.Context, tenant, csID, cs
 				}
 				code, _ := cm["code"].(string)
 				disp, _ := cm["display"].(string)
+				var parents []string
+				if parentCode != "" {
+					parents = append(parents, parentCode)
+				}
+				var props map[string]string
+				if rawProps, ok := cm["property"].([]any); ok {
+					for _, rp := range rawProps {
+						pm, ok := rp.(map[string]any)
+						if !ok {
+							continue
+						}
+						pCode, _ := pm["code"].(string)
+						pVal := ""
+						for _, vk := range []string{"valueCode", "valueString", "valueUri"} {
+							if sVal, ok := pm[vk].(string); ok && sVal != "" {
+								pVal = sVal
+								break
+							}
+						}
+						if pVal == "" {
+							if bVal, ok := pm["valueBoolean"].(bool); ok {
+								pVal = strconv.FormatBool(bVal)
+							} else if iVal, ok := pm["valueInteger"].(float64); ok {
+								pVal = strconv.Itoa(int(iVal))
+							}
+						}
+						if pCode != "" && pVal != "" {
+							if props == nil {
+								props = make(map[string]string)
+							}
+							props[pCode] = pVal
+							switch pCode {
+							case "parent", "subsumedBy":
+								parents = append(parents, pVal)
+							case "child":
+								if code != "" {
+									childToParents[pVal] = append(childToParents[pVal], code)
+								}
+							}
+						}
+					}
+				}
 				if code != "" {
 					concepts = append(concepts, terminologyConcept{
-						System:  sysURL,
-						Code:    code,
-						Display: disp,
+						System:     sysURL,
+						Code:       code,
+						Display:    disp,
+						Parents:    parents,
+						Properties: props,
 					})
 				}
 				if children, ok := cm["concept"].([]any); ok {
-					walkConcepts(children)
+					walkConcepts(children, code)
 				}
 			}
 		}
 		if rootConcepts, ok := csMap["concept"].([]any); ok {
-			walkConcepts(rootConcepts)
+			walkConcepts(rootConcepts, "")
+		}
+		if len(childToParents) > 0 {
+			for i := range concepts {
+				if extra, ok := childToParents[concepts[i].Code]; ok {
+					concepts[i].Parents = append(concepts[i].Parents, extra...)
+				}
+			}
 		}
 		return concepts, csName, nil
 	}
@@ -592,6 +907,139 @@ func (s *Server) handleCodeSystemLookup(w http.ResponseWriter, r *http.Request) 
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    outParams,
+	})
+}
+
+// handleCodeSystemValidateCode handles GET/POST /fhir/r4/{tenant}/CodeSystem/$validate-code and /CodeSystem/{id}/$validate-code
+// per HL7 FHIR R4 OperationDefinition/CodeSystem-validate-code.
+func (s *Server) handleCodeSystemValidateCode(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	csID := r.PathValue("id")
+	params, inlineRes := extractTerminologyParams(r)
+	systemURL := firstNonEmpty(params["url"], params["system"])
+	code := params["code"]
+	reqDisplay := params["display"]
+
+	if code == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "CodeSystem/$validate-code requires 'code' (or 'coding'/'codeableConcept') parameter")
+		return
+	}
+	if csID == "" && systemURL == "" && inlineRes == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "CodeSystem/$validate-code requires 'url' (or 'system') parameter, instance id, or inline CodeSystem")
+		return
+	}
+
+	csConcepts, _, err := s.resolveCodeSystemConceptsWithInline(r.Context(), tenant, csID, systemURL, inlineRes)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found",
+			fmt.Sprintf("CodeSystem %q not found", firstNonEmpty(systemURL, csID)))
+		return
+	}
+
+	var matched *terminologyConcept
+	for i := range csConcepts {
+		c := &csConcepts[i]
+		if c.Code == code {
+			matched = c
+			break
+		}
+	}
+
+	result := matched != nil
+	msg := ""
+	if matched != nil && reqDisplay != "" && matched.Display != "" && !strings.EqualFold(reqDisplay, matched.Display) {
+		result = false
+		msg = fmt.Sprintf("code %q is valid in CodeSystem %q, but display %q does not match expected %q", code, firstNonEmpty(matched.System, systemURL, csID), reqDisplay, matched.Display)
+	} else if matched == nil {
+		msg = fmt.Sprintf("code %q is not in CodeSystem %q", code, firstNonEmpty(systemURL, csID))
+	}
+
+	outParams := []map[string]any{
+		{"name": "result", "valueBoolean": result},
+		{"name": "code", "valueCode": code},
+	}
+	if matched != nil {
+		if sys := firstNonEmpty(matched.System, systemURL); sys != "" {
+			outParams = append(outParams, map[string]any{"name": "system", "valueUri": sys})
+		}
+		if matched.Display != "" {
+			outParams = append(outParams, map[string]any{"name": "display", "valueString": matched.Display})
+		}
+	}
+	if msg != "" {
+		outParams = append(outParams, map[string]any{"name": "message", "valueString": msg})
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    outParams,
+	})
+}
+
+// handleCodeSystemSubsumes handles GET/POST /fhir/r4/{tenant}/CodeSystem/$subsumes and /CodeSystem/{id}/$subsumes
+// per HL7 FHIR R4 OperationDefinition/CodeSystem-subsumes.
+func (s *Server) handleCodeSystemSubsumes(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	csID := r.PathValue("id")
+	params, inlineRes := extractTerminologyParams(r)
+	systemURL := firstNonEmpty(params["system"], params["url"])
+	codeA := params["codeA"]
+	codeB := params["codeB"]
+
+	if codeA == "" || codeB == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "CodeSystem/$subsumes requires 'codeA' and 'codeB' (or 'codingA' and 'codingB') parameters")
+		return
+	}
+	if csID == "" && systemURL == "" && inlineRes == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "CodeSystem/$subsumes requires 'system' parameter or CodeSystem instance id")
+		return
+	}
+
+	csConcepts, _, err := s.resolveCodeSystemConceptsWithInline(r.Context(), tenant, csID, systemURL, inlineRes)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found",
+			fmt.Sprintf("CodeSystem %q not found", firstNonEmpty(systemURL, csID)))
+		return
+	}
+
+	var foundA, foundB bool
+	for _, c := range csConcepts {
+		if c.Code == codeA {
+			foundA = true
+		}
+		if c.Code == codeB {
+			foundB = true
+		}
+	}
+	if !foundA || !foundB {
+		missing := codeA
+		if foundA {
+			missing = codeB
+		}
+		writeOperationOutcome(w, http.StatusBadRequest, "code-invalid",
+			fmt.Sprintf("code %q is not valid in CodeSystem %q", missing, firstNonEmpty(systemURL, csID)))
+		return
+	}
+
+	parentsMap := buildCodeSystemParentsMap(csConcepts)
+	outcome := "not-subsumed"
+	if strings.EqualFold(codeA, codeB) {
+		outcome = "equivalent"
+	} else if codeIsAncestorOrEqual(codeA, codeB, parentsMap, false) {
+		outcome = "subsumes"
+	} else if codeIsAncestorOrEqual(codeB, codeA, parentsMap, false) {
+		outcome = "subsumed-by"
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{"name": "outcome", "valueCode": outcome},
+		},
 	})
 }
 
@@ -813,13 +1261,42 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 	}
 
 	if !foundExplicitMap {
-		// Also include any stored ConceptMaps in the tenant when translating by system/targetsystem
+		// Also include any stored ConceptMaps in the tenant when translating by system/targetsystem,
+		// pre-filtering via spidx_uri (source-uri / target-uri) when available.
 		if cmURL == "" && s.store != nil {
-			if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
-				TenantID: tenant,
-				ResType:  "ConceptMap",
-				Count:    100,
-			}); err == nil {
+			uriFilters := map[string]string{}
+			if system != "" {
+				if reverse {
+					uriFilters["target-uri"] = system
+				} else {
+					uriFilters["source-uri"] = system
+				}
+			}
+			if targetSystem != "" {
+				if reverse {
+					uriFilters["source-uri"] = targetSystem
+				} else {
+					uriFilters["target-uri"] = targetSystem
+				}
+			}
+			var sr *postgres.SearchResults
+			var err error
+			if len(uriFilters) > 0 {
+				sr, err = s.store.Search(r.Context(), postgres.SearchParams{
+					TenantID: tenant,
+					ResType:  "ConceptMap",
+					URIs:     uriFilters,
+					Count:    100,
+				})
+			}
+			if sr == nil || err != nil || len(sr.Matches) == 0 {
+				sr, err = s.store.Search(r.Context(), postgres.SearchParams{
+					TenantID: tenant,
+					ResType:  "ConceptMap",
+					Count:    100,
+				})
+			}
+			if err == nil && sr != nil {
 				for _, m := range sr.Matches {
 					if jb, err := s.protoToJSONWithMeta("ConceptMap", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
 						var cmMap map[string]any

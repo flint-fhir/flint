@@ -444,6 +444,7 @@ var (
 		"intended-performertype": true, "address-use": true,
 		"accession": true, "bodysite": true, "specialty": true,
 		"role": true, "relationship": true, "subscriber-id": true,
+		"_tag": true, "_security": true,
 	}
 	knownRefSearchParams = map[string]bool{
 		"organization": true, "general-practitioner": true,
@@ -485,8 +486,22 @@ var (
 		"target-uri":       true,
 		"instantiates-uri": true,
 		"definition":       true,
+		"_profile":         true,
+		"_source":          true,
 	}
 )
+
+// isSearchableUnderscoreParam returns true for standard FHIR R4 Resource.meta search
+// parameters (_profile, _tag, _security, _source, and any modifier variants such as :missing, :not, :below, :above).
+func isSearchableUnderscoreParam(key string) bool {
+	base, _ := splitParamModifier(key)
+	switch base {
+	case "_profile", "_tag", "_security", "_source":
+		return true
+	default:
+		return false
+	}
+}
 
 // splitParamModifier splits a search parameter key into its base parameter name
 // and optional modifier (e.g. "name:exact" -> "name", "exact"; "status:not" -> "status", "not").
@@ -579,7 +594,7 @@ func ValidateSearchQuery(q url.Values) error {
 			}
 			continue
 		}
-		if strings.HasPrefix(key, "_") || len(values) == 0 {
+		if (strings.HasPrefix(key, "_") && !isSearchableUnderscoreParam(key)) || len(values) == 0 {
 			continue
 		}
 		baseKey, mod := splitParamModifier(key)
@@ -740,7 +755,7 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 			}
 			continue
 		}
-		if strings.HasPrefix(key, "_") || len(values) == 0 {
+		if (strings.HasPrefix(key, "_") && !isSearchableUnderscoreParam(key)) || len(values) == 0 {
 			continue
 		}
 		value := values[0]

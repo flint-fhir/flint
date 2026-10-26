@@ -651,8 +651,11 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 		if err == nil {
 			respMeta, bMeta, errMeta := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$meta", "", nil, nil)
+			respTagQ, bTagQ, errTagQ := doReq(http.MethodGet, basePath+"/Patient?_tag=http://example.org/tags|vip-cohort&_profile:below=http://hl7.org/fhir/us/core/StructureDefinition/&_security=http://terminology.hl7.org/CodeSystem/v3-Confidentiality|R", "", nil, nil)
 			if errMeta != nil || respMeta.StatusCode != http.StatusOK || !strings.Contains(string(bMeta), `"vip-cohort"`) {
 				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$meta to contain vip-cohort, got %s", string(bMeta))
+			} else if errTagQ != nil || respTagQ.StatusCode != http.StatusOK || !strings.Contains(string(bTagQ), `"cert-pat-1"`) {
+				err = fmt.Errorf("expected GET /Patient?_tag=...|vip-cohort&_profile:below=...&_security=... to return cert-pat-1, got %s", string(bTagQ))
 			}
 		}
 		if err == nil {
@@ -670,10 +673,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			respDelMeta, bDelMeta, errDelMeta := doReq(http.MethodPost, basePath+"/Patient/cert-pat-1/$meta-delete", "application/fhir+json", metaDelBody, nil)
 			if errDelMeta != nil || respDelMeta.StatusCode != http.StatusOK || strings.Contains(string(bDelMeta), `"vip-cohort"`) {
 				err = fmt.Errorf("expected vip-cohort tag to be removed after $meta-delete, got %s", string(bDelMeta))
+			} else {
+				respTagAfter, bTagAfter, errTagAfter := doReq(http.MethodGet, basePath+"/Patient?_tag=http://example.org/tags|vip-cohort", "", nil, nil)
+				if errTagAfter != nil || respTagAfter.StatusCode != http.StatusOK || strings.Contains(string(bTagAfter), `"cert-pat-1"`) {
+					err = fmt.Errorf("expected _tag search to exclude cert-pat-1 after $meta-delete, got %s", string(bTagAfter))
+				}
 			}
 		}
 	}
-	record("META-01", suite3, "FHIR R4 $meta, $meta-add & $meta-delete Profile/Tag/Security Lifecycle", t0, err, "Added, queried, and deleted profile/tag/security metadata on Patient/cert-pat-1")
+	record("META-01", suite3, "FHIR R4 $meta, $meta-add, $meta-delete & _profile/_tag/_security Search Indexing", t0, err, "Added, searched via _tag/_profile/_security, and deleted metadata on Patient/cert-pat-1")
 
 	// =========================================================================
 	// Suite 4: Patient $everything & ONC (g)(10) Bulk Data $export
@@ -954,6 +962,10 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		respVC, bVC, errVC := doReq(http.MethodGet, basePath+"/ValueSet/$validate-code?url=http://hl7.org/fhir/ValueSet/administrative-gender&code=female", "", nil, nil)
 		// 3. CodeSystem/$lookup
 		respLkp, bLkp, errLkp := doReq(http.MethodGet, basePath+"/CodeSystem/$lookup?system=http://loinc.org&code=8867-4", "", nil, nil)
+		// 4. CodeSystem/$validate-code
+		respCSVC, bCSVC, errCSVC := doReq(http.MethodGet, basePath+"/CodeSystem/$validate-code?url=http://snomed.info/sct&code=38341003", "", nil, nil)
+		// 5. CodeSystem/$subsumes (38341003 Hypertensive disorder subsumes 59621000 Essential hypertension)
+		respSubsumes, bSubsumes, errSubsumes := doReq(http.MethodGet, basePath+"/CodeSystem/$subsumes?system=http://snomed.info/sct&codeA=38341003&codeB=59621000", "", nil, nil)
 
 		if errExp != nil || respExp.StatusCode != http.StatusOK || !strings.Contains(string(bExp), `"8867-4"`) {
 			err = fmt.Errorf("expected 200 OK with 8867-4 from ValueSet/$expand, got %s", string(bExp))
@@ -961,9 +973,13 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			err = fmt.Errorf("expected valueBoolean:true from ValueSet/$validate-code, got %s", string(bVC))
 		} else if errLkp != nil || respLkp.StatusCode != http.StatusOK || !strings.Contains(string(bLkp), `"Heart rate"`) {
 			err = fmt.Errorf("expected Heart rate from CodeSystem/$lookup, got %s", string(bLkp))
+		} else if errCSVC != nil || respCSVC.StatusCode != http.StatusOK || !strings.Contains(string(bCSVC), `"valueBoolean":true`) {
+			err = fmt.Errorf("expected valueBoolean:true from CodeSystem/$validate-code, got %s", string(bCSVC))
+		} else if errSubsumes != nil || respSubsumes.StatusCode != http.StatusOK || !strings.Contains(string(bSubsumes), `"subsumes"`) {
+			err = fmt.Errorf("expected outcome=subsumes from CodeSystem/$subsumes, got %s", string(bSubsumes))
 		}
 	}
-	record("TERM-01", suite5, "FHIR R4 Terminology Services (ValueSet/$expand, $validate-code & CodeSystem/$lookup)", t0, err, "Verified ValueSet/$expand, $validate-code, and CodeSystem/$lookup")
+	record("TERM-01", suite5, "FHIR R4 Terminology Services (ValueSet/$expand, $validate-code, CodeSystem/$lookup, $validate-code & $subsumes)", t0, err, "Verified ValueSet/$expand, $validate-code, CodeSystem/$lookup, $validate-code & $subsumes")
 
 	t0 = time.Now()
 	{

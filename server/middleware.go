@@ -868,12 +868,12 @@ func extractClientIP(r *http.Request) string {
 func isTerminologyOp(parts []string) bool {
 	if len(parts) == 5 {
 		return (strings.EqualFold(parts[3], "ValueSet") && (parts[4] == "$expand" || parts[4] == "$validate-code")) ||
-			(strings.EqualFold(parts[3], "CodeSystem") && parts[4] == "$lookup") ||
+			(strings.EqualFold(parts[3], "CodeSystem") && (parts[4] == "$lookup" || parts[4] == "$validate-code" || parts[4] == "$subsumes")) ||
 			(strings.EqualFold(parts[3], "ConceptMap") && parts[4] == "$translate")
 	}
 	if len(parts) == 6 {
 		return (strings.EqualFold(parts[3], "ValueSet") && (parts[5] == "$expand" || parts[5] == "$validate-code")) ||
-			(strings.EqualFold(parts[3], "CodeSystem") && parts[5] == "$lookup") ||
+			(strings.EqualFold(parts[3], "CodeSystem") && (parts[5] == "$lookup" || parts[5] == "$validate-code" || parts[5] == "$subsumes")) ||
 			(strings.EqualFold(parts[3], "ConceptMap") && parts[5] == "$translate")
 	}
 	return false

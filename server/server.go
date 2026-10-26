@@ -335,6 +335,16 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleCodeSystemLookup(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "CodeSystem") && parts[4] == "$validate-code" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCodeSystemValidateCode(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "CodeSystem") && parts[4] == "$subsumes" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCodeSystemSubsumes(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "ConceptMap") && parts[4] == "$translate" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleConceptMapTranslate(w, r)
@@ -423,6 +433,18 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleCodeSystemLookup(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "CodeSystem") && parts[5] == "$validate-code" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCodeSystemValidateCode(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "CodeSystem") && parts[5] == "$subsumes" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCodeSystemSubsumes(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "ConceptMap") && parts[5] == "$translate" {
@@ -2234,6 +2256,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	defaultSearchParams := []map[string]string{
 		{"name": "_id", "type": "token"},
 		{"name": "_lastUpdated", "type": "date"},
+		{"name": "_profile", "type": "uri"},
+		{"name": "_tag", "type": "token"},
+		{"name": "_security", "type": "token"},
+		{"name": "_source", "type": "uri"},
 		{"name": "identifier", "type": "token"},
 		{"name": "status", "type": "token"},
 		{"name": "code", "type": "token"},
@@ -2435,6 +2461,14 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					"name":       "lookup",
 					"definition": "http://hl7.org/fhir/OperationDefinition/CodeSystem-lookup",
 				},
+				{
+					"name":       "validate-code",
+					"definition": "http://hl7.org/fhir/OperationDefinition/CodeSystem-validate-code",
+				},
+				{
+					"name":       "subsumes",
+					"definition": "http://hl7.org/fhir/OperationDefinition/CodeSystem-subsumes",
+				},
 			}
 		case "ConceptMap":
 			entry["operation"] = []map[string]string{
@@ -2581,6 +2615,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "lookup",
 						"definition": "http://hl7.org/fhir/OperationDefinition/CodeSystem-lookup",
+					},
+					{
+						"name":       "subsumes",
+						"definition": "http://hl7.org/fhir/OperationDefinition/CodeSystem-subsumes",
 					},
 					{
 						"name":       "translate",

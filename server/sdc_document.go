@@ -151,12 +151,21 @@ func (s *Server) handleQuestionnairePopulate(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	if questionnaireMap == nil && questionnaireURL != "" {
-		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
 			TenantID: tenant,
 			ResType:  "Questionnaire",
-			Tokens:   map[string]string{"url": questionnaireURL},
+			URIs:     map[string]string{"url": questionnaireURL},
 			Count:    1,
-		}); err == nil && len(sr.Matches) > 0 {
+		})
+		if err != nil || len(sr.Matches) == 0 {
+			sr, err = s.store.Search(r.Context(), postgres.SearchParams{
+				TenantID: tenant,
+				ResType:  "Questionnaire",
+				Tokens:   map[string]string{"url": questionnaireURL},
+				Count:    1,
+			})
+		}
+		if err == nil && len(sr.Matches) > 0 {
 			m := sr.Matches[0]
 			if qBytes, err := s.protoToJSONWithMeta("Questionnaire", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
 				_ = json.Unmarshal(qBytes, &questionnaireMap)
@@ -298,7 +307,20 @@ func populateQuestionnaireItems(
 		linkID, _ := im["linkId"].(string)
 		text, _ := im["text"].(string)
 		itemType, _ := im["type"].(string)
-		lowerKey := strings.ToLower(linkID + " " + text)
+		var codeParts []string
+		if rawCodes, ok := im["code"].([]any); ok {
+			for _, rc := range rawCodes {
+				if cm, ok := rc.(map[string]any); ok {
+					if c, _ := cm["code"].(string); c != "" {
+						codeParts = append(codeParts, c)
+					}
+					if d, _ := cm["display"].(string); d != "" {
+						codeParts = append(codeParts, d)
+					}
+				}
+			}
+		}
+		lowerKey := strings.ToLower(linkID + " " + text + " " + strings.Join(codeParts, " "))
 
 		respItem := map[string]any{
 			"linkId": linkID,
@@ -392,26 +414,91 @@ func resolveItemAnswers(
 			return ans
 		}
 	case strings.Contains(lowerKey, "heart-rate") || strings.Contains(lowerKey, "heart rate") || strings.Contains(lowerKey, "8867-4"):
+		if vq := extractObservationQuantityOrComponent(observations, "8867-4"); vq != nil {
+			return []any{map[string]any{"valueQuantity": vq}}
+		}
+	case strings.Contains(lowerKey, "systolic") || strings.Contains(lowerKey, "8480-6") || strings.Contains(lowerKey, "96608-5"):
+		if vq := extractObservationQuantityOrComponent(observations, "8480-6", "96608-5"); vq != nil {
+			return []any{map[string]any{"valueQuantity": vq}}
+		}
+	case strings.Contains(lowerKey, "diastolic") || strings.Contains(lowerKey, "8462-4") || strings.Contains(lowerKey, "96609-3"):
+		if vq := extractObservationQuantityOrComponent(observations, "8462-4", "96609-3"); vq != nil {
+			return []any{map[string]any{"valueQuantity": vq}}
+		}
+	case strings.Contains(lowerKey, "blood-pressure") || strings.Contains(lowerKey, "blood pressure") || strings.Contains(lowerKey, "85354-9") || strings.Contains(lowerKey, "96607-7"):
+		sysVQ := extractObservationQuantityOrComponent(observations, "8480-6", "96608-5")
+		diaVQ := extractObservationQuantityOrComponent(observations, "8462-4", "96609-3")
+		if itemDef["type"] == "string" && sysVQ != nil && diaVQ != nil {
+			return []any{map[string]any{"valueString": fmt.Sprintf("%v/%v mmHg", sysVQ["value"], diaVQ["value"])}}
+		}
+		if sysVQ != nil {
+			return []any{map[string]any{"valueQuantity": sysVQ}}
+		}
+	case strings.Contains(lowerKey, "bmi") || strings.Contains(lowerKey, "body-mass-index") || strings.Contains(lowerKey, "body mass index") || strings.Contains(lowerKey, "39156-5"):
+		if vq := extractObservationQuantityOrComponent(observations, "39156-5"); vq != nil {
+			return []any{map[string]any{"valueQuantity": vq}}
+		}
+	case strings.Contains(lowerKey, "weight") || strings.Contains(lowerKey, "29463-7"):
+		if vq := extractObservationQuantityOrComponent(observations, "29463-7"); vq != nil {
+			return []any{map[string]any{"valueQuantity": vq}}
+		}
+	case strings.Contains(lowerKey, "height") || strings.Contains(lowerKey, "8302-2"):
+		if vq := extractObservationQuantityOrComponent(observations, "8302-2"); vq != nil {
+			return []any{map[string]any{"valueQuantity": vq}}
+		}
+	case strings.Contains(lowerKey, "smoking") || strings.Contains(lowerKey, "tobacco") || strings.Contains(lowerKey, "72166-2"):
 		for _, obs := range observations {
-			if hasCodingCode(obs, "code", "8867-4") {
-				if vq, ok := obs["valueQuantity"].(map[string]any); ok {
-					return []any{map[string]any{"valueQuantity": vq}}
+			if hasCodingCode(obs, "code", "72166-2") {
+				if coding := extractFirstCodingMap(obs, "valueCodeableConcept"); coding != nil {
+					if itemDef["type"] == "string" {
+						if disp, _ := coding["display"].(string); disp != "" {
+							return []any{map[string]any{"valueString": disp}}
+						}
+						if c, _ := coding["code"].(string); c != "" {
+							return []any{map[string]any{"valueString": c}}
+						}
+					}
+					return []any{map[string]any{"valueCoding": coding}}
 				}
 			}
 		}
 	case strings.Contains(lowerKey, "hba1c") || strings.Contains(lowerKey, "4548-4"):
-		for _, obs := range observations {
-			if hasCodingCode(obs, "code", "4548-4") {
-				if vq, ok := obs["valueQuantity"].(map[string]any); ok {
-					return []any{map[string]any{"valueQuantity": vq}}
-				}
-			}
+		if vq := extractObservationQuantityOrComponent(observations, "4548-4"); vq != nil {
+			return []any{map[string]any{"valueQuantity": vq}}
 		}
 	}
 
 	// Fallback to Questionnaire.item.initial if present
 	if initials, ok := itemDef["initial"].([]any); ok && len(initials) > 0 {
 		return initials
+	}
+	return nil
+}
+
+func extractObservationQuantityOrComponent(observations []map[string]any, codes ...string) map[string]any {
+	for _, obs := range observations {
+		for _, code := range codes {
+			if hasCodingCode(obs, "code", code) {
+				if vq, ok := obs["valueQuantity"].(map[string]any); ok {
+					return vq
+				}
+			}
+		}
+		if comps, ok := obs["component"].([]any); ok {
+			for _, rawComp := range comps {
+				compMap, ok := rawComp.(map[string]any)
+				if !ok {
+					continue
+				}
+				for _, code := range codes {
+					if hasCodingCode(compMap, "code", code) {
+						if vq, ok := compMap["valueQuantity"].(map[string]any); ok {
+							return vq
+						}
+					}
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -620,6 +707,41 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 							"fullUrl":  "urn:uuid:" + uuid.NewString(),
 							"resource": allRes,
 							"request":  map[string]any{"method": "POST", "url": "AllergyIntolerance"},
+						})
+					}
+				case strings.Contains(lowerKey, "medication") || strings.Contains(lowerKey, "meds") || strings.Contains(lowerKey, "prescription"):
+					if vc, ok := am["valueCoding"].(map[string]any); ok {
+						medRes := map[string]any{
+							"resourceType":              "MedicationRequest",
+							"id":                        fmt.Sprintf("ext-medreq-%s-%d", qrID, seq),
+							"status":                    "active",
+							"intent":                    "order",
+							"medicationCodeableConcept": map[string]any{"coding": []any{vc}},
+							"subject":                   subjectRef,
+							"authoredOn":                authored,
+						}
+						extractedResources = append(extractedResources, medRes)
+						entries = append(entries, map[string]any{
+							"fullUrl":  "urn:uuid:" + uuid.NewString(),
+							"resource": medRes,
+							"request":  map[string]any{"method": "POST", "url": "MedicationRequest"},
+						})
+					}
+				case strings.Contains(lowerKey, "procedure") || strings.Contains(lowerKey, "surgery"):
+					if vc, ok := am["valueCoding"].(map[string]any); ok {
+						procRes := map[string]any{
+							"resourceType":      "Procedure",
+							"id":                fmt.Sprintf("ext-proc-%s-%d", qrID, seq),
+							"status":            "completed",
+							"code":              map[string]any{"coding": []any{vc}},
+							"subject":           subjectRef,
+							"performedDateTime": authored,
+						}
+						extractedResources = append(extractedResources, procRes)
+						entries = append(entries, map[string]any{
+							"fullUrl":  "urn:uuid:" + uuid.NewString(),
+							"resource": procRes,
+							"request":  map[string]any{"method": "POST", "url": "Procedure"},
 						})
 					}
 				default:

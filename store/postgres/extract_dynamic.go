@@ -41,7 +41,12 @@ func extractFromMessage(idx *SearchIndexes, tenantID, resType, resID string, msg
 	msg.Range(func(fd protoreflect.FieldDescriptor, val protoreflect.Value) bool {
 		fieldName := string(fd.Name())
 		switch fieldName {
-		case "id", "meta", "implicit_rules", "language", "text", "contained", "extension", "modifier_extension":
+		case "meta":
+			if depth == 0 && fd.Kind() == protoreflect.MessageKind && !fd.IsList() {
+				extractMetaFromMessage(idx, tenantID, resType, resID, val.Message())
+			}
+			return true
+		case "id", "implicit_rules", "language", "text", "contained", "extension", "modifier_extension":
 			return true
 		}
 
@@ -56,6 +61,89 @@ func extractFromMessage(idx *SearchIndexes, tenantID, resType, resID string, msg
 		extractSingleFieldValue(idx, tenantID, resType, resID, fd, val, fieldName, parentField, depth)
 		return true
 	})
+}
+
+func extractMetaFromMessage(idx *SearchIndexes, tenantID, resType, resID string, metaMsg protoreflect.Message) {
+	if idx == nil || !metaMsg.IsValid() {
+		return
+	}
+	md := metaMsg.Descriptor()
+	if srcFD := md.Fields().ByName("source"); srcFD != nil && metaMsg.Has(srcFD) && srcFD.Kind() == protoreflect.MessageKind {
+		if src := strings.TrimSpace(extractWrappedString(metaMsg.Get(srcFD).Message())); src != "" {
+			idx.URIs = append(idx.URIs, SpidxURI{
+				TenantID: tenantID,
+				ResType:  resType,
+				ResID:    resID,
+				SpName:   "_source",
+				SpValue:  src,
+			})
+			idx.Tokens = append(idx.Tokens, SpidxToken{
+				TenantID: tenantID,
+				ResType:  resType,
+				ResID:    resID,
+				SpName:   "_source",
+				SpValue:  src,
+			})
+		}
+	}
+	if profFD := md.Fields().ByName("profile"); profFD != nil && metaMsg.Has(profFD) && profFD.IsList() {
+		list := metaMsg.Get(profFD).List()
+		for i := 0; i < list.Len(); i++ {
+			if prof := strings.TrimSpace(extractWrappedString(list.Get(i).Message())); prof != "" {
+				idx.URIs = append(idx.URIs, SpidxURI{
+					TenantID: tenantID,
+					ResType:  resType,
+					ResID:    resID,
+					SpName:   "_profile",
+					SpValue:  prof,
+				})
+				idx.Tokens = append(idx.Tokens, SpidxToken{
+					TenantID: tenantID,
+					ResType:  resType,
+					ResID:    resID,
+					SpName:   "_profile",
+					SpValue:  prof,
+				})
+			}
+		}
+	}
+	for _, fieldSpec := range []struct {
+		field  string
+		spName string
+	}{
+		{field: "security", spName: "_security"},
+		{field: "tag", spName: "_tag"},
+	} {
+		fd := md.Fields().ByName(protoreflect.Name(fieldSpec.field))
+		if fd == nil || !metaMsg.Has(fd) || !fd.IsList() {
+			continue
+		}
+		list := metaMsg.Get(fd).List()
+		for i := 0; i < list.Len(); i++ {
+			cm := list.Get(i).Message()
+			if !cm.IsValid() {
+				continue
+			}
+			var sys, code string
+			if sysFD := cm.Descriptor().Fields().ByName("system"); sysFD != nil && cm.Has(sysFD) {
+				sys = strings.TrimSpace(extractWrappedString(cm.Get(sysFD).Message()))
+			}
+			if codeFD := cm.Descriptor().Fields().ByName("code"); codeFD != nil && cm.Has(codeFD) {
+				code = strings.TrimSpace(extractWrappedString(cm.Get(codeFD).Message()))
+			}
+			if code == "" && sys == "" {
+				continue
+			}
+			idx.Tokens = append(idx.Tokens, SpidxToken{
+				TenantID: tenantID,
+				ResType:  resType,
+				ResID:    resID,
+				SpName:   fieldSpec.spName,
+				SpSystem: sys,
+				SpValue:  code,
+			})
+		}
+	}
 }
 
 func extractSingleFieldValue(
@@ -184,6 +272,23 @@ func extractSingleFieldValue(
 				SpName:   spName,
 				SpValue:  s,
 			})
+			if resType == "ConceptMap" && (spName == "source" || spName == "target") {
+				aliasName := spName + "-uri"
+				idx.URIs = append(idx.URIs, SpidxURI{
+					TenantID: tenantID,
+					ResType:  resType,
+					ResID:    resID,
+					SpName:   aliasName,
+					SpValue:  s,
+				})
+				idx.Tokens = append(idx.Tokens, SpidxToken{
+					TenantID: tenantID,
+					ResType:  resType,
+					ResID:    resID,
+					SpName:   aliasName,
+					SpValue:  s,
+				})
+			}
 			if spName == "questionnaire" || spName == "instantiates-canonical" {
 				targetType := ""
 				targetID := s

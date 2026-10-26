@@ -437,6 +437,11 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read resource meta")
 			return
 		}
+		if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, resType, resID, rec.ResourceProto) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("insufficient granular scope to read %s/%s $meta", resType, resID))
+			return
+		}
 		jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize resource meta")
@@ -471,22 +476,49 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	seenTags := make(map[string]bool)
 	var tags []map[string]any
 
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	patientRestricted := hasSecCtx && auth.IsPatientRestricted(secCtx)
+	allowedPatientID := ""
+	if patientRestricted {
+		allowedPatientID = cleanID(secCtx.GetPatientId())
+	}
+
 	for _, rt := range targetTypes {
+		if hasSecCtx {
+			if !auth.Allows(secCtx, rt, auth.ActionRead) && !auth.Allows(secCtx, rt, auth.ActionSearch) {
+				continue
+			}
+			if patientRestricted && !strings.EqualFold(rt, "Patient") && !postgres.IsPatientCompartmentResourceType(rt) {
+				continue
+			}
+		}
 		for _, prof := range usCoreSupportedProfiles(rt) {
 			if !seenProfiles[prof] {
 				seenProfiles[prof] = true
 				profiles = append(profiles, prof)
 			}
 		}
-		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		sp := postgres.SearchParams{
 			TenantID: tenant,
 			ResType:  rt,
 			Count:    100,
-		})
+		}
+		if patientRestricted && allowedPatientID != "" {
+			if strings.EqualFold(rt, "Patient") {
+				sp.ID = allowedPatientID
+			} else if postgres.IsPatientCompartmentResourceType(rt) {
+				sp.References = map[string]string{"patient": "Patient/" + allowedPatientID}
+				sp.ReferenceFilters = map[string][]string{"patient": {"Patient/" + allowedPatientID}}
+			}
+		}
+		sr, err := s.store.Search(r.Context(), sp)
 		if err != nil {
 			continue
 		}
 		for _, rec := range sr.Matches {
+			if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, rt, rec.ResID, rec.ResourceProto) {
+				continue
+			}
 			jsonBytes, err := s.protoToJSONWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 			if err != nil {
 				continue
@@ -591,6 +623,15 @@ func (s *Server) mutateInstanceMeta(w http.ResponseWriter, r *http.Request, isDe
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read resource")
 		return
 	}
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		if constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionUpdate); constrained {
+			if !s.resourceSatisfiesScopeConstraints(tenant, resType, resID, rec.ResourceProto, constraints) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient granular SMART v2 scope to mutate meta of %s/%s", resType, resID))
+				return
+			}
+		}
+	}
 
 	jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
@@ -644,6 +685,9 @@ func (s *Server) mutateInstanceMeta(w http.ResponseWriter, r *http.Request, isDe
 	var idx *postgres.SearchIndexes
 	if extractor, hasExtractor := s.extractors[resType]; hasExtractor {
 		idx, _ = extractor(tenant, resID, protoBytes)
+	}
+	if strings.EqualFold(resType, "Provenance") {
+		s.enrichProvenancePatientIndex(r.Context(), tenant, resID, idx)
 	}
 
 	newRec, err := s.store.WriteResourceWithMeta(r.Context(), postgres.ResourceInput{
