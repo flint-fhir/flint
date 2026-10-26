@@ -155,6 +155,12 @@ func extractSingleFieldValue(
 					SpValue:  fhirutil.NormalizeString(s),
 				})
 			}
+			if resType == "Coverage" && fieldName == "subscriber_id" {
+				idx.Tokens = append(idx.Tokens,
+					SpidxToken{TenantID: tenantID, ResType: resType, ResID: resID, SpName: "subscriber-id", SpValue: s},
+					SpidxToken{TenantID: tenantID, ResType: resType, ResID: resID, SpName: "identifier", SpValue: s},
+				)
+			}
 		}
 
 	case "google.fhir.r4.core.Canonical", "google.fhir.r4.core.Uri", "google.fhir.r4.core.Url", "google.fhir.r4.core.Oid", "google.fhir.r4.core.Uuid":

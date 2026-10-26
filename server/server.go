@@ -315,6 +315,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleEvaluateMeasure(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Measure") && parts[4] == "$care-gaps" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCareGaps(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "ValueSet") && parts[4] == "$expand" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleValueSetExpand(w, r)
@@ -394,6 +399,12 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleEvaluateMeasure(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Measure") && parts[5] == "$care-gaps" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCareGaps(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "ValueSet") && parts[5] == "$expand" {
@@ -2402,6 +2413,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					"name":       "evaluate-measure",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Measure-evaluate-measure",
 				},
+				{
+					"name":       "care-gaps",
+					"definition": "http://hl7.org/fhir/us/davinci-deqm/OperationDefinition/care-gaps",
+				},
 			}
 		case "ValueSet":
 			entry["operation"] = []map[string]string{
@@ -2534,6 +2549,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "evaluate-measure",
 						"definition": "http://hl7.org/fhir/OperationDefinition/Measure-evaluate-measure",
+					},
+					{
+						"name":       "care-gaps",
+						"definition": "http://hl7.org/fhir/us/davinci-deqm/OperationDefinition/care-gaps",
 					},
 					{
 						"name":       "meta",

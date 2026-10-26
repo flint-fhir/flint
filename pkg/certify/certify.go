@@ -692,7 +692,13 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			err = fmt.Errorf("expected Patient/$everything total >= 26 across all 26 US Core v6.1.0 & v7.0.0 resource types, got %v", ev["total"])
 		}
 	}
-	record("EXP-01", suite4, "Patient/$everything Compartment Closure (All 26 US Core v6.1.0 & v7.0.0 Resource Types)", t0, err, "All 26 US Core resource types + Provenance returned in compartment")
+	if err == nil {
+		respEncEv, bEncEv, errEncEv := doReq(http.MethodGet, basePath+"/Encounter/cert-enc-1/$everything", "", nil, nil)
+		if errEncEv != nil || respEncEv.StatusCode != http.StatusOK || !strings.Contains(string(bEncEv), `"Encounter/cert-enc-1"`) || !strings.Contains(string(bEncEv), `"Location/cert-loc-1"`) {
+			err = fmt.Errorf("expected Encounter/cert-enc-1/$everything to include Encounter and Location/cert-loc-1, got %d: %s", respEncEv.StatusCode, string(bEncEv))
+		}
+	}
+	record("EXP-01", suite4, "Patient/$everything & Encounter/$everything Compartment Closure (All 26 US Core Types)", t0, err, "All 26 US Core resource types + Encounter/$everything verified")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/Group/all/$export", "", nil, map[string]string{
@@ -1048,7 +1054,17 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			}
 		}
 	}
-	record("CQM-01", suite5, "Clinical Quality Measures (Measure/$evaluate-measure CMS165 eCQM)", t0, err, "Evaluated CMS165 Controlling High Blood Pressure MeasureReport (score=1.0)")
+	if err == nil {
+		// Verify reportType=subject-list and Da Vinci DEQM Measure/$care-gaps
+		respSL, bSL, errSL := doReq(http.MethodGet, basePath+"/Measure/cms165-bp-control/$evaluate-measure?periodStart=2025-01-01&periodEnd=2027-01-01&reportType=subject-list", "", nil, nil)
+		respCG, bCG, errCG := doReq(http.MethodGet, basePath+"/Measure/$care-gaps?periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/cert-pat-1", "", nil, nil)
+		if errSL != nil || respSL.StatusCode != http.StatusOK || !strings.Contains(string(bSL), `"subject-list"`) || !strings.Contains(string(bSL), `"#numerator-list"`) {
+			err = fmt.Errorf("expected subject-list MeasureReport with #numerator-list, got %d: %s", respSL.StatusCode, string(bSL))
+		} else if errCG != nil || respCG.StatusCode != http.StatusOK || !strings.Contains(string(bCG), `"96315-7"`) || !strings.Contains(string(bCG), `"DetectedIssue"`) || !strings.Contains(string(bCG), `"closed-gap"`) {
+			err = fmt.Errorf("expected Da Vinci DEQM $care-gaps document Bundle with 96315-7 Composition and closed-gap DetectedIssue, got %d: %s", respCG.StatusCode, string(bCG))
+		}
+	}
+	record("CQM-01", suite5, "Clinical Quality Measures (Measure/$evaluate-measure individual/subject-list & DEQM $care-gaps)", t0, err, "Evaluated CMS165 MeasureReport (score=1.0, subject-list) & Da Vinci DEQM $care-gaps Bundle")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/cds-services", "", nil, nil)
@@ -1198,11 +1214,14 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("failed creating List/cert-list-1: %d %s", respLst.StatusCode, string(bLst))
 			} else {
 				respQList, bQList, errQList := doReq(http.MethodGet, basePath+"/Patient?_list=cert-list-1", "", nil, nil)
-				respChain, bChain, errChain := doReq(http.MethodGet, basePath+"/Observation?subject:Patient.name:exact=Certify&patient.organization=Organization/cert-org-1&patient.gender:not=male", "", nil, nil)
+				respChain, bChain, errChain := doReq(http.MethodGet, basePath+"/Observation?subject:Patient.name:exact=Certify&patient.organization.name=Certify+Medical&patient.gender:not=male", "", nil, nil)
+				respSubID, bSubID, errSubID := doReq(http.MethodGet, basePath+"/Coverage?subscriber-id=SUB-CERT-1", "", nil, nil)
 				if errQList != nil || respQList.StatusCode != http.StatusOK || !strings.Contains(string(bQList), `"cert-pat-1"`) {
 					err = fmt.Errorf("expected Patient?_list=cert-list-1 to return cert-pat-1, got %s", string(bQList))
 				} else if errChain != nil || respChain.StatusCode != http.StatusOK || !strings.Contains(string(bChain), `"cert-obs-1"`) {
-					err = fmt.Errorf("expected chained Observation search (:exact, reference, :not) to return cert-obs-1, got %s", string(bChain))
+					err = fmt.Errorf("expected multi-hop chained Observation search (:exact, patient.organization.name, :not) to return cert-obs-1, got %s", string(bChain))
+				} else if errSubID != nil || respSubID.StatusCode != http.StatusOK || !strings.Contains(string(bSubID), `"cert-cov-1"`) {
+					err = fmt.Errorf("expected Coverage?subscriber-id=SUB-CERT-1 to return cert-cov-1, got %s", string(bSubID))
 				}
 			}
 		}

@@ -881,10 +881,10 @@ func isTerminologyOp(parts []string) bool {
 
 func isMeasureOp(parts []string) bool {
 	if len(parts) == 5 {
-		return strings.EqualFold(parts[3], "Measure") && parts[4] == "$evaluate-measure"
+		return strings.EqualFold(parts[3], "Measure") && (parts[4] == "$evaluate-measure" || parts[4] == "$care-gaps")
 	}
 	if len(parts) == 6 {
-		return strings.EqualFold(parts[3], "Measure") && parts[5] == "$evaluate-measure"
+		return strings.EqualFold(parts[3], "Measure") && (parts[5] == "$evaluate-measure" || parts[5] == "$care-gaps")
 	}
 	return false
 }
