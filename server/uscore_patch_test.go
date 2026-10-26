@@ -620,6 +620,41 @@ func TestServer_PatchAndConditionalCRUD(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200 OK when Patient A patches own Patient resource, got %d", resp.StatusCode)
 	}
+
+	// 10. Multi-hop chained search (Observation?patient.organization.name=HopOrg), Encounter/$everything, and Composition/$document 2nd-hop resolution
+	doReq(http.MethodPut, "/fhir/r4/"+tenant+"/Organization/org-hop", "application/fhir+json", `{"resourceType":"Organization","id":"org-hop","active":true,"name":"HopOrg Medical"}`, sysToken, nil)
+	doReq(http.MethodPut, "/fhir/r4/"+tenant+"/Patient/pat-hop", "application/fhir+json", `{"resourceType":"Patient","id":"pat-hop","gender":"female","managingOrganization":{"reference":"Organization/org-hop"}}`, sysToken, nil)
+	doReq(http.MethodPut, "/fhir/r4/"+tenant+"/Encounter/enc-hop", "application/fhir+json", `{"resourceType":"Encounter","id":"enc-hop","status":"finished","class":{"system":"http://terminology.hl7.org/CodeSystem/v3-ActCode","code":"AMB"},"subject":{"reference":"Patient/pat-hop"},"serviceProvider":{"reference":"Organization/org-hop"}}`, sysToken, nil)
+	doReq(http.MethodPut, "/fhir/r4/"+tenant+"/Observation/obs-hop", "application/fhir+json", `{"resourceType":"Observation","id":"obs-hop","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/pat-hop"},"encounter":{"reference":"Encounter/enc-hop"}}`, sysToken, nil)
+	doReq(http.MethodPut, "/fhir/r4/"+tenant+"/Composition/comp-hop", "application/fhir+json", `{"resourceType":"Composition","id":"comp-hop","status":"final","type":{"coding":[{"system":"http://loinc.org","code":"11502-2"}]},"date":"2026-01-15T10:00:00Z","title":"Summary","subject":{"reference":"Patient/pat-hop"},"author":[{"reference":"Organization/org-hop"}],"section":[{"title":"Vitals","entry":[{"reference":"Observation/obs-hop"}]}]}`, sysToken, nil)
+
+	resp, b = doReq(http.MethodGet, "/fhir/r4/"+tenant+"/Observation?patient.organization.name=HopOrg", "", "", sysToken, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("multi-hop chained search expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	var hopBundle map[string]any
+	_ = json.Unmarshal(b, &hopBundle)
+	if hopBundle["total"] != float64(1) {
+		t.Errorf("expected multi-hop chained search Observation?patient.organization.name=HopOrg to return total=1, got %v", hopBundle["total"])
+	}
+
+	resp, b = doReq(http.MethodGet, "/fhir/r4/"+tenant+"/Encounter/enc-hop/$everything", "", "", sysToken, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Encounter/$everything expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	var encEvBundle map[string]any
+	_ = json.Unmarshal(b, &encEvBundle)
+	if total, _ := encEvBundle["total"].(float64); total < 3 {
+		t.Errorf("expected Encounter/$everything to include Encounter, Patient, Organization, and Observation (total >= 3), got %v", encEvBundle["total"])
+	}
+
+	resp, b = doReq(http.MethodGet, "/fhir/r4/"+tenant+"/Composition/comp-hop/$document", "", "", sysToken, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Composition/$document expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	if !strings.Contains(string(b), `"Encounter/enc-hop"`) {
+		t.Errorf("expected Composition/$document to include 2nd-hop referenced Encounter/enc-hop from Observation/obs-hop, got %s", b)
+	}
 }
 
 func TestBundleOrderingConditionalRefsPreferAndSMART(t *testing.T) {
@@ -737,5 +772,62 @@ func TestBundleOrderingConditionalRefsPreferAndSMART(t *testing.T) {
 	}
 	if parsedIDToken.Payload.Extra["nonce"] != "nonce-xyz-123" {
 		t.Errorf("expected id_token nonce=nonce-xyz-123, got %v", parsedIDToken.Payload.Extra["nonce"])
+	}
+}
+
+func TestMultiHopChainedScopeAndEncounterEverything(t *testing.T) {
+	srv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(srv)
+	mockAuth, err := auth.NewMockTokenValidator("https://auth.example.com", "flint-api")
+	if err != nil {
+		t.Fatalf("new mock validator: %v", err)
+	}
+	srv.SetTokenValidator(mockAuth)
+	h := srv.Handler()
+
+	// 1. Multi-hop chained search SMART scope check:
+	// Observation?patient.organization.name=Acme requires scope on Observation, Patient (hop 1), and Organization (hop 2).
+	partialToken := "partial-hop-token"
+	mockAuth.RegisterStatic(partialToken, &authv1.SecurityContext{
+		Subject:  "prac-1",
+		TenantId: "test-tenant",
+		Scopes:   auth.ParseScopes("user/Observation.rs user/Patient.rs"),
+	})
+	req := httptest.NewRequest(http.MethodGet, "/fhir/r4/test-tenant/Observation?patient.organization.name=Acme", nil)
+	req.Header.Set("Authorization", "Bearer "+partialToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden when missing Organization scope on 2nd hop of patient.organization.name, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// 2. $everything on unsupported resource type (e.g. Observation/{id}/$everything) returns 404 Not Found
+	fullToken := "full-sys-token"
+	mockAuth.RegisterStatic(fullToken, &authv1.SecurityContext{
+		Subject:  "prac-1",
+		TenantId: "test-tenant",
+		Scopes:   auth.ParseScopes("system/*.rs"),
+	})
+	badEvReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/test-tenant/Observation/obs-1/$everything", nil)
+	badEvReq.Header.Set("Authorization", "Bearer "+fullToken)
+	badEvRec := httptest.NewRecorder()
+	h.ServeHTTP(badEvRec, badEvReq)
+	if badEvRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 Not Found for Observation/$everything, got %d: %s", badEvRec.Code, badEvRec.Body.String())
+	}
+
+	// 3. CapabilityStatement advertises Encounter-everything and Composition-document
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/test-tenant/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	h.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /metadata, got %d", metaRec.Code)
+	}
+	bodyStr := metaRec.Body.String()
+	if !strings.Contains(bodyStr, "http://hl7.org/fhir/OperationDefinition/Encounter-everything") {
+		t.Errorf("expected CapabilityStatement to advertise Encounter-everything operation")
+	}
+	if !strings.Contains(bodyStr, "http://hl7.org/fhir/OperationDefinition/Composition-document") {
+		t.Errorf("expected CapabilityStatement to advertise Composition-document operation")
 	}
 }

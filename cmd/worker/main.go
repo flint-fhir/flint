@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"log"
 	"log/slog"
 	"os"
@@ -22,7 +23,20 @@ import (
 )
 
 func main() {
+	var tenantIsolationFlag string
+	flag.StringVar(&tenantIsolationFlag, "tenant-isolation", "", "Multi-tenant PostgreSQL isolation mode: 'schema' (default, schema-per-tenant) or 'shared' (shared public tables)")
+	flag.Parse()
+
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	rawIsolation := strings.TrimSpace(tenantIsolationFlag)
+	if rawIsolation == "" {
+		rawIsolation = strings.TrimSpace(os.Getenv("FLINT_TENANT_ISOLATION"))
+	}
+	isolationMode, err := postgres.ParseTenantIsolationMode(rawIsolation)
+	if err != nil {
+		log.Fatalf("invalid tenant isolation mode: %v", err)
+	}
 
 	// Connect to Temporal
 	temporalAddr := firstEnvOrDefault([]string{"FLINT_TEMPORAL_ADDR", "TEMPORAL_ADDRESS"}, "localhost:7233")
@@ -43,8 +57,17 @@ func main() {
 	if err := postgres.RunMigrations(context.Background(), db); err != nil {
 		log.Fatalf("postgres migrations: %v", err)
 	}
-	store := postgres.New(db)
-	logger.Info("connected to postgres")
+	storeOpts := []postgres.Option{
+		postgres.WithTenantIsolation(isolationMode),
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("FLINT_TENANT_ROLE_SWITCH")), "true") {
+		storeOpts = append(storeOpts, postgres.WithTenantRoleSwitch(true))
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("FLINT_TENANT_AUTO_PROVISION")), "false") {
+		storeOpts = append(storeOpts, postgres.WithAutoProvision(false))
+	}
+	store := postgres.New(db, storeOpts...)
+	logger.Info("connected to postgres", "tenant_isolation", string(isolationMode))
 
 	// Connect to AutoMQ (optional)
 	var producer *automq.Producer

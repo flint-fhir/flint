@@ -913,6 +913,24 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 			}
 		}
 	}
+	if relatesTo, ok := compMap["relatesTo"].([]any); ok {
+		for _, rel := range relatesTo {
+			if rm, ok := rel.(map[string]any); ok {
+				addRef(rm["targetReference"])
+			}
+		}
+	}
+	if events, ok := compMap["event"].([]any); ok {
+		for _, ev := range events {
+			if em, ok := ev.(map[string]any); ok {
+				if details, ok := em["detail"].([]any); ok {
+					for _, det := range details {
+						addRef(det)
+					}
+				}
+			}
+		}
+	}
 
 	var walkSections func(sections []any)
 	walkSections = func(sections []any) {
@@ -948,7 +966,9 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 		},
 	}
 
-	for _, ref := range orderedRefs {
+	firstHopCount := len(orderedRefs)
+	for idx := 0; idx < len(orderedRefs); idx++ {
+		ref := orderedRefs[idx]
 		parts := strings.SplitN(ref, "/", 2)
 		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 			continue
@@ -995,6 +1015,11 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 			"fullUrl":  resType + "/" + resID,
 			"resource": rm,
 		})
+		// Per HL7 FHIR R4 Composition/$document, also resolve direct references from resources
+		// directly referenced by the Composition (e.g. MedicationRequest.medicationReference, Observation.performer).
+		if idx < firstHopCount {
+			collectNestedReferenceStrings(rm, addRef)
+		}
 	}
 
 	nowStr := time.Now().UTC().Format(time.RFC3339)
@@ -1025,6 +1050,22 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(docBundle)
+}
+
+func collectNestedReferenceStrings(node any, addRef func(any)) {
+	switch v := node.(type) {
+	case map[string]any:
+		if _, hasRef := v["reference"].(string); hasRef {
+			addRef(v)
+		}
+		for _, child := range v {
+			collectNestedReferenceStrings(child, addRef)
+		}
+	case []any:
+		for _, item := range v {
+			collectNestedReferenceStrings(item, addRef)
+		}
+	}
 }
 
 // handleDocumentReferenceDocref implements GET|POST /fhir/r4/{tenant}/DocumentReference/$docref

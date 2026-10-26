@@ -367,6 +367,26 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 									secCtx.GetPatientId(), parts[5], id))
 							return
 						}
+					} else if len(parts) == 6 && strings.EqualFold(resType, "Encounter") && parts[5] == "$everything" {
+						id := parts[4]
+						if !auth.Allows(secCtx, "Encounter", auth.ActionRead) && !auth.Allows(secCtx, "Encounter", auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Encounter/$everything")
+							return
+						}
+						if auth.IsPatientRestricted(secCtx) && s.store != nil {
+							exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, "Encounter", id, secCtx.GetPatientId())
+							if err != nil {
+								writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+								return
+							}
+							if exists && !allowed {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("patient-scoped token (%s) cannot access Encounter/%s outside patient compartment",
+										secCtx.GetPatientId(), id))
+								return
+							}
+						}
 					} else if len(parts) == 6 && (parts[5] == "$meta-add" || parts[5] == "$meta-delete") {
 						id := parts[4]
 						if !auth.Allows(secCtx, resType, auth.ActionUpdate) && !auth.Allows(secCtx, resType, auth.ActionCreate) {

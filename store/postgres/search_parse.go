@@ -34,14 +34,23 @@ type IncludeParam struct {
 	Iterate    bool   // true when requested via _include:iterate or _revinclude:iterate
 }
 
-// ChainedParam represents a chained parameter like "patient.name=Smith" or "subject:Patient.name:exact=Smith".
+// ChainedHop represents a single reference traversal hop in a chained search parameter
+// (e.g. "subject:Patient" or "organization").
+type ChainedHop struct {
+	RefParam   string // e.g. "patient", "subject", "organization"
+	TargetType string // Inferred or explicit target type, e.g. "Patient", "Organization" (empty when polymorphic without :TargetType)
+}
+
+// ChainedParam represents a chained parameter like "patient.name=Smith",
+// "subject:Patient.name:exact=Smith", or multi-hop "patient.organization.name=Acme".
 type ChainedParam struct {
-	RefParam       string // e.g. "patient" or "subject"
-	TargetType     string // Inferred or explicit target type, e.g. "Patient" (empty when polymorphic without :TargetType)
-	TargetParam    string // Base target search parameter, e.g. "name", "family", "gender", "organization"
-	TargetModifier string // Optional modifier on targetParam, e.g. "exact", "contains", "not"
-	ParamType      string // "id", "string", "token", "date", "quantity", "reference"
-	Value          string // Search value
+	RefParam       string       // First hop reference param (e.g. "patient" or "subject")
+	TargetType     string       // Final hop inferred or explicit target type (empty when polymorphic without :TargetType)
+	Hops           []ChainedHop // Ordered reference hops (len >= 1); Hops[len(Hops)-1] leads to TargetParam
+	TargetParam    string       // Base target search parameter, e.g. "name", "family", "gender", "organization", "url"
+	TargetModifier string       // Optional modifier on targetParam, e.g. "exact", "contains", "not", "below", "above"
+	ParamType      string       // "id", "string", "token", "date", "quantity", "reference", "uri"
+	Value          string       // Search value
 }
 
 // HasParam represents a FHIR R4 reverse-chaining parameter (_has:SourceType:refParam:searchParam=value).
@@ -202,48 +211,49 @@ func ParseInclude(raw string) (IncludeParam, error) {
 }
 
 // ParseChainedParam checks if a query parameter key represents a chained search.
-// Format: "refParam.targetParam", "refParam:TargetType.targetParam", or "refParam:TargetType.targetParam:modifier"
+// Supports single-hop ("refParam.targetParam", "refParam:TargetType.targetParam:modifier")
+// and multi-hop ("patient.organization.name", "subject:Patient.general-practitioner:Practitioner.identifier") chains.
 func ParseChainedParam(key, value string) (*ChainedParam, bool) {
-	dotIdx := strings.IndexByte(key, '.')
-	if dotIdx == -1 {
+	if !strings.Contains(key, ".") {
 		return nil, false
 	}
 
-	left := key[:dotIdx]
-	targetParamRaw := key[dotIdx+1:]
-	if strings.TrimSpace(left) == "" || strings.TrimSpace(targetParamRaw) == "" {
+	segments := strings.Split(key, ".")
+	if len(segments) < 2 {
+		return nil, false
+	}
+
+	targetParamRaw := strings.TrimSpace(segments[len(segments)-1])
+	if targetParamRaw == "" {
 		return nil, false
 	}
 	targetParam, targetMod := splitParamModifier(targetParamRaw)
-
-	refParam := left
-	targetType := ""
-
-	if colonIdx := strings.IndexByte(left, ':'); colonIdx != -1 {
-		refParam = left[:colonIdx]
-		targetType = left[colonIdx+1:]
+	if strings.TrimSpace(targetParam) == "" {
+		return nil, false
 	}
 
-	// Default inferred target types for standard FHIR references if not explicit
-	if targetType == "" {
-		switch refParam {
-		case "patient", "subject", "beneficiary", "subscriber":
-			targetType = "Patient"
-		case "encounter":
-			targetType = "Encounter"
-		case "performer", "general-practitioner", "requester", "asserter", "recorder", "results-interpreter", "collector", "practitioner", "author", "agent":
-			targetType = "Practitioner"
-		case "organization", "partof", "part-of", "manufacturer", "intended-dispenser", "payor", "custodian":
-			targetType = "Organization"
-		case "location":
-			targetType = "Location"
-		case "medication":
-			targetType = "Medication"
-		case "device":
-			targetType = "Device"
-		case "questionnaire":
-			targetType = "Questionnaire"
+	hops := make([]ChainedHop, 0, len(segments)-1)
+	for _, seg := range segments[:len(segments)-1] {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			return nil, false
 		}
+		refParam := seg
+		targetType := ""
+		if colonIdx := strings.IndexByte(seg, ':'); colonIdx != -1 {
+			refParam = strings.TrimSpace(seg[:colonIdx])
+			targetType = strings.TrimSpace(seg[colonIdx+1:])
+		}
+		if refParam == "" {
+			return nil, false
+		}
+		if targetType == "" {
+			targetType = inferChainedTargetType(refParam)
+		}
+		hops = append(hops, ChainedHop{
+			RefParam:   refParam,
+			TargetType: targetType,
+		})
 	}
 
 	paramType := "token"
@@ -263,13 +273,37 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 	}
 
 	return &ChainedParam{
-		RefParam:       refParam,
-		TargetType:     targetType,
+		RefParam:       hops[0].RefParam,
+		TargetType:     hops[len(hops)-1].TargetType,
+		Hops:           hops,
 		TargetParam:    targetParam,
 		TargetModifier: targetMod,
 		ParamType:      paramType,
 		Value:          value,
 	}, true
+}
+
+func inferChainedTargetType(refParam string) string {
+	switch refParam {
+	case "patient", "subject", "beneficiary", "subscriber":
+		return "Patient"
+	case "encounter":
+		return "Encounter"
+	case "performer", "general-practitioner", "requester", "asserter", "recorder", "results-interpreter", "collector", "practitioner", "author", "agent", "individual", "participant":
+		return "Practitioner"
+	case "organization", "partof", "part-of", "manufacturer", "intended-dispenser", "payor", "custodian", "service-provider":
+		return "Organization"
+	case "location":
+		return "Location"
+	case "medication":
+		return "Medication"
+	case "device":
+		return "Device"
+	case "questionnaire":
+		return "Questionnaire"
+	default:
+		return ""
+	}
 }
 
 // ParseHasParam parses a FHIR R4 reverse-chaining parameter (_has:SourceType:refParam:searchParam=value).
