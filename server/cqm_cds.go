@@ -67,7 +67,32 @@ func resolveMeasureSpec(ctx context.Context, s *Server, tenant, rawMeasure strin
 		return measureSpecFromRecord(s, rec)
 	}
 
-	// Try searching Measure by url or identifier
+	// Try searching Measure by indexed canonical url (spidx_uri) or identifier (spidx_token) first
+	rawTrimmed := strings.TrimSpace(rawMeasure)
+	if rawTrimmed != "" {
+		if sr, err := s.store.Search(ctx, postgres.SearchParams{
+			TenantID: tenant,
+			ResType:  "Measure",
+			URIs:     map[string]string{"url": rawTrimmed},
+			Count:    10,
+		}); err == nil && len(sr.Matches) > 0 {
+			if spec, err := measureSpecFromSearchResult(s, sr.Matches[0]); err == nil {
+				return spec, nil
+			}
+		}
+		if sr, err := s.store.Search(ctx, postgres.SearchParams{
+			TenantID: tenant,
+			ResType:  "Measure",
+			Tokens:   map[string]string{"identifier": rawTrimmed},
+			Count:    10,
+		}); err == nil && len(sr.Matches) > 0 {
+			if spec, err := measureSpecFromSearchResult(s, sr.Matches[0]); err == nil {
+				return spec, nil
+			}
+		}
+	}
+
+	// Fallback scan for legacy/differently-cased Measure resources
 	sr, err := s.store.Search(ctx, postgres.SearchParams{
 		TenantID: tenant,
 		ResType:  "Measure",
@@ -273,11 +298,17 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	initialPop := 0
-	denominator := 0
-	denomExclusion := 0
-	numerator := 0
-	var evaluatedRefs []map[string]any
+	var (
+		initialPop     int
+		denominator    int
+		denomExclusion int
+		numerator      int
+		initPopIDs     []string
+		denomIDs       []string
+		exclIDs        []string
+		numIDs         []string
+		evaluatedRefs  []map[string]any
+	)
 	seenEvalRefs := make(map[string]bool)
 	addEvalRef := func(ref string) {
 		if ref != "" && !seenEvalRefs[ref] {
@@ -286,21 +317,30 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	patIDs := make([]string, 0, len(patResults.Matches))
 	for _, patRec := range patResults.Matches {
-		patID := patRec.ResID
-		snap := s.loadPatientClinicalSnapshot(r.Context(), tenant, patID)
+		patIDs = append(patIDs, patRec.ResID)
+	}
+	cohortSnaps := s.loadCohortClinicalSnapshots(r.Context(), tenant, patIDs)
+
+	for _, patID := range patIDs {
+		snap := cohortSnaps[patID]
 		inInitPop, inDenom, inExcl, inNum, refs := evaluatePatientForMeasure(spec.kind, snap, periodStart, periodEnd)
 		if inInitPop {
 			initialPop++
+			initPopIDs = append(initPopIDs, patID)
 		}
 		if inDenom {
 			denominator++
+			denomIDs = append(denomIDs, patID)
 		}
 		if inExcl {
 			denomExclusion++
+			exclIDs = append(exclIDs, patID)
 		}
 		if inNum {
 			numerator++
+			numIDs = append(numIDs, patID)
 		}
 		if targetPatientID != "" {
 			for _, ref := range refs {
@@ -320,6 +360,13 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 		effectiveType = "individual"
 	} else if reportType == "subject-list" {
 		effectiveType = "subject-list"
+	}
+
+	pops := []map[string]any{
+		buildMeasurePopulation("initial-population", "Initial Population", initialPop, effectiveType == "subject-list"),
+		buildMeasurePopulation("denominator", "Denominator", denominator, effectiveType == "subject-list"),
+		buildMeasurePopulation("denominator-exclusion", "Denominator Exclusion", denomExclusion, effectiveType == "subject-list"),
+		buildMeasurePopulation("numerator", "Numerator", numerator, effectiveType == "subject-list"),
 	}
 
 	report := map[string]any{
@@ -343,18 +390,21 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 		},
 		"group": []map[string]any{
 			{
-				"id": "group-1",
-				"population": []map[string]any{
-					buildMeasurePopulation("initial-population", "Initial Population", initialPop),
-					buildMeasurePopulation("denominator", "Denominator", denominator),
-					buildMeasurePopulation("denominator-exclusion", "Denominator Exclusion", denomExclusion),
-					buildMeasurePopulation("numerator", "Numerator", numerator),
-				},
+				"id":         "group-1",
+				"population": pops,
 				"measureScore": map[string]any{
 					"value": score,
 				},
 			},
 		},
+	}
+	if effectiveType == "subject-list" {
+		report["contained"] = []map[string]any{
+			buildSubjectListResource("initial-population", "Initial Population", initPopIDs),
+			buildSubjectListResource("denominator", "Denominator", denomIDs),
+			buildSubjectListResource("denominator-exclusion", "Denominator Exclusion", exclIDs),
+			buildSubjectListResource("numerator", "Numerator", numIDs),
+		}
 	}
 	if targetPatientID != "" {
 		report["subject"] = map[string]any{
@@ -370,8 +420,8 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(report)
 }
 
-func buildMeasurePopulation(code, display string, count int) map[string]any {
-	return map[string]any{
+func buildMeasurePopulation(code, display string, count int, withSubjectList bool) map[string]any {
+	pop := map[string]any{
 		"code": map[string]any{
 			"coding": []map[string]any{
 				{
@@ -383,6 +433,422 @@ func buildMeasurePopulation(code, display string, count int) map[string]any {
 		},
 		"count": count,
 	}
+	if withSubjectList {
+		pop["subjectResults"] = map[string]any{
+			"reference": "#" + code + "-list",
+		}
+	}
+	return pop
+}
+
+func buildSubjectListResource(code, title string, patIDs []string) map[string]any {
+	entries := make([]map[string]any, 0, len(patIDs))
+	for _, pid := range patIDs {
+		entries = append(entries, map[string]any{
+			"item": map[string]any{
+				"reference": "Patient/" + pid,
+			},
+		})
+	}
+	return map[string]any{
+		"resourceType": "List",
+		"id":           code + "-list",
+		"status":       "current",
+		"mode":         "snapshot",
+		"title":        title,
+		"entry":        entries,
+	}
+}
+
+// handleCareGaps implements GET/POST /fhir/r4/{tenant}/Measure/$care-gaps
+// and GET/POST /fhir/r4/{tenant}/Measure/{id}/$care-gaps per the HL7 Da Vinci DEQM IG.
+func (s *Server) handleCareGaps(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	measureRef := strings.TrimSpace(r.PathValue("id"))
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "operational store is not configured")
+		return
+	}
+
+	q := r.URL.Query()
+	var measureRefs []string
+	if measureRef != "" {
+		measureRefs = append(measureRefs, measureRef)
+	}
+	for _, key := range []string{"measureId", "measure"} {
+		for _, v := range q[key] {
+			for part := range strings.SplitSeq(v, ",") {
+				if trimmed := strings.TrimSpace(part); trimmed != "" {
+					measureRefs = append(measureRefs, trimmed)
+				}
+			}
+		}
+	}
+	periodStartStr := strings.TrimSpace(q.Get("periodStart"))
+	periodEndStr := strings.TrimSpace(q.Get("periodEnd"))
+	subjectRef := strings.TrimSpace(q.Get("subject"))
+	if subjectRef == "" {
+		subjectRef = strings.TrimSpace(q.Get("patient"))
+	}
+	var statusFilters []string
+	for _, v := range q["status"] {
+		for part := range strings.SplitSeq(v, ",") {
+			if trimmed := strings.ToLower(strings.TrimSpace(part)); trimmed != "" {
+				statusFilters = append(statusFilters, trimmed)
+			}
+		}
+	}
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		if err == nil && len(strings.TrimSpace(string(body))) > 0 {
+			var payload map[string]any
+			if err := json.Unmarshal(body, &payload); err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for Measure/$care-gaps")
+				return
+			}
+			if payload["resourceType"] == "Parameters" {
+				if params, ok := payload["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						val := extractParamString(pm)
+						switch name {
+						case "measureId", "measure":
+							if val != "" {
+								measureRefs = append(measureRefs, val)
+							}
+						case "periodStart":
+							if periodStartStr == "" {
+								periodStartStr = val
+							}
+						case "periodEnd":
+							if periodEndStr == "" {
+								periodEndStr = val
+							}
+						case "subject", "patient":
+							if subjectRef == "" {
+								subjectRef = val
+							}
+						case "status":
+							if val != "" {
+								for part := range strings.SplitSeq(val, ",") {
+									if trimmed := strings.ToLower(strings.TrimSpace(part)); trimmed != "" {
+										statusFilters = append(statusFilters, trimmed)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	wantStatus := make(map[string]bool)
+	for _, st := range statusFilters {
+		switch st {
+		case "open-gap", "closed-gap", "not-in-population":
+			wantStatus[st] = true
+		default:
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid $care-gaps status %q: expected open-gap, closed-gap, or not-in-population", st))
+			return
+		}
+	}
+	if len(wantStatus) == 0 {
+		wantStatus["open-gap"] = true
+		wantStatus["closed-gap"] = true
+	}
+
+	if periodStartStr == "" {
+		periodStartStr = "2000-01-01"
+	}
+	if periodEndStr == "" {
+		periodEndStr = "2099-12-31"
+	}
+	periodStart, err := parseFlexibleDate(periodStartStr, false)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid periodStart %q: %v", periodStartStr, err))
+		return
+	}
+	periodEnd, err := parseFlexibleDate(periodEndStr, true)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid periodEnd %q: %v", periodEndStr, err))
+		return
+	}
+	if periodEnd.Before(periodStart) {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "periodEnd must not be before periodStart")
+		return
+	}
+
+	var targetPatientID string
+	if subjectRef != "" {
+		targetPatientID = cleanID(subjectRef)
+	}
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		allowedPat := cleanID(secCtx.GetPatientId())
+		if allowedPat == "" {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token is missing patient_id")
+			return
+		}
+		if targetPatientID != "" && targetPatientID != allowedPat {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token cannot evaluate care gaps for another patient")
+			return
+		}
+		targetPatientID = allowedPat
+	}
+
+	if len(measureRefs) == 0 {
+		measureRefs = []string{MeasureIDCMS165, MeasureIDCMS122}
+	}
+	var specs []*measureSpec
+	seenSpecIDs := make(map[string]bool)
+	for _, mr := range measureRefs {
+		sp, err := resolveMeasureSpec(r.Context(), s, tenant, mr)
+		if errors.Is(err, sql.ErrNoRows) || sp == nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Measure %q not found", mr))
+			return
+		}
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to resolve Measure")
+			return
+		}
+		if !seenSpecIDs[sp.id] {
+			seenSpecIDs[sp.id] = true
+			specs = append(specs, sp)
+		}
+	}
+
+	patSearch := postgres.SearchParams{
+		TenantID: tenant,
+		ResType:  "Patient",
+		Count:    200,
+	}
+	if targetPatientID != "" {
+		patSearch.ID = targetPatientID
+	}
+	patResults, err := s.store.Search(r.Context(), patSearch)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to query patients for Measure/$care-gaps")
+		return
+	}
+	if targetPatientID != "" && len(patResults.Matches) == 0 {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", targetPatientID))
+		return
+	}
+
+	patIDs := make([]string, 0, len(patResults.Matches))
+	patMaps := make(map[string]map[string]any, len(patResults.Matches))
+	for _, patRec := range patResults.Matches {
+		patIDs = append(patIDs, patRec.ResID)
+		if jb, err := s.protoToJSONWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated); err == nil {
+			var pm map[string]any
+			if json.Unmarshal(jb, &pm) == nil {
+				patMaps[patRec.ResID] = pm
+			}
+		}
+	}
+	cohortSnaps := s.loadCohortClinicalSnapshots(r.Context(), tenant, patIDs)
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	compSubject := map[string]any{"display": "Tenant Cohort"}
+	if len(patIDs) == 1 {
+		compSubject = map[string]any{"reference": "Patient/" + patIDs[0]}
+	}
+
+	var sections []map[string]any
+	var extraEntries []map[string]any
+	addedPatients := make(map[string]bool)
+
+	for _, patID := range patIDs {
+		snap := cohortSnaps[patID]
+		for _, spec := range specs {
+			inInitPop, inDenom, inExcl, inNum, evalRefs := evaluatePatientForMeasure(spec.kind, snap, periodStart, periodEnd)
+			gapStatus := "not-in-population"
+			gapDisplay := "Not in Population"
+			if inDenom && !inExcl {
+				if spec.improvementNotation == "decrease" {
+					// Inverse measure (e.g. CMS122 poor control): numerator means poor control (open gap)
+					if inNum {
+						gapStatus = "open-gap"
+						gapDisplay = "Open Gap"
+					} else {
+						gapStatus = "closed-gap"
+						gapDisplay = "Closed Gap"
+					}
+				} else {
+					if inNum {
+						gapStatus = "closed-gap"
+						gapDisplay = "Closed Gap"
+					} else {
+						gapStatus = "open-gap"
+						gapDisplay = "Open Gap"
+					}
+				}
+			}
+			if !wantStatus[gapStatus] {
+				continue
+			}
+
+			if !addedPatients[patID] {
+				addedPatients[patID] = true
+				if pm, ok := patMaps[patID]; ok {
+					extraEntries = append(extraEntries, map[string]any{
+						"fullUrl":  "Patient/" + patID,
+						"resource": pm,
+					})
+				}
+			}
+
+			initCnt, denomCnt, exclCnt, numCnt := 0, 0, 0, 0
+			if inInitPop {
+				initCnt = 1
+			}
+			if inDenom {
+				denomCnt = 1
+			}
+			if inExcl {
+				exclCnt = 1
+			}
+			if inNum {
+				numCnt = 1
+			}
+			score := 0.0
+			if denomCnt-exclCnt > 0 {
+				score = float64(numCnt) / float64(denomCnt-exclCnt)
+			}
+
+			mrID := fmt.Sprintf("mr-gap-%s-%s", spec.id, patID)
+			var evalRefObjs []map[string]any
+			seenEval := make(map[string]bool)
+			for _, ref := range evalRefs {
+				if ref != "" && !seenEval[ref] {
+					seenEval[ref] = true
+					evalRefObjs = append(evalRefObjs, map[string]any{"reference": ref})
+				}
+			}
+
+			mrRes := map[string]any{
+				"resourceType": "MeasureReport",
+				"id":           mrID,
+				"status":       "complete",
+				"type":         "individual",
+				"measure":      spec.url,
+				"subject":      map[string]any{"reference": "Patient/" + patID},
+				"date":         nowStr,
+				"period": map[string]any{
+					"start": periodStartStr,
+					"end":   periodEndStr,
+				},
+				"improvementNotation": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system": "http://terminology.hl7.org/CodeSystem/measure-improvement-notation",
+							"code":   spec.improvementNotation,
+						},
+					},
+				},
+				"group": []map[string]any{
+					{
+						"id": "group-1",
+						"population": []map[string]any{
+							buildMeasurePopulation("initial-population", "Initial Population", initCnt, false),
+							buildMeasurePopulation("denominator", "Denominator", denomCnt, false),
+							buildMeasurePopulation("denominator-exclusion", "Denominator Exclusion", exclCnt, false),
+							buildMeasurePopulation("numerator", "Numerator", numCnt, false),
+						},
+						"measureScore": map[string]any{"value": score},
+					},
+				},
+			}
+			if len(evalRefObjs) > 0 {
+				mrRes["evaluatedResource"] = evalRefObjs
+			}
+
+			issueID := fmt.Sprintf("care-gap-%s-%s", spec.id, patID)
+			detectedIssue := map[string]any{
+				"resourceType": "DetectedIssue",
+				"id":           issueID,
+				"status":       "final",
+				"code": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/davinci-deqm/CodeSystem/care-gap-status",
+							"code":    gapStatus,
+							"display": gapDisplay,
+						},
+					},
+					"text": fmt.Sprintf("%s: %s", gapDisplay, spec.title),
+				},
+				"patient": map[string]any{"reference": "Patient/" + patID},
+				"evidence": []map[string]any{
+					{
+						"detail": []map[string]any{
+							{"reference": "MeasureReport/" + mrID},
+						},
+					},
+				},
+			}
+
+			sections = append(sections, map[string]any{
+				"title": spec.title,
+				"focus": map[string]any{"reference": "MeasureReport/" + mrID},
+				"entry": []map[string]any{
+					{"reference": "DetectedIssue/" + issueID},
+				},
+			})
+			extraEntries = append(extraEntries,
+				map[string]any{"fullUrl": "MeasureReport/" + mrID, "resource": mrRes},
+				map[string]any{"fullUrl": "DetectedIssue/" + issueID, "resource": detectedIssue},
+			)
+		}
+	}
+
+	compRes := map[string]any{
+		"resourceType": "Composition",
+		"id":           "care-gaps-composition",
+		"status":       "final",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "96315-7",
+					"display": "Gaps in care report",
+				},
+			},
+		},
+		"subject": compSubject,
+		"date":    nowStr,
+		"author": []map[string]any{
+			{"display": "Flint Clinical Quality Engine (DEQM)"},
+		},
+		"title":   "Care Gaps Report",
+		"section": sections,
+	}
+
+	bundleEntries := make([]map[string]any, 0, 1+len(extraEntries))
+	bundleEntries = append(bundleEntries, map[string]any{
+		"fullUrl":  "Composition/care-gaps-composition",
+		"resource": compRes,
+	})
+	bundleEntries = append(bundleEntries, extraEntries...)
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "care-gaps-bundle",
+		"type":         "document",
+		"timestamp":    nowStr,
+		"total":        len(bundleEntries),
+		"entry":        bundleEntries,
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
 }
 
 type patientClinicalSnapshot struct {
@@ -393,38 +859,104 @@ type patientClinicalSnapshot struct {
 	allergies    []map[string]any
 }
 
-func (s *Server) loadPatientClinicalSnapshot(ctx context.Context, tenant, patID string) patientClinicalSnapshot {
-	snap := patientClinicalSnapshot{patientID: patID}
-	if s.store == nil || patID == "" {
-		return snap
+func extractClinicalSubjectPatientID(res map[string]any) string {
+	for _, key := range []string{"subject", "patient"} {
+		if refObj, ok := res[key].(map[string]any); ok {
+			if ref, _ := refObj["reference"].(string); ref != "" {
+				return cleanID(ref)
+			}
+		}
 	}
-	loadType := func(resType string) []map[string]any {
+	return ""
+}
+
+// loadCohortClinicalSnapshots loads Condition, Encounter, and Observation resources for a cohort
+// of patient IDs in 3 batch SQL queries instead of 4*N individual queries.
+func (s *Server) loadCohortClinicalSnapshots(ctx context.Context, tenant string, patIDs []string) map[string]patientClinicalSnapshot {
+	out := make(map[string]patientClinicalSnapshot, len(patIDs))
+	for _, pid := range patIDs {
+		out[pid] = patientClinicalSnapshot{patientID: pid}
+	}
+	if s.store == nil || len(patIDs) == 0 {
+		return out
+	}
+	patRefs := make([]string, 0, len(patIDs))
+	for _, pid := range patIDs {
+		if pid != "" {
+			patRefs = append(patRefs, "Patient/"+pid)
+		}
+	}
+	if len(patRefs) == 0 {
+		return out
+	}
+	refFilter := strings.Join(patRefs, ",")
+	limit := max(200, len(patIDs)*50)
+
+	loadBatch := func(resType string, assign func(snap *patientClinicalSnapshot, m map[string]any)) {
 		sr, err := s.store.Search(ctx, postgres.SearchParams{
 			TenantID:   tenant,
 			ResType:    resType,
-			References: map[string]string{"patient": "Patient/" + patID},
-			Count:      200,
+			References: map[string]string{"patient": refFilter},
+			Count:      limit,
 		})
 		if err != nil {
-			return nil
+			return
 		}
-		var out []map[string]any
 		for _, rec := range sr.Matches {
 			jb, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 			if err != nil {
 				continue
 			}
 			var m map[string]any
-			if err := json.Unmarshal(jb, &m); err == nil {
-				out = append(out, m)
+			if err := json.Unmarshal(jb, &m); err != nil {
+				continue
+			}
+			pid := extractClinicalSubjectPatientID(m)
+			if pid == "" && len(patIDs) == 1 {
+				pid = patIDs[0]
+			}
+			if snap, ok := out[pid]; ok {
+				assign(&snap, m)
+				out[pid] = snap
 			}
 		}
-		return out
 	}
-	snap.conditions = loadType("Condition")
-	snap.encounters = loadType("Encounter")
-	snap.observations = loadType("Observation")
-	snap.allergies = loadType("AllergyIntolerance")
+
+	loadBatch("Condition", func(snap *patientClinicalSnapshot, m map[string]any) {
+		snap.conditions = append(snap.conditions, m)
+	})
+	loadBatch("Encounter", func(snap *patientClinicalSnapshot, m map[string]any) {
+		snap.encounters = append(snap.encounters, m)
+	})
+	loadBatch("Observation", func(snap *patientClinicalSnapshot, m map[string]any) {
+		snap.observations = append(snap.observations, m)
+	})
+	return out
+}
+
+func (s *Server) loadPatientClinicalSnapshot(ctx context.Context, tenant, patID string) patientClinicalSnapshot {
+	if s.store == nil || patID == "" {
+		return patientClinicalSnapshot{patientID: patID}
+	}
+	cohort := s.loadCohortClinicalSnapshots(ctx, tenant, []string{patID})
+	snap := cohort[patID]
+	if sr, err := s.store.Search(ctx, postgres.SearchParams{
+		TenantID:   tenant,
+		ResType:    "AllergyIntolerance",
+		References: map[string]string{"patient": "Patient/" + patID},
+		Count:      200,
+	}); err == nil {
+		for _, rec := range sr.Matches {
+			jb, err := s.protoToJSONWithMeta("AllergyIntolerance", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+			if err != nil {
+				continue
+			}
+			var m map[string]any
+			if err := json.Unmarshal(jb, &m); err == nil {
+				snap.allergies = append(snap.allergies, m)
+			}
+		}
+	}
 	return snap
 }
 

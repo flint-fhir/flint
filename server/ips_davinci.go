@@ -389,16 +389,44 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 		allowedPatientID = cleanID(secCtx.GetPatientId())
 	}
 
-	// Fetch active Coverage resources in the tenant to check subscriberId / identifier links
+	// Fetch active Coverage resources in the tenant to check subscriberId / identifier links.
+	// Pre-filter via spidx_token (identifier / subscriber-id) when CoverageToMatch specifies
+	// a subscriberId or identifier, with fallback to a bounded scan for legacy/differently-cased rows.
 	covSearchParams := postgres.SearchParams{
 		TenantID: tenant,
 		ResType:  "Coverage",
-		Count:    1000,
+		Count:    200,
 	}
 	if patientRestricted {
 		covSearchParams.References = map[string]string{"patient": "Patient/" + allowedPatientID}
 	}
-	covSR, _ := s.store.Search(r.Context(), covSearchParams)
+	var covTokenParts []string
+	seenCovTok := make(map[string]bool)
+	addCovTok := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			return
+		}
+		for _, cand := range []string{v, strings.ToLower(v), strings.ToUpper(v)} {
+			if !seenCovTok[cand] {
+				seenCovTok[cand] = true
+				covTokenParts = append(covTokenParts, cand)
+			}
+		}
+	}
+	addCovTok(covSubscriberID)
+	for _, cid := range covIdentifiers {
+		addCovTok(cid)
+	}
+	var covSR *postgres.SearchResults
+	if len(covTokenParts) > 0 {
+		filteredCovParams := covSearchParams
+		filteredCovParams.Tokens = map[string]string{"identifier": strings.Join(covTokenParts, ",")}
+		covSR, _ = s.store.Search(r.Context(), filteredCovParams)
+	}
+	if covSR == nil || len(covSR.Matches) == 0 {
+		covSR, _ = s.store.Search(r.Context(), covSearchParams)
+	}
 	coveragePatients := make(map[string]string) // patientID -> memberIdentifierValue
 	if covSR != nil {
 		for _, m := range covSR.Matches {

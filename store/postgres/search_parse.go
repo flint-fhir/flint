@@ -443,7 +443,7 @@ var (
 		"status-reason": true, "target-disease": true,
 		"intended-performertype": true, "address-use": true,
 		"accession": true, "bodysite": true, "specialty": true,
-		"role": true, "relationship": true,
+		"role": true, "relationship": true, "subscriber-id": true,
 	}
 	knownRefSearchParams = map[string]bool{
 		"organization": true, "general-practitioner": true,

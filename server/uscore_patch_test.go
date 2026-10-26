@@ -655,6 +655,34 @@ func TestServer_PatchAndConditionalCRUD(t *testing.T) {
 	if !strings.Contains(string(b), `"Encounter/enc-hop"`) {
 		t.Errorf("expected Composition/$document to include 2nd-hop referenced Encounter/enc-hop from Observation/obs-hop, got %s", b)
 	}
+
+	// 11. Da Vinci DEQM Measure/$care-gaps, Measure/$evaluate-measure reportType=subject-list, and Coverage?subscriber-id=...
+	doReq(http.MethodPut, "/fhir/r4/"+tenant+"/Condition/cond-htn-hop", "application/fhir+json", `{"resourceType":"Condition","id":"cond-htn-hop","clinicalStatus":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/condition-clinical","code":"active"}]},"code":{"coding":[{"system":"http://snomed.info/sct","code":"38341003","display":"Essential hypertension"}]},"subject":{"reference":"Patient/pat-hop"}}`, sysToken, nil)
+	doReq(http.MethodPut, "/fhir/r4/"+tenant+"/Coverage/cov-hop", "application/fhir+json", `{"resourceType":"Coverage","id":"cov-hop","status":"active","subscriberId":"SUB-HOP-777","beneficiary":{"reference":"Patient/pat-hop"},"payor":[{"reference":"Organization/org-hop"}]}`, sysToken, nil)
+
+	// Patient/pat-hop has Hypertension + Encounter/enc-hop, but no BP reading -> open-gap on CMS165!
+	resp, b = doReq(http.MethodGet, "/fhir/r4/"+tenant+"/Measure/$care-gaps?subject=Patient/pat-hop&status=open-gap", "", "", sysToken, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Measure/$care-gaps expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	if !strings.Contains(string(b), `"open-gap"`) || !strings.Contains(string(b), `"care-gap-cms165-bp-control-pat-hop"`) {
+		t.Errorf("expected Measure/$care-gaps to report open-gap for CMS165 on pat-hop, got %s", b)
+	}
+
+	// Measure/$evaluate-measure with reportType=subject-list returns contained List resources and subjectResults
+	resp, b = doReq(http.MethodGet, "/fhir/r4/"+tenant+"/Measure/cms165-bp-control/$evaluate-measure?reportType=subject-list", "", "", sysToken, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Measure/$evaluate-measure?reportType=subject-list expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	if !strings.Contains(string(b), `"subject-list"`) || !strings.Contains(string(b), `"#denominator-list"`) || !strings.Contains(string(b), `"Patient/pat-hop"`) {
+		t.Errorf("expected subject-list MeasureReport to include #denominator-list with Patient/pat-hop, got %s", b)
+	}
+
+	// Coverage?subscriber-id=SUB-HOP-777 hits spidx_token
+	resp, b = doReq(http.MethodGet, "/fhir/r4/"+tenant+"/Coverage?subscriber-id=SUB-HOP-777", "", "", sysToken, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `"cov-hop"`) {
+		t.Errorf("expected Coverage?subscriber-id=SUB-HOP-777 to match cov-hop, got %d: %s", resp.StatusCode, b)
+	}
 }
 
 func TestBundleOrderingConditionalRefsPreferAndSMART(t *testing.T) {
@@ -829,5 +857,22 @@ func TestMultiHopChainedScopeAndEncounterEverything(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "http://hl7.org/fhir/OperationDefinition/Composition-document") {
 		t.Errorf("expected CapabilityStatement to advertise Composition-document operation")
+	}
+	if !strings.Contains(bodyStr, "http://hl7.org/fhir/us/davinci-deqm/OperationDefinition/care-gaps") {
+		t.Errorf("expected CapabilityStatement to advertise Da Vinci DEQM care-gaps operation")
+	}
+
+	// 4. OpenAPI 3.1.0 exposes /Measure/$care-gaps and /Encounter/{id}/$everything
+	oaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/test-tenant/openapi.json", nil)
+	oaRec := httptest.NewRecorder()
+	h.ServeHTTP(oaRec, oaReq)
+	if oaRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /openapi.json, got %d", oaRec.Code)
+	}
+	oaStr := oaRec.Body.String()
+	for _, wantPath := range []string{`"/Measure/$care-gaps"`, `"/Measure/{id}/$care-gaps"`, `"/Encounter/{id}/$everything"`} {
+		if !strings.Contains(oaStr, wantPath) {
+			t.Errorf("expected OpenAPI spec to contain path %s", wantPath)
+		}
 	}
 }
