@@ -42,36 +42,40 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		authHeader := r.Header.Get("Authorization")
-		validator := s.tokenValidator
-		if validator == nil {
-			// If no external token validator is configured and no Authorization header is supplied,
-			// server operates in unauthenticated dev mode. When an Authorization header IS supplied
-			// (e.g. SMART App Launch / HL7 Inferno conformance tests), validate and enforce scopes via devAuth.
-			if authHeader == "" {
-				next.ServeHTTP(w, r)
+		secCtx, hasExistingSecCtx := auth.FromContext(r.Context())
+		if !hasExistingSecCtx || authHeader != "" {
+			validator := s.tokenValidator
+			if validator == nil {
+				// If no external token validator is configured and no Authorization header is supplied,
+				// server operates in unauthenticated dev mode. When an Authorization header IS supplied
+				// (e.g. SMART App Launch / HL7 Inferno conformance tests), validate and enforce scopes via devAuth.
+				if authHeader == "" {
+					next.ServeHTTP(w, r)
+					return
+				}
+				validator = s.devAuth
+			}
+
+			// Extract Bearer token
+			if authHeader == "" || !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+				writeOperationOutcome(w, http.StatusUnauthorized, "login", "missing or malformed Authorization header")
 				return
 			}
-			validator = s.devAuth
-		}
+			rawToken := strings.TrimSpace(authHeader[7:])
 
-		// Extract Bearer token
-		if authHeader == "" || !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
-			writeOperationOutcome(w, http.StatusUnauthorized, "login", "missing or malformed Authorization header")
-			return
-		}
-		rawToken := strings.TrimSpace(authHeader[7:])
+			if s.isTokenRevoked(rawToken) {
+				writeOperationOutcome(w, http.StatusUnauthorized, "login", "token has been revoked")
+				return
+			}
 
-		if s.isTokenRevoked(rawToken) {
-			writeOperationOutcome(w, http.StatusUnauthorized, "login", "token has been revoked")
-			return
-		}
-
-		// Validate token using configured TokenValidator (OIDC/Zitadel/Mock)
-		secCtx, err := validator.ValidateToken(r.Context(), rawToken)
-		if err != nil {
-			s.logger.Warn("token validation failed", "error", err, "path", r.URL.Path)
-			writeOperationOutcome(w, http.StatusUnauthorized, "login", err.Error())
-			return
+			// Validate token using configured TokenValidator (OIDC/Zitadel/Mock)
+			var err error
+			secCtx, err = validator.ValidateToken(r.Context(), rawToken)
+			if err != nil {
+				s.logger.Warn("token validation failed", "error", err, "path", r.URL.Path)
+				writeOperationOutcome(w, http.StatusUnauthorized, "login", err.Error())
+				return
+			}
 		}
 
 		if holder, ok := r.Context().Value(auditActorKey).(*auditActorHolder); ok && holder != nil {

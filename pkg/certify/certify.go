@@ -1,6 +1,6 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), and ONC §170.315(g)(10) / HTI-1 Standardized API conformance
-// & certification runner. It executes 5 structured test suites (49 checks) against
+// & certification runner. It executes 5 structured test suites (50 checks) against
 // a target Flint server and produces both a standard FHIR R4 TestReport resource
 // and a human-readable scorecard.
 package certify
@@ -1010,9 +1010,25 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			if subID != "" {
 				_, _, _ = doReq(http.MethodDelete, basePath+"/Subscription/"+subID, "", nil, nil)
 			}
+			// Verify SSRF webhook endpoint rejection (link-local / cloud metadata)
+			ssrfBody := []byte(`{
+				"resourceType": "Subscription",
+				"status": "requested",
+				"reason": "SSRF test",
+				"criteria": "Observation?code=8867-4",
+				"channel": {
+					"type": "rest-hook",
+					"endpoint": "http://169.254.169.254/latest/meta-data/",
+					"payload": "application/fhir+json"
+				}
+			}`)
+			respSSRF, _, errSSRF := doReq(http.MethodPost, basePath+"/Subscription", "application/fhir+json", ssrfBody, nil)
+			if errSSRF != nil || respSSRF.StatusCode != http.StatusUnprocessableEntity {
+				err = fmt.Errorf("expected 422 Unprocessable Entity when Subscription targets link-local/metadata SSRF endpoint, got %d", respSSRF.StatusCode)
+			}
 		}
 	}
-	record("SUB-01", suite5, "FHIR R4 Subscription (rest-hook) Lifecycle & Criteria Activation", t0, err, "Transitioned Subscription from requested -> active & verified rest-hook criteria")
+	record("SUB-01", suite5, "FHIR R4 Subscription (rest-hook) Lifecycle, Criteria Activation & SSRF Guard", t0, err, "Transitioned Subscription from requested -> active & blocked SSRF metadata webhook")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/Measure/cms165-bp-control/$evaluate-measure?periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/cert-pat-1", "", nil, nil)

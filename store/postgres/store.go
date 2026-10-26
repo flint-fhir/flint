@@ -133,15 +133,17 @@ func ParseETagVersion(etag string) (int, error) {
 // Store provides FHIR resource storage operations on Postgres.
 type Store struct {
 	db                 *sql.DB
+	isolationMode      TenantIsolationMode
 	autoProvision      bool
 	roleSwitch         bool
 	provisionedSchemas sync.Map
 }
 
-// New creates a new Postgres FHIR resource store with schema-per-tenant ("tenant_<slug>") isolation.
+// New creates a new Postgres FHIR resource store with schema-per-tenant ("tenant_<slug>") isolation by default.
 func New(db *sql.DB, opts ...Option) *Store {
 	s := &Store{
 		db:            db,
+		isolationMode: TenantIsolationSchema,
 		autoProvision: true,
 	}
 	for _, opt := range opts {

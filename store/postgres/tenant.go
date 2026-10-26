@@ -29,8 +29,66 @@ const (
 
 var validTenantSlug = regexp.MustCompile(`^[a-z0-9]([-_a-z0-9]*[a-z0-9])?$`)
 
+// TenantIsolationMode configures how multi-tenant FHIR data is isolated in PostgreSQL.
+type TenantIsolationMode string
+
+const (
+	// TenantIsolationSchema (default) provisions a dedicated PostgreSQL schema ("tenant_<slug>")
+	// per tenant and scopes all tenant queries and transactions via SET LOCAL search_path.
+	TenantIsolationSchema TenantIsolationMode = "schema"
+
+	// TenantIsolationShared stores all tenants in shared public tables keyed by a leading
+	// tenant_id column in every primary key and covering B-tree index.
+	TenantIsolationShared TenantIsolationMode = "shared"
+)
+
+// ParseTenantIsolationMode parses a configuration string (e.g. from FLINT_TENANT_ISOLATION
+// or --tenant-isolation) into a TenantIsolationMode. Empty string defaults to TenantIsolationSchema.
+func ParseTenantIsolationMode(raw string) (TenantIsolationMode, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "schema", "schema-per-tenant", "per-tenant", "tenant-schema":
+		return TenantIsolationSchema, nil
+	case "shared", "public", "table", "none", "disabled", "off":
+		return TenantIsolationShared, nil
+	default:
+		return "", fmt.Errorf("invalid tenant isolation mode %q (valid modes: %q, %q)", raw, TenantIsolationSchema, TenantIsolationShared)
+	}
+}
+
 // Option configures a Postgres Store.
 type Option func(*Store)
+
+// StoreOption is an alias for Option for backwards compatibility.
+type StoreOption = Option
+
+// WithTenantIsolation configures the Store's multi-tenant storage isolation mode
+// (TenantIsolationSchema by default, or TenantIsolationShared).
+func WithTenantIsolation(mode TenantIsolationMode) Option {
+	return func(s *Store) {
+		if mode == TenantIsolationShared {
+			s.isolationMode = TenantIsolationShared
+		} else {
+			s.isolationMode = TenantIsolationSchema
+		}
+	}
+}
+
+// SetTenantIsolation updates the Store's multi-tenant storage isolation mode.
+func (s *Store) SetTenantIsolation(mode TenantIsolationMode) {
+	if mode == TenantIsolationShared {
+		s.isolationMode = TenantIsolationShared
+	} else {
+		s.isolationMode = TenantIsolationSchema
+	}
+}
+
+// TenantIsolation returns the Store's configured multi-tenant storage isolation mode.
+func (s *Store) TenantIsolation() TenantIsolationMode {
+	if s == nil || s.isolationMode == "" {
+		return TenantIsolationSchema
+	}
+	return s.isolationMode
+}
 
 // WithAutoProvision controls whether the Store automatically creates and migrates
 // the per-tenant schema ("tenant_<slug>") on first access (default: true).
@@ -64,6 +122,11 @@ func SchemaFromSlug(slug string) (string, error) {
 		return "", fmt.Errorf("%w: %q", ErrInvalidTenantSlug, slug)
 	}
 	return tenantSchemaPrefix + strings.ReplaceAll(s, "-", "_"), nil
+}
+
+// TenantSchemaName is an alias for SchemaFromSlug.
+func TenantSchemaName(tenantID string) (string, error) {
+	return SchemaFromSlug(tenantID)
 }
 
 // QuoteIdent quotes a SQL identifier to prevent injection, wrapping in double quotes
@@ -148,10 +211,26 @@ func (s *Store) EnsureTenantSchema(ctx context.Context, tenantID string) (string
 	return schema, nil
 }
 
-// withTenantTx executes fn inside a database transaction isolated to the tenant's
-// dedicated PostgreSQL schema ("tenant_<slug>") via SET LOCAL search_path (and
-// optional SET LOCAL ROLE).
+// withTenantTx executes fn inside a database transaction. In TenantIsolationSchema mode
+// (the default), the transaction is isolated to the tenant's dedicated PostgreSQL schema
+// ("tenant_<slug>") via SET LOCAL search_path (and optional SET LOCAL ROLE). In
+// TenantIsolationShared mode, it executes against the shared public schema.
 func (s *Store) withTenantTx(ctx context.Context, tenantID string, fn func(tx *sql.Tx) error) error {
+	if s.TenantIsolation() == TenantIsolationShared {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("begin tx: %w", err)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if err := fn(tx); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit tx: %w", err)
+		}
+		return nil
+	}
+
 	schema, err := s.EnsureTenantSchema(ctx, tenantID)
 	if err != nil {
 		return err
@@ -183,11 +262,28 @@ func (s *Store) withTenantTx(ctx context.Context, tenantID string, fn func(tx *s
 }
 
 // PurgeTenant deletes all FHIR resources, history, search indexes, audit events,
-// and export jobs from the tenant's dedicated schema ("tenant_<slug>").
+// and export jobs from the tenant's dedicated schema ("tenant_<slug>") and shared public tables.
 func PurgeTenant(ctx context.Context, db *sql.DB, tenantID string) error {
 	schema, err := SchemaFromSlug(tenantID)
 	if err != nil {
 		return err
+	}
+
+	tables := []string{
+		"fhir_export_job",
+		"spidx_string",
+		"spidx_token",
+		"spidx_date",
+		"spidx_reference",
+		"spidx_quantity",
+		"spidx_uri",
+		"fhir_audit_event",
+		"fhir_resource_history",
+		"fhir_resource",
+	}
+
+	for _, table := range tables {
+		_, _ = db.ExecContext(ctx, "DELETE FROM public."+table+" WHERE tenant_id = $1", tenantID)
 	}
 
 	var exists bool
@@ -213,18 +309,6 @@ func PurgeTenant(ctx context.Context, db *sql.DB, tenantID string) error {
 		return err
 	}
 
-	tables := []string{
-		"fhir_export_job",
-		"spidx_string",
-		"spidx_token",
-		"spidx_date",
-		"spidx_reference",
-		"spidx_quantity",
-		"spidx_uri",
-		"fhir_audit_event",
-		"fhir_resource_history",
-		"fhir_resource",
-	}
 	for _, table := range tables {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return fmt.Errorf("purge %s.%s: %w", schema, table, err)

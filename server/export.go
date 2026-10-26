@@ -29,11 +29,14 @@ type exportJob struct {
 	TypesOrder []string
 	Files      map[string][]byte // resourceType -> NDJSON bytes
 	Counts     map[string]int    // resourceType -> line count
-	Combined   []byte            // all NDJSON lines concatenated
+	Combined   []byte            // optional combined NDJSON
+	Status     string            // "in-progress", "completed", "failed"
+	Err        string
+	done       chan struct{}
 }
 
 func (s *Server) storeExportJob(job *exportJob) {
-	if s.store != nil && job != nil {
+	if s.store != nil && job != nil && job.Status != "in-progress" {
 		_ = s.store.SaveExportJob(context.Background(), postgres.ExportJobRecord{
 			ID:         job.ID,
 			TenantID:   job.TenantID,
@@ -43,7 +46,7 @@ func (s *Server) storeExportJob(job *exportJob) {
 			TypesOrder: job.TypesOrder,
 			Files:      job.Files,
 			Counts:     job.Counts,
-			Combined:   job.Combined,
+			Combined:   nil, // Per-type files are already stored in Files; avoid 2x storage bloat in Postgres
 		})
 	}
 	s.exportMu.Lock()
@@ -51,7 +54,7 @@ func (s *Server) storeExportJob(job *exportJob) {
 	if s.exportJobs == nil {
 		s.exportJobs = make(map[string]*exportJob)
 	}
-	if len(s.exportJobs) >= maxStoredExportJobs {
+	if _, exists := s.exportJobs[job.ID]; !exists && len(s.exportJobs) >= maxStoredExportJobs {
 		var oldestID string
 		var oldestTime time.Time
 		for id, j := range s.exportJobs {
@@ -246,83 +249,70 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		return
 	}
 
-	results, err := s.store.ExportResources(r.Context(), postgres.ExportParams{
+	// Verify target Patient exists upfront for single-patient compartment export
+	if patientID != "" {
+		_, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patientID)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found",
+				fmt.Sprintf("Patient/%s not found", patientID))
+			return
+		}
+		if errors.Is(err, postgres.ErrResourceDeleted) {
+			writeOperationOutcome(w, http.StatusGone, "deleted",
+				fmt.Sprintf("Patient/%s has been deleted", patientID))
+			return
+		}
+		if err != nil {
+			s.logger.Error("bulk export patient lookup failed", "error", err, "tenant", tenant, "patient", patientID)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to execute bulk export")
+			return
+		}
+	}
+
+	exportParams := postgres.ExportParams{
 		TenantID:           tenant,
 		PatientID:          patientID,
 		PatientCompartment: isPatientExport && patientID == "",
 		ResourceTypes:      requestedTypes,
 		Since:              since,
-	})
-	if errors.Is(err, sql.ErrNoRows) {
-		writeOperationOutcome(w, http.StatusNotFound, "not-found",
-			fmt.Sprintf("Patient/%s not found", patientID))
-		return
-	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
-		writeOperationOutcome(w, http.StatusGone, "deleted",
-			fmt.Sprintf("Patient/%s has been deleted", patientID))
-		return
-	}
-	if err != nil {
-		s.logger.Error("bulk export query failed", "error", err, "tenant", tenant, "patient", patientID)
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to execute bulk export")
-		return
 	}
 
-	// Filter exported resources by patient compartment and SMART v2 granular sub-resource scopes when secCtx is present
-	if hasSecCtx {
-		patientRestricted := auth.IsPatientRestricted(secCtx)
-		allowedPat := cleanID(secCtx.GetPatientId())
-		filtered := make([]postgres.SearchResult, 0, len(results))
-		for _, res := range results {
-			if patientRestricted && patientID != "" && strings.EqualFold(res.ResType, "Patient") {
-				if cleanID(res.ResID) != allowedPat {
-					continue
+	prefer := strings.ToLower(r.Header.Get("Prefer"))
+	isAsync := strings.Contains(prefer, "respond-async") || strings.EqualFold(q.Get("_async"), "true")
+	accept := strings.ToLower(r.Header.Get("Accept"))
+	wantsManifest := (strings.Contains(accept, "application/json") || strings.Contains(accept, "application/fhir+json")) &&
+		!strings.Contains(accept, "ndjson") || strings.EqualFold(q.Get("_format"), "manifest")
+
+	// Fast path for direct NDJSON streaming (neither async nor manifest requested):
+	// stream each resource line directly to the response writer in paginated DB batches
+	// without buffering the entire export in memory or writing a job row to Postgres.
+	if !isAsync && !wantsManifest {
+		w.Header().Set("Content-Type", "application/fhir+ndjson; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		patientRestricted := hasSecCtx && auth.IsPatientRestricted(secCtx)
+		allowedPat := ""
+		if patientRestricted {
+			allowedPat = cleanID(secCtx.GetPatientId())
+		}
+		_ = s.store.StreamExportResources(r.Context(), exportParams, func(res postgres.SearchResult) error {
+			if hasSecCtx {
+				if patientRestricted && patientID != "" && strings.EqualFold(res.ResType, "Patient") && cleanID(res.ResID) != allowedPat {
+					return nil
+				}
+				if !s.resourceAllowedByGranularScope(secCtx, tenant, res.ResType, res.ResID, res.ResourceProto) {
+					return nil
 				}
 			}
-			if !s.resourceAllowedByGranularScope(secCtx, tenant, res.ResType, res.ResID, res.ResourceProto) {
-				continue
+			line, ok := s.formatExportNDJSONLine(res)
+			if ok {
+				_, _ = w.Write(line)
 			}
-			filtered = append(filtered, res)
-		}
-		results = filtered
-	}
-
-	files := make(map[string]*bytes.Buffer)
-	counts := make(map[string]int)
-	var typesOrder []string
-	var combined bytes.Buffer
-
-	for _, res := range results {
-		jsonBytes, err := s.protoToJSONWithMeta(res.ResType, res.ResourceProto, res.ResVersion, res.LastUpdated)
-		if err != nil {
-			s.logger.Error("proto to json in export", "error", err, "type", res.ResType, "id", res.ResID)
-			continue
-		}
-		var compactLine bytes.Buffer
-		if err := json.Compact(&compactLine, jsonBytes); err != nil {
-			compactLine.Reset()
-			compactLine.Write(bytes.ReplaceAll(jsonBytes, []byte("\n"), []byte(" ")))
-		}
-		compactLine.WriteByte('\n')
-
-		buf, exists := files[res.ResType]
-		if !exists {
-			buf = &bytes.Buffer{}
-			files[res.ResType] = buf
-			typesOrder = append(typesOrder, res.ResType)
-		}
-		buf.Write(compactLine.Bytes())
-		counts[res.ResType]++
-		combined.Write(compactLine.Bytes())
+			return nil
+		})
+		return
 	}
 
 	jobID := uuid.NewString()
-	fileBytes := make(map[string][]byte, len(files))
-	for rt, buf := range files {
-		fileBytes[rt] = buf.Bytes()
-	}
-
 	jobPatientID := ""
 	if hasSecCtx && auth.IsPatientRestricted(secCtx) {
 		jobPatientID = cleanID(secCtx.GetPatientId())
@@ -331,24 +321,24 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 	}
 
 	base := requestBaseURL(r)
-	job := &exportJob{
-		ID:         jobID,
-		TenantID:   tenant,
-		PatientID:  jobPatientID,
-		CreatedAt:  time.Now().UTC(),
-		RequestURL: base + r.URL.RequestURI(),
-		TypesOrder: typesOrder,
-		Files:      fileBytes,
-		Counts:     counts,
-		Combined:   combined.Bytes(),
-	}
-	s.storeExportJob(job)
-
 	pollLocation := fmt.Sprintf("%s/fhir/r4/%s/$export-poll/%s", base, tenant, jobID)
 	w.Header().Set("Content-Location", pollLocation)
 
-	prefer := strings.ToLower(r.Header.Get("Prefer"))
-	if strings.Contains(prefer, "respond-async") || strings.EqualFold(q.Get("_async"), "true") {
+	if isAsync {
+		job := &exportJob{
+			ID:         jobID,
+			TenantID:   tenant,
+			PatientID:  jobPatientID,
+			CreatedAt:  time.Now().UTC(),
+			RequestURL: base + r.URL.RequestURI(),
+			Status:     "in-progress",
+			done:       make(chan struct{}),
+		}
+		s.storeExportJob(job)
+
+		asyncCtx := context.WithoutCancel(r.Context())
+		go s.populateExportJob(asyncCtx, job, exportParams, hasSecCtx, secCtx, patientID)
+
 		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -364,16 +354,107 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		return
 	}
 
-	accept := strings.ToLower(r.Header.Get("Accept"))
-	if (strings.Contains(accept, "application/json") || strings.Contains(accept, "application/fhir+json")) &&
-		!strings.Contains(accept, "ndjson") || strings.EqualFold(q.Get("_format"), "manifest") {
-		s.writeExportManifest(w, r, job)
+	// Synchronous manifest mode
+	job := &exportJob{
+		ID:         jobID,
+		TenantID:   tenant,
+		PatientID:  jobPatientID,
+		CreatedAt:  time.Now().UTC(),
+		RequestURL: base + r.URL.RequestURI(),
+		Status:     "in-progress",
+		done:       make(chan struct{}),
+	}
+	s.populateExportJob(r.Context(), job, exportParams, hasSecCtx, secCtx, patientID)
+	if job.Err != "" {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to execute bulk export")
 		return
 	}
+	s.writeExportManifest(w, r, job)
+}
 
-	w.Header().Set("Content-Type", "application/fhir+ndjson; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(job.Combined)
+func (s *Server) formatExportNDJSONLine(res postgres.SearchResult) ([]byte, bool) {
+	jsonBytes, err := s.protoToJSONWithMeta(res.ResType, res.ResourceProto, res.ResVersion, res.LastUpdated)
+	if err != nil {
+		s.logger.Error("proto to json in export", "error", err, "type", res.ResType, "id", res.ResID)
+		return nil, false
+	}
+	var compactLine bytes.Buffer
+	if err := json.Compact(&compactLine, jsonBytes); err != nil {
+		compactLine.Reset()
+		compactLine.Write(bytes.ReplaceAll(jsonBytes, []byte("\n"), []byte(" ")))
+	}
+	compactLine.WriteByte('\n')
+	return compactLine.Bytes(), true
+}
+
+func (s *Server) populateExportJob(
+	ctx context.Context,
+	job *exportJob,
+	exportParams postgres.ExportParams,
+	hasSecCtx bool,
+	secCtx *auth.SecurityContext,
+	patientID string,
+) {
+	defer func() {
+		if job.done != nil {
+			close(job.done)
+		}
+	}()
+
+	files := make(map[string]*bytes.Buffer)
+	counts := make(map[string]int)
+	var typesOrder []string
+
+	patientRestricted := hasSecCtx && auth.IsPatientRestricted(secCtx)
+	allowedPat := ""
+	if patientRestricted {
+		allowedPat = cleanID(secCtx.GetPatientId())
+	}
+
+	err := s.store.StreamExportResources(ctx, exportParams, func(res postgres.SearchResult) error {
+		if hasSecCtx {
+			if patientRestricted && patientID != "" && strings.EqualFold(res.ResType, "Patient") && cleanID(res.ResID) != allowedPat {
+				return nil
+			}
+			if !s.resourceAllowedByGranularScope(secCtx, exportParams.TenantID, res.ResType, res.ResID, res.ResourceProto) {
+				return nil
+			}
+		}
+		line, ok := s.formatExportNDJSONLine(res)
+		if !ok {
+			return nil
+		}
+		buf, exists := files[res.ResType]
+		if !exists {
+			buf = &bytes.Buffer{}
+			files[res.ResType] = buf
+			typesOrder = append(typesOrder, res.ResType)
+		}
+		buf.Write(line)
+		counts[res.ResType]++
+		return nil
+	})
+
+	fileBytes := make(map[string][]byte, len(files))
+	for rt, buf := range files {
+		fileBytes[rt] = buf.Bytes()
+	}
+
+	s.exportMu.Lock()
+	job.TypesOrder = typesOrder
+	job.Files = fileBytes
+	job.Counts = counts
+	if err != nil {
+		job.Status = "failed"
+		job.Err = err.Error()
+	} else {
+		job.Status = "completed"
+	}
+	s.exportMu.Unlock()
+
+	if err == nil {
+		s.storeExportJob(job)
+	}
 }
 
 func requestBaseURL(r *http.Request) string {
@@ -410,12 +491,40 @@ func (s *Server) handleExportPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if job.done != nil {
+		if strings.EqualFold(r.URL.Query().Get("_nowait"), "true") {
+			select {
+			case <-job.done:
+			default:
+				w.Header().Set("X-Progress", "in-progress")
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(http.StatusAccepted)
+				return
+			}
+		} else {
+			select {
+			case <-job.done:
+			case <-time.After(2 * time.Second):
+				w.Header().Set("X-Progress", "in-progress")
+				w.Header().Set("Retry-After", "1")
+				w.WriteHeader(http.StatusAccepted)
+				return
+			}
+		}
+	}
+
 	if !s.authorizeExportJobAccess(w, r, job, "") {
 		return
 	}
 
 	if job.PatientID != "" {
 		setAuditPatientID(r.Context(), job.PatientID)
+	}
+
+	if job.Status == "failed" {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception",
+			fmt.Sprintf("bulk export job %s failed: %s", jobID, job.Err))
+		return
 	}
 
 	s.writeExportManifest(w, r, job)
@@ -431,6 +540,12 @@ func (s *Server) handleExportCancel(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found",
 			fmt.Sprintf("export job %s not found", jobID))
 		return
+	}
+	if job.done != nil {
+		select {
+		case <-job.done:
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 
 	if !s.authorizeExportJobAccess(w, r, job, "") {
@@ -456,6 +571,16 @@ func (s *Server) handleExportFile(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found",
 			fmt.Sprintf("export job %s not found", jobID))
 		return
+	}
+	if job.done != nil {
+		select {
+		case <-job.done:
+		case <-time.After(2 * time.Second):
+			w.Header().Set("X-Progress", "in-progress")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 	}
 
 	resType := strings.TrimSuffix(fileName, ".ndjson")

@@ -1,14 +1,50 @@
--- Tenant provisioning helper
--- Usage: SELECT create_tenant_schema('hca');
+-- Tenant schema provisioning helper for Flint's optional schema-per-tenant isolation mode.
+-- Usage:
+--   SELECT provision_tenant('hca');
+--   SELECT create_tenant_schema('hca');
+
+CREATE OR REPLACE FUNCTION provision_tenant(tenant_name TEXT)
+RETURNS TEXT AS $$
+DECLARE
+    sanitized TEXT;
+    schema_ident TEXT;
+    tbl TEXT;
+BEGIN
+    sanitized := lower(regexp_replace(trim(tenant_name), '[^a-zA-Z0-9_]+', '_', 'g'));
+    sanitized := trim(both '_' from sanitized);
+    IF sanitized = '' THEN
+        RAISE EXCEPTION 'invalid tenant_name: %', tenant_name;
+    END IF;
+    schema_ident := 'tenant_' || sanitized;
+
+    EXECUTE format('CREATE SCHEMA IF NOT EXISTS %I', schema_ident);
+
+    FOREACH tbl IN ARRAY ARRAY[
+        'fhir_resource',
+        'fhir_resource_history',
+        'fhir_audit_event',
+        'fhir_export_job',
+        'spidx_string',
+        'spidx_token',
+        'spidx_date',
+        'spidx_reference',
+        'spidx_quantity',
+        'spidx_uri'
+    ]
+    LOOP
+        EXECUTE format(
+            'CREATE TABLE IF NOT EXISTS %I.%I (LIKE public.%I INCLUDING ALL)',
+            schema_ident, tbl, tbl
+        );
+    END LOOP;
+
+    RETURN schema_ident;
+END;
+$$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION create_tenant_schema(tenant_name TEXT)
 RETURNS void AS $$
 BEGIN
-    EXECUTE format('CREATE SCHEMA IF NOT EXISTS tenant_%I', tenant_name);
-    EXECUTE format('SET search_path = tenant_%I', tenant_name);
-
-    -- Apply the static DDL (8 tables)
-    -- In production, read from sql/schema.sql. Inlined here for simplicity.
-    RAISE NOTICE 'Schema tenant_% created. Apply sql/schema.sql with search_path set.', tenant_name;
+    PERFORM provision_tenant(tenant_name);
 END;
 $$ LANGUAGE plpgsql;

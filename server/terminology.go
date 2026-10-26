@@ -224,9 +224,17 @@ func (s *Server) resolveValueSetConcepts(ctx context.Context, tenant, vsID, vsUR
 		sr, err := s.store.Search(ctx, postgres.SearchParams{
 			TenantID: tenant,
 			ResType:  "ValueSet",
-			Tokens:   map[string]string{"url": vsURL},
+			URIs:     map[string]string{"url": vsURL},
 			Count:    1,
 		})
+		if err != nil || len(sr.Matches) == 0 {
+			sr, err = s.store.Search(ctx, postgres.SearchParams{
+				TenantID: tenant,
+				ResType:  "ValueSet",
+				Tokens:   map[string]string{"url": vsURL},
+				Count:    1,
+			})
+		}
 		if err == nil && len(sr.Matches) > 0 {
 			res := sr.Matches[0]
 			if jsonBytes, err := s.protoToJSONWithMeta("ValueSet", res.ResourceProto, res.ResVersion, res.LastUpdated); err == nil {
@@ -318,9 +326,17 @@ func (s *Server) resolveCodeSystemConcepts(ctx context.Context, tenant, csID, cs
 		sr, err := s.store.Search(ctx, postgres.SearchParams{
 			TenantID: tenant,
 			ResType:  "CodeSystem",
-			Tokens:   map[string]string{"url": csURL},
+			URIs:     map[string]string{"url": csURL},
 			Count:    1,
 		})
+		if err != nil || len(sr.Matches) == 0 {
+			sr, err = s.store.Search(ctx, postgres.SearchParams{
+				TenantID: tenant,
+				ResType:  "CodeSystem",
+				Tokens:   map[string]string{"url": csURL},
+				Count:    1,
+			})
+		}
 		if err == nil && len(sr.Matches) > 0 {
 			res := sr.Matches[0]
 			if jsonBytes, err := s.protoToJSONWithMeta("CodeSystem", res.ResourceProto, res.ResVersion, res.LastUpdated); err == nil {
@@ -772,9 +788,17 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
 			TenantID: tenant,
 			ResType:  "ConceptMap",
-			Tokens:   map[string]string{"url": cmURL},
+			URIs:     map[string]string{"url": cmURL},
 			Count:    10,
 		})
+		if err != nil || len(sr.Matches) == 0 {
+			sr, err = s.store.Search(r.Context(), postgres.SearchParams{
+				TenantID: tenant,
+				ResType:  "ConceptMap",
+				Tokens:   map[string]string{"url": cmURL},
+				Count:    10,
+			})
+		}
 		if err == nil && len(sr.Matches) > 0 {
 			for _, m := range sr.Matches {
 				if jb, err := s.protoToJSONWithMeta("ConceptMap", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {

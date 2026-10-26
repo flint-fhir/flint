@@ -22,15 +22,30 @@ type ExportParams struct {
 // ExportResources retrieves all active FHIR resources matching ExportParams ordered
 // deterministically by (res_type, res_id) for NDJSON bulk export.
 func (s *Store) ExportResources(ctx context.Context, params ExportParams) ([]SearchResult, error) {
+	var out []SearchResult
+	err := s.StreamExportResources(ctx, params, func(r SearchResult) error {
+		out = append(out, r)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// StreamExportResources streams active FHIR resources matching ExportParams in
+// deterministic paginated batches ordered by (res_type, res_id), avoiding unbounded
+// single-query result buffering.
+func (s *Store) StreamExportResources(ctx context.Context, params ExportParams, emit func(SearchResult) error) error {
 	if params.PatientID != "" {
-		return s.exportSinglePatientCompartment(ctx, params)
+		return s.streamSinglePatientCompartment(ctx, params, emit)
 	}
 
 	whereConds := []string{
 		"r.tenant_id = $1",
 		"r.is_deleted = FALSE",
 	}
-	args := []any{params.TenantID}
+	baseArgs := []any{params.TenantID}
 
 	if params.PatientCompartment {
 		whereConds = append(whereConds, `(
@@ -101,45 +116,72 @@ func (s *Store) ExportResources(ctx context.Context, params ExportParams) ([]Sea
 	}
 
 	if len(params.ResourceTypes) > 0 {
-		whereConds = append(whereConds, fmt.Sprintf("r.res_type = ANY($%d)", len(args)+1))
-		args = append(args, pq.Array(params.ResourceTypes))
+		whereConds = append(whereConds, fmt.Sprintf("r.res_type = ANY($%d)", len(baseArgs)+1))
+		baseArgs = append(baseArgs, pq.Array(params.ResourceTypes))
 	}
 	if params.Since != nil {
-		whereConds = append(whereConds, fmt.Sprintf("r.last_updated >= $%d", len(args)+1))
-		args = append(args, *params.Since)
+		whereConds = append(whereConds, fmt.Sprintf("r.last_updated >= $%d", len(baseArgs)+1))
+		baseArgs = append(baseArgs, *params.Since)
 	}
 
-	querySQL := fmt.Sprintf(
-		"SELECT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r WHERE %s ORDER BY r.res_type ASC, r.res_id ASC",
-		strings.Join(whereConds, " AND "),
-	)
+	const exportBatchSize = 500
+	lastType := ""
+	lastID := ""
 
-	var out []SearchResult
-	err := s.withTenantTx(ctx, params.TenantID, func(tx *sql.Tx) error {
-		rows, err := tx.QueryContext(ctx, querySQL, args...)
-		if err != nil {
-			return fmt.Errorf("export resources query: %w", err)
+	for {
+		conds := append([]string{}, whereConds...)
+		args := append([]any{}, baseArgs...)
+		if lastType != "" || lastID != "" {
+			tIdx := len(args) + 1
+			idIdx := len(args) + 2
+			args = append(args, lastType, lastID)
+			conds = append(conds, fmt.Sprintf("(r.res_type > $%d OR (r.res_type = $%d AND r.res_id > $%d))", tIdx, tIdx, idIdx))
 		}
-		defer rows.Close()
+		limitIdx := len(args) + 1
+		args = append(args, exportBatchSize)
 
-		for rows.Next() {
-			var r SearchResult
-			if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
-				return fmt.Errorf("scan export resource: %w", err)
+		querySQL := fmt.Sprintf(
+			"SELECT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r WHERE %s ORDER BY r.res_type ASC, r.res_id ASC LIMIT $%d",
+			strings.Join(conds, " AND "), limitIdx,
+		)
+
+		batch := make([]SearchResult, 0, exportBatchSize)
+		err := s.withTenantTx(ctx, params.TenantID, func(tx *sql.Tx) error {
+			rows, err := tx.QueryContext(ctx, querySQL, args...)
+			if err != nil {
+				return fmt.Errorf("export resources query: %w", err)
 			}
-			out = append(out, r)
+			defer rows.Close()
+
+			for rows.Next() {
+				var r SearchResult
+				if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
+					return fmt.Errorf("scan export resource: %w", err)
+				}
+				batch = append(batch, r)
+			}
+			return rows.Err()
+		})
+		if err != nil {
+			return err
 		}
-		return rows.Err()
-	})
-	if err != nil {
-		return nil, err
+
+		for _, item := range batch {
+			if err := emit(item); err != nil {
+				return err
+			}
+			lastType = item.ResType
+			lastID = item.ResID
+		}
+		if len(batch) < exportBatchSize {
+			break
+		}
 	}
-	return out, nil
+	return nil
 }
 
-func (s *Store) exportSinglePatientCompartment(ctx context.Context, params ExportParams) ([]SearchResult, error) {
-	const pageSize = 1000
-	var all []SearchResult
+func (s *Store) streamSinglePatientCompartment(ctx context.Context, params ExportParams, emit func(SearchResult) error) error {
+	const pageSize = 500
 	offset := 0
 
 	for {
@@ -152,16 +194,24 @@ func (s *Store) exportSinglePatientCompartment(ctx context.Context, params Expor
 			Offset:        offset,
 		})
 		if err != nil {
-			return nil, err
+			return err
 		}
-		if offset == 0 && len(sr.Matches) > 0 {
-			all = append(all, sr.Matches...)
+		if offset == 0 {
+			for _, m := range sr.Matches {
+				if err := emit(m); err != nil {
+					return err
+				}
+			}
 		}
-		all = append(all, sr.Includes...)
+		for _, inc := range sr.Includes {
+			if err := emit(inc); err != nil {
+				return err
+			}
+		}
 		if len(sr.Includes) < pageSize {
 			break
 		}
 		offset += pageSize
 	}
-	return all, nil
+	return nil
 }

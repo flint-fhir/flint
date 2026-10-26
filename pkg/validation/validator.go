@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
+
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // Validator validates FHIR resources against StructureDefinitions and ValueSets.
@@ -145,7 +148,7 @@ func (e *Engine) ValidateResource(expectedResType string, resMap map[string]any)
 
 	// 5. Primitive type format checks
 	if e.opts.EnforcePrimitiveFormats {
-		e.validatePrimitiveFormats(resTypeStr, resMap, outcome)
+		e.validatePrimitiveFormats(resTypeStr, schema, resMap, outcome)
 	}
 
 	// 6. ValueSet code bindings check
@@ -153,10 +156,13 @@ func (e *Engine) ValidateResource(expectedResType string, resMap map[string]any)
 		e.validateCodeBindings(resTypeStr, schema, resMap, outcome)
 	}
 
+	// 7. Recursive BackboneElement, complex datatype, and embedded ContainedResource validation
+	e.validateNestedChildren(resTypeStr, schema.ChildDescriptors, resMap, outcome, 0)
+
 	return outcome
 }
 
-func (e *Engine) validatePrimitiveFormats(resType string, resMap map[string]any, outcome *Outcome) {
+func (e *Engine) validatePrimitiveFormats(resType string, schema ResourceSchema, resMap map[string]any, outcome *Outcome) {
 	// id format
 	if idVal, ok := resMap["id"]; ok && idVal != nil {
 		idStr := extractStringOrWrapped(idVal)
@@ -167,18 +173,45 @@ func (e *Engine) validatePrimitiveFormats(resType string, resMap map[string]any,
 		}
 	}
 
-	// birthDate format
-	if bVal, ok := resMap["birthDate"]; ok && bVal != nil {
-		bStr := extractStringOrWrapped(bVal)
-		if bStr != "" && !DateRegex.MatchString(bStr) {
-			outcome.AddError(CodeValue,
-				fmt.Sprintf("Invalid birthDate format %q (must be YYYY, YYYY-MM, or YYYY-MM-DD)", bStr),
-				resType+".birthDate")
+	checkedDate := make(map[string]bool)
+	for dField := range schema.DateFields {
+		checkedDate[dField] = true
+		if dVal, ok := resMap[dField]; ok && dVal != nil {
+			dStr := extractStringOrWrapped(dVal)
+			if dStr != "" && !DateRegex.MatchString(dStr) {
+				outcome.AddError(CodeValue,
+					fmt.Sprintf("Invalid %s format %q (must be YYYY, YYYY-MM, or YYYY-MM-DD)", dField, dStr),
+					resType+"."+dField)
+			}
+		}
+	}
+	if !checkedDate["birthDate"] {
+		if bVal, ok := resMap["birthDate"]; ok && bVal != nil {
+			bStr := extractStringOrWrapped(bVal)
+			if bStr != "" && !DateRegex.MatchString(bStr) {
+				outcome.AddError(CodeValue,
+					fmt.Sprintf("Invalid birthDate format %q (must be YYYY, YYYY-MM, or YYYY-MM-DD)", bStr),
+					resType+".birthDate")
+			}
 		}
 	}
 
-	// dateTime fields format
+	checkedDateTime := make(map[string]bool)
+	for dtField := range schema.DateTimeFields {
+		checkedDateTime[dtField] = true
+		if dtVal, ok := resMap[dtField]; ok && dtVal != nil {
+			dtStr := extractStringOrWrapped(dtVal)
+			if dtStr != "" && !DateTimeRegex.MatchString(dtStr) {
+				outcome.AddError(CodeValue,
+					fmt.Sprintf("Invalid %s format %q", dtField, dtStr),
+					resType+"."+dtField)
+			}
+		}
+	}
 	for _, dtField := range []string{"effectiveDateTime", "authoredOn", "recordedDate", "occurrenceDateTime", "performedDateTime", "receivedTime"} {
+		if checkedDateTime[dtField] {
+			continue
+		}
 		if dtVal, ok := resMap[dtField]; ok && dtVal != nil {
 			dtStr := extractStringOrWrapped(dtVal)
 			if dtStr != "" && !DateTimeRegex.MatchString(dtStr) {
@@ -189,13 +222,26 @@ func (e *Engine) validatePrimitiveFormats(resType string, resMap map[string]any,
 		}
 	}
 
-	// issued format (instant)
-	if instVal, ok := resMap["issued"]; ok && instVal != nil {
-		instStr := extractStringOrWrapped(instVal)
-		if instStr != "" && !InstantRegex.MatchString(instStr) {
-			outcome.AddError(CodeValue,
-				fmt.Sprintf("Invalid issued instant format %q (requires full timestamp with timezone)", instStr),
-				resType+".issued")
+	checkedInstant := make(map[string]bool)
+	for instField := range schema.InstantFields {
+		checkedInstant[instField] = true
+		if instVal, ok := resMap[instField]; ok && instVal != nil {
+			instStr := extractStringOrWrapped(instVal)
+			if instStr != "" && !InstantRegex.MatchString(instStr) {
+				outcome.AddError(CodeValue,
+					fmt.Sprintf("Invalid %s instant format %q (requires full timestamp with timezone)", instField, instStr),
+					resType+"."+instField)
+			}
+		}
+	}
+	if !checkedInstant["issued"] {
+		if instVal, ok := resMap["issued"]; ok && instVal != nil {
+			instStr := extractStringOrWrapped(instVal)
+			if instStr != "" && !InstantRegex.MatchString(instStr) {
+				outcome.AddError(CodeValue,
+					fmt.Sprintf("Invalid issued instant format %q (requires full timestamp with timezone)", instStr),
+					resType+".issued")
+			}
 		}
 	}
 }
@@ -220,7 +266,7 @@ func (e *Engine) validateCodeBindings(resType string, schema ResourceSchema, res
 
 		switch v := val.(type) {
 		case string:
-			if !validCodes[v] {
+			if !isValidCodeInSet(validCodes, v) {
 				outcome.AddError(CodeInvalid,
 					fmt.Sprintf("Code %q is not in required ValueSet %s", v, uri),
 					path)
@@ -287,4 +333,162 @@ func isEmptyValue(v any) bool {
 	default:
 		return false
 	}
+}
+
+var (
+	nestedDetailsMu    sync.RWMutex
+	nestedDetailsCache = make(map[protoreflect.FullName]protoSchemaDetails)
+)
+
+func cachedProtoSchemaDetails(md protoreflect.MessageDescriptor) protoSchemaDetails {
+	if md == nil {
+		return protoSchemaDetails{}
+	}
+	fn := md.FullName()
+	nestedDetailsMu.RLock()
+	det, ok := nestedDetailsCache[fn]
+	nestedDetailsMu.RUnlock()
+	if ok {
+		return det
+	}
+	det = deriveProtoSchemaDetails(md)
+	nestedDetailsMu.Lock()
+	nestedDetailsCache[fn] = det
+	nestedDetailsMu.Unlock()
+	return det
+}
+
+func (e *Engine) validateNestedChildren(
+	parentPath string,
+	childDescs map[string]protoreflect.MessageDescriptor,
+	parentMap map[string]any,
+	outcome *Outcome,
+	depth int,
+) {
+	if depth > 6 || len(childDescs) == 0 {
+		return
+	}
+	for key, val := range parentMap {
+		if val == nil {
+			continue
+		}
+		cleanKey := strings.TrimPrefix(key, "_")
+		childMD, ok := childDescs[cleanKey]
+		if !ok || childMD == nil {
+			continue
+		}
+		fieldPath := parentPath + "." + key
+		if string(childMD.FullName()) == "google.fhir.r4.core.ContainedResource" {
+			// Skip full resource schema check on PATCH entry payloads inside Bundles
+			if reqMap, hasReq := parentMap["request"].(map[string]any); hasReq {
+				if strings.EqualFold(extractStringOrWrapped(reqMap["method"]), "PATCH") {
+					continue
+				}
+			}
+			switch v := val.(type) {
+			case map[string]any:
+				e.validateEmbeddedResource(fieldPath, v, outcome)
+			case []any:
+				for idx, item := range v {
+					if itemMap, ok := item.(map[string]any); ok {
+						e.validateEmbeddedResource(fmt.Sprintf("%s[%d]", fieldPath, idx), itemMap, outcome)
+					}
+				}
+			}
+			continue
+		}
+
+		switch v := val.(type) {
+		case map[string]any:
+			e.validateComplexElement(fieldPath, childMD, v, outcome, depth+1)
+		case []any:
+			for idx, item := range v {
+				if itemMap, ok := item.(map[string]any); ok {
+					e.validateComplexElement(fmt.Sprintf("%s[%d]", fieldPath, idx), childMD, itemMap, outcome, depth+1)
+				}
+			}
+		}
+	}
+}
+
+func (e *Engine) validateEmbeddedResource(fieldPath string, resMap map[string]any, outcome *Outcome) {
+	subOutcome := e.ValidateResource("", resMap)
+	for _, iss := range subOutcome.Issues {
+		exprs := make([]string, 0, len(iss.Expression))
+		for _, ex := range iss.Expression {
+			if dotIdx := strings.IndexByte(ex, '.'); dotIdx != -1 {
+				exprs = append(exprs, fieldPath+ex[dotIdx:])
+			} else {
+				exprs = append(exprs, fieldPath)
+			}
+		}
+		if len(exprs) == 0 {
+			exprs = []string{fieldPath}
+		}
+		outcome.Issues = append(outcome.Issues, Issue{
+			Severity:    iss.Severity,
+			Code:        iss.Code,
+			Diagnostics: iss.Diagnostics,
+			Expression:  exprs,
+		})
+	}
+}
+
+func (e *Engine) validateComplexElement(
+	elementPath string,
+	md protoreflect.MessageDescriptor,
+	elemMap map[string]any,
+	outcome *Outcome,
+	depth int,
+) {
+	if md == nil || depth > 6 {
+		return
+	}
+	det := cachedProtoSchemaDetails(md)
+
+	if e.opts.DisallowUnknownFields {
+		for key := range elemMap {
+			cleanKey := strings.TrimPrefix(key, "_")
+			if !det.allowedFields[cleanKey] {
+				outcome.AddError(CodeStructure,
+					fmt.Sprintf("Unrecognized nested element %q at %s", key, elementPath),
+					elementPath+"."+key)
+			}
+		}
+	}
+
+	if e.opts.EnforcePrimitiveFormats {
+		for dField := range det.dateFields {
+			if dVal, ok := elemMap[dField]; ok && dVal != nil {
+				dStr := extractStringOrWrapped(dVal)
+				if dStr != "" && !DateRegex.MatchString(dStr) {
+					outcome.AddError(CodeValue,
+						fmt.Sprintf("Invalid %s format %q at %s.%s (must be YYYY, YYYY-MM, or YYYY-MM-DD)", dField, dStr, elementPath, dField),
+						elementPath+"."+dField)
+				}
+			}
+		}
+		for dtField := range det.dateTimeFields {
+			if dtVal, ok := elemMap[dtField]; ok && dtVal != nil {
+				dtStr := extractStringOrWrapped(dtVal)
+				if dtStr != "" && !DateTimeRegex.MatchString(dtStr) {
+					outcome.AddError(CodeValue,
+						fmt.Sprintf("Invalid %s format %q at %s.%s", dtField, dtStr, elementPath, dtField),
+						elementPath+"."+dtField)
+				}
+			}
+		}
+		for instField := range det.instantFields {
+			if instVal, ok := elemMap[instField]; ok && instVal != nil {
+				instStr := extractStringOrWrapped(instVal)
+				if instStr != "" && !InstantRegex.MatchString(instStr) {
+					outcome.AddError(CodeValue,
+						fmt.Sprintf("Invalid %s instant format %q at %s.%s (requires full timestamp with timezone)", instField, instStr, elementPath, instField),
+						elementPath+"."+instField)
+				}
+			}
+		}
+	}
+
+	e.validateNestedChildren(elementPath, det.childDescriptors, elemMap, outcome, depth)
 }

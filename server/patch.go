@@ -158,6 +158,13 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	resolvedPatch, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, patchedJSON, nil)
+	if refErr != nil {
+		writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
+		return
+	}
+	patchedJSON = resolvedPatch
+
 	if s.validator != nil {
 		outcome := s.validator.ValidateJSON(resType, patchedJSON)
 		if !outcome.IsValid() {
@@ -251,11 +258,9 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 		outJSON = patchedJSON
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
-	w.WriteHeader(http.StatusOK)
-	w.Write(outJSON)
+	writePreferResourceResponse(w, r, http.StatusOK, resType, resID, rec.ResVersion, outJSON)
 }
 
 // handleConditionalUpdate handles PUT /fhir/r4/{tenant}/{resourceType}?{searchParams}.
@@ -312,6 +317,13 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read body")
 		return
 	}
+
+	resolvedBody, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, body, nil)
+	if refErr != nil {
+		writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
+		return
+	}
+	body = resolvedBody
 
 	if s.validator != nil {
 		outcome := s.validator.ValidateJSON(resType, body)
@@ -428,16 +440,14 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 		jsonBytes = body
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, rec.ResID))
 	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+	status := http.StatusOK
 	if rec.Created {
-		w.WriteHeader(http.StatusCreated)
-	} else {
-		w.WriteHeader(http.StatusOK)
+		status = http.StatusCreated
 	}
-	w.Write(jsonBytes)
+	writePreferResourceResponse(w, r, status, resType, rec.ResID, rec.ResVersion, jsonBytes)
 }
 
 // handleConditionalDelete handles DELETE /fhir/r4/{tenant}/{resourceType}?{searchParams}.

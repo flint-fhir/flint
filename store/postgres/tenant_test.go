@@ -95,6 +95,24 @@ func TestQuoteIdent(t *testing.T) {
 	}
 }
 
+func TestParseTenantIsolationMode(t *testing.T) {
+	mode, err := postgres.ParseTenantIsolationMode("")
+	if err != nil || mode != postgres.TenantIsolationSchema {
+		t.Fatalf("ParseTenantIsolationMode(\"\") = %q, %v; want %q", mode, err, postgres.TenantIsolationSchema)
+	}
+	mode, err = postgres.ParseTenantIsolationMode("schema")
+	if err != nil || mode != postgres.TenantIsolationSchema {
+		t.Fatalf("ParseTenantIsolationMode(\"schema\") = %q, %v; want %q", mode, err, postgres.TenantIsolationSchema)
+	}
+	mode, err = postgres.ParseTenantIsolationMode("shared")
+	if err != nil || mode != postgres.TenantIsolationShared {
+		t.Fatalf("ParseTenantIsolationMode(\"shared\") = %q, %v; want %q", mode, err, postgres.TenantIsolationShared)
+	}
+	if _, err := postgres.ParseTenantIsolationMode("bogus"); err == nil {
+		t.Fatalf("expected error for invalid mode")
+	}
+}
+
 func TestSchemaPerTenant_PhysicalIsolation(t *testing.T) {
 	dsn := os.Getenv("FLINT_TEST_POSTGRES_DSN")
 	if dsn == "" {

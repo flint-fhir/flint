@@ -307,16 +307,25 @@ func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	searchParams := postgres.SearchParams{
-		TenantID: tenant,
-		ResType:  "Patient",
-		Count:    500,
+	var candIdentifiers []string
+	for _, idKey := range targetDemo.identifiers {
+		if idKey.code != "" {
+			candIdentifiers = append(candIdentifiers, idKey.code)
+		}
+	}
+	candParams := postgres.PatientMatchCandidateParams{
+		TenantID:    tenant,
+		Identifiers: candIdentifiers,
+		Families:    targetDemo.families,
+		Givens:      targetDemo.givens,
+		BirthDate:   targetDemo.birthDate,
+		Limit:       500,
 	}
 	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
-		searchParams.ID = cleanID(secCtx.GetPatientId())
+		candParams.RestrictedPatientID = cleanID(secCtx.GetPatientId())
 	}
 
-	sr, err := s.store.Search(r.Context(), searchParams)
+	candidates, err := s.store.SearchPatientMatchCandidates(r.Context(), candParams)
 	if err != nil {
 		s.logger.Error("patient $match search failed", "error", err, "tenant", tenant)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to evaluate Patient/$match candidates")
@@ -332,7 +341,7 @@ func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
 	var matches []scoredCandidate
 
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
-	for _, rec := range sr.Matches {
+	for _, rec := range candidates {
 		if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, "Patient", rec.ResID, rec.ResourceProto) {
 			continue
 		}

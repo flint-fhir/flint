@@ -4,13 +4,90 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/flint-fhir/flint/store/postgres"
 )
+
+// SetDisallowPrivateWebhooks configures whether Subscription rest-hook endpoints
+// may target loopback or RFC 1918 private network addresses. Cloud metadata and
+// link-local addresses (e.g. 169.254.169.254) are always blocked unconditionally.
+func (s *Server) SetDisallowPrivateWebhooks(disallow bool) {
+	s.disallowPrivateWebhooks = disallow
+}
+
+// ValidateSubscriptionEndpoint validates a FHIR Subscription channel.endpoint URL
+// against SSRF attacks (blocking non-HTTP(S) schemes, cloud metadata hosts,
+// link-local 169.254.0.0/16 & fe80::/10, unspecified 0.0.0.0/::, multicast, and
+// optionally loopback/RFC1918 private ranges when disallowPrivate is true).
+func ValidateSubscriptionEndpoint(rawURL string, disallowPrivate bool) error {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return fmt.Errorf("subscription endpoint URL is empty")
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil {
+		return fmt.Errorf("invalid subscription endpoint URL %q: %w", rawURL, err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("unsupported subscription endpoint scheme %q: only http and https are allowed", u.Scheme)
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if host == "" {
+		return fmt.Errorf("subscription endpoint URL %q is missing hostname", rawURL)
+	}
+	switch host {
+	case "metadata.google.internal", "metadata.goog", "metadata", "instance-data":
+		return fmt.Errorf("subscription endpoint hostname %q is blocked by SSRF policy", host)
+	}
+	if disallowPrivate && (host == "localhost" || strings.HasSuffix(host, ".localhost") || strings.HasSuffix(host, ".internal")) {
+		return fmt.Errorf("subscription endpoint hostname %q is blocked by private network SSRF policy", host)
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		if err := validateWebhookIP(addr, disallowPrivate); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateWebhookIP(addr netip.Addr, disallowPrivate bool) error {
+	addr = addr.Unmap()
+	if addr.IsUnspecified() || addr.IsLinkLocalUnicast() || addr.IsLinkLocalMulticast() || addr.IsMulticast() {
+		return fmt.Errorf("subscription endpoint IP %s is blocked by SSRF policy (link-local/metadata/unspecified)", addr.String())
+	}
+	if disallowPrivate && (addr.IsLoopback() || addr.IsPrivate()) {
+		return fmt.Errorf("subscription endpoint IP %s is blocked by private/loopback SSRF policy", addr.String())
+	}
+	return nil
+}
+
+func (s *Server) validateSubscriptionResourceJSON(resType string, rawJSON []byte) error {
+	if resType != "Subscription" || len(rawJSON) == 0 {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal(rawJSON, &m); err != nil {
+		return nil
+	}
+	ch, _ := m["channel"].(map[string]any)
+	if ch == nil {
+		return nil
+	}
+	chType, _ := ch["type"].(string)
+	endpoint, _ := ch["endpoint"].(string)
+	if strings.EqualFold(chType, "rest-hook") && strings.TrimSpace(endpoint) != "" {
+		return ValidateSubscriptionEndpoint(endpoint, s.disallowPrivateWebhooks)
+	}
+	return nil
+}
 
 // normalizeSubscriptionOnWrite transitions a newly requested FHIR R4 Subscription
 // ("status": "requested") to "active" per FHIR R4 §2.46.7.1.
@@ -32,7 +109,7 @@ func normalizeSubscriptionOnWrite(resType string, rawJSON []byte) []byte {
 }
 
 // dispatchSubscriptions evaluates active FHIR R4 Subscriptions in tenant against
-// a newly created or updated resource and delivers rest-hook notifications.
+// a newly created or updated resource and dispatches rest-hook notifications asynchronously.
 func (s *Server) dispatchSubscriptions(ctx context.Context, tenant, resType, resID string, resourceProto []byte, resVersion int, lastUpdated time.Time, idx *postgres.SearchIndexes) {
 	if s.store == nil || resType == "Subscription" || resType == "AuditEvent" {
 		return
@@ -78,6 +155,15 @@ func (s *Server) dispatchSubscriptions(ctx context.Context, tenant, resType, res
 		if !strings.EqualFold(chType, "rest-hook") || strings.TrimSpace(endpoint) == "" {
 			continue
 		}
+		if err := ValidateSubscriptionEndpoint(endpoint, s.disallowPrivateWebhooks); err != nil {
+			if s.metrics != nil {
+				s.metrics.subscriptionDeliveryErrorsTotal.Add(1)
+			}
+			if s.logger != nil {
+				s.logger.Warn("subscription rest-hook blocked by SSRF check", "endpoint", endpoint, "error", err)
+			}
+			continue
+		}
 
 		payloadType, _ := channel["payload"].(string)
 		var headers []string
@@ -90,13 +176,44 @@ func (s *Server) dispatchSubscriptions(ctx context.Context, tenant, resType, res
 		}
 
 		var bodyBytes []byte
-		if strings.Contains(strings.ToLower(payloadType), "json") {
+		lowerPayload := strings.ToLower(strings.TrimSpace(payloadType))
+		switch {
+		case lowerPayload == "id-only":
+			bodyBytes, _ = json.Marshal(map[string]any{
+				"resourceType": resType,
+				"id":           resID,
+				"meta": map[string]any{
+					"versionId":   fmt.Sprintf("%d", resVersion),
+					"lastUpdated": lastUpdated.UTC().Format(time.RFC3339),
+				},
+			})
+			payloadType = "application/fhir+json; charset=utf-8"
+		case strings.Contains(lowerPayload, "json"):
 			if jb, err := s.protoToJSONWithMeta(resType, resourceProto, resVersion, lastUpdated); err == nil {
 				bodyBytes = jb
 			}
 		}
 
-		s.deliverRestHook(ctx, endpoint, payloadType, headers, bodyBytes)
+		// Dispatch webhook asynchronously via bounded worker semaphore so write latency is never blocked
+		asyncCtx := context.WithoutCancel(ctx)
+		if s.subSem != nil {
+			select {
+			case s.subSem <- struct{}{}:
+				go func(ep, pt string, hdrs []string, body []byte) {
+					defer func() { <-s.subSem }()
+					s.deliverRestHook(asyncCtx, ep, pt, hdrs, body)
+				}(endpoint, payloadType, headers, bodyBytes)
+			default:
+				if s.metrics != nil {
+					s.metrics.subscriptionDeliveryErrorsTotal.Add(1)
+				}
+				if s.logger != nil {
+					s.logger.Warn("subscription rest-hook queue full; dropping notification", "endpoint", endpoint)
+				}
+			}
+		} else {
+			go s.deliverRestHook(asyncCtx, endpoint, payloadType, headers, bodyBytes)
+		}
 	}
 }
 
@@ -241,49 +358,104 @@ func subscriptionMatchesResource(criteria, resType, resID string, idx *postgres.
 }
 
 func (s *Server) deliverRestHook(ctx context.Context, endpoint, payloadType string, headers []string, bodyBytes []byte) {
-	reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-
-	var bodyReader *bytes.Reader
-	if len(bodyBytes) > 0 {
-		bodyReader = bytes.NewReader(bodyBytes)
-	} else {
-		bodyReader = bytes.NewReader(nil)
-	}
-
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bodyReader)
-	if err != nil {
-		return
-	}
-	if len(bodyBytes) > 0 {
-		ct := strings.TrimSpace(payloadType)
-		if ct == "" {
-			ct = "application/fhir+json; charset=utf-8"
-		}
-		req.Header.Set("Content-Type", ct)
-	}
-	for _, h := range headers {
-		if parts := strings.SplitN(h, ":", 2); len(parts) == 2 {
-			req.Header.Add(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
-		}
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	if err := ValidateSubscriptionEndpoint(endpoint, s.disallowPrivateWebhooks); err != nil {
 		if s.metrics != nil {
 			s.metrics.subscriptionDeliveryErrorsTotal.Add(1)
 		}
-		if s.logger != nil {
-			s.logger.Warn("subscription rest-hook delivery failed", "endpoint", endpoint, "error", err)
-		}
 		return
 	}
-	resp.Body.Close()
-	if s.metrics != nil {
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			s.metrics.subscriptionsDeliveredTotal.Add(1)
-		} else {
-			s.metrics.subscriptionDeliveryErrorsTotal.Add(1)
+
+	disallowPrivate := s.disallowPrivateWebhooks
+	dialer := &net.Dialer{Timeout: 2 * time.Second}
+	transport := &http.Transport{
+		DialContext: func(dialCtx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			ips, err := net.DefaultResolver.LookupNetIP(dialCtx, "ip", host)
+			if err != nil {
+				return nil, err
+			}
+			for _, ip := range ips {
+				if err := validateWebhookIP(ip, disallowPrivate); err != nil {
+					return nil, err
+				}
+			}
+			if len(ips) > 0 {
+				return dialer.DialContext(dialCtx, network, net.JoinHostPort(ips[0].String(), port))
+			}
+			return dialer.DialContext(dialCtx, network, addr)
+		},
+	}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   3 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	const maxAttempts = 2
+	var lastErr error
+	var lastStatus int
+
+	for attempt := range maxAttempts {
+		if attempt > 0 {
+			time.Sleep(50 * time.Millisecond)
 		}
+		reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+
+		var bodyReader *bytes.Reader
+		if len(bodyBytes) > 0 {
+			bodyReader = bytes.NewReader(bodyBytes)
+		} else {
+			bodyReader = bytes.NewReader(nil)
+		}
+
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bodyReader)
+		if err != nil {
+			cancel()
+			lastErr = err
+			break
+		}
+		if len(bodyBytes) > 0 {
+			ct := strings.TrimSpace(payloadType)
+			if ct == "" {
+				ct = "application/fhir+json; charset=utf-8"
+			}
+			req.Header.Set("Content-Type", ct)
+		}
+		for _, h := range headers {
+			if parts := strings.SplitN(h, ":", 2); len(parts) == 2 {
+				req.Header.Add(strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
+			}
+		}
+
+		resp, err := client.Do(req)
+		cancel()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		resp.Body.Close()
+		lastStatus = resp.StatusCode
+		lastErr = nil
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if s.metrics != nil {
+				s.metrics.subscriptionsDeliveredTotal.Add(1)
+			}
+			return
+		}
+		if resp.StatusCode < 500 {
+			break
+		}
+	}
+
+	if s.metrics != nil {
+		s.metrics.subscriptionDeliveryErrorsTotal.Add(1)
+	}
+	if s.logger != nil {
+		s.logger.Warn("subscription rest-hook delivery failed", "endpoint", endpoint, "status", lastStatus, "error", lastErr)
 	}
 }
