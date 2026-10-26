@@ -7,12 +7,19 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
 
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
+
 	authv1 "github.com/flint-fhir/flint/gen/go/flint/auth/v1"
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store/postgres"
 )
@@ -874,5 +881,266 @@ func TestMultiHopChainedScopeAndEncounterEverything(t *testing.T) {
 		if !strings.Contains(oaStr, wantPath) {
 			t.Errorf("expected OpenAPI spec to contain path %s", wantPath)
 		}
+	}
+}
+
+func TestWave5MetaSearchTerminologyAndSDC(t *testing.T) {
+	reg := fhirutil.AllR4ResourceDescriptors()
+	toProtoBytes := func(md protoreflect.MessageDescriptor, rawJSON []byte) []byte {
+		t.Helper()
+		norm, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, rawJSON)
+		if err != nil {
+			t.Fatalf("NormalizeFHIRJSONToProtoJSON: %v", err)
+		}
+		msg := dynamicpb.NewMessage(md)
+		if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(norm, msg); err != nil {
+			t.Fatalf("protojson.Unmarshal: %v", err)
+		}
+		b, err := proto.Marshal(msg)
+		if err != nil {
+			t.Fatalf("proto.Marshal: %v", err)
+		}
+		return b
+	}
+
+	// 1. Verify static (Patient) and dynamic (Coverage & ConceptMap) meta & URI index extraction
+	patJSON := []byte(`{
+		"resourceType": "Patient",
+		"id": "pat-meta-1",
+		"meta": {
+			"source": "http://ehr.example.org/system-a",
+			"profile": ["http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"],
+			"tag": [{"system": "http://example.org/tags", "code": "cohort-a"}],
+			"security": [{"system": "http://terminology.hl7.org/CodeSystem/v3-Confidentiality", "code": "R"}]
+		},
+		"name": [{"family": "MetaTest"}]
+	}`)
+	patProto := toProtoBytes(reg["Patient"], patJSON)
+	patIdx, err := postgres.ExtractPatient("t1", "pat-meta-1", patProto)
+	if err != nil {
+		t.Fatalf("ExtractPatient: %v", err)
+	}
+	foundProfileURI, foundSourceURI, foundTagToken, foundSecToken := false, false, false, false
+	for _, u := range patIdx.URIs {
+		if u.SpName == "_profile" && u.SpValue == "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient" {
+			foundProfileURI = true
+		}
+		if u.SpName == "_source" && u.SpValue == "http://ehr.example.org/system-a" {
+			foundSourceURI = true
+		}
+	}
+	for _, tk := range patIdx.Tokens {
+		if tk.SpName == "_tag" && tk.SpSystem == "http://example.org/tags" && tk.SpValue == "cohort-a" {
+			foundTagToken = true
+		}
+		if tk.SpName == "_security" && tk.SpSystem == "http://terminology.hl7.org/CodeSystem/v3-Confidentiality" && tk.SpValue == "R" {
+			foundSecToken = true
+		}
+	}
+	if !foundProfileURI || !foundSourceURI || !foundTagToken || !foundSecToken {
+		t.Fatalf("expected _profile, _source, _tag, and _security in static Patient indexes, got profile=%v source=%v tag=%v sec=%v",
+			foundProfileURI, foundSourceURI, foundTagToken, foundSecToken)
+	}
+
+	// Dynamic extractor on Coverage (meta) and ConceptMap (source-uri / target-uri)
+	covJSON := []byte(`{
+		"resourceType": "Coverage",
+		"id": "cov-meta-1",
+		"meta": {
+			"source": "http://payer.example.org",
+			"profile": ["http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"],
+			"tag": [{"system": "http://example.org/tags", "code": "plan-gold"}],
+			"security": [{"system": "http://terminology.hl7.org/CodeSystem/v3-Confidentiality", "code": "N"}]
+		},
+		"status": "active",
+		"beneficiary": {"reference": "Patient/pat-meta-1"},
+		"payor": [{"reference": "Organization/org-1"}]
+	}`)
+	covProto := toProtoBytes(reg["Coverage"], covJSON)
+	covExtract := postgres.NewDynamicResourceExtractor("Coverage", reg["Coverage"])
+	covIdx, err := covExtract("t1", "cov-meta-1", covProto)
+	if err != nil {
+		t.Fatalf("ExtractDynamic(Coverage): %v", err)
+	}
+	hasCovProfile, hasCovTag := false, false
+	for _, u := range covIdx.URIs {
+		if u.SpName == "_profile" && u.SpValue == "http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage" {
+			hasCovProfile = true
+		}
+	}
+	for _, tk := range covIdx.Tokens {
+		if tk.SpName == "_tag" && tk.SpValue == "plan-gold" {
+			hasCovTag = true
+		}
+	}
+	if !hasCovProfile || !hasCovTag {
+		t.Fatalf("expected dynamic Coverage extractor to index _profile and _tag, got profile=%v tag=%v", hasCovProfile, hasCovTag)
+	}
+
+	cmJSON := []byte(`{
+		"resourceType": "ConceptMap",
+		"id": "cm-1",
+		"url": "http://example.org/fhir/ConceptMap/custom-map",
+		"status": "active",
+		"sourceUri": "http://snomed.info/sct",
+		"targetUri": "http://hl7.org/fhir/sid/icd-10-cm",
+		"group": [{
+			"source": "http://snomed.info/sct",
+			"target": "http://hl7.org/fhir/sid/icd-10-cm"
+		}]
+	}`)
+	cmProto := toProtoBytes(reg["ConceptMap"], cmJSON)
+	cmExtract := postgres.NewDynamicResourceExtractor("ConceptMap", reg["ConceptMap"])
+	cmIdx, err := cmExtract("t1", "cm-1", cmProto)
+	if err != nil {
+		t.Fatalf("ExtractDynamic(ConceptMap): %v", err)
+	}
+	hasSrcURI, hasTgtURI := false, false
+	for _, u := range cmIdx.URIs {
+		if u.SpName == "source-uri" && u.SpValue == "http://snomed.info/sct" {
+			hasSrcURI = true
+		}
+		if u.SpName == "target-uri" && u.SpValue == "http://hl7.org/fhir/sid/icd-10-cm" {
+			hasTgtURI = true
+		}
+	}
+	if !hasSrcURI || !hasTgtURI {
+		t.Fatalf("expected ConceptMap dynamic extractor to index source-uri and target-uri, got src=%v tgt=%v", hasSrcURI, hasTgtURI)
+	}
+
+	// 2. Verify ValidateSearchQuery & BuildSearchParamsFromQuery for _profile, _tag, _security, _source
+	qVals, _ := url.ParseQuery("_profile:below=http://hl7.org/fhir/us/core/StructureDefinition/&_tag=http://example.org/tags|cohort-a&_tag:not=excluded&_security:missing=false&_source=http://ehr.example.org/system-a")
+	if err := postgres.ValidateSearchQuery(qVals); err != nil {
+		t.Fatalf("ValidateSearchQuery rejected meta search params: %v", err)
+	}
+	sp := postgres.BuildSearchParamsFromQuery("t1", "Patient", qVals)
+	if sp.URIs["_profile:below"] != "http://hl7.org/fhir/us/core/StructureDefinition/" {
+		t.Errorf("expected URIs[_profile:below], got %v", sp.URIs)
+	}
+	if sp.URIs["_source"] != "http://ehr.example.org/system-a" {
+		t.Errorf("expected URIs[_source], got %v", sp.URIs)
+	}
+	if sp.Tokens["_tag"] != "http://example.org/tags|cohort-a" {
+		t.Errorf("expected Tokens[_tag], got %v", sp.Tokens)
+	}
+	if sp.Tokens["_tag:not"] != "excluded" {
+		t.Errorf("expected Tokens[_tag:not]=excluded, got %v", sp.Tokens)
+	}
+	if sp.Missing["_security"] {
+		t.Errorf("expected Missing[_security]==false, got %v", sp.Missing)
+	}
+
+	// 3. Verify CodeSystem/$validate-code, CodeSystem/$subsumes, ValueSet compose filter/exclude/valueSet, and SDC $extract
+	srv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(srv)
+	h := srv.Handler()
+
+	// 3a. CodeSystem/$validate-code (valid code + display mismatch)
+	csVCReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/t1/CodeSystem/$validate-code?url=http://snomed.info/sct&code=38341003", nil)
+	csVCRec := httptest.NewRecorder()
+	h.ServeHTTP(csVCRec, csVCReq)
+	if csVCRec.Code != http.StatusOK || !strings.Contains(csVCRec.Body.String(), `"valueBoolean":true`) {
+		t.Fatalf("expected 200 OK with valueBoolean:true from CodeSystem/$validate-code, got %d: %s", csVCRec.Code, csVCRec.Body.String())
+	}
+
+	csBadDispReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/t1/CodeSystem/$validate-code?url=http://snomed.info/sct&code=38341003&display=WrongDisplay", nil)
+	csBadDispRec := httptest.NewRecorder()
+	h.ServeHTTP(csBadDispRec, csBadDispReq)
+	if csBadDispRec.Code != http.StatusOK || !strings.Contains(csBadDispRec.Body.String(), `"valueBoolean":false`) {
+		t.Fatalf("expected valueBoolean:false on display mismatch in CodeSystem/$validate-code, got %d: %s", csBadDispRec.Code, csBadDispRec.Body.String())
+	}
+
+	// 3b. CodeSystem/$subsumes (subsumes, subsumed-by, equivalent, not-subsumed)
+	for _, tc := range []struct {
+		codeA, codeB, want string
+	}{
+		{"38341003", "59621000", "subsumes"},
+		{"59621000", "38341003", "subsumed-by"},
+		{"38341003", "38341003", "equivalent"},
+		{"38341003", "44054006", "not-subsumed"},
+	} {
+		subReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/t1/CodeSystem/$subsumes?system=http://snomed.info/sct&codeA="+tc.codeA+"&codeB="+tc.codeB, nil)
+		subRec := httptest.NewRecorder()
+		h.ServeHTTP(subRec, subReq)
+		if subRec.Code != http.StatusOK || !strings.Contains(subRec.Body.String(), `"valueCode":"`+tc.want+`"`) {
+			t.Fatalf("CodeSystem/$subsumes(%s, %s): expected %s, got %d: %s", tc.codeA, tc.codeB, tc.want, subRec.Code, subRec.Body.String())
+		}
+	}
+
+	// 3c. ValueSet/$expand with compose.include.filter (is-a), compose.include.valueSet, and compose.exclude
+	inlineVSBody := []byte(`{
+		"resourceType": "Parameters",
+		"parameter": [{
+			"name": "valueSet",
+			"resource": {
+				"resourceType": "ValueSet",
+				"url": "http://example.org/fhir/ValueSet/diabetes-and-vitals-custom",
+				"status": "active",
+				"compose": {
+					"include": [
+						{
+							"system": "http://snomed.info/sct",
+							"filter": [{"property": "concept", "op": "is-a", "value": "73211009"}]
+						},
+						{
+							"valueSet": ["http://hl7.org/fhir/ValueSet/administrative-gender"]
+						}
+					],
+					"exclude": [
+						{
+							"system": "http://hl7.org/fhir/administrative-gender",
+							"concept": [{"code": "unknown"}]
+						}
+					]
+				}
+			}
+		}]
+	}`)
+	expReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/t1/ValueSet/$expand", strings.NewReader(string(inlineVSBody)))
+	expReq.Header.Set("Content-Type", "application/fhir+json")
+	expRec := httptest.NewRecorder()
+	h.ServeHTTP(expRec, expReq)
+	if expRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from ValueSet/$expand with filter/valueSet/exclude, got %d: %s", expRec.Code, expRec.Body.String())
+	}
+	expStr := expRec.Body.String()
+	// Must include 73211009 (Diabetes mellitus) and 44054006 (Diabetes mellitus type 2, child of 73211009), plus female, but exclude unknown
+	if !strings.Contains(expStr, `"73211009"`) || !strings.Contains(expStr, `"44054006"`) || !strings.Contains(expStr, `"female"`) {
+		t.Fatalf("expected expanded ValueSet to contain 73211009, 44054006 (via is-a filter), and female (via imported ValueSet), got: %s", expStr)
+	}
+	if strings.Contains(expStr, `"code":"unknown"`) {
+		t.Fatalf("expected compose.exclude to remove code 'unknown', got: %s", expStr)
+	}
+
+	// 3d. QuestionnaireResponse/$extract with MedicationRequest and Procedure
+	qrExtractBody := []byte(`{
+		"resourceType": "QuestionnaireResponse",
+		"id": "qr-ext-wave5",
+		"status": "completed",
+		"subject": {"reference": "Patient/pat-1"},
+		"authored": "2026-02-01T12:00:00Z",
+		"item": [
+			{
+				"linkId": "current-medication",
+				"text": "Active Medication Prescription",
+				"answer": [{"valueCoding": {"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "314076", "display": "Lisinopril 10 MG Oral Tablet"}}]
+			},
+			{
+				"linkId": "prior-procedure",
+				"text": "Past Surgical Procedure",
+				"answer": [{"valueCoding": {"system": "http://snomed.info/sct", "code": "80146002", "display": "Appendectomy"}}]
+			}
+		]
+	}`)
+	extReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/t1/QuestionnaireResponse/$extract", strings.NewReader(string(qrExtractBody)))
+	extReq.Header.Set("Content-Type", "application/fhir+json")
+	extRec := httptest.NewRecorder()
+	h.ServeHTTP(extRec, extReq)
+	if extRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from QuestionnaireResponse/$extract, got %d: %s", extRec.Code, extRec.Body.String())
+	}
+	extStr := extRec.Body.String()
+	if !strings.Contains(extStr, `"MedicationRequest"`) || !strings.Contains(extStr, `"Procedure"`) || !strings.Contains(extStr, `"Provenance"`) {
+		t.Fatalf("expected extracted Bundle to include MedicationRequest, Procedure, and Provenance, got: %s", extStr)
 	}
 }

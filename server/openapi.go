@@ -47,7 +47,7 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Advanced Search Engine",
-			Capability:    "Date/Quantity Ranges, Composite Search (code-value-quantity, component-code-value-quantity), Multi-Hop Chained Search (:exact/:contains/:not, reference & URI :below/:above), _has Reverse Chaining, _list Cohort Search, _include / _revinclude (:iterate), Choice-Type :missing, Multi-field _sort, _summary / _elements (SUBSETTED), _total=none, Bundle.link Pagination, POST /_search",
+			Capability:    "Date/Quantity Ranges, Composite Search (code-value-quantity, component-code-value-quantity), Multi-Hop Chained Search (:exact/:contains/:not, reference & URI :below/:above), _has Reverse Chaining, _list Cohort Search, _profile / _tag / _security / _source Meta Search, _include / _revinclude (:iterate), Choice-Type :missing, Multi-field _sort, _summary / _elements (SUBSETTED), _total=none, Bundle.link Pagination, POST /_search",
 			Specification: "HL7 FHIR R4 Search",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/{resourceType}?_include=...",
@@ -61,7 +61,7 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Terminology Services",
-			Capability:    "ValueSet/$expand, ValueSet/$validate-code, CodeSystem/$lookup & ConceptMap/$translate",
+			Capability:    "ValueSet/$expand (with compose.include.filter, valueSet imports & exclude), ValueSet/$validate-code, CodeSystem/$lookup, CodeSystem/$validate-code, CodeSystem/$subsumes & ConceptMap/$translate",
 			Specification: "HL7 FHIR R4 Terminology Services (4.0.1)",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/ValueSet/$expand",
@@ -112,7 +112,7 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 }
 
 func resourceSearchParamDefs() map[string][]map[string]string {
-	return map[string][]map[string]string{
+	defs := map[string][]map[string]string{
 		"Patient": {
 			{"name": "_id", "type": "token"},
 			{"name": "_lastUpdated", "type": "date"},
@@ -434,6 +434,16 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "version", "type": "token"},
 		},
 	}
+	metaParams := []map[string]string{
+		{"name": "_profile", "type": "uri"},
+		{"name": "_tag", "type": "token"},
+		{"name": "_security", "type": "token"},
+		{"name": "_source", "type": "uri"},
+	}
+	for rt, sp := range defs {
+		defs[rt] = append(sp, metaParams...)
+	}
+	return defs
 }
 
 // BuildOpenAPISpec dynamically synthesizes an OpenAPI 3.1.0 specification for a Flint tenant
@@ -1015,6 +1025,104 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/CodeSystem/$validate-code": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Validate that a coded concept belongs to a FHIR R4 CodeSystem ($validate-code)",
+				"operationId": "validateCodeCodeSystemGet",
+				"parameters": []map[string]any{
+					{"name": "url", "in": "query", "required": false, "description": "Canonical CodeSystem URL (e.g. http://snomed.info/sct)", "schema": map[string]any{"type": "string"}},
+					{"name": "code", "in": "query", "required": true, "description": "Concept code to validate", "schema": map[string]any{"type": "string"}},
+					{"name": "display", "in": "query", "required": false, "description": "Expected display text", "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (result, message, display)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Validate that a coded concept belongs to a FHIR R4 CodeSystem (POST Parameters)",
+				"operationId": "validateCodeCodeSystemPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (result, message, display)"},
+				},
+			},
+		},
+		"/CodeSystem/{id}/$validate-code": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Validate that a coded concept belongs to CodeSystem/{id} ($validate-code)",
+				"operationId": "validateCodeCodeSystemByIdGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "code", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "display", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (result, message, display)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Validate that a coded concept belongs to CodeSystem/{id} (POST Parameters)",
+				"operationId": "validateCodeCodeSystemByIdPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (result, message, display)"},
+				},
+			},
+		},
+		"/CodeSystem/$subsumes": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Test the subsumption relationship between codeA and codeB in a CodeSystem ($subsumes)",
+				"operationId": "subsumesCodeSystemGet",
+				"parameters": []map[string]any{
+					{"name": "system", "in": "query", "required": true, "description": "Canonical CodeSystem URL (e.g. http://snomed.info/sct)", "schema": map[string]any{"type": "string"}},
+					{"name": "codeA", "in": "query", "required": true, "description": "First concept code", "schema": map[string]any{"type": "string"}},
+					{"name": "codeB", "in": "query", "required": true, "description": "Second concept code", "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (outcome = equivalent | subsumes | subsumed-by | not-subsumed)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Test the subsumption relationship between codeA/codingA and codeB/codingB (POST Parameters)",
+				"operationId": "subsumesCodeSystemPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (outcome = equivalent | subsumes | subsumed-by | not-subsumed)"},
+				},
+			},
+		},
+		"/CodeSystem/{id}/$subsumes": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Test the subsumption relationship between codeA and codeB in CodeSystem/{id} ($subsumes)",
+				"operationId": "subsumesCodeSystemByIdGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "codeA", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "codeB", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (outcome = equivalent | subsumes | subsumed-by | not-subsumed)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology Services"},
+				"summary":     "Test the subsumption relationship between codeA/codingA and codeB/codingB in CodeSystem/{id} (POST Parameters)",
+				"operationId": "subsumesCodeSystemByIdPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters (outcome = equivalent | subsumes | subsumed-by | not-subsumed)"},
+				},
+			},
+		},
 		"/ConceptMap/$translate": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Terminology Services"},
@@ -1438,6 +1546,10 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		queryParams := []map[string]any{
 			{"name": "_id", "in": "query", "description": "Logical resource ID", "schema": map[string]any{"type": "string"}},
 			{"name": "_lastUpdated", "in": "query", "description": "Last updated timestamp with optional FHIR comparator (ge, le, gt, lt)", "schema": map[string]any{"type": "string"}},
+			{"name": "_profile", "in": "query", "description": "Resource profile canonical URL (supports :below, :above, :missing)", "schema": map[string]any{"type": "string"}},
+			{"name": "_tag", "in": "query", "description": "Resource meta.tag token (system|code, supports :not, :missing)", "schema": map[string]any{"type": "string"}},
+			{"name": "_security", "in": "query", "description": "Resource meta.security label token (system|code, supports :not, :missing)", "schema": map[string]any{"type": "string"}},
+			{"name": "_source", "in": "query", "description": "Resource meta.source URI (supports :below, :above, :missing)", "schema": map[string]any{"type": "string"}},
 			{"name": "_count", "in": "query", "description": "Page size (default 100)", "schema": map[string]any{"type": "integer"}},
 			{"name": "_offset", "in": "query", "description": "Pagination offset", "schema": map[string]any{"type": "integer"}},
 			{"name": "_sort", "in": "query", "description": "Comma-separated sort fields with optional '-' descending prefix (e.g. -date,_id)", "schema": map[string]any{"type": "string"}},
@@ -1451,7 +1563,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			{"name": "_has", "in": "query", "description": "Reverse chained search filter (e.g. _has:Observation:patient:code=8867-4)", "schema": map[string]any{"type": "string"}},
 			{"name": "_list", "in": "query", "description": "Cohort membership search against a FHIR List or Group ID", "schema": map[string]any{"type": "string"}},
 		}
-		seenParam := map[string]bool{"_id": true, "_lastUpdated": true}
+		seenParam := map[string]bool{"_id": true, "_lastUpdated": true, "_profile": true, "_tag": true, "_security": true, "_source": true}
 		for _, sp := range spDefs[rt] {
 			if seenParam[sp["name"]] {
 				continue
