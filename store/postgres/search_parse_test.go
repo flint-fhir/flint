@@ -174,8 +174,41 @@ func TestParseChainedParam(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, "subject", p.RefParam)
 		assert.Equal(t, "Patient", p.TargetType)
+		require.Len(t, p.Hops, 1)
 		assert.Equal(t, "family", p.TargetParam)
 		assert.Equal(t, "Doe", p.Value)
+	})
+
+	t.Run("Multi-hop chained param with implicit and explicit target types", func(t *testing.T) {
+		p, ok := postgres.ParseChainedParam("patient.organization.name:exact", "Acme Health")
+		require.True(t, ok)
+		assert.Equal(t, "patient", p.RefParam)
+		assert.Equal(t, "Organization", p.TargetType)
+		require.Len(t, p.Hops, 2)
+		assert.Equal(t, postgres.ChainedHop{RefParam: "patient", TargetType: "Patient"}, p.Hops[0])
+		assert.Equal(t, postgres.ChainedHop{RefParam: "organization", TargetType: "Organization"}, p.Hops[1])
+		assert.Equal(t, "name", p.TargetParam)
+		assert.Equal(t, "exact", p.TargetModifier)
+		assert.Equal(t, "string", p.ParamType)
+		assert.Equal(t, "Acme Health", p.Value)
+
+		p2, ok := postgres.ParseChainedParam("subject:Patient.general-practitioner:Practitioner.identifier", "http://hl7.org/fhir/sid/us-npi|12345")
+		require.True(t, ok)
+		require.Len(t, p2.Hops, 2)
+		assert.Equal(t, postgres.ChainedHop{RefParam: "subject", TargetType: "Patient"}, p2.Hops[0])
+		assert.Equal(t, postgres.ChainedHop{RefParam: "general-practitioner", TargetType: "Practitioner"}, p2.Hops[1])
+		assert.Equal(t, "identifier", p2.TargetParam)
+		assert.Equal(t, "token", p2.ParamType)
+	})
+
+	t.Run("Chained URI param with :below modifier", func(t *testing.T) {
+		p, ok := postgres.ParseChainedParam("questionnaire.url:below", "http://example.org/fhir/Questionnaire")
+		require.True(t, ok)
+		assert.Equal(t, "questionnaire", p.RefParam)
+		assert.Equal(t, "Questionnaire", p.TargetType)
+		assert.Equal(t, "url", p.TargetParam)
+		assert.Equal(t, "below", p.TargetModifier)
+		assert.Equal(t, "uri", p.ParamType)
 	})
 
 	t.Run("Non-chained param", func(t *testing.T) {

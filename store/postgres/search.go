@@ -47,6 +47,16 @@ type PatientEverythingParams struct {
 	Offset        int
 }
 
+// EncounterEverythingParams specifies parameters for the FHIR R4 Encounter/$everything operation.
+type EncounterEverythingParams struct {
+	TenantID      string
+	EncounterID   string
+	ResourceTypes []string   // Optional _type filter (e.g. ["Observation", "Condition"])
+	Since         *time.Time // Optional _since filter on last_updated
+	Count         int
+	Offset        int
+}
+
 // SearchParams holds parsed FHIR search parameters for a query.
 type SearchParams struct {
 	TenantID                 string
@@ -374,11 +384,12 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		}
 	}
 
-	// 6. Chained search parameters (e.g. Observation?patient.name=Smith, Observation?subject:Patient.name:exact=Smith, Observation?patient.organization=Organization/org-1)
+	// 6. Chained search parameters (e.g. Observation?patient.name=Smith, Observation?subject:Patient.name:exact=Smith, Observation?patient.organization.name=Acme)
 	for _, chained := range params.Chained {
-		joinIdx++
-		refAlias := fmt.Sprintf("crf%d", joinIdx)
-		targetAlias := fmt.Sprintf("ctg%d", joinIdx)
+		hops := chained.Hops
+		if len(hops) == 0 {
+			hops = []ChainedHop{{RefParam: chained.RefParam, TargetType: chained.TargetType}}
+		}
 
 		targetParam, targetMod := splitParamModifier(chained.TargetParam)
 		if chained.TargetModifier != "" {
@@ -398,10 +409,42 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 				paramType = "quantity"
 			case knownRefSearchParams[targetParam]:
 				paramType = "reference"
+			case knownURISearchParams[targetParam] || targetMod == "below" || targetMod == "above":
+				paramType = "uri"
 			default:
 				paramType = "token"
 			}
 		}
+
+		prevTypeExpr := "r.res_type"
+		prevIDExpr := "r.res_id"
+
+		// Join intermediate hops (when len(hops) > 1)
+		for _, hop := range hops[:len(hops)-1] {
+			joinIdx++
+			hopAlias := fmt.Sprintf("crf%d", joinIdx)
+			if hop.TargetType != "" {
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = %s AND %s.res_id = %s AND %s.sp_name = $%d AND (%s.target_type = $%d OR %s.target_type = '')",
+					hopAlias, hopAlias, hopAlias, prevTypeExpr, hopAlias, prevIDExpr, hopAlias, len(args)+1, hopAlias, len(args)+2, hopAlias,
+				))
+				args = append(args, hop.RefParam, hop.TargetType)
+				prevTypeExpr = fmt.Sprintf("$%d", len(args))
+			} else {
+				joins = append(joins, fmt.Sprintf(
+					"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = %s AND %s.res_id = %s AND %s.sp_name = $%d",
+					hopAlias, hopAlias, hopAlias, prevTypeExpr, hopAlias, prevIDExpr, hopAlias, len(args)+1,
+				))
+				args = append(args, hop.RefParam)
+				prevTypeExpr = hopAlias + ".target_type"
+			}
+			prevIDExpr = hopAlias + ".target_id"
+		}
+
+		lastHop := hops[len(hops)-1]
+		joinIdx++
+		refAlias := fmt.Sprintf("crf%d", joinIdx)
+		targetAlias := fmt.Sprintf("ctg%d", joinIdx)
 
 		if paramType == "id" {
 			var targetIDs []string
@@ -418,36 +461,36 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 			if len(targetIDs) == 0 {
 				continue
 			}
-			if chained.TargetType != "" {
+			if lastHop.TargetType != "" {
 				joins = append(joins, fmt.Sprintf(
-					"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s.target_type = $%d OR %s.target_type = '') AND %s.target_id = ANY($%d)",
-					refAlias, refAlias, refAlias, refAlias, refAlias, len(args)+1, refAlias, len(args)+2, refAlias, refAlias, len(args)+3,
+					"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = %s AND %s.res_id = %s AND %s.sp_name = $%d AND (%s.target_type = $%d OR %s.target_type = '') AND %s.target_id = ANY($%d)",
+					refAlias, refAlias, refAlias, prevTypeExpr, refAlias, prevIDExpr, refAlias, len(args)+1, refAlias, len(args)+2, refAlias, refAlias, len(args)+3,
 				))
-				args = append(args, chained.RefParam, chained.TargetType, pq.Array(targetIDs))
+				args = append(args, lastHop.RefParam, lastHop.TargetType, pq.Array(targetIDs))
 			} else {
 				joins = append(joins, fmt.Sprintf(
-					"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND %s.target_id = ANY($%d)",
-					refAlias, refAlias, refAlias, refAlias, refAlias, len(args)+1, refAlias, len(args)+2,
+					"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = %s AND %s.res_id = %s AND %s.sp_name = $%d AND %s.target_id = ANY($%d)",
+					refAlias, refAlias, refAlias, prevTypeExpr, refAlias, prevIDExpr, refAlias, len(args)+1, refAlias, len(args)+2,
 				))
-				args = append(args, chained.RefParam, pq.Array(targetIDs))
+				args = append(args, lastHop.RefParam, pq.Array(targetIDs))
 			}
 			continue
 		}
 
 		var targetTypeCond string
-		if chained.TargetType != "" {
+		if lastHop.TargetType != "" {
 			joins = append(joins, fmt.Sprintf(
-				"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s.target_type = $%d OR %s.target_type = '')",
-				refAlias, refAlias, refAlias, refAlias, refAlias, len(args)+1, refAlias, len(args)+2, refAlias,
+				"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = %s AND %s.res_id = %s AND %s.sp_name = $%d AND (%s.target_type = $%d OR %s.target_type = '')",
+				refAlias, refAlias, refAlias, prevTypeExpr, refAlias, prevIDExpr, refAlias, len(args)+1, refAlias, len(args)+2, refAlias,
 			))
-			args = append(args, chained.RefParam, chained.TargetType)
+			args = append(args, lastHop.RefParam, lastHop.TargetType)
 			targetTypeCond = fmt.Sprintf("%s.res_type = $%d", targetAlias, len(args))
 		} else {
 			joins = append(joins, fmt.Sprintf(
-				"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d",
-				refAlias, refAlias, refAlias, refAlias, refAlias, len(args)+1,
+				"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = %s AND %s.res_id = %s AND %s.sp_name = $%d",
+				refAlias, refAlias, refAlias, prevTypeExpr, refAlias, prevIDExpr, refAlias, len(args)+1,
 			))
-			args = append(args, chained.RefParam)
+			args = append(args, lastHop.RefParam)
 			targetTypeCond = fmt.Sprintf("%s.res_type = %s.target_type", targetAlias, refAlias)
 		}
 
@@ -544,6 +587,47 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 					"JOIN spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND (%s)",
 					targetAlias, targetAlias, targetTypeCond, targetAlias, refAlias, targetAlias, spIdx, strings.Join(orConds, " OR "),
 				))
+			}
+		case "uri":
+			spIdx := len(args) + 1
+			args = append(args, targetParam)
+			utAlias := fmt.Sprintf("ctgu%d", joinIdx)
+			utTargetTypeCond := strings.ReplaceAll(targetTypeCond, targetAlias+".", utAlias+".")
+			var uConds []string
+			var utConds []string
+			for part := range strings.SplitSeq(chained.Value, ",") {
+				v := strings.TrimSpace(part)
+				if v == "" {
+					continue
+				}
+				switch targetMod {
+				case "below":
+					baseURI := strings.TrimSuffix(v, "/")
+					p1 := len(args) + 1
+					p2 := len(args) + 2
+					p3 := len(args) + 3
+					args = append(args, v, baseURI, escapeLikePattern(baseURI)+"/%")
+					uConds = append(uConds, fmt.Sprintf(`(%s.sp_value = $%d OR %s.sp_value = $%d OR %s.sp_value LIKE $%d ESCAPE '\')`, targetAlias, p1, targetAlias, p2, targetAlias, p3))
+					utConds = append(utConds, fmt.Sprintf(`(%s.sp_value = $%d OR %s.sp_value = $%d OR %s.sp_value LIKE $%d ESCAPE '\')`, utAlias, p1, utAlias, p2, utAlias, p3))
+				case "above":
+					ancestors := uriHierarchyAncestors(v)
+					p1 := len(args) + 1
+					args = append(args, pq.Array(ancestors))
+					uConds = append(uConds, fmt.Sprintf("(%s.sp_value = ANY($%d))", targetAlias, p1))
+					utConds = append(utConds, fmt.Sprintf("(%s.sp_value = ANY($%d))", utAlias, p1))
+				default:
+					p1 := len(args) + 1
+					args = append(args, v)
+					uConds = append(uConds, fmt.Sprintf("(%s.sp_value = $%d)", targetAlias, p1))
+					utConds = append(utConds, fmt.Sprintf("(%s.sp_value = $%d)", utAlias, p1))
+				}
+			}
+			if len(uConds) > 0 {
+				whereExtra += fmt.Sprintf(
+					" AND (EXISTS (SELECT 1 FROM spidx_uri %s WHERE %s.tenant_id = r.tenant_id AND %s AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND (%s)) OR EXISTS (SELECT 1 FROM spidx_token %s WHERE %s.tenant_id = r.tenant_id AND %s AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND (%s)))",
+					targetAlias, targetAlias, targetTypeCond, targetAlias, refAlias, targetAlias, spIdx, strings.Join(uConds, " OR "),
+					utAlias, utAlias, utTargetTypeCond, utAlias, refAlias, utAlias, spIdx, strings.Join(utConds, " OR "),
+				)
 			}
 		default: // string
 			spIdx := len(args) + 1
@@ -1387,6 +1471,166 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 		}
 		if err := rows.Err(); err != nil {
 			return fmt.Errorf("patient everything rows: %w", err)
+		}
+
+		out = &SearchResults{
+			Matches:  matches,
+			Includes: includes,
+			Total:    len(matches) + compTotal,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// EncounterEverything implements the HL7 FHIR R4 Encounter/$everything operation,
+// returning the target Encounter resource plus all compartment-linked resources
+// (Observation, Condition, Procedure, DiagnosticReport, Patient, Practitioner, Location, etc.)
+// via spidx_reference.
+func (s *Store) EncounterEverything(ctx context.Context, params EncounterEverythingParams) (*SearchResults, error) {
+	if params.Count <= 0 {
+		params.Count = 100
+	}
+	if params.Count > 1000 {
+		params.Count = 1000
+	}
+	offset := max(params.Offset, 0)
+
+	var out *SearchResults
+	err := s.withTenantTx(ctx, params.TenantID, func(tx *sql.Tx) error {
+		encRec, err := s.readResourceWithMetaInTx(ctx, tx, params.TenantID, "Encounter", params.EncounterID)
+		if err != nil {
+			return err
+		}
+
+		includeEncounter := true
+		if len(params.ResourceTypes) > 0 {
+			includeEncounter = false
+			for _, rt := range params.ResourceTypes {
+				if strings.EqualFold(rt, "Encounter") {
+					includeEncounter = true
+					break
+				}
+			}
+		}
+		if params.Since != nil && encRec.LastUpdated.Before(*params.Since) {
+			includeEncounter = false
+		}
+
+		var matches []SearchResult
+		if includeEncounter {
+			matches = append(matches, SearchResult{
+				ResType:       "Encounter",
+				ResID:         params.EncounterID,
+				ResVersion:    encRec.ResVersion,
+				LastUpdated:   encRec.LastUpdated,
+				ResourceProto: encRec.ResourceProto,
+			})
+		}
+
+		// Build Encounter compartment query against spidx_reference:
+		// 1. Resources referencing this Encounter (e.g., Observation, Condition, Procedure, DiagnosticReport, MedicationRequest)
+		// 2. Resources directly referenced by this Encounter (e.g., Patient, Practitioner, Location, Organization)
+		// 3. Shared clinical target resources referenced by clinical resources in this Encounter's compartment
+		// 4. Provenance targeting this Encounter or any resource in this Encounter's compartment
+		whereConds := []string{
+			"r.tenant_id = $1",
+			"r.is_deleted = FALSE",
+			"NOT (r.res_type = 'Encounter' AND r.res_id = $2)",
+			`(
+				EXISTS (
+					SELECT 1 FROM spidx_reference rf
+					WHERE rf.tenant_id = r.tenant_id
+					  AND rf.res_type = r.res_type
+					  AND rf.res_id = r.res_id
+					  AND rf.target_id = $2
+					  AND (rf.target_type = 'Encounter' OR rf.target_type = '')
+				)
+				OR EXISTS (
+					SELECT 1 FROM spidx_reference rf
+					WHERE rf.tenant_id = r.tenant_id
+					  AND rf.res_type = 'Encounter'
+					  AND rf.res_id = $2
+					  AND rf.target_type = r.res_type
+					  AND rf.target_id = r.res_id
+				)
+				OR (
+					r.res_type IN ('Organization', 'Practitioner', 'PractitionerRole', 'Location', 'Medication', 'HealthcareService', 'Endpoint', 'Substance', 'Device', 'Specimen')
+					AND EXISTS (
+						SELECT 1 FROM spidx_reference rf_clin
+						JOIN spidx_reference rf_enc
+						  ON rf_enc.tenant_id = rf_clin.tenant_id
+						 AND rf_enc.res_type = rf_clin.res_type
+						 AND rf_enc.res_id = rf_clin.res_id
+						WHERE rf_clin.tenant_id = r.tenant_id
+						  AND rf_clin.target_type = r.res_type
+						  AND rf_clin.target_id = r.res_id
+						  AND rf_enc.target_id = $2
+						  AND (rf_enc.target_type = 'Encounter' OR rf_enc.target_type = '')
+					)
+				)
+				OR (
+					r.res_type = 'Provenance'
+					AND EXISTS (
+						SELECT 1 FROM spidx_reference rf_prov
+						JOIN spidx_reference rf_enc
+						  ON rf_enc.tenant_id = rf_prov.tenant_id
+						 AND rf_enc.res_type = rf_prov.target_type
+						 AND rf_enc.res_id = rf_prov.target_id
+						WHERE rf_prov.tenant_id = r.tenant_id
+						  AND rf_prov.res_type = 'Provenance'
+						  AND rf_prov.res_id = r.res_id
+						  AND rf_prov.sp_name = 'target'
+						  AND rf_enc.target_id = $2
+						  AND (rf_enc.target_type = 'Encounter' OR rf_enc.target_type = '')
+					)
+				)
+			)`,
+		}
+		args := []any{params.TenantID, params.EncounterID}
+
+		if len(params.ResourceTypes) > 0 {
+			whereConds = append(whereConds, fmt.Sprintf("r.res_type = ANY($%d)", len(args)+1))
+			args = append(args, pq.Array(params.ResourceTypes))
+		}
+		if params.Since != nil {
+			whereConds = append(whereConds, fmt.Sprintf("r.last_updated >= $%d", len(args)+1))
+			args = append(args, *params.Since)
+		}
+
+		whereClause := strings.Join(whereConds, " AND ")
+
+		var compTotal int
+		countSQL := "SELECT COUNT(*) FROM fhir_resource r WHERE " + whereClause
+		if err := tx.QueryRowContext(ctx, countSQL, args...).Scan(&compTotal); err != nil {
+			return fmt.Errorf("encounter everything count: %w", err)
+		}
+
+		dataSQL := fmt.Sprintf(
+			"SELECT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r WHERE %s ORDER BY r.res_type ASC, r.res_id ASC LIMIT $%d OFFSET $%d",
+			whereClause, len(args)+1, len(args)+2,
+		)
+		args = append(args, params.Count, offset)
+
+		rows, err := tx.QueryContext(ctx, dataSQL, args...)
+		if err != nil {
+			return fmt.Errorf("encounter everything query: %w", err)
+		}
+		defer rows.Close()
+
+		var includes []SearchResult
+		for rows.Next() {
+			var r SearchResult
+			if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
+				return fmt.Errorf("scan encounter everything row: %w", err)
+			}
+			includes = append(includes, r)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("encounter everything rows: %w", err)
 		}
 
 		out = &SearchResults{

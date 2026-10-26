@@ -1369,10 +1369,19 @@ func (s *Server) handleSearchAuditEvents(w http.ResponseWriter, r *http.Request)
 	json.NewEncoder(w).Encode(bundle)
 }
 
-// handlePatientEverything handles GET/POST /{tenant}/Patient/{id}/$everything — assemble full patient compartment Bundle.
+// handlePatientEverything handles GET/POST /{tenant}/{resourceType}/{id}/$everything — assemble full Patient or Encounter compartment Bundle.
 func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
-	patientID := r.PathValue("id")
+	resType := strings.TrimSpace(r.PathValue("resourceType"))
+	if resType == "" {
+		resType = "Patient"
+	}
+	if !strings.EqualFold(resType, "Patient") && !strings.EqualFold(resType, "Encounter") {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found",
+			fmt.Sprintf("$everything is only supported on Patient and Encounter (got %s)", resType))
+		return
+	}
+	resID := r.PathValue("id")
 	q := mergedSearchQuery(r)
 
 	typeRaw := strings.TrimSpace(q.Get("_type"))
@@ -1446,12 +1455,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	params := postgres.PatientEverythingParams{
-		TenantID:  tenant,
-		PatientID: patientID,
-		Count:     100,
-	}
-
+	var resourceTypes []string
 	if typeRaw != "" {
 		for part := range strings.SplitSeq(typeRaw, ",") {
 			if trimmed := strings.TrimSpace(part); trimmed != "" {
@@ -1460,14 +1464,14 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 						fmt.Sprintf("unknown or unsupported resource type %q in _type parameter", trimmed))
 					return
 				}
-				params.ResourceTypes = append(params.ResourceTypes, trimmed)
+				resourceTypes = append(resourceTypes, trimmed)
 			}
 		}
 	}
 
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
 	if hasSecCtx {
-		for _, rt := range params.ResourceTypes {
+		for _, rt := range resourceTypes {
 			if !auth.Allows(secCtx, rt, auth.ActionRead) && !auth.Allows(secCtx, rt, auth.ActionSearch) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 					fmt.Sprintf("insufficient scope for $everything _type %s", rt))
@@ -1476,6 +1480,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	var sinceTime *time.Time
 	if sinceRaw != "" {
 		dOp, err := postgres.ParseDateOp(sinceRaw)
 		if err != nil {
@@ -1484,9 +1489,10 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		t := dOp.Value
-		params.Since = &t
+		sinceTime = &t
 	}
 
+	count := 100
 	if countRaw != "" {
 		n, err := strconv.Atoi(countRaw)
 		if err != nil || n <= 0 {
@@ -1494,8 +1500,9 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 				fmt.Sprintf("invalid _count parameter %q: must be a positive integer", countRaw))
 			return
 		}
-		params.Count = n
+		count = n
 	}
+	offset := 0
 	if offsetRaw != "" {
 		n, err := strconv.Atoi(offsetRaw)
 		if err != nil || n < 0 {
@@ -1503,23 +1510,46 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 				fmt.Sprintf("invalid _offset parameter %q: must be a non-negative integer", offsetRaw))
 			return
 		}
-		params.Offset = n
+		offset = n
 	}
 
-	sr, err := s.store.PatientEverything(r.Context(), params)
+	var sr *postgres.SearchResults
+	var err error
+	targetLabel := "Patient"
+	if strings.EqualFold(resType, "Encounter") {
+		targetLabel = "Encounter"
+		sr, err = s.store.EncounterEverything(r.Context(), postgres.EncounterEverythingParams{
+			TenantID:      tenant,
+			EncounterID:   resID,
+			ResourceTypes: resourceTypes,
+			Since:         sinceTime,
+			Count:         count,
+			Offset:        offset,
+		})
+	} else {
+		sr, err = s.store.PatientEverything(r.Context(), postgres.PatientEverythingParams{
+			TenantID:      tenant,
+			PatientID:     resID,
+			ResourceTypes: resourceTypes,
+			Since:         sinceTime,
+			Count:         count,
+			Offset:        offset,
+		})
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found",
-			fmt.Sprintf("Patient/%s not found", patientID))
+			fmt.Sprintf("%s/%s not found", targetLabel, resID))
 		return
 	}
 	if errors.Is(err, postgres.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted",
-			fmt.Sprintf("Patient/%s has been deleted", patientID))
+			fmt.Sprintf("%s/%s has been deleted", targetLabel, resID))
 		return
 	}
 	if err != nil {
-		s.logger.Error("patient $everything", "error", err, "patient", patientID)
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to assemble Patient/$everything")
+		s.logger.Error("$everything failed", "error", err, "type", targetLabel, "id", resID)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception",
+			fmt.Sprintf("failed to assemble %s/$everything", targetLabel))
 		return
 	}
 
@@ -1532,8 +1562,8 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.writeSearchSetBundleWithOpts(w, r, sr, postgres.SearchParams{
-		Count:   params.Count,
-		Offset:  params.Offset,
+		Count:   count,
+		Offset:  offset,
 		ResType: "$everything",
 	})
 }
@@ -1660,10 +1690,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		for _, ch := range params.Chained {
-			if ch.TargetType != "" && !auth.Allows(secCtx, ch.TargetType, auth.ActionRead) && !auth.Allows(secCtx, ch.TargetType, auth.ActionSearch) {
-				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-					fmt.Sprintf("insufficient scope for chained search target %s", ch.TargetType))
-				return
+			hops := ch.Hops
+			if len(hops) == 0 && ch.TargetType != "" {
+				hops = []postgres.ChainedHop{{RefParam: ch.RefParam, TargetType: ch.TargetType}}
+			}
+			for _, hop := range hops {
+				if hop.TargetType != "" && !auth.Allows(secCtx, hop.TargetType, auth.ActionRead) && !auth.Allows(secCtx, hop.TargetType, auth.ActionSearch) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+						fmt.Sprintf("insufficient scope for chained search target %s", hop.TargetType))
+					return
+				}
 			}
 		}
 		if len(params.List) > 0 && !auth.Allows(secCtx, "List", auth.ActionRead) && !auth.Allows(secCtx, "List", auth.ActionSearch) {
@@ -2240,6 +2276,20 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 				{
 					"name":       "export",
 					"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/patient-export",
+				},
+			}
+		case "Encounter":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "everything",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Encounter-everything",
+				},
+			}
+		case "Composition":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "document",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Composition-document",
 				},
 			}
 		case "DocumentReference":
