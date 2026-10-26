@@ -57,23 +57,27 @@ type Server struct {
 	logger *slog.Logger
 	// protoRegistry maps FHIR resource type names to proto message descriptors.
 	// Used to unmarshal proto bytes back to proto messages for JSON conversion.
-	protoRegistry           map[string]protoreflect.MessageDescriptor
-	extractors              map[string]postgres.IndexExtractorFunc
-	smartConfig             *SMARTConfig
-	tokenValidator          auth.TokenValidator
-	devAuth                 *auth.MockTokenValidator
-	oauthMu                 sync.Mutex
-	oauthCodes              map[string]authCodeEntry
-	refreshTokens           map[string]refreshTokenEntry
-	revokedTokens           map[string]time.Time
-	validator               validation.Validator
-	auditRecorder           audit.Recorder
-	cdcPublisher            automq.Publisher
-	exportMu                sync.RWMutex
-	exportJobs              map[string]*exportJob
-	subSem                  chan struct{}
-	disallowPrivateWebhooks bool
-	metrics                 *serverMetrics
+	protoRegistry              map[string]protoreflect.MessageDescriptor
+	extractors                 map[string]postgres.IndexExtractorFunc
+	smartConfig                *SMARTConfig
+	tokenValidator             auth.TokenValidator
+	devAuth                    *auth.MockTokenValidator
+	oauthMu                    sync.Mutex
+	oauthCodes                 map[string]authCodeEntry
+	refreshTokens              map[string]refreshTokenEntry
+	revokedTokens              map[string]time.Time
+	validator                  validation.Validator
+	auditRecorder              audit.Recorder
+	cdcPublisher               automq.Publisher
+	exportMu                   sync.RWMutex
+	exportJobs                 map[string]*exportJob
+	subSem                     chan struct{}
+	disallowPrivateWebhooks    bool
+	clientJWKs                 map[string]auth.JWK
+	requireRegisteredClientJWK bool
+	routerOnce                 sync.Once
+	internalRouter             http.Handler
+	metrics                    *serverMetrics
 }
 
 // New creates a new FHIR server.
@@ -94,6 +98,7 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 		oauthCodes:    make(map[string]authCodeEntry),
 		refreshTokens: make(map[string]refreshTokenEntry),
 		revokedTokens: make(map[string]time.Time),
+		clientJWKs:    make(map[string]auth.JWK),
 		validator:     validation.NewEngine(validation.DefaultOptions()),
 		auditRecorder: auditRec,
 		exportJobs:    make(map[string]*exportJob),
@@ -186,6 +191,17 @@ func (s *Server) RegisterIndexExtractor(resType string, fn postgres.IndexExtract
 
 // Handler returns the HTTP handler for the FHIR API.
 func (s *Server) Handler() http.Handler {
+	return s.metricsMiddleware(s.auditMiddleware(s.authMiddleware(s.fhirRouter())))
+}
+
+func (s *Server) fhirRouter() http.Handler {
+	s.routerOnce.Do(func() {
+		s.internalRouter = s.buildFHIRRouter()
+	})
+	return s.internalRouter
+}
+
+func (s *Server) buildFHIRRouter() http.Handler {
 	mux := http.NewServeMux()
 
 	// Operational Liveness, Readiness & Prometheus Metrics endpoints
@@ -423,7 +439,7 @@ func (s *Server) Handler() http.Handler {
 		mux.ServeHTTP(w, r)
 	})
 
-	return s.metricsMiddleware(s.auditMiddleware(s.authMiddleware(router)))
+	return router
 }
 
 // handleRead handles GET /{resourceType}/{id} — read a single resource.
@@ -737,6 +753,13 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	resolvedBody, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, body, nil)
+	if refErr != nil {
+		writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
+		return
+	}
+	body = resolvedBody
+
 	// Validate against FHIR R4 StructureDefinitions and ValueSets if validator configured
 	if s.validator != nil {
 		outcome := s.validator.ValidateJSON(resType, body)
@@ -747,7 +770,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.validateSubscriptionResourceJSON(resType, body); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "security", err.Error())
+		writeOperationOutcome(w, http.StatusUnprocessableEntity, "security", err.Error())
 		return
 	}
 	body = normalizeSubscriptionOnWrite(resType, body)
@@ -866,16 +889,14 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
 			return
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 		w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, rec.ResID))
 		w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 		w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+		status := http.StatusOK
 		if created {
-			w.WriteHeader(http.StatusCreated)
-		} else {
-			w.WriteHeader(http.StatusOK)
+			status = http.StatusCreated
 		}
-		w.Write(jsonBytes)
+		writePreferResourceResponse(w, r, status, resType, rec.ResID, rec.ResVersion, jsonBytes)
 		return
 	}
 
@@ -906,13 +927,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		jsonBytes = body
 	}
 
-	// Return the serialized resource as JSON with 201 Created, Location, ETag, and Last-Modified
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	// Return the serialized resource (or Prefer representation/minimal/OperationOutcome) with 201 Created, Location, ETag, and Last-Modified
 	w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, resID))
 	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
-	w.WriteHeader(http.StatusCreated)
-	w.Write(jsonBytes)
+	writePreferResourceResponse(w, r, http.StatusCreated, resType, resID, rec.ResVersion, jsonBytes)
 }
 
 func validateAndScopeIfNoneExistForPatient(condParams *postgres.SearchParams, resType, allowedPatientID, rawPatientID string) error {
@@ -1003,6 +1022,13 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	resolvedBody, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, body, nil)
+	if refErr != nil {
+		writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
+		return
+	}
+	body = resolvedBody
+
 	if s.validator != nil {
 		outcome := s.validator.ValidateJSON(resType, body)
 		if !outcome.IsValid() {
@@ -1012,7 +1038,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.validateSubscriptionResourceJSON(resType, body); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "security", err.Error())
+		writeOperationOutcome(w, http.StatusUnprocessableEntity, "security", err.Error())
 		return
 	}
 	body = normalizeSubscriptionOnWrite(resType, body)
@@ -1107,16 +1133,14 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		jsonBytes = body
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+	status := http.StatusOK
 	if rec.Created {
 		w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, resID))
-		w.WriteHeader(http.StatusCreated)
-	} else {
-		w.WriteHeader(http.StatusOK)
+		status = http.StatusCreated
 	}
-	w.Write(jsonBytes)
+	writePreferResourceResponse(w, r, status, resType, resID, rec.ResVersion, jsonBytes)
 }
 
 // handleDelete handles DELETE /{resourceType}/{id} — soft-delete a FHIR resource.
@@ -2533,4 +2557,56 @@ func writeOperationOutcome(w http.ResponseWriter, status int, code, message stri
 			},
 		},
 	})
+}
+
+// parsePreferReturn extracts the FHIR Return Preference ("minimal", "representation", or "OperationOutcome")
+// from the HTTP Prefer header per FHIR R4 §3.1.0.5.2. Returns "" when unset.
+func parsePreferReturn(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	for _, h := range r.Header.Values("Prefer") {
+		for part := range strings.SplitSeq(h, ",") {
+			for kv := range strings.SplitSeq(part, ";") {
+				kv = strings.TrimSpace(kv)
+				if strings.HasPrefix(strings.ToLower(kv), "return=") {
+					val := strings.Trim(strings.TrimSpace(kv[len("return="):]), `"`)
+					switch strings.ToLower(val) {
+					case "minimal":
+						return "minimal"
+					case "representation":
+						return "representation"
+					case "operationoutcome":
+						return "OperationOutcome"
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// writePreferResourceResponse writes a resource write response honoring the HTTP Prefer: return=... header.
+func writePreferResourceResponse(w http.ResponseWriter, r *http.Request, status int, resType, resID string, version int, jsonBytes []byte) {
+	switch parsePreferReturn(r) {
+	case "minimal":
+		w.WriteHeader(status)
+	case "OperationOutcome":
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resourceType": "OperationOutcome",
+			"issue": []map[string]any{
+				{
+					"severity":    "information",
+					"code":        "informational",
+					"diagnostics": fmt.Sprintf("%s/%s version %d stored", resType, resID, version),
+				},
+			},
+		})
+	default:
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(status)
+		_, _ = w.Write(jsonBytes)
+	}
 }

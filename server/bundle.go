@@ -2,12 +2,14 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -74,8 +76,12 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isTransaction := bundle.Type == "transaction"
+	preferReturn := parsePreferReturn(r)
 	ops := make([]postgres.BundleOperation, 0, len(bundle.Entry))
-	responseEntries := make([]map[string]any, 0, len(bundle.Entry))
+	opEntryIdx := make([]int, 0, len(bundle.Entry))
+	txGetIndices := make([]int, 0)
+	responseEntries := make([]map[string]any, len(bundle.Entry))
+	inBundleIndexed := make([]inBundleIndexedResource, 0, len(bundle.Entry))
 
 	// Pre-pass: assign server IDs for urn:uuid: fullUrl entries so intra-bundle
 	// (including forward) urn:uuid: references can be rewritten before validation and indexing.
@@ -94,7 +100,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 			cleanURL := strings.Trim(entry.Request.URL, "/")
 			if cleanURL != "" {
-				parts := strings.SplitN(cleanURL, "/", 2)
+				pathPart, _, _ := strings.Cut(cleanURL, "?")
+				parts := strings.SplitN(strings.Trim(pathPart, "/"), "/", 2)
 				resType = parts[0]
 				if len(parts) == 2 {
 					resID = parts[1]
@@ -140,7 +147,21 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		urnMap[entry.FullURL] = resType + "/" + resID
 	}
 
-	for i, entry := range bundle.Entry {
+	// Per FHIR R4 §3.1.0.10.1, transaction Bundles execute in order:
+	// 1. DELETE -> 2. POST -> 3. PUT/PATCH -> 4. GET/HEAD,
+	// while preserving the original entry order in the returned Bundle.entry array.
+	order := make([]int, len(bundle.Entry))
+	for i := range bundle.Entry {
+		order[i] = i
+	}
+	if isTransaction {
+		slices.SortStableFunc(order, func(a, b int) int {
+			return bundleEntryMethodPriority(bundle.Entry[a]) - bundleEntryMethodPriority(bundle.Entry[b])
+		})
+	}
+
+	for _, i := range order {
+		entry := bundle.Entry[i]
 		method := "PUT"
 		resTypeFromURL := ""
 		resID := ""
@@ -152,6 +173,9 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				method = strings.ToUpper(strings.TrimSpace(entry.Request.Method))
 			}
 			cleanURL := strings.Trim(entry.Request.URL, "/")
+			if strings.HasPrefix(cleanURL, "fhir/r4/"+tenant+"/") {
+				cleanURL = strings.TrimPrefix(cleanURL, "fhir/r4/"+tenant+"/")
+			}
 			if cleanURL != "" {
 				pathPart, qPart, hasQuery := strings.Cut(cleanURL, "?")
 				if hasQuery {
@@ -171,21 +195,63 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 							fmt.Sprintf("entry[%d]: invalid ifMatch %q", i, entry.Request.IfMatch))
 						return
 					}
-					responseEntries = append(responseEntries, bundleErrorResponse(
-						http.StatusBadRequest, fmt.Sprintf("entry[%d]: invalid ifMatch %q", i, entry.Request.IfMatch)))
+					responseEntries[i] = bundleErrorResponse(
+						http.StatusBadRequest, fmt.Sprintf("entry[%d]: invalid ifMatch %q", i, entry.Request.IfMatch))
 					continue
 				}
 				expectedVersion = v
 			}
 		}
 
-		if method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" {
-			msg := fmt.Sprintf("entry[%d]: unsupported bundle request method %q (expected POST, PUT, PATCH, or DELETE)", i, method)
+		if method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" && method != "GET" {
+			msg := fmt.Sprintf("entry[%d]: unsupported bundle request method %q (expected POST, PUT, PATCH, DELETE, or GET)", i, method)
 			if isTransaction {
 				writeOperationOutcome(w, http.StatusBadRequest, "not-supported", msg)
 				return
 			}
-			responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, msg))
+			responseEntries[i] = bundleErrorResponse(http.StatusBadRequest, msg)
+			continue
+		}
+
+		if method == "GET" {
+			if entry.Request == nil || strings.TrimSpace(entry.Request.URL) == "" {
+				msg := fmt.Sprintf("entry[%d]: GET requires non-empty request.url", i)
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusBadRequest, "required", msg)
+					return
+				}
+				responseEntries[i] = bundleErrorResponse(http.StatusBadRequest, msg)
+				continue
+			}
+			if hasSecCtx {
+				if auth.IsPatientRestricted(secCtx) && cleanID(secCtx.GetPatientId()) == "" {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token is missing required patient_id claim")
+					return
+				}
+				if resTypeFromURL != "" && !strings.HasPrefix(resTypeFromURL, "$") && resTypeFromURL != "_history" && resTypeFromURL != "metadata" {
+					allowed := false
+					if resID != "" {
+						allowed = auth.Allows(secCtx, resTypeFromURL, auth.ActionRead)
+					} else {
+						allowed = auth.Allows(secCtx, resTypeFromURL, auth.ActionSearch) || auth.Allows(secCtx, resTypeFromURL, auth.ActionRead)
+					}
+					if !allowed {
+						msg := fmt.Sprintf("entry[%d]: insufficient scope for GET on %s", i, resTypeFromURL)
+						if isTransaction {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
+							return
+						}
+						responseEntries[i] = bundleErrorResponse(http.StatusForbidden, msg)
+						continue
+					}
+				}
+			}
+			if isTransaction {
+				txGetIndices = append(txGetIndices, i)
+				continue
+			}
+			getResp, _ := s.executeBundleGetEntry(r, tenant, entry.Request.URL, urnMap)
+			responseEntries[i] = getResp
 			continue
 		}
 
@@ -196,6 +262,17 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					entry.Resource = rewritten
 				}
 			}
+			resolvedRes, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, entry.Resource, inBundleIndexed)
+			if refErr != nil {
+				msg := fmt.Sprintf("entry[%d]: %v", i, refErr)
+				if isTransaction {
+					writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), msg)
+					return
+				}
+				responseEntries[i] = bundleErrorResponse(refStatus, msg)
+				continue
+			}
+			entry.Resource = resolvedRes
 			var resourceMeta struct {
 				ResourceType string `json:"resourceType"`
 			}
@@ -205,8 +282,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						fmt.Sprintf("entry[%d]: invalid resource JSON", i))
 					return
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(
-					http.StatusBadRequest, fmt.Sprintf("entry[%d]: invalid resource JSON", i)))
+				responseEntries[i] = bundleErrorResponse(
+					http.StatusBadRequest, fmt.Sprintf("entry[%d]: invalid resource JSON", i))
 				continue
 			}
 			if resourceMeta.ResourceType != "" {
@@ -220,8 +297,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("entry[%d]: missing resourceType", i))
 				return
 			}
-			responseEntries = append(responseEntries, bundleErrorResponse(
-				http.StatusBadRequest, fmt.Sprintf("entry[%d]: missing resourceType", i)))
+			responseEntries[i] = bundleErrorResponse(
+				http.StatusBadRequest, fmt.Sprintf("entry[%d]: missing resourceType", i))
 			continue
 		}
 
@@ -247,7 +324,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				if isTransaction {
 					writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
+				responseEntries[i] = bundleErrorResponse(http.StatusForbidden, msg)
 				if isTransaction {
 					return
 				}
@@ -259,7 +336,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
 					return
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
+				responseEntries[i] = bundleErrorResponse(http.StatusForbidden, msg)
 				continue
 			}
 		}
@@ -273,7 +350,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("entry[%d]: %v", i, err))
 					return
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, fmt.Sprintf("entry[%d]: %v", i, err)))
+				responseEntries[i] = bundleErrorResponse(http.StatusBadRequest, fmt.Sprintf("entry[%d]: %v", i, err))
 				continue
 			}
 			if hasSecCtx && auth.IsPatientRestricted(secCtx) {
@@ -282,7 +359,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						writeOperationOutcome(w, http.StatusForbidden, "forbidden", fmt.Sprintf("entry[%d]: %v", i, err))
 						return
 					}
-					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, fmt.Sprintf("entry[%d]: %v", i, err)))
+					responseEntries[i] = bundleErrorResponse(http.StatusForbidden, fmt.Sprintf("entry[%d]: %v", i, err))
 					continue
 				}
 			}
@@ -292,21 +369,21 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				condParams.Count = 2
 				sr, err := s.store.Search(r.Context(), condParams)
 				if err != nil {
-					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, fmt.Sprintf("entry[%d]: conditional search failed", i)))
+					responseEntries[i] = bundleErrorResponse(http.StatusInternalServerError, fmt.Sprintf("entry[%d]: conditional search failed", i))
 					continue
 				}
 				if sr.Total > 1 {
 					msg := fmt.Sprintf("entry[%d]: conditional %s matched %d resources (expected 0 or 1)", i, method, sr.Total)
-					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusPreconditionFailed, msg))
+					responseEntries[i] = bundleErrorResponse(http.StatusPreconditionFailed, msg)
 					continue
 				}
 				if sr.Total == 1 {
 					resID = sr.Matches[0].ResID
 				} else if method == "DELETE" {
 					// 0 matches on conditional DELETE is an idempotent 204 No Content
-					responseEntries = append(responseEntries, map[string]any{
+					responseEntries[i] = map[string]any{
 						"response": map[string]any{"status": "204 No Content"},
-					})
+					}
 					continue
 				}
 			}
@@ -320,7 +397,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					writeOperationOutcome(w, http.StatusBadRequest, "required", msg)
 					return
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, msg))
+				responseEntries[i] = bundleErrorResponse(http.StatusBadRequest, msg)
 				continue
 			}
 			if _, ok := s.protoRegistry[resType]; !ok {
@@ -329,7 +406,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					writeOperationOutcome(w, http.StatusBadRequest, "not-supported", msg)
 					return
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, msg))
+				responseEntries[i] = bundleErrorResponse(http.StatusBadRequest, msg)
 				continue
 			}
 			if hasSecCtx && auth.IsPatientRestricted(secCtx) {
@@ -339,7 +416,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
 						return
 					}
-					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, "internal security check error"))
+					responseEntries[i] = bundleErrorResponse(http.StatusInternalServerError, "internal security check error")
 					continue
 				}
 				if exists && !allowed {
@@ -349,7 +426,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
 						return
 					}
-					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
+					responseEntries[i] = bundleErrorResponse(http.StatusForbidden, msg)
 					continue
 				}
 			}
@@ -360,7 +437,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					writeOperationOutcome(w, http.StatusNotFound, "not-found", msg)
 					return
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusNotFound, msg))
+				responseEntries[i] = bundleErrorResponse(http.StatusNotFound, msg)
 				continue
 			}
 			if errors.Is(err, postgres.ErrResourceDeleted) {
@@ -369,7 +446,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					writeOperationOutcome(w, http.StatusGone, "deleted", msg)
 					return
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusGone, msg))
+				responseEntries[i] = bundleErrorResponse(http.StatusGone, msg)
 				continue
 			}
 			if err != nil {
@@ -377,7 +454,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					writeOperationOutcome(w, http.StatusInternalServerError, "exception", err.Error())
 					return
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, err.Error()))
+				responseEntries[i] = bundleErrorResponse(http.StatusInternalServerError, err.Error())
 				continue
 			}
 			if hasSecCtx {
@@ -388,7 +465,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
 							return
 						}
-						responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
+						responseEntries[i] = bundleErrorResponse(http.StatusForbidden, msg)
 						continue
 					}
 				}
@@ -399,7 +476,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", msg)
 					return
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusPreconditionFailed, msg))
+				responseEntries[i] = bundleErrorResponse(http.StatusPreconditionFailed, msg)
 				continue
 			}
 			currentJSON, err := s.protoToJSONWithMeta(resType, currentRec.ResourceProto, 0, time.Time{})
@@ -408,7 +485,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode existing resource")
 					return
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, "failed to decode existing resource"))
+				responseEntries[i] = bundleErrorResponse(http.StatusInternalServerError, "failed to decode existing resource")
 				continue
 			}
 			trimmedPatch := bytes.TrimSpace(entry.Resource)
@@ -421,7 +498,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						writeOperationOutcome(w, status, "invalid", fmt.Sprintf("entry[%d]: %v", i, err))
 						return
 					}
-					responseEntries = append(responseEntries, bundleErrorResponse(status, fmt.Sprintf("entry[%d]: %v", i, err)))
+					responseEntries[i] = bundleErrorResponse(status, fmt.Sprintf("entry[%d]: %v", i, err))
 					continue
 				}
 			} else {
@@ -431,7 +508,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("entry[%d]: %v", i, err))
 						return
 					}
-					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, fmt.Sprintf("entry[%d]: %v", i, err)))
+					responseEntries[i] = bundleErrorResponse(http.StatusBadRequest, fmt.Sprintf("entry[%d]: %v", i, err))
 					continue
 				}
 			}
@@ -443,7 +520,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						writeOperationOutcome(w, http.StatusBadRequest, "invariant", msg)
 						return
 					}
-					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, msg))
+					responseEntries[i] = bundleErrorResponse(http.StatusBadRequest, msg)
 					continue
 				}
 				if rawID, hasID := patchedMap["id"]; hasID && rawID != nil {
@@ -454,7 +531,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 							writeOperationOutcome(w, http.StatusBadRequest, "invariant", msg)
 							return
 						}
-						responseEntries = append(responseEntries, bundleErrorResponse(http.StatusBadRequest, msg))
+						responseEntries[i] = bundleErrorResponse(http.StatusBadRequest, msg)
 						continue
 					}
 				}
@@ -463,7 +540,17 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					patchedJSON = remars
 				}
 			}
-			entry.Resource = patchedJSON
+			resolvedPatch, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, patchedJSON, inBundleIndexed)
+			if refErr != nil {
+				msg := fmt.Sprintf("entry[%d]: %v", i, refErr)
+				if isTransaction {
+					writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), msg)
+					return
+				}
+				responseEntries[i] = bundleErrorResponse(refStatus, msg)
+				continue
+			}
+			entry.Resource = resolvedPatch
 			method = "PUT"
 		}
 
@@ -490,6 +577,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						return nil
 					},
 				})
+				opEntryIdx = append(opEntryIdx, i)
 				continue
 			}
 
@@ -499,8 +587,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						fmt.Sprintf("entry[%d]: DELETE requires resource ID", i))
 					return
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(
-					http.StatusBadRequest, fmt.Sprintf("entry[%d]: DELETE requires resource ID", i)))
+				responseEntries[i] = bundleErrorResponse(
+					http.StatusBadRequest, fmt.Sprintf("entry[%d]: DELETE requires resource ID", i))
 				continue
 			}
 
@@ -511,7 +599,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
 						return
 					}
-					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, "internal security check error"))
+					responseEntries[i] = bundleErrorResponse(http.StatusInternalServerError, "internal security check error")
 					continue
 				}
 				if !exists || !allowed {
@@ -521,7 +609,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
 						return
 					}
-					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
+					responseEntries[i] = bundleErrorResponse(http.StatusForbidden, msg)
 					continue
 				}
 			}
@@ -535,13 +623,14 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						ResID:    resID,
 					},
 				})
+				opEntryIdx = append(opEntryIdx, i)
 				continue
 			}
 
 			// Batch mode: execute immediately
 			if err := s.store.DeleteResource(r.Context(), tenant, resType, resID); err != nil {
-				responseEntries = append(responseEntries, bundleErrorResponse(
-					http.StatusInternalServerError, fmt.Sprintf("entry[%d]: delete failed: %v", i, err)))
+				responseEntries[i] = bundleErrorResponse(
+					http.StatusInternalServerError, fmt.Sprintf("entry[%d]: delete failed: %v", i, err))
 				continue
 			}
 			s.publishCDC(r.Context(), automq.Message{
@@ -550,11 +639,11 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				ResID:    resID,
 				Op:       "D",
 			})
-			responseEntries = append(responseEntries, map[string]any{
+			responseEntries[i] = map[string]any{
 				"response": map[string]any{
 					"status": "204 No Content",
 				},
-			})
+			}
 			continue
 		}
 
@@ -566,12 +655,12 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					outcome.WriteHTTP(w, http.StatusBadRequest)
 					return
 				}
-				responseEntries = append(responseEntries, map[string]any{
+				responseEntries[i] = map[string]any{
 					"response": map[string]any{
 						"status":  "400 Bad Request",
 						"outcome": outcome.ToOperationOutcomeMap(),
 					},
-				})
+				}
 				continue
 			}
 		}
@@ -584,8 +673,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("entry[%d]: resource type %s not registered", i, resType))
 				return
 			}
-			responseEntries = append(responseEntries, bundleErrorResponse(
-				http.StatusBadRequest, fmt.Sprintf("entry[%d]: resource type %s not registered", i, resType)))
+			responseEntries[i] = bundleErrorResponse(
+				http.StatusBadRequest, fmt.Sprintf("entry[%d]: resource type %s not registered", i, resType))
 			continue
 		}
 
@@ -598,8 +687,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("entry[%d]: invalid %s JSON: %v", i, resType, err))
 				return
 			}
-			responseEntries = append(responseEntries, bundleErrorResponse(
-				http.StatusBadRequest, fmt.Sprintf("entry[%d]: invalid %s JSON: %v", i, resType, err)))
+			responseEntries[i] = bundleErrorResponse(
+				http.StatusBadRequest, fmt.Sprintf("entry[%d]: invalid %s JSON: %v", i, resType, err))
 			continue
 		}
 
@@ -611,8 +700,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("entry[%d]: invalid %s JSON: %v", i, resType, err))
 				return
 			}
-			responseEntries = append(responseEntries, bundleErrorResponse(
-				http.StatusBadRequest, fmt.Sprintf("entry[%d]: invalid %s JSON: %v", i, resType, err)))
+			responseEntries[i] = bundleErrorResponse(
+				http.StatusBadRequest, fmt.Sprintf("entry[%d]: invalid %s JSON: %v", i, resType, err))
 			continue
 		}
 
@@ -627,8 +716,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("entry[%d]: resource id %q in body does not match URL id %q", i, bodyID, resID))
 				return
 			}
-			responseEntries = append(responseEntries, bundleErrorResponse(
-				http.StatusBadRequest, fmt.Sprintf("entry[%d]: resource id %q in body does not match URL id %q", i, bodyID, resID)))
+			responseEntries[i] = bundleErrorResponse(
+				http.StatusBadRequest, fmt.Sprintf("entry[%d]: resource id %q in body does not match URL id %q", i, bodyID, resID))
 			continue
 		}
 		if resID == "" {
@@ -649,8 +738,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("entry[%d]: proto encode failed", i))
 				return
 			}
-			responseEntries = append(responseEntries, bundleErrorResponse(
-				http.StatusInternalServerError, fmt.Sprintf("entry[%d]: proto encode failed", i)))
+			responseEntries[i] = bundleErrorResponse(
+				http.StatusInternalServerError, fmt.Sprintf("entry[%d]: proto encode failed", i))
 			continue
 		}
 
@@ -663,6 +752,11 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					"type", resType, "id", resID, "error", extractErr)
 			}
 		}
+		inBundleIndexed = append(inBundleIndexed, inBundleIndexedResource{
+			resType: resType,
+			resID:   resID,
+			idx:     idx,
+		})
 		setAuditPatientID(r.Context(), extractPatientIDFromIndexes(resType, resID, idx))
 
 		// Enforce patient compartment isolation on existing target (PUT) and incoming payload (POST/PUT)
@@ -675,7 +769,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
 						return
 					}
-					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, "internal security check error"))
+					responseEntries[i] = bundleErrorResponse(http.StatusInternalServerError, "internal security check error")
 					continue
 				}
 				if exists && !allowed {
@@ -685,7 +779,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
 						return
 					}
-					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
+					responseEntries[i] = bundleErrorResponse(http.StatusForbidden, msg)
 					continue
 				}
 			}
@@ -697,7 +791,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
 						return
 					}
-					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
+					responseEntries[i] = bundleErrorResponse(http.StatusForbidden, msg)
 					continue
 				}
 			}
@@ -712,8 +806,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						fmt.Sprintf("entry[%d]: %v", i, err))
 					return
 				}
-				responseEntries = append(responseEntries, bundleErrorResponse(
-					http.StatusBadRequest, fmt.Sprintf("entry[%d]: %v", i, err)))
+				responseEntries[i] = bundleErrorResponse(
+					http.StatusBadRequest, fmt.Sprintf("entry[%d]: %v", i, err))
 				continue
 			}
 			if hasSecCtx && auth.IsPatientRestricted(secCtx) {
@@ -724,7 +818,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
 						return
 					}
-					responseEntries = append(responseEntries, bundleErrorResponse(http.StatusForbidden, msg))
+					responseEntries[i] = bundleErrorResponse(http.StatusForbidden, msg)
 					continue
 				}
 			}
@@ -790,6 +884,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			ops = append(ops, bundleOp)
+			opEntryIdx = append(opEntryIdx, i)
 			continue
 		}
 
@@ -797,15 +892,15 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		if condParams != nil && s.store != nil {
 			rec, created, err := s.store.ConditionalCreateResource(r.Context(), input, *condParams)
 			if errors.Is(err, postgres.ErrPreconditionFailed) {
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusPreconditionFailed, err.Error()))
+				responseEntries[i] = bundleErrorResponse(http.StatusPreconditionFailed, err.Error())
 				continue
 			}
 			if errors.Is(err, postgres.ErrResourceAlreadyExists) {
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusConflict, err.Error()))
+				responseEntries[i] = bundleErrorResponse(http.StatusConflict, err.Error())
 				continue
 			}
 			if err != nil {
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, err.Error()))
+				responseEntries[i] = bundleErrorResponse(http.StatusInternalServerError, err.Error())
 				continue
 			}
 			if created {
@@ -822,29 +917,22 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			if created {
 				status = "201 Created"
 			}
-			responseEntries = append(responseEntries, map[string]any{
-				"fullUrl": fmt.Sprintf("%s/%s", resType, rec.ResID),
-				"response": map[string]any{
-					"status":   status,
-					"location": fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, rec.ResID),
-					"etag":     postgres.FormatETag(rec.ResVersion),
-				},
-			})
+			responseEntries[i] = s.buildBundleWriteEntry(preferReturn, tenant, resType, rec.ResID, rec.ResVersion, rec.LastUpdated, rec.ResourceProto, status)
 			continue
 		}
 
 		if s.store != nil {
 			rec, err := s.store.WriteResourceWithMeta(r.Context(), input)
 			if errors.Is(err, postgres.ErrVersionConflict) {
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusPreconditionFailed, err.Error()))
+				responseEntries[i] = bundleErrorResponse(http.StatusPreconditionFailed, err.Error())
 				continue
 			}
 			if errors.Is(err, postgres.ErrResourceAlreadyExists) {
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusConflict, err.Error()))
+				responseEntries[i] = bundleErrorResponse(http.StatusConflict, err.Error())
 				continue
 			}
 			if err != nil {
-				responseEntries = append(responseEntries, bundleErrorResponse(http.StatusInternalServerError, err.Error()))
+				responseEntries[i] = bundleErrorResponse(http.StatusInternalServerError, err.Error())
 				continue
 			}
 			s.publishCDC(r.Context(), automq.Message{
@@ -859,14 +947,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			if method == "POST" || rec.Created {
 				status = "201 Created"
 			}
-			responseEntries = append(responseEntries, map[string]any{
-				"fullUrl": fmt.Sprintf("%s/%s", resType, rec.ResID),
-				"response": map[string]any{
-					"status":   status,
-					"location": fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, rec.ResID),
-					"etag":     postgres.FormatETag(rec.ResVersion),
-				},
-			})
+			responseEntries[i] = s.buildBundleWriteEntry(preferReturn, tenant, resType, rec.ResID, rec.ResVersion, rec.LastUpdated, rec.ResourceProto, status)
 		}
 	}
 
@@ -898,6 +979,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 
 		for idxOp, res := range results {
 			op := ops[idxOp]
+			origIdx := opEntryIdx[idxOp]
 			if op.Method == "DELETE" {
 				respMap := map[string]any{
 					"status": "204 No Content",
@@ -915,13 +997,16 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						Op:       "D",
 					})
 				}
-				responseEntries = append(responseEntries, map[string]any{
+				responseEntries[origIdx] = map[string]any{
 					"response": respMap,
-				})
+				}
 				continue
 			}
 
 			rec := res.Record
+			if origEntry := bundle.Entry[origIdx]; strings.HasPrefix(origEntry.FullURL, "urn:uuid:") && rec != nil {
+				urnMap[origEntry.FullURL] = rec.ResType + "/" + rec.ResID
+			}
 			if res.Created || op.IfNoneExist == nil {
 				s.publishCDC(r.Context(), automq.Message{
 					TenantID:  tenant,
@@ -939,17 +1024,21 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					status = "201 Created"
 				}
 			}
-			respMap := map[string]any{
-				"status":   status,
-				"location": fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, rec.ResType, rec.ResID),
-			}
-			if rec.ResVersion > 0 {
-				respMap["etag"] = postgres.FormatETag(rec.ResVersion)
-			}
-			responseEntries = append(responseEntries, map[string]any{
-				"fullUrl":  fmt.Sprintf("%s/%s", rec.ResType, rec.ResID),
-				"response": respMap,
-			})
+			responseEntries[origIdx] = s.buildBundleWriteEntry(preferReturn, tenant, rec.ResType, rec.ResID, rec.ResVersion, rec.LastUpdated, rec.ResourceProto, status)
+		}
+	}
+
+	// Execute GET entries in transaction Bundles last (FHIR R4 DELETE -> POST -> PUT/PATCH -> GET)
+	for _, i := range txGetIndices {
+		getResp, _ := s.executeBundleGetEntry(r, tenant, bundle.Entry[i].Request.URL, urnMap)
+		responseEntries[i] = getResp
+	}
+
+	// Filter out any nil entries if s.store == nil in unit tests
+	finalEntries := make([]map[string]any, 0, len(responseEntries))
+	for _, re := range responseEntries {
+		if re != nil {
+			finalEntries = append(finalEntries, re)
 		}
 	}
 
@@ -957,12 +1046,348 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 	responseBundle := map[string]any{
 		"resourceType": "Bundle",
 		"type":         bundle.Type + "-response",
-		"entry":        responseEntries,
+		"entry":        finalEntries,
 	}
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(responseBundle)
+}
+
+func conditionalRefOutcomeCode(status int) string {
+	switch status {
+	case http.StatusPreconditionFailed:
+		return "duplicate"
+	case http.StatusForbidden:
+		return "forbidden"
+	default:
+		return "invalid"
+	}
+}
+
+func bundleEntryMethodPriority(entry bundleEntry) int {
+	method := "PUT"
+	if entry.Request != nil && entry.Request.Method != "" {
+		method = strings.ToUpper(strings.TrimSpace(entry.Request.Method))
+	}
+	switch method {
+	case "DELETE":
+		return 1
+	case "POST":
+		return 2
+	case "PUT", "PATCH":
+		return 3
+	case "GET", "HEAD":
+		return 4
+	default:
+		return 0
+	}
+}
+
+func (s *Server) buildBundleWriteEntry(preferReturn, tenant, resType, resID string, version int, lastUpdated time.Time, protoBytes []byte, status string) map[string]any {
+	respMap := map[string]any{
+		"status":   status,
+		"location": fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, resID),
+	}
+	if version > 0 {
+		respMap["etag"] = postgres.FormatETag(version)
+	}
+	if !lastUpdated.IsZero() {
+		respMap["lastModified"] = lastUpdated.UTC().Format(time.RFC3339)
+	}
+	entryMap := map[string]any{
+		"fullUrl":  fmt.Sprintf("%s/%s", resType, resID),
+		"response": respMap,
+	}
+	switch preferReturn {
+	case "representation":
+		if len(protoBytes) > 0 {
+			if jsonBytes, err := s.protoToJSONWithMeta(resType, protoBytes, version, lastUpdated); err == nil {
+				var resObj map[string]any
+				if err := json.Unmarshal(jsonBytes, &resObj); err == nil {
+					entryMap["resource"] = resObj
+				}
+			}
+		}
+	case "OperationOutcome":
+		respMap["outcome"] = map[string]any{
+			"resourceType": "OperationOutcome",
+			"issue": []map[string]any{
+				{
+					"severity":    "information",
+					"code":        "informational",
+					"diagnostics": fmt.Sprintf("%s/%s version %d stored", resType, resID, version),
+				},
+			},
+		}
+	}
+	return entryMap
+}
+
+type bundleSubResponseRecorder struct {
+	header     http.Header
+	body       bytes.Buffer
+	statusCode int
+}
+
+func (r *bundleSubResponseRecorder) Header() http.Header {
+	if r.header == nil {
+		r.header = make(http.Header)
+	}
+	return r.header
+}
+
+func (r *bundleSubResponseRecorder) WriteHeader(statusCode int) {
+	if r.statusCode == 0 {
+		r.statusCode = statusCode
+	}
+}
+
+func (r *bundleSubResponseRecorder) Write(b []byte) (int, error) {
+	if r.statusCode == 0 {
+		r.statusCode = http.StatusOK
+	}
+	return r.body.Write(b)
+}
+
+func (s *Server) executeBundleGetEntry(r *http.Request, tenant, rawURL string, urnMap map[string]string) (map[string]any, int) {
+	resolvedURL := strings.TrimSpace(rawURL)
+	for urn, ref := range urnMap {
+		if strings.Contains(resolvedURL, urn) {
+			resolvedURL = strings.ReplaceAll(resolvedURL, urn, ref)
+		}
+	}
+	cleanRel := strings.TrimLeft(resolvedURL, "/")
+	if !strings.HasPrefix(cleanRel, "fhir/r4/") {
+		cleanRel = "fhir/r4/" + tenant + "/" + cleanRel
+	}
+	targetURL := "/" + cleanRel
+	subReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, nil)
+	if err != nil {
+		return bundleErrorResponse(http.StatusBadRequest, fmt.Sprintf("invalid GET url %q: %v", rawURL, err)), http.StatusBadRequest
+	}
+	if r.Host != "" {
+		subReq.Host = r.Host
+	}
+	if authHdr := r.Header.Get("Authorization"); authHdr != "" {
+		subReq.Header.Set("Authorization", authHdr)
+	}
+
+	rec := &bundleSubResponseRecorder{header: make(http.Header)}
+	s.authMiddleware(s.fhirRouter()).ServeHTTP(rec, subReq)
+	statusCode := rec.statusCode
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+
+	respMap := map[string]any{
+		"status": fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode)),
+	}
+	if etag := rec.header.Get("ETag"); etag != "" {
+		respMap["etag"] = etag
+	}
+	if lm := rec.header.Get("Last-Modified"); lm != "" {
+		respMap["lastModified"] = lm
+	}
+
+	entryMap := map[string]any{
+		"response": respMap,
+	}
+	if rec.body.Len() > 0 {
+		var bodyObj map[string]any
+		if err := json.Unmarshal(rec.body.Bytes(), &bodyObj); err == nil {
+			if statusCode >= 400 && bodyObj["resourceType"] == "OperationOutcome" {
+				respMap["outcome"] = bodyObj
+			} else {
+				entryMap["resource"] = bodyObj
+				if rt, _ := bodyObj["resourceType"].(string); rt != "" && rt != "Bundle" {
+					if id, _ := bodyObj["id"].(string); id != "" {
+						entryMap["fullUrl"] = fmt.Sprintf("%s/%s", rt, id)
+					}
+				}
+			}
+		}
+	}
+	return entryMap, statusCode
+}
+
+type inBundleIndexedResource struct {
+	resType string
+	resID   string
+	idx     *postgres.SearchIndexes
+}
+
+// resolveConditionalReferencesInJSON resolves FHIR R4 conditional references (§3.1.0.7.2, e.g.
+// "reference": "Patient?identifier=http://mrn|123") inside a resource JSON payload to concrete
+// "ResourceType/id" references before validation and storage.
+func (s *Server) resolveConditionalReferencesInJSON(
+	ctx context.Context,
+	tenant string,
+	rawJSON []byte,
+	inBundle []inBundleIndexedResource,
+) ([]byte, int, error) {
+	if (s.store == nil && len(inBundle) == 0) || !bytes.Contains(rawJSON, []byte("?")) {
+		return rawJSON, http.StatusOK, nil
+	}
+	var root any
+	if err := json.Unmarshal(rawJSON, &root); err != nil {
+		return rawJSON, http.StatusOK, nil
+	}
+	changed := false
+	secCtx, hasSecCtx := auth.FromContext(ctx)
+
+	var walk func(node any) (int, error)
+	walk = func(node any) (int, error) {
+		switch v := node.(type) {
+		case map[string]any:
+			if refRaw, ok := v["reference"].(string); ok && strings.Contains(refRaw, "?") {
+				trimmed := strings.TrimSpace(refRaw)
+				if !strings.HasPrefix(trimmed, "http://") &&
+					!strings.HasPrefix(trimmed, "https://") &&
+					!strings.HasPrefix(trimmed, "urn:") &&
+					!strings.HasPrefix(trimmed, "#") &&
+					!strings.HasPrefix(trimmed, "/") {
+					targetType, queryStr, hasQ := strings.Cut(trimmed, "?")
+					targetType = strings.Trim(targetType, "/")
+					if hasQ && targetType != "" && queryStr != "" {
+						if _, registered := s.protoRegistry[targetType]; !registered {
+							return http.StatusBadRequest, fmt.Errorf("conditional reference target resource type %q is not registered", targetType)
+						}
+						condParams, err := postgres.ParseIfNoneExist(tenant, targetType, queryStr)
+						if err != nil {
+							return http.StatusBadRequest, fmt.Errorf("invalid conditional reference %q: %w", trimmed, err)
+						}
+						if hasSecCtx && auth.IsPatientRestricted(secCtx) {
+							if err := validateAndScopeIfNoneExistForPatient(&condParams, targetType, cleanID(secCtx.GetPatientId()), secCtx.GetPatientId()); err != nil {
+								return http.StatusForbidden, err
+							}
+						}
+						var matchedIDs []string
+						seenIDs := make(map[string]bool)
+						for _, ib := range inBundle {
+							if matchesInBundleSearchIndexes(ib, condParams) && !seenIDs[ib.resID] {
+								seenIDs[ib.resID] = true
+								matchedIDs = append(matchedIDs, ib.resID)
+							}
+						}
+						if s.store != nil {
+							condParams.Count = 2
+							sr, err := s.store.Search(ctx, condParams)
+							if err != nil {
+								return http.StatusInternalServerError, fmt.Errorf("conditional reference search failed for %q: %w", trimmed, err)
+							}
+							for _, m := range sr.Matches {
+								if !seenIDs[m.ResID] {
+									seenIDs[m.ResID] = true
+									matchedIDs = append(matchedIDs, m.ResID)
+								}
+							}
+						}
+						if len(matchedIDs) == 0 {
+							return http.StatusBadRequest, fmt.Errorf("conditional reference %q matched 0 resources", trimmed)
+						}
+						if len(matchedIDs) > 1 {
+							return http.StatusPreconditionFailed, fmt.Errorf("conditional reference %q matched %d resources (expected 1)", trimmed, len(matchedIDs))
+						}
+						v["reference"] = targetType + "/" + matchedIDs[0]
+						changed = true
+					}
+				}
+			}
+			for _, child := range v {
+				if st, err := walk(child); err != nil {
+					return st, err
+				}
+			}
+		case []any:
+			for _, item := range v {
+				if st, err := walk(item); err != nil {
+					return st, err
+				}
+			}
+		}
+		return http.StatusOK, nil
+	}
+
+	if st, err := walk(root); err != nil {
+		return nil, st, err
+	}
+	if !changed {
+		return rawJSON, http.StatusOK, nil
+	}
+	marshaled, err := json.Marshal(root)
+	if err != nil {
+		return rawJSON, http.StatusOK, nil
+	}
+	return marshaled, http.StatusOK, nil
+}
+
+func matchesInBundleSearchIndexes(ib inBundleIndexedResource, condParams postgres.SearchParams) bool {
+	if !strings.EqualFold(ib.resType, condParams.ResType) {
+		return false
+	}
+	if condParams.ID != "" && ib.resID != condParams.ID {
+		return false
+	}
+	if ib.idx == nil {
+		return len(condParams.Tokens) == 0 && len(condParams.Strings) == 0 && len(condParams.URIs) == 0 && len(condParams.References) == 0
+	}
+	for k, rawVal := range condParams.Tokens {
+		matched := false
+		for _, tok := range ib.idx.Tokens {
+			if !strings.EqualFold(tok.SpName, k) {
+				continue
+			}
+			cand := tok.SpValue
+			if tok.SpSystem != "" {
+				cand = tok.SpSystem + "|" + tok.SpValue
+			}
+			if auth.TokenValueMatchesConstraint(cand, rawVal) || strings.EqualFold(tok.SpValue, rawVal) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	for k, rawVal := range condParams.Strings {
+		matched := false
+		for _, str := range ib.idx.Strings {
+			if strings.EqualFold(str.SpName, k) && strings.HasPrefix(strings.ToLower(str.SpValue), strings.ToLower(rawVal)) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	for k, rawVal := range condParams.URIs {
+		matched := false
+		for _, u := range ib.idx.URIs {
+			if strings.EqualFold(u.SpName, k) && u.SpValue == rawVal {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	for k, rawVal := range condParams.References {
+		matched := false
+		for _, ref := range ib.idx.References {
+			if strings.EqualFold(ref.SpName, k) && (ref.TargetType+"/"+ref.TargetID == rawVal || ref.TargetID == rawVal) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 func bundleErrorResponse(status int, message string) map[string]any {

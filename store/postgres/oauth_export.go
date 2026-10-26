@@ -12,6 +12,20 @@ import (
 	"time"
 )
 
+// OAuthAuthCodeRecord represents a persisted OAuth2 authorization code grant.
+type OAuthAuthCodeRecord struct {
+	ClientID            string
+	RedirectURI         string
+	Scope               string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	PatientID           string
+	EncounterID         string
+	TenantID            string
+	Nonce               string
+	ExpiresAt           time.Time
+}
+
 // OAuthRefreshTokenRecord represents a persisted OAuth2 refresh token grant.
 type OAuthRefreshTokenRecord struct {
 	Subject     string
@@ -37,6 +51,58 @@ type ExportJobRecord struct {
 func hashToken(rawToken string) string {
 	sum := sha256.Sum256([]byte(rawToken))
 	return hex.EncodeToString(sum[:])
+}
+
+// SaveAuthCode stores an OAuth2 authorization code (hashed with SHA-256) in PostgreSQL.
+func (s *Store) SaveAuthCode(ctx context.Context, rawCode string, rec OAuthAuthCodeRecord) error {
+	if s == nil || s.db == nil || rawCode == "" {
+		return nil
+	}
+	_, _ = s.db.ExecContext(ctx, "DELETE FROM fhir_oauth_auth_code WHERE expires_at <= NOW()")
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO fhir_oauth_auth_code (
+			code_hash, client_id, redirect_uri, scope, code_challenge, code_challenge_method,
+			patient_id, encounter_id, tenant_id, nonce, expires_at, created_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+		ON CONFLICT (code_hash) DO UPDATE SET
+			client_id             = EXCLUDED.client_id,
+			redirect_uri          = EXCLUDED.redirect_uri,
+			scope                 = EXCLUDED.scope,
+			code_challenge        = EXCLUDED.code_challenge,
+			code_challenge_method = EXCLUDED.code_challenge_method,
+			patient_id            = EXCLUDED.patient_id,
+			encounter_id          = EXCLUDED.encounter_id,
+			tenant_id             = EXCLUDED.tenant_id,
+			nonce                 = EXCLUDED.nonce,
+			expires_at            = EXCLUDED.expires_at
+	`, hashToken(rawCode), rec.ClientID, rec.RedirectURI, rec.Scope, rec.CodeChallenge, rec.CodeChallengeMethod,
+		rec.PatientID, rec.EncounterID, rec.TenantID, rec.Nonce, rec.ExpiresAt.UTC())
+	return err
+}
+
+// ConsumeAuthCode atomically deletes and returns an unexpired OAuth2 authorization code record.
+func (s *Store) ConsumeAuthCode(ctx context.Context, rawCode string) (OAuthAuthCodeRecord, bool, error) {
+	if s == nil || s.db == nil || rawCode == "" {
+		return OAuthAuthCodeRecord{}, false, nil
+	}
+	var rec OAuthAuthCodeRecord
+	err := s.db.QueryRowContext(ctx, `
+		DELETE FROM fhir_oauth_auth_code
+		WHERE code_hash = $1 AND expires_at > NOW()
+		RETURNING client_id, redirect_uri, scope, code_challenge, code_challenge_method,
+		          patient_id, encounter_id, tenant_id, nonce, expires_at
+	`, hashToken(rawCode)).Scan(
+		&rec.ClientID, &rec.RedirectURI, &rec.Scope, &rec.CodeChallenge, &rec.CodeChallengeMethod,
+		&rec.PatientID, &rec.EncounterID, &rec.TenantID, &rec.Nonce, &rec.ExpiresAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return OAuthAuthCodeRecord{}, false, nil
+	}
+	if err != nil {
+		return OAuthAuthCodeRecord{}, false, err
+	}
+	return rec, true, nil
 }
 
 // SaveRefreshToken stores an OAuth2 refresh token (hashed with SHA-256) in PostgreSQL.

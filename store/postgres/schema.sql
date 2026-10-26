@@ -176,6 +176,24 @@ CREATE TABLE IF NOT EXISTS fhir_oauth_revoked_token (
 CREATE INDEX IF NOT EXISTS idx_oauth_revoked_token_expires
     ON fhir_oauth_revoked_token (expires_at);
 
+CREATE TABLE IF NOT EXISTS fhir_oauth_auth_code (
+    code_hash             TEXT        PRIMARY KEY,
+    client_id             TEXT        NOT NULL DEFAULT '',
+    redirect_uri          TEXT        NOT NULL DEFAULT '',
+    scope                 TEXT        NOT NULL DEFAULT '',
+    code_challenge        TEXT        NOT NULL DEFAULT '',
+    code_challenge_method TEXT        NOT NULL DEFAULT '',
+    patient_id            TEXT        NOT NULL DEFAULT '',
+    encounter_id          TEXT        NOT NULL DEFAULT '',
+    tenant_id             TEXT        NOT NULL DEFAULT '',
+    nonce                 TEXT        NOT NULL DEFAULT '',
+    expires_at            TIMESTAMPTZ NOT NULL,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_auth_code_expires
+    ON fhir_oauth_auth_code (expires_at);
+
 CREATE TABLE IF NOT EXISTS fhir_export_job (
     job_id       TEXT        PRIMARY KEY,
     tenant_id    TEXT        NOT NULL,

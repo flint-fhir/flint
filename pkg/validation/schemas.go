@@ -165,19 +165,25 @@ var (
 
 // ResourceSchema represents validation rules derived from a FHIR StructureDefinition.
 type ResourceSchema struct {
-	ResourceType   string
-	AllowedFields  map[string]bool
-	RequiredFields []string
-	CodeBindings   map[string]map[string]bool // field -> valid code set
-	ValueSetURIs   map[string]string          // field -> ValueSet canonical URI
-	DateFields     map[string]bool            // primitive Date fields derived from proto descriptor
-	DateTimeFields map[string]bool            // primitive DateTime fields derived from proto descriptor
-	InstantFields  map[string]bool            // primitive Instant fields derived from proto descriptor
+	ResourceType     string
+	Descriptor       protoreflect.MessageDescriptor
+	AllowedFields    map[string]bool
+	RequiredFields   []string
+	CodeBindings     map[string]map[string]bool // field -> valid code set
+	ValueSetURIs     map[string]string          // field -> ValueSet canonical URI
+	DateFields       map[string]bool            // primitive Date fields derived from proto descriptor
+	DateTimeFields   map[string]bool            // primitive DateTime fields derived from proto descriptor
+	InstantFields    map[string]bool            // primitive Instant fields derived from proto descriptor
+	ChildDescriptors map[string]protoreflect.MessageDescriptor
 }
 
 var commonResourceFields = []string{
 	"resourceType", "id", "meta", "implicitRules", "language",
 	"text", "contained", "extension", "modifierExtension",
+}
+
+var commonElementFields = []string{
+	"id", "extension", "modifierExtension", "fhir_comments", "_value",
 }
 
 func buildFieldMap(fields ...[]string) map[string]bool {
@@ -191,27 +197,47 @@ func buildFieldMap(fields ...[]string) map[string]bool {
 }
 
 type protoSchemaDetails struct {
-	allowedFields  map[string]bool
-	codeBindings   map[string]map[string]bool
-	valueSetURIs   map[string]string
-	dateFields     map[string]bool
-	dateTimeFields map[string]bool
-	instantFields  map[string]bool
+	allowedFields    map[string]bool
+	codeBindings     map[string]map[string]bool
+	valueSetURIs     map[string]string
+	dateFields       map[string]bool
+	dateTimeFields   map[string]bool
+	instantFields    map[string]bool
+	childDescriptors map[string]protoreflect.MessageDescriptor
+}
+
+func isPrimitiveWrapperDescriptor(md protoreflect.MessageDescriptor) bool {
+	if md == nil {
+		return false
+	}
+	if md.Fields().ByName("value_us") != nil {
+		return true
+	}
+	if valFD := md.Fields().ByName("value"); valFD != nil && valFD.Kind() != protoreflect.MessageKind {
+		return true
+	}
+	return false
 }
 
 func deriveProtoSchemaDetails(md protoreflect.MessageDescriptor) protoSchemaDetails {
 	det := protoSchemaDetails{
-		allowedFields:  buildFieldMap(commonResourceFields),
-		codeBindings:   make(map[string]map[string]bool),
-		valueSetURIs:   make(map[string]string),
-		dateFields:     make(map[string]bool),
-		dateTimeFields: make(map[string]bool),
-		instantFields:  make(map[string]bool),
+		allowedFields:    buildFieldMap(commonResourceFields, commonElementFields),
+		codeBindings:     make(map[string]map[string]bool),
+		valueSetURIs:     make(map[string]string),
+		dateFields:       make(map[string]bool),
+		dateTimeFields:   make(map[string]bool),
+		instantFields:    make(map[string]bool),
+		childDescriptors: make(map[string]protoreflect.MessageDescriptor),
 	}
 	if md == nil {
 		return det
 	}
 	resTypeLower := strings.ToLower(string(md.Name()))
+	oneofs := md.Oneofs()
+	for i := 0; i < oneofs.Len(); i++ {
+		od := oneofs.Get(i)
+		det.allowedFields[string(od.Name())] = true
+	}
 	fields := md.Fields()
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
@@ -219,6 +245,9 @@ func deriveProtoSchemaDetails(md protoreflect.MessageDescriptor) protoSchemaDeta
 		det.allowedFields[jsonName] = true
 		if jsonName == "classValue" {
 			det.allowedFields["class"] = true
+		}
+		if jsonName == "stringValue" {
+			det.allowedFields["string"] = true
 		}
 		if fd.Kind() != protoreflect.MessageKind || fd.Message() == nil {
 			continue
@@ -238,17 +267,28 @@ func deriveProtoSchemaDetails(md protoreflect.MessageDescriptor) protoSchemaDeta
 				choiceFieldName := jsonName + strings.ToUpper(optJSON[:1]) + optJSON[1:]
 				det.allowedFields[choiceFieldName] = true
 				if cfd.Kind() == protoreflect.MessageKind && cfd.Message() != nil {
-					switch string(cfd.Message().FullName()) {
+					cfmd := cfd.Message()
+					switch string(cfmd.FullName()) {
 					case "google.fhir.r4.core.Date":
 						det.dateFields[choiceFieldName] = true
 					case "google.fhir.r4.core.DateTime":
 						det.dateTimeFields[choiceFieldName] = true
 					case "google.fhir.r4.core.Instant":
 						det.instantFields[choiceFieldName] = true
+					default:
+						if !isPrimitiveWrapperDescriptor(cfmd) {
+							det.childDescriptors[choiceFieldName] = cfmd
+						}
 					}
 				}
 			}
 			continue
+		}
+		if !isPrimitiveWrapperDescriptor(fmd) {
+			det.childDescriptors[jsonName] = fmd
+			if jsonName == "classValue" {
+				det.childDescriptors["class"] = fmd
+			}
 		}
 		if !fd.IsList() {
 			switch string(fmd.FullName()) {
@@ -692,23 +732,27 @@ func DefaultSchemas() map[string]ResourceSchema {
 			for k, v := range override.ValueSetURIs {
 				det.valueSetURIs[k] = v
 			}
+			override.Descriptor = md
 			override.AllowedFields = det.allowedFields
 			override.CodeBindings = det.codeBindings
 			override.ValueSetURIs = det.valueSetURIs
 			override.DateFields = det.dateFields
 			override.DateTimeFields = det.dateTimeFields
 			override.InstantFields = det.instantFields
+			override.ChildDescriptors = det.childDescriptors
 			schemas[resType] = override
 		} else {
 			schemas[resType] = ResourceSchema{
-				ResourceType:   resType,
-				AllowedFields:  det.allowedFields,
-				RequiredFields: []string{},
-				CodeBindings:   det.codeBindings,
-				ValueSetURIs:   det.valueSetURIs,
-				DateFields:     det.dateFields,
-				DateTimeFields: det.dateTimeFields,
-				InstantFields:  det.instantFields,
+				ResourceType:     resType,
+				Descriptor:       md,
+				AllowedFields:    det.allowedFields,
+				RequiredFields:   []string{},
+				CodeBindings:     det.codeBindings,
+				ValueSetURIs:     det.valueSetURIs,
+				DateFields:       det.dateFields,
+				DateTimeFields:   det.dateTimeFields,
+				InstantFields:    det.instantFields,
+				ChildDescriptors: det.childDescriptors,
 			}
 		}
 	}

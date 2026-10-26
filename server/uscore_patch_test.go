@@ -625,3 +625,121 @@ func TestServer_PatchAndConditionalCRUD(t *testing.T) {
 		t.Errorf("expected 200 OK when Patient A patches own Patient resource, got %d", resp.StatusCode)
 	}
 }
+
+func TestBundleOrderingConditionalRefsPreferAndSMART(t *testing.T) {
+	srv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(srv)
+	h := srv.Handler()
+
+	// 1. Transaction Bundle with intra-bundle conditional reference & Prefer: return=OperationOutcome
+	// Entry 0 (PUT Observation) references Patient?identifier=http://hospital.org|mrn-777 which is created by Entry 1 (POST Patient).
+	// Because transaction ordering runs POST (priority 2) before PUT (priority 3), Entry 1 is indexed first
+	// and Entry 0 resolves the conditional reference to Patient/pat-cond-777!
+	txBundle := `{
+		"resourceType": "Bundle",
+		"type": "transaction",
+		"entry": [
+			{
+				"request": {"method": "PUT", "url": "Observation/obs-cond-1"},
+				"resource": {
+					"resourceType": "Observation",
+					"id": "obs-cond-1",
+					"status": "final",
+					"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+					"subject": {"reference": "Patient?identifier=http://hospital.org|mrn-777"}
+				}
+			},
+			{
+				"request": {"method": "POST", "url": "Patient"},
+				"resource": {
+					"resourceType": "Patient",
+					"id": "pat-cond-777",
+					"identifier": [{"system": "http://hospital.org", "value": "mrn-777"}],
+					"name": [{"family": "CondTarget"}]
+				}
+			},
+			{
+				"request": {"method": "GET", "url": "metadata"}
+			}
+		]
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/fhir/r4/default", strings.NewReader(txBundle))
+	req.Header.Set("Content-Type", "application/fhir+json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on transaction bundle with conditional reference and GET entry, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var bundleResp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &bundleResp); err != nil {
+		t.Fatalf("unmarshal bundle response: %v", err)
+	}
+	entries, _ := bundleResp["entry"].([]any)
+	if len(entries) == 0 {
+		t.Fatalf("expected non-empty bundle response entries, got %v", bundleResp)
+	}
+	firstEntry, _ := entries[0].(map[string]any)
+	firstRes, _ := firstEntry["resource"].(map[string]any)
+	if firstRes == nil || firstRes["resourceType"] != "CapabilityStatement" {
+		t.Fatalf("expected GET metadata entry in transaction bundle to return CapabilityStatement resource, got %v", firstEntry)
+	}
+
+	// 2. SMART v2 OAuth2 redirect_uri binding, client_id binding, and OIDC id_token with aud + nonce
+	authReq := httptest.NewRequest(http.MethodGet, "/oauth2/authorize?response_type=code&client_id=my-smart-app&redirect_uri=https://app.example.com/cb&scope=openid+fhirUser+patient/Patient.rs&nonce=nonce-xyz-123&state=st-1", nil)
+	authRec := httptest.NewRecorder()
+	h.ServeHTTP(authRec, authReq)
+	if authRec.Code != http.StatusFound {
+		t.Fatalf("expected 302 from /oauth2/authorize, got %d: %s", authRec.Code, authRec.Body.String())
+	}
+	locURL, err := http.NewRequest(http.MethodGet, authRec.Header().Get("Location"), nil)
+	if err != nil {
+		t.Fatalf("parse redirect Location: %v", err)
+	}
+	code := locURL.URL.Query().Get("code")
+	if code == "" {
+		t.Fatalf("expected code in redirect Location %q", authRec.Header().Get("Location"))
+	}
+
+	// Mismatched redirect_uri must fail with 400 invalid_grant (before consuming a valid exchange? Note: code is single-use, so let's issue a code specifically to test mismatch)
+	authReqMismatch := httptest.NewRequest(http.MethodGet, "/oauth2/authorize?response_type=code&client_id=my-smart-app&redirect_uri=https://app.example.com/cb", nil)
+	authRecMismatch := httptest.NewRecorder()
+	h.ServeHTTP(authRecMismatch, authReqMismatch)
+	locMismatch, _ := http.NewRequest(http.MethodGet, authRecMismatch.Header().Get("Location"), nil)
+	badCode := locMismatch.URL.Query().Get("code")
+
+	tokMismatchReq := httptest.NewRequest(http.MethodPost, "/oauth2/token", strings.NewReader("grant_type=authorization_code&code="+badCode+"&redirect_uri=https://evil.example.com/cb"))
+	tokMismatchReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokMismatchRec := httptest.NewRecorder()
+	h.ServeHTTP(tokMismatchRec, tokMismatchReq)
+	if tokMismatchRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on mismatched redirect_uri, got %d: %s", tokMismatchRec.Code, tokMismatchRec.Body.String())
+	}
+
+	// Valid token exchange with matching redirect_uri and client_id
+	tokReq := httptest.NewRequest(http.MethodPost, "/oauth2/token", strings.NewReader("grant_type=authorization_code&code="+code+"&client_id=my-smart-app&redirect_uri=https://app.example.com/cb"))
+	tokReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokRec := httptest.NewRecorder()
+	h.ServeHTTP(tokRec, tokReq)
+	if tokRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /oauth2/token, got %d: %s", tokRec.Code, tokRec.Body.String())
+	}
+	var tokResp map[string]any
+	if err := json.Unmarshal(tokRec.Body.Bytes(), &tokResp); err != nil {
+		t.Fatalf("unmarshal token response: %v", err)
+	}
+	idTokenStr, _ := tokResp["id_token"].(string)
+	accessTokenStr, _ := tokResp["access_token"].(string)
+	if idTokenStr == "" || idTokenStr == accessTokenStr {
+		t.Fatalf("expected distinct OIDC id_token, got id_token=%q access_token=%q", idTokenStr, accessTokenStr)
+	}
+	parsedIDToken, err := auth.ParseJWT(idTokenStr)
+	if err != nil {
+		t.Fatalf("ParseJWT(id_token): %v", err)
+	}
+	if !parsedIDToken.Payload.Audience.Contains("my-smart-app") {
+		t.Errorf("expected id_token aud to contain my-smart-app, got %v", parsedIDToken.Payload.Audience)
+	}
+	if parsedIDToken.Payload.Extra["nonce"] != "nonce-xyz-123" {
+		t.Errorf("expected id_token nonce=nonce-xyz-123, got %v", parsedIDToken.Payload.Extra["nonce"])
+	}
+}

@@ -44,19 +44,53 @@ type authCodeEntry struct {
 	PatientID           string
 	EncounterID         string
 	Tenant              string
+	Nonce               string
 	ExpiresAt           time.Time
 }
 
 // refreshTokenEntry stores an issued OAuth2 refresh token and its original grant context.
 type refreshTokenEntry struct {
 	Subject     string
+	ClientID    string
 	PatientID   string
 	EncounterID string
 	Scope       string
 	ExpiresAt   time.Time
 }
 
+// RegisterOAuthClientJWK registers a trusted public JWK for a SMART Backend Services client_id.
+func (s *Server) RegisterOAuthClientJWK(clientID string, jwk auth.JWK) {
+	s.oauthMu.Lock()
+	defer s.oauthMu.Unlock()
+	if s.clientJWKs == nil {
+		s.clientJWKs = make(map[string]auth.JWK)
+	}
+	s.clientJWKs[strings.TrimSpace(clientID)] = jwk
+}
+
+// SetRequireRegisteredClientJWK configures whether private_key_jwt client_credentials
+// assertions must match a key pre-registered via RegisterOAuthClientJWK.
+func (s *Server) SetRequireRegisteredClientJWK(require bool) {
+	s.oauthMu.Lock()
+	defer s.oauthMu.Unlock()
+	s.requireRegisteredClientJWK = require
+}
+
 func (s *Server) storeAuthCode(code string, entry authCodeEntry) {
+	if s.store != nil {
+		_ = s.store.SaveAuthCode(context.Background(), code, postgres.OAuthAuthCodeRecord{
+			ClientID:            entry.ClientID,
+			RedirectURI:         entry.RedirectURI,
+			Scope:               entry.Scope,
+			CodeChallenge:       entry.CodeChallenge,
+			CodeChallengeMethod: entry.CodeChallengeMethod,
+			PatientID:           entry.PatientID,
+			EncounterID:         entry.EncounterID,
+			TenantID:            entry.Tenant,
+			Nonce:               entry.Nonce,
+			ExpiresAt:           entry.ExpiresAt,
+		})
+	}
 	now := time.Now()
 	s.oauthMu.Lock()
 	defer s.oauthMu.Unlock()
@@ -82,6 +116,40 @@ func (s *Server) storeAuthCode(code string, entry authCodeEntry) {
 		}
 	}
 	s.oauthCodes[code] = entry
+}
+
+func (s *Server) consumeAuthCode(code string) (authCodeEntry, bool) {
+	if s.store != nil {
+		if rec, ok, err := s.store.ConsumeAuthCode(context.Background(), code); err == nil && ok {
+			s.oauthMu.Lock()
+			if s.oauthCodes != nil {
+				delete(s.oauthCodes, code)
+			}
+			s.oauthMu.Unlock()
+			return authCodeEntry{
+				ClientID:            rec.ClientID,
+				RedirectURI:         rec.RedirectURI,
+				Scope:               rec.Scope,
+				CodeChallenge:       rec.CodeChallenge,
+				CodeChallengeMethod: rec.CodeChallengeMethod,
+				PatientID:           rec.PatientID,
+				EncounterID:         rec.EncounterID,
+				Tenant:              rec.TenantID,
+				Nonce:               rec.Nonce,
+				ExpiresAt:           rec.ExpiresAt,
+			}, true
+		}
+	}
+	s.oauthMu.Lock()
+	defer s.oauthMu.Unlock()
+	if s.oauthCodes == nil {
+		return authCodeEntry{}, false
+	}
+	entry, ok := s.oauthCodes[code]
+	if ok {
+		delete(s.oauthCodes, code)
+	}
+	return entry, ok
 }
 
 func (s *Server) storeRefreshToken(token string, entry refreshTokenEntry) {
@@ -357,6 +425,7 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	redirectURI := r.FormValue("redirect_uri")
 	scope := r.FormValue("scope")
 	state := r.FormValue("state")
+	nonce := r.FormValue("nonce")
 	codeChallenge := r.FormValue("code_challenge")
 	codeChallengeMethod := r.FormValue("code_challenge_method")
 	patientID := r.FormValue("patient")
@@ -393,6 +462,7 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 		CodeChallengeMethod: codeChallengeMethod,
 		PatientID:           patientID,
 		EncounterID:         encounterID,
+		Nonce:               nonce,
 		ExpiresAt:           time.Now().Add(5 * time.Minute),
 	})
 
@@ -427,15 +497,23 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		code := r.FormValue("code")
 		codeVerifier := r.FormValue("code_verifier")
 
-		s.oauthMu.Lock()
-		entry, ok := s.oauthCodes[code]
-		if ok {
-			delete(s.oauthCodes, code)
-		}
-		s.oauthMu.Unlock()
-
+		entry, ok := s.consumeAuthCode(code)
 		if !ok || time.Now().After(entry.ExpiresAt) {
 			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "invalid or expired authorization code")
+			return
+		}
+
+		// RFC 6749 §4.1.3: enforce redirect_uri and client_id binding when provided
+		if reqRedirectURI := strings.TrimSpace(r.FormValue("redirect_uri")); reqRedirectURI != "" && entry.RedirectURI != "" && reqRedirectURI != entry.RedirectURI {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "redirect_uri does not match authorization request")
+			return
+		}
+		reqClientID := strings.TrimSpace(r.FormValue("client_id"))
+		if basicUser, _, hasBasic := r.BasicAuth(); hasBasic && reqClientID == "" {
+			reqClientID = strings.TrimSpace(basicUser)
+		}
+		if reqClientID != "" && entry.ClientID != "" && reqClientID != entry.ClientID {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "client_id does not match authorization request")
 			return
 		}
 
@@ -461,7 +539,9 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(scope, "patient/") {
 			sub = "Patient/" + entry.PatientID
 		}
+		cfg := s.resolveSMARTConfig(r)
 		extra := map[string]any{
+			"iss":       cfg.Issuer,
 			"fhirUser":  sub,
 			"encounter": entry.EncounterID,
 			"jti":       uuid.NewString(),
@@ -472,9 +552,32 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		audClientID := entry.ClientID
+		if audClientID == "" {
+			audClientID = reqClientID
+		}
+		if audClientID == "" {
+			audClientID = "flint-smart-client"
+		}
+		idTokenExtra := map[string]any{
+			"iss":      cfg.Issuer,
+			"aud":      []string{audClientID},
+			"fhirUser": sub,
+			"profile":  sub,
+			"jti":      uuid.NewString(),
+		}
+		if entry.Nonce != "" {
+			idTokenExtra["nonce"] = entry.Nonce
+		}
+		idToken, err := s.devAuth.IssueToken(sub, scope, entry.PatientID, time.Hour, idTokenExtra)
+		if err != nil {
+			idToken = accessToken
+		}
+
 		refreshToken := "flint-rt-" + uuid.NewString()
 		s.storeRefreshToken(refreshToken, refreshTokenEntry{
 			Subject:     sub,
+			ClientID:    audClientID,
 			PatientID:   entry.PatientID,
 			EncounterID: entry.EncounterID,
 			Scope:       scope,
@@ -490,7 +593,7 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			"encounter":           entry.EncounterID,
 			"need_patient_banner": true,
 			"smart_style_url":     "https://hl7.org/fhir/smart-app-launch/smart-styles.json",
-			"id_token":            accessToken,
+			"id_token":            idToken,
 			"refresh_token":       refreshToken,
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -566,7 +669,25 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 				writeOAuthError(w, http.StatusBadRequest, "invalid_client", "invalid client_assertion signature")
 				return
 			}
-			if parsed.Header.Jwk != nil {
+			s.oauthMu.Lock()
+			regJWK, hasRegJWK := s.clientJWKs[iss]
+			requireReg := s.requireRegisteredClientJWK
+			s.oauthMu.Unlock()
+
+			if hasRegJWK {
+				pubKey, err := regJWK.PublicKey()
+				if err != nil {
+					writeOAuthError(w, http.StatusBadRequest, "invalid_client", "invalid registered JWK for client: "+err.Error())
+					return
+				}
+				if err := parsed.VerifySignature(pubKey); err != nil {
+					writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_assertion signature verification failed against registered client JWK")
+					return
+				}
+			} else if requireReg {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_id has no registered public key JWK")
+				return
+			} else if parsed.Header.Jwk != nil {
 				pubKey, err := parsed.Header.Jwk.PublicKey()
 				if err != nil {
 					writeOAuthError(w, http.StatusBadRequest, "invalid_client", "invalid JWK in client_assertion header: "+err.Error())

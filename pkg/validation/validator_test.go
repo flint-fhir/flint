@@ -336,4 +336,43 @@ func TestValidationEngine_StrictUnknownAndTypes(t *testing.T) {
 			t.Fatalf("expected invalid Subscription status and end instant to fail with >=2 errors, got %+v", invalidSub.Issues)
 		}
 	})
+
+	t.Run("Recursive BackboneElement, Period dateTime, and Bundle.entry.resource validation", func(t *testing.T) {
+		// Unknown nested field in Patient.name and invalid Period.start dateTime
+		badNested := strictEngine.ValidateJSON("Observation", []byte(`{
+			"resourceType": "Observation",
+			"status": "final",
+			"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+			"effectivePeriod": {
+				"start": "not-a-valid-datetime",
+				"unknownPeriodField": "foo"
+			},
+			"component": [
+				{
+					"code": {"coding": [{"code": "8480-6"}]},
+					"undeclaredComponentField": 123
+				}
+			]
+		}`))
+		if badNested.IsValid() || len(badNested.Issues) < 3 {
+			t.Fatalf("expected recursive validation to catch invalid effectivePeriod.start, unknownPeriodField, and undeclaredComponentField, got %+v", badNested.Issues)
+		}
+
+		// Bundle with an invalid embedded Observation resource inside entry[0].resource
+		badBundle := strictEngine.ValidateJSON("Bundle", []byte(`{
+			"resourceType": "Bundle",
+			"type": "transaction",
+			"entry": [
+				{
+					"resource": {
+						"resourceType": "Observation",
+						"status": "invalid-obs-status"
+					}
+				}
+			]
+		}`))
+		if badBundle.IsValid() {
+			t.Fatal("expected Bundle with invalid embedded Observation to fail validation")
+		}
+	})
 }
