@@ -79,9 +79,7 @@ func main() {
 		targetURL = ts.URL
 		cleanup = func() {
 			ts.Close()
-			for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
-				_, _ = db.ExecContext(context.Background(), "DELETE FROM "+table+" WHERE tenant_id = $1", *tenantFlag)
-			}
+			_ = postgres.PurgeTenant(context.Background(), db, *tenantFlag)
 			db.Close()
 		}
 	}

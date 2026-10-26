@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -145,8 +146,8 @@ func (s *Store) StreamExportResources(ctx context.Context, params ExportParams, 
 		)
 
 		batch := make([]SearchResult, 0, exportBatchSize)
-		err := s.withTenantExec(ctx, params.TenantID, func(exec queryExecer) error {
-			rows, err := exec.QueryContext(ctx, querySQL, args...)
+		err := s.withTenantTx(ctx, params.TenantID, func(tx *sql.Tx) error {
+			rows, err := tx.QueryContext(ctx, querySQL, args...)
 			if err != nil {
 				return fmt.Errorf("export resources query: %w", err)
 			}

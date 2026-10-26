@@ -30,7 +30,7 @@ func main() {
 	var showVersion bool
 	var tenantIsolationFlag string
 	flag.BoolVar(&showVersion, "version", false, "Print flintd version and exit")
-	flag.StringVar(&tenantIsolationFlag, "tenant-isolation", "", "Multi-tenant PostgreSQL isolation mode: 'shared' (default) or 'schema' (schema-per-tenant)")
+	flag.StringVar(&tenantIsolationFlag, "tenant-isolation", "", "Multi-tenant PostgreSQL isolation mode: 'schema' (default, schema-per-tenant) or 'shared' (shared public tables)")
 	flag.Parse()
 	if showVersion {
 		fmt.Printf("flintd %s\n", version)
@@ -71,7 +71,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	store := postgres.New(db, postgres.WithTenantIsolation(isolationMode))
+	storeOpts := []postgres.Option{
+		postgres.WithTenantIsolation(isolationMode),
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("FLINT_TENANT_ROLE_SWITCH")), "true") {
+		storeOpts = append(storeOpts, postgres.WithTenantRoleSwitch(true))
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("FLINT_TENANT_AUTO_PROVISION")), "false") {
+		storeOpts = append(storeOpts, postgres.WithAutoProvision(false))
+	}
+	store := postgres.New(db, storeOpts...)
 	logger.Info("PostgreSQL store initialized", "tenant_isolation", string(isolationMode))
 	srv := server.New(store, logger)
 

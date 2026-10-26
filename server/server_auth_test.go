@@ -336,9 +336,7 @@ func TestServer_PatientCompartmentIsolation_Integration(t *testing.T) {
 
 	ctx := t.Context()
 	defer func() {
-		for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
-			db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = 'test-compartment'")
-		}
+		_ = postgres.PurgeTenant(ctx, db, "test-compartment")
 	}()
 
 	// System token to seed 2 patients (pat-100 and pat-200), a shared Practitioner (prac-shared), and their Observations (obs-100 and obs-200)

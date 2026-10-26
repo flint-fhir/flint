@@ -263,9 +263,7 @@ func TestServer_USCoreResourcesEndToEnd(t *testing.T) {
 
 	tenant := "test-uscore-e2e"
 	cleanup := func() {
-		for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
-			db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = $1", tenant)
-		}
+		_ = postgres.PurgeTenant(ctx, db, tenant)
 	}
 	cleanup()
 	defer cleanup()
@@ -444,9 +442,7 @@ func TestServer_PatchAndConditionalCRUD(t *testing.T) {
 
 	tenant := "test-patch-cond"
 	cleanup := func() {
-		for _, table := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri", "fhir_audit_event", "fhir_resource_history", "fhir_resource"} {
-			db.ExecContext(ctx, "DELETE FROM "+table+" WHERE tenant_id = $1", tenant)
-		}
+		_ = postgres.PurgeTenant(ctx, db, tenant)
 	}
 	cleanup()
 	defer cleanup()

@@ -1,16 +1,16 @@
-# Graph Report - flint  (2026-10-12)
+# Graph Report - flint  (2026-10-21)
 
 ## Corpus Check
-- 129 files · ~304,753 words
+- 148 files · ~356,673 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 917 nodes · 2101 edges · 63 communities (46 shown, 16 thin omitted)
-- Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 85 edges (avg confidence: 0.85)
+- 1135 nodes · 2952 edges · 70 communities (54 shown, 15 thin omitted)
+- Extraction: 95% EXTRACTED · 5% INFERRED · 0% AMBIGUOUS · INFERRED: 151 edges (avg confidence: 0.85)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `8879e239`
+- Built from commit: `e3a7c399`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -19,20 +19,20 @@
 - New
 - spike4_search_index/search_index_test.go
 - FHIRString
-- Server
-- ScopeMatches
-- ExtractEncounterIndexes
+- net/http.Request
+- ParseScopes
+- ExtractPatientIndexes
 - MiniPatient
-- condition_search_index.go
+- cleanID
 - SmartConfiguration
 - spike_test.go
+- FHIRDate
 - Extension
-- google.golang.org/protobuf/reflect/protoreflect.Message
 - mini_fhir.pb.go
 - extract.go
 - ingest.go
 - OIDCValidator
-- time.Time
+- SearchParams
 - Producer
 - Flint — High-Performance FHIR R4 Server on a Data Lakehouse
 - query_duckdb.py
@@ -44,116 +44,123 @@
 - json_codec.go
 - file_spike_spike1_proto_mini_fhir_proto_rawDescGZIP
 - audit/audit.go
-- testing.T
+- extract_test.go
 - Outcome
 - SecurityContext
-- NewEngine
-- Action
+- testing.T
+- Server
 - README.md
-- helpers.go
-- google.golang.org/protobuf/reflect/protoreflect.EnumNumber
+- google.golang.org/protobuf/reflect/protoreflect.Message
+- time.Time
 - Contributing to Flint
-- auth.pb.go
+- sdc_document.go
 - Contributor Covenant Code of Conduct
 - Quickstart
 - patch.go
-- Enforcement Guidelines
-- HumanName
+- Server
+- time.Duration
 - roundtrip.go
 - API Reference
-- SmartScope
-- ExtractPatientIndexes
+- main
+- .authMiddleware
 - SMART on FHIR v2 & Identity Architecture
 - automq_test.go
-- Run
+- .resolveValueSetConcepts
 - TestSchema_NoJSONBAndAtlasSumSync
 - HL7 Inferno US Core v6.1.0 & ONC `(g)(10)` Certification Harness
-- ExtractAllergyIntoleranceIndexes
-- ExtractDiagnosticReportIndexes
-- ExtractImmunizationIndexes
+- SearchIndexes
+- ExtractDiagnosticReport
+- ExtractImmunization
 - ExtractMedicationRequestIndexes
 - ExtractOrganizationIndexes
-- ExtractProcedureIndexes
+- ExtractProcedure
 - ExtractLocationIndexes
-- ExtractSpecimenIndexes
-- google.golang.org/protobuf/reflect/protoreflect.EnumType
+- operations.go
+- DefaultIndexExtractors
+- ExtractObservation
+- .handlePatientMemberMatch
+- NewMockTokenValidator
+- Installation & Quickstart (Standalone FHIR R4 Server)
+- ExtractEncounterIndexes
+- Optional Add-Ons (Streaming CDC, Temporal Workflows & Clinical Lakehouse)
+- .RegisterResourceType
 
 ## God Nodes (most connected - your core abstractions)
-1. `Server` - 49 edges
-2. `FHIRString` - 28 edges
-3. `SecurityContext` - 26 edges
-4. `writeOperationOutcome()` - 25 edges
-5. `Store` - 25 edges
-6. `MiniPatient` - 23 edges
-7. `New()` - 22 edges
-8. `Extension` - 22 edges
-9. `SmartScope` - 20 edges
-10. `NewEngine()` - 20 edges
+1. `Server` - 62 edges
+2. `SearchIndexes` - 45 edges
+3. `writeOperationOutcome()` - 44 edges
+4. `cleanID()` - 37 edges
+5. `FromContext()` - 33 edges
+6. `IsPatientRestricted()` - 31 edges
+7. `Store` - 28 edges
+8. `FHIRString` - 28 edges
+9. `SecurityContext` - 27 edges
+10. `New()` - 25 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `Activities` --references--> `Producer`  [EXTRACTED]
-  ingest/activity/activities.go → automq/producer.go
-- `TestServer_Integration()` --calls--> `NewMemoryPublisher()`  [EXTRACTED]
-  server/server_test.go → automq/producer.go
 - `main()` --calls--> `NewProducer()`  [EXTRACTED]
   cmd/flintd/main.go → automq/producer.go
 - `main()` --calls--> `NewProducer()`  [EXTRACTED]
   cmd/worker/main.go → automq/producer.go
+- `main()` --calls--> `Run()`  [EXTRACTED]
+  cmd/certify/main.go → pkg/certify/certify.go
 - `main()` --calls--> `NewOIDCValidator()`  [EXTRACTED]
   cmd/flintd/main.go → pkg/auth/validator_oidc.go
+- `main()` --calls--> `NewZitadelValidator()`  [EXTRACTED]
+  cmd/flintd/main.go → pkg/auth/validator_zitadel.go
 
 ## Import Cycles
 - None detected.
 
-## Communities (63 total, 16 thin omitted)
+## Communities (70 total, 15 thin omitted)
 
 ### Community 0 - "context.Context"
-Cohesion: 0.08
-Nodes (32): Activities, PublishToAutoMQInput, WriteMedplumBatchInput, WritePostgresBatchInput, MemoryRecorder, StoreRecorder, context.Context, database/sql.Tx (+24 more)
+Cohesion: 0.07
+Nodes (37): MemoryRecorder, StoreRecorder, ExtractConditionIndexes(), context.Context, database/sql.Tx, github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/condition_go_proto.Condition, sync.Map, BundleOperation (+29 more)
 
 ### Community 1 - "New"
-Cohesion: 0.10
-Nodes (32): CheckResult, Config, Report, main(), main(), TestSeedRun_EndToEndIntegration(), envOrDefault(), main() (+24 more)
+Cohesion: 0.20
+Nodes (24): main(), TestSeedRun_EndToEndIntegration(), database/sql.DB, TestWritePostgresBatch_WithExtractors(), NewStoreRecorder(), TestServer_BundlePatchAndConditionalCRUD(), TestServer_CertifyEndpointAndRunner(), TestServer_CriticalSecurityAndSearchHardening() (+16 more)
 
 ### Community 2 - "spike4_search_index/search_index_test.go"
-Cohesion: 0.41
-Nodes (12): SearchIndexes, SpidxDate, SpidxReference, SpidxString, SpidxToken, assertStringValue(), ExtractPatientIndexes(), findDates() (+4 more)
+Cohesion: 0.27
+Nodes (15): github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto.Patient, SearchIndexes, SpidxDate, SpidxReference, SpidxString, SpidxToken, buildTestPatient(), TestProtoProduceConsume() (+7 more)
 
 ### Community 3 - "FHIRString"
-Cohesion: 0.13
-Nodes (6): google.golang.org/protobuf/runtime/protoimpl.MessageState, google.golang.org/protobuf/runtime/protoimpl.SizeCache, google.golang.org/protobuf/runtime/protoimpl.UnknownFields, Coding, FHIRString, Identifier
+Cohesion: 0.09
+Nodes (4): google.golang.org/protobuf/runtime/protoimpl.SizeCache, Coding, FHIRString, HumanName
 
-### Community 4 - "Server"
-Cohesion: 0.06
-Nodes (52): contextKey, Publisher, github.com/flint-fhir/flint/pkg/auth.SecurityContext, github.com/flint-fhir/flint/store/postgres.SearchIndexes, google.golang.org/protobuf/types/dynamicpb.Message, net/http.Handler, net/http.Request, net/http.ResponseWriter (+44 more)
-
-### Community 5 - "ScopeMatches"
-Cohesion: 0.36
-Nodes (8): ParseSingleScope(), ScopeMatches(), TestParseScopes(), TestProperty_ParseScopesNeverPanicsOnArbitraryInput(), TestProperty_QueryParameterFilterInvariance(), TestProperty_SMARTV1GrammarAcceptance(), TestProperty_SMARTV2GrammarAcceptance(), TestProperty_WildcardResourceMatchesAnyResourceType()
-
-### Community 6 - "ExtractEncounterIndexes"
+### Community 4 - "net/http.Request"
 Cohesion: 0.12
-Nodes (13): ExtractEncounterIndexes(), SearchIndexes, ExtractObservationIndexes(), SearchIndexes, ExtractPractitionerIndexes(), SearchIndexes, TestExtractConditionIndexes(), TestExtractEncounterIndexes() (+5 more)
+Nodes (14): net/http.Request, net/http.ResponseWriter, extractBearerHeader(), Server, Server, isValidNDJSONFormat(), requestBaseURL(), exportJob (+6 more)
 
-### Community 8 - "condition_search_index.go"
-Cohesion: 0.18
-Nodes (13): ExtractConditionIndexes(), SearchIndexes, SpidxDate, SpidxReference, SpidxString, SpidxToken, github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/condition_go_proto.Condition, SpidxDate (+5 more)
+### Community 5 - "ParseScopes"
+Cohesion: 0.19
+Nodes (13): ParseScopes(), ParseSingleScope(), ScopeMatches(), TestJWKPublicKey_BoundsValidation(), TestJWTVerifyClaims_Adversarial(), TestOIDCValidator_HTTPJWKSAndHardening(), TestParseScopes(), TestSecurityContext_Allows() (+5 more)
+
+### Community 6 - "ExtractPatientIndexes"
+Cohesion: 0.22
+Nodes (6): ExtractPatientIndexes(), ExtractPractitionerIndexes(), TestExtractConditionIndexes(), TestExtractPatientIndexes(), TestExtractPractitionerIndexes(), github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto.Practitioner
+
+### Community 7 - "MiniPatient"
+Cohesion: 0.11
+Nodes (5): google.golang.org/protobuf/runtime/protoimpl.MessageState, google.golang.org/protobuf/runtime/protoimpl.UnknownFields, FHIRBoolean, Identifier, MiniPatient
+
+### Community 8 - "cleanID"
+Cohesion: 0.20
+Nodes (21): github.com/flint-fhir/flint/pkg/auth.SecurityContext, google.golang.org/protobuf/types/dynamicpb.Message, Allows(), IsPatientRestricted(), NormalizeFHIRJSONToProtoJSON(), Server, cleanID(), extractPatientIDFromIndexes() (+13 more)
 
 ### Community 10 - "spike_test.go"
 Cohesion: 0.50
 Nodes (8): protoNameToFHIR(), ProtoToFHIRJSON(), TestProtojsonMarshalOutput(), TestRoundTripFidelity(), unwrap(), unwrapHumanNames(), unwrapIdentifiers(), unwrapStringArray()
-
-### Community 11 - "Extension"
-Cohesion: 0.11
-Nodes (4): Extension, Extension_ValueDate, FHIRDate, isExtension_Value
 
 ### Community 13 - "mini_fhir.pb.go"
 Cohesion: 0.25
 Nodes (5): Extension_ValueBoolean, Extension_ValueDateTime, Extension_ValueString, file_spike_spike1_proto_mini_fhir_proto_init(), init()
 
 ### Community 14 - "extract.go"
-Cohesion: 0.29
-Nodes (17): github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto.Quantity, appendQuantityIndexes(), ExtractAllergyIntolerance(), ExtractCondition(), ExtractDiagnosticReport(), ExtractEncounter(), ExtractImmunization(), ExtractLocation() (+9 more)
+Cohesion: 0.42
+Nodes (8): ExtractCondition(), ExtractLocation(), ExtractMedicationRequest(), ExtractOrganization(), ExtractPractitioner(), ExtractSpecimen(), isEnumTokenParam(), normalizeSearchIndexes()
 
 ### Community 15 - "ingest.go"
 Cohesion: 0.38
@@ -161,19 +168,19 @@ Nodes (6): go.temporal.io/sdk/workflow.Context, IngestFHIRBundle(), IngestInput,
 
 ### Community 16 - "OIDCValidator"
 Cohesion: 0.08
-Nodes (34): Audience, JWK, JWKSet, JWTHeader, JWTPayload, OIDCConfig, OIDCValidator, ParsedToken (+26 more)
+Nodes (29): Audience, JWK, JWKSet, JWTHeader, JWTPayload, OIDCConfig, OIDCValidator, ParsedToken (+21 more)
 
-### Community 17 - "time.Time"
+### Community 17 - "SearchParams"
 Cohesion: 0.09
-Nodes (37): net/url.Values, time.Time, ChainedParam, DateOp, ExportParams, IncludeParam, PatientEverythingParams, QuantityOp (+29 more)
+Nodes (46): ChainedParam, CompositeTokenQuantityParam, DateOp, ExportParams, HasParam, IncludeParam, PatientEverythingParams, QuantityOp (+38 more)
 
 ### Community 18 - "Producer"
-Cohesion: 0.09
-Nodes (25): Config, MemoryPublisher, Message, Producer, NewMemoryPublisher(), NewProducer(), TestMemoryPublisher(), TestNewProducer() (+17 more)
+Cohesion: 0.06
+Nodes (40): Activities, PublishToAutoMQInput, WriteMedplumBatchInput, WritePostgresBatchInput, Config, MemoryPublisher, Message, Producer (+32 more)
 
 ### Community 19 - "Flint — High-Performance FHIR R4 Server on a Data Lakehouse"
-Cohesion: 0.18
-Nodes (11): Architecture, Clinical Dimensional Lakehouse (`analytics/` — SQLMesh on DuckDB / Iceberg), Community & Contributing, Copy-Pasteable API Cookbook (`curl`), Flint — High-Performance FHIR R4 Server on a Data Lakehouse, License, Project Structure, Property-Based Testing (via Hegel) (+3 more)
+Cohesion: 0.24
+Nodes (13): Architecture, Clinical Dimensional Lakehouse (`analytics/` — SQLMesh on DuckDB / Iceberg), Community & Contributing, Copy-Pasteable API Cookbook (`curl`), Flint — High-Performance FHIR R4 Server on a Data Lakehouse, Flint — High-Performance Open Source FHIR R4 Server, License, Project Structure (+5 more)
 
 ### Community 27 - "json_codec.go"
 Cohesion: 0.15
@@ -183,41 +190,49 @@ Nodes (27): google.golang.org/protobuf/reflect/protoreflect.FieldDescriptor, goo
 Cohesion: 0.29
 Nodes (9): ClassifyHTTPInteraction(), ClassifyHTTPOutcome(), NewMemoryRecorder(), TestProperty_ClassifyNeverPanicsOnArbitraryFuzz(), TestProperty_InteractionClassificationAndFHIRSerialization(), TestProperty_OutcomeClassificationInvariance(), TestClassifyHTTPInteraction(), TestMemoryRecorderAndToFHIRResource() (+1 more)
 
-### Community 30 - "testing.T"
-Cohesion: 0.11
-Nodes (26): testing.T, TestActivities_SliceBoundsAndNilStoreValidation(), TestPublishToAutoMQ_NilProducer(), TestIngestFHIRBundle_AutoMQFailure_Fails(), TestIngestFHIRBundle_HappyPath(), TestIngestFHIRBundle_MedplumFailure_ContinuesAnyway(), TestIngestFHIRBundle_PostgresFailure_Fails(), TestRealGoogleFHIRPatientMarshal() (+18 more)
+### Community 30 - "extract_test.go"
+Cohesion: 0.22
+Nodes (10): ExtractPatient(), TestExtractCondition(), TestExtractLocation(), TestExtractMedicationRequest(), TestExtractOrganization(), TestExtractPatient(), TestExtractPatient_FallbackResID(), TestExtractPatient_InvalidBytes() (+2 more)
 
 ### Community 31 - "Outcome"
 Cohesion: 0.11
-Nodes (18): NewOutcome(), buildFieldMap(), DefaultSchemas(), extractStringOrWrapped(), isEmptyValue(), isValidCodeInSet(), TestOutcome_ToOperationOutcomeMap(), ConformanceMatrixEntry (+10 more)
+Nodes (19): NewOutcome(), allowedFieldsFromDescriptor(), buildFieldMap(), DefaultSchemas(), extractStringOrWrapped(), Validator, isEmptyValue(), isValidCodeInSet() (+11 more)
 
 ### Community 32 - "SecurityContext"
-Cohesion: 0.13
-Nodes (4): crypto/rsa.PrivateKey, crypto/rsa.PublicKey, MockTokenValidator, SecurityContext
+Cohesion: 0.05
+Nodes (13): file_proto_flint_auth_v1_auth_proto_init(), file_proto_flint_auth_v1_auth_proto_rawDescGZIP(), init(), crypto/rsa.PrivateKey, crypto/rsa.PublicKey, google.golang.org/protobuf/reflect/protoreflect.EnumDescriptor, google.golang.org/protobuf/reflect/protoreflect.EnumNumber, google.golang.org/protobuf/reflect/protoreflect.EnumType (+5 more)
 
-### Community 33 - "NewEngine"
-Cohesion: 0.19
-Nodes (18): TestCohortTransactionBundle_ValidatesAllResources(), TestSeedRun_UnitHTTP(), TestDenormalizeProtoJSONToFHIRJSON_RoundTripAndValidation(), TestNormalizeFHIRJSONToProtoJSON_StandardFlatFHIR(), TestProperty_NormalizeAndDenormalizeRoundTripValidates(), TestRewriteURNReferences(), TestProperty_InvalidGenderRejected(), TestProperty_ObservationRequiredFields() (+10 more)
+### Community 33 - "testing.T"
+Cohesion: 0.12
+Nodes (29): TestCohortTransactionBundle_ValidatesAllResources(), TestSeedRun_UnitHTTP(), testing.T, TestActivities_SliceBoundsAndNilStoreValidation(), TestPublishToAutoMQ_NilAndMemoryPublisher(), TestPublishToAutoMQ_NilProducer(), TestIngestFHIRBundle_AutoMQFailure_Fails(), TestIngestFHIRBundle_HappyPath() (+21 more)
+
+### Community 34 - "Server"
+Cohesion: 0.15
+Nodes (15): contextKey, net/url.Values, Recorder, FromContext(), TokenValidator, ScopeQueryConstraints(), splitSystemCode(), TestContextHelpers() (+7 more)
 
 ### Community 35 - "README.md"
 Cohesion: 0.22
 Nodes (6): Healthcare & Security Architecture Principles, Information to Include, Reporting a Vulnerability, Response Timeline, Security Policy, Supported Versions
 
-### Community 36 - "helpers.go"
-Cohesion: 0.20
-Nodes (9): mockString, FHIRDateToTime(), NormalizeString(), StringValue(), StringValues(), TestFHIRDateToTime(), TestNormalizeString(), TestStringValue() (+1 more)
+### Community 36 - "google.golang.org/protobuf/reflect/protoreflect.Message"
+Cohesion: 0.13
+Nodes (30): mockString, google.golang.org/protobuf/reflect/protoreflect.Message, google.golang.org/protobuf/reflect/protoreflect.Value, FHIRDateToTime(), NormalizeString(), StringValue(), StringValues(), TestFHIRDateToTime() (+22 more)
+
+### Community 37 - "time.Time"
+Cohesion: 0.19
+Nodes (25): time.Time, Server, buildMeasurePopulation(), checkMedicationAllergyConflict(), evaluatePatientForMeasure(), extractCodingsFromResource(), extractParamString(), extractPrefetchResources() (+17 more)
 
 ### Community 38 - "Contributing to Flint"
 Cohesion: 0.22
 Nodes (9): Code Generation (`proto2type` & `buf`), Code of Conduct, Contributing to Flint, Development Environment Setup, Git Workflow & Conventional Commits, Local Development Stack, Prerequisites, Quick Start with Nix & Direnv (+1 more)
 
-### Community 39 - "auth.pb.go"
-Cohesion: 0.29
-Nodes (3): file_proto_flint_auth_v1_auth_proto_init(), file_proto_flint_auth_v1_auth_proto_rawDescGZIP(), init()
+### Community 39 - "sdc_document.go"
+Cohesion: 0.18
+Nodes (14): github.com/flint-fhir/flint/store/postgres.SearchIndexes, appendProvenancePatientRef(), buildDefaultProvenanceAgent(), defaultClinicalIntakeQuestionnaire(), docrefTypeMatchesSummary(), extractFirstCodingMap(), formatPatientDisplayName(), Server (+6 more)
 
 ### Community 40 - "Contributor Covenant Code of Conduct"
-Cohesion: 0.29
-Nodes (7): Attribution, Contributor Covenant Code of Conduct, Enforcement, Enforcement Responsibilities, Our Pledge, Our Standards, Scope
+Cohesion: 0.17
+Nodes (12): 1. Correction, 2. Warning, 3. Temporary Ban, 4. Permanent Ban, Attribution, Contributor Covenant Code of Conduct, Enforcement, Enforcement Guidelines (+4 more)
 
 ### Community 41 - "Quickstart"
 Cohesion: 0.33
@@ -225,11 +240,15 @@ Nodes (6): 1. Development Environment (Hermetic Nix Shell), 2. Launch Local Dev 
 
 ### Community 42 - "patch.go"
 Cohesion: 0.18
-Nodes (16): encoding/json.RawMessage, bundleErrorResponse(), bundleEntry, bundleEntryRequest, bundleRequest, jsonPatchOp, ApplyJSONPatch(), ApplyMergePatch() (+8 more)
+Nodes (15): encoding/json.RawMessage, bundleErrorResponse(), bundleEntry, bundleEntryRequest, bundleRequest, jsonPatchOp, ApplyJSONPatch(), ApplyMergePatch() (+7 more)
 
-### Community 43 - "Enforcement Guidelines"
-Cohesion: 0.40
-Nodes (5): 1. Correction, 2. Warning, 3. Temporary Ban, 4. Permanent Ban, Enforcement Guidelines
+### Community 43 - "Server"
+Cohesion: 0.19
+Nodes (6): authCodeEntry, refreshTokenEntry, Server, isScopeSubset(), writeOAuthError(), SMARTConfig
+
+### Community 44 - "time.Duration"
+Cohesion: 0.23
+Nodes (15): generateBundlePayloads(), main(), printReport(), ratio(), runHTTPLoad(), runStoreLoad(), runTemporalLoad(), sync/atomic.Int64 (+7 more)
 
 ### Community 45 - "roundtrip.go"
 Cohesion: 0.36
@@ -239,9 +258,13 @@ Nodes (9): FHIRToProtoJSON(), ProtoJSONToFHIR(), RoundTrip(), TestBirthDateWithE
 Cohesion: 0.40
 Nodes (5): Advanced FHIR Search Engine, API Reference, Batch / Transaction Bundles, FHIR Conformance & Validation Engine (`pkg/validation`), Resource Interactions
 
-### Community 48 - "ExtractPatientIndexes"
-Cohesion: 0.29
-Nodes (6): ExtractPatientIndexes(), SearchIndexes, TestExtractPatientIndexes(), github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto.Patient, buildTestPatient(), TestProtoProduceConsume()
+### Community 47 - "main"
+Cohesion: 0.22
+Nodes (10): main(), Option, Store, ProvisionTenantSchema(), QuoteIdent(), SchemaFromSlug(), TestQuoteIdent(), TestSchemaFromSlug() (+2 more)
+
+### Community 48 - ".authMiddleware"
+Cohesion: 0.17
+Nodes (10): net/http.Handler, auditActorHolder, auditActorKeyType, auditResponseWriter, extractClientIP(), isMeasureOp(), isPublicEndpoint(), isQuestionnaireExtractOp() (+2 more)
 
 ### Community 49 - "SMART on FHIR v2 & Identity Architecture"
 Cohesion: 0.50
@@ -251,65 +274,81 @@ Nodes (4): Decoupled `TokenValidator` Interface (`pkg/auth`), Environment Config
 Cohesion: 0.38
 Nodes (6): IcebergColumn, ProtoToExpectedIceberg(), TestAutoMQTableTopicConfig(), TestExpectedIcebergSchema(), TestFlattenVsNested(), TestWrapperProtoDesign()
 
-### Community 51 - "Run"
-Cohesion: 0.48
-Nodes (6): CohortTransactionBundleJSON(), main(), putEntry(), Run(), io.Writer, Config
+### Community 51 - ".resolveValueSetConcepts"
+Cohesion: 0.32
+Nodes (7): builtInCodeSystemDef, conceptMapEntry, extractEntriesFromConceptMapJSON(), extractTerminologyParams(), firstNonEmpty(), Server, terminologyConcept
 
 ### Community 53 - "HL7 Inferno US Core v6.1.0 & ONC `(g)(10)` Certification Harness"
 Cohesion: 0.50
 Nodes (3): 1. Quick Automated Certification (No Docker Required), 2. Running Official HL7 Inferno UI (`localhost:4567`), HL7 Inferno US Core v6.1.0 & ONC `(g)(10)` Certification Harness
 
-### Community 54 - "ExtractAllergyIntoleranceIndexes"
-Cohesion: 0.50
-Nodes (3): ExtractAllergyIntoleranceIndexes(), SearchIndexes, github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/allergy_intolerance_go_proto.AllergyIntolerance
+### Community 54 - "SearchIndexes"
+Cohesion: 0.25
+Nodes (7): ExtractAllergyIntoleranceIndexes(), SearchIndexes, ExtractSpecimenIndexes(), github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/allergy_intolerance_go_proto.AllergyIntolerance, github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/specimen_go_proto.Specimen, ExtractAllergyIntolerance(), TestExtractAllergyIntolerance()
 
-### Community 55 - "ExtractDiagnosticReportIndexes"
-Cohesion: 0.50
-Nodes (3): ExtractDiagnosticReportIndexes(), SearchIndexes, github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/diagnostic_report_go_proto.DiagnosticReport
+### Community 55 - "ExtractDiagnosticReport"
+Cohesion: 0.40
+Nodes (4): ExtractDiagnosticReportIndexes(), github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/diagnostic_report_go_proto.DiagnosticReport, ExtractDiagnosticReport(), TestExtractDiagnosticReport()
 
-### Community 56 - "ExtractImmunizationIndexes"
-Cohesion: 0.50
-Nodes (3): ExtractImmunizationIndexes(), SearchIndexes, github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/immunization_go_proto.Immunization
+### Community 56 - "ExtractImmunization"
+Cohesion: 0.40
+Nodes (4): ExtractImmunizationIndexes(), github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/immunization_go_proto.Immunization, ExtractImmunization(), TestExtractImmunization()
 
-### Community 57 - "ExtractMedicationRequestIndexes"
-Cohesion: 0.50
-Nodes (3): ExtractMedicationRequestIndexes(), SearchIndexes, github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/medication_request_go_proto.MedicationRequest
+### Community 59 - "ExtractProcedure"
+Cohesion: 0.40
+Nodes (4): ExtractProcedureIndexes(), github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/procedure_go_proto.Procedure, ExtractProcedure(), TestExtractProcedure()
 
-### Community 58 - "ExtractOrganizationIndexes"
-Cohesion: 0.50
-Nodes (3): ExtractOrganizationIndexes(), SearchIndexes, github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/organization_go_proto.Organization
+### Community 61 - "operations.go"
+Cohesion: 0.27
+Nodes (12): codingKey, applyMetaAdd(), applyMetaDelete(), codingDedupeKey(), extractPatientDemographics(), matchGradeForScore(), mergeCodingSlices(), normalizeTelecomValue() (+4 more)
 
-### Community 59 - "ExtractProcedureIndexes"
-Cohesion: 0.50
-Nodes (3): ExtractProcedureIndexes(), SearchIndexes, github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/procedure_go_proto.Procedure
+### Community 62 - "DefaultIndexExtractors"
+Cohesion: 0.26
+Nodes (10): envOrDefault(), firstEnvOrDefault(), main(), AllR4ResourceDescriptors(), AllR4ResourceTypes(), USCoreResourceTypes(), DefaultIndexExtractors(), jsonToProtoBytes() (+2 more)
 
-### Community 60 - "ExtractLocationIndexes"
-Cohesion: 0.50
-Nodes (3): ExtractLocationIndexes(), SearchIndexes, github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/location_go_proto.Location
+### Community 63 - "ExtractObservation"
+Cohesion: 0.25
+Nodes (7): ExtractObservationIndexes(), TestExtractObservationIndexes(), github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto.Quantity, github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto.Observation, appendQuantityIndexes(), ExtractObservation(), TestExtractObservation()
 
-### Community 61 - "ExtractSpecimenIndexes"
+### Community 64 - ".handlePatientMemberMatch"
+Cohesion: 0.32
+Nodes (4): extractClaimFromBundle(), extractCoverageBeneficiaryPatientID(), Server, isVitalSignObservation()
+
+### Community 65 - "NewMockTokenValidator"
+Cohesion: 0.29
+Nodes (5): TestOIDCValidator_EndToEnd(), TestZitadelValidator(), NewMockTokenValidator(), TestServer_OpenAPIAndDocs(), TestServer_AuthMiddleware()
+
+### Community 66 - "Installation & Quickstart (Standalone FHIR R4 Server)"
+Cohesion: 0.29
+Nodes (7): Installation & Quickstart (Standalone FHIR R4 Server), Option 1: Docker Compose (Fastest — Postgres + FHIR Server + Demo Cohort), Option 2: Container Image (`ghcr.io/flint-fhir/flint`), Option 3: Single Binary (`go install` or GitHub Releases), Option 4: Contributor Development Environment (Nix + `k3d` Kubernetes), Run Benchmarks & Tests, Runtime Configuration (`flintd`)
+
+### Community 67 - "ExtractEncounterIndexes"
+Cohesion: 0.33
+Nodes (5): ExtractEncounterIndexes(), TestExtractEncounterIndexes(), github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/encounter_go_proto.Encounter, ExtractEncounter(), TestExtractEncounter()
+
+### Community 68 - "Optional Add-Ons (Streaming CDC, Temporal Workflows & Clinical Lakehouse)"
 Cohesion: 0.50
-Nodes (3): ExtractSpecimenIndexes(), SearchIndexes, github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/specimen_go_proto.Specimen
+Nodes (4): 1. Streaming CDC Add-On (`pkg/cdc` + `automq/`), 2. Temporal Ingestion Worker Add-On (`ingest/`, `cmd/worker/`), 3. Clinical Dimensional Lakehouse Add-On (`analytics/` — SQLMesh on DuckDB / Iceberg), Optional Add-Ons (Streaming CDC, Temporal Workflows & Clinical Lakehouse)
 
 ## Knowledge Gaps
-- **59 isolated node(s):** `flint-analytics`, `SpidxToken`, `SpidxString`, `SpidxReference`, `github.com/flint-fhir/flint` (+54 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 212 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
-- **16 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **58 isolated node(s):** `flint-analytics`, `github.com/flint-fhir/flint`, `writeMedplumBatchInput`, `publishToAutoMQInput`, `contextKey` (+53 more)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 190 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+- **15 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `SecurityContext` connect `SecurityContext` to `FHIRString`, `Server`, `auth.pb.go`, `google.golang.org/protobuf/reflect/protoreflect.Message`, `SmartScope`, `OIDCValidator`?**
-  _High betweenness centrality (0.182) - this node is a cross-community bridge._
-- **Why does `Server` connect `Server` to `SecurityContext`, `New`, `context.Context`, `OIDCValidator`, `Producer`, `json_codec.go`?**
-  _High betweenness centrality (0.089) - this node is a cross-community bridge._
-- **Why does `SmartScope` connect `SmartScope` to `SecurityContext`, `New`, `Action`, `FHIRString`, `ScopeMatches`, `auth.pb.go`, `google.golang.org/protobuf/reflect/protoreflect.Message`?**
-  _High betweenness centrality (0.078) - this node is a cross-community bridge._
-- **What connects `flint-analytics`, `SpidxToken`, `SpidxString` to the rest of the system?**
-  _59 weakly-connected nodes found - possible documentation gaps or missing edges._
+- **Why does `SecurityContext` connect `SecurityContext` to `Server`, `FHIRString`, `ParseScopes`, `MiniPatient`, `cleanID`, `OIDCValidator`?**
+  _High betweenness centrality (0.121) - this node is a cross-community bridge._
+- **Why does `Server` connect `Server` to `SecurityContext`, `New`, `context.Context`, `net/http.Request`, `time.Time`, `.RegisterResourceType`, `cleanID`, `Server`, `time.Duration`, `Producer`, `json_codec.go`, `Outcome`?**
+  _High betweenness centrality (0.099) - this node is a cross-community bridge._
+- **Why does `SearchIndexes` connect `SearchIndexes` to `context.Context`, `ExtractEncounterIndexes`, `google.golang.org/protobuf/reflect/protoreflect.Message`, `ExtractPatientIndexes`, `cleanID`, `extract.go`, `ExtractDiagnosticReport`, `ExtractImmunization`, `ExtractMedicationRequestIndexes`, `ExtractOrganizationIndexes`, `ExtractProcedure`, `ExtractLocationIndexes`, `extract_test.go`, `ExtractObservation`?**
+  _High betweenness centrality (0.085) - this node is a cross-community bridge._
+- **What connects `flint-analytics`, `github.com/flint-fhir/flint`, `writeMedplumBatchInput` to the rest of the system?**
+  _58 weakly-connected nodes found - possible documentation gaps or missing edges._
 - **Should `context.Context` be split into smaller, more focused modules?**
-  _Cohesion score 0.08461538461538462 - nodes in this community are weakly interconnected._
-- **Should `New` be split into smaller, more focused modules?**
-  _Cohesion score 0.09797979797979799 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.07292707292707293 - nodes in this community are weakly interconnected._
 - **Should `FHIRString` be split into smaller, more focused modules?**
-  _Cohesion score 0.13043478260869565 - nodes in this community are weakly interconnected._
+  _Cohesion score 0.09259259259259259 - nodes in this community are weakly interconnected._
+- **Should `net/http.Request` be split into smaller, more focused modules?**
+  _Cohesion score 0.12473572938689217 - nodes in this community are weakly interconnected._

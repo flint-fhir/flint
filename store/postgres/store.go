@@ -134,14 +134,17 @@ func ParseETagVersion(etag string) (int, error) {
 type Store struct {
 	db                 *sql.DB
 	isolationMode      TenantIsolationMode
-	provisionedTenants sync.Map
+	autoProvision      bool
+	roleSwitch         bool
+	provisionedSchemas sync.Map
 }
 
-// New creates a new Postgres FHIR resource store.
-func New(db *sql.DB, opts ...StoreOption) *Store {
+// New creates a new Postgres FHIR resource store with schema-per-tenant ("tenant_<slug>") isolation by default.
+func New(db *sql.DB, opts ...Option) *Store {
 	s := &Store{
 		db:            db,
-		isolationMode: TenantIsolationShared,
+		isolationMode: TenantIsolationSchema,
+		autoProvision: true,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -174,18 +177,13 @@ func (s *Store) WriteResource(ctx context.Context, input ResourceInput) error {
 // ExpectedVersion if > 0, recording a snapshot in fhir_resource_history, and
 // returning the resulting version metadata.
 func (s *Store) WriteResourceWithMeta(ctx context.Context, input ResourceInput) (*ResourceRecord, error) {
-	tx, err := s.beginTenantTx(ctx, input.TenantID)
+	var rec *ResourceRecord
+	err := s.withTenantTx(ctx, input.TenantID, func(tx *sql.Tx) error {
+		var txErr error
+		rec, txErr = writeResourceInTx(ctx, tx, input)
+		return txErr
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	rec, err := writeResourceInTx(ctx, tx, input)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return rec, nil
@@ -195,18 +193,14 @@ func (s *Store) WriteResourceWithMeta(ctx context.Context, input ResourceInput) 
 // inside a single transaction guarded by a transaction-scoped advisory lock, preventing TOCTOU
 // duplicate creation races. Returns (record, created, error).
 func (s *Store) ConditionalCreateResource(ctx context.Context, input ResourceInput, condParams SearchParams) (*ResourceRecord, bool, error) {
-	tx, err := s.beginTenantTx(ctx, input.TenantID)
+	var rec *ResourceRecord
+	var created bool
+	err := s.withTenantTx(ctx, input.TenantID, func(tx *sql.Tx) error {
+		var txErr error
+		rec, created, txErr = s.conditionalCreateInTx(ctx, tx, input, condParams)
+		return txErr
+	})
 	if err != nil {
-		return nil, false, err
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	rec, created, err := s.conditionalCreateInTx(ctx, tx, input, condParams)
-	if err != nil {
-		return nil, false, err
-	}
-
-	if err := tx.Commit(); err != nil {
 		return nil, false, err
 	}
 	return rec, created, nil
@@ -252,44 +246,40 @@ func (s *Store) ConditionalUpdateResource(
 	condParams SearchParams,
 	buildInput func(matchedID string, isExisting bool) (ResourceInput, error),
 ) (*ResourceRecord, error) {
-	tx, err := s.beginTenantTx(ctx, tenantID)
+	var rec *ResourceRecord
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		lockKey := tenantID + ":" + resType
+		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
+			return fmt.Errorf("acquire conditional update lock: %w", err)
+		}
+
+		condParams.Count = 2
+		condParams.Offset = 0
+		sr, err := s.searchWithExecutor(ctx, tx, condParams)
+		if err != nil {
+			return err
+		}
+		if sr.Total > 1 {
+			return fmt.Errorf("%w: conditional update matched %d existing %s resources", ErrPreconditionFailed, sr.Total, resType)
+		}
+
+		matchedID := ""
+		isExisting := false
+		if sr.Total == 1 && len(sr.Matches) == 1 {
+			matchedID = sr.Matches[0].ResID
+			isExisting = true
+		}
+
+		input, err := buildInput(matchedID, isExisting)
+		if err != nil {
+			return err
+		}
+
+		var txErr error
+		rec, txErr = writeResourceInTx(ctx, tx, input)
+		return txErr
+	})
 	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	lockKey := tenantID + ":" + resType
-	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
-		return nil, fmt.Errorf("acquire conditional update lock: %w", err)
-	}
-
-	condParams.Count = 2
-	condParams.Offset = 0
-	sr, err := s.searchWithExecutor(ctx, tx, condParams)
-	if err != nil {
-		return nil, err
-	}
-	if sr.Total > 1 {
-		return nil, fmt.Errorf("%w: conditional update matched %d existing %s resources", ErrPreconditionFailed, sr.Total, resType)
-	}
-
-	matchedID := ""
-	isExisting := false
-	if sr.Total == 1 && len(sr.Matches) == 1 {
-		matchedID = sr.Matches[0].ResID
-		isExisting = true
-	}
-
-	input, err := buildInput(matchedID, isExisting)
-	if err != nil {
-		return nil, err
-	}
-
-	rec, err := writeResourceInTx(ctx, tx, input)
-	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return rec, nil
@@ -306,45 +296,38 @@ func (s *Store) ConditionalDeleteResource(
 	condParams SearchParams,
 	verifyMatch func(matchedID string) error,
 ) (*ResourceRecord, error) {
-	tx, err := s.beginTenantTx(ctx, tenantID)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	lockKey := tenantID + ":" + resType
-	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
-		return nil, fmt.Errorf("acquire conditional delete lock: %w", err)
-	}
-
-	condParams.Count = 2
-	condParams.Offset = 0
-	sr, err := s.searchWithExecutor(ctx, tx, condParams)
-	if err != nil {
-		return nil, err
-	}
-	if sr.Total > 1 {
-		return nil, fmt.Errorf("%w: conditional delete matched %d existing %s resources", ErrPreconditionFailed, sr.Total, resType)
-	}
-	if sr.Total == 0 || len(sr.Matches) == 0 {
-		if err := tx.Commit(); err != nil {
-			return nil, err
+	var rec *ResourceRecord
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		lockKey := tenantID + ":" + resType
+		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
+			return fmt.Errorf("acquire conditional delete lock: %w", err)
 		}
-		return nil, nil
-	}
 
-	matchedID := sr.Matches[0].ResID
-	if verifyMatch != nil {
-		if err := verifyMatch(matchedID); err != nil {
-			return nil, err
+		condParams.Count = 2
+		condParams.Offset = 0
+		sr, err := s.searchWithExecutor(ctx, tx, condParams)
+		if err != nil {
+			return err
 		}
-	}
+		if sr.Total > 1 {
+			return fmt.Errorf("%w: conditional delete matched %d existing %s resources", ErrPreconditionFailed, sr.Total, resType)
+		}
+		if sr.Total == 0 || len(sr.Matches) == 0 {
+			return nil
+		}
 
-	rec, err := s.deleteResourceInTx(ctx, tx, tenantID, resType, matchedID)
+		matchedID := sr.Matches[0].ResID
+		if verifyMatch != nil {
+			if err := verifyMatch(matchedID); err != nil {
+				return err
+			}
+		}
+
+		var txErr error
+		rec, txErr = s.deleteResourceInTx(ctx, tx, tenantID, resType, matchedID)
+		return txErr
+	})
 	if err != nil {
-		return nil, err
-	}
-	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return rec, nil
@@ -354,80 +337,129 @@ func (s *Store) ConditionalDeleteResource(
 // including If-Match, If-None-Exist, and conditional PUT/DELETE) atomically within a single SQL transaction.
 // If any entry fails, all prior writes and deletes in the Bundle are rolled back.
 func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []BundleOperation) ([]BundleOpResult, error) {
-	var tenantID string
+	if len(ops) == 0 {
+		return []BundleOpResult{}, nil
+	}
+	tenantID := ops[0].Input.TenantID
 	for _, op := range ops {
-		if op.Input.TenantID != "" {
-			tenantID = op.Input.TenantID
-			break
+		if op.Input.TenantID != tenantID {
+			return nil, ErrCrossTenantBatch
 		}
 	}
-	tx, err := s.beginTenantTx(ctx, tenantID)
-	if err != nil {
-		return nil, fmt.Errorf("begin bundle tx: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
 
-	results := make([]BundleOpResult, 0, len(ops))
-	for i, op := range ops {
-		if op.OpType == BundleOpDelete || strings.EqualFold(op.Method, "DELETE") {
-			targetID := op.Input.ResID
-			if op.ConditionalParams != nil {
+	var results []BundleOpResult
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		results = make([]BundleOpResult, 0, len(ops))
+		for i, op := range ops {
+			if op.OpType == BundleOpDelete || strings.EqualFold(op.Method, "DELETE") {
+				targetID := op.Input.ResID
+				if op.ConditionalParams != nil {
+					lockKey := op.Input.TenantID + ":" + op.Input.ResType
+					if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
+						return fmt.Errorf("entry[%d] acquire conditional delete lock: %w", i, err)
+					}
+					condParams := *op.ConditionalParams
+					condParams.Count = 2
+					condParams.Offset = 0
+					sr, err := s.searchWithExecutor(ctx, tx, condParams)
+					if err != nil {
+						return fmt.Errorf("entry[%d] conditional delete search %s: %w", i, op.Input.ResType, err)
+					}
+					if sr.Total > 1 {
+						return fmt.Errorf("entry[%d] conditional delete %s: %w: matched %d existing resources", i, op.Input.ResType, ErrPreconditionFailed, sr.Total)
+					}
+					if sr.Total == 0 || len(sr.Matches) == 0 {
+						results = append(results, BundleOpResult{
+							Status:  "204 No Content",
+							ResType: op.Input.ResType,
+						})
+						continue
+					}
+					targetID = sr.Matches[0].ResID
+					if op.VerifyDeleteMatch != nil {
+						if err := op.VerifyDeleteMatch(targetID); err != nil {
+							return fmt.Errorf("entry[%d] conditional delete %s/%s: %w", i, op.Input.ResType, targetID, err)
+						}
+					}
+				}
+				rec, err := s.deleteResourceInTx(ctx, tx, op.Input.TenantID, op.Input.ResType, targetID)
+				if err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("entry[%d] delete %s/%s: %w", i, op.Input.ResType, targetID, err)
+				}
+				ver := 0
+				var lastUpd time.Time
+				if rec != nil {
+					ver = rec.ResVersion
+					lastUpd = rec.LastUpdated
+				}
+				results = append(results, BundleOpResult{
+					Status:      "204 No Content",
+					ResType:     op.Input.ResType,
+					ResID:       targetID,
+					ResVersion:  ver,
+					LastUpdated: lastUpd,
+					Record:      rec,
+				})
+				continue
+			}
+
+			if strings.EqualFold(op.Method, "POST") && op.IfNoneExist != nil {
+				rec, created, err := s.conditionalCreateInTx(ctx, tx, op.Input, *op.IfNoneExist)
+				if err != nil {
+					return fmt.Errorf("entry[%d] conditional create %s: %w", i, op.Input.ResType, err)
+				}
+				status := "200 OK"
+				if created {
+					status = "201 Created"
+				}
+				results = append(results, BundleOpResult{
+					Status:        status,
+					ResType:       rec.ResType,
+					ResID:         rec.ResID,
+					ResVersion:    rec.ResVersion,
+					LastUpdated:   rec.LastUpdated,
+					ResourceProto: rec.ResourceProto,
+					Record:        rec,
+					Created:       created,
+				})
+				continue
+			}
+
+			writeInput := op.Input
+			if strings.EqualFold(op.Method, "PUT") && op.ConditionalParams != nil && op.BuildWriteInput != nil {
 				lockKey := op.Input.TenantID + ":" + op.Input.ResType
 				if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
-					return nil, fmt.Errorf("entry[%d] acquire conditional delete lock: %w", i, err)
+					return fmt.Errorf("entry[%d] acquire conditional update lock: %w", i, err)
 				}
 				condParams := *op.ConditionalParams
 				condParams.Count = 2
 				condParams.Offset = 0
 				sr, err := s.searchWithExecutor(ctx, tx, condParams)
 				if err != nil {
-					return nil, fmt.Errorf("entry[%d] conditional delete search %s: %w", i, op.Input.ResType, err)
+					return fmt.Errorf("entry[%d] conditional update search %s: %w", i, op.Input.ResType, err)
 				}
 				if sr.Total > 1 {
-					return nil, fmt.Errorf("entry[%d] conditional delete %s: %w: matched %d existing resources", i, op.Input.ResType, ErrPreconditionFailed, sr.Total)
+					return fmt.Errorf("entry[%d] conditional update %s: %w: matched %d existing resources", i, op.Input.ResType, ErrPreconditionFailed, sr.Total)
 				}
-				if sr.Total == 0 || len(sr.Matches) == 0 {
-					results = append(results, BundleOpResult{
-						Status:  "204 No Content",
-						ResType: op.Input.ResType,
-					})
-					continue
+				matchedID := ""
+				isExisting := false
+				if sr.Total == 1 && len(sr.Matches) == 1 {
+					matchedID = sr.Matches[0].ResID
+					isExisting = true
 				}
-				targetID = sr.Matches[0].ResID
-				if op.VerifyDeleteMatch != nil {
-					if err := op.VerifyDeleteMatch(targetID); err != nil {
-						return nil, fmt.Errorf("entry[%d] conditional delete %s/%s: %w", i, op.Input.ResType, targetID, err)
-					}
+				built, err := op.BuildWriteInput(matchedID, isExisting)
+				if err != nil {
+					return fmt.Errorf("entry[%d] conditional update %s: %w", i, op.Input.ResType, err)
 				}
+				writeInput = built
 			}
-			rec, err := s.deleteResourceInTx(ctx, tx, op.Input.TenantID, op.Input.ResType, targetID)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return nil, fmt.Errorf("entry[%d] delete %s/%s: %w", i, op.Input.ResType, targetID, err)
-			}
-			ver := 0
-			var lastUpd time.Time
-			if rec != nil {
-				ver = rec.ResVersion
-				lastUpd = rec.LastUpdated
-			}
-			results = append(results, BundleOpResult{
-				Status:      "204 No Content",
-				ResType:     op.Input.ResType,
-				ResID:       targetID,
-				ResVersion:  ver,
-				LastUpdated: lastUpd,
-				Record:      rec,
-			})
-			continue
-		}
 
-		if strings.EqualFold(op.Method, "POST") && op.IfNoneExist != nil {
-			rec, created, err := s.conditionalCreateInTx(ctx, tx, op.Input, *op.IfNoneExist)
+			rec, err := writeResourceInTx(ctx, tx, writeInput)
 			if err != nil {
-				return nil, fmt.Errorf("entry[%d] conditional create %s: %w", i, op.Input.ResType, err)
+				return fmt.Errorf("entry[%d] resource %s/%s: %w", i, writeInput.ResType, writeInput.ResID, err)
 			}
 			status := "200 OK"
-			if created {
+			if strings.EqualFold(op.Method, "POST") || rec.Created {
 				status = "201 Created"
 			}
 			results = append(results, BundleOpResult{
@@ -438,62 +470,13 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []BundleOperat
 				LastUpdated:   rec.LastUpdated,
 				ResourceProto: rec.ResourceProto,
 				Record:        rec,
-				Created:       created,
+				Created:       rec.Created,
 			})
-			continue
 		}
-
-		writeInput := op.Input
-		if strings.EqualFold(op.Method, "PUT") && op.ConditionalParams != nil && op.BuildWriteInput != nil {
-			lockKey := op.Input.TenantID + ":" + op.Input.ResType
-			if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
-				return nil, fmt.Errorf("entry[%d] acquire conditional update lock: %w", i, err)
-			}
-			condParams := *op.ConditionalParams
-			condParams.Count = 2
-			condParams.Offset = 0
-			sr, err := s.searchWithExecutor(ctx, tx, condParams)
-			if err != nil {
-				return nil, fmt.Errorf("entry[%d] conditional update search %s: %w", i, op.Input.ResType, err)
-			}
-			if sr.Total > 1 {
-				return nil, fmt.Errorf("entry[%d] conditional update %s: %w: matched %d existing resources", i, op.Input.ResType, ErrPreconditionFailed, sr.Total)
-			}
-			matchedID := ""
-			isExisting := false
-			if sr.Total == 1 && len(sr.Matches) == 1 {
-				matchedID = sr.Matches[0].ResID
-				isExisting = true
-			}
-			built, err := op.BuildWriteInput(matchedID, isExisting)
-			if err != nil {
-				return nil, fmt.Errorf("entry[%d] conditional update %s: %w", i, op.Input.ResType, err)
-			}
-			writeInput = built
-		}
-
-		rec, err := writeResourceInTx(ctx, tx, writeInput)
-		if err != nil {
-			return nil, fmt.Errorf("entry[%d] resource %s/%s: %w", i, writeInput.ResType, writeInput.ResID, err)
-		}
-		status := "200 OK"
-		if strings.EqualFold(op.Method, "POST") || rec.Created {
-			status = "201 Created"
-		}
-		results = append(results, BundleOpResult{
-			Status:        status,
-			ResType:       rec.ResType,
-			ResID:         rec.ResID,
-			ResVersion:    rec.ResVersion,
-			LastUpdated:   rec.LastUpdated,
-			ResourceProto: rec.ResourceProto,
-			Record:        rec,
-			Created:       rec.Created,
-		})
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit bundle tx: %w", err)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return results, nil
 }
@@ -501,26 +484,23 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []BundleOperat
 // WriteBatch writes multiple resources in a single transaction.
 // This is the hot path for FHIR Bundle ingestion (R8: batch per Bundle).
 func (s *Store) WriteBatch(ctx context.Context, inputs []ResourceInput) error {
-	var tenantID string
-	for _, in := range inputs {
-		if in.TenantID != "" {
-			tenantID = in.TenantID
-			break
-		}
+	if len(inputs) == 0 {
+		return nil
 	}
-	tx, err := s.beginTenantTx(ctx, tenantID)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() //nolint:errcheck
-
+	tenantID := inputs[0].TenantID
 	for _, input := range inputs {
-		if _, err := writeResourceInTx(ctx, tx, input); err != nil {
-			return fmt.Errorf("resource %s/%s: %w", input.ResType, input.ResID, err)
+		if input.TenantID != tenantID {
+			return ErrCrossTenantBatch
 		}
 	}
-
-	return tx.Commit()
+	return s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		for _, input := range inputs {
+			if _, err := writeResourceInTx(ctx, tx, input); err != nil {
+				return fmt.Errorf("resource %s/%s: %w", input.ResType, input.ResID, err)
+			}
+		}
+		return nil
+	})
 }
 
 func writeResourceInTx(ctx context.Context, tx *sql.Tx, input ResourceInput) (*ResourceRecord, error) {
@@ -610,8 +590,8 @@ func writeResourceInTx(ctx context.Context, tx *sql.Tx, input ResourceInput) (*R
 // Returns the proto-encoded resource bytes, or sql.ErrNoRows if not found or deleted.
 func (s *Store) ReadResource(ctx context.Context, tenantID, resType, resID string) ([]byte, error) {
 	var proto []byte
-	err := s.withTenantExec(ctx, tenantID, func(exec queryExecer) error {
-		return exec.QueryRowContext(ctx, `
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
 			SELECT resource_proto FROM fhir_resource
 			WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3 AND is_deleted = FALSE
 		`, tenantID, resType, resID).Scan(&proto)
@@ -627,12 +607,15 @@ func (s *Store) ReadResource(ctx context.Context, tenantID, resType, resID strin
 // (alongside the tombstone ResourceRecord) if the resource was soft-deleted.
 func (s *Store) ReadResourceWithMeta(ctx context.Context, tenantID, resType, resID string) (*ResourceRecord, error) {
 	var rec *ResourceRecord
-	err := s.withTenantExec(ctx, tenantID, func(exec queryExecer) error {
-		var rErr error
-		rec, rErr = s.readResourceWithMetaWithExec(ctx, exec, tenantID, resType, resID)
-		return rErr
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		var txErr error
+		rec, txErr = s.readResourceWithMetaWithExec(ctx, tx, tenantID, resType, resID)
+		return txErr
 	})
-	return rec, err
+	if err != nil {
+		return rec, err
+	}
+	return rec, nil
 }
 
 func (s *Store) readResourceWithMetaInTx(ctx context.Context, tx *sql.Tx, tenantID, resType, resID string) (*ResourceRecord, error) {
@@ -668,21 +651,21 @@ func (s *Store) ReadResourceVersion(ctx context.Context, tenantID, resType, resI
 		ResType:  resType,
 		ResID:    resID,
 	}
-	err := s.withTenantExec(ctx, tenantID, func(exec queryExecer) error {
-		qErr := exec.QueryRowContext(ctx, `
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		txErr := tx.QueryRowContext(ctx, `
 			SELECT resource_proto, res_version, last_updated, is_deleted
 			FROM fhir_resource_history
 			WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3 AND res_version = $4
 		`, tenantID, resType, resID, version).Scan(&rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted)
-		if errors.Is(qErr, sql.ErrNoRows) {
+		if errors.Is(txErr, sql.ErrNoRows) {
 			// Fallback to fhir_resource if row was seeded directly without history table entry.
-			qErr = exec.QueryRowContext(ctx, `
+			txErr = tx.QueryRowContext(ctx, `
 				SELECT resource_proto, res_version, last_updated, is_deleted
 				FROM fhir_resource
 				WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3 AND res_version = $4
 			`, tenantID, resType, resID, version).Scan(&rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted)
 		}
-		return qErr
+		return txErr
 	})
 	if err != nil {
 		return nil, err
@@ -729,9 +712,9 @@ func (s *Store) ListHistory(ctx context.Context, tenantID, resType, resID string
 
 	var total int
 	var records []ResourceRecord
-	err := s.withTenantExec(ctx, tenantID, func(exec queryExecer) error {
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
 		countSQL := "SELECT COUNT(*) FROM fhir_resource_history " + where
-		if err := exec.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
+		if err := tx.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
 			return fmt.Errorf("count resource history: %w", err)
 		}
 
@@ -745,7 +728,7 @@ func (s *Store) ListHistory(ctx context.Context, tenantID, resType, resID string
 			where, orderBy, len(args)+1, len(args)+2,
 		)
 
-		rows, err := exec.QueryContext(ctx, dataSQL, dataArgs...)
+		rows, err := tx.QueryContext(ctx, dataSQL, dataArgs...)
 		if err != nil {
 			return fmt.Errorf("query resource history: %w", err)
 		}
@@ -781,21 +764,15 @@ func (s *Store) DeleteResource(ctx context.Context, tenantID, resType, resID str
 // records a deletion tombstone in fhir_resource_history, and clears search indexes.
 // Returns sql.ErrNoRows if the resource does not exist.
 func (s *Store) DeleteResourceWithMeta(ctx context.Context, tenantID, resType, resID string) (*ResourceRecord, error) {
-	tx, err := s.beginTenantTx(ctx, tenantID)
+	var rec *ResourceRecord
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		var txErr error
+		rec, txErr = s.deleteResourceInTx(ctx, tx, tenantID, resType, resID)
+		return txErr
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback() //nolint:errcheck
-
-	rec, err := s.deleteResourceInTx(ctx, tx, tenantID, resType, resID)
-	if err != nil {
-		return nil, err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-
 	return rec, nil
 }
 

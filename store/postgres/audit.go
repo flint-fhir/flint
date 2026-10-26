@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -50,8 +51,8 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec AuditRecord) error {
 		rec.AgentSubject = "anonymous"
 	}
 
-	err := s.withTenantExec(ctx, rec.TenantID, func(exec queryExecer) error {
-		_, err := exec.ExecContext(ctx, `
+	return s.withTenantTx(ctx, rec.TenantID, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `
 			INSERT INTO fhir_audit_event (
 				tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc,
 				http_method, http_status, request_uri, agent_subject, agent_patient,
@@ -67,19 +68,18 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec AuditRecord) error {
 			rec.HTTPMethod, rec.HTTPStatus, rec.RequestURI, rec.AgentSubject, rec.AgentPatient,
 			rec.ClientIP, rec.EntityType, rec.EntityID, rec.EntityVersion,
 		)
-		return err
+		if err != nil {
+			return fmt.Errorf("insert audit event: %w", err)
+		}
+		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("insert audit event: %w", err)
-	}
-	return nil
 }
 
 // ReadAuditEvent reads a single AuditRecord by (tenant_id, audit_id).
 func (s *Store) ReadAuditEvent(ctx context.Context, tenantID, auditID string) (*AuditRecord, error) {
 	var rec AuditRecord
-	err := s.withTenantExec(ctx, tenantID, func(exec queryExecer) error {
-		return exec.QueryRowContext(ctx, `
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		return tx.QueryRowContext(ctx, `
 			SELECT
 				tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc,
 				http_method, http_status, request_uri, agent_subject, agent_patient,
@@ -135,9 +135,9 @@ func (s *Store) QueryAuditEvents(ctx context.Context, params AuditQueryParams) (
 
 	var total int
 	var records []AuditRecord
-	err := s.withTenantExec(ctx, params.TenantID, func(exec queryExecer) error {
+	err := s.withTenantTx(ctx, params.TenantID, func(tx *sql.Tx) error {
 		countQuery := "SELECT COUNT(*) FROM fhir_audit_event " + whereSQL
-		if err := exec.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		if err := tx.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
 			return fmt.Errorf("count audit events: %w", err)
 		}
 
@@ -155,7 +155,7 @@ func (s *Store) QueryAuditEvents(ctx context.Context, params AuditQueryParams) (
 			LIMIT $%d OFFSET $%d
 		`, whereSQL, limitPos, offsetPos)
 
-		rows, err := exec.QueryContext(ctx, selectQuery, queryArgs...)
+		rows, err := tx.QueryContext(ctx, selectQuery, queryArgs...)
 		if err != nil {
 			return fmt.Errorf("query audit events: %w", err)
 		}

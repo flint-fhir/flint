@@ -3,154 +3,317 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io/fs"
+	"regexp"
+	"sort"
 	"strings"
 )
+
+var (
+	// ErrNoTenant is returned when a tenant-scoped database operation is invoked with an empty tenant ID.
+	ErrNoTenant = errors.New("postgres: no tenant specified")
+
+	// ErrInvalidTenantSlug is returned when a tenant slug fails identifier validation.
+	ErrInvalidTenantSlug = errors.New("postgres: invalid tenant slug format")
+
+	// ErrCrossTenantBatch is returned when a batch or bundle transaction spans multiple tenants.
+	ErrCrossTenantBatch = errors.New("postgres: cross-tenant operations are not permitted in a single transaction")
+)
+
+const (
+	tenantSchemaPrefix = "tenant_"
+	maxTenantSlugLen   = 63 - len(tenantSchemaPrefix)
+)
+
+var validTenantSlug = regexp.MustCompile(`^[a-z0-9]([-_a-z0-9]*[a-z0-9])?$`)
 
 // TenantIsolationMode configures how multi-tenant FHIR data is isolated in PostgreSQL.
 type TenantIsolationMode string
 
 const (
-	// TenantIsolationShared (default) stores all tenants in shared public tables
-	// keyed by a leading tenant_id column in every primary key and covering B-tree index.
-	TenantIsolationShared TenantIsolationMode = "shared"
-
-	// TenantIsolationSchema provisions a dedicated PostgreSQL schema (tenant_<id>) per tenant
-	// cloned from the public template tables and scopes all tenant queries and transactions
-	// via SET LOCAL search_path TO "tenant_<id>", public.
+	// TenantIsolationSchema (default) provisions a dedicated PostgreSQL schema ("tenant_<slug>")
+	// per tenant and scopes all tenant queries and transactions via SET LOCAL search_path.
 	TenantIsolationSchema TenantIsolationMode = "schema"
+
+	// TenantIsolationShared stores all tenants in shared public tables keyed by a leading
+	// tenant_id column in every primary key and covering B-tree index.
+	TenantIsolationShared TenantIsolationMode = "shared"
 )
 
 // ParseTenantIsolationMode parses a configuration string (e.g. from FLINT_TENANT_ISOLATION
-// or --tenant-isolation) into a TenantIsolationMode. Empty string defaults to TenantIsolationShared.
+// or --tenant-isolation) into a TenantIsolationMode. Empty string defaults to TenantIsolationSchema.
 func ParseTenantIsolationMode(raw string) (TenantIsolationMode, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", "shared", "public", "table":
-		return TenantIsolationShared, nil
-	case "schema", "schema-per-tenant", "per-tenant", "tenant-schema":
+	case "", "schema", "schema-per-tenant", "per-tenant", "tenant-schema":
 		return TenantIsolationSchema, nil
+	case "shared", "public", "table", "none", "disabled", "off":
+		return TenantIsolationShared, nil
 	default:
-		return "", fmt.Errorf("invalid tenant isolation mode %q (valid modes: %q, %q)", raw, TenantIsolationShared, TenantIsolationSchema)
+		return "", fmt.Errorf("invalid tenant isolation mode %q (valid modes: %q, %q)", raw, TenantIsolationSchema, TenantIsolationShared)
 	}
 }
 
-// StoreOption configures a Postgres Store instance.
-type StoreOption func(*Store)
+// Option configures a Postgres Store.
+type Option func(*Store)
 
-// WithTenantIsolation configures the Store's multi-tenant storage isolation mode.
-func WithTenantIsolation(mode TenantIsolationMode) StoreOption {
+// StoreOption is an alias for Option for backwards compatibility.
+type StoreOption = Option
+
+// WithTenantIsolation configures the Store's multi-tenant storage isolation mode
+// (TenantIsolationSchema by default, or TenantIsolationShared).
+func WithTenantIsolation(mode TenantIsolationMode) Option {
 	return func(s *Store) {
-		if mode == TenantIsolationSchema {
-			s.isolationMode = TenantIsolationSchema
-		} else {
+		if mode == TenantIsolationShared {
 			s.isolationMode = TenantIsolationShared
+		} else {
+			s.isolationMode = TenantIsolationSchema
 		}
 	}
 }
 
 // SetTenantIsolation updates the Store's multi-tenant storage isolation mode.
 func (s *Store) SetTenantIsolation(mode TenantIsolationMode) {
-	if mode == TenantIsolationSchema {
-		s.isolationMode = TenantIsolationSchema
-	} else {
+	if mode == TenantIsolationShared {
 		s.isolationMode = TenantIsolationShared
+	} else {
+		s.isolationMode = TenantIsolationSchema
 	}
 }
 
 // TenantIsolation returns the Store's configured multi-tenant storage isolation mode.
 func (s *Store) TenantIsolation() TenantIsolationMode {
 	if s == nil || s.isolationMode == "" {
-		return TenantIsolationShared
+		return TenantIsolationSchema
 	}
 	return s.isolationMode
 }
 
-// TenantSchemaName deterministically converts a tenant identifier into a safe PostgreSQL
-// schema name (e.g. "hca-west" -> "tenant_hca_west").
+// WithAutoProvision controls whether the Store automatically creates and migrates
+// the per-tenant schema ("tenant_<slug>") on first access (default: true).
+// Set to false when tenant schemas are strictly pre-provisioned by an external
+// schema control plane (such as Azra's tenant-worker + Atlas Operator).
+func WithAutoProvision(enabled bool) Option {
+	return func(s *Store) {
+		s.autoProvision = enabled
+	}
+}
+
+// WithTenantRoleSwitch controls whether each tenant transaction also executes
+// SET LOCAL ROLE "tenant_<slug>" alongside SET LOCAL search_path TO "tenant_<slug>"
+// (default: false). Enable when running against a shared database where each
+// tenant schema has a dedicated NOLOGIN role granted to the application login.
+func WithTenantRoleSwitch(enabled bool) Option {
+	return func(s *Store) {
+		s.roleSwitch = enabled
+	}
+}
+
+// SchemaFromSlug derives the PostgreSQL schema name from a tenant slug following
+// the Azra platform convention ("tenant_" prefix, hyphens replaced with underscores).
+// Example: "mayo-clinic" -> "tenant_mayo_clinic".
+func SchemaFromSlug(slug string) (string, error) {
+	s := strings.ToLower(strings.TrimSpace(slug))
+	if s == "" {
+		return "", ErrNoTenant
+	}
+	if len(s) > maxTenantSlugLen || !validTenantSlug.MatchString(s) {
+		return "", fmt.Errorf("%w: %q", ErrInvalidTenantSlug, slug)
+	}
+	return tenantSchemaPrefix + strings.ReplaceAll(s, "-", "_"), nil
+}
+
+// TenantSchemaName is an alias for SchemaFromSlug.
 func TenantSchemaName(tenantID string) (string, error) {
-	raw := strings.ToLower(strings.TrimSpace(tenantID))
-	if raw == "" {
-		return "", fmt.Errorf("tenant ID is empty")
-	}
-	var b strings.Builder
-	prevUnderscore := false
-	for i := 0; i < len(raw); i++ {
-		ch := raw[i]
-		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
-			b.WriteByte(ch)
-			prevUnderscore = false
-		} else if !prevUnderscore && b.Len() > 0 {
-			b.WriteByte('_')
-			prevUnderscore = true
-		}
-	}
-	sanitized := strings.Trim(b.String(), "_")
-	if sanitized == "" {
-		return "", fmt.Errorf("invalid tenant ID %q", tenantID)
-	}
-	return "tenant_" + sanitized, nil
+	return SchemaFromSlug(tenantID)
 }
 
-func quotePostgresIdent(ident string) string {
-	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
+// QuoteIdent quotes a SQL identifier to prevent injection, wrapping in double quotes
+// and escaping embedded double quotes.
+func QuoteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
-// ProvisionTenantSchema ensures the dedicated PostgreSQL schema and cloned tables exist
-// for tenantID, caching provisioned schemas in memory to avoid repeated DDL checks.
-func (s *Store) ProvisionTenantSchema(ctx context.Context, tenantID string) (string, error) {
-	schemaName, err := TenantSchemaName(tenantID)
+// ProvisionTenantSchema idempotently creates the "tenant_<slug>" schema and applies
+// all embedded operational store migrations within that schema.
+func ProvisionTenantSchema(ctx context.Context, db *sql.DB, tenantID string) (string, error) {
+	schema, err := SchemaFromSlug(tenantID)
 	if err != nil {
 		return "", err
 	}
-	if _, ok := s.provisionedTenants.Load(schemaName); ok {
-		return schemaName, nil
+
+	entries, err := fs.ReadDir(MigrationsFS, "migrations")
+	if err != nil {
+		return "", fmt.Errorf("read migrations dir: %w", err)
 	}
-	if s.db == nil {
-		return schemaName, nil
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			names = append(names, entry.Name())
+		}
 	}
-	var provisioned string
-	if err := s.db.QueryRowContext(ctx, "SELECT provision_tenant($1)", tenantID).Scan(&provisioned); err != nil {
-		return "", fmt.Errorf("provision tenant schema %s: %w", schemaName, err)
+	sort.Strings(names)
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", fmt.Errorf("begin tenant schema migration tx: %w", err)
 	}
-	s.provisionedTenants.Store(schemaName, true)
-	return schemaName, nil
+	defer tx.Rollback() //nolint:errcheck
+
+	lockKey := "flint_tenant_schema:" + schema
+	if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
+		return "", fmt.Errorf("acquire tenant schema advisory lock: %w", err)
+	}
+
+	quoted := QuoteIdent(schema)
+	if _, err := tx.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS "+quoted); err != nil {
+		return "", fmt.Errorf("create schema %s: %w", schema, err)
+	}
+	if _, err := tx.ExecContext(ctx, "SET LOCAL search_path TO "+quoted); err != nil {
+		return "", fmt.Errorf("set search_path to %s: %w", schema, err)
+	}
+
+	for _, name := range names {
+		sqlBytes, err := MigrationsFS.ReadFile("migrations/" + name)
+		if err != nil {
+			return "", fmt.Errorf("read migration %s: %w", name, err)
+		}
+		if _, err := tx.ExecContext(ctx, string(sqlBytes)); err != nil {
+			return "", fmt.Errorf("apply migration %s in schema %s: %w", name, schema, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("commit tenant schema %s migrations: %w", schema, err)
+	}
+	return schema, nil
 }
 
-func (s *Store) beginTenantTx(ctx context.Context, tenantID string) (*sql.Tx, error) {
-	if s.TenantIsolation() == TenantIsolationSchema && strings.TrimSpace(tenantID) != "" {
-		schemaName, err := s.ProvisionTenantSchema(ctx, tenantID)
-		if err != nil {
-			return nil, err
-		}
+// EnsureTenantSchema resolves the PostgreSQL schema for tenantID ("tenant_<slug>")
+// and ensures it is provisioned if auto-provisioning is enabled on the Store.
+func (s *Store) EnsureTenantSchema(ctx context.Context, tenantID string) (string, error) {
+	schema, err := SchemaFromSlug(tenantID)
+	if err != nil {
+		return "", err
+	}
+	if !s.autoProvision {
+		return schema, nil
+	}
+	if _, ok := s.provisionedSchemas.Load(schema); ok {
+		return schema, nil
+	}
+	if _, err := ProvisionTenantSchema(ctx, s.db, tenantID); err != nil {
+		return "", err
+	}
+	s.provisionedSchemas.Store(schema, true)
+	return schema, nil
+}
+
+// withTenantTx executes fn inside a database transaction. In TenantIsolationSchema mode
+// (the default), the transaction is isolated to the tenant's dedicated PostgreSQL schema
+// ("tenant_<slug>") via SET LOCAL search_path (and optional SET LOCAL ROLE). In
+// TenantIsolationShared mode, it executes against the shared public schema.
+func (s *Store) withTenantTx(ctx context.Context, tenantID string, fn func(tx *sql.Tx) error) error {
+	if s.TenantIsolation() == TenantIsolationShared {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
-			return nil, fmt.Errorf("begin tx: %w", err)
+			return fmt.Errorf("begin tx: %w", err)
 		}
-		setPathSQL := fmt.Sprintf("SET LOCAL search_path TO %s, public", quotePostgresIdent(schemaName))
-		if _, err := tx.ExecContext(ctx, setPathSQL); err != nil {
-			_ = tx.Rollback()
-			return nil, fmt.Errorf("set tenant search_path %s: %w", schemaName, err)
+		defer tx.Rollback() //nolint:errcheck
+		if err := fn(tx); err != nil {
+			return err
 		}
-		return tx, nil
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit tx: %w", err)
+		}
+		return nil
 	}
+
+	schema, err := s.EnsureTenantSchema(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+		return fmt.Errorf("begin tenant tx: %w", err)
 	}
-	return tx, nil
+	defer tx.Rollback() //nolint:errcheck
+
+	quoted := QuoteIdent(schema)
+	isolateSQL := "SET LOCAL search_path TO " + quoted
+	if s.roleSwitch {
+		isolateSQL += "; SET LOCAL ROLE " + quoted
+	}
+	if _, err := tx.ExecContext(ctx, isolateSQL); err != nil {
+		return fmt.Errorf("schema isolation (%s): %w", schema, err)
+	}
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit tenant tx: %w", err)
+	}
+	return nil
 }
 
-func (s *Store) withTenantExec(ctx context.Context, tenantID string, fn func(exec queryExecer) error) error {
-	if s.TenantIsolation() != TenantIsolationSchema || strings.TrimSpace(tenantID) == "" {
-		return fn(s.db)
+// PurgeTenant deletes all FHIR resources, history, search indexes, audit events,
+// and export jobs from the tenant's dedicated schema ("tenant_<slug>") and shared public tables.
+func PurgeTenant(ctx context.Context, db *sql.DB, tenantID string) error {
+	schema, err := SchemaFromSlug(tenantID)
+	if err != nil {
+		return err
 	}
-	tx, err := s.beginTenantTx(ctx, tenantID)
+
+	tables := []string{
+		"fhir_export_job",
+		"spidx_string",
+		"spidx_token",
+		"spidx_date",
+		"spidx_reference",
+		"spidx_quantity",
+		"spidx_uri",
+		"fhir_audit_event",
+		"fhir_resource_history",
+		"fhir_resource",
+	}
+
+	for _, table := range tables {
+		_, _ = db.ExecContext(ctx, "DELETE FROM public."+table+" WHERE tenant_id = $1", tenantID)
+	}
+
+	var exists bool
+	if err := db.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.schemata WHERE schema_name = $1
+		)
+	`, schema).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	if err := fn(tx); err != nil {
+
+	quoted := QuoteIdent(schema)
+	if _, err := tx.ExecContext(ctx, "SET LOCAL search_path TO "+quoted); err != nil {
 		return err
 	}
+
+	for _, table := range tables {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			return fmt.Errorf("purge %s.%s: %w", schema, table, err)
+		}
+	}
+
 	return tx.Commit()
 }

@@ -292,7 +292,7 @@ func TestParseCompositeTokenQuantity(t *testing.T) {
 func TestTenantIsolationConfiguration(t *testing.T) {
 	mode, err := postgres.ParseTenantIsolationMode("")
 	require.NoError(t, err)
-	assert.Equal(t, postgres.TenantIsolationShared, mode)
+	assert.Equal(t, postgres.TenantIsolationSchema, mode)
 
 	mode, err = postgres.ParseTenantIsolationMode("shared")
 	require.NoError(t, err)
@@ -309,7 +309,7 @@ func TestTenantIsolationConfiguration(t *testing.T) {
 	_, err = postgres.ParseTenantIsolationMode("invalid-mode")
 	assert.Error(t, err)
 
-	schemaName, err := postgres.TenantSchemaName("HCA-West.01")
+	schemaName, err := postgres.TenantSchemaName("HCA-West-01")
 	require.NoError(t, err)
 	assert.Equal(t, "tenant_hca_west_01", schemaName)
 
