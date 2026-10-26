@@ -54,3 +54,29 @@ test_stg_patient_cdc_dedup_and_tombstone:
           active: true
           postal_code: "10001"
           updated_at: "2026-10-01 12:00:00+00:00"
+
+test_stg_patient_apicurio_protobuf_flattened:
+  model: flint_stg.stg_patient
+  inputs:
+    fhir_raw.patient:
+      rows:
+        - tenant_id: "tenant-azra"
+          res_id: "pat-apicurio-001"
+          res_type: "Patient"
+          _kafka_key: "tenant-azra/pat-apicurio-001"
+          _kafka_offset: 1
+          _kafka_timestamp: "2026-10-26 20:00:00+00:00"
+          op: "U"
+          payload: '{"name":[{"family":"Hopper","given":["Grace"]}],"gender":"female","birthDate":"1985-04-12","active":true,"address":[{"postalCode":"02139"}]}'
+  outputs:
+    query:
+      rows:
+        - tenant_id: "tenant-azra"
+          patient_id: "pat-apicurio-001"
+          family_name: "Hopper"
+          given_name: "Grace"
+          gender: "female"
+          birth_date: "1985-04-12"
+          active: true
+          postal_code: "02139"
+          updated_at: "2026-10-26 20:00:00+00:00"

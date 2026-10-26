@@ -80,16 +80,18 @@ func main() {
 			}
 		}
 		if len(brokers) > 0 {
+			schemaRegistryURL := firstEnvOrDefault([]string{"FLINT_SCHEMA_REGISTRY_URL", "SCHEMA_REGISTRY_URL"}, "")
 			producer, err = automq.NewProducer(automq.Config{
-				Brokers:     brokers,
-				TopicPrefix: firstEnvOrDefault([]string{"FLINT_AUTOMQ_TOPIC_PREFIX", "AUTOMQ_TOPIC_PREFIX"}, "fhir."),
-				Logger:      logger,
+				Brokers:           brokers,
+				TopicPrefix:       firstEnvOrDefault([]string{"FLINT_AUTOMQ_TOPIC_PREFIX", "AUTOMQ_TOPIC_PREFIX"}, "fhir."),
+				SchemaRegistryURL: schemaRegistryURL,
+				Logger:            logger,
 			})
 			if err != nil {
 				log.Fatalf("automq connect %v: %v", brokers, err)
 			}
 			defer producer.Close()
-			logger.Info("connected to automq", "brokers", brokers)
+			logger.Info("connected to automq", "brokers", brokers, "schemaRegistryURL", schemaRegistryURL)
 		}
 	} else {
 		logger.Warn("AUTOMQ_BROKERS not set, AutoMQ publishing disabled")

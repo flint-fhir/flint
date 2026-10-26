@@ -1,8 +1,8 @@
 {
   "automq/producer.go": {
-    "mtime": 1792609767.731782,
-    "seen": 1792612825.064848,
-    "ast_hash": "d304d73575e8dc998ac4018fba53f81f",
+    "mtime": 1793048846.2902048,
+    "seen": 1793049135.390888,
+    "ast_hash": "ab4bf45a27278fc61cfffbca9fd3da9a",
     "semantic_hash": ""
   },
   "cmd/e2e/main.go": {
@@ -12,10 +12,10 @@
     "semantic_hash": ""
   },
   "cmd/e2e/query_duckdb.py": {
-    "mtime": 1792609767.7380478,
-    "seen": 1792612825.064852,
-    "ast_hash": "a31ddc0ca19f1c82d3e4e173032c2ad3",
-    "semantic_hash": "a31ddc0ca19f1c82d3e4e173032c2ad3"
+    "mtime": 1793048929.80566,
+    "seen": 1793049135.390947,
+    "ast_hash": "3be968e39afd791a9cb61508b4e614ee",
+    "semantic_hash": ""
   },
   "cmd/e2e/query_iceberg.py": {
     "mtime": 1792609767.738315,
@@ -24,15 +24,15 @@
     "semantic_hash": "0b8def460ecf642653f928e9baac1645"
   },
   "cmd/flintd/main.go": {
-    "mtime": 1792610356.2988904,
-    "seen": 1792612825.064855,
-    "ast_hash": "69d42f2c1655163ffd7ed760f0e0916c",
+    "mtime": 1793048888.1636238,
+    "seen": 1793049135.390982,
+    "ast_hash": "94ed23cf0034af554af9580fb91e3477",
     "semantic_hash": ""
   },
   "cmd/worker/main.go": {
-    "mtime": 1792609767.7414992,
-    "seen": 1792612825.064857,
-    "ast_hash": "e998aeae0714aecf9254c74f4ca96d70",
+    "mtime": 1793048889.6931555,
+    "seen": 1793049135.3910341,
+    "ast_hash": "504b8771f3242af6058458fb396fea9f",
     "semantic_hash": ""
   },
   "go.mod": {
@@ -162,9 +162,9 @@
     "semantic_hash": ""
   },
   "Taskfile.yaml": {
-    "mtime": 1792609767.7146115,
-    "seen": 1792612825.0649102,
-    "ast_hash": "b953d0d2d425741d3761621220237dda",
+    "mtime": 1793048911.1708944,
+    "seen": 1793049135.392469,
+    "ast_hash": "fc837949486b6f3c8771c65f036e9c0b",
     "semantic_hash": ""
   },
   "buf.gen.search_index.yaml": {
@@ -192,15 +192,15 @@
     "semantic_hash": ""
   },
   "deploy/k8s/apicurio.yaml": {
-    "mtime": 1792609767.7437882,
-    "seen": 1792612825.064919,
-    "ast_hash": "26c4d21049442e6520f2aabaf7ab0d32",
+    "mtime": 1793047084.8662875,
+    "seen": 1793049135.3926961,
+    "ast_hash": "2b91477a3aefdc5a3752d02d36a2bf48",
     "semantic_hash": ""
   },
   "deploy/k8s/automq.yaml": {
-    "mtime": 1792609767.7443833,
-    "seen": 1792612825.06492,
-    "ast_hash": "121adbe625c2fe84064fdb7a6b490378",
+    "mtime": 1793048800.1174788,
+    "seen": 1793049135.3926961,
+    "ast_hash": "85a2853df6dac3da800b6f18631ae141",
     "semantic_hash": ""
   },
   "deploy/k8s/garage.yaml": {
@@ -282,9 +282,9 @@
     "semantic_hash": ""
   },
   "cmd/e2e/recovery.go": {
-    "mtime": 1792609767.7385747,
-    "seen": 1792612825.064854,
-    "ast_hash": "85c2ef4b3730aa07178b83351ead0a64",
+    "mtime": 1793048928.0324762,
+    "seen": 1793049135.390965,
+    "ast_hash": "2ac5a1cc200ec72ef22259c222a1f0cd",
     "semantic_hash": ""
   },
   "cmd/loadtest/main.go": {
@@ -324,9 +324,9 @@
     "semantic_hash": ""
   },
   "automq/producer_test.go": {
-    "mtime": 1792609767.7342854,
-    "seen": 1792612825.064849,
-    "ast_hash": "b32e7b93c6e6e6ba6f91d2578865fa39",
+    "mtime": 1793048870.6994276,
+    "seen": 1793049135.39089,
+    "ast_hash": "4fb7c0f67e2c5017d6854ef9c00a007e",
     "semantic_hash": ""
   },
   "gen/go/flint/auth/v1/auth.pb.go": {

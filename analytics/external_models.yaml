@@ -1,0 +1,55 @@
+- name: fhir_raw.patient
+  columns:
+    tenant_id: VARCHAR
+    res_id: VARCHAR
+    res_type: VARCHAR
+    payload: VARCHAR
+    op: VARCHAR
+    _kafka_key: VARCHAR
+    _kafka_offset: BIGINT
+    _kafka_timestamp: TIMESTAMPTZ
+    _kafka_value: VARCHAR
+- name: fhir_raw.encounter
+  columns:
+    tenant_id: VARCHAR
+    res_id: VARCHAR
+    res_type: VARCHAR
+    payload: VARCHAR
+    op: VARCHAR
+    _kafka_key: VARCHAR
+    _kafka_offset: BIGINT
+    _kafka_timestamp: TIMESTAMPTZ
+    _kafka_value: VARCHAR
+- name: fhir_raw.observation
+  columns:
+    tenant_id: VARCHAR
+    res_id: VARCHAR
+    res_type: VARCHAR
+    payload: VARCHAR
+    op: VARCHAR
+    _kafka_key: VARCHAR
+    _kafka_offset: BIGINT
+    _kafka_timestamp: TIMESTAMPTZ
+    _kafka_value: VARCHAR
+- name: fhir_raw.condition
+  columns:
+    tenant_id: VARCHAR
+    res_id: VARCHAR
+    res_type: VARCHAR
+    payload: VARCHAR
+    op: VARCHAR
+    _kafka_key: VARCHAR
+    _kafka_offset: BIGINT
+    _kafka_timestamp: TIMESTAMPTZ
+    _kafka_value: VARCHAR
+- name: fhir_raw.medication_request
+  columns:
+    tenant_id: VARCHAR
+    res_id: VARCHAR
+    res_type: VARCHAR
+    payload: VARCHAR
+    op: VARCHAR
+    _kafka_key: VARCHAR
+    _kafka_offset: BIGINT
+    _kafka_timestamp: TIMESTAMPTZ
+    _kafka_value: VARCHAR

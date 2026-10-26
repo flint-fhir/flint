@@ -96,10 +96,12 @@ func main() {
 			}
 		}
 		if len(brokers) > 0 {
+			schemaRegistryURL := strings.TrimSpace(os.Getenv("FLINT_SCHEMA_REGISTRY_URL"))
 			cdcProducer, err := automq.NewProducer(automq.Config{
-				Brokers:     brokers,
-				TopicPrefix: "fhir.",
-				Logger:      logger,
+				Brokers:           brokers,
+				TopicPrefix:       "fhir.",
+				SchemaRegistryURL: schemaRegistryURL,
+				Logger:            logger,
 			})
 			if err != nil {
 				logger.Error("init automq cdc producer", "error", err)
@@ -107,7 +109,7 @@ func main() {
 			}
 			defer cdcProducer.Close()
 			srv.SetCDCPublisher(cdcProducer)
-			logger.Info("AutoMQ CDC streaming enabled", "brokers", brokers)
+			logger.Info("AutoMQ CDC streaming enabled", "brokers", brokers, "schemaRegistryURL", schemaRegistryURL)
 		}
 	}
 

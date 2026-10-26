@@ -22,14 +22,27 @@ con = duckdb.connect()
 con.register("patient_iceberg", arrow_table)
 
 print("=== DuckDB SQL Query on Iceberg Table ===")
-result = con.execute("""
-    SELECT 
-        _kafka_key AS patient_id,
-        _kafka_metadata.partition AS partition,
-        _kafka_metadata.offset AS offset,
-        CAST(_kafka_value AS VARCHAR) AS raw_json
-    FROM patient_iceberg
-    ORDER BY _kafka_key
-""").fetchdf()
+cols = set(arrow_table.column_names)
+if "payload" in cols:
+    result = con.execute("""
+        SELECT
+            res_id AS patient_id,
+            tenant_id,
+            _kafka_metadata.partition AS partition,
+            _kafka_metadata.offset AS offset,
+            payload AS raw_json
+        FROM patient_iceberg
+        ORDER BY _kafka_key
+    """).fetchdf()
+else:
+    result = con.execute("""
+        SELECT 
+            _kafka_key AS patient_id,
+            _kafka_metadata.partition AS partition,
+            _kafka_metadata.offset AS offset,
+            CAST(_kafka_value AS VARCHAR) AS raw_json
+        FROM patient_iceberg
+        ORDER BY _kafka_key
+    """).fetchdf()
 
 print(result.to_string(index=False))
