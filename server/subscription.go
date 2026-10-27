@@ -17,14 +17,78 @@ import (
 	"strings"
 	"time"
 
+	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/store/postgres"
 )
+
+type subscriptionEventRecord struct {
+	EventNumber int64
+	Timestamp   time.Time
+	ResType     string
+	ResID       string
+	ResVersion  int
+	Resource    map[string]any
+}
 
 type subscriptionDeliveryStats struct {
 	eventsDelivered int64
 	deliveryErrors  int64
 	lastDeliveredAt time.Time
 	lastError       string
+	events          []subscriptionEventRecord
+}
+
+func (s *Server) recordSubscriptionEvent(tenant, subID, resType, resID string, resVersion int, lastUpdated time.Time, resourceProto []byte) {
+	if subID == "" {
+		return
+	}
+	ts := lastUpdated.UTC()
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	var resMap map[string]any
+	if len(resourceProto) > 0 {
+		if jb, err := s.protoToJSONWithMeta(resType, resourceProto, resVersion, ts); err == nil {
+			_ = json.Unmarshal(jb, &resMap)
+		}
+	}
+	if resMap == nil {
+		resMap = map[string]any{
+			"resourceType": resType,
+			"id":           resID,
+			"meta": map[string]any{
+				"versionId":   strconv.Itoa(resVersion),
+				"lastUpdated": ts.Format(time.RFC3339),
+			},
+		}
+	}
+
+	key := tenant + "/" + subID
+	s.subStatsMu.Lock()
+	defer s.subStatsMu.Unlock()
+	if s.subStats == nil {
+		s.subStats = make(map[string]*subscriptionDeliveryStats)
+	}
+	st, ok := s.subStats[key]
+	if !ok {
+		st = &subscriptionDeliveryStats{}
+		s.subStats[key] = st
+	}
+	nextNum := int64(1)
+	if n := len(st.events); n > 0 {
+		nextNum = st.events[n-1].EventNumber + 1
+	}
+	st.events = append(st.events, subscriptionEventRecord{
+		EventNumber: nextNum,
+		Timestamp:   ts,
+		ResType:     resType,
+		ResID:       resID,
+		ResVersion:  resVersion,
+		Resource:    resMap,
+	})
+	if len(st.events) > 500 {
+		st.events = st.events[len(st.events)-500:]
+	}
 }
 
 func (s *Server) recordSubscriptionDelivery(tenant, subID string, delivered bool, errMsg string) {
@@ -60,7 +124,12 @@ func (s *Server) getSubscriptionDeliveryStats(tenant, subID string) subscription
 		return subscriptionDeliveryStats{}
 	}
 	if st, ok := s.subStats[key]; ok && st != nil {
-		return *st
+		cp := *st
+		if len(st.events) > 0 {
+			cp.events = make([]subscriptionEventRecord, len(st.events))
+			copy(cp.events, st.events)
+		}
+		return cp
 	}
 	return subscriptionDeliveryStats{}
 }
@@ -254,6 +323,8 @@ func (s *Server) dispatchSubscriptions(ctx context.Context, tenant, resType, res
 		if !subscriptionMatchesResourceWithMeta(criteria, resType, resID, lastUpdated, idx) {
 			continue
 		}
+
+		s.recordSubscriptionEvent(tenant, subRes.ResID, resType, resID, resVersion, lastUpdated, resourceProto)
 
 		channel, _ := subMap["channel"].(map[string]any)
 		if channel == nil {
@@ -1175,4 +1246,286 @@ func (s *Server) buildSubscriptionStatusParameters(
 		"id":           subID + "-status",
 		"parameter":    params,
 	}, nil
+}
+
+// handleSubscriptionEvents handles GET/POST /fhir/r4/{tenant}/Subscription/{id}/$events
+// and GET/POST /fhir/r4/{tenant}/Subscription/$events per the HL7 FHIR Subscriptions
+// R5 Backport IG, replaying missed notification events as a history Bundle whose first
+// entry is the R4 Backport SubscriptionStatus Parameters resource ("type": "event-notification").
+func (s *Server) handleSubscriptionEvents(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	if resType := r.PathValue("resourceType"); resType != "" && resType != "Subscription" {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found",
+			fmt.Sprintf("$events is only supported on Subscription resources (got %s)", resType))
+		return
+	}
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		if !auth.Allows(secCtx, "Subscription", auth.ActionRead) && !auth.Allows(secCtx, "Subscription", auth.ActionSearch) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope to read Subscription events")
+			return
+		}
+	}
+
+	subID := strings.TrimSpace(r.PathValue("id"))
+	if subID == "" {
+		subID = strings.TrimSpace(r.URL.Query().Get("id"))
+	}
+	sinceStr := strings.TrimSpace(r.URL.Query().Get("eventsSinceNumber"))
+	untilStr := strings.TrimSpace(r.URL.Query().Get("eventsUntilNumber"))
+	contentMode := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("content")))
+
+	if r.Method == http.MethodPost && r.Body != nil && r.ContentLength != 0 {
+		if body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024)); err == nil && len(bytes.TrimSpace(body)) > 0 {
+			var raw map[string]any
+			if json.Unmarshal(body, &raw) == nil {
+				if paramsArr, ok := raw["parameter"].([]any); ok {
+					for _, p := range paramsArr {
+						pm, _ := p.(map[string]any)
+						name, _ := pm["name"].(string)
+						switch name {
+						case "id", "subscription":
+							if subID == "" {
+								if sVal, ok := pm["valueString"].(string); ok && strings.TrimSpace(sVal) != "" {
+									subID = cleanID(sVal)
+								} else if cVal, ok := pm["valueId"].(string); ok && strings.TrimSpace(cVal) != "" {
+									subID = cleanID(cVal)
+								} else if refMap, ok := pm["valueReference"].(map[string]any); ok {
+									if refStr, ok := refMap["reference"].(string); ok && strings.TrimSpace(refStr) != "" {
+										subID = cleanID(refStr)
+									}
+								}
+							}
+						case "eventsSinceNumber":
+							if sinceStr == "" {
+								if sVal, ok := pm["valueString"].(string); ok {
+									sinceStr = strings.TrimSpace(sVal)
+								} else if fVal, ok := pm["valueInteger"].(float64); ok {
+									sinceStr = strconv.FormatInt(int64(fVal), 10)
+								} else if fVal, ok := pm["valueInteger64"].(string); ok {
+									sinceStr = strings.TrimSpace(fVal)
+								}
+							}
+						case "eventsUntilNumber":
+							if untilStr == "" {
+								if sVal, ok := pm["valueString"].(string); ok {
+									untilStr = strings.TrimSpace(sVal)
+								} else if fVal, ok := pm["valueInteger"].(float64); ok {
+									untilStr = strconv.FormatInt(int64(fVal), 10)
+								} else if fVal, ok := pm["valueInteger64"].(string); ok {
+									untilStr = strings.TrimSpace(fVal)
+								}
+							}
+						case "content":
+							if contentMode == "" {
+								if cVal, ok := pm["valueCode"].(string); ok {
+									contentMode = strings.ToLower(strings.TrimSpace(cVal))
+								} else if sVal, ok := pm["valueString"].(string); ok {
+									contentMode = strings.ToLower(strings.TrimSpace(sVal))
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if subID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required",
+			"Subscription/$events requires a Subscription {id} path parameter or subscription parameter")
+		return
+	}
+	if contentMode != "" && contentMode != "empty" && contentMode != "id-only" && contentMode != "full-resource" {
+		writeOperationOutcome(w, http.StatusBadRequest, "value",
+			fmt.Sprintf("unsupported Subscription/$events content mode %q (expected empty, id-only, or full-resource)", contentMode))
+		return
+	}
+
+	var sinceNum, untilNum int64
+	hasSince := false
+	hasUntil := false
+	if sinceStr != "" {
+		v, err := strconv.ParseInt(sinceStr, 10, 64)
+		if err != nil || v < 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "value", "invalid eventsSinceNumber parameter")
+			return
+		}
+		sinceNum = v
+		hasSince = true
+	}
+	if untilStr != "" {
+		v, err := strconv.ParseInt(untilStr, 10, 64)
+		if err != nil || v < 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "value", "invalid eventsUntilNumber parameter")
+			return
+		}
+		untilNum = v
+		hasUntil = true
+	}
+
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "operational store is not configured")
+		return
+	}
+
+	rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Subscription", subID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Subscription/%s not found", subID))
+		return
+	}
+	if errors.Is(err, postgres.ErrResourceDeleted) {
+		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("Subscription/%s has been deleted", subID))
+		return
+	}
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read Subscription")
+		return
+	}
+
+	subJSON, err := s.protoToJSONWithMeta("Subscription", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode Subscription")
+		return
+	}
+	var subMap map[string]any
+	_ = json.Unmarshal(subJSON, &subMap)
+
+	now := time.Now().UTC()
+	status, _ := subMap["status"].(string)
+	if subscriptionIsExpired(subMap, now) {
+		status = "off"
+	}
+	if contentMode == "" {
+		contentMode = "full-resource"
+		if ch, ok := subMap["channel"].(map[string]any); ok {
+			if pl, _ := ch["payload"].(string); strings.EqualFold(strings.TrimSpace(pl), "id-only") {
+				contentMode = "id-only"
+			}
+		}
+	}
+
+	stats := s.getSubscriptionDeliveryStats(tenant, subID)
+	totalEvents := stats.eventsDelivered
+	if n := len(stats.events); n > 0 && stats.events[n-1].EventNumber > totalEvents {
+		totalEvents = stats.events[n-1].EventNumber
+	}
+
+	matched := make([]subscriptionEventRecord, 0, len(stats.events))
+	for _, ev := range stats.events {
+		if hasSince && ev.EventNumber < sinceNum {
+			continue
+		}
+		if hasUntil && ev.EventNumber > untilNum {
+			continue
+		}
+		matched = append(matched, ev)
+	}
+
+	statusParams := []map[string]any{
+		{
+			"name": "subscription",
+			"valueReference": map[string]any{
+				"reference": "Subscription/" + subID,
+			},
+		},
+		{
+			"name":      "status",
+			"valueCode": status,
+		},
+		{
+			"name":      "type",
+			"valueCode": "event-notification",
+		},
+		{
+			"name":        "events-since-subscription-start",
+			"valueString": strconv.FormatInt(totalEvents, 10),
+		},
+		{
+			"name":         "events-in-notification",
+			"valueInteger": len(matched),
+		},
+	}
+
+	for _, ev := range matched {
+		parts := []map[string]any{
+			{
+				"name":        "event-number",
+				"valueString": strconv.FormatInt(ev.EventNumber, 10),
+			},
+			{
+				"name":         "timestamp",
+				"valueInstant": ev.Timestamp.UTC().Format(time.RFC3339),
+			},
+		}
+		if contentMode != "empty" {
+			parts = append(parts, map[string]any{
+				"name": "focus",
+				"valueReference": map[string]any{
+					"reference": ev.ResType + "/" + ev.ResID,
+				},
+			})
+		}
+		statusParams = append(statusParams, map[string]any{
+			"name": "notification-event",
+			"part": parts,
+		})
+	}
+
+	statusRes := map[string]any{
+		"resourceType": "Parameters",
+		"id":           subID + "-events-status",
+		"parameter":    statusParams,
+	}
+
+	entries := []map[string]any{
+		{
+			"fullUrl":  fmt.Sprintf("Subscription/%s/$status", subID),
+			"resource": statusRes,
+			"request": map[string]any{
+				"method": "GET",
+				"url":    fmt.Sprintf("Subscription/%s/$status", subID),
+			},
+			"response": map[string]any{
+				"status": "200 OK",
+			},
+		},
+	}
+
+	if contentMode != "empty" {
+		for _, ev := range matched {
+			entry := map[string]any{
+				"fullUrl": ev.ResType + "/" + ev.ResID,
+				"request": map[string]any{
+					"method": "PUT",
+					"url":    ev.ResType + "/" + ev.ResID,
+				},
+				"response": map[string]any{
+					"status": "200 OK",
+				},
+			}
+			if contentMode == "full-resource" && ev.Resource != nil {
+				entry["resource"] = ev.Resource
+			} else if contentMode == "id-only" {
+				entry["resource"] = map[string]any{
+					"resourceType": ev.ResType,
+					"id":           ev.ResID,
+					"meta": map[string]any{
+						"versionId":   strconv.Itoa(ev.ResVersion),
+						"lastUpdated": ev.Timestamp.UTC().Format(time.RFC3339),
+					},
+				}
+			}
+			entries = append(entries, entry)
+		}
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"type":         "history",
+		"total":        len(matched),
+		"entry":        entries,
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
 }

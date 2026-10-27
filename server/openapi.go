@@ -1968,6 +1968,79 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/$closure": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Terminology"},
+				"summary":     "FHIR R4 Terminology Subsumption Closure Table Maintenance ($closure)",
+				"operationId": "conceptMapClosure",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "ConceptMap containing incremental or resynchronized subsumption relations"},
+				},
+			},
+		},
+		"/$data-requirements": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ClinicalReasoning"},
+				"summary":     "HL7 Clinical Reasoning $data-requirements operation returning a module-definition Library",
+				"operationId": "dataRequirementsGet",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 Library (type: module-definition) with dataRequirement entries"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ClinicalReasoning"},
+				"summary":     "HL7 Clinical Reasoning $data-requirements operation (POST Parameters)",
+				"operationId": "dataRequirementsPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 Library (type: module-definition) with dataRequirement entries"},
+				},
+			},
+		},
+		"/$fhirpath": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ClinicalReasoning"},
+				"summary":     "Evaluate a FHIRPath R4 expression against a FHIR resource ($fhirpath)",
+				"operationId": "fhirpathEvalGet",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing evaluated FHIRPath results"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ClinicalReasoning"},
+				"summary":     "Evaluate a FHIRPath R4 expression against an inline or stored FHIR resource ($fhirpath)",
+				"operationId": "fhirpathEvalPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing evaluated FHIRPath results"},
+				},
+			},
+		},
+		"/Subscription/{id}/$events": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "HL7 Subscriptions R5 Backport Subscription/{id}/$events notification replay",
+				"operationId": "subscriptionEventsGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "eventsSinceNumber", "in": "query", "required": false, "schema": map[string]any{"type": "integer"}},
+					{"name": "eventsUntilNumber", "in": "query", "required": false, "schema": map[string]any{"type": "integer"}},
+					{"name": "content", "in": "query", "required": false, "schema": map[string]any{"type": "string", "enum": []string{"empty", "id-only", "full-resource"}}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: history) starting with SubscriptionStatus Parameters (event-notification)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "HL7 Subscriptions R5 Backport Subscription/{id}/$events notification replay (POST Parameters)",
+				"operationId": "subscriptionEventsPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: history) starting with SubscriptionStatus Parameters (event-notification)"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

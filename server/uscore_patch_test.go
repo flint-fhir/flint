@@ -3002,3 +3002,197 @@ func TestCustomSearchParamReindexPlanDefApplyAndEverythingDatesWave14(t *testing
 		t.Fatalf("GET /ActivityDefinition/activitydef-hba1c-lab-order/$apply expected ServiceRequest with LOINC 4548-4, got %d: %s", actApplyRec.Code, actApplyRec.Body.String())
 	}
 }
+
+func TestDataRequirementsFHIRPathClosureAndSubscriptionEventsWave15(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave15-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+	putRes := func(resType, id, body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/"+resType+"/"+id, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s/%s expected 200/201, got %d: %s", resType, id, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. Terminology $closure maintenance (init -> add parent & child -> version=0 full resynchronization)
+	closureInit := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "name", "valueString": "htn-closure-table"}
+		]
+	}`
+	clReq1 := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/$closure", strings.NewReader(closureInit))
+	clReq1.Header.Set("Content-Type", "application/fhir+json")
+	clRec1 := httptest.NewRecorder()
+	pgH.ServeHTTP(clRec1, clReq1)
+	if clRec1.Code != http.StatusOK || !strings.Contains(clRec1.Body.String(), `"version":"1"`) {
+		t.Fatalf("POST /$closure init expected 200 OK with version 1, got %d: %s", clRec1.Code, clRec1.Body.String())
+	}
+
+	closureAdd := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "name", "valueString": "htn-closure-table"},
+			{"name": "concept", "valueCoding": {"system": "http://snomed.info/sct", "code": "38341003"}},
+			{"name": "concept", "valueCoding": {"system": "http://snomed.info/sct", "code": "59621000"}}
+		]
+	}`
+	clReq2 := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/$closure", strings.NewReader(closureAdd))
+	clReq2.Header.Set("Content-Type", "application/fhir+json")
+	clRec2 := httptest.NewRecorder()
+	pgH.ServeHTTP(clRec2, clReq2)
+	if clRec2.Code != http.StatusOK || !strings.Contains(clRec2.Body.String(), `"subsumes"`) || !strings.Contains(clRec2.Body.String(), `"59621000"`) {
+		t.Fatalf("POST /$closure add concepts expected subsumes relation between 38341003 and 59621000, got %d: %s", clRec2.Code, clRec2.Body.String())
+	}
+
+	closureResync := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "name", "valueString": "htn-closure-table"},
+			{"name": "version", "valueString": "0"}
+		]
+	}`
+	clReq3 := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/$closure", strings.NewReader(closureResync))
+	clReq3.Header.Set("Content-Type", "application/fhir+json")
+	clRec3 := httptest.NewRecorder()
+	pgH.ServeHTTP(clRec3, clReq3)
+	if clRec3.Code != http.StatusOK || !strings.Contains(clRec3.Body.String(), `"subsumes"`) {
+		t.Fatalf("POST /$closure version=0 resync expected full ConceptMap with subsumes, got %d: %s", clRec3.Code, clRec3.Body.String())
+	}
+
+	// 2. Clinical Reasoning $data-requirements on Measure, PlanDefinition, and Library
+	drReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Measure/cms165-bp-control/$data-requirements?periodStart=2026-01-01&periodEnd=2026-12-31", nil)
+	drRec := httptest.NewRecorder()
+	pgH.ServeHTTP(drRec, drReq)
+	if drRec.Code != http.StatusOK {
+		t.Fatalf("GET /Measure/cms165-bp-control/$data-requirements got %d: %s", drRec.Code, drRec.Body.String())
+	}
+	for _, want := range []string{`"resourceType":"Library"`, `"module-definition"`, `"dataRequirement"`, `"85354-9"`, `"38341003"`, `"2026-01-01"`} {
+		if !strings.Contains(drRec.Body.String(), want) {
+			t.Errorf("expected $data-requirements Library to contain %s, got %s", want, drRec.Body.String())
+		}
+	}
+
+	pdDrReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/PlanDefinition/plandef-hypertension-control/$data-requirements", nil)
+	pdDrRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pdDrRec, pdDrReq)
+	if pdDrRec.Code != http.StatusOK || !strings.Contains(pdDrRec.Body.String(), `"MedicationRequest"`) {
+		t.Fatalf("GET /PlanDefinition/plandef-hypertension-control/$data-requirements expected MedicationRequest dataRequirement, got %d: %s", pdDrRec.Code, pdDrRec.Body.String())
+	}
+
+	// 3. Seed Patient and Blood Pressure Observation and evaluate $fhirpath (stored instance + inline POST)
+	putRes("Patient", "pat-w15-1", `{
+		"resourceType": "Patient",
+		"id": "pat-w15-1",
+		"active": true,
+		"name": [{"use": "official", "family": "Rivera", "given": ["Elena", "Maria"]}],
+		"gender": "female",
+		"birthDate": "1979-08-22"
+	}`)
+	putRes("Observation", "obs-w15-bp", `{
+		"resourceType": "Observation",
+		"id": "obs-w15-bp",
+		"status": "final",
+		"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+		"code": {"coding": [{"system": "http://loinc.org", "code": "85354-9", "display": "Blood pressure panel"}]},
+		"subject": {"reference": "Patient/pat-w15-1"},
+		"effectiveDateTime": "2026-04-10T10:00:00Z",
+		"component": [
+			{
+				"code": {"coding": [{"system": "http://loinc.org", "code": "8480-6", "display": "Systolic blood pressure"}]},
+				"valueQuantity": {"value": 146.0, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+			},
+			{
+				"code": {"coding": [{"system": "http://loinc.org", "code": "8462-4", "display": "Diastolic blood pressure"}]},
+				"valueQuantity": {"value": 92.0, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+			}
+		]
+	}`)
+
+	fpReq1 := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w15-1/$fhirpath?expression=Patient.name.where(use='official').given.first()", nil)
+	fpRec1 := httptest.NewRecorder()
+	pgH.ServeHTTP(fpRec1, fpReq1)
+	if fpRec1.Code != http.StatusOK || !strings.Contains(fpRec1.Body.String(), `"valueString":"Elena"`) {
+		t.Fatalf("GET /Patient/pat-w15-1/$fhirpath expected valueString:Elena, got %d: %s", fpRec1.Code, fpRec1.Body.String())
+	}
+
+	fpReq2 := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Observation/obs-w15-bp/$fhirpath?expression=Observation.component.where(code.coding.code='8480-6').valueQuantity.value>=140", nil)
+	fpRec2 := httptest.NewRecorder()
+	pgH.ServeHTTP(fpRec2, fpReq2)
+	if fpRec2.Code != http.StatusOK || !strings.Contains(fpRec2.Body.String(), `"valueBoolean":true`) {
+		t.Fatalf("GET /Observation/obs-w15-bp/$fhirpath comparison >=140 expected valueBoolean:true, got %d: %s", fpRec2.Code, fpRec2.Body.String())
+	}
+
+	// 4. Subscription/{id}/$events notification replay (HL7 Subscriptions R5 Backport)
+	putRes("Subscription", "sub-w15-vitals", `{
+		"resourceType": "Subscription",
+		"id": "sub-w15-vitals",
+		"status": "active",
+		"reason": "Replay vital-signs observations",
+		"criteria": "Observation?category=vital-signs",
+		"channel": {
+			"type": "rest-hook",
+			"endpoint": "https://hooks.hospital.example.org/fhir/notify",
+			"payload": "application/fhir+json"
+		}
+	}`)
+	// Trigger two matching vital-signs Observations
+	putRes("Observation", "obs-w15-hr-1", `{
+		"resourceType": "Observation",
+		"id": "obs-w15-hr-1",
+		"status": "final",
+		"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+		"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}]},
+		"subject": {"reference": "Patient/pat-w15-1"},
+		"effectiveDateTime": "2026-04-10T10:05:00Z",
+		"valueQuantity": {"value": 74.0, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+	}`)
+	putRes("Observation", "obs-w15-hr-2", `{
+		"resourceType": "Observation",
+		"id": "obs-w15-hr-2",
+		"status": "final",
+		"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+		"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}]},
+		"subject": {"reference": "Patient/pat-w15-1"},
+		"effectiveDateTime": "2026-04-10T10:10:00Z",
+		"valueQuantity": {"value": 78.0, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+	}`)
+
+	evReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Subscription/sub-w15-vitals/$events?eventsSinceNumber=1&eventsUntilNumber=2&content=full-resource", nil)
+	evRec := httptest.NewRecorder()
+	pgH.ServeHTTP(evRec, evReq)
+	if evRec.Code != http.StatusOK {
+		t.Fatalf("GET /Subscription/sub-w15-vitals/$events got %d: %s", evRec.Code, evRec.Body.String())
+	}
+	evBody := evRec.Body.String()
+	for _, want := range []string{`"type":"history"`, `"event-notification"`, `"notification-event"`, `"Observation/obs-w15-hr-1"`, `"Observation/obs-w15-hr-2"`} {
+		if !strings.Contains(evBody, want) {
+			t.Errorf("expected Subscription/$events Bundle to contain %s, got %s", want, evBody)
+		}
+	}
+
+	// Verify content=empty omits resource entries and only includes the SubscriptionStatus Parameters entry
+	evEmptyReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Subscription/sub-w15-vitals/$events?eventsSinceNumber=2&eventsUntilNumber=2&content=empty", nil)
+	evEmptyRec := httptest.NewRecorder()
+	pgH.ServeHTTP(evEmptyRec, evEmptyReq)
+	if evEmptyRec.Code != http.StatusOK || strings.Contains(evEmptyRec.Body.String(), `"Observation/obs-w15-hr-1"`) || !strings.Contains(evEmptyRec.Body.String(), `"events-in-notification"`) {
+		t.Errorf("expected Subscription/$events?content=empty to return only SubscriptionStatus Parameters for event 2, got %d: %s", evEmptyRec.Code, evEmptyRec.Body.String())
+	}
+}
