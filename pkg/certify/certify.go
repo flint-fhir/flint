@@ -951,7 +951,17 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	if err == nil && resp.StatusCode != http.StatusBadRequest {
 		err = fmt.Errorf("expected 400 Bad Request when MedicationRequest omits medication[x], got %d", resp.StatusCode)
 	}
-	record("VAL-01", suite5, "StructureDefinition & Choice-Type Validation ($validate)", t0, err, "Rejected missing mandatory choice element medication[x]")
+	if err == nil {
+		respProfFail, _, errPF := doReq(http.MethodPost, basePath+"/Patient/$validate?profile=http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient", "application/fhir+json",
+			[]byte(`{"resourceType":"Patient","id":"incomplete-pat","active":true}`), nil)
+		respInstOK, _, errInstOK := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$validate?profile=http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient", "", nil, nil)
+		if errPF != nil || respProfFail.StatusCode != http.StatusBadRequest {
+			err = fmt.Errorf("expected 400 Bad Request when Patient violates us-core-patient profile, got %d", respProfFail.StatusCode)
+		} else if errInstOK != nil || respInstOK.StatusCode != http.StatusOK {
+			err = fmt.Errorf("expected 200 OK on instance GET /Patient/cert-pat-1/$validate against us-core-patient, got %d", respInstOK.StatusCode)
+		}
+	}
+	record("VAL-01", suite5, "StructureDefinition, US Core Profile & Instance Validation ($validate)", t0, err, "Verified choice-type medication[x], US Core profile enforcement, and instance $validate")
 
 	t0 = time.Now()
 	{
@@ -1030,6 +1040,10 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected Subscription status to transition from requested to active, got %v", subMap["status"])
 			}
 			if subID != "" {
+				respSubSt, bSubSt, errSubSt := doReq(http.MethodGet, basePath+"/Subscription/"+subID+"/$status", "", nil, nil)
+				if errSubSt != nil || respSubSt.StatusCode != http.StatusOK || !strings.Contains(string(bSubSt), `"query-status"`) {
+					err = fmt.Errorf("expected 200 OK with query-status from Subscription/$status, got %d: %s", respSubSt.StatusCode, string(bSubSt))
+				}
 				_, _, _ = doReq(http.MethodDelete, basePath+"/Subscription/"+subID, "", nil, nil)
 			}
 			// Verify SSRF webhook endpoint rejection (link-local / cloud metadata)

@@ -15,6 +15,13 @@ type Validator interface {
 	ValidateResource(expectedResType string, resMap map[string]any) *Outcome
 }
 
+// ProfileValidator extends Validator with US Core / StructureDefinition profile and mode validation.
+type ProfileValidator interface {
+	Validator
+	ValidateJSONWithProfiles(expectedResType string, rawJSON []byte, profiles []string, mode string) *Outcome
+	ValidateResourceWithProfiles(expectedResType string, resMap map[string]any, profiles []string, mode string) *Outcome
+}
+
 // Options configures validation strictness.
 type Options struct {
 	DisallowUnknownFields   bool // If true, undeclared elements cause validation errors
@@ -491,4 +498,525 @@ func (e *Engine) validateComplexElement(
 	}
 
 	e.validateNestedChildren(elementPath, det.childDescriptors, elemMap, outcome, depth)
+}
+
+// ValidateJSONWithProfiles validates a raw JSON byte slice against base FHIR R4 rules,
+// optional $validate operation mode ("create", "update", "delete"), and explicit or
+// meta.profile-declared US Core v6.1.0 / v7.0.0 StructureDefinition profiles.
+func (e *Engine) ValidateJSONWithProfiles(expectedResType string, rawJSON []byte, profiles []string, mode string) *Outcome {
+	outcome := NewOutcome()
+	if len(rawJSON) == 0 {
+		outcome.AddError(CodeStructure, "Payload body is empty")
+		return outcome
+	}
+	var resMap map[string]any
+	if err := json.Unmarshal(rawJSON, &resMap); err != nil {
+		outcome.AddError(CodeStructure, fmt.Sprintf("Malformed FHIR JSON: %v", err))
+		return outcome
+	}
+	return e.ValidateResourceWithProfiles(expectedResType, resMap, profiles, mode)
+}
+
+// ValidateResourceWithProfiles validates an unmarshaled JSON map against base FHIR R4 rules,
+// optional $validate operation mode ("create", "update", "delete"), and explicit or
+// meta.profile-declared US Core v6.1.0 / v7.0.0 StructureDefinition profiles.
+func (e *Engine) ValidateResourceWithProfiles(expectedResType string, resMap map[string]any, profiles []string, mode string) *Outcome {
+	outcome := e.ValidateResource(expectedResType, resMap)
+	resTypeStr, _ := resMap["resourceType"].(string)
+	if resTypeStr == "" {
+		return outcome
+	}
+
+	if trimmedMode := strings.ToLower(strings.TrimSpace(mode)); trimmedMode != "" {
+		switch trimmedMode {
+		case "create":
+		case "update", "delete":
+			if extractStringOrWrapped(resMap["id"]) == "" {
+				outcome.AddError(CodeRequired,
+					fmt.Sprintf("Resource id is required when $validate mode is %q", trimmedMode),
+					resTypeStr+".id")
+			}
+		default:
+			outcome.AddError(CodeValue,
+				fmt.Sprintf("Unsupported $validate mode %q (expected create, update, or delete)", mode),
+				resTypeStr)
+		}
+	}
+
+	var allProfiles []string
+	seen := make(map[string]bool)
+	addProf := func(p string) {
+		p = strings.TrimSpace(p)
+		if p != "" && !seen[p] {
+			seen[p] = true
+			allProfiles = append(allProfiles, p)
+		}
+	}
+	for _, p := range profiles {
+		for part := range strings.SplitSeq(p, ",") {
+			addProf(part)
+		}
+	}
+	if metaMap, ok := resMap["meta"].(map[string]any); ok {
+		if profArr, ok := metaMap["profile"].([]any); ok {
+			for _, item := range profArr {
+				addProf(extractStringOrWrapped(item))
+			}
+		}
+	}
+
+	for _, rawProf := range allProfiles {
+		baseProf := rawProf
+		if pipeIdx := strings.IndexByte(rawProf, '|'); pipeIdx != -1 {
+			baseProf = strings.TrimSpace(rawProf[:pipeIdx])
+		}
+		if after, ok := strings.CutPrefix(baseProf, "http://hl7.org/fhir/StructureDefinition/"); ok {
+			targetRT := strings.TrimSpace(after)
+			if targetRT != "" && targetRT != "Resource" && targetRT != "DomainResource" && targetRT != resTypeStr {
+				outcome.AddError(CodeInvariant,
+					fmt.Sprintf("Resource of type %q does not conform to profile %q (expected resourceType %q)", resTypeStr, rawProf, targetRT),
+					resTypeStr+".resourceType")
+			}
+			continue
+		}
+
+		spec, known := usCoreProfileSpecs[baseProf]
+		if !known {
+			outcome.AddWarning(CodeNotSupported,
+				fmt.Sprintf("Profile %q is not registered in the US Core StructureDefinition registry; validated against base %s schema", rawProf, resTypeStr),
+				resTypeStr+".meta.profile")
+			continue
+		}
+
+		if spec.ResourceType != resTypeStr {
+			outcome.AddError(CodeInvariant,
+				fmt.Sprintf("Resource of type %q does not conform to %s profile %q", resTypeStr, spec.ResourceType, rawProf),
+				resTypeStr+".resourceType")
+			continue
+		}
+
+		for _, reqField := range spec.RequiredFields {
+			if !hasUSCoreRequiredElement(resMap, reqField) {
+				exprField := strings.TrimSuffix(reqField, "[x]")
+				if idx := strings.IndexByte(exprField, '|'); idx != -1 {
+					exprField = exprField[:idx]
+				}
+				outcome.AddError(CodeRequired,
+					fmt.Sprintf("US Core profile %s requires element %q on %s", spec.Slug, reqField, resTypeStr),
+					resTypeStr+"."+exprField)
+			}
+		}
+
+		if spec.CustomCheck != nil {
+			spec.CustomCheck(resTypeStr, resMap, outcome)
+		}
+	}
+
+	return outcome
+}
+
+type usCoreProfileSpec struct {
+	Slug           string
+	ResourceType   string
+	RequiredFields []string
+	CustomCheck    func(resType string, resMap map[string]any, outcome *Outcome)
+}
+
+func hasUSCoreRequiredElement(resMap map[string]any, fieldSpec string) bool {
+	for candidate := range strings.SplitSeq(fieldSpec, "|") {
+		candidate = strings.TrimSpace(candidate)
+		switch candidate {
+		case "effective[x]":
+			for _, k := range []string{"effectiveDateTime", "effectivePeriod", "effectiveTiming", "effectiveInstant"} {
+				if v, ok := resMap[k]; ok && v != nil && !isEmptyValue(v) {
+					return true
+				}
+			}
+		case "value[x]":
+			for _, k := range []string{
+				"valueQuantity", "valueCodeableConcept", "valueString", "valueBoolean",
+				"valueInteger", "valueRange", "valueRatio", "valueSampledData",
+				"valueTime", "valueDateTime", "valuePeriod",
+			} {
+				if v, ok := resMap[k]; ok && v != nil && !isEmptyValue(v) {
+					return true
+				}
+			}
+		case "medication[x]":
+			for _, k := range []string{"medicationCodeableConcept", "medicationReference"} {
+				if v, ok := resMap[k]; ok && v != nil && !isEmptyValue(v) {
+					return true
+				}
+			}
+		case "occurrence[x]":
+			for _, k := range []string{"occurrenceDateTime", "occurrenceString"} {
+				if v, ok := resMap[k]; ok && v != nil && !isEmptyValue(v) {
+					return true
+				}
+			}
+		case "performed[x]":
+			for _, k := range []string{"performedDateTime", "performedPeriod", "performedString", "performedAge", "performedRange"} {
+				if v, ok := resMap[k]; ok && v != nil && !isEmptyValue(v) {
+					return true
+				}
+			}
+		case "class":
+			for _, k := range []string{"class", "classValue"} {
+				if v, ok := resMap[k]; ok && v != nil && !isEmptyValue(v) {
+					return true
+				}
+			}
+		default:
+			if v, ok := resMap[candidate]; ok && v != nil && !isEmptyValue(v) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func extractCodesFromElement(v any) []string {
+	switch val := v.(type) {
+	case string:
+		if val != "" {
+			return []string{val}
+		}
+	case map[string]any:
+		var out []string
+		if s := extractStringOrWrapped(val["code"]); s != "" {
+			out = append(out, s)
+		} else if s := extractStringOrWrapped(val["value"]); s != "" {
+			out = append(out, s)
+		}
+		if codings, ok := val["coding"].([]any); ok {
+			for _, item := range codings {
+				if cm, ok := item.(map[string]any); ok {
+					if c := extractStringOrWrapped(cm["code"]); c != "" {
+						out = append(out, c)
+					}
+				}
+			}
+		}
+		return out
+	}
+	return nil
+}
+
+func categoryContainsCode(resMap map[string]any, wantCode string) bool {
+	cats, ok := resMap["category"].([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range cats {
+		cc, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, code := range extractCodesFromElement(cc) {
+			if strings.EqualFold(code, wantCode) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func verificationStatusIsEnteredInError(resMap map[string]any) bool {
+	vs, ok := resMap["verificationStatus"]
+	if !ok || vs == nil {
+		return false
+	}
+	for _, c := range extractCodesFromElement(vs) {
+		if strings.EqualFold(c, "entered-in-error") {
+			return true
+		}
+	}
+	return false
+}
+
+var usCoreProfileSpecs = map[string]usCoreProfileSpec{
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient": {
+		Slug:           "us-core-patient",
+		ResourceType:   "Patient",
+		RequiredFields: []string{"identifier", "name", "gender"},
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			if ids, ok := resMap["identifier"].([]any); ok {
+				hasSysAndVal := false
+				for _, it := range ids {
+					if m, ok := it.(map[string]any); ok {
+						if extractStringOrWrapped(m["system"]) != "" && extractStringOrWrapped(m["value"]) != "" {
+							hasSysAndVal = true
+							break
+						}
+					}
+				}
+				if !hasSysAndVal {
+					outcome.AddError(CodeRequired,
+						"US Core profile us-core-patient requires at least one identifier with both system and value",
+						"Patient.identifier")
+				}
+			}
+			if names, ok := resMap["name"].([]any); ok {
+				hasNamePart := false
+				for _, it := range names {
+					if m, ok := it.(map[string]any); ok {
+						if extractStringOrWrapped(m["family"]) != "" || (m["given"] != nil && !isEmptyValue(m["given"])) {
+							hasNamePart = true
+							break
+						}
+					}
+				}
+				if !hasNamePart {
+					outcome.AddError(CodeRequired,
+						"US Core profile us-core-patient requires at least one name with family or given",
+						"Patient.name")
+				}
+			}
+		},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-vital-signs":            vitalSignsSpec("us-core-vital-signs", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-heart-rate":             vitalSignsSpec("us-core-heart-rate", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-respiratory-rate":       vitalSignsSpec("us-core-respiratory-rate", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-temperature":       vitalSignsSpec("us-core-body-temperature", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-weight":            vitalSignsSpec("us-core-body-weight", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-height":            vitalSignsSpec("us-core-body-height", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-bmi":                    vitalSignsSpec("us-core-bmi", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pulse-oximetry":         vitalSignsSpec("us-core-pulse-oximetry", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-blood-pressure":         vitalSignsSpec("us-core-blood-pressure", checkBloodPressureComponents),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-average-blood-pressure": vitalSignsSpec("us-core-average-blood-pressure", checkBloodPressureComponents),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab": {
+		Slug:           "us-core-observation-lab",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "value[x]|dataAbsentReason|hasMember|component"},
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			if _, ok := resMap["category"]; ok && !categoryContainsCode(resMap, "laboratory") {
+				outcome.AddError(CodeInvalid,
+					"US Core profile us-core-observation-lab requires category code 'laboratory'",
+					"Observation.category")
+			}
+		},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-smokingstatus": {
+		Slug:           "us-core-smokingstatus",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject", "valueCodeableConcept"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-care-experience-preference": {
+		Slug:           "us-core-care-experience-preference",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject", "effective[x]", "value[x]|dataAbsentReason"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-treatment-intervention-preference": {
+		Slug:           "us-core-treatment-intervention-preference",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject", "effective[x]", "value[x]|dataAbsentReason"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-simple-observation": {
+		Slug:           "us-core-simple-observation",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-screening-assessment": {
+		Slug:           "us-core-observation-screening-assessment",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result": {
+		Slug:           "us-core-observation-clinical-result",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns": conditionProfileSpec("us-core-condition-problems-health-concerns"),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-encounter-diagnosis":      conditionProfileSpec("us-core-condition-encounter-diagnosis"),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-encounter": {
+		Slug:           "us-core-encounter",
+		ResourceType:   "Encounter",
+		RequiredFields: []string{"status", "class", "type", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationrequest": {
+		Slug:           "us-core-medicationrequest",
+		ResourceType:   "MedicationRequest",
+		RequiredFields: []string{"status", "intent", "medication[x]", "subject", "requester"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-allergyintolerance": {
+		Slug:           "us-core-allergyintolerance",
+		ResourceType:   "AllergyIntolerance",
+		RequiredFields: []string{"code", "patient"},
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			if !verificationStatusIsEnteredInError(resMap) && !hasUSCoreRequiredElement(resMap, "clinicalStatus") {
+				outcome.AddError(CodeRequired,
+					"US Core profile us-core-allergyintolerance requires element \"clinicalStatus\" unless verificationStatus is entered-in-error",
+					"AllergyIntolerance.clinicalStatus")
+			}
+		},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-procedure": {
+		Slug:           "us-core-procedure",
+		ResourceType:   "Procedure",
+		RequiredFields: []string{"status", "code", "subject", "performed[x]"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-lab": {
+		Slug:           "us-core-diagnosticreport-lab",
+		ResourceType:   "DiagnosticReport",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]|issued"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note": {
+		Slug:           "us-core-diagnosticreport-note",
+		ResourceType:   "DiagnosticReport",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]|issued"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-immunization": {
+		Slug:           "us-core-immunization",
+		ResourceType:   "Immunization",
+		RequiredFields: []string{"status", "vaccineCode", "patient", "occurrence[x]"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitioner": {
+		Slug:           "us-core-practitioner",
+		ResourceType:   "Practitioner",
+		RequiredFields: []string{"identifier", "name"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-organization": {
+		Slug:           "us-core-organization",
+		ResourceType:   "Organization",
+		RequiredFields: []string{"active", "name"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-documentreference": {
+		Slug:           "us-core-documentreference",
+		ResourceType:   "DocumentReference",
+		RequiredFields: []string{"status", "type", "category", "subject", "content"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-provenance": {
+		Slug:           "us-core-provenance",
+		ResourceType:   "Provenance",
+		RequiredFields: []string{"target", "recorded", "agent"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-careplan": {
+		Slug:           "us-core-careplan",
+		ResourceType:   "CarePlan",
+		RequiredFields: []string{"status", "intent", "category", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-careteam": {
+		Slug:           "us-core-careteam",
+		ResourceType:   "CareTeam",
+		RequiredFields: []string{"status", "subject", "participant"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-goal": {
+		Slug:           "us-core-goal",
+		ResourceType:   "Goal",
+		RequiredFields: []string{"lifecycleStatus", "description", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-servicerequest": {
+		Slug:           "us-core-servicerequest",
+		ResourceType:   "ServiceRequest",
+		RequiredFields: []string{"status", "intent", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage": {
+		Slug:           "us-core-coverage",
+		ResourceType:   "Coverage",
+		RequiredFields: []string{"status", "beneficiary", "payor"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-questionnaireresponse": {
+		Slug:           "us-core-questionnaireresponse",
+		ResourceType:   "QuestionnaireResponse",
+		RequiredFields: []string{"status", "questionnaire", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationdispense": {
+		Slug:           "us-core-medicationdispense",
+		ResourceType:   "MedicationDispense",
+		RequiredFields: []string{"status", "medication[x]", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medication": {
+		Slug:           "us-core-medication",
+		ResourceType:   "Medication",
+		RequiredFields: []string{"code"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-implantable-device": {
+		Slug:           "us-core-implantable-device",
+		ResourceType:   "Device",
+		RequiredFields: []string{"type", "patient"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitionerrole": {
+		Slug:           "us-core-practitionerrole",
+		ResourceType:   "PractitionerRole",
+		RequiredFields: []string{"practitioner|organization|code|specialty"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-relatedperson": {
+		Slug:           "us-core-relatedperson",
+		ResourceType:   "RelatedPerson",
+		RequiredFields: []string{"patient", "relationship", "name"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-specimen": {
+		Slug:           "us-core-specimen",
+		ResourceType:   "Specimen",
+		RequiredFields: []string{"type", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-location": {
+		Slug:           "us-core-location",
+		ResourceType:   "Location",
+		RequiredFields: []string{"name"},
+	},
+}
+
+func vitalSignsSpec(slug string, extra func(resType string, resMap map[string]any, outcome *Outcome)) usCoreProfileSpec {
+	return usCoreProfileSpec{
+		Slug:           slug,
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]", "value[x]|dataAbsentReason|component"},
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			if _, ok := resMap["category"]; ok && !categoryContainsCode(resMap, "vital-signs") {
+				outcome.AddError(CodeInvalid,
+					fmt.Sprintf("US Core profile %s requires category code 'vital-signs'", slug),
+					"Observation.category")
+			}
+			if extra != nil {
+				extra(resType, resMap, outcome)
+			}
+		},
+	}
+}
+
+func checkBloodPressureComponents(resType string, resMap map[string]any, outcome *Outcome) {
+	comps, ok := resMap["component"].([]any)
+	if !ok || len(comps) == 0 {
+		outcome.AddError(CodeRequired,
+			"US Core blood pressure profile requires systolic (8480-6) and diastolic (8462-4) components",
+			"Observation.component")
+		return
+	}
+	hasSystolic := false
+	hasDiastolic := false
+	for _, c := range comps {
+		cm, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, code := range extractCodesFromElement(cm["code"]) {
+			switch code {
+			case "8480-6":
+				hasSystolic = true
+			case "8462-4":
+				hasDiastolic = true
+			}
+		}
+	}
+	if !hasSystolic || !hasDiastolic {
+		outcome.AddError(CodeRequired,
+			"US Core blood pressure profile requires both systolic (8480-6) and diastolic (8462-4) components",
+			"Observation.component")
+	}
+}
+
+func conditionProfileSpec(slug string) usCoreProfileSpec {
+	return usCoreProfileSpec{
+		Slug:           slug,
+		ResourceType:   "Condition",
+		RequiredFields: []string{"category", "code", "subject"},
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			if !verificationStatusIsEnteredInError(resMap) && !hasUSCoreRequiredElement(resMap, "clinicalStatus") {
+				outcome.AddError(CodeRequired,
+					fmt.Sprintf("US Core profile %s requires element \"clinicalStatus\" unless verificationStatus is entered-in-error", slug),
+					"Condition.clinicalStatus")
+			}
+		},
+	}
 }

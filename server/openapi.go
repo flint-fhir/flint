@@ -1183,10 +1183,20 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				"parameters": []map[string]any{
 					{"name": "_type", "in": "query", "description": "Comma-separated FHIR resource types (e.g. Patient,Observation)", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "Only include resources updated at or after this ISO-8601 timestamp", "schema": map[string]any{"type": "string"}},
+					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters (e.g. Observation?category=vital-signs)", "schema": map[string]any{"type": "string"}},
 					{"name": "_outputFormat", "in": "query", "description": "NDJSON output format (default application/fhir+ndjson)", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "Newline-delimited FHIR JSON (application/fhir+ndjson) or BulkExportManifest"},
+					"202": map[string]any{"description": "Async job accepted (Content-Location polling URL)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Bulk Data ($export)"},
+				"summary":     "System-level FHIR Bulk Data Export via POST Parameters kick-off",
+				"operationId": "systemBulkExportPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Newline-delimited FHIR JSON or BulkExportManifest"},
 					"202": map[string]any{"description": "Async job accepted (Content-Location polling URL)"},
 				},
 			},
@@ -1199,10 +1209,53 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				"parameters": []map[string]any{
 					{"name": "_type", "in": "query", "description": "Comma-separated FHIR resource types", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters", "schema": map[string]any{"type": "string"}},
+					{"name": "patient", "in": "query", "description": "Optional patient cohort filter (e.g. Patient/pat-1,Patient/pat-2)", "schema": map[string]any{"type": "string"}},
 					{"name": "_outputFormat", "in": "query", "description": "NDJSON output format (application/fhir+ndjson)", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "Newline-delimited FHIR JSON (application/fhir+ndjson)"},
+					"202": map[string]any{"description": "Async job accepted (Content-Location polling URL)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Bulk Data ($export)"},
+				"summary":     "Patient-level Cohort Bulk Data Export via POST Parameters kick-off",
+				"operationId": "patientGroupBulkExportPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Newline-delimited FHIR JSON or BulkExportManifest"},
+					"202": map[string]any{"description": "Async job accepted (Content-Location polling URL)"},
+				},
+			},
+		},
+		"/Group/{id}/$export": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Bulk Data ($export)", "Group"},
+				"summary":     "ONC (g)(10) Group Cohort Bulk Data Export resolving active Group.member Patients",
+				"operationId": "groupBulkExport",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "_type", "in": "query", "description": "Comma-separated FHIR resource types", "schema": map[string]any{"type": "string"}},
+					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters", "schema": map[string]any{"type": "string"}},
+					{"name": "patient", "in": "query", "description": "Optional patient subset filter within the Group cohort", "schema": map[string]any{"type": "string"}},
+					{"name": "_outputFormat", "in": "query", "description": "NDJSON output format (application/fhir+ndjson)", "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Newline-delimited FHIR JSON (application/fhir+ndjson) or BulkExportManifest"},
+					"202": map[string]any{"description": "Async job accepted (Content-Location polling URL)"},
+					"404": map[string]any{"description": "Group not found"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Bulk Data ($export)", "Group"},
+				"summary":     "ONC (g)(10) Group Cohort Bulk Data Export via POST Parameters kick-off",
+				"operationId": "groupBulkExportPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Newline-delimited FHIR JSON or BulkExportManifest"},
 					"202": map[string]any{"description": "Async job accepted (Content-Location polling URL)"},
 				},
 			},
@@ -1216,10 +1269,69 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 					{"name": "_type", "in": "query", "description": "Comma-separated FHIR resource types", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "Newline-delimited FHIR JSON (application/fhir+ndjson)"},
 					"202": map[string]any{"description": "Async job accepted"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Bulk Data ($export)"},
+				"summary":     "Single-Patient Compartment Bulk Data Export via POST Parameters kick-off",
+				"operationId": "singlePatientBulkExportPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Newline-delimited FHIR JSON or BulkExportManifest"},
+					"202": map[string]any{"description": "Async job accepted"},
+				},
+			},
+		},
+		"/Subscription/$status": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "Query FHIR R4 Subscription status and delivery telemetry across active subscriptions ($status)",
+				"operationId": "subscriptionStatusAllGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "query", "required": false, "description": "Optional Subscription ID", "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle of FHIR Parameters subscription status reports (or single Parameters if id specified)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "Query FHIR R4 Subscription status via POST Parameters ($status)",
+				"operationId": "subscriptionStatusAllPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle of FHIR Parameters subscription status reports"},
+				},
+			},
+		},
+		"/Subscription/{id}/$status": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "Query FHIR R4 Subscription/{id} status, events-since-subscription-start, and error diagnostics ($status)",
+				"operationId": "subscriptionStatusGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters subscription status report"},
+					"404": map[string]any{"description": "Subscription not found"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "Query FHIR R4 Subscription/{id} status ($status, POST)",
+				"operationId": "subscriptionStatusPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters subscription status report"},
 				},
 			},
 		},
@@ -1766,8 +1878,42 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		paths["/"+rt+"/$validate"] = map[string]any{
 			"post": map[string]any{
 				"tags":        []string{rt},
-				"summary":     fmt.Sprintf("Validate %s resource against StructureDefinition & ValueSets", rt),
+				"summary":     fmt.Sprintf("Validate %s resource against StructureDefinition, US Core profiles, & ValueSets", rt),
 				"operationId": "validate" + rt,
+				"parameters": []map[string]any{
+					{"name": "profile", "in": "query", "required": false, "description": "StructureDefinition canonical URL (e.g. http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient)", "schema": map[string]any{"type": "string"}},
+					{"name": "mode", "in": "query", "required": false, "description": "Validation mode (create, update, delete)", "schema": map[string]any{"type": "string", "enum": []string{"create", "update", "delete"}}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OperationOutcome validation result"},
+				},
+			},
+		}
+
+		paths["/"+rt+"/{id}/$validate"] = map[string]any{
+			"get": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Validate stored %s/{id} instance against StructureDefinition, US Core profiles, & ValueSets", rt),
+				"operationId": "validateInstanceGet" + rt,
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "profile", "in": "query", "required": false, "description": "StructureDefinition canonical URL", "schema": map[string]any{"type": "string"}},
+					{"name": "mode", "in": "query", "required": false, "description": "Validation mode (create, update, delete)", "schema": map[string]any{"type": "string", "enum": []string{"create", "update", "delete"}}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OperationOutcome validation result"},
+					"404": map[string]any{"description": rt + " not found"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Validate %s/{id} instance against StructureDefinition, US Core profiles, & ValueSets (POST)", rt),
+				"operationId": "validateInstancePost" + rt,
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "profile", "in": "query", "required": false, "description": "StructureDefinition canonical URL", "schema": map[string]any{"type": "string"}},
+					{"name": "mode", "in": "query", "required": false, "description": "Validation mode (create, update, delete)", "schema": map[string]any{"type": "string", "enum": []string{"create", "update", "delete"}}},
+				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "OperationOutcome validation result"},
 				},
