@@ -208,6 +208,8 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.syncSearchParameterOnWrite(resType, resID, patchedJSON)
+
 	var idx *postgres.SearchIndexes
 	if extractor, ok := s.extractors[resType]; ok {
 		idx, _ = extractor(tenant, resID, protoBytes)
@@ -395,6 +397,8 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 				return postgres.ResourceInput{}, mErr
 			}
 			finalProtoBytes = pBytes
+
+			s.syncSearchParameterOnWrite(resType, finalResID, body)
 
 			if extractor, ok := s.extractors[resType]; ok {
 				finalIdx, _ = extractor(tenant, finalResID, finalProtoBytes)
@@ -644,6 +648,7 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 		}
 		for _, rec := range recs {
 			if rec.ResVersion > 0 {
+				s.syncSearchParameterOnDelete(resType, rec.ResID)
 				s.publishCDC(r.Context(), automq.Message{
 					TenantID: tenant,
 					ResType:  resType,

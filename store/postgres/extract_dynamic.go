@@ -38,6 +38,9 @@ func extractFromMessage(idx *SearchIndexes, tenantID, resType, resID string, msg
 	if !msg.IsValid() || depth > 2 {
 		return
 	}
+	if depth == 0 && !strings.Contains(resID, "#") {
+		extractExtensionsContainedAndCustomFromRoot(idx, tenantID, resType, resID, msg)
+	}
 
 	msg.Range(func(fd protoreflect.FieldDescriptor, val protoreflect.Value) bool {
 		fieldName := string(fd.Name())
@@ -588,6 +591,9 @@ func appendTokenTextFromMessage(idx *SearchIndexes, tenantID, resType, resID str
 	if idx == nil || !msg.IsValid() || depth > 2 {
 		return
 	}
+	if depth == 0 && !strings.Contains(resID, "#") {
+		extractExtensionsContainedAndCustomFromRoot(idx, tenantID, resType, resID, msg)
+	}
 	msg.Range(func(fd protoreflect.FieldDescriptor, val protoreflect.Value) bool {
 		fieldName := string(fd.Name())
 		switch fieldName {
@@ -1122,4 +1128,758 @@ func extractQuantityFromMessage(idx *SearchIndexes, tenantID, resType, resID str
 			})
 		}
 	}
+}
+
+func extractExtensionsContainedAndCustomFromRoot(idx *SearchIndexes, tenantID, resType, resID string, msg protoreflect.Message) {
+	if idx == nil || !msg.IsValid() || resID == "" {
+		return
+	}
+	customDefs := CustomSearchParamsForType(resType)
+	extractExtensionsFromMessage(idx, tenantID, resType, resID, msg, customDefs, 0)
+	extractCustomSearchParamsFromMessage(idx, tenantID, resType, resID, msg, customDefs)
+	extractContainedResourcesFromRoot(idx, tenantID, resType, resID, msg)
+}
+
+func extractExtensionsFromMessage(idx *SearchIndexes, tenantID, resType, resID string, msg protoreflect.Message, customDefs []CustomSearchParamDef, depth int) {
+	if !msg.IsValid() || depth > 2 {
+		return
+	}
+	msg.Range(func(fd protoreflect.FieldDescriptor, val protoreflect.Value) bool {
+		if fd.Kind() != protoreflect.MessageKind {
+			return true
+		}
+		name := string(fd.Name())
+		if name == "extension" || name == "modifier_extension" {
+			if fd.IsList() {
+				list := val.List()
+				for i := 0; i < list.Len(); i++ {
+					processSingleExtension(idx, tenantID, resType, resID, list.Get(i).Message(), customDefs)
+				}
+			} else {
+				processSingleExtension(idx, tenantID, resType, resID, val.Message(), customDefs)
+			}
+			return true
+		}
+		if name == "id" || name == "meta" || name == "text" || name == "contained" {
+			return true
+		}
+		if fd.IsList() {
+			list := val.List()
+			for i := 0; i < list.Len(); i++ {
+				extractExtensionsFromMessage(idx, tenantID, resType, resID, list.Get(i).Message(), customDefs, depth+1)
+			}
+		} else {
+			extractExtensionsFromMessage(idx, tenantID, resType, resID, val.Message(), customDefs, depth+1)
+		}
+		return true
+	})
+}
+
+func processSingleExtension(idx *SearchIndexes, tenantID, resType, resID string, extMsg protoreflect.Message, customDefs []CustomSearchParamDef) {
+	if !extMsg.IsValid() {
+		return
+	}
+	extURL := extractExtensionURL(extMsg)
+	if extURL == "" {
+		return
+	}
+
+	var matched []struct {
+		code string
+		typ  string
+	}
+	switch strings.ToLower(extURL) {
+	case "http://hl7.org/fhir/us/core/structuredefinition/us-core-race":
+		matched = append(matched, struct{ code, typ string }{"race", "token"})
+	case "http://hl7.org/fhir/us/core/structuredefinition/us-core-ethnicity":
+		matched = append(matched, struct{ code, typ string }{"ethnicity", "token"})
+	case "http://hl7.org/fhir/us/core/structuredefinition/us-core-birthsex":
+		matched = append(matched, struct{ code, typ string }{"birthsex", "token"})
+	}
+
+	lowerURL := strings.ToLower(extURL)
+	for _, def := range customDefs {
+		if def.Code == "" || def.Expression == "" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(def.Expression), "'"+lowerURL+"'") ||
+			strings.Contains(strings.ToLower(def.Expression), `"`+lowerURL+`"`) {
+			already := false
+			for _, m := range matched {
+				if m.code == def.Code {
+					already = true
+					break
+				}
+			}
+			if !already {
+				matched = append(matched, struct{ code, typ string }{def.Code, def.Type})
+			}
+		}
+	}
+
+	for _, m := range matched {
+		extractExtensionValuesIntoIndex(idx, tenantID, resType, resID, extMsg, extURL, m.code, m.typ, 0)
+	}
+}
+
+func extractExtensionURL(extMsg protoreflect.Message) string {
+	if !extMsg.IsValid() {
+		return ""
+	}
+	urlFD := extMsg.Descriptor().Fields().ByName("url")
+	if urlFD == nil || !extMsg.Has(urlFD) {
+		return ""
+	}
+	if urlFD.Kind() == protoreflect.StringKind {
+		return strings.TrimSpace(extMsg.Get(urlFD).String())
+	}
+	if urlFD.Kind() == protoreflect.MessageKind {
+		return strings.TrimSpace(extractWrappedString(extMsg.Get(urlFD).Message()))
+	}
+	return ""
+}
+
+func extractExtensionValuesIntoIndex(idx *SearchIndexes, tenantID, resType, resID string, extMsg protoreflect.Message, rootExtURL, spName, paramType string, depth int) {
+	if !extMsg.IsValid() || depth > 3 {
+		return
+	}
+	subURL := extractExtensionURL(extMsg)
+	if valFD := extMsg.Descriptor().Fields().ByName("value"); valFD != nil && extMsg.Has(valFD) && valFD.Kind() == protoreflect.MessageKind {
+		valX := extMsg.Get(valFD).Message()
+		if valX.IsValid() {
+			valX.Range(func(cfd protoreflect.FieldDescriptor, cval protoreflect.Value) bool {
+				if cfd.Kind() != protoreflect.MessageKind {
+					return true
+				}
+				extractTypedValueIntoSpName(idx, tenantID, resType, resID, cval.Message(), string(cfd.Name()), rootExtURL, subURL, spName, paramType)
+				return true
+			})
+		}
+	}
+	if extFD := extMsg.Descriptor().Fields().ByName("extension"); extFD != nil && extMsg.Has(extFD) && extFD.IsList() {
+		list := extMsg.Get(extFD).List()
+		for i := 0; i < list.Len(); i++ {
+			extractExtensionValuesIntoIndex(idx, tenantID, resType, resID, list.Get(i).Message(), rootExtURL, spName, paramType, depth+1)
+		}
+	}
+}
+
+func extractTypedValueIntoSpName(idx *SearchIndexes, tenantID, resType, resID string, vMsg protoreflect.Message, fieldName, rootExtURL, subURL, spName, paramType string) {
+	if !vMsg.IsValid() || spName == "" {
+		return
+	}
+	fullName := string(vMsg.Descriptor().FullName())
+	switch fullName {
+	case "google.fhir.r4.core.Coding":
+		extractCodingToken(idx, tenantID, resType, resID, vMsg, []string{spName})
+		if paramType == "string" {
+			if dispFD := vMsg.Descriptor().Fields().ByName("display"); dispFD != nil && vMsg.Has(dispFD) {
+				if disp := fhirutil.NormalizeString(extractWrappedString(vMsg.Get(dispFD).Message())); disp != "" {
+					idx.Strings = append(idx.Strings, SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: disp})
+				}
+			}
+			if codeFD := vMsg.Descriptor().Fields().ByName("code"); codeFD != nil && vMsg.Has(codeFD) {
+				if code := fhirutil.NormalizeString(extractWrappedString(vMsg.Get(codeFD).Message())); code != "" {
+					idx.Strings = append(idx.Strings, SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: code})
+				}
+			}
+		}
+	case "google.fhir.r4.core.CodeableConcept":
+		extractCodeableConceptTokens(idx, tenantID, resType, resID, vMsg, []string{spName})
+		if paramType == "string" {
+			if txtFD := vMsg.Descriptor().Fields().ByName("text"); txtFD != nil && vMsg.Has(txtFD) {
+				if txt := fhirutil.NormalizeString(extractWrappedString(vMsg.Get(txtFD).Message())); txt != "" {
+					idx.Strings = append(idx.Strings, SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: txt})
+				}
+			}
+		}
+	case "google.fhir.r4.core.Identifier":
+		sys, val := extractIdentifier(vMsg)
+		if val != "" {
+			idx.Tokens = append(idx.Tokens, SpidxToken{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpSystem: sys, SpValue: val})
+			if paramType == "string" {
+				idx.Strings = append(idx.Strings, SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: fhirutil.NormalizeString(val)})
+			}
+		}
+	case "google.fhir.r4.core.Reference":
+		extractReferenceIndex(idx, tenantID, resType, resID, vMsg, []string{spName})
+	case "google.fhir.r4.core.Date", "google.fhir.r4.core.DateTime", "google.fhir.r4.core.Instant":
+		if t, ok := extractTemporalTime(vMsg); ok {
+			idx.Dates = append(idx.Dates, SpidxDate{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpLow: t, SpHigh: t})
+		}
+	case "google.fhir.r4.core.Period":
+		if startT, endT, ok := extractPeriodTimes(vMsg); ok {
+			idx.Dates = append(idx.Dates, SpidxDate{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpLow: startT, SpHigh: endT})
+		}
+	case "google.fhir.r4.core.Quantity", "google.fhir.r4.core.SimpleQuantity", "google.fhir.r4.core.Age", "google.fhir.r4.core.Duration", "google.fhir.r4.core.Distance", "google.fhir.r4.core.Count", "google.fhir.r4.core.Money":
+		extractQuantityIntoNamedSp(idx, tenantID, resType, resID, vMsg, spName)
+	case "google.fhir.r4.core.Decimal":
+		valStr := strings.TrimSpace(extractWrappedString(vMsg))
+		if numVal, err := strconv.ParseFloat(valStr, 64); err == nil {
+			idx.Quantities = append(idx.Quantities, SpidxQuantity{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: numVal})
+			idx.Tokens = append(idx.Tokens, SpidxToken{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: valStr})
+		}
+	case "google.fhir.r4.core.Integer", "google.fhir.r4.core.PositiveInt", "google.fhir.r4.core.UnsignedInt":
+		if valFD := vMsg.Descriptor().Fields().ByName("value"); valFD != nil && vMsg.Has(valFD) {
+			var n int64
+			switch valFD.Kind() {
+			case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Int64Kind:
+				n = vMsg.Get(valFD).Int()
+			case protoreflect.Uint32Kind, protoreflect.Uint64Kind:
+				n = int64(vMsg.Get(valFD).Uint())
+			}
+			s := strconv.FormatInt(n, 10)
+			idx.Tokens = append(idx.Tokens, SpidxToken{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: s})
+			idx.Quantities = append(idx.Quantities, SpidxQuantity{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: float64(n)})
+		}
+	case "google.fhir.r4.core.Boolean":
+		if valFD := vMsg.Descriptor().Fields().ByName("value"); valFD != nil && vMsg.Has(valFD) && valFD.Kind() == protoreflect.BoolKind {
+			bVal := "false"
+			if vMsg.Get(valFD).Bool() {
+				bVal = "true"
+			}
+			idx.Tokens = append(idx.Tokens, SpidxToken{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: bVal})
+		}
+	case "google.fhir.r4.core.Uri", "google.fhir.r4.core.Url", "google.fhir.r4.core.Canonical", "google.fhir.r4.core.Oid", "google.fhir.r4.core.Uuid":
+		u := strings.TrimSpace(extractWrappedString(vMsg))
+		if u != "" {
+			idx.URIs = append(idx.URIs, SpidxURI{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: u})
+			idx.Tokens = append(idx.Tokens, SpidxToken{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: u})
+			if paramType == "string" {
+				idx.Strings = append(idx.Strings, SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: fhirutil.NormalizeString(u)})
+			}
+		}
+	case "google.fhir.r4.core.String", "google.fhir.r4.core.Code", "google.fhir.r4.core.Markdown", "google.fhir.r4.core.Id":
+		s := strings.TrimSpace(extractWrappedString(vMsg))
+		if s == "" {
+			return
+		}
+		norm := fhirutil.NormalizeString(s)
+		switch paramType {
+		case "string":
+			if norm != "" {
+				idx.Strings = append(idx.Strings, SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: norm})
+			}
+		case "uri":
+			idx.URIs = append(idx.URIs, SpidxURI{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: s})
+			idx.Tokens = append(idx.Tokens, SpidxToken{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: s})
+		default: // "token"
+			if subURL == "text" {
+				if norm != "" {
+					idx.Strings = append(idx.Strings, SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName + ":text", SpValue: norm})
+				}
+				return
+			}
+			idx.Tokens = append(idx.Tokens, SpidxToken{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpSystem: "", SpValue: s})
+			if rootExtURL != "" {
+				idx.Tokens = append(idx.Tokens, SpidxToken{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpSystem: rootExtURL, SpValue: s})
+			}
+			if norm != "" {
+				idx.Strings = append(idx.Strings,
+					SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: norm},
+					SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName + ":text", SpValue: norm},
+				)
+			}
+		}
+	default:
+		if enumStr, ok := extractEnumWrapper(vMsg); ok {
+			idx.Tokens = append(idx.Tokens, SpidxToken{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: enumStr})
+			if paramType == "string" {
+				idx.Strings = append(idx.Strings, SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: fhirutil.NormalizeString(enumStr)})
+			}
+		}
+	}
+}
+
+func extractQuantityIntoNamedSp(idx *SearchIndexes, tenantID, resType, resID string, qMsg protoreflect.Message, spName string) {
+	if idx == nil || !qMsg.IsValid() || spName == "" {
+		return
+	}
+	valFD := qMsg.Descriptor().Fields().ByName("value")
+	if valFD == nil || !qMsg.Has(valFD) || valFD.Kind() != protoreflect.MessageKind {
+		return
+	}
+	valStr := extractWrappedString(qMsg.Get(valFD).Message())
+	numVal, err := strconv.ParseFloat(valStr, 64)
+	if err != nil {
+		return
+	}
+	var sys, code, unit string
+	if sysFD := qMsg.Descriptor().Fields().ByName("system"); sysFD != nil && qMsg.Has(sysFD) {
+		sys = extractWrappedString(qMsg.Get(sysFD).Message())
+	}
+	if codeFD := qMsg.Descriptor().Fields().ByName("code"); codeFD != nil && qMsg.Has(codeFD) {
+		code = extractWrappedString(qMsg.Get(codeFD).Message())
+	}
+	if unitFD := qMsg.Descriptor().Fields().ByName("unit"); unitFD != nil && qMsg.Has(unitFD) {
+		unit = extractWrappedString(qMsg.Get(unitFD).Message())
+	}
+	primaryCode := code
+	if primaryCode == "" {
+		primaryCode = unit
+	}
+	idx.Quantities = append(idx.Quantities, SpidxQuantity{
+		TenantID: tenantID,
+		ResType:  resType,
+		ResID:    resID,
+		SpName:   spName,
+		SpSystem: sys,
+		SpCode:   primaryCode,
+		SpValue:  numVal,
+	})
+	if unit != "" && unit != primaryCode {
+		idx.Quantities = append(idx.Quantities, SpidxQuantity{
+			TenantID: tenantID,
+			ResType:  resType,
+			ResID:    resID,
+			SpName:   spName,
+			SpSystem: sys,
+			SpCode:   unit,
+			SpValue:  numVal,
+		})
+	}
+}
+
+func extractCustomSearchParamsFromMessage(idx *SearchIndexes, tenantID, resType, resID string, msg protoreflect.Message, customDefs []CustomSearchParamDef) {
+	if !msg.IsValid() || len(customDefs) == 0 {
+		return
+	}
+	for _, def := range customDefs {
+		if def.Code == "" || def.Expression == "" {
+			continue
+		}
+		for branch := range strings.SplitSeq(def.Expression, "|") {
+			branch = strings.TrimSpace(branch)
+			if branch == "" {
+				continue
+			}
+			// Strip outer parentheses if any
+			for strings.HasPrefix(branch, "(") && strings.HasSuffix(branch, ")") {
+				branch = strings.TrimSpace(branch[1 : len(branch)-1])
+			}
+			segments := splitFHIRPathSegments(branch)
+			if len(segments) == 0 {
+				continue
+			}
+			first := segments[0]
+			if len(first) > 0 && first[0] >= 'A' && first[0] <= 'Z' {
+				if !strings.EqualFold(first, resType) && first != "Resource" && first != "DomainResource" {
+					continue
+				}
+				segments = segments[1:]
+			}
+			if len(segments) == 0 {
+				continue
+			}
+			// Root-level extension.where(url=...) is already extracted by extractExtensionsFromMessage
+			if (segments[0] == "extension" || segments[0] == "modifierExtension") && len(segments) <= 2 {
+				continue
+			}
+			walkCustomPathAndExtract(idx, tenantID, resType, resID, msg, segments, def)
+		}
+	}
+}
+
+func splitFHIRPathSegments(expr string) []string {
+	var out []string
+	var cur strings.Builder
+	depth := 0
+	var quote byte
+	for i := 0; i < len(expr); i++ {
+		c := expr[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			cur.WriteByte(c)
+			continue
+		}
+		if c == '\'' || c == '"' {
+			quote = c
+			cur.WriteByte(c)
+			continue
+		}
+		if c == '(' {
+			depth++
+			cur.WriteByte(c)
+			continue
+		}
+		if c == ')' {
+			if depth > 0 {
+				depth--
+			}
+			cur.WriteByte(c)
+			continue
+		}
+		if c == '.' && depth == 0 {
+			if s := strings.TrimSpace(cur.String()); s != "" {
+				out = append(out, s)
+			}
+			cur.Reset()
+			continue
+		}
+		cur.WriteByte(c)
+	}
+	if s := strings.TrimSpace(cur.String()); s != "" {
+		out = append(out, s)
+	}
+	return out
+}
+
+func walkCustomPathAndExtract(idx *SearchIndexes, tenantID, resType, resID string, curMsg protoreflect.Message, segments []string, def CustomSearchParamDef) {
+	if !curMsg.IsValid() {
+		return
+	}
+	if len(segments) == 0 {
+		extractTypedValueIntoSpName(idx, tenantID, resType, resID, curMsg, "", "", "", def.Code, def.Type)
+		return
+	}
+
+	seg := strings.TrimSpace(segments[0])
+	rest := segments[1:]
+
+	// Support .where(url='...') predicate on extension
+	if strings.HasPrefix(seg, "where(") {
+		urlFilter := parseWhereURLFilter(seg)
+		if urlFilter != "" && !strings.EqualFold(extractExtensionURL(curMsg), urlFilter) {
+			return
+		}
+		walkCustomPathAndExtract(idx, tenantID, resType, resID, curMsg, rest, def)
+		return
+	}
+	if strings.HasPrefix(seg, "extension(") && strings.HasSuffix(seg, ")") {
+		urlFilter := strings.Trim(strings.TrimSpace(seg[len("extension("):len(seg)-1]), `"'`)
+		for _, extFieldName := range []string{"extension", "modifier_extension"} {
+			fd := curMsg.Descriptor().Fields().ByName(protoreflect.Name(extFieldName))
+			if fd == nil || !curMsg.Has(fd) || !fd.IsList() {
+				continue
+			}
+			list := curMsg.Get(fd).List()
+			for i := 0; i < list.Len(); i++ {
+				extMsg := list.Get(i).Message()
+				if strings.EqualFold(extractExtensionURL(extMsg), urlFilter) {
+					if len(rest) == 0 {
+						extractExtensionValuesIntoIndex(idx, tenantID, resType, resID, extMsg, urlFilter, def.Code, def.Type, 0)
+					} else {
+						walkCustomPathAndExtract(idx, tenantID, resType, resID, extMsg, rest, def)
+					}
+				}
+			}
+		}
+		return
+	}
+
+	// Strip FHIRPath .as(Type) or [x] suffix
+	cleanSeg := strings.TrimSuffix(seg, "[x]")
+	if openIdx := strings.IndexByte(cleanSeg, '('); openIdx != -1 {
+		cleanSeg = strings.TrimSpace(cleanSeg[:openIdx])
+	}
+
+	md := curMsg.Descriptor()
+	fd := findProtoFieldByFHIRPathSegment(md, cleanSeg)
+	if fd == nil {
+		// Check if curMsg is a choice[x] wrapper (has oneof "choice") and step into its active choice field
+		if md.Oneofs().ByName("choice") != nil {
+			curMsg.Range(func(cfd protoreflect.FieldDescriptor, cval protoreflect.Value) bool {
+				if cfd.Kind() == protoreflect.MessageKind {
+					walkCustomPathAndExtract(idx, tenantID, resType, resID, cval.Message(), segments, def)
+				}
+				return true
+			})
+		}
+		return
+	}
+	if !curMsg.Has(fd) || fd.Kind() != protoreflect.MessageKind {
+		return
+	}
+
+	stepInto := func(childMsg protoreflect.Message) {
+		if !childMsg.IsValid() {
+			return
+		}
+		// Unwrap choice[x] wrapper automatically when at leaf or when next segment targets inner fields
+		if childMsg.Descriptor().Oneofs().ByName("choice") != nil {
+			childMsg.Range(func(cfd protoreflect.FieldDescriptor, cval protoreflect.Value) bool {
+				if cfd.Kind() == protoreflect.MessageKind {
+					walkCustomPathAndExtract(idx, tenantID, resType, resID, cval.Message(), rest, def)
+				}
+				return true
+			})
+			return
+		}
+		walkCustomPathAndExtract(idx, tenantID, resType, resID, childMsg, rest, def)
+	}
+
+	if fd.IsList() {
+		list := curMsg.Get(fd).List()
+		for i := 0; i < list.Len(); i++ {
+			stepInto(list.Get(i).Message())
+		}
+	} else {
+		stepInto(curMsg.Get(fd).Message())
+	}
+}
+
+func findProtoFieldByFHIRPathSegment(md protoreflect.MessageDescriptor, seg string) protoreflect.FieldDescriptor {
+	if md == nil || seg == "" {
+		return nil
+	}
+	fields := md.Fields()
+	if fd := fields.ByJSONName(seg); fd != nil {
+		return fd
+	}
+	if fd := fields.ByName(protoreflect.Name(seg)); fd != nil {
+		return fd
+	}
+	snake := strings.ReplaceAll(camelToKebab(seg), "-", "_")
+	if fd := fields.ByName(protoreflect.Name(snake)); fd != nil {
+		return fd
+	}
+	if fd := fields.ByName(protoreflect.Name(snake + "_value")); fd != nil {
+		return fd
+	}
+	// Choice[x] prefix match (e.g., "valueQuantity" or "medicationCodeableConcept" -> "value" or "medication")
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		prefix := fd.JSONName()
+		if strings.HasPrefix(seg, prefix) && len(seg) > len(prefix) && seg[len(prefix)] >= 'A' && seg[len(prefix)] <= 'Z' {
+			if fd.Kind() == protoreflect.MessageKind && fd.Message().Oneofs().ByName("choice") != nil {
+				return fd
+			}
+		}
+	}
+	return nil
+}
+
+func parseWhereURLFilter(whereSeg string) string {
+	for _, quote := range []byte{'\'', '"'} {
+		first := strings.IndexByte(whereSeg, quote)
+		if first != -1 {
+			last := strings.LastIndexByte(whereSeg, quote)
+			if last > first {
+				return strings.TrimSpace(whereSeg[first+1 : last])
+			}
+		}
+	}
+	return ""
+}
+
+func extractContainedResourcesFromRoot(idx *SearchIndexes, tenantID, resType, resID string, msg protoreflect.Message) {
+	if idx == nil || !msg.IsValid() || resID == "" {
+		return
+	}
+	containedFD := msg.Descriptor().Fields().ByName("contained")
+	if containedFD == nil || !msg.Has(containedFD) || !containedFD.IsList() {
+		return
+	}
+	list := msg.Get(containedFD).List()
+	if list.Len() == 0 {
+		return
+	}
+
+	r4Descs := fhirutil.AllR4ResourceDescriptors()
+	containedTypeByID := make(map[string]string, list.Len())
+	containedIdxByID := make(map[string]*SearchIndexes, list.Len())
+
+	for i := 0; i < list.Len(); i++ {
+		anyMsg := list.Get(i).Message()
+		if !anyMsg.IsValid() {
+			continue
+		}
+		typeURLFD := anyMsg.Descriptor().Fields().ByName("type_url")
+		valFD := anyMsg.Descriptor().Fields().ByName("value")
+		if typeURLFD == nil || valFD == nil || !anyMsg.Has(typeURLFD) || !anyMsg.Has(valFD) {
+			continue
+		}
+		typeURL := anyMsg.Get(typeURLFD).String()
+		valBytes := anyMsg.Get(valFD).Bytes()
+		if len(valBytes) == 0 {
+			continue
+		}
+		var containedResType string
+		if dotIdx := strings.LastIndexByte(typeURL, '.'); dotIdx != -1 && dotIdx+1 < len(typeURL) {
+			containedResType = typeURL[dotIdx+1:]
+		} else if slashIdx := strings.LastIndexByte(typeURL, '/'); slashIdx != -1 && slashIdx+1 < len(typeURL) {
+			containedResType = typeURL[slashIdx+1:]
+		}
+		containedMD := r4Descs[containedResType]
+		if containedMD == nil {
+			continue
+		}
+		containedMsg := dynamicpb.NewMessage(containedMD)
+		if err := proto.Unmarshal(valBytes, containedMsg); err != nil {
+			continue
+		}
+		var containedID string
+		if idFD := containedMD.Fields().ByName("id"); idFD != nil && containedMsg.Has(idFD) {
+			containedID = strings.TrimPrefix(strings.TrimSpace(extractWrappedString(containedMsg.Get(idFD).Message())), "#")
+		}
+		if containedID == "" {
+			containedID = fmt.Sprintf("contained-%d", i+1)
+		}
+		syntheticID := resType + "/" + resID + "#" + containedID
+		cIdx := &SearchIndexes{}
+		extractFromMessage(cIdx, tenantID, containedResType, syntheticID, containedMsg, "", 0)
+
+		idx.Strings = append(idx.Strings, cIdx.Strings...)
+		idx.Tokens = append(idx.Tokens, cIdx.Tokens...)
+		idx.Dates = append(idx.Dates, cIdx.Dates...)
+		idx.Quantities = append(idx.Quantities, cIdx.Quantities...)
+		idx.References = append(idx.References, cIdx.References...)
+		idx.URIs = append(idx.URIs, cIdx.URIs...)
+
+		// Also index contained strings and tokens under the parent resource for _content full-text search
+		for _, sRow := range cIdx.Strings {
+			if sRow.SpValue != "" {
+				idx.Strings = append(idx.Strings, SpidxString{
+					TenantID: tenantID,
+					ResType:  resType,
+					ResID:    resID,
+					SpName:   "_content",
+					SpValue:  sRow.SpValue,
+				})
+			}
+		}
+		for _, tRow := range cIdx.Tokens {
+			if tRow.SpValue != "" {
+				idx.Tokens = append(idx.Tokens, SpidxToken{
+					TenantID: tenantID,
+					ResType:  resType,
+					ResID:    resID,
+					SpName:   "_content",
+					SpSystem: tRow.SpSystem,
+					SpValue:  tRow.SpValue,
+				})
+			}
+		}
+
+		containedTypeByID[containedID] = containedResType
+		containedIdxByID[containedID] = cIdx
+	}
+
+	if len(containedTypeByID) > 0 {
+		extractFragmentReferencesFromMessage(idx, tenantID, resType, resID, msg, "", 0, containedTypeByID, containedIdxByID)
+	}
+}
+
+func extractFragmentReferencesFromMessage(
+	idx *SearchIndexes,
+	tenantID, resType, resID string,
+	msg protoreflect.Message,
+	parentField string,
+	depth int,
+	containedTypeByID map[string]string,
+	containedIdxByID map[string]*SearchIndexes,
+) {
+	if !msg.IsValid() || depth > 2 {
+		return
+	}
+	msg.Range(func(fd protoreflect.FieldDescriptor, val protoreflect.Value) bool {
+		if fd.Kind() != protoreflect.MessageKind {
+			return true
+		}
+		fieldName := string(fd.Name())
+		switch fieldName {
+		case "id", "meta", "text", "contained", "extension", "modifier_extension":
+			return true
+		}
+		visit := func(subMsg protoreflect.Message) {
+			if !subMsg.IsValid() {
+				return
+			}
+			if string(subMsg.Descriptor().FullName()) == "google.fhir.r4.core.Reference" {
+				var localID string
+				if uriFD := subMsg.Descriptor().Fields().ByName("uri"); uriFD != nil && subMsg.Has(uriFD) {
+					raw := strings.TrimSpace(extractWrappedString(subMsg.Get(uriFD).Message()))
+					if strings.HasPrefix(raw, "#") {
+						localID = strings.TrimPrefix(raw, "#")
+					}
+				}
+				if localID == "" {
+					if fragFD := subMsg.Descriptor().Fields().ByName("fragment"); fragFD != nil && subMsg.Has(fragFD) {
+						localID = strings.TrimPrefix(strings.TrimSpace(extractWrappedString(subMsg.Get(fragFD).Message())), "#")
+					}
+				}
+				if localID == "" {
+					return
+				}
+				spNames := mapReferenceSpNames(resType, fieldName, parentField)
+				targetType := containedTypeByID[localID]
+				if targetType == "" && len(spNames) > 0 {
+					targetType = inferChainedTargetType(spNames[0])
+				}
+				syntheticID := resType + "/" + resID + "#" + localID
+				for _, spName := range spNames {
+					idx.References = append(idx.References,
+						SpidxReference{
+							TenantID:   tenantID,
+							ResType:    resType,
+							ResID:      resID,
+							SpName:     spName,
+							TargetType: targetType,
+							TargetID:   syntheticID,
+						},
+						SpidxReference{
+							TenantID:   tenantID,
+							ResType:    resType,
+							ResID:      resID,
+							SpName:     spName,
+							TargetType: targetType,
+							TargetID:   "#" + localID,
+						},
+						SpidxReference{
+							TenantID:   tenantID,
+							ResType:    resType,
+							ResID:      resID,
+							SpName:     spName,
+							TargetType: targetType,
+							TargetID:   localID,
+						},
+					)
+					if spName == "medication" {
+						if cIdx := containedIdxByID[localID]; cIdx != nil {
+							for _, tok := range cIdx.Tokens {
+								if tok.SpName == "code" {
+									idx.Tokens = append(idx.Tokens, SpidxToken{
+										TenantID: tenantID,
+										ResType:  resType,
+										ResID:    resID,
+										SpName:   "code",
+										SpSystem: tok.SpSystem,
+										SpValue:  tok.SpValue,
+									})
+								}
+							}
+							for _, str := range cIdx.Strings {
+								if str.SpName == "code:text" {
+									idx.Strings = append(idx.Strings, SpidxString{
+										TenantID: tenantID,
+										ResType:  resType,
+										ResID:    resID,
+										SpName:   "code:text",
+										SpValue:  str.SpValue,
+									})
+								}
+							}
+						}
+					}
+				}
+				return
+			}
+			nextParent := fieldName
+			if parentField != "" {
+				nextParent = parentField
+			}
+			extractFragmentReferencesFromMessage(idx, tenantID, resType, resID, subMsg, nextParent, depth+1, containedTypeByID, containedIdxByID)
+		}
+		if fd.IsList() {
+			list := val.List()
+			for i := 0; i < list.Len(); i++ {
+				visit(list.Get(i).Message())
+			}
+		} else {
+			visit(val.Message())
+		}
+		return true
+	})
 }

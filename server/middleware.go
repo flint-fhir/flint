@@ -138,6 +138,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								"insufficient scope for Measure/$evaluate-measure")
 							return
 						}
+					} else if isPlanApplyOp(parts) {
+						// Detailed SMART scope and patient compartment checks are enforced in handlePlanDefinitionApply / handleActivityDefinitionApply.
 					} else if isQuestionnairePopulateOp(parts) {
 						hasQScope := auth.Allows(secCtx, "Questionnaire", auth.ActionRead) ||
 							auth.Allows(secCtx, "Questionnaire", auth.ActionSearch) ||
@@ -321,6 +323,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								"insufficient scope for Measure/$evaluate-measure")
 							return
 						}
+					} else if isPlanApplyOp(parts) {
+						// Detailed SMART scope and patient compartment checks are enforced in handlePlanDefinitionApply / handleActivityDefinitionApply.
 					} else if isQuestionnairePopulateOp(parts) {
 						hasQScope := auth.Allows(secCtx, "Questionnaire", auth.ActionRead) ||
 							auth.Allows(secCtx, "Questionnaire", auth.ActionSearch) ||
@@ -582,6 +586,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								fmt.Sprintf("insufficient scope for $expunge on %s (requires delete scope)", targetType))
 							return
 						}
+					} else if resType == "$reindex" || (len(parts) == 5 && parts[4] == "$reindex") || (len(parts) == 6 && parts[5] == "$reindex") {
+						// Detailed SMART scope checks are enforced in handleReindex.
 					} else if resType == "$diff" || (len(parts) == 5 && parts[4] == "$diff") || (len(parts) == 6 && parts[5] == "$diff") {
 						if resType == "$diff" {
 							if len(secCtx.GetScopes()) == 0 {
@@ -1095,6 +1101,16 @@ func isQuestionnaireExtractOp(parts []string) bool {
 	}
 	if len(parts) == 6 {
 		return strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[5] == "$extract"
+	}
+	return false
+}
+
+func isPlanApplyOp(parts []string) bool {
+	if len(parts) == 5 {
+		return (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition")) && parts[4] == "$apply"
+	}
+	if len(parts) == 6 {
+		return (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition")) && parts[5] == "$apply"
 	}
 	return false
 }

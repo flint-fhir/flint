@@ -123,6 +123,10 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "gender", "type": "token"},
 			{"name": "birthdate", "type": "date"},
 			{"name": "organization", "type": "reference"},
+			{"name": "race", "type": "token"},
+			{"name": "ethnicity", "type": "token"},
+			{"name": "birthsex", "type": "token"},
+			{"name": "marital-status", "type": "token"},
 		},
 		"Condition": {
 			{"name": "_id", "type": "token"},
@@ -454,9 +458,37 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 		{"name": "_text", "type": "string"},
 	}
 	for rt, sp := range defs {
-		defs[rt] = append(sp, metaParams...)
+		defs[rt] = mergeCustomSearchParams(rt, append(sp, metaParams...))
 	}
 	return defs
+}
+
+func mergeCustomSearchParams(rt string, sp []map[string]string) []map[string]string {
+	custom := postgres.CustomSearchParamsForType(rt)
+	if len(custom) == 0 {
+		return sp
+	}
+	seen := make(map[string]bool, len(sp))
+	out := make([]map[string]string, 0, len(sp)+len(custom))
+	for _, entry := range sp {
+		seen[entry["name"]] = true
+		out = append(out, entry)
+	}
+	for _, c := range custom {
+		if seen[c.Code] {
+			continue
+		}
+		seen[c.Code] = true
+		item := map[string]string{
+			"name": c.Code,
+			"type": c.Type,
+		}
+		if c.URL != "" {
+			item["definition"] = c.URL
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 // BuildOpenAPISpec dynamically synthesizes an OpenAPI 3.1.0 specification for a Flint tenant
@@ -1258,6 +1290,8 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					{"name": "_type", "in": "query", "description": "Comma-separated FHIR resource types", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
 					{"name": "_until", "in": "query", "description": "ISO-8601 timestamp upper bound", "schema": map[string]any{"type": "string"}},
+					{"name": "start", "in": "query", "description": "Clinical care-date lower bound (FHIR R4 $everything start)", "schema": map[string]any{"type": "string", "format": "date"}},
+					{"name": "end", "in": "query", "description": "Clinical care-date upper bound (FHIR R4 $everything end)", "schema": map[string]any{"type": "string", "format": "date"}},
 					{"name": "_elements", "in": "query", "description": "Comma-separated FHIR elements or ResourceType.element tokens to project", "schema": map[string]any{"type": "string"}},
 					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters", "schema": map[string]any{"type": "string"}},
 					{"name": "patient", "in": "query", "description": "Optional patient cohort filter (e.g. Patient/pat-1,Patient/pat-2)", "schema": map[string]any{"type": "string"}},
@@ -1288,6 +1322,8 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					{"name": "_type", "in": "query", "description": "Comma-separated FHIR resource types", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
 					{"name": "_until", "in": "query", "description": "ISO-8601 timestamp upper bound", "schema": map[string]any{"type": "string"}},
+					{"name": "start", "in": "query", "description": "Clinical care-date lower bound (FHIR R4 $everything start)", "schema": map[string]any{"type": "string", "format": "date"}},
+					{"name": "end", "in": "query", "description": "Clinical care-date upper bound (FHIR R4 $everything end)", "schema": map[string]any{"type": "string", "format": "date"}},
 					{"name": "_elements", "in": "query", "description": "Comma-separated FHIR elements or ResourceType.element tokens to project", "schema": map[string]any{"type": "string"}},
 					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters", "schema": map[string]any{"type": "string"}},
 					{"name": "patient", "in": "query", "description": "Optional patient subset filter within the Group cohort", "schema": map[string]any{"type": "string"}},
@@ -1322,6 +1358,8 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					{"name": "_type", "in": "query", "description": "Comma-separated FHIR resource types", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
 					{"name": "_until", "in": "query", "description": "ISO-8601 timestamp upper bound", "schema": map[string]any{"type": "string"}},
+					{"name": "start", "in": "query", "description": "Clinical care-date lower bound (FHIR R4 $everything start)", "schema": map[string]any{"type": "string", "format": "date"}},
+					{"name": "end", "in": "query", "description": "Clinical care-date upper bound (FHIR R4 $everything end)", "schema": map[string]any{"type": "string", "format": "date"}},
 					{"name": "_elements", "in": "query", "description": "Comma-separated FHIR elements or ResourceType.element tokens to project", "schema": map[string]any{"type": "string"}},
 					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters", "schema": map[string]any{"type": "string"}},
 				},
@@ -1489,6 +1527,113 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "OperationOutcome summarizing expunged records"},
+				},
+			},
+		},
+		"/$reindex": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"System Operations"},
+				"summary":     "Rebuild spidx_* covering search indexes across all active tenant resources ($reindex)",
+				"operationId": "systemReindex",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OperationOutcome summarizing reindexed resources"},
+				},
+			},
+		},
+		"/PlanDefinition/$apply": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"PlanDefinition"},
+				"summary":     "Apply a clinical PlanDefinition protocol to a Patient and synthesize a CarePlan ($apply)",
+				"operationId": "planDefinitionApplyGet",
+				"parameters": []map[string]any{
+					{"name": "planDefinition", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "subject", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "encounter", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "practitioner", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "organization", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Personalized FHIR R4 CarePlan (or Bundle)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"PlanDefinition"},
+				"summary":     "Apply a clinical PlanDefinition protocol to a Patient via POST Parameters ($apply)",
+				"operationId": "planDefinitionApplyPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Personalized FHIR R4 CarePlan (or Bundle)"},
+				},
+			},
+		},
+		"/PlanDefinition/{id}/$apply": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"PlanDefinition"},
+				"summary":     "Apply PlanDefinition/{id} to a Patient and synthesize a CarePlan ($apply)",
+				"operationId": "planDefinitionApplyByIdGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "subject", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Personalized FHIR R4 CarePlan (or Bundle)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"PlanDefinition"},
+				"summary":     "Apply PlanDefinition/{id} to a Patient ($apply, POST Parameters)",
+				"operationId": "planDefinitionApplyByIdPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Personalized FHIR R4 CarePlan (or Bundle)"},
+				},
+			},
+		},
+		"/ActivityDefinition/$apply": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ActivityDefinition"},
+				"summary":     "Apply a clinical ActivityDefinition to a Patient and synthesize a ServiceRequest or MedicationRequest ($apply)",
+				"operationId": "activityDefinitionApplyGet",
+				"parameters": []map[string]any{
+					{"name": "activityDefinition", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "subject", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Synthesized FHIR R4 ServiceRequest or MedicationRequest"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ActivityDefinition"},
+				"summary":     "Apply a clinical ActivityDefinition to a Patient ($apply, POST Parameters)",
+				"operationId": "activityDefinitionApplyPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Synthesized FHIR R4 ServiceRequest or MedicationRequest"},
+				},
+			},
+		},
+		"/ActivityDefinition/{id}/$apply": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ActivityDefinition"},
+				"summary":     "Apply ActivityDefinition/{id} to a Patient ($apply)",
+				"operationId": "activityDefinitionApplyByIdGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "subject", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Synthesized FHIR R4 ServiceRequest or MedicationRequest"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ActivityDefinition"},
+				"summary":     "Apply ActivityDefinition/{id} to a Patient ($apply, POST Parameters)",
+				"operationId": "activityDefinitionApplyByIdPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Synthesized FHIR R4 ServiceRequest or MedicationRequest"},
 				},
 			},
 		},
@@ -1690,6 +1835,8 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					{"name": "_type", "in": "query", "description": "Comma-separated resource types", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
 					{"name": "_until", "in": "query", "description": "ISO-8601 timestamp upper bound", "schema": map[string]any{"type": "string"}},
+					{"name": "start", "in": "query", "description": "Clinical care-date lower bound (FHIR R4 $everything start)", "schema": map[string]any{"type": "string", "format": "date"}},
+					{"name": "end", "in": "query", "description": "Clinical care-date upper bound (FHIR R4 $everything end)", "schema": map[string]any{"type": "string", "format": "date"}},
 					{"name": "_elements", "in": "query", "description": "Comma-separated FHIR elements or ResourceType.element tokens to project", "schema": map[string]any{"type": "string"}},
 					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters (e.g. Observation?category=vital-signs)", "schema": map[string]any{"type": "string"}},
 					{"name": "_count", "in": "query", "schema": map[string]any{"type": "integer"}},
@@ -1721,6 +1868,8 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					{"name": "_type", "in": "query", "description": "Comma-separated resource types", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
 					{"name": "_until", "in": "query", "description": "ISO-8601 timestamp upper bound", "schema": map[string]any{"type": "string"}},
+					{"name": "start", "in": "query", "description": "Clinical care-date lower bound (FHIR R4 $everything start)", "schema": map[string]any{"type": "string", "format": "date"}},
+					{"name": "end", "in": "query", "description": "Clinical care-date upper bound (FHIR R4 $everything end)", "schema": map[string]any{"type": "string", "format": "date"}},
 					{"name": "_elements", "in": "query", "description": "Comma-separated FHIR elements or ResourceType.element tokens to project", "schema": map[string]any{"type": "string"}},
 					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters (e.g. Observation?category=vital-signs)", "schema": map[string]any{"type": "string"}},
 					{"name": "_count", "in": "query", "schema": map[string]any{"type": "integer"}},
@@ -1752,6 +1901,8 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					{"name": "_type", "in": "query", "description": "Comma-separated resource types", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
 					{"name": "_until", "in": "query", "description": "ISO-8601 timestamp upper bound", "schema": map[string]any{"type": "string"}},
+					{"name": "start", "in": "query", "description": "Clinical care-date lower bound (FHIR R4 $everything start)", "schema": map[string]any{"type": "string", "format": "date"}},
+					{"name": "end", "in": "query", "description": "Clinical care-date upper bound (FHIR R4 $everything end)", "schema": map[string]any{"type": "string", "format": "date"}},
 					{"name": "_elements", "in": "query", "description": "Comma-separated FHIR elements or ResourceType.element tokens to project", "schema": map[string]any{"type": "string"}},
 					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters", "schema": map[string]any{"type": "string"}},
 					{"name": "_count", "in": "query", "schema": map[string]any{"type": "integer"}},
@@ -1845,7 +1996,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			{"name": "_text", "in": "query", "description": "Narrative text.div search", "schema": map[string]any{"type": "string"}},
 		}
 		seenParam := map[string]bool{"_id": true, "_lastUpdated": true, "_profile": true, "_tag": true, "_security": true, "_source": true, "_filter": true, "_content": true, "_text": true}
-		for _, sp := range spDefs[rt] {
+		for _, sp := range mergeCustomSearchParams(rt, spDefs[rt]) {
 			if seenParam[sp["name"]] {
 				continue
 			}
@@ -2239,6 +2390,31 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			},
 		}
 
+		paths["/"+rt+"/$reindex"] = map[string]any{
+			"post": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Rebuild spidx_* covering search indexes for all active %s resources ($reindex)", rt),
+				"operationId": "typeReindex" + rt,
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OperationOutcome summarizing reindexed resources"},
+				},
+			},
+		}
+
+		paths["/"+rt+"/{id}/$reindex"] = map[string]any{
+			"post": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Rebuild spidx_* covering search indexes for %s/{id} ($reindex)", rt),
+				"operationId": "instanceReindex" + rt,
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OperationOutcome summarizing reindexed resource"},
+				},
+			},
+		}
+
 		paths["/"+rt+"/$meta"] = map[string]any{
 			"get": map[string]any{
 				"tags":        []string{rt},
@@ -2352,6 +2528,7 @@ func (s *Server) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 	if tenant == "" {
 		tenant = "demo"
 	}
+	s.syncTenantCustomSearchParams(r.Context(), tenant)
 
 	spec := s.BuildOpenAPISpec(tenant)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

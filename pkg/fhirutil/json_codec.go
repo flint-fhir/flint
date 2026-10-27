@@ -220,6 +220,17 @@ func normalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any, extMa
 
 	switch v := val.(type) {
 	case map[string]any:
+		// Handle DomainResource.contained (repeated google.protobuf.Any) from standard FHIR JSON
+		if fullName == "google.protobuf.Any" {
+			if rt, ok := v["resourceType"].(string); ok && rt != "" && v["@type"] == nil {
+				if subMD := AllR4ResourceDescriptors()[rt]; subMD != nil {
+					delete(v, "resourceType")
+					normalizeMessageMap(subMD, v)
+					v["@type"] = "type.googleapis.com/" + string(subMD.FullName())
+					return v
+				}
+			}
+		}
 		// Already a map: if it wraps an enum in "value", normalize enum casing (e.g. "in-progress" -> "IN_PROGRESS")
 		if valFD != nil && valFD.Kind() == protoreflect.EnumKind {
 			if s, ok := v["value"].(string); ok {
@@ -434,6 +445,12 @@ func denormalizeUntypedMap(m map[string]any) {
 	if m == nil {
 		return
 	}
+	if typeURL, ok := m["@type"].(string); ok && typeURL != "" {
+		delete(m, "@type")
+		if dotIdx := strings.LastIndexByte(typeURL, '.'); dotIdx != -1 && dotIdx+1 < len(typeURL) {
+			m["resourceType"] = typeURL[dotIdx+1:]
+		}
+	}
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -508,6 +525,24 @@ func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any
 	}
 
 	fullName := string(msgDesc.FullName())
+	if fullName == "google.protobuf.Any" {
+		if typeURL, ok := vMap["@type"].(string); ok && typeURL != "" {
+			delete(vMap, "@type")
+			var rt string
+			if dotIdx := strings.LastIndexByte(typeURL, '.'); dotIdx != -1 && dotIdx+1 < len(typeURL) {
+				rt = typeURL[dotIdx+1:]
+			}
+			if subMD := AllR4ResourceDescriptors()[rt]; subMD != nil {
+				denormalizeMessageMap(subMD, vMap)
+			} else {
+				denormalizeUntypedMap(vMap)
+			}
+			if rt != "" {
+				vMap["resourceType"] = rt
+			}
+			return vMap
+		}
+	}
 	if isTemporalMessage(fullName) {
 		if formatted := formatProtoTemporalToISO(vMap); formatted != "" {
 			return formatted
@@ -543,6 +578,13 @@ func denormalizeReferenceMap(md protoreflect.MessageDescriptor, m map[string]any
 		if s, ok := rawURI["value"].(string); ok && s != "" {
 			delete(m, "uri")
 			m["reference"] = s
+			return
+		}
+	}
+	if rawFrag, ok := m["fragment"].(map[string]any); ok {
+		if s, ok := rawFrag["value"].(string); ok && s != "" {
+			delete(m, "fragment")
+			m["reference"] = "#" + strings.TrimPrefix(s, "#")
 			return
 		}
 	}
