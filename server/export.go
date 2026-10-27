@@ -743,7 +743,11 @@ func (s *Server) resolveExportTypeFilterAllowedIDs(
 		if _, exists := allowed[f.resType]; !exists {
 			allowed[f.resType] = make(map[string]bool)
 		}
-		sr, err := s.store.Search(ctx, f.params)
+		params := f.params
+		if err := s.expandTerminologySearchParams(ctx, params.TenantID, &params); err != nil {
+			return nil, err
+		}
+		sr, err := s.store.Search(ctx, params)
 		if err != nil {
 			return nil, err
 		}

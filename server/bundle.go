@@ -39,10 +39,12 @@ type bundleEntry struct {
 
 // bundleEntryRequest is the request part of a Bundle entry.
 type bundleEntryRequest struct {
-	Method      string `json:"method"`                // PUT, POST, DELETE
-	URL         string `json:"url"`                   // e.g. "Patient/123"
-	IfMatch     string `json:"ifMatch,omitempty"`     // Optional ETag for optimistic concurrency (e.g. W/"1")
-	IfNoneExist string `json:"ifNoneExist,omitempty"` // Optional search query for conditional create (e.g. "identifier=http://mrn|123")
+	Method          string `json:"method"`                    // PUT, POST, PATCH, DELETE, GET, HEAD
+	URL             string `json:"url"`                       // e.g. "Patient/123"
+	IfMatch         string `json:"ifMatch,omitempty"`         // Optional ETag for optimistic concurrency (e.g. W/"1")
+	IfNoneMatch     string `json:"ifNoneMatch,omitempty"`     // Optional ETag for conditional read (e.g. W/"1" or *)
+	IfModifiedSince string `json:"ifModifiedSince,omitempty"` // Optional timestamp for conditional read
+	IfNoneExist     string `json:"ifNoneExist,omitempty"`     // Optional search query for conditional create (e.g. "identifier=http://mrn|123")
 }
 
 // handleBundle handles POST /{tenant} — process a FHIR transaction/batch Bundle.
@@ -203,8 +205,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" && method != "GET" {
-			msg := fmt.Sprintf("entry[%d]: unsupported bundle request method %q (expected POST, PUT, PATCH, DELETE, or GET)", i, method)
+		if method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" && method != "GET" && method != "HEAD" {
+			msg := fmt.Sprintf("entry[%d]: unsupported bundle request method %q (expected POST, PUT, PATCH, DELETE, GET, or HEAD)", i, method)
 			if isTransaction {
 				writeOperationOutcome(w, http.StatusBadRequest, "not-supported", msg)
 				return
@@ -213,9 +215,18 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		if method == "GET" {
+		if method == "GET" || method == "HEAD" {
+			if method == "HEAD" && len(bytes.TrimSpace(entry.Resource)) > 0 && string(bytes.TrimSpace(entry.Resource)) != "null" {
+				msg := fmt.Sprintf("entry[%d]: HEAD request in Bundle must not include a resource payload", i)
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusBadRequest, "invalid", msg)
+					return
+				}
+				responseEntries[i] = bundleErrorResponse(http.StatusBadRequest, msg)
+				continue
+			}
 			if entry.Request == nil || strings.TrimSpace(entry.Request.URL) == "" {
-				msg := fmt.Sprintf("entry[%d]: GET requires non-empty request.url", i)
+				msg := fmt.Sprintf("entry[%d]: %s requires non-empty request.url", i, method)
 				if isTransaction {
 					writeOperationOutcome(w, http.StatusBadRequest, "required", msg)
 					return
@@ -236,7 +247,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						allowed = auth.Allows(secCtx, resTypeFromURL, auth.ActionSearch) || auth.Allows(secCtx, resTypeFromURL, auth.ActionRead)
 					}
 					if !allowed {
-						msg := fmt.Sprintf("entry[%d]: insufficient scope for GET on %s", i, resTypeFromURL)
+						msg := fmt.Sprintf("entry[%d]: insufficient scope for %s on %s", i, method, resTypeFromURL)
 						if isTransaction {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
 							return
@@ -250,7 +261,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				txGetIndices = append(txGetIndices, i)
 				continue
 			}
-			getResp, _ := s.executeBundleGetEntry(r, tenant, entry.Request.URL, urnMap)
+			getResp, _ := s.executeBundleGetEntry(r, tenant, entry.Request, urnMap)
 			responseEntries[i] = getResp
 			continue
 		}
@@ -1055,9 +1066,9 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Execute GET entries in transaction Bundles last (FHIR R4 DELETE -> POST -> PUT/PATCH -> GET)
+	// Execute GET/HEAD entries in transaction Bundles last (FHIR R4 DELETE -> POST -> PUT/PATCH -> GET/HEAD)
 	for _, i := range txGetIndices {
-		getResp, _ := s.executeBundleGetEntry(r, tenant, bundle.Entry[i].Request.URL, urnMap)
+		getResp, _ := s.executeBundleGetEntry(r, tenant, bundle.Entry[i].Request, urnMap)
 		responseEntries[i] = getResp
 	}
 
@@ -1177,7 +1188,15 @@ func (r *bundleSubResponseRecorder) Write(b []byte) (int, error) {
 	return r.body.Write(b)
 }
 
-func (s *Server) executeBundleGetEntry(r *http.Request, tenant, rawURL string, urnMap map[string]string) (map[string]any, int) {
+func (s *Server) executeBundleGetEntry(r *http.Request, tenant string, entryReq *bundleEntryRequest, urnMap map[string]string) (map[string]any, int) {
+	rawURL := ""
+	method := http.MethodGet
+	if entryReq != nil {
+		rawURL = entryReq.URL
+		if strings.EqualFold(strings.TrimSpace(entryReq.Method), http.MethodHead) {
+			method = http.MethodHead
+		}
+	}
 	resolvedURL := strings.TrimSpace(rawURL)
 	for urn, ref := range urnMap {
 		if strings.Contains(resolvedURL, urn) {
@@ -1189,15 +1208,23 @@ func (s *Server) executeBundleGetEntry(r *http.Request, tenant, rawURL string, u
 		cleanRel = "fhir/r4/" + tenant + "/" + cleanRel
 	}
 	targetURL := "/" + cleanRel
-	subReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, targetURL, nil)
+	subReq, err := http.NewRequestWithContext(r.Context(), method, targetURL, nil)
 	if err != nil {
-		return bundleErrorResponse(http.StatusBadRequest, fmt.Sprintf("invalid GET url %q: %v", rawURL, err)), http.StatusBadRequest
+		return bundleErrorResponse(http.StatusBadRequest, fmt.Sprintf("invalid %s url %q: %v", method, rawURL, err)), http.StatusBadRequest
 	}
 	if r.Host != "" {
 		subReq.Host = r.Host
 	}
 	if authHdr := r.Header.Get("Authorization"); authHdr != "" {
 		subReq.Header.Set("Authorization", authHdr)
+	}
+	if entryReq != nil {
+		if inm := strings.TrimSpace(entryReq.IfNoneMatch); inm != "" {
+			subReq.Header.Set("If-None-Match", inm)
+		}
+		if ims := strings.TrimSpace(entryReq.IfModifiedSince); ims != "" {
+			subReq.Header.Set("If-Modified-Since", ims)
+		}
 	}
 
 	rec := &bundleSubResponseRecorder{header: make(http.Header)}
@@ -1282,6 +1309,9 @@ func (s *Server) resolveConditionalReferencesInJSON(
 						}
 						condParams, err := postgres.ParseIfNoneExist(tenant, targetType, queryStr)
 						if err != nil {
+							return http.StatusBadRequest, fmt.Errorf("invalid conditional reference %q: %w", trimmed, err)
+						}
+						if err := s.expandTerminologySearchParams(ctx, tenant, &condParams); err != nil {
 							return http.StatusBadRequest, fmt.Errorf("invalid conditional reference %q: %w", trimmed, err)
 						}
 						if hasSecCtx && auth.IsPatientRestricted(secCtx) {

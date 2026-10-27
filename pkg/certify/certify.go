@@ -414,10 +414,10 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("SEARCH-02", suite2, "HL7 Inferno multipleOr Comma-Separated Search (status=a,b & _id=id1,id2)", t0, err, "Matched multipleOr comma-separated token & _id filters")
 
-	// 2.21 FHIR R4 Search Modifiers (:exact, :contains, :not, :missing)
+	// 2.21 FHIR R4 Search Modifiers (:exact, :contains, :not, :missing, :in, :not-in, :below, :above, :identifier)
 	t0 = time.Now()
 	{
-		modQuery := "Patient?family:exact=Certify&given:contains=lic&gender:not=male&identifier:missing=false"
+		modQuery := "Patient?family:exact=Certify&given:contains=lic&gender:not=male&gender:in=http://hl7.org/fhir/ValueSet/administrative-gender&identifier:missing=false"
 		respMod, bMod, errMod := doReq(http.MethodGet, basePath+"/"+modQuery, "", nil, nil)
 		if errMod != nil || respMod.StatusCode != http.StatusOK {
 			err = fmt.Errorf("expected 200 OK on search modifiers query, got %d: %s", respMod.StatusCode, string(bMod))
@@ -426,11 +426,38 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			if uErr := json.Unmarshal(bMod, &modBundle); uErr != nil {
 				err = uErr
 			} else if tot, _ := modBundle["total"].(float64); tot < 1 {
-				err = fmt.Errorf("expected total >= 1 on :exact/:contains/:not/:missing query, got %v", modBundle["total"])
+				err = fmt.Errorf("expected total >= 1 on :exact/:contains/:not/:in/:missing query, got %v", modBundle["total"])
+			}
+		}
+		if err == nil {
+			// Verify :in, :not-in, :below hierarchical token search and :identifier reference modifier
+			hierQuery := "Observation?patient:identifier=http://hospital.example.org/mrn|CERT-MRN-1&code:in=http://hl7.org/fhir/ValueSet/observation-vitalsignresult&status:not-in=http://hl7.org/fhir/ValueSet/administrative-gender"
+			respHier, bHier, errHier := doReq(http.MethodGet, basePath+"/"+hierQuery, "", nil, nil)
+			if errHier != nil || respHier.StatusCode != http.StatusOK {
+				err = fmt.Errorf("expected 200 OK on :in/:not-in/:identifier query, got %d: %s", respHier.StatusCode, string(bHier))
+			} else {
+				var hierBundle map[string]any
+				_ = json.Unmarshal(bHier, &hierBundle)
+				if tot, _ := hierBundle["total"].(float64); tot < 1 {
+					err = fmt.Errorf("expected total >= 1 on :in/:not-in/:identifier query, got %v", hierBundle["total"])
+				}
+			}
+		}
+		if err == nil {
+			condHierQuery := "Condition?patient:identifier=CERT-MRN-1&clinical-status:below=http://terminology.hl7.org/CodeSystem/condition-clinical|active"
+			respCH, bCH, errCH := doReq(http.MethodGet, basePath+"/"+condHierQuery, "", nil, nil)
+			if errCH != nil || respCH.StatusCode != http.StatusOK {
+				err = fmt.Errorf("expected 200 OK on Condition :below/:identifier query, got %d: %s", respCH.StatusCode, string(bCH))
+			} else {
+				var chBundle map[string]any
+				_ = json.Unmarshal(bCH, &chBundle)
+				if tot, _ := chBundle["total"].(float64); tot < 1 {
+					err = fmt.Errorf("expected total >= 1 on Condition :below/:identifier query, got %v", chBundle["total"])
+				}
 			}
 		}
 	}
-	record("SEARCH-03", suite2, "FHIR R4 Search Modifiers (:exact, :contains, :not, :missing)", t0, err, "Verified :exact, :contains, :not, and :missing modifiers")
+	record("SEARCH-03", suite2, "FHIR R4 Search Modifiers (:exact, :contains, :not, :missing, :in, :not-in, :below, :identifier)", t0, err, "Verified :exact, :contains, :not, :missing, :in, :not-in, :below, and :identifier modifiers")
 
 	// 2.22 FHIR R4 _sort, _has Reverse Chaining, _summary/_elements, Bundle.link & Compartment Search
 	t0 = time.Now()
@@ -547,16 +574,30 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		_ = json.Unmarshal(b, &m)
 		condOrgID, _ = m["id"].(string)
 	}
-	// Repeat If-None-Exist -> must return 200 OK with same ID
+	// Repeat If-None-Exist -> must return 200 OK with same ID, then verify Conditional Read (If-None-Match & If-Modified-Since -> 304 Not Modified)
 	if err == nil {
 		resp2, b2, err2 := doReq(http.MethodPost, basePath+"/Organization", "application/fhir+json", condOrg, map[string]string{
 			"If-None-Exist": "identifier=http://hl7.org/fhir/sid/us-npi|7776665554",
 		})
 		if err2 != nil || resp2.StatusCode != http.StatusOK {
 			err = fmt.Errorf("expected idempotent 200 OK on repeat If-None-Exist, got %d: %v", resp2.StatusCode, string(b2))
+		} else {
+			v1ETag := resp2.Header.Get("ETag")
+			v1LM := resp2.Header.Get("Last-Modified")
+			resp304ETag, _, err304E := doReq(http.MethodGet, basePath+"/Organization/"+condOrgID, "", nil, map[string]string{
+				"If-None-Match": v1ETag,
+			})
+			resp304IMS, _, err304I := doReq(http.MethodGet, basePath+"/Organization/"+condOrgID, "", nil, map[string]string{
+				"If-Modified-Since": v1LM,
+			})
+			if err304E != nil || resp304ETag.StatusCode != http.StatusNotModified {
+				err = fmt.Errorf("expected 304 Not Modified on If-None-Match=%s, got %d", v1ETag, resp304ETag.StatusCode)
+			} else if err304I != nil || resp304IMS.StatusCode != http.StatusNotModified {
+				err = fmt.Errorf("expected 304 Not Modified on If-Modified-Since=%s, got %d", v1LM, resp304IMS.StatusCode)
+			}
 		}
 	}
-	record("CRUD-01", suite3, "Conditional Create (If-None-Exist Idempotency)", t0, err, "Created once and returned 200 OK idempotently")
+	record("CRUD-01", suite3, "Conditional Create (If-None-Exist) & Conditional Read (If-None-Match / If-Modified-Since 304)", t0, err, "Created once, returned 200 OK idempotently, and verified 304 Not Modified conditional reads")
 
 	// 3.2 Conditional Update (PUT ?identifier=...)
 	t0 = time.Now()

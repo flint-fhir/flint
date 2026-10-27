@@ -268,7 +268,7 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 		paramType = "quantity"
 	case knownRefSearchParams[targetParam]:
 		paramType = "reference"
-	case knownURISearchParams[targetParam] || targetMod == "below" || targetMod == "above":
+	case knownURISearchParams[targetParam] || ((targetMod == "below" || targetMod == "above") && !knownTokenSearchParams[targetParam] && !strings.Contains(value, "|")):
 		paramType = "uri"
 	}
 
@@ -460,7 +460,7 @@ var (
 		"payor": true, "subscriber": true, "practitioner": true, "device": true,
 		"questionnaire": true, "source": true, "care-team": true, "goal": true,
 		"focus": true, "owner": true, "for": true, "actor": true,
-		"item": true, "member": true, "entity": true,
+		"item": true, "member": true, "entity": true, "service-provider": true,
 	}
 	knownDateSearchParams = map[string]bool{
 		"birthdate": true, "date": true, "onset-date": true,
@@ -788,7 +788,7 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 					params.CompositeTokenQuantities = append(params.CompositeTokenQuantities, orGroup)
 				}
 			}
-		case knownURISearchParams[baseKey] || mod == "below" || mod == "above":
+		case knownURISearchParams[baseKey]:
 			params.URIs[key] = value
 			params.URIFilters[key] = append(params.URIFilters[key], values...)
 		case knownStringSearchParams[baseKey]:
@@ -800,6 +800,9 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 		case knownRefSearchParams[baseKey]:
 			params.References[key] = value
 			params.ReferenceFilters[key] = append(params.ReferenceFilters[key], values...)
+		case (mod == "below" || mod == "above") && !strings.Contains(value, "|"):
+			params.URIs[key] = value
+			params.URIFilters[key] = append(params.URIFilters[key], values...)
 		case knownDateSearchParams[baseKey]:
 			for _, rawVal := range values {
 				for part := range strings.SplitSeq(rawVal, ",") {

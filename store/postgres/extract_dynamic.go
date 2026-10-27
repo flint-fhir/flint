@@ -446,6 +446,37 @@ func extractCodeableConceptTokens(idx *SearchIndexes, tenantID, resType, resID s
 }
 
 func extractReferenceIndex(idx *SearchIndexes, tenantID, resType, resID string, refMsg protoreflect.Message, spNames []string) {
+	if identFD := refMsg.Descriptor().Fields().ByName("identifier"); identFD != nil && refMsg.Has(identFD) && identFD.Kind() == protoreflect.MessageKind {
+		sys, val := extractIdentifier(refMsg.Get(identFD).Message())
+		if val != "" {
+			seenLogical := make(map[string]bool)
+			addLogical := func(name string) {
+				key := name + ":identifier"
+				if seenLogical[key] {
+					return
+				}
+				seenLogical[key] = true
+				idx.Tokens = append(idx.Tokens, SpidxToken{
+					TenantID: tenantID,
+					ResType:  resType,
+					ResID:    resID,
+					SpName:   key,
+					SpSystem: sys,
+					SpValue:  val,
+				})
+			}
+			for _, spName := range spNames {
+				addLogical(spName)
+				switch spName {
+				case "subject", "beneficiary":
+					addLogical("patient")
+				case "patient":
+					addLogical("subject")
+				}
+			}
+		}
+	}
+
 	var targetType, targetID string
 	refMsg.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
 		name := string(fd.Name())

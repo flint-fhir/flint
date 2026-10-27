@@ -135,13 +135,17 @@ var builtInCodeSystems = map[string]builtInCodeSystemDef{
 }
 
 var builtInValueSetToCodeSystem = map[string]string{
-	"http://hl7.org/fhir/ValueSet/administrative-gender":       "http://hl7.org/fhir/administrative-gender",
-	"http://hl7.org/fhir/ValueSet/observation-status":          "http://hl7.org/fhir/observation-status",
-	"http://hl7.org/fhir/ValueSet/condition-clinical":          "http://terminology.hl7.org/CodeSystem/condition-clinical",
-	"http://hl7.org/fhir/ValueSet/allergyintolerance-clinical": "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical",
-	"http://hl7.org/fhir/ValueSet/observation-category":        "http://terminology.hl7.org/CodeSystem/observation-category",
-	"http://hl7.org/fhir/ValueSet/observation-vitalsignresult": "http://loinc.org",
-	"http://hl7.org/fhir/us/core/ValueSet/us-core-vital-signs": "http://loinc.org",
+	"http://hl7.org/fhir/ValueSet/administrative-gender":            "http://hl7.org/fhir/administrative-gender",
+	"http://hl7.org/fhir/ValueSet/observation-status":               "http://hl7.org/fhir/observation-status",
+	"http://hl7.org/fhir/ValueSet/condition-clinical":               "http://terminology.hl7.org/CodeSystem/condition-clinical",
+	"http://hl7.org/fhir/ValueSet/allergyintolerance-clinical":      "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical",
+	"http://hl7.org/fhir/ValueSet/observation-category":             "http://terminology.hl7.org/CodeSystem/observation-category",
+	"http://hl7.org/fhir/ValueSet/observation-vitalsignresult":      "http://loinc.org",
+	"http://hl7.org/fhir/us/core/ValueSet/us-core-vital-signs":      "http://loinc.org",
+	"http://hl7.org/fhir/ValueSet/condition-code":                   "http://snomed.info/sct",
+	"http://hl7.org/fhir/us/core/ValueSet/us-core-condition-code":   "http://snomed.info/sct",
+	"http://hl7.org/fhir/us/core/ValueSet/us-core-procedure-code":   "http://snomed.info/sct",
+	"http://hl7.org/fhir/us/core/ValueSet/us-core-medication-codes": "http://www.nlm.nih.gov/research/umls/rxnorm",
 }
 
 func extractTerminologyParams(r *http.Request) (map[string]string, map[string]any) {
@@ -1370,4 +1374,196 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 		"resourceType": "Parameters",
 		"parameter":    outParams,
 	})
+}
+
+// ExpandTerminologySearchParams resolves terminology-aware token search modifiers
+// (:in, :not-in, :below, :above) across direct and chained token search parameters,
+// rewriting them into spidx_token-compatible filters.
+func (s *Server) ExpandTerminologySearchParams(ctx context.Context, tenant string, params *postgres.SearchParams) error {
+	return s.expandTerminologySearchParams(ctx, tenant, params)
+}
+
+// expandTerminologySearchParams resolves terminology-aware token search modifiers
+// (:in, :not-in, :below, :above) across direct and chained token search parameters,
+// rewriting them into spidx_token-compatible filters.
+func (s *Server) expandTerminologySearchParams(ctx context.Context, tenant string, params *postgres.SearchParams) error {
+	if params == nil {
+		return nil
+	}
+
+	if len(params.TokenFilters) > 0 {
+		newFilters := make(map[string][]string, len(params.TokenFilters))
+		newTokens := make(map[string]string, len(params.Tokens))
+		for spKey, filterVals := range params.TokenFilters {
+			baseName := spKey
+			mod := ""
+			if colonIdx := strings.IndexByte(spKey, ':'); colonIdx != -1 {
+				baseName = spKey[:colonIdx]
+				mod = strings.ToLower(strings.TrimSpace(spKey[colonIdx+1:]))
+			}
+			switch mod {
+			case "in", "not-in", "below", "above":
+				for _, rawVal := range filterVals {
+					rewrittenKey, rewrittenVal, err := s.expandSingleTerminologyTokenValue(ctx, tenant, baseName, mod, rawVal)
+					if err != nil {
+						return err
+					}
+					if rewrittenKey != "" && rewrittenVal != "" {
+						newFilters[rewrittenKey] = append(newFilters[rewrittenKey], rewrittenVal)
+						if _, exists := newTokens[rewrittenKey]; !exists {
+							newTokens[rewrittenKey] = rewrittenVal
+						}
+					}
+				}
+			default:
+				newFilters[spKey] = append(newFilters[spKey], filterVals...)
+				if v, ok := params.Tokens[spKey]; ok {
+					newTokens[spKey] = v
+				} else if len(filterVals) > 0 {
+					newTokens[spKey] = filterVals[0]
+				}
+			}
+		}
+		params.TokenFilters = newFilters
+		params.Tokens = newTokens
+	}
+
+	for i := range params.Chained {
+		ch := &params.Chained[i]
+		mod := strings.ToLower(strings.TrimSpace(ch.TargetModifier))
+		if ch.ParamType == "token" && (mod == "in" || mod == "not-in" || mod == "below" || mod == "above") {
+			rewrittenKey, rewrittenVal, err := s.expandSingleTerminologyTokenValue(ctx, tenant, ch.TargetParam, mod, ch.Value)
+			if err != nil {
+				return err
+			}
+			if strings.HasSuffix(rewrittenKey, ":not") {
+				ch.TargetModifier = "not"
+			} else {
+				ch.TargetModifier = ""
+			}
+			ch.Value = rewrittenVal
+		}
+	}
+
+	return nil
+}
+
+func (s *Server) expandSingleTerminologyTokenValue(ctx context.Context, tenant, baseName, modifier, rawVal string) (string, string, error) {
+	switch modifier {
+	case "in", "not-in":
+		var tokens []string
+		seen := make(map[string]bool)
+		addTok := func(t string) {
+			if t != "" && !seen[t] {
+				seen[t] = true
+				tokens = append(tokens, t)
+			}
+		}
+		for part := range strings.SplitSeq(rawVal, ",") {
+			vsRef := strings.TrimSpace(part)
+			if vsRef == "" {
+				continue
+			}
+			vsID := ""
+			vsURL := ""
+			if strings.HasPrefix(vsRef, "http://") || strings.HasPrefix(vsRef, "https://") || strings.HasPrefix(vsRef, "urn:") {
+				vsURL = vsRef
+			} else if strings.HasPrefix(vsRef, "ValueSet/") {
+				vsID = strings.TrimPrefix(vsRef, "ValueSet/")
+			} else {
+				vsID = vsRef
+				vsURL = vsRef
+			}
+			_, _, concepts, err := s.resolveValueSetConcepts(ctx, tenant, vsID, vsURL, nil)
+			if err != nil && vsID != "" && vsURL != "" {
+				_, _, concepts, err = s.resolveValueSetConcepts(ctx, tenant, "", vsURL, nil)
+			}
+			if err != nil {
+				return "", "", fmt.Errorf("invalid :%s ValueSet %q: %w", modifier, vsRef, err)
+			}
+			for _, c := range concepts {
+				if c.Code == "" {
+					continue
+				}
+				if c.System != "" {
+					addTok(c.System + "|" + c.Code)
+				}
+				if c.System == "" || baseName == "gender" || baseName == "status" || baseName == "clinical-status" || baseName == "verification-status" || baseName == "category" {
+					addTok(c.Code)
+				}
+			}
+		}
+		if modifier == "in" {
+			if len(tokens) == 0 {
+				return baseName, "__empty_valueset__|__none__", nil
+			}
+			return baseName, strings.Join(tokens, ","), nil
+		}
+		if len(tokens) == 0 {
+			return "", "", nil
+		}
+		return baseName + ":not", strings.Join(tokens, ","), nil
+
+	case "below", "above":
+		var tokens []string
+		seen := make(map[string]bool)
+		addTok := func(t string) {
+			if t != "" && !seen[t] {
+				seen[t] = true
+				tokens = append(tokens, t)
+			}
+		}
+		for part := range strings.SplitSeq(rawVal, ",") {
+			item := strings.TrimSpace(part)
+			if item == "" {
+				continue
+			}
+			addTok(item)
+			var sys, code string
+			if p := strings.SplitN(item, "|", 2); len(p) == 2 {
+				sys = strings.TrimSpace(p[0])
+				code = strings.TrimSpace(p[1])
+			} else {
+				code = item
+			}
+			if sys == "" {
+				switch baseName {
+				case "clinical-status":
+					sys = "http://terminology.hl7.org/CodeSystem/condition-clinical"
+				case "gender":
+					sys = "http://hl7.org/fhir/administrative-gender"
+				case "status":
+					sys = "http://hl7.org/fhir/observation-status"
+				}
+			}
+			if sys != "" && code != "" {
+				if concepts, _, err := s.resolveCodeSystemConcepts(ctx, tenant, "", sys); err == nil && len(concepts) > 0 {
+					parentsByCode := make(map[string][]string, len(concepts))
+					for _, c := range concepts {
+						if len(c.Parents) > 0 {
+							parentsByCode[c.Code] = c.Parents
+						}
+					}
+					for _, c := range concepts {
+						matched := false
+						if modifier == "below" {
+							matched = codeIsAncestorOrEqual(code, c.Code, parentsByCode, true)
+						} else {
+							matched = codeIsAncestorOrEqual(c.Code, code, parentsByCode, true)
+						}
+						if matched {
+							if c.System != "" {
+								addTok(c.System + "|" + c.Code)
+							}
+							if !strings.Contains(item, "|") || baseName == "clinical-status" || baseName == "status" || baseName == "gender" {
+								addTok(c.Code)
+							}
+						}
+					}
+				}
+			}
+		}
+		return baseName, strings.Join(tokens, ","), nil
+	}
+	return baseName, rawVal, nil
 }
