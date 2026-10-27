@@ -765,11 +765,35 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 						break
 					}
 				}
+				if err == nil {
+					impReq := []byte(`{
+						"resourceType": "Parameters",
+						"parameter": [
+							{"name": "inputFormat", "valueCode": "application/fhir+ndjson"},
+							{
+								"name": "input",
+								"part": [
+									{"name": "type", "valueCode": "Patient"},
+									{"name": "content", "valueString": "{\"resourceType\":\"Patient\",\"id\":\"cert-imp-pat-1\",\"active\":true,\"gender\":\"male\",\"name\":[{\"family\":\"Imported\",\"given\":[\"Bob\"]}]}"}
+								]
+							}
+						]
+					}`)
+					respImp, bImp, errImp := doReq(http.MethodPost, basePath+"/$import", "application/fhir+json", impReq, nil)
+					if errImp != nil || respImp.StatusCode != http.StatusOK || !strings.Contains(string(bImp), "Successfully imported 1") {
+						err = fmt.Errorf("expected 200 OK from POST /$import, got %d: %s", respImp.StatusCode, string(bImp))
+					} else {
+						respPrg, _, errPrg := doReq(http.MethodPost, basePath+"/Patient/cert-imp-pat-1/$purge?expunge=true", "", nil, nil)
+						if errPrg != nil || respPrg.StatusCode != http.StatusOK {
+							err = fmt.Errorf("expected 200 OK from POST /Patient/cert-imp-pat-1/$purge?expunge=true, got %d", respPrg.StatusCode)
+						}
+					}
+				}
 			}
 		}
 	}
-	record("EXP-02", suite4, "ONC (g)(10) Async Group/$export Kickoff, Poll & NDJSON Validation", t0, err,
-		fmt.Sprintf("Validated %d exported NDJSON resources across US Core profiles", exportedCount))
+	record("EXP-02", suite4, "ONC (g)(10) Async Group/$export, Bulk Data $import, Patient/$purge & NDJSON Validation", t0, err,
+		fmt.Sprintf("Validated %d exported NDJSON resources plus $import & $purge", exportedCount))
 
 	// =========================================================================
 	// Suite 5: SMART v2 OAuth2 PKCE Launch, $validate & ONC (d)(2) AuditEvent
