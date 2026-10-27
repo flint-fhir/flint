@@ -1795,16 +1795,16 @@ func (s *Server) handleSearchAuditEvents(w http.ResponseWriter, r *http.Request)
 	}
 }
 
-// handlePatientEverything handles GET/POST /{tenant}/{resourceType}/{id}/$everything — assemble full Patient or Encounter compartment Bundle.
+// handlePatientEverything handles GET/POST /{tenant}/{resourceType}/{id}/$everything — assemble full Patient, Encounter, or Group compartment Bundle.
 func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	resType := strings.TrimSpace(r.PathValue("resourceType"))
 	if resType == "" {
 		resType = "Patient"
 	}
-	if !strings.EqualFold(resType, "Patient") && !strings.EqualFold(resType, "Encounter") {
+	if !strings.EqualFold(resType, "Patient") && !strings.EqualFold(resType, "Encounter") && !strings.EqualFold(resType, "Group") {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found",
-			fmt.Sprintf("$everything is only supported on Patient and Encounter (got %s)", resType))
+			fmt.Sprintf("$everything is only supported on Patient, Encounter, and Group (got %s)", resType))
 		return
 	}
 	resID := r.PathValue("id")
@@ -1812,8 +1812,17 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 
 	typeRaw := strings.TrimSpace(q.Get("_type"))
 	sinceRaw := strings.TrimSpace(q.Get("_since"))
+	untilRaw := strings.TrimSpace(q.Get("_until"))
 	countRaw := strings.TrimSpace(q.Get("_count"))
 	offsetRaw := strings.TrimSpace(q.Get("_offset"))
+	var elements []string
+	for _, el := range q["_elements"] {
+		for part := range strings.SplitSeq(el, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				elements = append(elements, trimmed)
+			}
+		}
+	}
 	var typeFilters []string
 	for _, tf := range q["_typeFilter"] {
 		for part := range strings.SplitSeq(tf, ",") {
@@ -1874,6 +1883,10 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 							if val != "" && sinceRaw == "" {
 								sinceRaw = val
 							}
+						case "_until":
+							if val != "" && untilRaw == "" {
+								untilRaw = val
+							}
 						case "_count":
 							if val != "" && countRaw == "" {
 								countRaw = val
@@ -1881,6 +1894,12 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 						case "_offset":
 							if val != "" && offsetRaw == "" {
 								offsetRaw = val
+							}
+						case "_elements":
+							for part := range strings.SplitSeq(val, ",") {
+								if trimmed := strings.TrimSpace(part); trimmed != "" {
+									elements = append(elements, trimmed)
+								}
 							}
 						case "_typeFilter":
 							for part := range strings.SplitSeq(val, ",") {
@@ -1944,10 +1963,39 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
 	if hasSecCtx {
+		if strings.EqualFold(resType, "Group") {
+			if auth.IsPatientRestricted(secCtx) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					"patient-scoped token cannot invoke multi-patient Group/$everything; use /Patient/{id}/$everything")
+				return
+			}
+			if !auth.Allows(secCtx, "Group", auth.ActionRead) && !auth.Allows(secCtx, "Group", auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					"insufficient scope for Group/$everything")
+				return
+			}
+		}
 		for _, rt := range resourceTypes {
 			if !auth.Allows(secCtx, rt, auth.ActionRead) && !auth.Allows(secCtx, rt, auth.ActionSearch) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 					fmt.Sprintf("insufficient scope for $everything _type %s", rt))
+				return
+			}
+		}
+	}
+
+	for _, el := range elements {
+		if idx := strings.IndexByte(el, '.'); idx != -1 {
+			rt := strings.TrimSpace(el[:idx])
+			field := strings.TrimSpace(el[idx+1:])
+			if rt == "" || field == "" || strings.Contains(field, ".") {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+					fmt.Sprintf("invalid _elements token %q", el))
+				return
+			}
+			if _, ok := s.protoRegistry[rt]; !ok {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+					fmt.Sprintf("unsupported resource type %q in _elements token %q", rt, el))
 				return
 			}
 		}
@@ -1963,6 +2011,26 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		}
 		t := dOp.Value
 		sinceTime = &t
+	}
+
+	var untilTime *time.Time
+	if untilRaw != "" {
+		dOp, err := postgres.ParseDateOp(untilRaw)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _until parameter %q: %v", untilRaw, err))
+			return
+		}
+		t := dOp.Value
+		if dOp.High.After(dOp.Value) {
+			t = dOp.High.Add(-time.Microsecond)
+		}
+		untilTime = &t
+	}
+	if sinceTime != nil && untilTime != nil && untilTime.Before(*sinceTime) {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+			fmt.Sprintf("_until (%s) must not be earlier than _since (%s)", untilRaw, sinceRaw))
+		return
 	}
 
 	count := 100
@@ -1989,13 +2057,44 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 	var sr *postgres.SearchResults
 	var err error
 	targetLabel := "Patient"
-	if strings.EqualFold(resType, "Encounter") {
+	if strings.EqualFold(resType, "Group") {
+		targetLabel = "Group"
+		groupPatIDs, isBuiltinAll, gErr := s.resolveExportGroupCohort(r.Context(), tenant, resID, 0, make(map[string]bool))
+		if errors.Is(gErr, sql.ErrNoRows) {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found",
+				fmt.Sprintf("Group/%s not found", resID))
+			return
+		}
+		if errors.Is(gErr, postgres.ErrResourceDeleted) {
+			writeOperationOutcome(w, http.StatusGone, "deleted",
+				fmt.Sprintf("Group/%s has been deleted", resID))
+			return
+		}
+		if gErr != nil {
+			s.logger.Error("Group/$everything cohort resolution failed", "error", gErr, "group", resID)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to assemble Group/$everything")
+			return
+		}
+		sr, err = s.store.GroupEverything(r.Context(), postgres.GroupEverythingParams{
+			TenantID:      tenant,
+			GroupID:       resID,
+			PatientIDs:    groupPatIDs,
+			AllPatients:   isBuiltinAll,
+			EmptyCohort:   !isBuiltinAll && len(groupPatIDs) == 0,
+			ResourceTypes: resourceTypes,
+			Since:         sinceTime,
+			Until:         untilTime,
+			Count:         count,
+			Offset:        offset,
+		})
+	} else if strings.EqualFold(resType, "Encounter") {
 		targetLabel = "Encounter"
 		sr, err = s.store.EncounterEverything(r.Context(), postgres.EncounterEverythingParams{
 			TenantID:      tenant,
 			EncounterID:   resID,
 			ResourceTypes: resourceTypes,
 			Since:         sinceTime,
+			Until:         untilTime,
 			Count:         count,
 			Offset:        offset,
 		})
@@ -2005,6 +2104,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 			PatientID:     resID,
 			ResourceTypes: resourceTypes,
 			Since:         sinceTime,
+			Until:         untilTime,
 			Count:         count,
 			Offset:        offset,
 		})
@@ -2070,9 +2170,10 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 	}
 
 	s.writeSearchSetBundleWithOpts(w, r, sr, postgres.SearchParams{
-		Count:   count,
-		Offset:  offset,
-		ResType: "$everything",
+		Count:    count,
+		Offset:   offset,
+		ResType:  "$everything",
+		Elements: elements,
 	})
 }
 
@@ -2246,6 +2347,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 						fmt.Sprintf("insufficient scope for chained search target %s", hop.TargetType))
 					return
 				}
+			}
+		}
+		for _, f := range params.Filters {
+			if unauthType := checkFilterExprChainedScopes(secCtx, f); unauthType != "" {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope for chained search target %s", unauthType))
+				return
 			}
 		}
 		if len(params.List) > 0 && !auth.Allows(secCtx, "List", auth.ActionRead) && !auth.Allows(secCtx, "List", auth.ActionSearch) {
@@ -2443,6 +2551,13 @@ func (s *Server) handleSystemSearch(w http.ResponseWriter, r *http.Request) {
 						fmt.Sprintf("insufficient scope for chained search target %s", hop.TargetType))
 					return
 				}
+			}
+		}
+		for _, f := range params.Filters {
+			if unauthType := checkFilterExprChainedScopes(secCtx, f); unauthType != "" {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope for chained search target %s", unauthType))
+				return
 			}
 		}
 		if len(params.List) > 0 && !auth.Allows(secCtx, "List", auth.ActionRead) && !auth.Allows(secCtx, "List", auth.ActionSearch) {
@@ -2654,6 +2769,9 @@ func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Req
 			if err := json.Unmarshal(jsonBytes, &resource); err != nil {
 				continue
 			}
+			if needsProjection && params.ResType == "$everything" {
+				resource = applySummaryOrElements(resource, params.Summary, params.Elements)
+			}
 
 			entries = append(entries, map[string]any{
 				"fullUrl":  fmt.Sprintf("%s/%s", inc.ResType, inc.ResID),
@@ -2806,6 +2924,28 @@ var fhirSummaryElements = map[string]bool{
 	"occurrenceDateTime":        true,
 }
 
+func checkFilterExprChainedScopes(secCtx *auth.SecurityContext, expr postgres.FilterExpr) string {
+	switch expr.Kind {
+	case "and", "or", "not":
+		for _, child := range expr.Children {
+			if t := checkFilterExprChainedScopes(secCtx, child); t != "" {
+				return t
+			}
+		}
+	case "param":
+		if strings.Contains(expr.Param, ".") {
+			if ch, ok := postgres.ParseChainedParam(expr.Param, expr.Value); ok {
+				for _, hop := range ch.Hops {
+					if hop.TargetType != "" && !auth.Allows(secCtx, hop.TargetType, auth.ActionRead) && !auth.Allows(secCtx, hop.TargetType, auth.ActionSearch) {
+						return hop.TargetType
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func applySummaryOrElements(resource map[string]any, summary string, elements []string) map[string]any {
 	if resource == nil {
 		return nil
@@ -2814,15 +2954,32 @@ func applySummaryOrElements(resource map[string]any, summary string, elements []
 
 	switch {
 	case len(elements) > 0:
+		resType, _ := resource["resourceType"].(string)
 		keep := map[string]bool{
 			"resourceType": true,
 			"id":           true,
 			"meta":         true,
 		}
 		var prefixes []string
+		hasMatchedForType := false
+		hasUnqualified := false
 		for _, el := range elements {
-			keep[el] = true
-			prefixes = append(prefixes, el)
+			if idx := strings.IndexByte(el, '.'); idx != -1 {
+				rt := strings.TrimSpace(el[:idx])
+				field := strings.TrimSpace(el[idx+1:])
+				if strings.EqualFold(rt, resType) && field != "" {
+					keep[field] = true
+					prefixes = append(prefixes, field)
+					hasMatchedForType = true
+				}
+			} else {
+				keep[el] = true
+				prefixes = append(prefixes, el)
+				hasUnqualified = true
+			}
+		}
+		if !hasUnqualified && !hasMatchedForType {
+			return resource
 		}
 		for k, v := range resource {
 			if keep[k] {
@@ -2996,6 +3153,9 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		{"name": "_tag", "type": "token"},
 		{"name": "_security", "type": "token"},
 		{"name": "_source", "type": "uri"},
+		{"name": "_filter", "type": "special"},
+		{"name": "_content", "type": "string"},
+		{"name": "_text", "type": "string"},
 		{"name": "identifier", "type": "token"},
 		{"name": "status", "type": "token"},
 		{"name": "code", "type": "token"},
@@ -3105,6 +3265,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			{
 				"name":       "export",
 				"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/group-export",
+			},
+			{
+				"name":       "everything",
+				"definition": "http://hl7.org/fhir/OperationDefinition/Group-everything",
 			},
 		},
 	})

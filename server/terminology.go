@@ -1445,6 +1445,52 @@ func (s *Server) expandTerminologySearchParams(ctx context.Context, tenant strin
 		}
 	}
 
+	for i := range params.Filters {
+		if err := s.expandFilterExprTerminology(ctx, tenant, &params.Filters[i]); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (s *Server) expandFilterExprTerminology(ctx context.Context, tenant string, expr *postgres.FilterExpr) error {
+	if expr == nil {
+		return nil
+	}
+	switch expr.Kind {
+	case "and", "or", "not":
+		for i := range expr.Children {
+			if err := s.expandFilterExprTerminology(ctx, tenant, &expr.Children[i]); err != nil {
+				return err
+			}
+		}
+	case "param":
+		op := strings.ToLower(strings.TrimSpace(expr.Op))
+		var mod string
+		switch op {
+		case "in":
+			mod = "in"
+		case "ni":
+			mod = "not-in"
+		case "ss":
+			mod = "above"
+		case "sb":
+			mod = "below"
+		default:
+			return nil
+		}
+		_, rewrittenVal, err := s.expandSingleTerminologyTokenValue(ctx, tenant, expr.Param, mod, expr.Value)
+		if err != nil {
+			return err
+		}
+		if op == "ni" {
+			expr.Op = "ne"
+		} else {
+			expr.Op = "eq"
+		}
+		expr.Value = rewrittenVal
+	}
 	return nil
 }
 

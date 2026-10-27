@@ -169,6 +169,8 @@ type parsedExportRequest struct {
 	outputFormat string
 	typeRaw      string
 	sinceRaw     string
+	untilRaw     string
+	elements     []string
 	typeFilters  []string
 	patientRefs  []string
 	asyncParam   string
@@ -181,8 +183,16 @@ func parseExportRequest(r *http.Request) (parsedExportRequest, error) {
 		outputFormat: q.Get("_outputFormat"),
 		typeRaw:      strings.Join(q["_type"], ","),
 		sinceRaw:     q.Get("_since"),
+		untilRaw:     q.Get("_until"),
 		asyncParam:   q.Get("_async"),
 		formatParam:  q.Get("_format"),
+	}
+	for _, el := range q["_elements"] {
+		for part := range strings.SplitSeq(el, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				req.elements = append(req.elements, trimmed)
+			}
+		}
 	}
 	for _, tf := range q["_typeFilter"] {
 		for part := range strings.SplitSeq(tf, ",") {
@@ -258,6 +268,16 @@ func parseExportRequest(r *http.Request) (parsedExportRequest, error) {
 						case "_since":
 							if req.sinceRaw == "" {
 								req.sinceRaw = val
+							}
+						case "_until":
+							if req.untilRaw == "" {
+								req.untilRaw = val
+							}
+						case "_elements":
+							for part := range strings.SplitSeq(val, ",") {
+								if trimmed := strings.TrimSpace(part); trimmed != "" {
+									req.elements = append(req.elements, trimmed)
+								}
 							}
 						case "_typeFilter":
 							for part := range strings.SplitSeq(val, ",") {
@@ -335,6 +355,43 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		}
 		t := dOp.Value
 		since = &t
+	}
+
+	var until *time.Time
+	if untilRaw := strings.TrimSpace(reqParams.untilRaw); untilRaw != "" {
+		dOp, err := postgres.ParseDateOp(untilRaw)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _until parameter %q: %v", untilRaw, err))
+			return
+		}
+		t := dOp.Value
+		if dOp.High.After(dOp.Value) {
+			t = dOp.High.Add(-time.Microsecond)
+		}
+		until = &t
+	}
+	if since != nil && until != nil && until.Before(*since) {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+			fmt.Sprintf("_until (%s) must not be earlier than _since (%s)", reqParams.untilRaw, reqParams.sinceRaw))
+		return
+	}
+
+	for _, el := range reqParams.elements {
+		if idx := strings.IndexByte(el, '.'); idx != -1 {
+			rt := strings.TrimSpace(el[:idx])
+			field := strings.TrimSpace(el[idx+1:])
+			if rt == "" || field == "" || strings.Contains(field, ".") {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+					fmt.Sprintf("invalid _elements token %q", el))
+				return
+			}
+			if _, ok := s.protoRegistry[rt]; !ok {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+					fmt.Sprintf("unsupported resource type %q in _elements token %q", rt, el))
+				return
+			}
+		}
 	}
 
 	var parsedTypeFilters []exportTypeFilter
@@ -524,6 +581,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		PatientCompartment: isPatientExport && patientID == "" && len(cohortPatientIDs) == 0 && !emptyCohort,
 		ResourceTypes:      requestedTypes,
 		Since:              since,
+		Until:              until,
 	}
 
 	prefer := strings.ToLower(r.Header.Get("Prefer"))
@@ -555,7 +613,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 					return nil
 				}
 			}
-			line, ok := s.formatExportNDJSONLine(res)
+			line, ok := s.formatExportNDJSONLine(res, reqParams.elements)
 			if ok {
 				_, _ = w.Write(line)
 			}
@@ -589,7 +647,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		s.storeExportJob(job)
 
 		asyncCtx := context.WithoutCancel(r.Context())
-		go s.populateExportJob(asyncCtx, job, exportParams, typeFilterAllowed, hasSecCtx, secCtx, patientID)
+		go s.populateExportJob(asyncCtx, job, exportParams, typeFilterAllowed, reqParams.elements, hasSecCtx, secCtx, patientID)
 
 		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 		w.WriteHeader(http.StatusAccepted)
@@ -616,7 +674,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		Status:     "in-progress",
 		done:       make(chan struct{}),
 	}
-	s.populateExportJob(r.Context(), job, exportParams, typeFilterAllowed, hasSecCtx, secCtx, patientID)
+	s.populateExportJob(r.Context(), job, exportParams, typeFilterAllowed, reqParams.elements, hasSecCtx, secCtx, patientID)
 	if job.Err != "" {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to execute bulk export")
 		return
@@ -769,11 +827,20 @@ func matchesExportTypeFilter(allowed map[string]map[string]bool, resType, resID 
 	return idSet[resID]
 }
 
-func (s *Server) formatExportNDJSONLine(res postgres.SearchResult) ([]byte, bool) {
+func (s *Server) formatExportNDJSONLine(res postgres.SearchResult, elements []string) ([]byte, bool) {
 	jsonBytes, err := s.protoToJSONWithMeta(res.ResType, res.ResourceProto, res.ResVersion, res.LastUpdated)
 	if err != nil {
 		s.logger.Error("proto to json in export", "error", err, "type", res.ResType, "id", res.ResID)
 		return nil, false
+	}
+	if len(elements) > 0 {
+		var resource map[string]any
+		if err := json.Unmarshal(jsonBytes, &resource); err == nil {
+			resource = applySummaryOrElements(resource, "", elements)
+			if projected, mErr := json.Marshal(resource); mErr == nil {
+				jsonBytes = projected
+			}
+		}
 	}
 	var compactLine bytes.Buffer
 	if err := json.Compact(&compactLine, jsonBytes); err != nil {
@@ -789,6 +856,7 @@ func (s *Server) populateExportJob(
 	job *exportJob,
 	exportParams postgres.ExportParams,
 	typeFilterAllowed map[string]map[string]bool,
+	elements []string,
 	hasSecCtx bool,
 	secCtx *auth.SecurityContext,
 	patientID string,
@@ -821,7 +889,7 @@ func (s *Server) populateExportJob(
 				return nil
 			}
 		}
-		line, ok := s.formatExportNDJSONLine(res)
+		line, ok := s.formatExportNDJSONLine(res, elements)
 		if !ok {
 			return nil
 		}

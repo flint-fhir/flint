@@ -257,6 +257,17 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						} else if !s.enforceSearchScopeAndCompartment(w, r, secCtx, targetType) {
 							return
 						}
+					} else if len(parts) == 6 && strings.EqualFold(resType, "Group") && parts[5] == "$everything" {
+						if !auth.Allows(secCtx, "Group", auth.ActionRead) && !auth.Allows(secCtx, "Group", auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Group/$everything")
+							return
+						}
+						if auth.IsPatientRestricted(secCtx) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"patient-scoped token cannot invoke multi-patient Group/$everything; use /Patient/{id}/$everything")
+							return
+						}
 					} else if len(parts) >= 5 {
 						// Read / VRead / Instance History / $everything / $meta / Patient/{id}/$export: GET /{tenant}/{resourceType}/{id}...
 						id := parts[4]
@@ -417,6 +428,17 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 										secCtx.GetPatientId(), id))
 								return
 							}
+						}
+					} else if len(parts) == 6 && strings.EqualFold(resType, "Group") && parts[5] == "$everything" {
+						if !auth.Allows(secCtx, "Group", auth.ActionRead) && !auth.Allows(secCtx, "Group", auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Group/$everything")
+							return
+						}
+						if auth.IsPatientRestricted(secCtx) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"patient-scoped token cannot invoke multi-patient Group/$everything; use /Patient/{id}/$everything")
+							return
 						}
 					} else if len(parts) == 6 && (parts[5] == "$meta-add" || parts[5] == "$meta-delete") {
 						id := parts[4]
