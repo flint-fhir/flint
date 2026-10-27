@@ -439,7 +439,7 @@ func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID
 					IsDeleted:   true,
 				})
 			} else {
-				rec, err := s.deleteResourceInTx(ctx, tx, tenantID, t.resType, t.resID)
+				rec, err := s.deleteResourceInTx(ctx, tx, tenantID, t.resType, t.resID, 0)
 				if err != nil && !errors.Is(err, sql.ErrNoRows) {
 					return err
 				}

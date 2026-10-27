@@ -528,8 +528,21 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleExportFile(w, r)
 					return
 				}
-				if isGetOrHead && strings.EqualFold(parts[3], "Patient") && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" {
+				if isGetOrHead && postgres.IsCompartmentType(parts[3]) && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" {
 					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("compartmentType", postgres.CanonicalCompartmentType(parts[3]))
+					r.SetPathValue("compartmentId", parts[4])
+					r.SetPathValue("patientId", parts[4])
+					r.SetPathValue("resourceType", parts[5])
+					s.handleCompartmentSearch(w, r)
+					return
+				}
+			}
+			if len(parts) == 7 && parts[0] == "fhir" && parts[1] == "r4" {
+				if r.Method == http.MethodPost && postgres.IsCompartmentType(parts[3]) && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" && parts[6] == "_search" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("compartmentType", postgres.CanonicalCompartmentType(parts[3]))
+					r.SetPathValue("compartmentId", parts[4])
 					r.SetPathValue("patientId", parts[4])
 					r.SetPathValue("resourceType", parts[5])
 					s.handleCompartmentSearch(w, r)
@@ -728,6 +741,25 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	summary := strings.TrimSpace(r.URL.Query().Get("_summary"))
+	var elements []string
+	for _, rawEl := range r.URL.Query()["_elements"] {
+		for el := range strings.SplitSeq(rawEl, ",") {
+			if trimmed := strings.TrimSpace(el); trimmed != "" {
+				elements = append(elements, trimmed)
+			}
+		}
+	}
+	if (summary != "" && summary != "false") || len(elements) > 0 {
+		var resourceMap map[string]any
+		if err := json.Unmarshal(jsonBytes, &resourceMap); err == nil {
+			projected := applySummaryOrElements(resourceMap, summary, elements)
+			if b, err := json.Marshal(projected); err == nil {
+				jsonBytes = b
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
@@ -746,11 +778,31 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	resType := r.PathValue("resourceType")
 	resID := r.PathValue("id")
+	q := r.URL.Query()
 
 	count := 100
 	offset := 0
 	var since *time.Time
-	if v := strings.TrimSpace(r.URL.Query().Get("_count")); v != "" {
+	var atOps []postgres.DateOp
+	var listIDs []string
+	summary := strings.TrimSpace(q.Get("_summary"))
+	switch summary {
+	case "", "true", "text", "data", "count", "false":
+	default:
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+			fmt.Sprintf("invalid _summary parameter %q: expected true, text, data, count, or false", summary))
+		return
+	}
+	var elements []string
+	for _, rawEl := range q["_elements"] {
+		for el := range strings.SplitSeq(rawEl, ",") {
+			if trimmed := strings.TrimSpace(el); trimmed != "" {
+				elements = append(elements, trimmed)
+			}
+		}
+	}
+
+	if v := strings.TrimSpace(q.Get("_count")); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n <= 0 {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
@@ -759,7 +811,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		count = n
 	}
-	if v := strings.TrimSpace(r.URL.Query().Get("_offset")); v != "" {
+	if v := strings.TrimSpace(q.Get("_offset")); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
@@ -768,7 +820,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		}
 		offset = n
 	}
-	if sinceRaw := strings.TrimSpace(r.URL.Query().Get("_since")); sinceRaw != "" {
+	if sinceRaw := strings.TrimSpace(q.Get("_since")); sinceRaw != "" {
 		dOp, err := postgres.ParseDateOp(sinceRaw)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
@@ -778,8 +830,47 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		t := dOp.Value
 		since = &t
 	}
+	for _, rawAt := range q["_at"] {
+		for part := range strings.SplitSeq(rawAt, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				continue
+			}
+			dOp, err := postgres.ParseDateOp(trimmed)
+			if err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+					fmt.Sprintf("invalid _at parameter %q: %v", trimmed, err))
+				return
+			}
+			atOps = append(atOps, dOp)
+		}
+	}
+	for _, rawList := range q["_list"] {
+		if trimmed := strings.TrimSpace(rawList); trimmed != "" {
+			listIDs = append(listIDs, trimmed)
+		}
+	}
 
-	records, total, err := s.store.ListHistory(r.Context(), tenant, resType, resID, since, count, offset)
+	if len(listIDs) > 0 {
+		if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+			if !auth.Allows(secCtx, "List", auth.ActionRead) && !auth.Allows(secCtx, "List", auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					"insufficient scope for _list history filter (requires List read/search scope)")
+				return
+			}
+		}
+	}
+
+	records, total, err := s.store.ListHistoryWithParams(r.Context(), postgres.HistoryParams{
+		TenantID: tenant,
+		ResType:  resType,
+		ResID:    resID,
+		Since:    since,
+		At:       atOps,
+		List:     listIDs,
+		Limit:    count,
+		Offset:   offset,
+	})
 	if err != nil {
 		s.logger.Error("list resource history", "error", err, "type", resType, "id", resID)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to query resource history")
@@ -840,56 +931,99 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	entries := make([]any, 0, len(records))
-	for _, rec := range records {
-		rt := rec.ResType
-		if rt == "" {
-			rt = resType
+	baseURL := requestBaseURL(r) + r.URL.Path
+	makeURL := func(vals url.Values) string {
+		enc := vals.Encode()
+		if enc == "" {
+			return baseURL
 		}
-		rid := rec.ResID
-		if rid == "" {
-			rid = resID
+		return baseURL + "?" + enc
+	}
+	links := []map[string]string{
+		{
+			"relation": "self",
+			"url":      makeURL(q),
+		},
+	}
+	if summary != "count" {
+		if len(records) > 0 && offset+len(records) < total {
+			nextQ := cloneURLValues(q)
+			nextQ.Set("_count", strconv.Itoa(count))
+			nextQ.Set("_offset", strconv.Itoa(offset+count))
+			links = append(links, map[string]string{
+				"relation": "next",
+				"url":      makeURL(nextQ),
+			})
 		}
-		method := "PUT"
-		status := "200 OK"
-		if rec.IsDeleted {
-			method = "DELETE"
-			status = "204 No Content"
-		} else if rec.ResVersion == 1 {
-			method = "POST"
-			status = "201 Created"
+		if offset > 0 {
+			prevQ := cloneURLValues(q)
+			prevQ.Set("_count", strconv.Itoa(count))
+			prevQ.Set("_offset", strconv.Itoa(max(0, offset-count)))
+			links = append(links, map[string]string{
+				"relation": "previous",
+				"url":      makeURL(prevQ),
+			})
 		}
-
-		entry := map[string]any{
-			"fullUrl": fmt.Sprintf("%s/%s", rt, rid),
-			"request": map[string]any{
-				"method": method,
-				"url":    fmt.Sprintf("%s/%s", rt, rid),
-			},
-			"response": map[string]any{
-				"status":       status,
-				"etag":         postgres.FormatETag(rec.ResVersion),
-				"lastModified": rec.LastUpdated.UTC().Format(time.RFC3339),
-			},
-		}
-
-		if !rec.IsDeleted && len(rec.ResourceProto) > 0 {
-			if jsonBytes, err := s.protoToJSONWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
-				var resource any
-				if err := json.Unmarshal(jsonBytes, &resource); err == nil {
-					entry["resource"] = resource
-				}
-			}
-		}
-
-		entries = append(entries, entry)
 	}
 
 	bundle := map[string]any{
 		"resourceType": "Bundle",
 		"type":         "history",
 		"total":        total,
-		"entry":        entries,
+		"link":         links,
+	}
+
+	if summary != "count" {
+		needsProjection := (summary != "" && summary != "false") || len(elements) > 0
+		entries := make([]any, 0, len(records))
+		for _, rec := range records {
+			rt := rec.ResType
+			if rt == "" {
+				rt = resType
+			}
+			rid := rec.ResID
+			if rid == "" {
+				rid = resID
+			}
+			method := "PUT"
+			status := "200 OK"
+			if rec.IsDeleted {
+				method = "DELETE"
+				status = "204 No Content"
+			} else if rec.ResVersion == 1 {
+				method = "POST"
+				status = "201 Created"
+			}
+
+			entry := map[string]any{
+				"fullUrl": fmt.Sprintf("%s/%s", rt, rid),
+				"request": map[string]any{
+					"method": method,
+					"url":    fmt.Sprintf("%s/%s", rt, rid),
+				},
+				"response": map[string]any{
+					"status":       status,
+					"location":     fmt.Sprintf("%s/%s/_history/%d", rt, rid, rec.ResVersion),
+					"etag":         postgres.FormatETag(rec.ResVersion),
+					"lastModified": rec.LastUpdated.UTC().Format(time.RFC3339),
+				},
+			}
+
+			if !rec.IsDeleted && len(rec.ResourceProto) > 0 {
+				if jsonBytes, err := s.protoToJSONWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+					var resourceMap map[string]any
+					if err := json.Unmarshal(jsonBytes, &resourceMap); err == nil {
+						if needsProjection {
+							resourceMap = applySummaryOrElements(resourceMap, summary, elements)
+						}
+						entry["resource"] = resourceMap
+					}
+				}
+			}
+
+			entries = append(entries, entry)
+		}
+		bundle["entry"] = entries
 	}
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
@@ -1316,12 +1450,28 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleDelete handles DELETE /{resourceType}/{id} — soft-delete a FHIR resource.
+// Supports optimistic concurrency control via the If-Match header (returning 412 Precondition Failed on conflict).
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	resType := r.PathValue("resourceType")
 	resID := r.PathValue("id")
 
-	rec, err := s.store.DeleteResourceWithMeta(r.Context(), tenant, resType, resID)
+	expectedVersion := 0
+	if ifMatch := strings.TrimSpace(r.Header.Get("If-Match")); ifMatch != "" {
+		v, err := postgres.ParseETagVersion(ifMatch)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid If-Match header %q", ifMatch))
+			return
+		}
+		expectedVersion = v
+	}
+
+	rec, err := s.store.DeleteResourceWithExpectedVersion(r.Context(), tenant, resType, resID, expectedVersion)
+	if errors.Is(err, postgres.ErrVersionConflict) {
+		writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", err.Error())
+		return
+	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		s.logger.Error("delete resource", "error", err, "type", resType, "id", resID)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to delete resource")
@@ -1980,16 +2130,33 @@ func (s *Server) resourceSatisfiesScopeConstraints(tenant, resType, resID string
 	return true
 }
 
-// handleCompartmentSearch handles GET /{tenant}/Patient/{patientId}/{resourceType} — compartment search.
+// handleCompartmentSearch handles GET/HEAD /{tenant}/{compartmentType}/{compartmentId}/{resourceType}
+// and POST /{tenant}/{compartmentType}/{compartmentId}/{resourceType}/_search
+// across all 5 FHIR R4 compartments (Patient, Encounter, Practitioner, RelatedPerson, Device),
+// including wildcard multi-type compartment search (/{compartmentType}/{compartmentId}/*).
 func (s *Server) handleCompartmentSearch(w http.ResponseWriter, r *http.Request) {
-	patientID := cleanID(r.PathValue("patientId"))
+	compType := postgres.CanonicalCompartmentType(r.PathValue("compartmentType"))
+	if compType == "" {
+		compType = "Patient"
+	}
+	compID := cleanID(r.PathValue("compartmentId"))
+	if compID == "" {
+		compID = cleanID(r.PathValue("patientId"))
+	}
 	resType := r.PathValue("resourceType")
 
-	if resType == "AuditEvent" {
+	if resType == "AuditEvent" && compType == "Patient" {
 		q := r.URL.Query()
-		q.Set("patient", patientID)
+		q.Set("patient", compID)
 		r.URL.RawQuery = q.Encode()
 		s.handleSearchAuditEvents(w, r)
+		return
+	}
+
+	if resType == "*" {
+		r.SetPathValue("compartmentType", compType)
+		r.SetPathValue("compartmentId", compID)
+		s.handleSystemSearch(w, r)
 		return
 	}
 
@@ -1999,13 +2166,20 @@ func (s *Server) handleCompartmentSearch(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	q := r.URL.Query()
-	if strings.EqualFold(resType, "Patient") {
-		q.Set("_id", patientID)
-	} else {
-		q.Set("patient", "Patient/"+patientID)
+	if compType == "Patient" {
+		q := r.URL.Query()
+		if strings.EqualFold(resType, "Patient") {
+			q.Set("_id", compID)
+		} else {
+			q.Set("patient", "Patient/"+compID)
+		}
+		r.URL.RawQuery = q.Encode()
+		s.handleSearch(w, r)
+		return
 	}
-	r.URL.RawQuery = q.Encode()
+
+	r.SetPathValue("compartmentType", compType)
+	r.SetPathValue("compartmentId", compID)
 	s.handleSearch(w, r)
 }
 
@@ -2026,6 +2200,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	params := postgres.BuildSearchParamsFromQuery(tenant, resType, q)
+	if compType := postgres.CanonicalCompartmentType(r.PathValue("compartmentType")); compType != "" && compType != "Patient" {
+		params.CompartmentType = compType
+		params.CompartmentID = cleanID(r.PathValue("compartmentId"))
+	}
 	if err := s.expandTerminologySearchParams(r.Context(), tenant, &params); err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
 		return
@@ -2173,6 +2351,10 @@ func (s *Server) handleSystemSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	params := postgres.BuildSearchParamsFromQuery(tenant, "", q)
+	if compType := postgres.CanonicalCompartmentType(r.PathValue("compartmentType")); compType != "" {
+		params.CompartmentType = compType
+		params.CompartmentID = cleanID(r.PathValue("compartmentId"))
+	}
 	if len(params.ResTypes) > 0 {
 		seen := make(map[string]bool, len(params.ResTypes))
 		deduped := make([]string, 0, len(params.ResTypes))
@@ -3106,6 +3288,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 				},
 				"compartment": []string{
 					"http://hl7.org/fhir/CompartmentDefinition/patient",
+					"http://hl7.org/fhir/CompartmentDefinition/encounter",
+					"http://hl7.org/fhir/CompartmentDefinition/practitioner",
+					"http://hl7.org/fhir/CompartmentDefinition/relatedPerson",
+					"http://hl7.org/fhir/CompartmentDefinition/device",
 				},
 				"operation": []map[string]any{
 					{

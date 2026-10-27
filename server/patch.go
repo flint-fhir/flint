@@ -573,6 +573,16 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if ifMatch := strings.TrimSpace(r.Header.Get("If-Match")); ifMatch != "" {
+		v, err := postgres.ParseETagVersion(ifMatch)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid If-Match header %q", ifMatch))
+			return
+		}
+		condParams.ExpectedVersion = v
+	}
+
 	maxCount := 1
 	if rawCount := strings.TrimSpace(q.Get("_count")); rawCount != "" {
 		if n, cErr := strconv.Atoi(rawCount); cErr == nil && n > 1 {
@@ -612,7 +622,7 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 			return nil
 		},
 	)
-	if errors.Is(err, postgres.ErrPreconditionFailed) {
+	if errors.Is(err, postgres.ErrPreconditionFailed) || errors.Is(err, postgres.ErrVersionConflict) {
 		writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", err.Error())
 		return
 	}
