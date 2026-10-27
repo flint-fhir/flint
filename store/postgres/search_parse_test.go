@@ -340,6 +340,33 @@ func TestParseCompositeTokenQuantity(t *testing.T) {
 		assert.Equal(t, "http://hl7.org/fhir/us/core/StructureDefinition/", sp.URIs["_profile:below"])
 		assert.True(t, postgres.HasSearchCriteria(sp))
 	})
+
+	t.Run("BuildSearchParamsFromQuery parses _type, token :text modifier, chained :text, and _has :text", func(t *testing.T) {
+		q := map[string][]string{
+			"_type":                            {"Patient,Observation", "Condition"},
+			"code:text":                        {"hypertension"},
+			"category:text":                    {"vital"},
+			"subject:Patient.identifier:text":  {"Medical Record"},
+			"_has:Condition:patient:code:text": {"diabetes"},
+		}
+		require.NoError(t, postgres.ValidateSearchQuery(q))
+		sp := postgres.BuildSearchParamsFromQuery("t1", "", q)
+		assert.Equal(t, []string{"Patient", "Observation", "Condition"}, sp.ResTypes)
+		assert.Equal(t, "hypertension", sp.Strings["code:text"])
+		assert.Equal(t, "vital", sp.Strings["category:text"])
+		require.Len(t, sp.Chained, 1)
+		assert.Equal(t, "identifier", sp.Chained[0].TargetParam)
+		assert.Equal(t, "text", sp.Chained[0].TargetModifier)
+		assert.Equal(t, "string", sp.Chained[0].ParamType)
+		require.Len(t, sp.Has, 1)
+		assert.Equal(t, "Condition", sp.Has[0].SourceType)
+		assert.Equal(t, "code:text", sp.Has[0].SearchParam)
+		assert.Equal(t, "string", sp.Has[0].ParamType)
+		assert.True(t, postgres.HasSearchCriteria(sp))
+
+		links := postgres.DefaultGraphLinksForResource("Patient")
+		assert.NotEmpty(t, links)
+	})
 }
 
 func TestTenantIsolationConfiguration(t *testing.T) {

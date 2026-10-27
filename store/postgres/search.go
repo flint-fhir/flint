@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/lib/pq"
 )
@@ -61,6 +63,7 @@ type EncounterEverythingParams struct {
 type SearchParams struct {
 	TenantID                 string
 	ResType                  string
+	ResTypes                 []string                        // Optional _type filter for system-level multi-type search (e.g. ["Patient", "Observation"])
 	ID                       string                          // Optional _id filter (supports comma-separated multipleOr)
 	LastUpdated              []DateOp                        // Optional _lastUpdated filter(s) (e.g. ge + le range)
 	Strings                  map[string]string               // sp_name → value (prefix, :exact, or :contains)
@@ -117,12 +120,31 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		params.Offset = 0
 	}
 
-	args := []any{params.TenantID, params.ResType}
+	var resTypeCond string
+	var resTypeArg any
+	switch {
+	case params.ResType != "":
+		resTypeCond = "r.res_type = $2"
+		resTypeArg = params.ResType
+	case len(params.ResTypes) > 0:
+		resTypeCond = "r.res_type = ANY($2)"
+		resTypeArg = pq.Array(params.ResTypes)
+	default:
+		resTypeCond = "($2 = '' OR r.res_type = $2)"
+		resTypeArg = ""
+	}
+
+	args := []any{params.TenantID, resTypeArg}
 	joins := []string{}
 	whereExtra := ""
 	joinIdx := 0
 
-	// 1. String search parameters (spidx_string) — supports :exact, :contains, multipleOr (comma), and multipleAnd
+	if params.ResType != "" && len(params.ResTypes) > 0 {
+		whereExtra += fmt.Sprintf(" AND r.res_type = ANY($%d)", len(args)+1)
+		args = append(args, pq.Array(params.ResTypes))
+	}
+
+	// 1. String search parameters (spidx_string) — supports :exact, :contains, :text, multipleOr (comma), and multipleAnd
 	stringFilters := params.StringFilters
 	if len(stringFilters) == 0 && len(params.Strings) > 0 {
 		stringFilters = make(map[string][]string, len(params.Strings))
@@ -136,8 +158,17 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 			var orConds []string
 			joinIdx++
 			alias := fmt.Sprintf("s%d", joinIdx)
-			spIdx := len(args) + 1
-			args = append(args, baseName)
+			var spNameCond string
+			if modifier == "text" {
+				p1 := len(args) + 1
+				p2 := len(args) + 2
+				args = append(args, baseName+":text", baseName)
+				spNameCond = fmt.Sprintf("(%s.sp_name = $%d OR %s.sp_name = $%d)", alias, p1, alias, p2)
+			} else {
+				spIdx := len(args) + 1
+				args = append(args, baseName)
+				spNameCond = fmt.Sprintf("%s.sp_name = $%d", alias, spIdx)
+			}
 			for part := range strings.SplitSeq(rawVal, ",") {
 				v := strings.ToLower(strings.TrimSpace(part))
 				if v == "" {
@@ -147,7 +178,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 				case "exact":
 					orConds = append(orConds, fmt.Sprintf("%s.sp_value = $%d", alias, len(args)+1))
 					args = append(args, v)
-				case "contains":
+				case "contains", "text":
 					orConds = append(orConds, fmt.Sprintf(`%s.sp_value LIKE $%d ESCAPE '\'`, alias, len(args)+1))
 					args = append(args, "%"+escapeLikePattern(v)+"%")
 				default:
@@ -157,8 +188,8 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 			}
 			if len(orConds) > 0 {
 				joins = append(joins, fmt.Sprintf(
-					"JOIN spidx_string %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s)",
-					alias, alias, alias, alias, alias, spIdx, strings.Join(orConds, " OR "),
+					"JOIN spidx_string %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s AND (%s)",
+					alias, alias, alias, alias, spNameCond, strings.Join(orConds, " OR "),
 				))
 			}
 		}
@@ -683,8 +714,17 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 				)
 			}
 		default: // string
-			spIdx := len(args) + 1
-			args = append(args, targetParam)
+			var spNameCond string
+			if targetMod == "text" {
+				p1 := len(args) + 1
+				p2 := len(args) + 2
+				args = append(args, targetParam+":text", targetParam)
+				spNameCond = fmt.Sprintf("(%s.sp_name = $%d OR %s.sp_name = $%d)", targetAlias, p1, targetAlias, p2)
+			} else {
+				spIdx := len(args) + 1
+				args = append(args, targetParam)
+				spNameCond = fmt.Sprintf("%s.sp_name = $%d", targetAlias, spIdx)
+			}
 			var orConds []string
 			for part := range strings.SplitSeq(chained.Value, ",") {
 				v := strings.ToLower(strings.TrimSpace(part))
@@ -695,7 +735,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 				case "exact":
 					orConds = append(orConds, fmt.Sprintf("%s.sp_value = $%d", targetAlias, len(args)+1))
 					args = append(args, v)
-				case "contains":
+				case "contains", "text":
 					orConds = append(orConds, fmt.Sprintf(`%s.sp_value LIKE $%d ESCAPE '\'`, targetAlias, len(args)+1))
 					args = append(args, "%"+escapeLikePattern(v)+"%")
 				default:
@@ -705,8 +745,8 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 			}
 			if len(orConds) > 0 {
 				joins = append(joins, fmt.Sprintf(
-					"JOIN spidx_string %s ON %s.tenant_id = r.tenant_id AND %s AND %s.res_id = %s.target_id AND %s.sp_name = $%d AND (%s)",
-					targetAlias, targetAlias, targetTypeCond, targetAlias, refAlias, targetAlias, spIdx, strings.Join(orConds, " OR "),
+					"JOIN spidx_string %s ON %s.tenant_id = r.tenant_id AND %s AND %s.res_id = %s.target_id AND %s AND (%s)",
+					targetAlias, targetAlias, targetTypeCond, targetAlias, refAlias, spNameCond, strings.Join(orConds, " OR "),
 				))
 			}
 		}
@@ -859,8 +899,8 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 	var total int
 	if params.TotalMode != "none" || params.Summary == "count" {
 		countSQL := fmt.Sprintf(
-			"SELECT COUNT(DISTINCT r.res_id) FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE%s",
-			joinClause, whereExtra,
+			"SELECT COUNT(DISTINCT (r.res_type, r.res_id)) FROM fhir_resource r %s WHERE r.tenant_id = $1 AND %s AND r.is_deleted = FALSE%s",
+			joinClause, resTypeCond, whereExtra,
 		)
 		if err := exec.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
 			return nil, fmt.Errorf("count query: %w", err)
@@ -876,15 +916,15 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 	var dataSQL string
 	if len(params.Sort) == 0 {
 		dataSQL = fmt.Sprintf(
-			"SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE%s ORDER BY r.res_id LIMIT $%d OFFSET $%d",
-			joinClause, whereExtra, len(args)+1, len(args)+2,
+			"SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r %s WHERE r.tenant_id = $1 AND %s AND r.is_deleted = FALSE%s ORDER BY r.res_type, r.res_id LIMIT $%d OFFSET $%d",
+			joinClause, resTypeCond, whereExtra, len(args)+1, len(args)+2,
 		)
 	} else {
 		orderClause, sortArgs := buildSortOrderClause(params.Sort, len(args))
 		args = append(args, sortArgs...)
 		dataSQL = fmt.Sprintf(
-			"SELECT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r %s WHERE r.tenant_id = $1 AND r.res_type = $2 AND r.is_deleted = FALSE%s GROUP BY r.tenant_id, r.res_type, r.res_id ORDER BY %s LIMIT $%d OFFSET $%d",
-			joinClause, whereExtra, orderClause, len(args)+1, len(args)+2,
+			"SELECT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r %s WHERE r.tenant_id = $1 AND %s AND r.is_deleted = FALSE%s GROUP BY r.tenant_id, r.res_type, r.res_id ORDER BY %s LIMIT $%d OFFSET $%d",
+			joinClause, resTypeCond, whereExtra, orderClause, len(args)+1, len(args)+2,
 		)
 	}
 	args = append(args, params.Count, params.Offset)
@@ -1026,12 +1066,21 @@ func buildHasExistsCondition(hp HasParam, startIdx int) (string, []any) {
 		), args
 	}
 
+	searchBase, searchMod := splitParamModifier(hp.SearchParam)
 	spIdx := startIdx + 3
-	args = append(args, hp.SearchParam)
+	spColVal := searchBase
+	if searchMod == "text" && !knownStringSearchParams[searchBase] {
+		spColVal = searchBase + ":text"
+	}
+	args = append(args, spColVal)
 
 	switch paramType {
 	case "string":
-		args = append(args, escapeLikePattern(strings.ToLower(strings.TrimSpace(hp.Value)))+"%")
+		likePattern := escapeLikePattern(strings.ToLower(strings.TrimSpace(hp.Value))) + "%"
+		if searchMod == "contains" || searchMod == "text" {
+			likePattern = "%" + escapeLikePattern(strings.ToLower(strings.TrimSpace(hp.Value))) + "%"
+		}
+		args = append(args, likePattern)
 		valIdx := startIdx + len(args)
 		return fmt.Sprintf(
 			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_string hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND hsp.sp_value LIKE $%d ESCAPE '\' WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
@@ -2060,4 +2109,401 @@ func (s *Store) SearchPatientMatchCandidates(ctx context.Context, params Patient
 		return nil, err
 	}
 	return matches, nil
+}
+
+// GraphLink represents a FHIR R4 GraphDefinition.link element.
+type GraphLink struct {
+	Path        string        `json:"path,omitempty"`
+	SliceName   string        `json:"sliceName,omitempty"`
+	Min         int           `json:"min,omitempty"`
+	Max         string        `json:"max,omitempty"`
+	Description string        `json:"description,omitempty"`
+	Target      []GraphTarget `json:"target,omitempty"`
+}
+
+// GraphTarget represents a FHIR R4 GraphDefinition.link.target element.
+type GraphTarget struct {
+	Type   string      `json:"type,omitempty"`
+	Params string      `json:"params,omitempty"`
+	Link   []GraphLink `json:"link,omitempty"`
+}
+
+// ResourceGraphParams specifies parameters for the FHIR R4 Resource/$graph operation.
+type ResourceGraphParams struct {
+	TenantID     string
+	ResourceType string
+	ResourceID   string
+	Links        []GraphLink // Optional GraphDefinition.link tree; if empty, uses DefaultGraphLinksForResource
+}
+
+// DefaultGraphLinksForResource returns the built-in US Core / FHIR R4 clinical GraphDefinition links
+// for the given starting resource type when no explicit GraphDefinition.link list is provided.
+func DefaultGraphLinksForResource(resType string) []GraphLink {
+	switch resType {
+	case "Patient":
+		return []GraphLink{
+			{
+				Path: "Patient.managingOrganization",
+				Target: []GraphTarget{
+					{Type: "Organization"},
+				},
+			},
+			{
+				Path: "Patient.generalPractitioner",
+				Target: []GraphTarget{
+					{Type: "Practitioner"},
+					{Type: "Organization"},
+				},
+			},
+			{
+				Target: []GraphTarget{
+					{
+						Type:   "Encounter",
+						Params: "patient={ref}",
+						Link: []GraphLink{
+							{
+								Path: "Encounter.participant.individual",
+								Target: []GraphTarget{
+									{Type: "Practitioner"},
+								},
+							},
+							{
+								Path: "Encounter.location.location",
+								Target: []GraphTarget{
+									{Type: "Location"},
+								},
+							},
+							{
+								Path: "Encounter.serviceProvider",
+								Target: []GraphTarget{
+									{Type: "Organization"},
+								},
+							},
+						},
+					},
+					{
+						Type:   "DiagnosticReport",
+						Params: "patient={ref}",
+						Link: []GraphLink{
+							{
+								Path: "DiagnosticReport.result",
+								Target: []GraphTarget{
+									{Type: "Observation"},
+								},
+							},
+						},
+					},
+					{
+						Type:   "Observation",
+						Params: "patient={ref}",
+						Link: []GraphLink{
+							{
+								Path: "Observation.specimen",
+								Target: []GraphTarget{
+									{Type: "Specimen"},
+								},
+							},
+						},
+					},
+					{
+						Params: "*={ref}",
+					},
+				},
+			},
+		}
+	case "Encounter":
+		return []GraphLink{
+			{
+				Target: []GraphTarget{
+					{
+						Params: "",
+					},
+					{
+						Params: "*={ref}",
+					},
+				},
+			},
+		}
+	default:
+		return []GraphLink{
+			{
+				Target: []GraphTarget{
+					{
+						Params: "",
+					},
+					{
+						Params: "*={ref}",
+					},
+				},
+			},
+		}
+	}
+}
+
+// ResourceGraph executes a FHIR R4 Resource/$graph traversal starting at (ResourceType, ResourceID)
+// and following forward and reverse GraphDefinition links across spidx_reference and search indexes.
+func (s *Store) ResourceGraph(ctx context.Context, params ResourceGraphParams) (*SearchResults, error) {
+	links := params.Links
+	if len(links) == 0 {
+		links = DefaultGraphLinksForResource(params.ResourceType)
+	}
+
+	var out *SearchResults
+	err := s.withTenantTx(ctx, params.TenantID, func(tx *sql.Tx) error {
+		focalRec, err := s.readResourceWithMetaInTx(ctx, tx, params.TenantID, params.ResourceType, params.ResourceID)
+		if err != nil {
+			return err
+		}
+
+		focalMatch := SearchResult{
+			ResType:       focalRec.ResType,
+			ResID:         focalRec.ResID,
+			ResVersion:    focalRec.ResVersion,
+			LastUpdated:   focalRec.LastUpdated,
+			ResourceProto: focalRec.ResourceProto,
+		}
+		seen := map[string]bool{
+			focalMatch.ResType + "/" + focalMatch.ResID: true,
+		}
+		results := []SearchResult{focalMatch}
+
+		if err := s.traverseGraphLinks(ctx, tx, params.TenantID, []SearchResult{focalMatch}, links, seen, &results, 0); err != nil {
+			return err
+		}
+
+		out = &SearchResults{
+			Matches: results,
+			Total:   len(results),
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *Store) traverseGraphLinks(
+	ctx context.Context,
+	tx *sql.Tx,
+	tenantID string,
+	sources []SearchResult,
+	links []GraphLink,
+	seen map[string]bool,
+	results *[]SearchResult,
+	depth int,
+) error {
+	if depth >= 5 || len(sources) == 0 || len(links) == 0 {
+		return nil
+	}
+
+	idsByType := make(map[string][]string)
+	var sourceTypes []string
+	for _, src := range sources {
+		if src.ResType == "" || src.ResID == "" {
+			continue
+		}
+		if _, ok := idsByType[src.ResType]; !ok {
+			sourceTypes = append(sourceTypes, src.ResType)
+		}
+		idsByType[src.ResType] = append(idsByType[src.ResType], src.ResID)
+	}
+
+	for _, link := range links {
+		spNames := mapGraphPathToSpNames(link.Path)
+		targets := link.Target
+		if len(targets) == 0 {
+			targets = []GraphTarget{{}}
+		}
+
+		for _, target := range targets {
+			var targetMatches []SearchResult
+			targetSeen := make(map[string]bool)
+			addTargetMatch := func(r SearchResult) {
+				key := r.ResType + "/" + r.ResID
+				if !targetSeen[key] {
+					targetSeen[key] = true
+					targetMatches = append(targetMatches, r)
+				}
+				if !seen[key] {
+					seen[key] = true
+					*results = append(*results, r)
+				}
+			}
+
+			rawParams := strings.TrimSpace(target.Params)
+			if rawParams == "*={ref}" {
+				for _, sType := range sourceTypes {
+					sIDs := idsByType[sType]
+					query := `
+						SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto
+						FROM spidx_reference rf
+						JOIN fhir_resource r ON r.tenant_id = rf.tenant_id AND r.res_type = rf.res_type AND r.res_id = rf.res_id AND r.is_deleted = FALSE
+						WHERE rf.tenant_id = $1 AND rf.target_id = ANY($2) AND (rf.target_type = $3 OR rf.target_type = '')
+					`
+					qArgs := []any{tenantID, pq.Array(sIDs), sType}
+					if target.Type != "" {
+						query += " AND r.res_type = $4"
+						qArgs = append(qArgs, target.Type)
+					}
+					query += " ORDER BY r.res_type, r.res_id LIMIT 1000"
+					rows, err := tx.QueryContext(ctx, query, qArgs...)
+					if err != nil {
+						return fmt.Errorf("graph reverse wildcard query: %w", err)
+					}
+					for rows.Next() {
+						var r SearchResult
+						if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
+							rows.Close()
+							return err
+						}
+						addTargetMatch(r)
+					}
+					if err := rows.Err(); err != nil {
+						rows.Close()
+						return err
+					}
+					rows.Close()
+				}
+			} else if rawParams != "" {
+				for _, src := range sources {
+					refVal := src.ResType + "/" + src.ResID
+					expanded := strings.ReplaceAll(rawParams, "{ref}", refVal)
+					if !strings.Contains(expanded, "=") {
+						expanded = expanded + "=" + refVal
+					}
+					q, err := url.ParseQuery(expanded)
+					if err != nil {
+						continue
+					}
+					sp := BuildSearchParamsFromQuery(tenantID, target.Type, q)
+					sp.Count = MaxSearchCount
+					sr, err := s.searchWithExecutor(ctx, tx, sp)
+					if err != nil {
+						return fmt.Errorf("graph target search (%s?%s): %w", target.Type, expanded, err)
+					}
+					for _, m := range sr.Matches {
+						addTargetMatch(m)
+					}
+				}
+			} else {
+				for _, sType := range sourceTypes {
+					sIDs := idsByType[sType]
+					query := `
+						SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto
+						FROM spidx_reference rf
+						JOIN fhir_resource r ON r.tenant_id = rf.tenant_id AND (r.res_type = rf.target_type OR rf.target_type = '') AND r.res_id = rf.target_id AND r.is_deleted = FALSE
+						WHERE rf.tenant_id = $1 AND rf.res_type = $2 AND rf.res_id = ANY($3)
+					`
+					qArgs := []any{tenantID, sType, pq.Array(sIDs)}
+					if len(spNames) > 0 {
+						query += fmt.Sprintf(" AND rf.sp_name = ANY($%d)", len(qArgs)+1)
+						qArgs = append(qArgs, pq.Array(spNames))
+					}
+					if target.Type != "" {
+						query += fmt.Sprintf(" AND r.res_type = $%d", len(qArgs)+1)
+						qArgs = append(qArgs, target.Type)
+					}
+					query += " ORDER BY r.res_type, r.res_id LIMIT 1000"
+					rows, err := tx.QueryContext(ctx, query, qArgs...)
+					if err != nil {
+						return fmt.Errorf("graph forward reference query: %w", err)
+					}
+					for rows.Next() {
+						var r SearchResult
+						if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
+							rows.Close()
+							return err
+						}
+						addTargetMatch(r)
+					}
+					if err := rows.Err(); err != nil {
+						rows.Close()
+						return err
+					}
+					rows.Close()
+				}
+			}
+
+			if len(target.Link) > 0 && len(targetMatches) > 0 {
+				if err := s.traverseGraphLinks(ctx, tx, tenantID, targetMatches, target.Link, seen, results, depth+1); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func mapGraphPathToSpNames(rawPath string) []string {
+	p := strings.TrimSpace(rawPath)
+	if p == "" || p == "*" {
+		return nil
+	}
+	if dotIdx := strings.IndexByte(p, '.'); dotIdx != -1 {
+		first := p[:dotIdx]
+		if len(first) > 0 && unicode.IsUpper(rune(first[0])) {
+			p = p[dotIdx+1:]
+		}
+	}
+	p = strings.TrimSuffix(p, "[x]")
+
+	switch p {
+	case "managingOrganization", "serviceProvider", "custodian", "organization", "service-provider":
+		return []string{"organization", "service-provider", "custodian"}
+	case "generalPractitioner", "general-practitioner":
+		return []string{"general-practitioner", "practitioner"}
+	case "participant.individual", "participant.actor", "participant.member", "participant", "practitioner":
+		return []string{"practitioner", "participant"}
+	case "subject", "patient", "beneficiary":
+		return []string{"patient", "subject", "beneficiary"}
+	case "encounter", "context":
+		return []string{"encounter"}
+	case "performer", "performer.actor":
+		return []string{"performer", "practitioner"}
+	case "location", "location.location":
+		return []string{"location"}
+	case "result":
+		return []string{"result"}
+	case "specimen":
+		return []string{"specimen"}
+	case "basedOn", "based-on":
+		return []string{"based-on"}
+	case "partOf", "part-of", "partof":
+		return []string{"partof", "part-of"}
+	case "reasonReference", "reason-reference":
+		return []string{"reason-reference"}
+	case "medication", "medicationReference":
+		return []string{"medication"}
+	case "requester":
+		return []string{"requester"}
+	case "author":
+		return []string{"author"}
+	case "item", "entry.item", "member", "entity":
+		return []string{"item", "member", "entity"}
+	default:
+		if dotIdx := strings.LastIndexByte(p, '.'); dotIdx != -1 {
+			p = p[dotIdx+1:]
+		}
+		kebab := camelToKebab(p)
+		if kebab == p {
+			return []string{p}
+		}
+		return []string{kebab, p}
+	}
+}
+
+func camelToKebab(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if unicode.IsUpper(r) {
+			if i > 0 {
+				b.WriteByte('-')
+			}
+			b.WriteRune(unicode.ToLower(r))
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

@@ -444,24 +444,34 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			}
 		}
 		if err == nil {
-			condHierQuery := "Condition?patient:identifier=CERT-MRN-1&clinical-status:below=http://terminology.hl7.org/CodeSystem/condition-clinical|active"
+			condHierQuery := "Condition?patient:identifier=CERT-MRN-1&clinical-status:below=http://terminology.hl7.org/CodeSystem/condition-clinical|active&code:text=hypertension"
 			respCH, bCH, errCH := doReq(http.MethodGet, basePath+"/"+condHierQuery, "", nil, nil)
 			if errCH != nil || respCH.StatusCode != http.StatusOK {
-				err = fmt.Errorf("expected 200 OK on Condition :below/:identifier query, got %d: %s", respCH.StatusCode, string(bCH))
+				err = fmt.Errorf("expected 200 OK on Condition :below/:identifier/:text query, got %d: %s", respCH.StatusCode, string(bCH))
 			} else {
 				var chBundle map[string]any
 				_ = json.Unmarshal(bCH, &chBundle)
 				if tot, _ := chBundle["total"].(float64); tot < 1 {
-					err = fmt.Errorf("expected total >= 1 on Condition :below/:identifier query, got %v", chBundle["total"])
+					err = fmt.Errorf("expected total >= 1 on Condition :below/:identifier/:text query, got %v", chBundle["total"])
 				}
 			}
 		}
+		if err == nil {
+			respSys, bSys, errSys := doReq(http.MethodGet, basePath+"?_type=Patient,Condition&_id=cert-pat-1,cert-cond-1", "", nil, nil)
+			respGraph, bGraph, errGraph := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$graph", "", nil, nil)
+			if errSys != nil || respSys.StatusCode != http.StatusOK || !strings.Contains(string(bSys), `"cert-pat-1"`) || !strings.Contains(string(bSys), `"cert-cond-1"`) {
+				err = fmt.Errorf("expected 200 OK with cert-pat-1 and cert-cond-1 from system-level _type search, got %d: %s", respSys.StatusCode, string(bSys))
+			} else if errGraph != nil || respGraph.StatusCode != http.StatusOK || !strings.Contains(string(bGraph), `"collection"`) || !strings.Contains(string(bGraph), `"cert-obs-1"`) {
+				err = fmt.Errorf("expected 200 OK collection Bundle with linked resources from Patient/cert-pat-1/$graph, got %d: %s", respGraph.StatusCode, string(bGraph))
+			}
+		}
 	}
-	record("SEARCH-03", suite2, "FHIR R4 Search Modifiers (:exact, :contains, :not, :missing, :in, :not-in, :below, :identifier)", t0, err, "Verified :exact, :contains, :not, :missing, :in, :not-in, :below, and :identifier modifiers")
+	record("SEARCH-03", suite2, "FHIR R4 Search Modifiers (:exact, :contains, :text, :not, :missing, :in, :not-in, :below, :identifier, _type & $graph)", t0, err, "Verified :exact, :contains, :text, :not, :missing, :in, :not-in, :below, :identifier, system _type search & $graph")
 
 	// 2.22 FHIR R4 _sort, _has Reverse Chaining, _summary/_elements, Bundle.link & Compartment Search
 	t0 = time.Now()
 	{
+		err = nil
 		// a) _has reverse chaining: Patient?_has:Observation:patient:code=8867-4
 		respHas, bHas, errHas := doReq(http.MethodGet, basePath+"/Patient?_has:Observation:patient:code=8867-4", "", nil, nil)
 		if errHas != nil || respHas.StatusCode != http.StatusOK {
@@ -1557,7 +1567,10 @@ func defaultCertifyCohortBundle() []byte {
 					"id": "cert-cond-1",
 					"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
 					"verificationStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"}]},
-					"code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003"}]},
+					"code": {
+						"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}],
+						"text": "Hypertension"
+					},
 					"subject": {"reference": "Patient/cert-pat-1"}
 				},
 				"request": {"method": "PUT", "url": "Condition/cert-cond-1"}

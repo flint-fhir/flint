@@ -272,11 +272,13 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/_history", s.handleInstanceHistory)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/_history", s.handleInstanceHistory)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/_search", s.handleSearch)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/_search", s.handleSystemSearch)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}", s.handleRead)
 	mux.HandleFunc("PUT /fhir/r4/{tenant}/{resourceType}/{id}", s.handleUpdate)
 	mux.HandleFunc("PATCH /fhir/r4/{tenant}/{resourceType}/{id}", s.handlePatch)
 	mux.HandleFunc("DELETE /fhir/r4/{tenant}/{resourceType}/{id}", s.handleDelete)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}", s.handleSearch)
+	mux.HandleFunc("GET /fhir/r4/{tenant}", s.handleSystemSearch)
 	mux.HandleFunc("PUT /fhir/r4/{tenant}/{resourceType}", s.handleConditionalUpdate)
 	mux.HandleFunc("PATCH /fhir/r4/{tenant}/{resourceType}", s.handleConditionalPatch)
 	mux.HandleFunc("DELETE /fhir/r4/{tenant}/{resourceType}", s.handleConditionalDelete)
@@ -409,6 +411,13 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("resourceType", parts[3])
 					r.SetPathValue("id", parts[4])
 					s.handleDiff(w, r)
+					return
+				}
+				if parts[5] == "$graph" && !strings.HasPrefix(parts[3], "$") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					r.SetPathValue("id", parts[4])
+					s.handleResourceGraph(w, r)
 					return
 				}
 				if r.Method == http.MethodPost && parts[5] == "$expunge" && !strings.HasPrefix(parts[3], "$") {
@@ -2141,6 +2150,157 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	s.writeSearchSetBundleWithOpts(w, r, sr, params)
 }
 
+// handleSystemSearch handles GET /fhir/r4/{tenant}?_type=Patient,Observation&... and POST /fhir/r4/{tenant}/_search
+// per FHIR R4 §3.1.1.4.2 (system-level multi-type search).
+func (s *Server) handleSystemSearch(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	q := mergedSearchQuery(r)
+
+	if err := postgres.ValidateSearchQuery(q); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+
+	params := postgres.BuildSearchParamsFromQuery(tenant, "", q)
+	if len(params.ResTypes) > 0 {
+		seen := make(map[string]bool, len(params.ResTypes))
+		deduped := make([]string, 0, len(params.ResTypes))
+		for _, rt := range params.ResTypes {
+			if _, ok := s.protoRegistry[rt]; !ok && rt != "AuditEvent" {
+				writeOperationOutcome(w, http.StatusBadRequest, "not-supported",
+					fmt.Sprintf("unknown or unsupported resource type %q in _type parameter", rt))
+				return
+			}
+			if !seen[rt] {
+				seen[rt] = true
+				deduped = append(deduped, rt)
+			}
+		}
+		params.ResTypes = deduped
+	}
+
+	if err := s.expandTerminologySearchParams(r.Context(), tenant, &params); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	if hasSecCtx {
+		if len(params.ResTypes) > 0 {
+			for _, rt := range params.ResTypes {
+				if !auth.Allows(secCtx, rt, auth.ActionSearch) && !auth.Allows(secCtx, rt, auth.ActionRead) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+						fmt.Sprintf("insufficient scope for system search on %s", rt))
+					return
+				}
+				if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(rt, "Patient") && !postgres.IsPatientCompartmentResourceType(rt) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+						fmt.Sprintf("patient-scoped token (%s) cannot search non-compartment resource %s",
+							secCtx.GetPatientId(), rt))
+					return
+				}
+			}
+		} else if !auth.Allows(secCtx, "*", auth.ActionSearch) && !auth.Allows(secCtx, "*", auth.ActionRead) {
+			var allowedTypes []string
+			for _, rt := range fhirutil.AllR4ResourceTypes() {
+				if _, ok := s.protoRegistry[rt]; !ok {
+					continue
+				}
+				if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(rt, "Patient") && !postgres.IsPatientCompartmentResourceType(rt) {
+					continue
+				}
+				if auth.Allows(secCtx, rt, auth.ActionSearch) || auth.Allows(secCtx, rt, auth.ActionRead) {
+					allowedTypes = append(allowedTypes, rt)
+				}
+			}
+			if len(allowedTypes) == 0 {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for system search")
+				return
+			}
+			params.ResTypes = allowedTypes
+		}
+
+		for _, inc := range params.Includes {
+			if inc.TargetType != "" && !auth.Allows(secCtx, inc.TargetType, auth.ActionRead) && !auth.Allows(secCtx, inc.TargetType, auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope for _include target %s", inc.TargetType))
+				return
+			}
+		}
+		for _, rev := range params.RevIncludes {
+			if rev.SourceType != "" && !auth.Allows(secCtx, rev.SourceType, auth.ActionRead) && !auth.Allows(secCtx, rev.SourceType, auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope for _revinclude source %s", rev.SourceType))
+				return
+			}
+		}
+		for _, hp := range params.Has {
+			if hp.SourceType != "" && !auth.Allows(secCtx, hp.SourceType, auth.ActionRead) && !auth.Allows(secCtx, hp.SourceType, auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope for _has source %s", hp.SourceType))
+				return
+			}
+		}
+		for _, ch := range params.Chained {
+			for _, hop := range ch.Hops {
+				if hop.TargetType != "" && !auth.Allows(secCtx, hop.TargetType, auth.ActionRead) && !auth.Allows(secCtx, hop.TargetType, auth.ActionSearch) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+						fmt.Sprintf("insufficient scope for chained search target %s", hop.TargetType))
+					return
+				}
+			}
+		}
+		if len(params.List) > 0 && !auth.Allows(secCtx, "List", auth.ActionRead) && !auth.Allows(secCtx, "List", auth.ActionSearch) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				"insufficient scope for _list cohort search (requires List read/search scope)")
+			return
+		}
+
+		if auth.IsPatientRestricted(secCtx) {
+			allowedPatientID := cleanID(secCtx.GetPatientId())
+			for _, refKey := range []string{"patient", "subject"} {
+				for _, rawRef := range params.ReferenceFilters[refKey] {
+					for part := range strings.SplitSeq(rawRef, ",") {
+						if trimmed := strings.TrimSpace(part); trimmed != "" && cleanID(trimmed) != allowedPatientID {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("patient-scoped token (%s) cannot search %s %s",
+									secCtx.GetPatientId(), refKey, trimmed))
+							return
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		return
+	}
+
+	sr, err := s.store.Search(r.Context(), params)
+	if err != nil {
+		s.logger.Error("system search", "error", err, "types", params.ResTypes)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "search error")
+		return
+	}
+
+	if hasSecCtx {
+		if len(sr.Matches) > 0 {
+			before := len(sr.Matches)
+			sr.Matches = s.filterAuthorizedIncludes(r, tenant, secCtx, sr.Matches)
+			if removed := before - len(sr.Matches); removed > 0 {
+				sr.Total = max(len(sr.Matches), sr.Total-removed)
+			}
+		}
+		if len(sr.Includes) > 0 {
+			sr.Includes = s.filterAuthorizedIncludes(r, tenant, secCtx, sr.Includes)
+		}
+	}
+
+	s.writeSearchSetBundleWithOpts(w, r, sr, params)
+}
+
 func (s *Server) resourceAllowedByGranularScope(secCtx *auth.SecurityContext, tenant, resType, resID string, protoBytes []byte) bool {
 	if secCtx == nil {
 		return true
@@ -2868,6 +3028,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 				"interaction": []map[string]string{
 					{"code": "transaction"},
 					{"code": "batch"},
+					{"code": "search-system"},
 					{"code": "history-system"},
 				},
 				"compartment": []string{
@@ -2877,6 +3038,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "validate",
 						"definition": "http://hl7.org/fhir/OperationDefinition/Resource-validate",
+					},
+					{
+						"name":       "graph",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Resource-graph",
 					},
 					{
 						"name":       "everything",

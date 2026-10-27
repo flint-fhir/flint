@@ -260,7 +260,7 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 	switch {
 	case targetParam == "_id":
 		paramType = "id"
-	case knownStringSearchParams[targetParam]:
+	case targetMod == "text" || knownStringSearchParams[targetParam]:
 		paramType = "string"
 	case knownDateSearchParams[targetParam]:
 		paramType = "date"
@@ -312,7 +312,7 @@ func ParseHasParam(key, value string) (*HasParam, bool, error) {
 		return nil, false, nil
 	}
 	rest := strings.TrimSpace(key[len("_has:"):])
-	parts := strings.Split(rest, ":")
+	parts := strings.SplitN(rest, ":", 3)
 	if len(parts) != 3 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
 		return nil, true, fmt.Errorf("invalid _has parameter %q: expected _has:{SourceType}:{refParam}:{searchParam}", key)
 	}
@@ -322,26 +322,27 @@ func ParseHasParam(key, value string) (*HasParam, bool, error) {
 	sourceType := strings.TrimSpace(parts[0])
 	refParam := strings.TrimSpace(parts[1])
 	searchParam := strings.TrimSpace(parts[2])
+	searchBase, searchMod := splitParamModifier(searchParam)
 
 	paramType := "token"
 	switch {
-	case searchParam == "_id":
+	case searchBase == "_id":
 		paramType = "id"
-	case knownStringSearchParams[searchParam]:
+	case searchMod == "text" || knownStringSearchParams[searchBase]:
 		paramType = "string"
-	case knownDateSearchParams[searchParam]:
+	case knownDateSearchParams[searchBase]:
 		paramType = "date"
 		if _, err := ParseDateOp(value); err != nil {
 			return nil, true, fmt.Errorf("invalid _has date value %s=%q: %w", key, value, err)
 		}
-	case knownQuantitySearchParams[searchParam]:
+	case knownQuantitySearchParams[searchBase]:
 		paramType = "quantity"
 		if _, err := ParseQuantityOp(value); err != nil {
 			return nil, true, fmt.Errorf("invalid _has quantity value %s=%q: %w", key, value, err)
 		}
-	case knownRefSearchParams[searchParam]:
+	case knownRefSearchParams[searchBase]:
 		paramType = "reference"
-	case knownURISearchParams[searchParam]:
+	case knownURISearchParams[searchBase]:
 		paramType = "uri"
 	}
 
@@ -667,6 +668,13 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 		TotalMode:        strings.ToLower(strings.TrimSpace(q.Get("_total"))),
 	}
 
+	for _, typeRaw := range q["_type"] {
+		for part := range strings.SplitSeq(typeRaw, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				params.ResTypes = append(params.ResTypes, trimmed)
+			}
+		}
+	}
 	for _, listRaw := range q["_list"] {
 		if trimmed := strings.TrimSpace(listRaw); trimmed != "" {
 			params.List = append(params.List, trimmed)
@@ -776,6 +784,9 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 		}
 
 		switch {
+		case mod == "text":
+			params.Strings[key] = value
+			params.StringFilters[key] = append(params.StringFilters[key], values...)
 		case knownCompositeTokenQuantityParams[baseKey]:
 			for _, rawVal := range values {
 				var orGroup []CompositeTokenQuantityParam
@@ -892,6 +903,7 @@ func ParseIfNoneExist(tenant, resType, rawHeader string) (SearchParams, error) {
 // HasSearchCriteria returns true if SearchParams contains at least one filter criterion.
 func HasSearchCriteria(p SearchParams) bool {
 	return p.ID != "" ||
+		len(p.ResTypes) > 0 ||
 		len(p.LastUpdated) > 0 ||
 		len(p.Strings) > 0 ||
 		len(p.StringFilters) > 0 ||

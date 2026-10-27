@@ -124,24 +124,35 @@ func extractMetaFromMessage(idx *SearchIndexes, tenantID, resType, resID string,
 			if !cm.IsValid() {
 				continue
 			}
-			var sys, code string
+			var sys, code, disp string
 			if sysFD := cm.Descriptor().Fields().ByName("system"); sysFD != nil && cm.Has(sysFD) {
 				sys = strings.TrimSpace(extractWrappedString(cm.Get(sysFD).Message()))
 			}
 			if codeFD := cm.Descriptor().Fields().ByName("code"); codeFD != nil && cm.Has(codeFD) {
 				code = strings.TrimSpace(extractWrappedString(cm.Get(codeFD).Message()))
 			}
-			if code == "" && sys == "" {
-				continue
+			if dispFD := cm.Descriptor().Fields().ByName("display"); dispFD != nil && cm.Has(dispFD) {
+				disp = fhirutil.NormalizeString(extractWrappedString(cm.Get(dispFD).Message()))
 			}
-			idx.Tokens = append(idx.Tokens, SpidxToken{
-				TenantID: tenantID,
-				ResType:  resType,
-				ResID:    resID,
-				SpName:   fieldSpec.spName,
-				SpSystem: sys,
-				SpValue:  code,
-			})
+			if code != "" || sys != "" {
+				idx.Tokens = append(idx.Tokens, SpidxToken{
+					TenantID: tenantID,
+					ResType:  resType,
+					ResID:    resID,
+					SpName:   fieldSpec.spName,
+					SpSystem: sys,
+					SpValue:  code,
+				})
+			}
+			if disp != "" {
+				idx.Strings = append(idx.Strings, SpidxString{
+					TenantID: tenantID,
+					ResType:  resType,
+					ResID:    resID,
+					SpName:   fieldSpec.spName + ":text",
+					SpValue:  disp,
+				})
+			}
 		}
 	}
 }
@@ -179,6 +190,9 @@ func extractSingleFieldValue(
 				SpSystem: sys,
 				SpValue:  v,
 			})
+		}
+		if typeFD := subMsg.Descriptor().Fields().ByName("type"); typeFD != nil && subMsg.Has(typeFD) && typeFD.Kind() == protoreflect.MessageKind {
+			extractCodeableConceptTextStrings(idx, tenantID, resType, resID, subMsg.Get(typeFD).Message(), []string{spName})
 		}
 
 	case "google.fhir.r4.core.CodeableConcept":
@@ -413,25 +427,80 @@ func extractIdentifier(msg protoreflect.Message) (string, string) {
 }
 
 func extractCodingToken(idx *SearchIndexes, tenantID, resType, resID string, codingMsg protoreflect.Message, spNames []string) {
-	var sys, code string
+	var sys, code, display string
 	if sysFD := codingMsg.Descriptor().Fields().ByName("system"); sysFD != nil && codingMsg.Has(sysFD) {
 		sys = extractWrappedString(codingMsg.Get(sysFD).Message())
 	}
 	if codeFD := codingMsg.Descriptor().Fields().ByName("code"); codeFD != nil && codingMsg.Has(codeFD) {
 		code = extractWrappedString(codingMsg.Get(codeFD).Message())
 	}
-	if code == "" {
-		return
+	if dispFD := codingMsg.Descriptor().Fields().ByName("display"); dispFD != nil && codingMsg.Has(dispFD) {
+		display = fhirutil.NormalizeString(extractWrappedString(codingMsg.Get(dispFD).Message()))
 	}
 	for _, spName := range spNames {
-		idx.Tokens = append(idx.Tokens, SpidxToken{
-			TenantID: tenantID,
-			ResType:  resType,
-			ResID:    resID,
-			SpName:   spName,
-			SpSystem: sys,
-			SpValue:  code,
-		})
+		if code != "" {
+			idx.Tokens = append(idx.Tokens, SpidxToken{
+				TenantID: tenantID,
+				ResType:  resType,
+				ResID:    resID,
+				SpName:   spName,
+				SpSystem: sys,
+				SpValue:  code,
+			})
+		}
+		if display != "" {
+			idx.Strings = append(idx.Strings, SpidxString{
+				TenantID: tenantID,
+				ResType:  resType,
+				ResID:    resID,
+				SpName:   spName + ":text",
+				SpValue:  display,
+			})
+		}
+	}
+}
+
+func extractCodingTextStrings(idx *SearchIndexes, tenantID, resType, resID string, codingMsg protoreflect.Message, spNames []string) {
+	if !codingMsg.IsValid() {
+		return
+	}
+	if dispFD := codingMsg.Descriptor().Fields().ByName("display"); dispFD != nil && codingMsg.Has(dispFD) {
+		if display := fhirutil.NormalizeString(extractWrappedString(codingMsg.Get(dispFD).Message())); display != "" {
+			for _, spName := range spNames {
+				idx.Strings = append(idx.Strings, SpidxString{
+					TenantID: tenantID,
+					ResType:  resType,
+					ResID:    resID,
+					SpName:   spName + ":text",
+					SpValue:  display,
+				})
+			}
+		}
+	}
+}
+
+func extractCodeableConceptTextStrings(idx *SearchIndexes, tenantID, resType, resID string, ccMsg protoreflect.Message, spNames []string) {
+	if !ccMsg.IsValid() {
+		return
+	}
+	if codingFD := ccMsg.Descriptor().Fields().ByName("coding"); codingFD != nil && ccMsg.Has(codingFD) {
+		list := ccMsg.Get(codingFD).List()
+		for i := 0; i < list.Len(); i++ {
+			extractCodingTextStrings(idx, tenantID, resType, resID, list.Get(i).Message(), spNames)
+		}
+	}
+	if txtFD := ccMsg.Descriptor().Fields().ByName("text"); txtFD != nil && ccMsg.Has(txtFD) {
+		if txt := fhirutil.NormalizeString(extractWrappedString(ccMsg.Get(txtFD).Message())); txt != "" {
+			for _, spName := range spNames {
+				idx.Strings = append(idx.Strings, SpidxString{
+					TenantID: tenantID,
+					ResType:  resType,
+					ResID:    resID,
+					SpName:   spName + ":text",
+					SpValue:  txt,
+				})
+			}
+		}
 	}
 }
 
@@ -443,6 +512,71 @@ func extractCodeableConceptTokens(idx *SearchIndexes, tenantID, resType, resID s
 			extractCodingToken(idx, tenantID, resType, resID, list.Get(i).Message(), spNames)
 		}
 	}
+	if txtFD := ccMsg.Descriptor().Fields().ByName("text"); txtFD != nil && ccMsg.Has(txtFD) {
+		if txt := fhirutil.NormalizeString(extractWrappedString(ccMsg.Get(txtFD).Message())); txt != "" {
+			for _, spName := range spNames {
+				idx.Strings = append(idx.Strings, SpidxString{
+					TenantID: tenantID,
+					ResType:  resType,
+					ResID:    resID,
+					SpName:   spName + ":text",
+					SpValue:  txt,
+				})
+			}
+		}
+	}
+}
+
+func appendTokenTextFromMessage(idx *SearchIndexes, tenantID, resType, resID string, msg protoreflect.Message, parentField string, depth int) {
+	if idx == nil || !msg.IsValid() || depth > 2 {
+		return
+	}
+	msg.Range(func(fd protoreflect.FieldDescriptor, val protoreflect.Value) bool {
+		fieldName := string(fd.Name())
+		switch fieldName {
+		case "id", "meta", "implicit_rules", "language", "text", "contained", "extension", "modifier_extension":
+			return true
+		}
+		if fd.Kind() != protoreflect.MessageKind {
+			return true
+		}
+		visitMsg := func(subMsg protoreflect.Message) {
+			if !subMsg.IsValid() {
+				return
+			}
+			switch string(subMsg.Descriptor().FullName()) {
+			case "google.fhir.r4.core.Identifier":
+				spName := "identifier"
+				if fieldName == "accession_identifier" {
+					spName = "accession"
+				}
+				if typeFD := subMsg.Descriptor().Fields().ByName("type"); typeFD != nil && subMsg.Has(typeFD) && typeFD.Kind() == protoreflect.MessageKind {
+					extractCodeableConceptTextStrings(idx, tenantID, resType, resID, subMsg.Get(typeFD).Message(), []string{spName})
+				}
+			case "google.fhir.r4.core.CodeableConcept":
+				spNames := mapCodeableConceptSpNames(resType, fieldName, parentField)
+				extractCodeableConceptTextStrings(idx, tenantID, resType, resID, subMsg, spNames)
+			case "google.fhir.r4.core.Coding":
+				spNames := mapCodeableConceptSpNames(resType, fieldName, parentField)
+				extractCodingTextStrings(idx, tenantID, resType, resID, subMsg, spNames)
+			default:
+				nextParent := fieldName
+				if parentField != "" {
+					nextParent = parentField
+				}
+				appendTokenTextFromMessage(idx, tenantID, resType, resID, subMsg, nextParent, depth+1)
+			}
+		}
+		if fd.IsList() {
+			list := val.List()
+			for i := 0; i < list.Len(); i++ {
+				visitMsg(list.Get(i).Message())
+			}
+			return true
+		}
+		visitMsg(val.Message())
+		return true
+	})
 }
 
 func extractReferenceIndex(idx *SearchIndexes, tenantID, resType, resID string, refMsg protoreflect.Message, spNames []string) {
@@ -654,9 +788,21 @@ func mapCodeableConceptSpNames(resType, fieldName, parentField string) []string 
 	}
 	switch effective {
 	case "code", "medication", "product":
+		if resType == "Observation" && effective == "code" {
+			if parentField == "component" {
+				return []string{"component-code", "combo-code"}
+			}
+			return []string{"code", "combo-code"}
+		}
 		return []string{"code"}
 	case "vaccine_code":
 		return []string{"vaccine-code", "code"}
+	case "class_value", "class":
+		return []string{"class"}
+	case "conclusion_code", "conclusion":
+		return []string{"conclusion"}
+	case "performer_type":
+		return []string{"intended-performertype", "performer-type"}
 	case "type":
 		return []string{"type"}
 	case "category":

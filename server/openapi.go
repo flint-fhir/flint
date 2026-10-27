@@ -682,6 +682,22 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			},
 		},
 		"/": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"System Operations"},
+				"summary":     "System-level multi-type FHIR search across resource types (supports _type, _id, _lastUpdated, patient, code, _include, _revinclude)",
+				"operationId": "systemSearchGet",
+				"parameters": []map[string]any{
+					{"name": "_type", "in": "query", "required": false, "description": "Comma-separated FHIR resource types (e.g. Patient,Observation,Condition)", "schema": map[string]any{"type": "string"}},
+					{"name": "_id", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "_lastUpdated", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "_count", "in": "query", "required": false, "schema": map[string]any{"type": "integer"}},
+					{"name": "_offset", "in": "query", "required": false, "schema": map[string]any{"type": "integer"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle across requested FHIR resource types"},
+				},
+			},
 			"post": map[string]any{
 				"tags":        []string{"System Operations"},
 				"summary":     "Execute ACID Transaction or Batch Bundle",
@@ -690,6 +706,19 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					"200": map[string]any{"description": "Transaction or Batch response Bundle"},
 					"400": map[string]any{"description": "Validation failure OperationOutcome"},
 					"412": map[string]any{"description": "If-Match / If-None-Exist precondition failure"},
+				},
+			},
+		},
+		"/_search": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"System Operations"},
+				"summary":     "System-level multi-type FHIR search via POST form body or query parameters (_type=Patient,Observation,Condition)",
+				"operationId": "systemSearchPost",
+				"parameters": []map[string]any{
+					{"name": "_type", "in": "query", "required": false, "description": "Comma-separated FHIR resource types (e.g. Patient,Observation,Condition)", "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle across requested FHIR resource types"},
 				},
 			},
 		},
@@ -2046,6 +2075,34 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "FHIR Parameters patch document"},
+				},
+			},
+		}
+
+		paths["/"+rt+"/{id}/$graph"] = map[string]any{
+			"get": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Assemble a clinical resource graph starting at %s/{id} via GraphDefinition ($graph)", rt),
+				"operationId": "instanceGraphGet" + rt,
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "graph", "in": "query", "required": false, "description": "GraphDefinition ID, name, or canonical URL (e.g. us-core-patient-care-graph)", "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle containing " + rt + "/{id} and all GraphDefinition-linked resources"},
+					"404": map[string]any{"description": rt + " or GraphDefinition not found"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Assemble a clinical resource graph starting at %s/{id} via inline GraphDefinition or Parameters ($graph)", rt),
+				"operationId": "instanceGraphPost" + rt,
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle containing " + rt + "/{id} and all GraphDefinition-linked resources"},
+					"422": map[string]any{"description": "GraphDefinition start type mismatch"},
 				},
 			},
 		}

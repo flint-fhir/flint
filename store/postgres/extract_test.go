@@ -885,4 +885,63 @@ func TestDynamicResourceExtractor_USCoreAndR4Resources(t *testing.T) {
 		assert.True(t, foundQRURI, "expected QuestionnaireResponse.questionnaire URI index")
 		assert.True(t, foundQRRef, "expected QuestionnaireResponse.questionnaire Reference index")
 	})
+
+	t.Run("Token :text modifier strings from CodeableConcept.text, Coding.display, and Identifier.type", func(t *testing.T) {
+		condJSON := []byte(`{
+			"resourceType": "Condition",
+			"id": "cond-text-1",
+			"code": {
+				"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}],
+				"text": "Essential Hypertension"
+			},
+			"category": [
+				{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-category", "code": "encounter-diagnosis", "display": "Encounter Diagnosis"}]}
+			],
+			"subject": {"reference": "Patient/pat-100"}
+		}`)
+		condBytes := jsonToProtoBytes(t, descriptors["Condition"], condJSON)
+		condIdx, err := extractors["Condition"]("tenant-1", "cond-text-1", condBytes)
+		require.NoError(t, err)
+
+		var foundCodeDisplay, foundCodeText, foundCatDisplay bool
+		for _, s := range condIdx.Strings {
+			if s.SpName == "code:text" && s.SpValue == "hypertensive disorder" {
+				foundCodeDisplay = true
+			}
+			if s.SpName == "code:text" && s.SpValue == "essential hypertension" {
+				foundCodeText = true
+			}
+			if s.SpName == "category:text" && s.SpValue == "encounter diagnosis" {
+				foundCatDisplay = true
+			}
+		}
+		assert.True(t, foundCodeDisplay, "expected Condition code:text from Coding.display")
+		assert.True(t, foundCodeText, "expected Condition code:text from CodeableConcept.text")
+		assert.True(t, foundCatDisplay, "expected Condition category:text from Coding.display")
+
+		patJSON := []byte(`{
+			"resourceType": "Patient",
+			"id": "pat-text-1",
+			"identifier": [
+				{
+					"type": {
+						"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "MR", "display": "Medical Record Number"}],
+						"text": "Hospital MRN"
+					},
+					"system": "http://hospital.example.org/mrn",
+					"value": "MRN-999"
+				}
+			]
+		}`)
+		patBytes := jsonToProtoBytes(t, descriptors["Patient"], patJSON)
+		patIdx, err := extractors["Patient"]("tenant-1", "pat-text-1", patBytes)
+		require.NoError(t, err)
+		var foundIDTypeText bool
+		for _, s := range patIdx.Strings {
+			if s.SpName == "identifier:text" && (s.SpValue == "medical record number" || s.SpValue == "hospital mrn") {
+				foundIDTypeText = true
+			}
+		}
+		assert.True(t, foundIDTypeText, "expected Patient identifier:text from Identifier.type")
+	})
 }

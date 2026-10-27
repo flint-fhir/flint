@@ -108,6 +108,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Check SMART scopes based on request shape
+		if len(parts) == 3 && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			if len(secCtx.GetScopes()) == 0 {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for system search")
+				return
+			}
+		}
 		if len(parts) >= 4 {
 			resType := parts[3]
 			isBulkExportOp := resType == "$export" || resType == "$export-poll" || resType == "$export-file" ||
@@ -414,6 +420,40 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								if exists && !allowed {
 									writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 										fmt.Sprintf("patient-scoped token (%s) cannot mutate meta of %s/%s outside patient compartment",
+											secCtx.GetPatientId(), resType, id))
+									return
+								}
+							}
+						}
+					} else if len(parts) == 4 && resType == "_search" {
+						// System-level POST search: POST /{tenant}/_search
+						if len(secCtx.GetScopes()) == 0 {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for system search")
+							return
+						}
+					} else if len(parts) == 6 && parts[5] == "$graph" {
+						id := parts[4]
+						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("insufficient scope for $graph on %s", resType))
+							return
+						}
+						if auth.IsPatientRestricted(secCtx) {
+							if strings.EqualFold(resType, "Patient") && cleanID(id) != cleanID(secCtx.GetPatientId()) {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("patient-scoped token (%s) cannot access $graph for patient %s",
+										secCtx.GetPatientId(), id))
+								return
+							}
+							if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+								exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
+								if err != nil {
+									writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+									return
+								}
+								if exists && !allowed {
+									writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+										fmt.Sprintf("patient-scoped token (%s) cannot access $graph for %s/%s outside patient compartment",
 											secCtx.GetPatientId(), resType, id))
 									return
 								}
