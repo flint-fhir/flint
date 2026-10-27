@@ -1119,6 +1119,9 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "ConceptMap") && parts[4] == "$closure" {
 			return true
 		}
+		if strings.EqualFold(parts[3], "Measure") && (parts[4] == "$collect-data" || parts[4] == "$submit-data") {
+			return true
+		}
 		return false
 	}
 	if len(parts) == 6 {
@@ -1126,6 +1129,12 @@ func isPlanApplyOp(parts []string) bool {
 			return true
 		}
 		if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition")) && parts[5] == "$data-requirements" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Measure") && (parts[5] == "$collect-data" || parts[5] == "$submit-data") {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Group") && (parts[5] == "$add" || parts[5] == "$remove") {
 			return true
 		}
 		if parts[5] == "$fhirpath" {

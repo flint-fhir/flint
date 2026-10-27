@@ -2041,6 +2041,60 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Measure/$collect-data": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Measure"},
+				"summary":     "HL7 Da Vinci DEQM / Clinical Reasoning Measure/$collect-data operation",
+				"operationId": "measureCollectDataGet",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing data-collection MeasureReport and clinical resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Measure"},
+				"summary":     "HL7 Da Vinci DEQM / Clinical Reasoning Measure/$collect-data operation (POST Parameters)",
+				"operationId": "measureCollectDataPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing data-collection MeasureReport and clinical resources"},
+				},
+			},
+		},
+		"/Measure/$submit-data": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Measure"},
+				"summary":     "HL7 Da Vinci DEQM / Clinical Reasoning Measure/$submit-data operation persisting MeasureReport and clinical resources",
+				"operationId": "measureSubmitDataPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: transaction-response)"},
+				},
+			},
+		},
+		"/Group/{id}/$add": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Group"},
+				"summary":     "Atomically add member references to Group/{id} cohort ($add)",
+				"operationId": "groupAddPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Updated FHIR R4 Group resource"},
+				},
+			},
+		},
+		"/Group/{id}/$remove": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Group"},
+				"summary":     "Atomically remove member references from Group/{id} cohort ($remove)",
+				"operationId": "groupRemovePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Updated FHIR R4 Group resource"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

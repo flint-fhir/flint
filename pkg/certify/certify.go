@@ -1235,16 +1235,19 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	if err == nil {
-		// Verify reportType=subject-list and Da Vinci DEQM Measure/$care-gaps
+		// Verify reportType=subject-list, Da Vinci DEQM Measure/$care-gaps, and Measure/$collect-data
 		respSL, bSL, errSL := doReq(http.MethodGet, basePath+"/Measure/cms165-bp-control/$evaluate-measure?periodStart=2025-01-01&periodEnd=2027-01-01&reportType=subject-list", "", nil, nil)
 		respCG, bCG, errCG := doReq(http.MethodGet, basePath+"/Measure/$care-gaps?periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/cert-pat-1", "", nil, nil)
+		respCD, bCD, errCD := doReq(http.MethodGet, basePath+"/Measure/cms165-bp-control/$collect-data?periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/cert-pat-1", "", nil, nil)
 		if errSL != nil || respSL.StatusCode != http.StatusOK || !strings.Contains(string(bSL), `"subject-list"`) || !strings.Contains(string(bSL), `"#numerator-list"`) {
 			err = fmt.Errorf("expected subject-list MeasureReport with #numerator-list, got %d: %s", respSL.StatusCode, string(bSL))
 		} else if errCG != nil || respCG.StatusCode != http.StatusOK || !strings.Contains(string(bCG), `"96315-7"`) || !strings.Contains(string(bCG), `"DetectedIssue"`) || !strings.Contains(string(bCG), `"closed-gap"`) {
 			err = fmt.Errorf("expected Da Vinci DEQM $care-gaps document Bundle with 96315-7 Composition and closed-gap DetectedIssue, got %d: %s", respCG.StatusCode, string(bCG))
+		} else if errCD != nil || respCD.StatusCode != http.StatusOK || !strings.Contains(string(bCD), `"data-collection"`) || !strings.Contains(string(bCD), `"cert-pat-1"`) {
+			err = fmt.Errorf("expected Da Vinci DEQM $collect-data Parameters with data-collection MeasureReport and cert-pat-1, got %d: %s", respCD.StatusCode, string(bCD))
 		}
 	}
-	record("CQM-01", suite5, "Clinical Quality Measures (Measure/$evaluate-measure individual/subject-list & DEQM $care-gaps)", t0, err, "Evaluated CMS165 MeasureReport (score=1.0, subject-list) & Da Vinci DEQM $care-gaps Bundle")
+	record("CQM-01", suite5, "Clinical Quality Measures (Measure/$evaluate-measure, DEQM $care-gaps & $collect-data)", t0, err, "Evaluated CMS165 MeasureReport (score=1.0, subject-list), DEQM $care-gaps & $collect-data")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/cds-services", "", nil, nil)
