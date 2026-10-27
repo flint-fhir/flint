@@ -194,6 +194,7 @@ func extractSingleFieldValue(
 		if typeFD := subMsg.Descriptor().Fields().ByName("type"); typeFD != nil && subMsg.Has(typeFD) && typeFD.Kind() == protoreflect.MessageKind {
 			extractCodeableConceptTextStrings(idx, tenantID, resType, resID, subMsg.Get(typeFD).Message(), []string{spName})
 		}
+		extractIdentifierOfTypeTokens(idx, tenantID, resType, resID, subMsg, spName)
 
 	case "google.fhir.r4.core.CodeableConcept":
 		spNames := mapCodeableConceptSpNames(resType, fieldName, parentField)
@@ -527,6 +528,53 @@ func extractCodeableConceptTokens(idx *SearchIndexes, tenantID, resType, resID s
 	}
 }
 
+func extractIdentifierOfTypeTokens(idx *SearchIndexes, tenantID, resType, resID string, idMsg protoreflect.Message, spName string) {
+	if idx == nil || !idMsg.IsValid() {
+		return
+	}
+	_, val := extractIdentifier(idMsg)
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return
+	}
+	typeFD := idMsg.Descriptor().Fields().ByName("type")
+	if typeFD == nil || !idMsg.Has(typeFD) || typeFD.Kind() != protoreflect.MessageKind {
+		return
+	}
+	typeMsg := idMsg.Get(typeFD).Message()
+	if !typeMsg.IsValid() {
+		return
+	}
+	codingFD := typeMsg.Descriptor().Fields().ByName("coding")
+	if codingFD == nil || !typeMsg.Has(codingFD) {
+		return
+	}
+	list := typeMsg.Get(codingFD).List()
+	for i := 0; i < list.Len(); i++ {
+		codingMsg := list.Get(i).Message()
+		if !codingMsg.IsValid() {
+			continue
+		}
+		var typeSys, typeCode string
+		if sysFD := codingMsg.Descriptor().Fields().ByName("system"); sysFD != nil && codingMsg.Has(sysFD) {
+			typeSys = strings.TrimSpace(extractWrappedString(codingMsg.Get(sysFD).Message()))
+		}
+		if codeFD := codingMsg.Descriptor().Fields().ByName("code"); codeFD != nil && codingMsg.Has(codeFD) {
+			typeCode = strings.TrimSpace(extractWrappedString(codingMsg.Get(codeFD).Message()))
+		}
+		if typeCode != "" {
+			idx.Tokens = append(idx.Tokens, SpidxToken{
+				TenantID: tenantID,
+				ResType:  resType,
+				ResID:    resID,
+				SpName:   spName + ":of-type",
+				SpSystem: typeSys + "|" + typeCode,
+				SpValue:  val,
+			})
+		}
+	}
+}
+
 func appendTokenTextFromMessage(idx *SearchIndexes, tenantID, resType, resID string, msg protoreflect.Message, parentField string, depth int) {
 	if idx == nil || !msg.IsValid() || depth > 2 {
 		return
@@ -553,6 +601,7 @@ func appendTokenTextFromMessage(idx *SearchIndexes, tenantID, resType, resID str
 				if typeFD := subMsg.Descriptor().Fields().ByName("type"); typeFD != nil && subMsg.Has(typeFD) && typeFD.Kind() == protoreflect.MessageKind {
 					extractCodeableConceptTextStrings(idx, tenantID, resType, resID, subMsg.Get(typeFD).Message(), []string{spName})
 				}
+				extractIdentifierOfTypeTokens(idx, tenantID, resType, resID, subMsg, spName)
 			case "google.fhir.r4.core.CodeableConcept":
 				spNames := mapCodeableConceptSpNames(resType, fieldName, parentField)
 				extractCodeableConceptTextStrings(idx, tenantID, resType, resID, subMsg, spNames)
@@ -819,6 +868,11 @@ func mapCodeableConceptSpNames(resType, fieldName, parentField string) []string 
 		return []string{"relationship"}
 	case "body_site":
 		return []string{"bodysite"}
+	case "value":
+		if resType == "Observation" {
+			return []string{"value-concept", "combo-value-concept"}
+		}
+		return []string{"value"}
 	case "description":
 		if resType == "Goal" {
 			return []string{"description", "code"}
@@ -913,6 +967,11 @@ func mapDateSpNames(resType, fieldName, parentField string) []string {
 		return []string{"whenhandedover", "date"}
 	case "when_prepared":
 		return []string{"whenprepared", "date"}
+	case "value":
+		if resType == "Observation" {
+			return []string{"value-date"}
+		}
+		return []string{"date", "value"}
 	default:
 		return []string{"date", strings.ReplaceAll(effective, "_", "-")}
 	}
@@ -924,6 +983,11 @@ func mapStringSpNames(fieldName, parentField string) []string {
 		return []string{"name", fieldName}
 	case "udi_carrier", "device_identifier":
 		return []string{"udi-carrier"}
+	case "string_value":
+		if parentField == "value" {
+			return []string{"value-string"}
+		}
+		return nil
 	default:
 		return nil
 	}

@@ -1891,3 +1891,232 @@ func TestSystemSearchTokenTextAndResourceGraphWave10(t *testing.T) {
 		t.Errorf("expected custom GraphDefinition $graph to include pat-w10-1 and obs-w10-1 but exclude cond-w10-1, got: %s", graphPostRec.Body.String())
 	}
 }
+
+func TestWildcardIncludeOfTypeCompositeAndPreferHandlingWave11(t *testing.T) {
+	srv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(srv)
+	h := srv.Handler()
+
+	// 1. Verify CapabilityStatement advertises Wave 11 Observation composite & value-* search parameters
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/test-tenant/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	h.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /metadata, got %d", metaRec.Code)
+	}
+	metaBody := metaRec.Body.String()
+	for _, spName := range []string{
+		`"code-value-concept"`,
+		`"component-code-value-concept"`,
+		`"combo-code-value-concept"`,
+		`"code-value-date"`,
+		`"code-value-string"`,
+		`"value-concept"`,
+		`"value-date"`,
+		`"value-string"`,
+	} {
+		if !strings.Contains(metaBody, spName) {
+			t.Errorf("expected /metadata CapabilityStatement to declare %s", spName)
+		}
+	}
+
+	// 2. Verify Prefer: handling=strict rejects unrecognized search parameter with 400 Bad Request
+	strictReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/test-tenant/Patient?family=Smith&unknown_bogus_param=123", nil)
+	strictReq.Header.Set("Prefer", "handling=strict")
+	strictRec := httptest.NewRecorder()
+	h.ServeHTTP(strictRec, strictReq)
+	if strictRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request under Prefer: handling=strict for unknown search param, got %d: %s", strictRec.Code, strictRec.Body.String())
+	}
+	if strictRec.Header().Get("Preference-Applied") != "handling=strict" {
+		t.Errorf("expected Preference-Applied: handling=strict header, got %q", strictRec.Header().Get("Preference-Applied"))
+	}
+
+	// 3. Postgres-backed integration checks
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+	tenant := "test-wave11-e2e"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	putRes := func(resType, id, body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/"+resType+"/"+id, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s/%s failed (%d): %s", resType, id, rec.Code, rec.Body.String())
+		}
+	}
+
+	putRes("Organization", "org-w11-1", `{
+		"resourceType": "Organization",
+		"id": "org-w11-1",
+		"active": true,
+		"name": "Wave11 Medical Group"
+	}`)
+
+	putRes("Patient", "pat-w11-1", `{
+		"resourceType": "Patient",
+		"id": "pat-w11-1",
+		"meta": {
+			"profile": ["http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"],
+			"tag": [{"system": "http://example.org/tags", "code": "w11-cohort"}],
+			"security": [{"system": "http://terminology.hl7.org/CodeSystem/v3-Confidentiality", "code": "N"}]
+		},
+		"identifier": [
+			{
+				"type": {
+					"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "MR"}]
+				},
+				"system": "http://hospital.example.org/mrn",
+				"value": "MRN-W11-777"
+			}
+		],
+		"name": [{"family": "Wildcard", "given": ["Wendy"]}],
+		"gender": "female",
+		"birthDate": "1985-05-20",
+		"managingOrganization": {"reference": "Organization/org-w11-1"}
+	}`)
+
+	putRes("Encounter", "enc-w11-1", `{
+		"resourceType": "Encounter",
+		"id": "enc-w11-1",
+		"status": "finished",
+		"class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB"},
+		"subject": {"reference": "Patient/pat-w11-1"},
+		"period": {"start": "2026-02-10T09:00:00Z", "end": "2026-02-10T10:00:00Z"}
+	}`)
+
+	putRes("Observation", "obs-w11-concept", `{
+		"resourceType": "Observation",
+		"id": "obs-w11-concept",
+		"status": "final",
+		"code": {"coding": [{"system": "http://loinc.org", "code": "72166-2"}]},
+		"subject": {"reference": "Patient/pat-w11-1"},
+		"encounter": {"reference": "Encounter/enc-w11-1"},
+		"effectiveDateTime": "2026-02-10T09:15:00Z",
+		"valueCodeableConcept": {
+			"coding": [{"system": "http://snomed.info/sct", "code": "266919005", "display": "Never smoked tobacco"}]
+		},
+		"component": [
+			{
+				"code": {"coding": [{"system": "http://loinc.org", "code": "11367-0"}]},
+				"valueCodeableConcept": {
+					"coding": [{"system": "http://snomed.info/sct", "code": "8517006"}]
+				}
+			}
+		]
+	}`)
+
+	putRes("Observation", "obs-w11-str", `{
+		"resourceType": "Observation",
+		"id": "obs-w11-str",
+		"status": "final",
+		"code": {"coding": [{"system": "http://loinc.org", "code": "95541-9"}]},
+		"subject": {"reference": "Patient/pat-w11-1"},
+		"effectiveDateTime": "2026-02-10T09:20:00Z",
+		"valueString": "Prefers afternoon telehealth"
+	}`)
+
+	// 3a. Verify identifier:of-type search (direct and chained)
+	ofTypeReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient?identifier:of-type=http://terminology.hl7.org/CodeSystem/v2-0203|MR|MRN-W11-777", nil)
+	ofTypeRec := httptest.NewRecorder()
+	pgH.ServeHTTP(ofTypeRec, ofTypeReq)
+	if ofTypeRec.Code != http.StatusOK || !strings.Contains(ofTypeRec.Body.String(), `"pat-w11-1"`) {
+		t.Errorf("expected identifier:of-type search to match pat-w11-1, got %d: %s", ofTypeRec.Code, ofTypeRec.Body.String())
+	}
+
+	chainOfTypeReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Observation?subject:Patient.identifier:of-type=|MR|MRN-W11-777", nil)
+	chainOfTypeRec := httptest.NewRecorder()
+	pgH.ServeHTTP(chainOfTypeRec, chainOfTypeReq)
+	if chainOfTypeRec.Code != http.StatusOK || !strings.Contains(chainOfTypeRec.Body.String(), `"obs-w11-concept"`) {
+		t.Errorf("expected chained subject:Patient.identifier:of-type=|MR|MRN-W11-777 to match obs-w11-concept, got %d: %s", chainOfTypeRec.Code, chainOfTypeRec.Body.String())
+	}
+
+	// 3b. Verify Wildcard _include=* and _revinclude=*
+	incWildReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Observation?_id=obs-w11-concept&_include=*", nil)
+	incWildRec := httptest.NewRecorder()
+	pgH.ServeHTTP(incWildRec, incWildReq)
+	if incWildRec.Code != http.StatusOK || !strings.Contains(incWildRec.Body.String(), `"pat-w11-1"`) || !strings.Contains(incWildRec.Body.String(), `"enc-w11-1"`) {
+		t.Errorf("expected Observation?_id=obs-w11-concept&_include=* to include pat-w11-1 and enc-w11-1, got %d: %s", incWildRec.Code, incWildRec.Body.String())
+	}
+
+	revWildReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient?_id=pat-w11-1&_revinclude=*", nil)
+	revWildRec := httptest.NewRecorder()
+	pgH.ServeHTTP(revWildRec, revWildReq)
+	if revWildRec.Code != http.StatusOK || !strings.Contains(revWildRec.Body.String(), `"enc-w11-1"`) || !strings.Contains(revWildRec.Body.String(), `"obs-w11-concept"`) {
+		t.Errorf("expected Patient?_id=pat-w11-1&_revinclude=* to include enc-w11-1 and obs-w11-concept, got %d: %s", revWildRec.Code, revWildRec.Body.String())
+	}
+
+	// 3c. Verify Multi-Hop Recursive _has Reverse Chaining
+	multiHasReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient?_has:Encounter:patient:_has:Observation:encounter:code=72166-2", nil)
+	multiHasRec := httptest.NewRecorder()
+	pgH.ServeHTTP(multiHasRec, multiHasReq)
+	if multiHasRec.Code != http.StatusOK || !strings.Contains(multiHasRec.Body.String(), `"pat-w11-1"`) {
+		t.Errorf("expected multi-hop _has Patient?_has:Encounter:patient:_has:Observation:encounter:code=72166-2 to match pat-w11-1, got %d: %s", multiHasRec.Code, multiHasRec.Body.String())
+	}
+
+	// 3d. Verify Date ap (approximately) prefix & Composite Observation searches (code-value-concept, component-code-value-concept, code-value-string)
+	apDateReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Observation?date=ap2026-02-12", nil)
+	apDateRec := httptest.NewRecorder()
+	pgH.ServeHTTP(apDateRec, apDateReq)
+	if apDateRec.Code != http.StatusOK || !strings.Contains(apDateRec.Body.String(), `"obs-w11-concept"`) {
+		t.Errorf("expected Observation?date=ap2026-02-12 to match obs-w11-concept (2026-02-10), got %d: %s", apDateRec.Code, apDateRec.Body.String())
+	}
+
+	cvcReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Observation?code-value-concept=http://loinc.org|72166-2$http://snomed.info/sct|266919005&component-code-value-concept=http://loinc.org|11367-0$http://snomed.info/sct|8517006", nil)
+	cvcRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cvcRec, cvcReq)
+	if cvcRec.Code != http.StatusOK || !strings.Contains(cvcRec.Body.String(), `"obs-w11-concept"`) {
+		t.Errorf("expected code-value-concept & component-code-value-concept to match obs-w11-concept, got %d: %s", cvcRec.Code, cvcRec.Body.String())
+	}
+
+	cvsReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Observation?code-value-string=http://loinc.org|95541-9$Prefers+afternoon", nil)
+	cvsRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cvsRec, cvsReq)
+	if cvsRec.Code != http.StatusOK || !strings.Contains(cvsRec.Body.String(), `"obs-w11-str"`) {
+		t.Errorf("expected code-value-string to match obs-w11-str, got %d: %s", cvsRec.Code, cvsRec.Body.String())
+	}
+
+	// 3e. Verify System-Level and Type-Level $meta aggregation
+	typeMetaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/$meta", nil)
+	typeMetaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(typeMetaRec, typeMetaReq)
+	if typeMetaRec.Code != http.StatusOK || !strings.Contains(typeMetaRec.Body.String(), `"w11-cohort"`) || !strings.Contains(typeMetaRec.Body.String(), `"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"`) {
+		t.Errorf("expected GET /Patient/$meta to aggregate w11-cohort tag and us-core-patient profile, got %d: %s", typeMetaRec.Code, typeMetaRec.Body.String())
+	}
+
+	sysMetaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/$meta", nil)
+	sysMetaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sysMetaRec, sysMetaReq)
+	if sysMetaRec.Code != http.StatusOK || !strings.Contains(sysMetaRec.Body.String(), `"w11-cohort"`) {
+		t.Errorf("expected GET /$meta to aggregate w11-cohort tag across tenant, got %d: %s", sysMetaRec.Code, sysMetaRec.Body.String())
+	}
+
+	// 3f. Verify Prefer: handling=lenient strips unknown params and includes OperationOutcome warning in Bundle
+	lenientReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient?family=Wildcard&unknown_extra_param=abc", nil)
+	lenientReq.Header.Set("Prefer", "handling=lenient")
+	lenientRec := httptest.NewRecorder()
+	pgH.ServeHTTP(lenientRec, lenientReq)
+	if lenientRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK under Prefer: handling=lenient, got %d: %s", lenientRec.Code, lenientRec.Body.String())
+	}
+	if lenientRec.Header().Get("Preference-Applied") != "handling=lenient" {
+		t.Errorf("expected Preference-Applied: handling=lenient, got %q", lenientRec.Header().Get("Preference-Applied"))
+	}
+	if !strings.Contains(lenientRec.Body.String(), `"pat-w11-1"`) || !strings.Contains(lenientRec.Body.String(), `"OperationOutcome"`) || !strings.Contains(lenientRec.Body.String(), `"mode":"outcome"`) {
+		t.Errorf("expected lenient search Bundle to contain pat-w11-1 and warning OperationOutcome entry with mode=outcome, got: %s", lenientRec.Body.String())
+	}
+}

@@ -936,12 +936,79 @@ func TestDynamicResourceExtractor_USCoreAndR4Resources(t *testing.T) {
 		patBytes := jsonToProtoBytes(t, descriptors["Patient"], patJSON)
 		patIdx, err := extractors["Patient"]("tenant-1", "pat-text-1", patBytes)
 		require.NoError(t, err)
-		var foundIDTypeText bool
+		var foundIDTypeText, foundIDOfType bool
 		for _, s := range patIdx.Strings {
 			if s.SpName == "identifier:text" && (s.SpValue == "medical record number" || s.SpValue == "hospital mrn") {
 				foundIDTypeText = true
 			}
 		}
+		for _, tok := range patIdx.Tokens {
+			if tok.SpName == "identifier:of-type" && tok.SpSystem == "http://terminology.hl7.org/CodeSystem/v2-0203|MR" && tok.SpValue == "MRN-999" {
+				foundIDOfType = true
+			}
+		}
 		assert.True(t, foundIDTypeText, "expected Patient identifier:text from Identifier.type")
+		assert.True(t, foundIDOfType, "expected Patient identifier:of-type token from Identifier.type.coding")
+	})
+
+	t.Run("Observation value-concept, component-value-concept, value-date, and value-string extraction", func(t *testing.T) {
+		obsConceptJSON := []byte(`{
+			"resourceType": "Observation",
+			"id": "obs-concept-1",
+			"status": "final",
+			"code": {"coding": [{"system": "http://loinc.org", "code": "72166-2"}]},
+			"valueCodeableConcept": {
+				"coding": [{"system": "http://snomed.info/sct", "code": "266919005", "display": "Never smoked tobacco"}]
+			},
+			"component": [
+				{
+					"code": {"coding": [{"system": "http://loinc.org", "code": "11367-0"}]},
+					"valueCodeableConcept": {
+						"coding": [{"system": "http://snomed.info/sct", "code": "8517006"}]
+					}
+				}
+			]
+		}`)
+		obsConceptBytes := jsonToProtoBytes(t, descriptors["Observation"], obsConceptJSON)
+		obsConceptIdx, err := extractors["Observation"]("tenant-1", "obs-concept-1", obsConceptBytes)
+		require.NoError(t, err)
+
+		var foundValConcept, foundComboValConcept, foundCompValConcept, foundPairedCompCVC bool
+		for _, tok := range obsConceptIdx.Tokens {
+			if tok.SpName == "value-concept" && tok.SpSystem == "http://snomed.info/sct" && tok.SpValue == "266919005" {
+				foundValConcept = true
+			}
+			if tok.SpName == "combo-value-concept" && tok.SpValue == "266919005" {
+				foundComboValConcept = true
+			}
+			if tok.SpName == "component-value-concept" && tok.SpValue == "8517006" {
+				foundCompValConcept = true
+			}
+			if tok.SpName == "comp-cvc:http://loinc.org|11367-0" && tok.SpSystem == "http://snomed.info/sct" && tok.SpValue == "8517006" {
+				foundPairedCompCVC = true
+			}
+		}
+		assert.True(t, foundValConcept, "expected value-concept token")
+		assert.True(t, foundComboValConcept, "expected combo-value-concept token")
+		assert.True(t, foundCompValConcept, "expected component-value-concept token")
+		assert.True(t, foundPairedCompCVC, "expected paired comp-cvc token")
+
+		obsStrDateJSON := []byte(`{
+			"resourceType": "Observation",
+			"id": "obs-str-1",
+			"status": "final",
+			"code": {"coding": [{"system": "http://loinc.org", "code": "95541-9"}]},
+			"valueString": "Patient prefers digital portal"
+		}`)
+		obsStrBytes := jsonToProtoBytes(t, descriptors["Observation"], obsStrDateJSON)
+		obsStrIdx, err := extractors["Observation"]("tenant-1", "obs-str-1", obsStrBytes)
+		require.NoError(t, err)
+		var foundValStr bool
+		for _, s := range obsStrIdx.Strings {
+			if s.SpName == "value-string" && s.SpValue == "patient prefers digital portal" {
+				foundValStr = true
+			}
+		}
+		assert.True(t, foundValStr, "expected value-string index")
 	})
 }

@@ -83,6 +83,9 @@ type SearchParams struct {
 	Has                      []HasParam                      // reverse-chained search parameters (e.g. _has:Observation:patient:code=8867-4)
 	List                     []string                        // _list cohort membership filters (e.g. _list=list-1)
 	CompositeTokenQuantities [][]CompositeTokenQuantityParam // token$quantity composite filters (e.g. code-value-quantity, component-code-value-quantity)
+	CompositeTokenTokens     [][]CompositeTokenTokenParam    // token$token composite filters (e.g. code-value-concept, component-code-value-concept)
+	CompositeTokenDates      [][]CompositeTokenDateParam     // token$date composite filters (e.g. code-value-date)
+	CompositeTokenStrings    [][]CompositeTokenStringParam   // token$string composite filters (e.g. code-value-string)
 	Includes                 []IncludeParam                  // _include parameters
 	RevIncludes              []IncludeParam                  // _revinclude parameters
 	Sort                     []SortSpec                      // _sort specifications
@@ -205,15 +208,26 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 	}
 	for spKey, filterVals := range tokenFilters {
 		baseName, modifier := splitParamModifier(spKey)
+		spColName := baseName
+		if modifier == "of-type" {
+			spColName = baseName + ":of-type"
+		}
 		for _, rawVal := range filterVals {
 			joinIdx++
 			alias := fmt.Sprintf("t%d", joinIdx)
 			spIdx := len(args) + 1
-			args = append(args, baseName)
+			args = append(args, spColName)
 			var orConds []string
 			for part := range strings.SplitSeq(rawVal, ",") {
 				item := strings.TrimSpace(part)
 				if item == "" {
+					continue
+				}
+				if modifier == "of-type" {
+					if cond, otArgs := buildOfTypeTokenOrCond(alias, item, len(args)); cond != "" {
+						orConds = append(orConds, cond)
+						args = append(args, otArgs...)
+					}
 					continue
 				}
 				if parts := strings.SplitN(item, "|", 2); len(parts) == 2 {
@@ -580,12 +594,23 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 
 		switch paramType {
 		case "token":
+			spColName := targetParam
+			if targetMod == "of-type" {
+				spColName = targetParam + ":of-type"
+			}
 			spIdx := len(args) + 1
-			args = append(args, targetParam)
+			args = append(args, spColName)
 			var orConds []string
 			for part := range strings.SplitSeq(chained.Value, ",") {
 				item := strings.TrimSpace(part)
 				if item == "" {
+					continue
+				}
+				if targetMod == "of-type" {
+					if cond, otArgs := buildOfTypeTokenOrCond(targetAlias, item, len(args)); cond != "" {
+						orConds = append(orConds, cond)
+						args = append(args, otArgs...)
+					}
 					continue
 				}
 				if parts := strings.SplitN(item, "|", 2); len(parts) == 2 {
@@ -849,6 +874,117 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		}
 	}
 
+	// 6e. Composite token$token, token$date, and token$string search parameters
+	for _, orGroup := range params.CompositeTokenTokens {
+		var orParts []string
+		for _, cp := range orGroup {
+			buildValTokCond := func(alias string) string {
+				if cp.ValueSystem != "" {
+					cond := fmt.Sprintf("(%s.sp_system = $%d AND %s.sp_value = $%d)", alias, len(args)+1, alias, len(args)+2)
+					args = append(args, cp.ValueSystem, cp.ValueCode)
+					return cond
+				}
+				cond := fmt.Sprintf("(%s.sp_value = $%d)", alias, len(args)+1)
+				args = append(args, cp.ValueCode)
+				return cond
+			}
+			buildCodeTokCond := func(alias string) string {
+				if cp.TokenSystem != "" {
+					cond := fmt.Sprintf("(%s.sp_system = $%d AND %s.sp_value = $%d)", alias, len(args)+1, alias, len(args)+2)
+					args = append(args, cp.TokenSystem, cp.TokenCode)
+					return cond
+				}
+				cond := fmt.Sprintf("(%s.sp_value = $%d)", alias, len(args)+1)
+				args = append(args, cp.TokenCode)
+				return cond
+			}
+			switch cp.ParamName {
+			case "component-code-value-concept":
+				compKey := "comp-cvc:" + cp.TokenCode
+				if cp.TokenSystem != "" {
+					compKey = "comp-cvc:" + cp.TokenSystem + "|" + cp.TokenCode
+				}
+				spIdx := len(args) + 1
+				args = append(args, compKey)
+				valCond := buildValTokCond("cvc")
+				orParts = append(orParts, fmt.Sprintf(
+					"EXISTS (SELECT 1 FROM spidx_token cvc WHERE cvc.tenant_id = r.tenant_id AND cvc.res_type = r.res_type AND cvc.res_id = r.res_id AND cvc.sp_name = $%d AND %s)",
+					spIdx, valCond,
+				))
+			case "combo-code-value-concept":
+				compKey := "comp-cvc:" + cp.TokenCode
+				if cp.TokenSystem != "" {
+					compKey = "comp-cvc:" + cp.TokenSystem + "|" + cp.TokenCode
+				}
+				spCompIdx := len(args) + 1
+				args = append(args, compKey)
+				compValCond := buildValTokCond("cvc1")
+				codeCond := buildCodeTokCond("ct")
+				topValCond := buildValTokCond("cvc2")
+				orParts = append(orParts, fmt.Sprintf(
+					"(EXISTS (SELECT 1 FROM spidx_token cvc1 WHERE cvc1.tenant_id = r.tenant_id AND cvc1.res_type = r.res_type AND cvc1.res_id = r.res_id AND cvc1.sp_name = $%d AND %s) OR EXISTS (SELECT 1 FROM spidx_token ct JOIN spidx_token cvc2 ON cvc2.tenant_id = ct.tenant_id AND cvc2.res_type = ct.res_type AND cvc2.res_id = ct.res_id WHERE ct.tenant_id = r.tenant_id AND ct.res_type = r.res_type AND ct.res_id = r.res_id AND ct.sp_name = 'code' AND %s AND cvc2.sp_name = 'value-concept' AND %s))",
+					spCompIdx, compValCond, codeCond, topValCond,
+				))
+			default: // code-value-concept
+				codeCond := buildCodeTokCond("ct")
+				valCond := buildValTokCond("cvc")
+				orParts = append(orParts, fmt.Sprintf(
+					"EXISTS (SELECT 1 FROM spidx_token ct JOIN spidx_token cvc ON cvc.tenant_id = ct.tenant_id AND cvc.res_type = ct.res_type AND cvc.res_id = ct.res_id WHERE ct.tenant_id = r.tenant_id AND ct.res_type = r.res_type AND ct.res_id = r.res_id AND ct.sp_name = 'code' AND %s AND cvc.sp_name = 'value-concept' AND %s)",
+					codeCond, valCond,
+				))
+			}
+		}
+		if len(orParts) > 0 {
+			whereExtra += " AND (" + strings.Join(orParts, " OR ") + ")"
+		}
+	}
+
+	for _, orGroup := range params.CompositeTokenDates {
+		var orParts []string
+		for _, cp := range orGroup {
+			var tokCond string
+			if cp.TokenSystem != "" {
+				tokCond = fmt.Sprintf("(ct.sp_system = $%d AND ct.sp_value = $%d)", len(args)+1, len(args)+2)
+				args = append(args, cp.TokenSystem, cp.TokenCode)
+			} else {
+				tokCond = fmt.Sprintf("(ct.sp_value = $%d)", len(args)+1)
+				args = append(args, cp.TokenCode)
+			}
+			dCond, dArgs := buildDateCondition("cd", cp.Date, len(args))
+			args = append(args, dArgs...)
+			orParts = append(orParts, fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM spidx_token ct JOIN spidx_date cd ON cd.tenant_id = ct.tenant_id AND cd.res_type = ct.res_type AND cd.res_id = ct.res_id WHERE ct.tenant_id = r.tenant_id AND ct.res_type = r.res_type AND ct.res_id = r.res_id AND ct.sp_name = 'code' AND %s AND cd.sp_name = 'value-date' AND %s)",
+				tokCond, dCond,
+			))
+		}
+		if len(orParts) > 0 {
+			whereExtra += " AND (" + strings.Join(orParts, " OR ") + ")"
+		}
+	}
+
+	for _, orGroup := range params.CompositeTokenStrings {
+		var orParts []string
+		for _, cp := range orGroup {
+			var tokCond string
+			if cp.TokenSystem != "" {
+				tokCond = fmt.Sprintf("(ct.sp_system = $%d AND ct.sp_value = $%d)", len(args)+1, len(args)+2)
+				args = append(args, cp.TokenSystem, cp.TokenCode)
+			} else {
+				tokCond = fmt.Sprintf("(ct.sp_value = $%d)", len(args)+1)
+				args = append(args, cp.TokenCode)
+			}
+			valIdx := len(args) + 1
+			args = append(args, escapeLikePattern(strings.ToLower(strings.TrimSpace(cp.Value)))+"%")
+			orParts = append(orParts, fmt.Sprintf(
+				`EXISTS (SELECT 1 FROM spidx_token ct JOIN spidx_string cs ON cs.tenant_id = ct.tenant_id AND cs.res_type = ct.res_type AND cs.res_id = ct.res_id WHERE ct.tenant_id = r.tenant_id AND ct.res_type = r.res_type AND ct.res_id = r.res_id AND ct.sp_name = 'code' AND %s AND cs.sp_name = 'value-string' AND cs.sp_value LIKE $%d ESCAPE '\')`,
+				tokCond, valIdx,
+			))
+		}
+		if len(orParts) > 0 {
+			whereExtra += " AND (" + strings.Join(orParts, " OR ") + ")"
+		}
+	}
+
 	joinClause := strings.Join(joins, "\n")
 
 	if params.ID != "" {
@@ -1030,7 +1166,51 @@ func buildSortOrderClause(sorts []SortSpec, startIdx int) (string, []any) {
 	return strings.Join(parts, ", "), args
 }
 
+func buildOfTypeTokenOrCond(alias, item string, startIdx int) (string, []any) {
+	parts := strings.SplitN(item, "|", 3)
+	if len(parts) != 3 {
+		return "", nil
+	}
+	typeSys := strings.TrimSpace(parts[0])
+	typeCode := strings.TrimSpace(parts[1])
+	idVal := strings.TrimSpace(parts[2])
+	if typeCode == "" || idVal == "" {
+		return "", nil
+	}
+	if typeSys != "" {
+		return fmt.Sprintf("(%s.sp_system = $%d AND %s.sp_value = $%d)", alias, startIdx+1, alias, startIdx+2),
+			[]any{typeSys + "|" + typeCode, idVal}
+	}
+	return fmt.Sprintf(`((%s.sp_system = $%d OR %s.sp_system LIKE $%d ESCAPE '\') AND %s.sp_value = $%d)`, alias, startIdx+1, alias, startIdx+2, alias, startIdx+3),
+		[]any{"|" + typeCode, "%|" + escapeLikePattern(typeCode), idVal}
+}
+
 func buildHasExistsCondition(hp HasParam, startIdx int) (string, []any) {
+	return buildHasExistsConditionWithAlias(hp, "r", 0, startIdx)
+}
+
+func buildHasExistsConditionWithAlias(hp HasParam, parentAlias string, depth int, startIdx int) (string, []any) {
+	hrfAlias := fmt.Sprintf("hrf%d", depth)
+	hrAlias := fmt.Sprintf("hr%d", depth)
+	hspAlias := fmt.Sprintf("hsp%d", depth)
+
+	args := []any{hp.SourceType, hp.RefParam}
+	srcIdx := startIdx + 1
+	refIdx := startIdx + 2
+
+	if hp.Child != nil {
+		childCond, childArgs := buildHasExistsConditionWithAlias(*hp.Child, hrAlias, depth+1, startIdx+len(args))
+		if childCond == "" {
+			return "", nil
+		}
+		args = append(args, childArgs...)
+		return fmt.Sprintf(
+			`EXISTS (SELECT 1 FROM spidx_reference %s JOIN fhir_resource %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.is_deleted = FALSE WHERE %s.tenant_id = %s.tenant_id AND %s.res_type = $%d AND %s.sp_name = $%d AND %s.target_id = %s.res_id AND (%s.target_type = %s.res_type OR %s.target_type = '') AND %s)`,
+			hrfAlias, hrAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias,
+			hrfAlias, parentAlias, hrfAlias, srcIdx, hrfAlias, refIdx, hrfAlias, parentAlias, hrfAlias, parentAlias, hrfAlias, childCond,
+		), args
+	}
+
 	paramType := hp.ParamType
 	if paramType == "" {
 		switch {
@@ -1049,10 +1229,6 @@ func buildHasExistsCondition(hp HasParam, startIdx int) (string, []any) {
 		}
 	}
 
-	args := []any{hp.SourceType, hp.RefParam}
-	srcIdx := startIdx + 1
-	refIdx := startIdx + 2
-
 	if paramType == "id" {
 		idVal := strings.TrimSpace(hp.Value)
 		if slashIdx := strings.LastIndex(idVal, "/"); slashIdx != -1 {
@@ -1061,8 +1237,9 @@ func buildHasExistsCondition(hp HasParam, startIdx int) (string, []any) {
 		args = append(args, idVal)
 		idIdx := startIdx + len(args)
 		return fmt.Sprintf(
-			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.res_id = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
-			srcIdx, refIdx, idIdx,
+			`EXISTS (SELECT 1 FROM spidx_reference %s JOIN fhir_resource %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.is_deleted = FALSE WHERE %s.tenant_id = %s.tenant_id AND %s.res_type = $%d AND %s.sp_name = $%d AND %s.res_id = $%d AND %s.target_id = %s.res_id AND (%s.target_type = %s.res_type OR %s.target_type = ''))`,
+			hrfAlias, hrAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias,
+			hrfAlias, parentAlias, hrfAlias, srcIdx, hrfAlias, refIdx, hrfAlias, idIdx, hrfAlias, parentAlias, hrfAlias, parentAlias, hrfAlias,
 		), args
 	}
 
@@ -1071,6 +1248,8 @@ func buildHasExistsCondition(hp HasParam, startIdx int) (string, []any) {
 	spColVal := searchBase
 	if searchMod == "text" && !knownStringSearchParams[searchBase] {
 		spColVal = searchBase + ":text"
+	} else if searchMod == "of-type" {
+		spColVal = searchBase + ":of-type"
 	}
 	args = append(args, spColVal)
 
@@ -1083,30 +1262,36 @@ func buildHasExistsCondition(hp HasParam, startIdx int) (string, []any) {
 		args = append(args, likePattern)
 		valIdx := startIdx + len(args)
 		return fmt.Sprintf(
-			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_string hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND hsp.sp_value LIKE $%d ESCAPE '\' WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
-			spIdx, valIdx, srcIdx, refIdx,
+			`EXISTS (SELECT 1 FROM spidx_reference %s JOIN fhir_resource %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.is_deleted = FALSE JOIN spidx_string %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.sp_name = $%d AND %s.sp_value LIKE $%d ESCAPE '\' WHERE %s.tenant_id = %s.tenant_id AND %s.res_type = $%d AND %s.sp_name = $%d AND %s.target_id = %s.res_id AND (%s.target_type = %s.res_type OR %s.target_type = ''))`,
+			hrfAlias, hrAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias,
+			hspAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, spIdx, hspAlias, valIdx,
+			hrfAlias, parentAlias, hrfAlias, srcIdx, hrfAlias, refIdx, hrfAlias, parentAlias, hrfAlias, parentAlias, hrfAlias,
 		), args
 	case "date":
 		dOp, err := ParseDateOp(hp.Value)
 		if err != nil {
 			return "", nil
 		}
-		cond, dArgs := buildDateCondition("hsp", dOp, startIdx+len(args))
+		cond, dArgs := buildDateCondition(hspAlias, dOp, startIdx+len(args))
 		args = append(args, dArgs...)
 		return fmt.Sprintf(
-			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_date hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND %s WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
-			spIdx, cond, srcIdx, refIdx,
+			`EXISTS (SELECT 1 FROM spidx_reference %s JOIN fhir_resource %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.is_deleted = FALSE JOIN spidx_date %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.sp_name = $%d AND %s WHERE %s.tenant_id = %s.tenant_id AND %s.res_type = $%d AND %s.sp_name = $%d AND %s.target_id = %s.res_id AND (%s.target_type = %s.res_type OR %s.target_type = ''))`,
+			hrfAlias, hrAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias,
+			hspAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, spIdx, cond,
+			hrfAlias, parentAlias, hrfAlias, srcIdx, hrfAlias, refIdx, hrfAlias, parentAlias, hrfAlias, parentAlias, hrfAlias,
 		), args
 	case "quantity":
 		qOp, err := ParseQuantityOp(hp.Value)
 		if err != nil {
 			return "", nil
 		}
-		cond, qArgs := buildQuantityCondition("hsp", qOp, startIdx+len(args))
+		cond, qArgs := buildQuantityCondition(hspAlias, qOp, startIdx+len(args))
 		args = append(args, qArgs...)
 		return fmt.Sprintf(
-			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_quantity hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND %s WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
-			spIdx, cond, srcIdx, refIdx,
+			`EXISTS (SELECT 1 FROM spidx_reference %s JOIN fhir_resource %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.is_deleted = FALSE JOIN spidx_quantity %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.sp_name = $%d AND %s WHERE %s.tenant_id = %s.tenant_id AND %s.res_type = $%d AND %s.sp_name = $%d AND %s.target_id = %s.res_id AND (%s.target_type = %s.res_type OR %s.target_type = ''))`,
+			hrfAlias, hrAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias,
+			hspAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, spIdx, cond,
+			hrfAlias, parentAlias, hrfAlias, srcIdx, hrfAlias, refIdx, hrfAlias, parentAlias, hrfAlias, parentAlias, hrfAlias,
 		), args
 	case "reference":
 		refVal := strings.TrimSpace(hp.Value)
@@ -1115,22 +1300,28 @@ func buildHasExistsCondition(hp HasParam, startIdx int) (string, []any) {
 			tTypeIdx := startIdx + len(args) - 1
 			tIDIdx := startIdx + len(args)
 			return fmt.Sprintf(
-				`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_reference hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND hsp.target_type = $%d AND hsp.target_id = $%d WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
-				spIdx, tTypeIdx, tIDIdx, srcIdx, refIdx,
+				`EXISTS (SELECT 1 FROM spidx_reference %s JOIN fhir_resource %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.is_deleted = FALSE JOIN spidx_reference %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.sp_name = $%d AND %s.target_type = $%d AND %s.target_id = $%d WHERE %s.tenant_id = %s.tenant_id AND %s.res_type = $%d AND %s.sp_name = $%d AND %s.target_id = %s.res_id AND (%s.target_type = %s.res_type OR %s.target_type = ''))`,
+				hrfAlias, hrAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias,
+				hspAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, spIdx, hspAlias, tTypeIdx, hspAlias, tIDIdx,
+				hrfAlias, parentAlias, hrfAlias, srcIdx, hrfAlias, refIdx, hrfAlias, parentAlias, hrfAlias, parentAlias, hrfAlias,
 			), args
 		}
 		args = append(args, refVal)
 		tIDIdx := startIdx + len(args)
 		return fmt.Sprintf(
-			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_reference hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND hsp.target_id = $%d WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
-			spIdx, tIDIdx, srcIdx, refIdx,
+			`EXISTS (SELECT 1 FROM spidx_reference %s JOIN fhir_resource %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.is_deleted = FALSE JOIN spidx_reference %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.sp_name = $%d AND %s.target_id = $%d WHERE %s.tenant_id = %s.tenant_id AND %s.res_type = $%d AND %s.sp_name = $%d AND %s.target_id = %s.res_id AND (%s.target_type = %s.res_type OR %s.target_type = ''))`,
+			hrfAlias, hrAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias,
+			hspAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, spIdx, hspAlias, tIDIdx,
+			hrfAlias, parentAlias, hrfAlias, srcIdx, hrfAlias, refIdx, hrfAlias, parentAlias, hrfAlias, parentAlias, hrfAlias,
 		), args
 	case "uri":
 		args = append(args, strings.TrimSpace(hp.Value))
 		valIdx := startIdx + len(args)
 		return fmt.Sprintf(
-			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_uri hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND hsp.sp_value = $%d WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
-			spIdx, valIdx, srcIdx, refIdx,
+			`EXISTS (SELECT 1 FROM spidx_reference %s JOIN fhir_resource %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.is_deleted = FALSE JOIN spidx_uri %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.sp_name = $%d AND %s.sp_value = $%d WHERE %s.tenant_id = %s.tenant_id AND %s.res_type = $%d AND %s.sp_name = $%d AND %s.target_id = %s.res_id AND (%s.target_type = %s.res_type OR %s.target_type = ''))`,
+			hrfAlias, hrAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias,
+			hspAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, spIdx, hspAlias, valIdx,
+			hrfAlias, parentAlias, hrfAlias, srcIdx, hrfAlias, refIdx, hrfAlias, parentAlias, hrfAlias, parentAlias, hrfAlias,
 		), args
 	default: // token
 		var orConds []string
@@ -1140,25 +1331,32 @@ func buildHasExistsCondition(hp HasParam, startIdx int) (string, []any) {
 				continue
 			}
 			currIdx := startIdx + len(args)
+			if searchMod == "of-type" {
+				if cond, otArgs := buildOfTypeTokenOrCond(hspAlias, item, currIdx); cond != "" {
+					orConds = append(orConds, cond)
+					args = append(args, otArgs...)
+				}
+				continue
+			}
 			if parts := strings.SplitN(item, "|", 2); len(parts) == 2 {
 				sys, code := parts[0], parts[1]
 				if sys == "" {
-					orConds = append(orConds, fmt.Sprintf("(hsp.sp_system = '' AND hsp.sp_value = $%d)", currIdx+1))
+					orConds = append(orConds, fmt.Sprintf("(%s.sp_system = '' AND %s.sp_value = $%d)", hspAlias, hspAlias, currIdx+1))
 					args = append(args, code)
 				} else if code == "" {
-					orConds = append(orConds, fmt.Sprintf("(hsp.sp_system = $%d)", currIdx+1))
+					orConds = append(orConds, fmt.Sprintf("(%s.sp_system = $%d)", hspAlias, currIdx+1))
 					args = append(args, sys)
 				} else {
-					orConds = append(orConds, fmt.Sprintf("(hsp.sp_system = $%d AND hsp.sp_value = $%d)", currIdx+1, currIdx+2))
+					orConds = append(orConds, fmt.Sprintf("(%s.sp_system = $%d AND %s.sp_value = $%d)", hspAlias, currIdx+1, hspAlias, currIdx+2))
 					args = append(args, sys, code)
 				}
-			} else if isEnumTokenParam(hp.SearchParam) {
+			} else if isEnumTokenParam(searchBase) {
 				normVal := strings.ToLower(strings.ReplaceAll(item, "_", "-"))
 				upperVal := strings.ToUpper(strings.ReplaceAll(item, "-", "_"))
-				orConds = append(orConds, fmt.Sprintf("(hsp.sp_value IN ($%d, $%d, $%d))", currIdx+1, currIdx+2, currIdx+3))
+				orConds = append(orConds, fmt.Sprintf("(%s.sp_value IN ($%d, $%d, $%d))", hspAlias, currIdx+1, currIdx+2, currIdx+3))
 				args = append(args, item, normVal, upperVal)
 			} else {
-				orConds = append(orConds, fmt.Sprintf("(hsp.sp_value = $%d)", currIdx+1))
+				orConds = append(orConds, fmt.Sprintf("(%s.sp_value = $%d)", hspAlias, currIdx+1))
 				args = append(args, item)
 			}
 		}
@@ -1166,8 +1364,10 @@ func buildHasExistsCondition(hp HasParam, startIdx int) (string, []any) {
 			return "", nil
 		}
 		return fmt.Sprintf(
-			`EXISTS (SELECT 1 FROM spidx_reference hrf JOIN fhir_resource hr ON hr.tenant_id = hrf.tenant_id AND hr.res_type = hrf.res_type AND hr.res_id = hrf.res_id AND hr.is_deleted = FALSE JOIN spidx_token hsp ON hsp.tenant_id = hrf.tenant_id AND hsp.res_type = hrf.res_type AND hsp.res_id = hrf.res_id AND hsp.sp_name = $%d AND (%s) WHERE hrf.tenant_id = r.tenant_id AND hrf.res_type = $%d AND hrf.sp_name = $%d AND hrf.target_id = r.res_id AND (hrf.target_type = r.res_type OR hrf.target_type = ''))`,
-			spIdx, strings.Join(orConds, " OR "), srcIdx, refIdx,
+			`EXISTS (SELECT 1 FROM spidx_reference %s JOIN fhir_resource %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.is_deleted = FALSE JOIN spidx_token %s ON %s.tenant_id = %s.tenant_id AND %s.res_type = %s.res_type AND %s.res_id = %s.res_id AND %s.sp_name = $%d AND (%s) WHERE %s.tenant_id = %s.tenant_id AND %s.res_type = $%d AND %s.sp_name = $%d AND %s.target_id = %s.res_id AND (%s.target_type = %s.res_type OR %s.target_type = ''))`,
+			hrfAlias, hrAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias, hrfAlias, hrAlias,
+			hspAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, hrfAlias, hspAlias, spIdx, strings.Join(orConds, " OR "),
+			hrfAlias, parentAlias, hrfAlias, srcIdx, hrfAlias, refIdx, hrfAlias, parentAlias, hrfAlias, parentAlias, hrfAlias,
 		), args
 	}
 }
@@ -1217,7 +1417,7 @@ func (s *Store) resolveIncludesWithExecutor(ctx context.Context, exec queryExece
 			}
 		}
 
-		// Handle _include (Source:param[:Target])
+		// Handle _include (Source:param[:Target] or *)
 		for _, inc := range includes {
 			if pass > 0 && !inc.Iterate {
 				continue
@@ -1233,11 +1433,22 @@ func (s *Store) resolveIncludesWithExecutor(ctx context.Context, exec queryExece
 				SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto
 				FROM spidx_reference rf
 				JOIN fhir_resource r ON r.tenant_id = rf.tenant_id AND r.res_type = rf.target_type AND r.res_id = rf.target_id AND r.is_deleted = FALSE
-				WHERE rf.tenant_id = $1 AND rf.res_type = $2 AND rf.res_id = ANY($3) AND rf.sp_name = $4
+				WHERE rf.tenant_id = $1 AND rf.res_id = ANY($2)
 			`
-			args := []any{tenantID, inc.SourceType, pq.Array(sourceIDs), inc.ParamName}
-			if inc.TargetType != "" {
-				query += " AND rf.target_type = $5"
+			args := []any{tenantID, pq.Array(sourceIDs)}
+			if inc.SourceType != "*" {
+				query += fmt.Sprintf(" AND rf.res_type = $%d", len(args)+1)
+				args = append(args, inc.SourceType)
+			} else if len(frontierTypes) > 0 {
+				query += fmt.Sprintf(" AND rf.res_type = ANY($%d)", len(args)+1)
+				args = append(args, pq.Array(frontierTypes))
+			}
+			if inc.ParamName != "*" {
+				query += fmt.Sprintf(" AND rf.sp_name = $%d", len(args)+1)
+				args = append(args, inc.ParamName)
+			}
+			if inc.TargetType != "" && inc.TargetType != "*" {
+				query += fmt.Sprintf(" AND rf.target_type = $%d", len(args)+1)
 				args = append(args, inc.TargetType)
 			}
 
@@ -1261,13 +1472,13 @@ func (s *Store) resolveIncludesWithExecutor(ctx context.Context, exec queryExece
 			rows.Close()
 		}
 
-		// Handle _revinclude (Source:param[:Target])
+		// Handle _revinclude (Source:param[:Target] or *)
 		for _, rev := range revIncludes {
 			if pass > 0 && !rev.Iterate {
 				continue
 			}
 			targetIDs := allFrontierIDs
-			if rev.TargetType != "" {
+			if rev.TargetType != "" && rev.TargetType != "*" {
 				targetIDs = idsByType[rev.TargetType]
 			}
 			if len(targetIDs) == 0 {
@@ -1277,10 +1488,18 @@ func (s *Store) resolveIncludesWithExecutor(ctx context.Context, exec queryExece
 				SELECT DISTINCT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto
 				FROM spidx_reference rf
 				JOIN fhir_resource r ON r.tenant_id = rf.tenant_id AND r.res_type = rf.res_type AND r.res_id = rf.res_id AND r.is_deleted = FALSE
-				WHERE rf.tenant_id = $1 AND rf.target_id = ANY($2) AND rf.res_type = $3 AND rf.sp_name = $4
+				WHERE rf.tenant_id = $1 AND rf.target_id = ANY($2)
 			`
-			args := []any{tenantID, pq.Array(targetIDs), rev.SourceType, rev.ParamName}
-			if rev.TargetType != "" {
+			args := []any{tenantID, pq.Array(targetIDs)}
+			if rev.SourceType != "*" {
+				query += fmt.Sprintf(" AND rf.res_type = $%d", len(args)+1)
+				args = append(args, rev.SourceType)
+			}
+			if rev.ParamName != "*" {
+				query += fmt.Sprintf(" AND rf.sp_name = $%d", len(args)+1)
+				args = append(args, rev.ParamName)
+			}
+			if rev.TargetType != "" && rev.TargetType != "*" {
 				query += fmt.Sprintf(" AND (rf.target_type = $%d OR rf.target_type = '')", len(args)+1)
 				args = append(args, rev.TargetType)
 			} else if len(frontierTypes) > 0 {
@@ -1346,12 +1565,26 @@ func buildTimestampColumnCondition(colExpr string, op DateOp, startIdx int) (str
 			return fmt.Sprintf("(%s < $%d OR %s >= $%d)", colExpr, startIdx+1, colExpr, startIdx+2), []any{low, high}
 		}
 		return fmt.Sprintf("%s != $%d", colExpr, startIdx+1), []any{low}
+	case "ap":
+		apLow, apHigh := approximateDateBounds(low, high)
+		return fmt.Sprintf("(%s >= $%d AND %s <= $%d)", colExpr, startIdx+1, colExpr, startIdx+2), []any{apLow, apHigh}
 	default: // "eq"
 		if high.After(low) {
 			return fmt.Sprintf("(%s >= $%d AND %s < $%d)", colExpr, startIdx+1, colExpr, startIdx+2), []any{low, high}
 		}
 		return fmt.Sprintf("%s = $%d", colExpr, startIdx+1), []any{low}
 	}
+}
+
+func approximateDateBounds(low, high time.Time) (time.Time, time.Time) {
+	effHigh := high
+	if !effHigh.After(low) {
+		effHigh = low
+	}
+	span := effHigh.Sub(low)
+	distFromNow := time.Since(low).Abs()
+	margin := max(span/10, distFromNow/10, 30*24*time.Hour)
+	return low.Add(-margin), effHigh.Add(margin)
 }
 
 func buildDateCondition(alias string, op DateOp, startIdx int) (string, []any) {
@@ -1383,6 +1616,9 @@ func buildDateCondition(alias string, op DateOp, startIdx int) (string, []any) {
 			return fmt.Sprintf("(%s.sp_high < $%d OR %s.sp_low >= $%d)", alias, startIdx+1, alias, startIdx+2), []any{low, high}
 		}
 		return fmt.Sprintf("(%s.sp_high < $%d OR %s.sp_low > $%d)", alias, startIdx+1, alias, startIdx+1), []any{low}
+	case "ap": // approximately
+		apLow, apHigh := approximateDateBounds(low, high)
+		return fmt.Sprintf("%s.sp_low <= $%d AND %s.sp_high >= $%d", alias, startIdx+1, alias, startIdx+2), []any{apHigh, apLow}
 	default: // "eq" (or unspecified)
 		// Overlaps the target date interval [low, high) or point [low, low]
 		if high.After(low) {
@@ -2506,4 +2742,76 @@ func camelToKebab(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// MetaCodingPair represents a distinct system|code pair from _tag or _security.
+type MetaCodingPair struct {
+	System string
+	Code   string
+}
+
+// AggregatedMeta contains distinct profiles, tags, and security labels across active resources.
+type AggregatedMeta struct {
+	Profiles []string
+	Tags     []MetaCodingPair
+	Security []MetaCodingPair
+}
+
+// AggregateMeta queries distinct _profile, _tag, and _security entries across all active
+// resources in the tenant (when resType == "") or for a specific resource type.
+func (s *Store) AggregateMeta(ctx context.Context, tenantID, resType string) (*AggregatedMeta, error) {
+	out := &AggregatedMeta{}
+	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		profSQL := `
+			SELECT DISTINCT u.sp_value
+			FROM spidx_uri u
+			JOIN fhir_resource r ON r.tenant_id = u.tenant_id AND r.res_type = u.res_type AND r.res_id = u.res_id AND r.is_deleted = FALSE
+			WHERE u.tenant_id = $1 AND ($2 = '' OR u.res_type = $2) AND u.sp_name = '_profile' AND u.sp_value != ''
+			ORDER BY u.sp_value
+		`
+		pRows, err := tx.QueryContext(ctx, profSQL, tenantID, resType)
+		if err != nil {
+			return fmt.Errorf("aggregate _profile: %w", err)
+		}
+		for pRows.Next() {
+			var p string
+			if err := pRows.Scan(&p); err != nil {
+				pRows.Close()
+				return err
+			}
+			out.Profiles = append(out.Profiles, p)
+		}
+		pRows.Close()
+
+		tokSQL := `
+			SELECT DISTINCT t.sp_name, t.sp_system, t.sp_value
+			FROM spidx_token t
+			JOIN fhir_resource r ON r.tenant_id = t.tenant_id AND r.res_type = t.res_type AND r.res_id = t.res_id AND r.is_deleted = FALSE
+			WHERE t.tenant_id = $1 AND ($2 = '' OR t.res_type = $2) AND t.sp_name IN ('_tag', '_security')
+			ORDER BY t.sp_name, t.sp_system, t.sp_value
+		`
+		tRows, err := tx.QueryContext(ctx, tokSQL, tenantID, resType)
+		if err != nil {
+			return fmt.Errorf("aggregate _tag/_security: %w", err)
+		}
+		for tRows.Next() {
+			var spName, sys, code string
+			if err := tRows.Scan(&spName, &sys, &code); err != nil {
+				tRows.Close()
+				return err
+			}
+			pair := MetaCodingPair{System: sys, Code: code}
+			if spName == "_security" {
+				out.Security = append(out.Security, pair)
+			} else {
+				out.Tags = append(out.Tags, pair)
+			}
+		}
+		tRows.Close()
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }

@@ -315,6 +315,42 @@ func ExtractObservation(tenantID string, resID string, protoBytes []byte) (*Sear
 		appendQuantityIndexes(idx, tenantID, "Observation", effectiveID, "value-quantity", q)
 		appendQuantityIndexes(idx, tenantID, "Observation", effectiveID, "combo-value-quantity", q)
 	}
+	if cc := r.GetValue().GetCodeableConcept(); cc != nil {
+		extractCodeableConceptTokens(idx, tenantID, "Observation", effectiveID, cc.ProtoReflect(), []string{"value-concept", "combo-value-concept"})
+	}
+	if sv := r.GetValue().GetStringValue(); sv != nil && strings.TrimSpace(sv.GetValue()) != "" {
+		idx.Strings = append(idx.Strings, SpidxString{
+			TenantID: tenantID,
+			ResType:  "Observation",
+			ResID:    effectiveID,
+			SpName:   "value-string",
+			SpValue:  fhirutil.NormalizeString(sv.GetValue()),
+		})
+	}
+	if dt := r.GetValue().GetDateTime(); dt != nil {
+		if t, ok := extractTemporalTime(dt.ProtoReflect()); ok {
+			idx.Dates = append(idx.Dates, SpidxDate{
+				TenantID: tenantID,
+				ResType:  "Observation",
+				ResID:    effectiveID,
+				SpName:   "value-date",
+				SpLow:    t,
+				SpHigh:   t,
+			})
+		}
+	}
+	if per := r.GetValue().GetPeriod(); per != nil {
+		if startT, endT, ok := extractPeriodTimes(per.ProtoReflect()); ok {
+			idx.Dates = append(idx.Dates, SpidxDate{
+				TenantID: tenantID,
+				ResType:  "Observation",
+				ResID:    effectiveID,
+				SpName:   "value-date",
+				SpLow:    startT,
+				SpHigh:   endT,
+			})
+		}
+	}
 	for _, comp := range r.GetComponent() {
 		var compCodes []string
 		for _, coding := range comp.GetCode().GetCoding() {
@@ -342,6 +378,31 @@ func ExtractObservation(tenantID string, resID string, protoBytes []byte) (*Sear
 			appendQuantityIndexes(idx, tenantID, "Observation", effectiveID, "combo-value-quantity", q)
 			for _, ck := range compCodes {
 				appendQuantityIndexes(idx, tenantID, "Observation", effectiveID, "comp-cvq:"+ck, q)
+			}
+		}
+		if cc := comp.GetValue().GetCodeableConcept(); cc != nil {
+			extractCodeableConceptTokens(idx, tenantID, "Observation", effectiveID, cc.ProtoReflect(), []string{"component-value-concept", "combo-value-concept"})
+			for _, coding := range cc.GetCoding() {
+				vSys := ""
+				if coding.GetSystem() != nil {
+					vSys = coding.GetSystem().GetValue()
+				}
+				vCode := ""
+				if coding.GetCode() != nil {
+					vCode = coding.GetCode().GetValue()
+				}
+				if vCode != "" {
+					for _, ck := range compCodes {
+						idx.Tokens = append(idx.Tokens, SpidxToken{
+							TenantID: tenantID,
+							ResType:  "Observation",
+							ResID:    effectiveID,
+							SpName:   "comp-cvc:" + ck,
+							SpSystem: vSys,
+							SpValue:  vCode,
+						})
+					}
+				}
 			}
 		}
 	}

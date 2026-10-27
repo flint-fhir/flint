@@ -401,3 +401,67 @@ func TestTenantIsolationConfiguration(t *testing.T) {
 	st.SetTenantIsolation(postgres.TenantIsolationShared)
 	assert.Equal(t, postgres.TenantIsolationShared, st.TenantIsolation())
 }
+
+func TestWave11SearchParsing(t *testing.T) {
+	t.Run("Wildcard _include=* and _revinclude=* parsing", func(t *testing.T) {
+		incAll, err := postgres.ParseInclude("*")
+		require.NoError(t, err)
+		assert.Equal(t, "*", incAll.SourceType)
+		assert.Equal(t, "*", incAll.ParamName)
+
+		incTypeWild, err := postgres.ParseInclude("Observation:*")
+		require.NoError(t, err)
+		assert.Equal(t, "Observation", incTypeWild.SourceType)
+		assert.Equal(t, "*", incTypeWild.ParamName)
+
+		revAll, err := postgres.ParseInclude("*:*")
+		require.NoError(t, err)
+		assert.Equal(t, "*", revAll.SourceType)
+		assert.Equal(t, "*", revAll.ParamName)
+	})
+
+	t.Run("Multi-hop recursive _has reverse chaining", func(t *testing.T) {
+		hp, ok, err := postgres.ParseHasParam("_has:Encounter:patient:_has:Observation:encounter:code", "http://loinc.org|8867-4")
+		require.NoError(t, err)
+		require.True(t, ok)
+		assert.Equal(t, "Encounter", hp.SourceType)
+		assert.Equal(t, "patient", hp.RefParam)
+		require.NotNil(t, hp.Child)
+		assert.Equal(t, "Observation", hp.Child.SourceType)
+		assert.Equal(t, "encounter", hp.Child.RefParam)
+		assert.Equal(t, "code", hp.Child.SearchParam)
+		assert.Equal(t, "token", hp.Child.ParamType)
+		assert.Equal(t, "http://loinc.org|8867-4", hp.Child.Value)
+	})
+
+	t.Run("Token :of-type validation and composite token/date/string parsing", func(t *testing.T) {
+		q := map[string][]string{
+			"identifier:of-type":           {"http://terminology.hl7.org/CodeSystem/v2-0203|MR|MRN-001"},
+			"code-value-concept":           {"http://loinc.org|72166-2$http://snomed.info/sct|266919005"},
+			"component-code-value-concept": {"http://loinc.org|11367-0$http://snomed.info/sct|8517006"},
+			"combo-code-value-concept":     {"72166-2$266919005"},
+			"code-value-date":              {"http://loinc.org|8867-4$ap2026-01-15"},
+			"code-value-string":            {"http://loinc.org|95541-9$Digital"},
+		}
+		require.NoError(t, postgres.ValidateSearchQuery(q))
+		sp := postgres.BuildSearchParamsFromQuery("t1", "Observation", q)
+		assert.Equal(t, "http://terminology.hl7.org/CodeSystem/v2-0203|MR|MRN-001", sp.Tokens["identifier:of-type"])
+		require.Len(t, sp.CompositeTokenTokens, 3)
+		require.Len(t, sp.CompositeTokenDates, 1)
+		assert.Equal(t, "ap", sp.CompositeTokenDates[0][0].Date.Prefix)
+		require.Len(t, sp.CompositeTokenStrings, 1)
+		assert.Equal(t, "Digital", sp.CompositeTokenStrings[0][0].Value)
+		assert.True(t, postgres.HasSearchCriteria(sp))
+
+		// Invalid :of-type (missing third segment)
+		badQ := map[string][]string{
+			"identifier:of-type": {"MR|MRN-001"},
+		}
+		assert.Error(t, postgres.ValidateSearchQuery(badQ))
+
+		assert.True(t, postgres.IsKnownSearchParam("code-value-concept"))
+		assert.True(t, postgres.IsKnownSearchParam("identifier:of-type"))
+		assert.True(t, postgres.IsKnownSearchParam("_has:Encounter:patient:_has:Observation:encounter:code"))
+		assert.False(t, postgres.IsKnownSearchParam("totally_unknown_param"))
+	})
+}

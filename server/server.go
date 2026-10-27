@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -2014,6 +2015,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	resType := r.PathValue("resourceType")
 
 	q := mergedSearchQuery(r)
+	ignoredParams, ok := evaluateSearchPreferHandling(w, r, q)
+	if !ok {
+		return
+	}
 
 	if err := postgres.ValidateSearchQuery(q); err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
@@ -2030,24 +2035,26 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if hasSecCtx {
 		// Enforce SMART scopes on explicit _include target types, _revinclude source types, and _has source types
 		for _, inc := range params.Includes {
-			if inc.TargetType != "" && !auth.Allows(secCtx, inc.TargetType, auth.ActionRead) && !auth.Allows(secCtx, inc.TargetType, auth.ActionSearch) {
+			if inc.TargetType != "" && inc.TargetType != "*" && !auth.Allows(secCtx, inc.TargetType, auth.ActionRead) && !auth.Allows(secCtx, inc.TargetType, auth.ActionSearch) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 					fmt.Sprintf("insufficient scope for _include target %s", inc.TargetType))
 				return
 			}
 		}
 		for _, rev := range params.RevIncludes {
-			if rev.SourceType != "" && !auth.Allows(secCtx, rev.SourceType, auth.ActionRead) && !auth.Allows(secCtx, rev.SourceType, auth.ActionSearch) {
+			if rev.SourceType != "" && rev.SourceType != "*" && !auth.Allows(secCtx, rev.SourceType, auth.ActionRead) && !auth.Allows(secCtx, rev.SourceType, auth.ActionSearch) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 					fmt.Sprintf("insufficient scope for _revinclude source %s", rev.SourceType))
 				return
 			}
 		}
 		for _, hp := range params.Has {
-			if hp.SourceType != "" && !auth.Allows(secCtx, hp.SourceType, auth.ActionRead) && !auth.Allows(secCtx, hp.SourceType, auth.ActionSearch) {
-				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-					fmt.Sprintf("insufficient scope for _has source %s", hp.SourceType))
-				return
+			for cur := &hp; cur != nil; cur = cur.Child {
+				if cur.SourceType != "" && !auth.Allows(secCtx, cur.SourceType, auth.ActionRead) && !auth.Allows(secCtx, cur.SourceType, auth.ActionSearch) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+						fmt.Sprintf("insufficient scope for _has source %s", cur.SourceType))
+					return
+				}
 			}
 		}
 		for _, ch := range params.Chained {
@@ -2147,7 +2154,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		sr.Includes = s.filterAuthorizedIncludes(r, tenant, secCtx, sr.Includes)
 	}
 
-	s.writeSearchSetBundleWithOpts(w, r, sr, params)
+	s.writeSearchSetBundleWithOpts(w, r, sr, params, ignoredParams...)
 }
 
 // handleSystemSearch handles GET /fhir/r4/{tenant}?_type=Patient,Observation&... and POST /fhir/r4/{tenant}/_search
@@ -2155,6 +2162,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSystemSearch(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	q := mergedSearchQuery(r)
+	ignoredParams, ok := evaluateSearchPreferHandling(w, r, q)
+	if !ok {
+		return
+	}
 
 	if err := postgres.ValidateSearchQuery(q); err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
@@ -2221,24 +2232,26 @@ func (s *Server) handleSystemSearch(w http.ResponseWriter, r *http.Request) {
 		}
 
 		for _, inc := range params.Includes {
-			if inc.TargetType != "" && !auth.Allows(secCtx, inc.TargetType, auth.ActionRead) && !auth.Allows(secCtx, inc.TargetType, auth.ActionSearch) {
+			if inc.TargetType != "" && inc.TargetType != "*" && !auth.Allows(secCtx, inc.TargetType, auth.ActionRead) && !auth.Allows(secCtx, inc.TargetType, auth.ActionSearch) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 					fmt.Sprintf("insufficient scope for _include target %s", inc.TargetType))
 				return
 			}
 		}
 		for _, rev := range params.RevIncludes {
-			if rev.SourceType != "" && !auth.Allows(secCtx, rev.SourceType, auth.ActionRead) && !auth.Allows(secCtx, rev.SourceType, auth.ActionSearch) {
+			if rev.SourceType != "" && rev.SourceType != "*" && !auth.Allows(secCtx, rev.SourceType, auth.ActionRead) && !auth.Allows(secCtx, rev.SourceType, auth.ActionSearch) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 					fmt.Sprintf("insufficient scope for _revinclude source %s", rev.SourceType))
 				return
 			}
 		}
 		for _, hp := range params.Has {
-			if hp.SourceType != "" && !auth.Allows(secCtx, hp.SourceType, auth.ActionRead) && !auth.Allows(secCtx, hp.SourceType, auth.ActionSearch) {
-				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-					fmt.Sprintf("insufficient scope for _has source %s", hp.SourceType))
-				return
+			for cur := &hp; cur != nil; cur = cur.Child {
+				if cur.SourceType != "" && !auth.Allows(secCtx, cur.SourceType, auth.ActionRead) && !auth.Allows(secCtx, cur.SourceType, auth.ActionSearch) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+						fmt.Sprintf("insufficient scope for _has source %s", cur.SourceType))
+					return
+				}
 			}
 		}
 		for _, ch := range params.Chained {
@@ -2298,7 +2311,48 @@ func (s *Server) handleSystemSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.writeSearchSetBundleWithOpts(w, r, sr, params)
+	s.writeSearchSetBundleWithOpts(w, r, sr, params, ignoredParams...)
+}
+
+func evaluateSearchPreferHandling(w http.ResponseWriter, r *http.Request, q url.Values) ([]string, bool) {
+	if r == nil {
+		return nil, true
+	}
+	var handling string
+	for _, rawPrefer := range r.Header.Values("Prefer") {
+		for part := range strings.SplitSeq(rawPrefer, ",") {
+			for sub := range strings.SplitSeq(part, ";") {
+				kv := strings.SplitN(strings.TrimSpace(sub), "=", 2)
+				if len(kv) == 2 && strings.EqualFold(strings.TrimSpace(kv[0]), "handling") {
+					handling = strings.ToLower(strings.Trim(strings.TrimSpace(kv[1]), `"`))
+				}
+			}
+		}
+	}
+	if handling != "strict" && handling != "lenient" {
+		return nil, true
+	}
+	var unknownKeys []string
+	for k := range q {
+		if !postgres.IsKnownSearchParam(k) {
+			unknownKeys = append(unknownKeys, k)
+		}
+	}
+	sort.Strings(unknownKeys)
+	if handling == "strict" {
+		w.Header().Set("Preference-Applied", "handling=strict")
+		if len(unknownKeys) > 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "not-supported",
+				fmt.Sprintf("unknown or unsupported search parameter(s): %s", strings.Join(unknownKeys, ", ")))
+			return nil, false
+		}
+		return nil, true
+	}
+	w.Header().Set("Preference-Applied", "handling=lenient")
+	for _, k := range unknownKeys {
+		delete(q, k)
+	}
+	return unknownKeys, true
 }
 
 func (s *Server) resourceAllowedByGranularScope(secCtx *auth.SecurityContext, tenant, resType, resID string, protoBytes []byte) bool {
@@ -2363,7 +2417,7 @@ func (s *Server) filterAuthorizedIncludes(r *http.Request, tenant string, secCtx
 	return filtered
 }
 
-func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Request, sr *postgres.SearchResults, params postgres.SearchParams) {
+func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Request, sr *postgres.SearchResults, params postgres.SearchParams, ignoredParams ...string) {
 	bundle := map[string]any{
 		"resourceType": "Bundle",
 		"type":         "searchset",
@@ -2378,7 +2432,7 @@ func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Req
 	}
 
 	if params.Summary != "count" {
-		entries := make([]any, 0, len(sr.Matches)+len(sr.Includes))
+		entries := make([]any, 0, len(sr.Matches)+len(sr.Includes)+1)
 		needsProjection := (params.Summary != "" && params.Summary != "false") || len(params.Elements) > 0
 
 		// 1. Primary search matches
@@ -2424,6 +2478,25 @@ func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Req
 				"resource": resource,
 				"search": map[string]any{
 					"mode": "include",
+				},
+			})
+		}
+
+		// 3. Optional search outcome warning entry (e.g. Prefer: handling=lenient ignored parameters)
+		if len(ignoredParams) > 0 {
+			entries = append(entries, map[string]any{
+				"resource": map[string]any{
+					"resourceType": "OperationOutcome",
+					"issue": []any{
+						map[string]any{
+							"severity":    "warning",
+							"code":        "not-supported",
+							"diagnostics": fmt.Sprintf("ignored unsupported search parameter(s): %s", strings.Join(ignoredParams, ", ")),
+						},
+					},
+				},
+				"search": map[string]any{
+					"mode": "outcome",
 				},
 			})
 		}
