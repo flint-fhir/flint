@@ -150,14 +150,22 @@ func (m *MemoryRecorder) Query(_ context.Context, params postgres.AuditQueryPara
 // and target entity metadata.
 func ClassifyHTTPInteraction(method string, parts []string, statusCode int) (action, subtype, entityType, entityID, entityVersion string) {
 	// Expected path shape: ["fhir", "r4", "{tenant}", ...]
-	if len(parts) == 3 && method == http.MethodPost {
-		return ActionExecute, "batch", "Bundle", "", ""
+	if len(parts) == 3 {
+		switch method {
+		case http.MethodPost:
+			return ActionExecute, "batch", "Bundle", "", ""
+		case http.MethodGet, http.MethodHead:
+			return ActionExecute, "search-system", "System", "", ""
+		}
 	}
 	if len(parts) < 4 {
 		return ActionExecute, "operation", "", "", ""
 	}
 
 	resType := parts[3]
+	if len(parts) == 4 && resType == "_search" && method == http.MethodPost {
+		return ActionExecute, "search-system", "System", "", ""
+	}
 	if resType == "$validate" {
 		return ActionExecute, "validate", "Resource", "", ""
 	}

@@ -896,3 +896,254 @@ func writeMetaParametersResponse(w http.ResponseWriter, metaObj map[string]any) 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(resp)
 }
+
+type parsedGraphDefinition struct {
+	ResourceType string               `json:"resourceType"`
+	ID           string               `json:"id,omitempty"`
+	URL          string               `json:"url,omitempty"`
+	Name         string               `json:"name,omitempty"`
+	Status       string               `json:"status,omitempty"`
+	Start        string               `json:"start,omitempty"`
+	Link         []postgres.GraphLink `json:"link,omitempty"`
+}
+
+// handleResourceGraph handles GET/POST /fhir/r4/{tenant}/{resourceType}/{id}/$graph
+// per HL7 FHIR R4 OperationDefinition/Resource-graph (http://hl7.org/fhir/OperationDefinition/Resource-graph).
+func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resType := strings.TrimSpace(r.PathValue("resourceType"))
+	resID := strings.TrimSpace(r.PathValue("id"))
+
+	if _, ok := s.protoRegistry[resType]; !ok {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found",
+			fmt.Sprintf("unknown or unsupported resource type %q", resType))
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		return
+	}
+
+	graphRef := strings.TrimSpace(r.URL.Query().Get("graph"))
+	var inlineGraph *parsedGraphDefinition
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 2*1024*1024))
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read request body")
+			return
+		}
+		trimmed := strings.TrimSpace(string(body))
+		if trimmed != "" {
+			var rootMap map[string]any
+			if err := json.Unmarshal([]byte(trimmed), &rootMap); err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid JSON body: %v", err))
+				return
+			}
+			rt, _ := rootMap["resourceType"].(string)
+			switch rt {
+			case "GraphDefinition":
+				var gd parsedGraphDefinition
+				if err := json.Unmarshal([]byte(trimmed), &gd); err != nil {
+					writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid GraphDefinition JSON: %v", err))
+					return
+				}
+				inlineGraph = &gd
+			case "Parameters":
+				if params, ok := rootMap["parameter"].([]any); ok {
+					for _, p := range params {
+						pMap, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						if name, _ := pMap["name"].(string); name == "graph" {
+							if resObj, ok := pMap["resource"].(map[string]any); ok {
+								if b, err := json.Marshal(resObj); err == nil {
+									var gd parsedGraphDefinition
+									if json.Unmarshal(b, &gd) == nil && gd.ResourceType == "GraphDefinition" {
+										inlineGraph = &gd
+									}
+								}
+							}
+							for _, k := range []string{"valueUri", "valueCanonical", "valueString", "valueCode", "valueId"} {
+								if v, ok := pMap[k].(string); ok && strings.TrimSpace(v) != "" {
+									graphRef = strings.TrimSpace(v)
+									break
+								}
+							}
+						}
+					}
+				}
+			default:
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+					"expected GraphDefinition or Parameters resource in $graph POST body")
+				return
+			}
+		}
+	}
+
+	var startType string
+	var links []postgres.GraphLink
+
+	if inlineGraph != nil {
+		startType = strings.TrimSpace(inlineGraph.Start)
+		links = inlineGraph.Link
+	} else if graphRef != "" {
+		gd, found, err := s.resolveStoredOrBuiltinGraphDefinition(r, tenant, graphRef, resType)
+		if err != nil {
+			s.logger.Error("resolve GraphDefinition", "error", err, "tenant", tenant, "graph", graphRef)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to resolve GraphDefinition")
+			return
+		}
+		if !found {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found",
+				fmt.Sprintf("GraphDefinition %q not found", graphRef))
+			return
+		}
+		startType = strings.TrimSpace(gd.Start)
+		links = gd.Link
+	} else {
+		links = postgres.DefaultGraphLinksForResource(resType)
+	}
+
+	if startType != "" && !strings.EqualFold(startType, resType) {
+		writeOperationOutcome(w, http.StatusUnprocessableEntity, "business-rule",
+			fmt.Sprintf("GraphDefinition start type %q does not match target resource type %q", startType, resType))
+		return
+	}
+
+	sr, err := s.store.ResourceGraph(r.Context(), postgres.ResourceGraphParams{
+		TenantID:     tenant,
+		ResourceType: resType,
+		ResourceID:   resID,
+		Links:        links,
+	})
+	if errors.Is(err, sql.ErrNoRows) {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found",
+			fmt.Sprintf("%s/%s not found", resType, resID))
+		return
+	}
+	if errors.Is(err, postgres.ErrResourceDeleted) {
+		writeOperationOutcome(w, http.StatusGone, "deleted",
+			fmt.Sprintf("%s/%s has been deleted", resType, resID))
+		return
+	}
+	if err != nil {
+		s.logger.Error("Resource/$graph failed", "error", err, "type", resType, "id", resID)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception",
+			fmt.Sprintf("failed to execute %s/%s/$graph", resType, resID))
+		return
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		sr.Matches = s.filterAuthorizedIncludes(r, tenant, secCtx, sr.Matches)
+	}
+
+	entries := make([]any, 0, len(sr.Matches))
+	for _, m := range sr.Matches {
+		jb, err := s.protoToJSONWithMeta(m.ResType, m.ResourceProto, m.ResVersion, m.LastUpdated)
+		if err != nil {
+			continue
+		}
+		var resMap map[string]any
+		if json.Unmarshal(jb, &resMap) != nil {
+			continue
+		}
+		entries = append(entries, map[string]any{
+			"fullUrl":  fmt.Sprintf("%s/%s", m.ResType, m.ResID),
+			"resource": resMap,
+		})
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"type":         "collection",
+		"total":        len(entries),
+		"entry":        entries,
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		json.NewEncoder(w).Encode(bundle)
+	}
+}
+
+func (s *Server) resolveStoredOrBuiltinGraphDefinition(r *http.Request, tenant, graphRef, resType string) (*parsedGraphDefinition, bool, error) {
+	if s.store != nil {
+		candID := cleanID(graphRef)
+		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "GraphDefinition", candID); err == nil && rec != nil {
+			if jb, err := s.protoToJSONWithMeta("GraphDefinition", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+				var gd parsedGraphDefinition
+				if json.Unmarshal(jb, &gd) == nil {
+					return &gd, true, nil
+				}
+			}
+		}
+
+		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID: tenant,
+			ResType:  "GraphDefinition",
+			URIs:     map[string]string{"url": graphRef},
+			Count:    1,
+		}); err == nil && sr != nil && len(sr.Matches) > 0 {
+			m := sr.Matches[0]
+			if jb, err := s.protoToJSONWithMeta("GraphDefinition", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
+				var gd parsedGraphDefinition
+				if json.Unmarshal(jb, &gd) == nil {
+					return &gd, true, nil
+				}
+			}
+		}
+
+		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID: tenant,
+			ResType:  "GraphDefinition",
+			Strings:  map[string]string{"name:exact": strings.ToLower(graphRef)},
+			Count:    1,
+		}); err == nil && sr != nil && len(sr.Matches) > 0 {
+			m := sr.Matches[0]
+			if jb, err := s.protoToJSONWithMeta("GraphDefinition", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
+				var gd parsedGraphDefinition
+				if json.Unmarshal(jb, &gd) == nil {
+					return &gd, true, nil
+				}
+			}
+		}
+	}
+
+	switch strings.ToLower(strings.TrimSpace(graphRef)) {
+	case "default", "http://flint-fhir.org/fhir/graphdefinition/default":
+		return &parsedGraphDefinition{
+			ResourceType: "GraphDefinition",
+			ID:           "default",
+			Start:        resType,
+			Link:         postgres.DefaultGraphLinksForResource(resType),
+		}, true, nil
+	case "us-core-patient-care-graph", "patient-care-graph", "patient-summary",
+		"http://hl7.org/fhir/us/core/graphdefinition/us-core-patient-care-graph",
+		"http://flint-fhir.org/fhir/graphdefinition/patient-care-graph":
+		return &parsedGraphDefinition{
+			ResourceType: "GraphDefinition",
+			ID:           "us-core-patient-care-graph",
+			Start:        "Patient",
+			Link:         postgres.DefaultGraphLinksForResource("Patient"),
+		}, true, nil
+	case "encounter-care-graph", "http://flint-fhir.org/fhir/graphdefinition/encounter-care-graph":
+		return &parsedGraphDefinition{
+			ResourceType: "GraphDefinition",
+			ID:           "encounter-care-graph",
+			Start:        "Encounter",
+			Link:         postgres.DefaultGraphLinksForResource("Encounter"),
+		}, true, nil
+	case "diagnostic-report-graph", "http://flint-fhir.org/fhir/graphdefinition/diagnostic-report-graph":
+		return &parsedGraphDefinition{
+			ResourceType: "GraphDefinition",
+			ID:           "diagnostic-report-graph",
+			Start:        "DiagnosticReport",
+			Link:         postgres.DefaultGraphLinksForResource("DiagnosticReport"),
+		}, true, nil
+	default:
+		return nil, false, nil
+	}
+}

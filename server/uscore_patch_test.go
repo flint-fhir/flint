@@ -1709,3 +1709,185 @@ func TestWave9TerminologyModifiersReferenceIdentifierAndConditionalRead(t *testi
 		t.Errorf("expected Observation search with inline subject:identifier and code:in to match obs-w9-inline, got %d: %s", obsSearchRec.Code, obsSearchRec.Body.String())
 	}
 }
+
+func TestSystemSearchTokenTextAndResourceGraphWave10(t *testing.T) {
+	srv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(srv)
+	h := srv.Handler()
+
+	// 1. Verify CapabilityStatement declares search-system and $graph operation
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/t1/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	h.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /metadata, got %d", metaRec.Code)
+	}
+	if !strings.Contains(metaRec.Body.String(), `"search-system"`) || !strings.Contains(metaRec.Body.String(), `"http://hl7.org/fhir/OperationDefinition/Resource-graph"`) {
+		t.Errorf("expected CapabilityStatement to declare search-system and Resource-graph operation")
+	}
+
+	// 2. Verify invalid _type in system search returns 400 Bad Request
+	badSysReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/t1?_type=Patient,NotAResourceType", nil)
+	badSysRec := httptest.NewRecorder()
+	h.ServeHTTP(badSysRec, badSysReq)
+	if badSysRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request for unknown _type in system search, got %d: %s", badSysRec.Code, badSysRec.Body.String())
+	}
+
+	// 3. End-to-end Postgres tests when FLINT_TEST_POSTGRES_DSN is configured
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+	tenant := "test-wave10-e2e"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	putRes := func(resType, id, body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/"+resType+"/"+id, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s/%s failed (%d): %s", resType, id, rec.Code, rec.Body.String())
+		}
+	}
+
+	putRes("Organization", "org-w10-1", `{
+		"resourceType": "Organization",
+		"id": "org-w10-1",
+		"active": true,
+		"name": "Wave10 Heart Institute"
+	}`)
+
+	putRes("Patient", "pat-w10-1", `{
+		"resourceType": "Patient",
+		"id": "pat-w10-1",
+		"identifier": [
+			{
+				"type": {
+					"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "MR", "display": "Medical Record Number"}],
+					"text": "Hospital MRN"
+				},
+				"system": "http://hospital.example.org/mrn",
+				"value": "MRN-W10-001"
+			}
+		],
+		"name": [{"family": "Graphson", "given": ["Grace"]}],
+		"gender": "female",
+		"birthDate": "1982-06-15",
+		"managingOrganization": {"reference": "Organization/org-w10-1"}
+	}`)
+
+	putRes("Condition", "cond-w10-1", `{
+		"resourceType": "Condition",
+		"id": "cond-w10-1",
+		"clinicalStatus": {
+			"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active", "display": "Active"}]
+		},
+		"category": [
+			{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-category", "code": "encounter-diagnosis", "display": "Encounter Diagnosis"}]}
+		],
+		"code": {
+			"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}],
+			"text": "Benign Essential Hypertension"
+		},
+		"subject": {"reference": "Patient/pat-w10-1"}
+	}`)
+
+	putRes("Observation", "obs-w10-1", `{
+		"resourceType": "Observation",
+		"id": "obs-w10-1",
+		"status": "final",
+		"category": [
+			{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"}]}
+		],
+		"code": {
+			"coding": [{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}],
+			"text": "Resting Heart Rate"
+		},
+		"subject": {"reference": "Patient/pat-w10-1"},
+		"valueQuantity": {"value": 68, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+	}`)
+
+	// 3a. Verify Token :text search modifier on Condition, Observation, and chained Patient.identifier:text
+	condTxtReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Condition?code:text=Benign+Essential", nil)
+	condTxtRec := httptest.NewRecorder()
+	pgH.ServeHTTP(condTxtRec, condTxtReq)
+	if condTxtRec.Code != http.StatusOK || !strings.Contains(condTxtRec.Body.String(), `"cond-w10-1"`) {
+		t.Errorf("expected Condition?code:text=Benign+Essential to match cond-w10-1, got %d: %s", condTxtRec.Code, condTxtRec.Body.String())
+	}
+
+	obsTxtReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Observation?category:text=vital&subject:Patient.identifier:text=Medical+Record", nil)
+	obsTxtRec := httptest.NewRecorder()
+	pgH.ServeHTTP(obsTxtRec, obsTxtReq)
+	if obsTxtRec.Code != http.StatusOK || !strings.Contains(obsTxtRec.Body.String(), `"obs-w10-1"`) {
+		t.Errorf("expected Observation?category:text=vital&subject:Patient.identifier:text=Medical+Record to match obs-w10-1, got %d: %s", obsTxtRec.Code, obsTxtRec.Body.String())
+	}
+
+	// 3b. Verify System-Level Multi-Type Search (GET /fhir/r4/{tenant}?_type=Condition,Observation&patient=Patient/pat-w10-1 and POST /_search)
+	sysGetReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"?_type=Condition,Observation&patient=Patient/pat-w10-1", nil)
+	sysGetRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sysGetRec, sysGetReq)
+	if sysGetRec.Code != http.StatusOK || !strings.Contains(sysGetRec.Body.String(), `"cond-w10-1"`) || !strings.Contains(sysGetRec.Body.String(), `"obs-w10-1"`) {
+		t.Errorf("expected system GET search with _type=Condition,Observation to return both cond-w10-1 and obs-w10-1, got %d: %s", sysGetRec.Code, sysGetRec.Body.String())
+	}
+
+	sysPostReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/_search", strings.NewReader("_type=Patient,Organization&_id=pat-w10-1,org-w10-1"))
+	sysPostReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	sysPostRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sysPostRec, sysPostReq)
+	if sysPostRec.Code != http.StatusOK || !strings.Contains(sysPostRec.Body.String(), `"pat-w10-1"`) || !strings.Contains(sysPostRec.Body.String(), `"org-w10-1"`) {
+		t.Errorf("expected system POST /_search with _type=Patient,Organization to return pat-w10-1 and org-w10-1, got %d: %s", sysPostRec.Code, sysPostRec.Body.String())
+	}
+
+	// 3c. Verify Resource/$graph (default built-in graph & custom inline GraphDefinition POST)
+	graphGetReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w10-1/$graph?graph=us-core-patient-care-graph", nil)
+	graphGetRec := httptest.NewRecorder()
+	pgH.ServeHTTP(graphGetRec, graphGetReq)
+	if graphGetRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on GET /Patient/pat-w10-1/$graph, got %d: %s", graphGetRec.Code, graphGetRec.Body.String())
+	}
+	for _, expectedID := range []string{`"pat-w10-1"`, `"org-w10-1"`, `"cond-w10-1"`, `"obs-w10-1"`} {
+		if !strings.Contains(graphGetRec.Body.String(), expectedID) {
+			t.Errorf("expected $graph Bundle to contain %s, got: %s", expectedID, graphGetRec.Body.String())
+		}
+	}
+
+	// Inline GraphDefinition selecting only Vital Signs Observations for the Patient
+	customGraphJSON := `{
+		"resourceType": "GraphDefinition",
+		"name": "VitalSignsOnlyGraph",
+		"status": "active",
+		"start": "Patient",
+		"link": [
+			{
+				"target": [
+					{
+						"type": "Observation",
+						"params": "patient={ref}&category:text=vital"
+					}
+				]
+			}
+		]
+	}`
+	graphPostReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/pat-w10-1/$graph", strings.NewReader(customGraphJSON))
+	graphPostReq.Header.Set("Content-Type", "application/fhir+json")
+	graphPostRec := httptest.NewRecorder()
+	pgH.ServeHTTP(graphPostRec, graphPostReq)
+	if graphPostRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on POST /Patient/pat-w10-1/$graph, got %d: %s", graphPostRec.Code, graphPostRec.Body.String())
+	}
+	if !strings.Contains(graphPostRec.Body.String(), `"pat-w10-1"`) || !strings.Contains(graphPostRec.Body.String(), `"obs-w10-1"`) || strings.Contains(graphPostRec.Body.String(), `"cond-w10-1"`) {
+		t.Errorf("expected custom GraphDefinition $graph to include pat-w10-1 and obs-w10-1 but exclude cond-w10-1, got: %s", graphPostRec.Body.String())
+	}
+}

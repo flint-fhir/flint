@@ -168,17 +168,26 @@ func appendMetaIndexes(idx *SearchIndexes, tenantID, resType, resID string, meta
 		}
 		sys := strings.TrimSpace(sec.GetSystem().GetValue())
 		code := strings.TrimSpace(sec.GetCode().GetValue())
-		if code == "" && sys == "" {
-			continue
+		disp := fhirutil.NormalizeString(sec.GetDisplay().GetValue())
+		if code != "" || sys != "" {
+			idx.Tokens = append(idx.Tokens, SpidxToken{
+				TenantID: tenantID,
+				ResType:  resType,
+				ResID:    resID,
+				SpName:   "_security",
+				SpSystem: sys,
+				SpValue:  code,
+			})
 		}
-		idx.Tokens = append(idx.Tokens, SpidxToken{
-			TenantID: tenantID,
-			ResType:  resType,
-			ResID:    resID,
-			SpName:   "_security",
-			SpSystem: sys,
-			SpValue:  code,
-		})
+		if disp != "" {
+			idx.Strings = append(idx.Strings, SpidxString{
+				TenantID: tenantID,
+				ResType:  resType,
+				ResID:    resID,
+				SpName:   "_security:text",
+				SpValue:  disp,
+			})
+		}
 	}
 	for _, tag := range meta.GetTag() {
 		if tag == nil {
@@ -186,17 +195,26 @@ func appendMetaIndexes(idx *SearchIndexes, tenantID, resType, resID string, meta
 		}
 		sys := strings.TrimSpace(tag.GetSystem().GetValue())
 		code := strings.TrimSpace(tag.GetCode().GetValue())
-		if code == "" && sys == "" {
-			continue
+		disp := fhirutil.NormalizeString(tag.GetDisplay().GetValue())
+		if code != "" || sys != "" {
+			idx.Tokens = append(idx.Tokens, SpidxToken{
+				TenantID: tenantID,
+				ResType:  resType,
+				ResID:    resID,
+				SpName:   "_tag",
+				SpSystem: sys,
+				SpValue:  code,
+			})
 		}
-		idx.Tokens = append(idx.Tokens, SpidxToken{
-			TenantID: tenantID,
-			ResType:  resType,
-			ResID:    resID,
-			SpName:   "_tag",
-			SpSystem: sys,
-			SpValue:  code,
-		})
+		if disp != "" {
+			idx.Strings = append(idx.Strings, SpidxString{
+				TenantID: tenantID,
+				ResType:  resType,
+				ResID:    resID,
+				SpName:   "_tag:text",
+				SpValue:  disp,
+			})
+		}
 	}
 }
 
@@ -234,6 +252,7 @@ func ExtractPatient(tenantID string, resID string, protoBytes []byte) (*SearchIn
 	effID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(genpostgres.ExtractPatientIndexes(tenantID, &r))
 	appendMetaIndexes(idx, tenantID, "Patient", effID, r.GetMeta())
+	appendTokenTextFromMessage(idx, tenantID, "Patient", effID, r.ProtoReflect(), "", 0)
 	appendRefLogicalIdentifierTokens(idx, tenantID, "Patient", effID, r.GetManagingOrganization(), "organization")
 	for _, gp := range r.GetGeneralPractitioner() {
 		appendRefLogicalIdentifierTokens(idx, tenantID, "Patient", effID, gp, "general-practitioner")
@@ -253,6 +272,7 @@ func ExtractCondition(tenantID string, resID string, protoBytes []byte) (*Search
 	effID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(genpostgres.ExtractConditionIndexes(tenantID, &r))
 	appendMetaIndexes(idx, tenantID, "Condition", effID, r.GetMeta())
+	appendTokenTextFromMessage(idx, tenantID, "Condition", effID, r.ProtoReflect(), "", 0)
 	appendRefLogicalIdentifierTokens(idx, tenantID, "Condition", effID, r.GetSubject(), "patient", "subject")
 	appendRefLogicalIdentifierTokens(idx, tenantID, "Condition", effID, r.GetEncounter(), "encounter")
 	return idx, nil
@@ -270,6 +290,7 @@ func ExtractEncounter(tenantID string, resID string, protoBytes []byte) (*Search
 	effID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(genpostgres.ExtractEncounterIndexes(tenantID, &r))
 	appendMetaIndexes(idx, tenantID, "Encounter", effID, r.GetMeta())
+	appendTokenTextFromMessage(idx, tenantID, "Encounter", effID, r.ProtoReflect(), "", 0)
 	appendRefLogicalIdentifierTokens(idx, tenantID, "Encounter", effID, r.GetSubject(), "patient", "subject")
 	appendRefLogicalIdentifierTokens(idx, tenantID, "Encounter", effID, r.GetServiceProvider(), "service-provider")
 	return idx, nil
@@ -287,6 +308,7 @@ func ExtractObservation(tenantID string, resID string, protoBytes []byte) (*Sear
 	effectiveID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(genpostgres.ExtractObservationIndexes(tenantID, &r))
 	appendMetaIndexes(idx, tenantID, "Observation", effectiveID, r.GetMeta())
+	appendTokenTextFromMessage(idx, tenantID, "Observation", effectiveID, r.ProtoReflect(), "", 0)
 	appendRefLogicalIdentifierTokens(idx, tenantID, "Observation", effectiveID, r.GetSubject(), "patient", "subject")
 	appendRefLogicalIdentifierTokens(idx, tenantID, "Observation", effectiveID, r.GetEncounter(), "encounter")
 	if q := r.GetValue().GetQuantity(); q != nil {
@@ -335,8 +357,10 @@ func ExtractPractitioner(tenantID string, resID string, protoBytes []byte) (*Sea
 	if (r.GetId() == nil || r.GetId().GetValue() == "") && resID != "" {
 		r.Id = &dtpb.Id{Value: resID}
 	}
+	effID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(genpostgres.ExtractPractitionerIndexes(tenantID, &r))
-	appendMetaIndexes(idx, tenantID, "Practitioner", r.GetId().GetValue(), r.GetMeta())
+	appendMetaIndexes(idx, tenantID, "Practitioner", effID, r.GetMeta())
+	appendTokenTextFromMessage(idx, tenantID, "Practitioner", effID, r.ProtoReflect(), "", 0)
 	return idx, nil
 }
 
@@ -349,8 +373,10 @@ func ExtractMedicationRequest(tenantID string, resID string, protoBytes []byte) 
 	if (r.GetId() == nil || r.GetId().GetValue() == "") && resID != "" {
 		r.Id = &dtpb.Id{Value: resID}
 	}
+	effID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(genpostgres.ExtractMedicationRequestIndexes(tenantID, &r))
-	appendMetaIndexes(idx, tenantID, "MedicationRequest", r.GetId().GetValue(), r.GetMeta())
+	appendMetaIndexes(idx, tenantID, "MedicationRequest", effID, r.GetMeta())
+	appendTokenTextFromMessage(idx, tenantID, "MedicationRequest", effID, r.ProtoReflect(), "", 0)
 	return idx, nil
 }
 
@@ -363,8 +389,10 @@ func ExtractAllergyIntolerance(tenantID string, resID string, protoBytes []byte)
 	if (r.GetId() == nil || r.GetId().GetValue() == "") && resID != "" {
 		r.Id = &dtpb.Id{Value: resID}
 	}
+	effID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(genpostgres.ExtractAllergyIntoleranceIndexes(tenantID, &r))
-	appendMetaIndexes(idx, tenantID, "AllergyIntolerance", r.GetId().GetValue(), r.GetMeta())
+	appendMetaIndexes(idx, tenantID, "AllergyIntolerance", effID, r.GetMeta())
+	appendTokenTextFromMessage(idx, tenantID, "AllergyIntolerance", effID, r.ProtoReflect(), "", 0)
 	return idx, nil
 }
 
@@ -377,8 +405,10 @@ func ExtractProcedure(tenantID string, resID string, protoBytes []byte) (*Search
 	if (r.GetId() == nil || r.GetId().GetValue() == "") && resID != "" {
 		r.Id = &dtpb.Id{Value: resID}
 	}
+	effID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(genpostgres.ExtractProcedureIndexes(tenantID, &r))
-	appendMetaIndexes(idx, tenantID, "Procedure", r.GetId().GetValue(), r.GetMeta())
+	appendMetaIndexes(idx, tenantID, "Procedure", effID, r.GetMeta())
+	appendTokenTextFromMessage(idx, tenantID, "Procedure", effID, r.ProtoReflect(), "", 0)
 	return idx, nil
 }
 
@@ -391,8 +421,10 @@ func ExtractDiagnosticReport(tenantID string, resID string, protoBytes []byte) (
 	if (r.GetId() == nil || r.GetId().GetValue() == "") && resID != "" {
 		r.Id = &dtpb.Id{Value: resID}
 	}
+	effID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(genpostgres.ExtractDiagnosticReportIndexes(tenantID, &r))
-	appendMetaIndexes(idx, tenantID, "DiagnosticReport", r.GetId().GetValue(), r.GetMeta())
+	appendMetaIndexes(idx, tenantID, "DiagnosticReport", effID, r.GetMeta())
+	appendTokenTextFromMessage(idx, tenantID, "DiagnosticReport", effID, r.ProtoReflect(), "", 0)
 	return idx, nil
 }
 
@@ -405,8 +437,10 @@ func ExtractImmunization(tenantID string, resID string, protoBytes []byte) (*Sea
 	if (r.GetId() == nil || r.GetId().GetValue() == "") && resID != "" {
 		r.Id = &dtpb.Id{Value: resID}
 	}
+	effID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(genpostgres.ExtractImmunizationIndexes(tenantID, &r))
-	appendMetaIndexes(idx, tenantID, "Immunization", r.GetId().GetValue(), r.GetMeta())
+	appendMetaIndexes(idx, tenantID, "Immunization", effID, r.GetMeta())
+	appendTokenTextFromMessage(idx, tenantID, "Immunization", effID, r.ProtoReflect(), "", 0)
 	return idx, nil
 }
 
@@ -422,6 +456,7 @@ func ExtractOrganization(tenantID string, resID string, protoBytes []byte) (*Sea
 	effectiveID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(genpostgres.ExtractOrganizationIndexes(tenantID, &r))
 	appendMetaIndexes(idx, tenantID, "Organization", effectiveID, r.GetMeta())
+	appendTokenTextFromMessage(idx, tenantID, "Organization", effectiveID, r.ProtoReflect(), "", 0)
 	for _, a := range r.GetAlias() {
 		if a != nil && a.GetValue() != "" {
 			idx.Strings = append(idx.Strings, SpidxString{
@@ -445,8 +480,10 @@ func ExtractSpecimen(tenantID string, resID string, protoBytes []byte) (*SearchI
 	if (r.GetId() == nil || r.GetId().GetValue() == "") && resID != "" {
 		r.Id = &dtpb.Id{Value: resID}
 	}
+	effID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(genpostgres.ExtractSpecimenIndexes(tenantID, &r))
-	appendMetaIndexes(idx, tenantID, "Specimen", r.GetId().GetValue(), r.GetMeta())
+	appendMetaIndexes(idx, tenantID, "Specimen", effID, r.GetMeta())
+	appendTokenTextFromMessage(idx, tenantID, "Specimen", effID, r.ProtoReflect(), "", 0)
 	return idx, nil
 }
 
@@ -459,8 +496,10 @@ func ExtractLocation(tenantID string, resID string, protoBytes []byte) (*SearchI
 	if (r.GetId() == nil || r.GetId().GetValue() == "") && resID != "" {
 		r.Id = &dtpb.Id{Value: resID}
 	}
+	effID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(genpostgres.ExtractLocationIndexes(tenantID, &r))
-	appendMetaIndexes(idx, tenantID, "Location", r.GetId().GetValue(), r.GetMeta())
+	appendMetaIndexes(idx, tenantID, "Location", effID, r.GetMeta())
+	appendTokenTextFromMessage(idx, tenantID, "Location", effID, r.ProtoReflect(), "", 0)
 	return idx, nil
 }
 
