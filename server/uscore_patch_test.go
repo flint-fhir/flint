@@ -3196,3 +3196,151 @@ func TestDataRequirementsFHIRPathClosureAndSubscriptionEventsWave15(t *testing.T
 		t.Errorf("expected Subscription/$events?content=empty to return only SubscriptionStatus Parameters for event 2, got %d: %s", evEmptyRec.Code, evEmptyRec.Body.String())
 	}
 }
+
+func TestCollectDataSubmitDataGroupAddRemoveAndBinaryNegotiationWave16(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave16-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	putRes := func(resType, id, body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/"+resType+"/"+id, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s/%s expected 200/201, got %d: %s", resType, id, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. Seed Patient & Condition, then run Measure/$collect-data and feed its output directly into Measure/$submit-data
+	putRes("Patient", "pat-w16-1", `{
+		"resourceType": "Patient",
+		"id": "pat-w16-1",
+		"active": true,
+		"name": [{"use": "official", "family": "Vance", "given": ["Marcus"]}],
+		"gender": "male",
+		"birthDate": "1974-11-03"
+	}`)
+	putRes("Condition", "cond-w16-htn", `{
+		"resourceType": "Condition",
+		"id": "cond-w16-htn",
+		"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+		"verificationStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"}]},
+		"code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}]},
+		"subject": {"reference": "Patient/pat-w16-1"}
+	}`)
+
+	cdReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Measure/cms165-bp-control/$collect-data?subject=Patient/pat-w16-1&periodStart=2026-01-01&periodEnd=2026-12-31", nil)
+	cdRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cdRec, cdReq)
+	if cdRec.Code != http.StatusOK {
+		t.Fatalf("GET /Measure/cms165-bp-control/$collect-data got %d: %s", cdRec.Code, cdRec.Body.String())
+	}
+	cdBody := cdRec.Body.String()
+	for _, want := range []string{`"resourceType":"Parameters"`, `"name":"measureReport"`, `"type":"data-collection"`, `"Patient/pat-w16-1"`, `"Condition/cond-w16-htn"`} {
+		if !strings.Contains(cdBody, want) {
+			t.Errorf("expected Measure/$collect-data Parameters to contain %s, got %s", want, cdBody)
+		}
+	}
+
+	// Submit collected Parameters payload to POST /Measure/cms165-bp-control/$submit-data in a receiving tenant
+	sdReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Measure/cms165-bp-control/$submit-data", strings.NewReader(cdBody))
+	sdReq.Header.Set("Content-Type", "application/fhir+json")
+	sdRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sdRec, sdReq)
+	if sdRec.Code != http.StatusOK || !strings.Contains(sdRec.Body.String(), `"type":"transaction-response"`) || !strings.Contains(sdRec.Body.String(), `"MeasureReport/collect-data-cms165-bp-control-pat-w16-1"`) {
+		t.Fatalf("POST /Measure/cms165-bp-control/$submit-data expected transaction-response Bundle with persisted MeasureReport, got %d: %s", sdRec.Code, sdRec.Body.String())
+	}
+
+	// 2. Group/{id}/$add and Group/{id}/$remove dynamic cohort operations
+	putRes("Patient", "pat-w16-2", `{
+		"resourceType": "Patient",
+		"id": "pat-w16-2",
+		"active": true,
+		"name": [{"use": "official", "family": "Chen", "given": ["Sophia"]}],
+		"gender": "female",
+		"birthDate": "1988-05-19"
+	}`)
+	putRes("Group", "grp-w16-htn", `{
+		"resourceType": "Group",
+		"id": "grp-w16-htn",
+		"active": true,
+		"type": "person",
+		"actual": true,
+		"name": "Hypertension Cohort",
+		"member": [
+			{"entity": {"reference": "Patient/pat-w16-1"}}
+		]
+	}`)
+
+	addBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "member", "valueReference": {"reference": "Patient/pat-w16-2"}}
+		]
+	}`
+	addReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Group/grp-w16-htn/$add", strings.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/fhir+json")
+	addRec := httptest.NewRecorder()
+	pgH.ServeHTTP(addRec, addReq)
+	if addRec.Code != http.StatusOK || !strings.Contains(addRec.Body.String(), `"Patient/pat-w16-2"`) || !strings.Contains(addRec.Body.String(), `"quantity":2`) {
+		t.Fatalf("POST /Group/grp-w16-htn/$add expected both members and quantity:2, got %d: %s", addRec.Code, addRec.Body.String())
+	}
+
+	rmBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "member", "valueReference": {"reference": "Patient/pat-w16-1"}}
+		]
+	}`
+	rmReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Group/grp-w16-htn/$remove", strings.NewReader(rmBody))
+	rmReq.Header.Set("Content-Type", "application/fhir+json")
+	rmRec := httptest.NewRecorder()
+	pgH.ServeHTTP(rmRec, rmReq)
+	if rmRec.Code != http.StatusOK || strings.Contains(rmRec.Body.String(), `"Patient/pat-w16-1"`) || !strings.Contains(rmRec.Body.String(), `"Patient/pat-w16-2"`) || !strings.Contains(rmRec.Body.String(), `"quantity":1`) {
+		t.Fatalf("POST /Group/grp-w16-htn/$remove expected only pat-w16-2 and quantity:1, got %d: %s", rmRec.Code, rmRec.Body.String())
+	}
+
+	// 3. Native Binary media-type streaming on GET /Binary/{id}
+	// "Hello FHIR Binary!" in base64 is "SGVsbG8gRkhJUiBCaW5hcnkh"
+	putRes("Binary", "bin-w16-note", `{
+		"resourceType": "Binary",
+		"id": "bin-w16-note",
+		"contentType": "text/plain",
+		"securityContext": {"reference": "DocumentReference/doc-w16-1"},
+		"data": "SGVsbG8gRkhJUiBCaW5hcnkh"
+	}`)
+
+	// 3a. Request with Accept: text/plain -> streams raw decoded bytes and X-Security-Context header
+	binRawReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Binary/bin-w16-note", nil)
+	binRawReq.Header.Set("Accept", "text/plain")
+	binRawRec := httptest.NewRecorder()
+	pgH.ServeHTTP(binRawRec, binRawReq)
+	if binRawRec.Code != http.StatusOK || binRawRec.Header().Get("Content-Type") != "text/plain" || binRawRec.Header().Get("X-Security-Context") != "DocumentReference/doc-w16-1" || binRawRec.Body.String() != "Hello FHIR Binary!" {
+		t.Fatalf("GET /Binary/bin-w16-note (Accept: text/plain) expected raw 'Hello FHIR Binary!' and X-Security-Context header, got status=%d ct=%q sec=%q body=%q",
+			binRawRec.Code, binRawRec.Header().Get("Content-Type"), binRawRec.Header().Get("X-Security-Context"), binRawRec.Body.String())
+	}
+
+	// 3b. Request with Accept: application/fhir+json -> returns standard FHIR JSON Binary resource
+	binJSONReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Binary/bin-w16-note", nil)
+	binJSONReq.Header.Set("Accept", "application/fhir+json")
+	binJSONRec := httptest.NewRecorder()
+	pgH.ServeHTTP(binJSONRec, binJSONReq)
+	if binJSONRec.Code != http.StatusOK || !strings.Contains(binJSONRec.Body.String(), `"resourceType":"Binary"`) || !strings.Contains(binJSONRec.Body.String(), `"SGVsbG8gRkhJUiBCaW5hcnkh"`) {
+		t.Fatalf("GET /Binary/bin-w16-note (Accept: application/fhir+json) expected FHIR JSON Binary resource, got %d: %s", binJSONRec.Code, binJSONRec.Body.String())
+	}
+}

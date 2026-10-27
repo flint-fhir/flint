@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -347,6 +348,16 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleCareGaps(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Measure") && parts[4] == "$collect-data" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleMeasureCollectData(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Measure") && parts[4] == "$submit-data" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleMeasureSubmitData(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "ValueSet") && parts[4] == "$expand" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleValueSetExpand(w, r)
@@ -553,6 +564,30 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleEvaluateMeasure(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Measure") && parts[5] == "$collect-data" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleMeasureCollectData(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Measure") && parts[5] == "$submit-data" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleMeasureSubmitData(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Group") && parts[5] == "$add" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleGroupAdd(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Group") && parts[5] == "$remove" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleGroupRemove(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Measure") && parts[5] == "$care-gaps" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -689,6 +724,41 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 			projected := applySummaryOrElements(resourceMap, summary, elements)
 			if b, err := json.Marshal(projected); err == nil {
 				jsonBytes = b
+			}
+		}
+	} else if strings.EqualFold(resType, "Binary") {
+		formatParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("_format")))
+		acceptHdr := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
+		wantsFHIRJSON := strings.Contains(formatParam, "fhir") || strings.Contains(formatParam, "json") ||
+			strings.Contains(acceptHdr, "application/fhir+json") || strings.Contains(acceptHdr, "application/json")
+		if !wantsFHIRJSON && (formatParam != "" || acceptHdr != "") {
+			var binMap map[string]any
+			if json.Unmarshal(jsonBytes, &binMap) == nil {
+				ct, _ := binMap["contentType"].(string)
+				dataB64, _ := binMap["data"].(string)
+				ctTrim := strings.TrimSpace(ct)
+				ctLower := strings.ToLower(ctTrim)
+				if ctTrim != "" && dataB64 != "" &&
+					(formatParam == ctLower || strings.Contains(acceptHdr, ctLower) || acceptHdr == "*/*") {
+					if rawBytes, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(dataB64)); decErr == nil {
+						if secRefMap, ok := binMap["securityContext"].(map[string]any); ok {
+							if secRef, _ := secRefMap["reference"].(string); strings.TrimSpace(secRef) != "" {
+								w.Header().Set("X-Security-Context", strings.TrimSpace(secRef))
+							}
+						}
+						w.Header().Set("Content-Type", ctTrim)
+						w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+						w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+						if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
+							return
+						}
+						w.WriteHeader(http.StatusOK)
+						if r.Method != http.MethodHead {
+							w.Write(rawBytes)
+						}
+						return
+					}
+				}
 			}
 		}
 	}
@@ -830,6 +900,41 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 			projected := applySummaryOrElements(resourceMap, summary, elements)
 			if b, err := json.Marshal(projected); err == nil {
 				jsonBytes = b
+			}
+		}
+	} else if strings.EqualFold(resType, "Binary") {
+		formatParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("_format")))
+		acceptHdr := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
+		wantsFHIRJSON := strings.Contains(formatParam, "fhir") || strings.Contains(formatParam, "json") ||
+			strings.Contains(acceptHdr, "application/fhir+json") || strings.Contains(acceptHdr, "application/json")
+		if !wantsFHIRJSON && (formatParam != "" || acceptHdr != "") {
+			var binMap map[string]any
+			if json.Unmarshal(jsonBytes, &binMap) == nil {
+				ct, _ := binMap["contentType"].(string)
+				dataB64, _ := binMap["data"].(string)
+				ctTrim := strings.TrimSpace(ct)
+				ctLower := strings.ToLower(ctTrim)
+				if ctTrim != "" && dataB64 != "" &&
+					(formatParam == ctLower || strings.Contains(acceptHdr, ctLower) || acceptHdr == "*/*") {
+					if rawBytes, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(dataB64)); decErr == nil {
+						if secRefMap, ok := binMap["securityContext"].(map[string]any); ok {
+							if secRef, _ := secRefMap["reference"].(string); strings.TrimSpace(secRef) != "" {
+								w.Header().Set("X-Security-Context", strings.TrimSpace(secRef))
+							}
+						}
+						w.Header().Set("Content-Type", ctTrim)
+						w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+						w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+						if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
+							return
+						}
+						w.WriteHeader(http.StatusOK)
+						if r.Method != http.MethodHead {
+							w.Write(rawBytes)
+						}
+						return
+					}
+				}
 			}
 		}
 	}
@@ -3400,6 +3505,14 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 				"name":       "everything",
 				"definition": "http://hl7.org/fhir/OperationDefinition/Group-everything",
 			},
+			{
+				"name":       "add",
+				"definition": "http://hl7.org/fhir/OperationDefinition/Group-add",
+			},
+			{
+				"name":       "remove",
+				"definition": "http://hl7.org/fhir/OperationDefinition/Group-remove",
+			},
 		},
 	})
 	seenTypes["AuditEvent"] = true
@@ -3487,6 +3600,14 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 				{
 					"name":       "data-requirements",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Measure-data-requirements",
+				},
+				{
+					"name":       "collect-data",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Measure-collect-data",
+				},
+				{
+					"name":       "submit-data",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Measure-submit-data",
 				},
 			}
 		case "Library":
@@ -3757,6 +3878,22 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "events",
 						"definition": "http://hl7.org/fhir/uv/subscriptions-backport/OperationDefinition/backport-subscription-events",
+					},
+					{
+						"name":       "collect-data",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Measure-collect-data",
+					},
+					{
+						"name":       "submit-data",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Measure-submit-data",
+					},
+					{
+						"name":       "add",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Group-add",
+					},
+					{
+						"name":       "remove",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Group-remove",
 					},
 				},
 			},

@@ -13,7 +13,12 @@ import (
 	"strings"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/dynamicpb"
+
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -2164,4 +2169,615 @@ func compareFHIRPathValues(lhsVals []any, op, rhsRaw string) bool {
 		}
 	}
 	return false
+}
+
+// handleMeasureCollectData handles GET/POST /fhir/r4/{tenant}/Measure/$collect-data
+// and GET/POST /fhir/r4/{tenant}/Measure/{id}/$collect-data per HL7 FHIR R4 §12.17.4.2
+// (OperationDefinition/Measure-collect-data) and HL7 Da Vinci DEQM.
+func (s *Server) handleMeasureCollectData(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	defID := strings.TrimSpace(r.PathValue("id"))
+	canonical := ""
+	subject := ""
+	periodStart := strings.TrimSpace(r.URL.Query().Get("periodStart"))
+	periodEnd := strings.TrimSpace(r.URL.Query().Get("periodEnd"))
+
+	for _, k := range []string{"id", "measure"} {
+		if v := strings.TrimSpace(r.URL.Query().Get(k)); v != "" {
+			if strings.Contains(v, "/") && strings.HasPrefix(v, "http") {
+				canonical = v
+			} else if defID == "" {
+				defID = cleanID(v)
+			}
+		}
+	}
+	if u := strings.TrimSpace(r.URL.Query().Get("url")); u != "" && canonical == "" {
+		canonical = u
+	}
+	for _, k := range []string{"subject", "patient"} {
+		if v := strings.TrimSpace(r.URL.Query().Get(k)); v != "" && subject == "" {
+			subject = v
+		}
+	}
+
+	if r.Method == http.MethodPost && r.Body != nil && r.ContentLength != 0 {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024))
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read request body")
+			return
+		}
+		if len(bytes.TrimSpace(body)) > 0 {
+			var raw map[string]any
+			if err := json.Unmarshal(body, &raw); err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for Measure/$collect-data")
+				return
+			}
+			if params, ok := raw["parameter"].([]any); ok {
+				for _, p := range params {
+					pm, ok := p.(map[string]any)
+					if !ok {
+						continue
+					}
+					name, _ := pm["name"].(string)
+					val := extractParamString(pm)
+					switch name {
+					case "id":
+						if defID == "" {
+							defID = cleanID(val)
+						}
+					case "measure", "url":
+						if strings.HasPrefix(val, "http") {
+							if canonical == "" {
+								canonical = val
+							}
+						} else if defID == "" {
+							defID = cleanID(val)
+						}
+					case "subject", "patient":
+						if subject == "" {
+							subject = val
+						}
+					case "periodStart":
+						if periodStart == "" {
+							periodStart = val
+						}
+					case "periodEnd":
+						if periodEnd == "" {
+							periodEnd = val
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if defID == "" && canonical == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required",
+			"Measure/$collect-data requires a Measure {id} or measure/url canonical parameter")
+		return
+	}
+	if periodStart == "" {
+		periodStart = "2026-01-01"
+	}
+	if periodEnd == "" {
+		periodEnd = "2026-12-31"
+	}
+
+	_, patID := normalizeTargetRef("Patient", subject)
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		if !auth.Allows(secCtx, "Measure", auth.ActionRead) && !auth.Allows(secCtx, "Measure", auth.ActionSearch) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope to read Measure for $collect-data")
+			return
+		}
+		if !auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope to read Patient data for $collect-data")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) {
+			if patID == "" || cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("patient-scoped token (%s) cannot invoke Measure/$collect-data outside own patient compartment",
+						secCtx.GetPatientId()))
+				return
+			}
+		}
+	}
+
+	// Verify Measure exists via data-requirements resolution
+	if _, err := s.resolveDataRequirementsLibrary(r.Context(), tenant, "Measure", defID, canonical, periodStart, periodEnd); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			target := defID
+			if target == "" {
+				target = canonical
+			}
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Measure %q not found", target))
+			return
+		}
+		if errors.Is(err, postgres.ErrResourceDeleted) {
+			writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("Measure/%s has been deleted", defID))
+			return
+		}
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to resolve Measure for $collect-data")
+		return
+	}
+
+	measureKey := defID
+	if measureKey == "" && canonical != "" {
+		if slash := strings.LastIndexByte(canonical, '/'); slash != -1 {
+			measureKey = canonical[slash+1:]
+		} else {
+			measureKey = canonical
+		}
+	}
+	measureURL := canonical
+	if measureURL == "" {
+		measureURL = "http://flint.fhir.org/Measure/" + measureKey
+	}
+
+	var patIDs []string
+	if patID != "" {
+		patIDs = []string{patID}
+	} else {
+		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID: tenant,
+			ResType:  "Patient",
+			Count:    50,
+		})
+		if err == nil && sr != nil {
+			for _, m := range sr.Matches {
+				patIDs = append(patIDs, m.ResID)
+			}
+		}
+	}
+
+	var collectedResources []map[string]any
+	var evaluatedRefs []any
+	seenRes := make(map[string]bool)
+
+	for _, pid := range patIDs {
+		pe, err := s.store.PatientEverything(r.Context(), postgres.PatientEverythingParams{
+			TenantID:  tenant,
+			PatientID: pid,
+			Count:     200,
+		})
+		if err != nil {
+			if patID != "" {
+				if errors.Is(err, sql.ErrNoRows) {
+					writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patID))
+					return
+				}
+				if errors.Is(err, postgres.ErrResourceDeleted) {
+					writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("Patient/%s has been deleted", patID))
+					return
+				}
+			}
+			continue
+		}
+		for _, rm := range s.decodeCompartmentMaps(pe) {
+			rt, _ := rm["resourceType"].(string)
+			rid, _ := rm["id"].(string)
+			if rt == "" || rid == "" {
+				continue
+			}
+			switch rt {
+			case "Patient", "Condition", "Observation", "MedicationRequest", "Encounter", "Procedure":
+			default:
+				continue
+			}
+			refKey := rt + "/" + rid
+			if seenRes[refKey] {
+				continue
+			}
+			seenRes[refKey] = true
+			collectedResources = append(collectedResources, rm)
+			evaluatedRefs = append(evaluatedRefs, map[string]any{
+				"reference": refKey,
+			})
+		}
+	}
+
+	mrID := "collect-data-" + measureKey
+	if patID != "" {
+		mrID += "-" + patID
+	}
+	measureReport := map[string]any{
+		"resourceType": "MeasureReport",
+		"id":           mrID,
+		"status":       "complete",
+		"type":         "data-collection",
+		"measure":      measureURL,
+		"date":         time.Now().UTC().Format(time.RFC3339),
+		"period": map[string]any{
+			"start": periodStart,
+			"end":   periodEnd,
+		},
+	}
+	if patID != "" {
+		measureReport["subject"] = map[string]any{
+			"reference": "Patient/" + patID,
+		}
+	}
+	if len(evaluatedRefs) > 0 {
+		measureReport["evaluatedResource"] = evaluatedRefs
+	}
+
+	paramsOut := make([]map[string]any, 0, 1+len(collectedResources))
+	paramsOut = append(paramsOut, map[string]any{
+		"name":     "measureReport",
+		"resource": measureReport,
+	})
+	for _, rm := range collectedResources {
+		paramsOut = append(paramsOut, map[string]any{
+			"name":     "resource",
+			"resource": rm,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    paramsOut,
+	})
+}
+
+// handleMeasureSubmitData handles POST /fhir/r4/{tenant}/Measure/$submit-data
+// and POST /fhir/r4/{tenant}/Measure/{id}/$submit-data per HL7 FHIR R4 §12.17.4.3
+// (OperationDefinition/Measure-submit-data) and HL7 Da Vinci DEQM.
+func (s *Server) handleMeasureSubmitData(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		return
+	}
+	tenant := r.PathValue("tenant")
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		if !auth.Allows(secCtx, "MeasureReport", auth.ActionCreate) &&
+			!auth.Allows(secCtx, "MeasureReport", auth.ActionUpdate) &&
+			!auth.Allows(secCtx, "Measure", auth.ActionCreate) &&
+			!auth.Allows(secCtx, "Measure", auth.ActionUpdate) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				"insufficient scope for Measure/$submit-data (requires MeasureReport or Measure create/update scope)")
+			return
+		}
+	}
+
+	if r.Body == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Measure/$submit-data requires a Parameters request body")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 5*1024*1024))
+	if err != nil || len(bytes.TrimSpace(body)) == 0 {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Measure/$submit-data requires a non-empty Parameters request body")
+		return
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for Measure/$submit-data")
+		return
+	}
+	if rt, _ := raw["resourceType"].(string); rt != "Parameters" {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "Measure/$submit-data body must be a FHIR Parameters resource")
+		return
+	}
+
+	var mrMap map[string]any
+	var clinicalMaps []map[string]any
+	if params, ok := raw["parameter"].([]any); ok {
+		for _, p := range params {
+			pm, ok := p.(map[string]any)
+			if !ok {
+				continue
+			}
+			name, _ := pm["name"].(string)
+			resObj, hasRes := pm["resource"].(map[string]any)
+			if !hasRes || resObj == nil {
+				continue
+			}
+			switch name {
+			case "measureReport":
+				mrMap = resObj
+			case "resource":
+				clinicalMaps = append(clinicalMaps, resObj)
+			}
+		}
+	}
+	if mrMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Measure/$submit-data requires a measureReport parameter")
+		return
+	}
+	if rt, _ := mrMap["resourceType"].(string); rt != "MeasureReport" {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "measureReport parameter must contain a MeasureReport resource")
+		return
+	}
+
+	toPersist := make([]map[string]any, 0, 1+len(clinicalMaps))
+	toPersist = append(toPersist, mrMap)
+	toPersist = append(toPersist, clinicalMaps...)
+
+	entries := make([]map[string]any, 0, len(toPersist))
+	for _, rm := range toPersist {
+		rt, rid, vid, savedMap, uErr := s.upsertResourceMap(r.Context(), tenant, rm)
+		if uErr != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", uErr.Error())
+			return
+		}
+		entries = append(entries, map[string]any{
+			"fullUrl":  fmt.Sprintf("%s/%s", rt, rid),
+			"resource": savedMap,
+			"response": map[string]any{
+				"status":   "200 OK",
+				"location": fmt.Sprintf("%s/%s/_history/%d", rt, rid, vid),
+				"etag":     postgres.FormatETag(vid),
+			},
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Bundle",
+		"type":         "transaction-response",
+		"entry":        entries,
+	})
+}
+
+func (s *Server) upsertResourceMap(ctx context.Context, tenant string, rm map[string]any) (string, string, int, map[string]any, error) {
+	rt, _ := rm["resourceType"].(string)
+	rt = strings.TrimSpace(rt)
+	if rt == "" {
+		return "", "", 0, nil, fmt.Errorf("submitted resource is missing resourceType")
+	}
+	md, ok := s.protoRegistry[rt]
+	if !ok {
+		return "", "", 0, nil, fmt.Errorf("unsupported resourceType %q", rt)
+	}
+	rid, _ := rm["id"].(string)
+	rid = strings.TrimSpace(rid)
+	if rid == "" {
+		rid = generateID()
+		rm["id"] = rid
+	}
+	rawJSON, err := json.Marshal(rm)
+	if err != nil {
+		return "", "", 0, nil, err
+	}
+	normJSON, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, rawJSON)
+	if err != nil {
+		return "", "", 0, nil, fmt.Errorf("invalid %s JSON: %w", rt, err)
+	}
+	msg := dynamicpb.NewMessage(md)
+	unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+	if err := unmarshaler.Unmarshal(normJSON, msg); err != nil {
+		return "", "", 0, nil, fmt.Errorf("invalid %s structure: %w", rt, err)
+	}
+	setProtoResourceID(msg, rid)
+	protoBytes, err := proto.Marshal(msg)
+	if err != nil {
+		return "", "", 0, nil, err
+	}
+	var idx *postgres.SearchIndexes
+	if extractor, hasExt := s.extractors[rt]; hasExt {
+		idx, _ = extractor(tenant, rid, protoBytes)
+	}
+	rec, err := s.store.WriteResourceWithMeta(ctx, postgres.ResourceInput{
+		TenantID:      tenant,
+		ResType:       rt,
+		ResID:         rid,
+		ResourceProto: protoBytes,
+		SearchIndexes: idx,
+		CreateOnly:    false,
+	})
+	if err != nil {
+		return "", "", 0, nil, err
+	}
+	s.dispatchSubscriptions(ctx, tenant, rt, rid, rec.ResourceProto, rec.ResVersion, rec.LastUpdated, idx)
+	var savedMap map[string]any
+	if jb, jErr := s.protoToJSONWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); jErr == nil {
+		_ = json.Unmarshal(jb, &savedMap)
+	}
+	if savedMap == nil {
+		savedMap = rm
+	}
+	return rt, rid, rec.ResVersion, savedMap, nil
+}
+
+// handleGroupAdd handles POST /fhir/r4/{tenant}/Group/{id}/$add, atomically adding
+// member references to a Group cohort resource.
+func (s *Server) handleGroupAdd(w http.ResponseWriter, r *http.Request) {
+	s.handleGroupMemberMutate(w, r, true)
+}
+
+// handleGroupRemove handles POST /fhir/r4/{tenant}/Group/{id}/$remove, atomically removing
+// member references from a Group cohort resource.
+func (s *Server) handleGroupRemove(w http.ResponseWriter, r *http.Request) {
+	s.handleGroupMemberMutate(w, r, false)
+}
+
+func (s *Server) handleGroupMemberMutate(w http.ResponseWriter, r *http.Request, isAdd bool) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	groupID := strings.TrimSpace(r.PathValue("id"))
+	if groupID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Group cohort operation requires a Group {id}")
+		return
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		if auth.IsPatientRestricted(secCtx) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token cannot modify Group cohort membership")
+			return
+		}
+		if !auth.Allows(secCtx, "Group", auth.ActionUpdate) && !auth.Allows(secCtx, "Group", auth.ActionCreate) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope to modify Group membership")
+			return
+		}
+	}
+
+	var memberRefs []string
+	for _, qv := range r.URL.Query()["member"] {
+		for part := range strings.SplitSeq(qv, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				memberRefs = append(memberRefs, trimmed)
+			}
+		}
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024))
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read request body")
+			return
+		}
+		if len(bytes.TrimSpace(body)) > 0 {
+			var raw map[string]any
+			if err := json.Unmarshal(body, &raw); err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for Group operation")
+				return
+			}
+			if params, ok := raw["parameter"].([]any); ok {
+				for _, p := range params {
+					pm, ok := p.(map[string]any)
+					if !ok {
+						continue
+					}
+					if v := extractParamString(pm); v != "" {
+						memberRefs = append(memberRefs, v)
+					}
+					if parts, ok := pm["part"].([]any); ok {
+						for _, pt := range parts {
+							if ptm, ok := pt.(map[string]any); ok {
+								if v := extractParamString(ptm); v != "" {
+									memberRefs = append(memberRefs, v)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if len(memberRefs) == 0 {
+		opName := "$remove"
+		if isAdd {
+			opName = "$add"
+		}
+		writeOperationOutcome(w, http.StatusBadRequest, "required",
+			fmt.Sprintf("Group/%s/%s requires at least one member reference parameter", groupID, opName))
+		return
+	}
+
+	normalizedRefs := make([]string, 0, len(memberRefs))
+	for _, mr := range memberRefs {
+		ref, _ := normalizeTargetRef("Patient", mr)
+		if ref != "" {
+			normalizedRefs = append(normalizedRefs, ref)
+		}
+	}
+
+	rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Group", groupID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Group/%s not found", groupID))
+		return
+	}
+	if errors.Is(err, postgres.ErrResourceDeleted) {
+		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("Group/%s has been deleted", groupID))
+		return
+	}
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read Group")
+		return
+	}
+
+	jb, err := s.protoToJSONWithMeta("Group", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode Group")
+		return
+	}
+	var groupMap map[string]any
+	if err := json.Unmarshal(jb, &groupMap); err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to unmarshal Group")
+		return
+	}
+
+	existingMembers, _ := groupMap["member"].([]any)
+	if isAdd {
+		existingSet := make(map[string]int, len(existingMembers))
+		for idx, em := range existingMembers {
+			if emMap, ok := em.(map[string]any); ok {
+				if ent, ok := emMap["entity"].(map[string]any); ok {
+					if refStr, _ := ent["reference"].(string); refStr != "" {
+						existingSet[strings.ToLower(strings.TrimSpace(refStr))] = idx
+					}
+				}
+			}
+		}
+		for _, wantRef := range normalizedRefs {
+			key := strings.ToLower(wantRef)
+			if idx, exists := existingSet[key]; exists {
+				if emMap, ok := existingMembers[idx].(map[string]any); ok {
+					delete(emMap, "inactive")
+				}
+			} else {
+				existingSet[key] = len(existingMembers)
+				existingMembers = append(existingMembers, map[string]any{
+					"entity": map[string]any{
+						"reference": wantRef,
+					},
+				})
+			}
+		}
+	} else {
+		removeSet := make(map[string]bool, len(normalizedRefs))
+		for _, wantRef := range normalizedRefs {
+			removeSet[strings.ToLower(wantRef)] = true
+		}
+		filtered := make([]any, 0, len(existingMembers))
+		for _, em := range existingMembers {
+			emMap, ok := em.(map[string]any)
+			if !ok {
+				continue
+			}
+			ent, _ := emMap["entity"].(map[string]any)
+			refStr, _ := ent["reference"].(string)
+			if removeSet[strings.ToLower(strings.TrimSpace(refStr))] {
+				continue
+			}
+			filtered = append(filtered, em)
+		}
+		existingMembers = filtered
+	}
+
+	if len(existingMembers) > 0 {
+		groupMap["member"] = existingMembers
+	} else {
+		delete(groupMap, "member")
+	}
+	activeCount := 0
+	for _, em := range existingMembers {
+		if emMap, ok := em.(map[string]any); ok {
+			if inact, _ := emMap["inactive"].(bool); !inact {
+				activeCount++
+			}
+		}
+	}
+	groupMap["quantity"] = activeCount
+
+	_, _, vid, savedMap, uErr := s.upsertResourceMap(r.Context(), tenant, groupMap)
+	if uErr != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", fmt.Sprintf("failed to update Group/%s: %v", groupID, uErr))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.Header().Set("ETag", postgres.FormatETag(vid))
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(savedMap)
 }
