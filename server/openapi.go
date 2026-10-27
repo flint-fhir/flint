@@ -2095,6 +2095,68 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Observation/$lastn": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Observation"},
+				"summary":     "HL7 FHIR R4 / US Core Observation/$lastn operation returning the most recent N observations per distinct code",
+				"operationId": "observationLastNGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "subject", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "category", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "code", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "max", "in": "query", "required": false, "description": "Maximum observations per distinct code (default 1)", "schema": map[string]any{"type": "integer"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: searchset) of latest N Observations per distinct code"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Observation"},
+				"summary":     "HL7 FHIR R4 / US Core Observation/$lastn operation (POST Parameters)",
+				"operationId": "observationLastNPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: searchset) of latest N Observations per distinct code"},
+				},
+			},
+		},
+		"/Observation/$stats": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Observation"},
+				"summary":     "HL7 FHIR R4 Observation/$stats operation computing clinical summary statistics (average, max, min, count, median, std-dev, sum, variance)",
+				"operationId": "observationStatsGet",
+				"parameters": []map[string]any{
+					{"name": "subject", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "code", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "statistic", "in": "query", "required": true, "description": "One or more statistic codes (average, max, min, count, totalcount, median, std-dev, sum, variance)", "schema": map[string]any{"type": "string"}},
+					{"name": "duration", "in": "query", "required": false, "schema": map[string]any{"type": "number"}},
+					{"name": "start", "in": "query", "required": false, "schema": map[string]any{"type": "string", "format": "date"}},
+					{"name": "end", "in": "query", "required": false, "schema": map[string]any{"type": "string", "format": "date"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing synthesized statistic Observation resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Observation"},
+				"summary":     "HL7 FHIR R4 Observation/$stats operation (POST Parameters)",
+				"operationId": "observationStatsPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing synthesized statistic Observation resources"},
+				},
+			},
+		},
+		"/Patient/$merge": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "FHIR R4 Master Patient Index survivorship & clinical compartment re-linking (Patient/$merge)",
+				"operationId": "patientMergePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing outcome OperationOutcome, surviving Patient result, and completed merge Task"},
+					"422": map[string]any{"description": "Invalid or identical source/target patients"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

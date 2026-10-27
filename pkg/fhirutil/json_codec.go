@@ -567,6 +567,9 @@ func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any
 			}
 			return rawVal
 		}
+		if len(vMap) == 0 && valFD.Kind() == protoreflect.BoolKind {
+			return false
+		}
 	}
 
 	denormalizeMessageMap(msgDesc, vMap)

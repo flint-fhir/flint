@@ -3344,3 +3344,163 @@ func TestCollectDataSubmitDataGroupAddRemoveAndBinaryNegotiationWave16(t *testin
 		t.Fatalf("GET /Binary/bin-w16-note (Accept: application/fhir+json) expected FHIR JSON Binary resource, got %d: %s", binJSONRec.Code, binJSONRec.Body.String())
 	}
 }
+
+func TestObservationLastNStatsAndPatientMergeWave17(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave17-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	putRes := func(resType, id, body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/"+resType+"/"+id, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s/%s expected 200/201, got %d: %s", resType, id, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. Seed Patient + longitudinal vital-signs Observations across multiple codes & timestamps
+	putRes("Patient", "pat-w17-target", `{
+		"resourceType": "Patient",
+		"id": "pat-w17-target",
+		"active": true,
+		"name": [{"use": "official", "family": "Sterling", "given": ["Elena"]}],
+		"gender": "female",
+		"birthDate": "1980-03-22"
+	}`)
+	putRes("Observation", "obs-hr-old", `{
+		"resourceType": "Observation",
+		"id": "obs-hr-old",
+		"status": "final",
+		"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+		"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}]},
+		"subject": {"reference": "Patient/pat-w17-target"},
+		"effectiveDateTime": "2026-01-10T08:00:00Z",
+		"valueQuantity": {"value": 60.0, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+	}`)
+	putRes("Observation", "obs-hr-mid", `{
+		"resourceType": "Observation",
+		"id": "obs-hr-mid",
+		"status": "final",
+		"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+		"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}]},
+		"subject": {"reference": "Patient/pat-w17-target"},
+		"effectiveDateTime": "2026-02-10T08:00:00Z",
+		"valueQuantity": {"value": 70.0, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+	}`)
+	putRes("Observation", "obs-hr-latest", `{
+		"resourceType": "Observation",
+		"id": "obs-hr-latest",
+		"status": "final",
+		"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+		"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}]},
+		"subject": {"reference": "Patient/pat-w17-target"},
+		"effectiveDateTime": "2026-03-10T08:00:00Z",
+		"valueQuantity": {"value": 80.0, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+	}`)
+	putRes("Observation", "obs-wt-latest", `{
+		"resourceType": "Observation",
+		"id": "obs-wt-latest",
+		"status": "final",
+		"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+		"code": {"coding": [{"system": "http://loinc.org", "code": "29463-7", "display": "Body weight"}]},
+		"subject": {"reference": "Patient/pat-w17-target"},
+		"effectiveDateTime": "2026-03-11T09:00:00Z",
+		"valueQuantity": {"value": 64.5, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg"}
+	}`)
+
+	// 1a. Verify GET /Observation/$lastn?patient=Patient/pat-w17-target&category=vital-signs&max=1 returns 1 latest per distinct code (obs-hr-latest and obs-wt-latest, not obs-hr-old/mid)
+	lnReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Observation/$lastn?patient=Patient/pat-w17-target&category=vital-signs&max=1", nil)
+	lnRec := httptest.NewRecorder()
+	pgH.ServeHTTP(lnRec, lnReq)
+	if lnRec.Code != http.StatusOK {
+		t.Fatalf("GET /Observation/$lastn got %d: %s", lnRec.Code, lnRec.Body.String())
+	}
+	lnBody := lnRec.Body.String()
+	if !strings.Contains(lnBody, `"obs-hr-latest"`) || !strings.Contains(lnBody, `"obs-wt-latest"`) || strings.Contains(lnBody, `"obs-hr-old"`) || strings.Contains(lnBody, `"obs-hr-mid"`) {
+		t.Fatalf("expected Observation/$lastn max=1 to contain obs-hr-latest and obs-wt-latest only, got %s", lnBody)
+	}
+
+	// 2. Verify GET /Observation/$stats?subject=Patient/pat-w17-target&code=8867-4&statistic=average&statistic=min&statistic=max&statistic=median&statistic=count&statistic=sum
+	stReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Observation/$stats?subject=Patient/pat-w17-target&code=8867-4&statistic=average&statistic=min&statistic=max&statistic=median&statistic=count&statistic=sum", nil)
+	stRec := httptest.NewRecorder()
+	pgH.ServeHTTP(stRec, stReq)
+	if stRec.Code != http.StatusOK {
+		t.Fatalf("GET /Observation/$stats got %d: %s", stRec.Code, stRec.Body.String())
+	}
+	stBody := stRec.Body.String()
+	for _, want := range []string{`"resourceType":"Parameters"`, `"name":"statistic"`, `"code":"average"`, `"value":70`, `"code":"min"`, `"value":60`, `"code":"max"`, `"value":80`, `"code":"median"`, `"code":"sum"`, `"value":210`} {
+		if !strings.Contains(stBody, want) {
+			t.Errorf("expected Observation/$stats response to contain %s, got %s", want, stBody)
+		}
+	}
+
+	// 3. Verify POST /Patient/$merge re-links duplicate Patient compartment resources and updates survivorship links
+	putRes("Patient", "pat-w17-dup", `{
+		"resourceType": "Patient",
+		"id": "pat-w17-dup",
+		"active": true,
+		"name": [{"use": "official", "family": "Sterling", "given": ["Elena"]}],
+		"gender": "female",
+		"birthDate": "1980-03-22"
+	}`)
+	putRes("Condition", "cond-w17-dup", `{
+		"resourceType": "Condition",
+		"id": "cond-w17-dup",
+		"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+		"code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}]},
+		"subject": {"reference": "Patient/pat-w17-dup"}
+	}`)
+
+	mergePayload := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "source-patient", "valueReference": {"reference": "Patient/pat-w17-dup"}},
+			{"name": "target-patient", "valueReference": {"reference": "Patient/pat-w17-target"}}
+		]
+	}`
+	mReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/$merge", strings.NewReader(mergePayload))
+	mReq.Header.Set("Content-Type", "application/fhir+json")
+	mRec := httptest.NewRecorder()
+	pgH.ServeHTTP(mRec, mReq)
+	if mRec.Code != http.StatusOK {
+		t.Fatalf("POST /Patient/$merge got %d: %s", mRec.Code, mRec.Body.String())
+	}
+	mBody := mRec.Body.String()
+	for _, want := range []string{`"resourceType":"Parameters"`, `"name":"outcome"`, `"name":"result"`, `"name":"task"`, `"replaces"`, `"Patient/pat-w17-dup"`} {
+		if !strings.Contains(mBody, want) {
+			t.Errorf("expected Patient/$merge response to contain %s, got %s", want, mBody)
+		}
+	}
+
+	// Verify source patient is now active:false with replaced-by link to Patient/pat-w17-target
+	srcGetReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w17-dup", nil)
+	srcGetRec := httptest.NewRecorder()
+	pgH.ServeHTTP(srcGetRec, srcGetReq)
+	if srcGetRec.Code != http.StatusOK || !strings.Contains(srcGetRec.Body.String(), `"active":false`) || !strings.Contains(srcGetRec.Body.String(), `"replaced-by"`) || !strings.Contains(srcGetRec.Body.String(), `"Patient/pat-w17-target"`) {
+		t.Fatalf("expected source Patient/pat-w17-dup to be inactive with replaced-by link to Patient/pat-w17-target, got %d: %s", srcGetRec.Code, srcGetRec.Body.String())
+	}
+
+	// Verify Condition/cond-w17-dup was re-linked to Patient/pat-w17-target and is searchable under patient=Patient/pat-w17-target
+	condGetReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Condition?patient=Patient/pat-w17-target", nil)
+	condGetRec := httptest.NewRecorder()
+	pgH.ServeHTTP(condGetRec, condGetReq)
+	if condGetRec.Code != http.StatusOK || !strings.Contains(condGetRec.Body.String(), `"cond-w17-dup"`) {
+		t.Fatalf("expected Condition?patient=Patient/pat-w17-target to return re-linked cond-w17-dup, got %d: %s", condGetRec.Code, condGetRec.Body.String())
+	}
+}

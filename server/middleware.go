@@ -1122,6 +1122,12 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Measure") && (parts[4] == "$collect-data" || parts[4] == "$submit-data") {
 			return true
 		}
+		if strings.EqualFold(parts[3], "Observation") && (parts[4] == "$lastn" || parts[4] == "$stats") {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Patient") && parts[4] == "$merge" {
+			return true
+		}
 		return false
 	}
 	if len(parts) == 6 {

@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -2780,4 +2782,772 @@ func (s *Server) handleGroupMemberMutate(w http.ResponseWriter, r *http.Request,
 	w.Header().Set("ETag", postgres.FormatETag(vid))
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(savedMap)
+}
+
+// handleObservationLastN handles GET/POST /fhir/r4/{tenant}/Observation/$lastn
+// per HL7 FHIR R4 §10.1.12.1 (OperationDefinition/Observation-lastn), returning the
+// most recent N (default 1) Observations per distinct Observation.code in a searchset Bundle.
+func (s *Server) handleObservationLastN(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	q := mergedSearchQuery(r)
+	maxPerCode := 1
+	if maxStr := strings.TrimSpace(q.Get("max")); maxStr != "" {
+		n, err := strconv.Atoi(maxStr)
+		if err != nil || n <= 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "value", "Observation/$lastn max parameter must be a positive integer")
+			return
+		}
+		maxPerCode = n
+	}
+
+	subject := strings.TrimSpace(q.Get("patient"))
+	if subject == "" {
+		subject = strings.TrimSpace(q.Get("subject"))
+	}
+	category := strings.TrimSpace(q.Get("category"))
+	codeFilter := strings.TrimSpace(q.Get("code"))
+
+	if r.Method == http.MethodPost && r.Body != nil && r.ContentLength != 0 {
+		if body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024)); err == nil && len(bytes.TrimSpace(body)) > 0 {
+			var raw map[string]any
+			if json.Unmarshal(body, &raw) == nil {
+				if params, ok := raw["parameter"].([]any); ok {
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "max":
+							if f, ok := pm["valueInteger"].(float64); ok && int(f) > 0 {
+								maxPerCode = int(f)
+							} else if f, ok := pm["valuePositiveInt"].(float64); ok && int(f) > 0 {
+								maxPerCode = int(f)
+							} else if sVal := extractParamString(pm); sVal != "" {
+								if n, nErr := strconv.Atoi(sVal); nErr == nil && n > 0 {
+									maxPerCode = n
+								}
+							}
+						case "patient", "subject":
+							if subject == "" {
+								subject = extractParamString(pm)
+							}
+						case "category":
+							if category == "" {
+								category = extractParamString(pm)
+							}
+						case "code":
+							if codeFilter == "" {
+								codeFilter = extractParamString(pm)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	_, patID := normalizeTargetRef("Patient", subject)
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		if !auth.Allows(secCtx, "Observation", auth.ActionRead) && !auth.Allows(secCtx, "Observation", auth.ActionSearch) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Observation/$lastn")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) {
+			allowedPat := cleanID(secCtx.GetPatientId())
+			if patID != "" && cleanID(patID) != allowedPat {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("patient-scoped token (%s) cannot invoke Observation/$lastn for Patient/%s",
+						secCtx.GetPatientId(), patID))
+				return
+			}
+			patID = allowedPat
+		}
+	}
+
+	sp := postgres.SearchParams{
+		TenantID:   tenant,
+		ResType:    "Observation",
+		Tokens:     make(map[string]string),
+		References: make(map[string]string),
+		Count:      500,
+	}
+	if patID != "" {
+		sp.References["patient"] = "Patient/" + patID
+	}
+	if category != "" {
+		sp.Tokens["category"] = category
+	}
+	if codeFilter != "" {
+		sp.Tokens["code"] = codeFilter
+	}
+
+	sr, err := s.store.Search(r.Context(), sp)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to search Observations for $lastn")
+		return
+	}
+
+	type obsCandidate struct {
+		resID       string
+		effectiveAt time.Time
+		resMap      map[string]any
+	}
+	groups := make(map[string][]obsCandidate)
+	var groupOrder []string
+
+	for _, m := range sr.Matches {
+		jb, err := s.protoToJSONWithMeta("Observation", m.ResourceProto, m.ResVersion, m.LastUpdated)
+		if err != nil {
+			continue
+		}
+		var rm map[string]any
+		if json.Unmarshal(jb, &rm) != nil {
+			continue
+		}
+		codeKey := extractObservationCodeKey(rm)
+		if codeKey == "" {
+			codeKey = "_uncoded"
+		}
+		effTime := extractObservationEffectiveTime(rm, m.LastUpdated)
+		if _, seen := groups[codeKey]; !seen {
+			groupOrder = append(groupOrder, codeKey)
+		}
+		groups[codeKey] = append(groups[codeKey], obsCandidate{
+			resID:       m.ResID,
+			effectiveAt: effTime,
+			resMap:      rm,
+		})
+	}
+
+	var entries []map[string]any
+	for _, codeKey := range groupOrder {
+		cands := groups[codeKey]
+		sort.Slice(cands, func(i, j int) bool {
+			if !cands[i].effectiveAt.Equal(cands[j].effectiveAt) {
+				return cands[i].effectiveAt.After(cands[j].effectiveAt)
+			}
+			return cands[i].resID > cands[j].resID
+		})
+		limit := min(len(cands), maxPerCode)
+		for i := range limit {
+			entries = append(entries, map[string]any{
+				"fullUrl":  "Observation/" + cands[i].resID,
+				"resource": cands[i].resMap,
+				"search": map[string]any{
+					"mode": "match",
+				},
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Bundle",
+		"type":         "searchset",
+		"total":        len(entries),
+		"entry":        entries,
+	})
+}
+
+func extractObservationCodeKey(rm map[string]any) string {
+	cc, ok := rm["code"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	if codings, ok := cc["coding"].([]any); ok {
+		for _, c := range codings {
+			if cm, ok := c.(map[string]any); ok {
+				sys, _ := cm["system"].(string)
+				code, _ := cm["code"].(string)
+				if strings.TrimSpace(code) != "" {
+					return strings.ToLower(strings.TrimSpace(sys)) + "|" + strings.ToLower(strings.TrimSpace(code))
+				}
+			}
+		}
+	}
+	if txt, _ := cc["text"].(string); strings.TrimSpace(txt) != "" {
+		return "text|" + strings.ToLower(strings.TrimSpace(txt))
+	}
+	return ""
+}
+
+func extractObservationEffectiveTime(rm map[string]any, fallback time.Time) time.Time {
+	for _, k := range []string{"effectiveDateTime", "effectiveInstant", "issued"} {
+		if s, _ := rm[k].(string); strings.TrimSpace(s) != "" {
+			if dOp, err := postgres.ParseDateOp(strings.TrimSpace(s)); err == nil && !dOp.Value.IsZero() {
+				return dOp.Value
+			}
+		}
+	}
+	if ep, ok := rm["effectivePeriod"].(map[string]any); ok {
+		for _, k := range []string{"end", "start"} {
+			if s, _ := ep[k].(string); strings.TrimSpace(s) != "" {
+				if dOp, err := postgres.ParseDateOp(strings.TrimSpace(s)); err == nil && !dOp.Value.IsZero() {
+					return dOp.Value
+				}
+			}
+		}
+	}
+	return fallback
+}
+
+// handleObservationStats handles GET/POST /fhir/r4/{tenant}/Observation/$stats
+// per HL7 FHIR R4 §10.1.12.2 (OperationDefinition/Observation-stats), computing
+// requested statistical aggregates (average, max, min, count, totalcount, median,
+// std-dev, sum, variance) over Observation/component valueQuantity values.
+func (s *Server) handleObservationStats(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	q := r.URL.Query()
+	subject := strings.TrimSpace(q.Get("subject"))
+	if subject == "" {
+		subject = strings.TrimSpace(q.Get("patient"))
+	}
+	var codes []string
+	for _, cv := range q["code"] {
+		for part := range strings.SplitSeq(cv, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				codes = append(codes, trimmed)
+			}
+		}
+	}
+	for _, cv := range q["coding"] {
+		for part := range strings.SplitSeq(cv, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				codes = append(codes, trimmed)
+			}
+		}
+	}
+	var statsWanted []string
+	for _, sv := range q["statistic"] {
+		for part := range strings.SplitSeq(sv, ",") {
+			if trimmed := strings.ToLower(strings.TrimSpace(part)); trimmed != "" {
+				statsWanted = append(statsWanted, trimmed)
+			}
+		}
+	}
+
+	if r.Method == http.MethodPost && r.Body != nil && r.ContentLength != 0 {
+		if body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024)); err == nil && len(bytes.TrimSpace(body)) > 0 {
+			var raw map[string]any
+			if json.Unmarshal(body, &raw) == nil {
+				if params, ok := raw["parameter"].([]any); ok {
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "subject", "patient":
+							if subject == "" {
+								subject = extractParamString(pm)
+							}
+						case "code", "coding":
+							if cMap, ok := pm["valueCoding"].(map[string]any); ok {
+								sys, _ := cMap["system"].(string)
+								c, _ := cMap["code"].(string)
+								if sys != "" && c != "" {
+									codes = append(codes, sys+"|"+c)
+								} else if c != "" {
+									codes = append(codes, c)
+								}
+							} else if sVal := extractParamString(pm); sVal != "" {
+								codes = append(codes, sVal)
+							}
+						case "statistic":
+							if sVal := strings.ToLower(extractParamString(pm)); sVal != "" {
+								statsWanted = append(statsWanted, sVal)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if subject == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Observation/$stats requires a subject or patient parameter")
+		return
+	}
+	if len(codes) == 0 {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Observation/$stats requires at least one code or coding parameter")
+		return
+	}
+	if len(statsWanted) == 0 {
+		statsWanted = []string{"average", "min", "max", "count"}
+	}
+
+	subjectRef, patID := normalizeTargetRef("Patient", subject)
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		if !auth.Allows(secCtx, "Observation", auth.ActionRead) && !auth.Allows(secCtx, "Observation", auth.ActionSearch) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Observation/$stats")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot invoke Observation/$stats for Patient/%s",
+					secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		TenantID:   tenant,
+		ResType:    "Observation",
+		References: map[string]string{"patient": "Patient/" + patID},
+		Count:      500,
+	})
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to search Observations for $stats")
+		return
+	}
+
+	obsMaps := make([]map[string]any, 0, len(sr.Matches))
+	for _, m := range sr.Matches {
+		if jb, jErr := s.protoToJSONWithMeta("Observation", m.ResourceProto, m.ResVersion, m.LastUpdated); jErr == nil {
+			var rm map[string]any
+			if json.Unmarshal(jb, &rm) == nil {
+				obsMaps = append(obsMaps, rm)
+			}
+		}
+	}
+
+	var paramOut []map[string]any
+	for _, rawCode := range codes {
+		wantSys := "http://loinc.org"
+		wantCode := rawCode
+		if idx := strings.IndexByte(rawCode, '|'); idx != -1 {
+			if strings.TrimSpace(rawCode[:idx]) != "" {
+				wantSys = strings.TrimSpace(rawCode[:idx])
+			}
+			wantCode = strings.TrimSpace(rawCode[idx+1:])
+		}
+		var vals []float64
+		unit := ""
+		uSystem := "http://unitsofmeasure.org"
+		uCode := ""
+
+		for _, rm := range obsMaps {
+			if cc, ok := rm["code"].(map[string]any); ok && codeableConceptMatchesLiterals(cc, []string{wantCode}) {
+				if vq, ok := rm["valueQuantity"].(map[string]any); ok {
+					if v, ok := vq["value"].(float64); ok {
+						vals = append(vals, v)
+						if unit == "" {
+							unit, _ = vq["unit"].(string)
+							uCode, _ = vq["code"].(string)
+							if sStr, _ := vq["system"].(string); sStr != "" {
+								uSystem = sStr
+							}
+						}
+					}
+				}
+			}
+			if comps, ok := rm["component"].([]any); ok {
+				for _, comp := range comps {
+					cm, ok := comp.(map[string]any)
+					if !ok {
+						continue
+					}
+					if cc, ok := cm["code"].(map[string]any); ok && codeableConceptMatchesLiterals(cc, []string{wantCode}) {
+						if vq, ok := cm["valueQuantity"].(map[string]any); ok {
+							if v, ok := vq["value"].(float64); ok {
+								vals = append(vals, v)
+								if unit == "" {
+									unit, _ = vq["unit"].(string)
+									uCode, _ = vq["code"].(string)
+									if sStr, _ := vq["system"].(string); sStr != "" {
+										uSystem = sStr
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
+		statComps := buildStatisticComponents(vals, statsWanted, unit, uSystem, uCode)
+		statObs := map[string]any{
+			"resourceType": "Observation",
+			"id":           "stats-" + wantCode + "-" + patID,
+			"status":       "final",
+			"subject": map[string]any{
+				"reference": subjectRef,
+			},
+			"code": map[string]any{
+				"coding": []any{
+					map[string]any{
+						"system": wantSys,
+						"code":   wantCode,
+					},
+				},
+			},
+			"effectiveDateTime": time.Now().UTC().Format(time.RFC3339),
+			"component":         statComps,
+		}
+		paramOut = append(paramOut, map[string]any{
+			"name":     "statistic",
+			"resource": statObs,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    paramOut,
+	})
+}
+
+func buildStatisticComponents(vals []float64, statsWanted []string, unit, uSystem, uCode string) []any {
+	sorted := make([]float64, len(vals))
+	copy(sorted, vals)
+	sort.Float64s(sorted)
+
+	count := float64(len(sorted))
+	var sum, minVal, maxVal, avg, median, variance, stdDev float64
+	if len(sorted) > 0 {
+		minVal = sorted[0]
+		maxVal = sorted[len(sorted)-1]
+		for _, v := range sorted {
+			sum += v
+		}
+		avg = sum / count
+		mid := len(sorted) / 2
+		if len(sorted)%2 == 1 {
+			median = sorted[mid]
+		} else {
+			median = (sorted[mid-1] + sorted[mid]) / 2.0
+		}
+		if len(sorted) > 1 {
+			var sqDiff float64
+			for _, v := range sorted {
+				d := v - avg
+				sqDiff += d * d
+			}
+			variance = sqDiff / float64(len(sorted)-1)
+			stdDev = math.Sqrt(variance)
+		}
+	}
+
+	var comps []any
+	for _, st := range statsWanted {
+		var val float64
+		isCount := false
+		switch st {
+		case "average", "mean":
+			val = avg
+		case "max", "maximum":
+			val = maxVal
+		case "min", "minimum":
+			val = minVal
+		case "sum":
+			val = sum
+		case "median":
+			val = median
+		case "variance":
+			val = variance
+		case "std-dev", "stddev":
+			val = stdDev
+		case "count", "totalcount":
+			val = count
+			isCount = true
+		default:
+			continue
+		}
+		vq := map[string]any{
+			"value": math.Round(val*1000) / 1000,
+		}
+		if isCount {
+			vq["unit"] = "1"
+			vq["system"] = "http://unitsofmeasure.org"
+			vq["code"] = "1"
+		} else {
+			if unit != "" {
+				vq["unit"] = unit
+			}
+			if uSystem != "" {
+				vq["system"] = uSystem
+			}
+			if uCode != "" {
+				vq["code"] = uCode
+			}
+		}
+		comps = append(comps, map[string]any{
+			"code": map[string]any{
+				"coding": []any{
+					map[string]any{
+						"system": "http://terminology.hl7.org/CodeSystem/observation-statistics",
+						"code":   st,
+					},
+				},
+			},
+			"valueQuantity": vq,
+		})
+	}
+	return comps
+}
+
+// handlePatientMerge handles POST /fhir/r4/{tenant}/Patient/$merge per HL7 FHIR
+// Patient-merge OperationDefinition, merging source-patient into target-patient,
+// re-linking all clinical compartment resources referencing source-patient to
+// target-patient, and marking source-patient inactive with a replaced-by link.
+func (s *Server) handlePatientMerge(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		return
+	}
+	tenant := r.PathValue("tenant")
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		if auth.IsPatientRestricted(secCtx) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token cannot invoke Patient/$merge")
+			return
+		}
+		if !auth.Allows(secCtx, "Patient", auth.ActionUpdate) && !auth.Allows(secCtx, "Patient", auth.ActionCreate) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Patient/$merge (requires Patient update or create scope)")
+			return
+		}
+	}
+
+	sourceRef := strings.TrimSpace(r.URL.Query().Get("source-patient"))
+	targetRef := strings.TrimSpace(r.URL.Query().Get("target-patient"))
+	preview := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("preview")), "true")
+	var resultPatientOverride map[string]any
+
+	if r.Body != nil && r.ContentLength != 0 {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 2*1024*1024))
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read request body")
+			return
+		}
+		if len(bytes.TrimSpace(body)) > 0 {
+			var raw map[string]any
+			if err := json.Unmarshal(body, &raw); err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for Patient/$merge")
+				return
+			}
+			if params, ok := raw["parameter"].([]any); ok {
+				for _, p := range params {
+					pm, ok := p.(map[string]any)
+					if !ok {
+						continue
+					}
+					name, _ := pm["name"].(string)
+					switch name {
+					case "source-patient", "sourcePatient":
+						if v := extractParamString(pm); v != "" {
+							sourceRef = v
+						} else if rm, ok := pm["resource"].(map[string]any); ok {
+							if rid, _ := rm["id"].(string); rid != "" {
+								sourceRef = "Patient/" + rid
+							}
+						}
+					case "target-patient", "targetPatient":
+						if v := extractParamString(pm); v != "" {
+							targetRef = v
+						} else if rm, ok := pm["resource"].(map[string]any); ok {
+							if rid, _ := rm["id"].(string); rid != "" {
+								targetRef = "Patient/" + rid
+							}
+						}
+					case "result-patient", "resultPatient":
+						if rm, ok := pm["resource"].(map[string]any); ok {
+							resultPatientOverride = rm
+						}
+					case "preview":
+						if b, ok := pm["valueBoolean"].(bool); ok {
+							preview = b
+						} else if strings.EqualFold(extractParamString(pm), "true") {
+							preview = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	_, sourceID := normalizeTargetRef("Patient", sourceRef)
+	_, targetID := normalizeTargetRef("Patient", targetRef)
+	if sourceID == "" || targetID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required",
+			"Patient/$merge requires both source-patient and target-patient parameters")
+		return
+	}
+	if sourceID == targetID {
+		writeOperationOutcome(w, http.StatusUnprocessableEntity, "invariant",
+			"source-patient and target-patient cannot reference the same Patient")
+		return
+	}
+
+	srcRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", sourceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("source Patient/%s not found", sourceID))
+		return
+	}
+	if errors.Is(err, postgres.ErrResourceDeleted) {
+		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("source Patient/%s has been deleted", sourceID))
+		return
+	}
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read source Patient")
+		return
+	}
+
+	tgtRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", targetID)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("target Patient/%s not found", targetID))
+		return
+	}
+	if errors.Is(err, postgres.ErrResourceDeleted) {
+		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("target Patient/%s has been deleted", targetID))
+		return
+	}
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read target Patient")
+		return
+	}
+
+	srcJSON, _ := s.protoToJSONWithMeta("Patient", srcRec.ResourceProto, srcRec.ResVersion, srcRec.LastUpdated)
+	tgtJSON, _ := s.protoToJSONWithMeta("Patient", tgtRec.ResourceProto, tgtRec.ResVersion, tgtRec.LastUpdated)
+	var srcMap, tgtMap map[string]any
+	_ = json.Unmarshal(srcJSON, &srcMap)
+	_ = json.Unmarshal(tgtJSON, &tgtMap)
+	if resultPatientOverride != nil {
+		tgtMap = resultPatientOverride
+		tgtMap["resourceType"] = "Patient"
+		tgtMap["id"] = targetID
+	}
+
+	// Discover all clinical compartment resources referencing Patient/{sourceID}
+	pe, _ := s.store.PatientEverything(r.Context(), postgres.PatientEverythingParams{
+		TenantID:  tenant,
+		PatientID: sourceID,
+		Count:     500,
+	})
+	var relinkedRefs []string
+	oldRef := "Patient/" + sourceID
+	newRef := "Patient/" + targetID
+
+	for _, rm := range s.decodeCompartmentMaps(pe) {
+		rt, _ := rm["resourceType"].(string)
+		rid, _ := rm["id"].(string)
+		if rt == "" || rid == "" || strings.EqualFold(rt, "Patient") {
+			continue
+		}
+		if rewritePatientReferenceInMap(rm, oldRef, newRef) {
+			relinkedRefs = append(relinkedRefs, rt+"/"+rid)
+			if !preview {
+				_, _, _, _, _ = s.upsertResourceMap(r.Context(), tenant, rm)
+			}
+		}
+	}
+
+	srcMap["active"] = false
+	srcLinks, _ := srcMap["link"].([]any)
+	srcLinks = append(srcLinks, map[string]any{
+		"other": map[string]any{"reference": newRef},
+		"type":  "replaced-by",
+	})
+	srcMap["link"] = srcLinks
+
+	tgtLinks, _ := tgtMap["link"].([]any)
+	tgtLinks = append(tgtLinks, map[string]any{
+		"other": map[string]any{"reference": oldRef},
+		"type":  "replaces",
+	})
+	tgtMap["link"] = tgtLinks
+
+	if !preview {
+		_, _, _, _, _ = s.upsertResourceMap(r.Context(), tenant, srcMap)
+		if _, _, _, savedTgt, uErr := s.upsertResourceMap(r.Context(), tenant, tgtMap); uErr == nil && savedTgt != nil {
+			tgtMap = savedTgt
+		}
+	}
+
+	diagMsg := fmt.Sprintf("Merged Patient/%s into Patient/%s and re-linked %d compartment resource(s)", sourceID, targetID, len(relinkedRefs))
+	if preview {
+		diagMsg = "[Preview] " + diagMsg
+	}
+
+	outParams := []map[string]any{
+		{
+			"name": "outcome",
+			"resource": map[string]any{
+				"resourceType": "OperationOutcome",
+				"issue": []any{
+					map[string]any{
+						"severity":    "information",
+						"code":        "informational",
+						"diagnostics": diagMsg,
+					},
+				},
+			},
+		},
+		{
+			"name":     "result",
+			"resource": tgtMap,
+		},
+		{
+			"name": "task",
+			"resource": map[string]any{
+				"resourceType": "Task",
+				"id":           "merge-" + sourceID + "-into-" + targetID,
+				"status":       "completed",
+				"intent":       "order",
+				"for":          map[string]any{"reference": newRef},
+				"description":  diagMsg,
+			},
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    outParams,
+	})
+}
+
+func rewritePatientReferenceInMap(m map[string]any, oldRef, newRef string) bool {
+	changed := false
+	for k, v := range m {
+		switch tv := v.(type) {
+		case map[string]any:
+			if ref, ok := tv["reference"].(string); ok && strings.EqualFold(strings.TrimSpace(ref), oldRef) {
+				tv["reference"] = newRef
+				changed = true
+			} else if rewritePatientReferenceInMap(tv, oldRef, newRef) {
+				changed = true
+			}
+		case []any:
+			for _, elem := range tv {
+				if em, ok := elem.(map[string]any); ok {
+					if ref, ok := em["reference"].(string); ok && strings.EqualFold(strings.TrimSpace(ref), oldRef) {
+						em["reference"] = newRef
+						changed = true
+					} else if rewritePatientReferenceInMap(em, oldRef, newRef) {
+						changed = true
+					}
+				}
+			}
+		case string:
+			if k == "reference" && strings.EqualFold(strings.TrimSpace(tv), oldRef) {
+				m[k] = newRef
+				changed = true
+			}
+		}
+	}
+	return changed
 }
