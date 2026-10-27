@@ -287,7 +287,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		))
 	}
 
-	// 5. Reference search parameters (spidx_reference) — supports TargetType/id, :TargetType modifier, and multipleOr
+	// 5. Reference search parameters (spidx_reference) — supports TargetType/id, :TargetType modifier, :identifier modifier, and multipleOr
 	referenceFilters := params.ReferenceFilters
 	if len(referenceFilters) == 0 && len(params.References) > 0 {
 		referenceFilters = make(map[string][]string, len(params.References))
@@ -297,6 +297,59 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 	}
 	for spKey, filterVals := range referenceFilters {
 		baseName, modType := splitParamModifier(spKey)
+		if strings.EqualFold(modType, "identifier") {
+			for _, rawVal := range filterVals {
+				joinIdx++
+				rfAlias := fmt.Sprintf("rf%d", joinIdx)
+				rtAlias := fmt.Sprintf("rt%d", joinIdx)
+				ltAlias := fmt.Sprintf("lt%d", joinIdx)
+				baseIdx := len(args) + 1
+				logicalIdx := len(args) + 2
+				args = append(args, baseName, baseName+":identifier")
+				var rtConds []string
+				var ltConds []string
+				for part := range strings.SplitSeq(rawVal, ",") {
+					item := strings.TrimSpace(part)
+					if item == "" {
+						continue
+					}
+					if parts := strings.SplitN(item, "|", 2); len(parts) == 2 {
+						sys, code := parts[0], parts[1]
+						if sys == "" {
+							cIdx := len(args) + 1
+							args = append(args, code)
+							rtConds = append(rtConds, fmt.Sprintf("(%s.sp_system = '' AND %s.sp_value = $%d)", rtAlias, rtAlias, cIdx))
+							ltConds = append(ltConds, fmt.Sprintf("(%s.sp_system = '' AND %s.sp_value = $%d)", ltAlias, ltAlias, cIdx))
+						} else if code == "" {
+							sIdx := len(args) + 1
+							args = append(args, sys)
+							rtConds = append(rtConds, fmt.Sprintf("(%s.sp_system = $%d)", rtAlias, sIdx))
+							ltConds = append(ltConds, fmt.Sprintf("(%s.sp_system = $%d)", ltAlias, sIdx))
+						} else {
+							sIdx := len(args) + 1
+							cIdx := len(args) + 2
+							args = append(args, sys, code)
+							rtConds = append(rtConds, fmt.Sprintf("(%s.sp_system = $%d AND %s.sp_value = $%d)", rtAlias, sIdx, rtAlias, cIdx))
+							ltConds = append(ltConds, fmt.Sprintf("(%s.sp_system = $%d AND %s.sp_value = $%d)", ltAlias, sIdx, ltAlias, cIdx))
+						}
+					} else {
+						cIdx := len(args) + 1
+						args = append(args, item)
+						rtConds = append(rtConds, fmt.Sprintf("(%s.sp_value = $%d)", rtAlias, cIdx))
+						ltConds = append(ltConds, fmt.Sprintf("(%s.sp_value = $%d)", ltAlias, cIdx))
+					}
+				}
+				if len(rtConds) > 0 {
+					whereExtra += fmt.Sprintf(
+						" AND (EXISTS (SELECT 1 FROM spidx_reference %s JOIN spidx_token %s ON %s.tenant_id = %s.tenant_id AND (%s.res_type = %s.target_type OR %s.target_type = '') AND %s.res_id = %s.target_id AND %s.sp_name = 'identifier' WHERE %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s)) OR EXISTS (SELECT 1 FROM spidx_token %s WHERE %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = $%d AND (%s)))",
+						rfAlias, rtAlias, rtAlias, rfAlias, rtAlias, rfAlias, rfAlias, rtAlias, rfAlias, rtAlias,
+						rfAlias, rfAlias, rfAlias, rfAlias, baseIdx, strings.Join(rtConds, " OR "),
+						ltAlias, ltAlias, ltAlias, ltAlias, ltAlias, logicalIdx, strings.Join(ltConds, " OR "),
+					)
+				}
+			}
+			continue
+		}
 		for _, rawVal := range filterVals {
 			joinIdx++
 			alias := fmt.Sprintf("rf%d", joinIdx)
@@ -409,7 +462,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 				paramType = "quantity"
 			case knownRefSearchParams[targetParam]:
 				paramType = "reference"
-			case knownURISearchParams[targetParam] || targetMod == "below" || targetMod == "above":
+			case knownURISearchParams[targetParam] || ((targetMod == "below" || targetMod == "above") && !knownTokenSearchParams[targetParam] && !strings.Contains(chained.Value, "|")):
 				paramType = "uri"
 			default:
 				paramType = "token"

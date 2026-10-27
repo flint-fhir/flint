@@ -290,7 +290,8 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/jwks.json", s.handleJWKS)
 
 	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet || r.Method == http.MethodPost {
+		isGetOrHead := r.Method == http.MethodGet || r.Method == http.MethodHead
+		if isGetOrHead || r.Method == http.MethodPost {
 			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 			if len(parts) == 4 && parts[0] == "fhir" && parts[1] == "r4" && parts[2] == "cds-services" && r.Method == http.MethodPost {
 				r.SetPathValue("serviceId", parts[3])
@@ -298,13 +299,13 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				return
 			}
 			if len(parts) == 5 && parts[0] == "fhir" && parts[1] == "r4" {
-				if r.Method == http.MethodGet && parts[4] == "_history" && !strings.HasPrefix(parts[3], "$") {
+				if isGetOrHead && parts[4] == "_history" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
 					s.handleInstanceHistory(w, r)
 					return
 				}
-				if r.Method == http.MethodGet && parts[4] == "$meta" && !strings.HasPrefix(parts[3], "$") {
+				if isGetOrHead && parts[4] == "$meta" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
 					s.handleMeta(w, r)
@@ -510,14 +511,14 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleConceptMapTranslate(w, r)
 					return
 				}
-				if r.Method == http.MethodGet && parts[3] == "$export-file" {
+				if isGetOrHead && parts[3] == "$export-file" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("jobId", parts[4])
 					r.SetPathValue("fileName", parts[5])
 					s.handleExportFile(w, r)
 					return
 				}
-				if r.Method == http.MethodGet && strings.EqualFold(parts[3], "Patient") && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" {
+				if isGetOrHead && strings.EqualFold(parts[3], "Patient") && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("patientId", parts[4])
 					r.SetPathValue("resourceType", parts[5])
@@ -598,8 +599,72 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+	if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
+		return
+	}
 	w.WriteHeader(http.StatusOK)
-	w.Write(jsonBytes)
+	if r.Method != http.MethodHead {
+		w.Write(jsonBytes)
+	}
+}
+
+// checkConditionalReadNotModified evaluates FHIR R4 §3.1.0.1.1 Conditional Read headers
+// (If-None-Match and If-Modified-Since) and writes 304 Not Modified when satisfied.
+func checkConditionalReadNotModified(w http.ResponseWriter, r *http.Request, version int, lastUpdated time.Time) bool {
+	if r == nil {
+		return false
+	}
+	if inmVals := r.Header.Values("If-None-Match"); len(inmVals) > 0 {
+		for _, rawHeader := range inmVals {
+			for cand := range strings.SplitSeq(rawHeader, ",") {
+				cand = strings.TrimSpace(cand)
+				if cand == "" {
+					continue
+				}
+				if cand == "*" {
+					w.WriteHeader(http.StatusNotModified)
+					return true
+				}
+				if v, err := postgres.ParseETagVersion(cand); err == nil && v == version {
+					w.WriteHeader(http.StatusNotModified)
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	if ims := strings.TrimSpace(r.Header.Get("If-Modified-Since")); ims != "" && !lastUpdated.IsZero() {
+		imsTime, ok := parseConditionalReadTime(ims)
+		if ok {
+			resUTC := lastUpdated.UTC()
+			imsUTC := imsTime.UTC()
+			if imsUTC.Nanosecond() == 0 {
+				resUTC = resUTC.Truncate(time.Second)
+			}
+			if !resUTC.After(imsUTC) {
+				w.WriteHeader(http.StatusNotModified)
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func parseConditionalReadTime(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if t, err := http.ParseTime(raw); err == nil {
+		return t, true
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, time.RFC1123Z, "2006-01-02"} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // handleVRead handles GET /{resourceType}/{id}/_history/{vid} — read a specific historical version.
@@ -656,8 +721,13 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+	if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
+		return
+	}
 	w.WriteHeader(http.StatusOK)
-	w.Write(jsonBytes)
+	if r.Method != http.MethodHead {
+		w.Write(jsonBytes)
+	}
 }
 
 // handleInstanceHistory handles GET /{resourceType}/{id}/_history, GET /{resourceType}/_history,
@@ -814,7 +884,9 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(bundle)
+	if r == nil || r.Method != http.MethodHead {
+		json.NewEncoder(w).Encode(bundle)
+	}
 }
 
 // handleCreate handles POST /{resourceType} — create a FHIR resource.
@@ -1558,7 +1630,9 @@ func (s *Server) handleSearchAuditEvents(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(bundle)
+	if r == nil || r.Method != http.MethodHead {
+		json.NewEncoder(w).Encode(bundle)
+	}
 }
 
 // handlePatientEverything handles GET/POST /{tenant}/{resourceType}/{id}/$everything — assemble full Patient or Encounter compartment Bundle.
@@ -1938,6 +2012,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	params := postgres.BuildSearchParamsFromQuery(tenant, resType, q)
+	if err := s.expandTerminologySearchParams(r.Context(), tenant, &params); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
 
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
 	if hasSecCtx {
@@ -2195,7 +2273,9 @@ func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Req
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(bundle)
+	if r == nil || r.Method != http.MethodHead {
+		json.NewEncoder(w).Encode(bundle)
+	}
 }
 
 func (s *Server) buildSearchBundleLinks(r *http.Request, sr *postgres.SearchResults, params postgres.SearchParams) []map[string]string {
@@ -2527,6 +2607,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			"readHistory":       true,
 			"updateCreate":      true,
 			"conditionalCreate": true,
+			"conditionalRead":   "full-support",
 			"conditionalUpdate": true,
 			"conditionalPatch":  true,
 			"conditionalDelete": "single",
@@ -2600,6 +2681,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		"readHistory":       true,
 		"updateCreate":      true,
 		"conditionalCreate": true,
+		"conditionalRead":   "full-support",
 		"conditionalUpdate": true,
 		"conditionalPatch":  true,
 		"conditionalDelete": "single",
@@ -2646,6 +2728,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			"readHistory":       true,
 			"updateCreate":      true,
 			"conditionalCreate": true,
+			"conditionalRead":   "full-support",
 			"conditionalUpdate": true,
 			"conditionalPatch":  true,
 			"conditionalDelete": "single",

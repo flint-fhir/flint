@@ -40,14 +40,14 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Conditional Operations & Bundles",
-			Capability:    "Conditional Create (If-None-Exist), Conditional Update, Conditional Patch, Conditional Delete (single & _count multiple), Intra-Bundle Conditional References, Prefer Header (return=minimal|representation|OperationOutcome, respond-async) & Atomic ACID Transaction / Batch Bundles (DELETE -> POST -> PUT/PATCH -> GET)",
+			Capability:    "Conditional Read (If-None-Match / If-Modified-Since -> 304 Not Modified & HEAD), Conditional Create (If-None-Exist), Conditional Update, Conditional Patch, Conditional Delete (single & _count multiple), Intra-Bundle Conditional References, Prefer Header (return=minimal|representation|OperationOutcome, respond-async) & Atomic ACID Transaction / Batch Bundles (DELETE -> POST -> PUT/PATCH -> GET/HEAD)",
 			Specification: "HL7 FHIR R4 Bundle & Conditional Operations",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/{resourceType}?identifier=...",
 		},
 		{
 			Category:      "Advanced Search Engine",
-			Capability:    "Date/Quantity Ranges, Composite Search (code-value-quantity, component-code-value-quantity), Multi-Hop Chained Search (:exact/:contains/:not, reference & URI :below/:above), _has Reverse Chaining, _list Cohort Search, _profile / _tag / _security / _source Meta Search, _include / _revinclude (:iterate), Choice-Type :missing, Multi-field _sort, _summary / _elements (SUBSETTED), _total=none, Bundle.link Pagination, POST /_search",
+			Capability:    "Date/Quantity Ranges, Composite Search (code-value-quantity, component-code-value-quantity), Terminology-Aware Modifiers (:in, :not-in, :below, :above), Reference :identifier Modifier (spidx_reference + inline Reference.identifier), Multi-Hop Chained Search (:exact/:contains/:not, reference & URI :below/:above), _has Reverse Chaining, _list Cohort Search, _profile / _tag / _security / _source Meta Search, _include / _revinclude (:iterate), Choice-Type :missing, Multi-field _sort, _summary / _elements (SUBSETTED), _total=none, Bundle.link Pagination, POST /_search",
 			Specification: "HL7 FHIR R4 Search",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/{resourceType}?_include=...",
@@ -1873,15 +1873,18 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		paths["/"+rt+"/{id}"] = map[string]any{
 			"get": map[string]any{
 				"tags":        []string{rt},
-				"summary":     fmt.Sprintf("Read %s by ID", rt),
+				"summary":     fmt.Sprintf("Read %s by ID (supports If-None-Match and If-Modified-Since conditional read)", rt),
 				"operationId": "read" + rt,
 				"parameters": []map[string]any{
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "If-None-Match", "in": "header", "required": false, "description": `Expected version ETag (e.g. W/"1" or *) for conditional read`, "schema": map[string]any{"type": "string"}},
+					{"name": "If-Modified-Since", "in": "header", "required": false, "description": "HTTP-date or RFC3339 timestamp for conditional read", "schema": map[string]any{"type": "string"}},
 					{"name": "_summary", "in": "query", "required": false, "description": "Summary projection mode (true, text, data, false)", "schema": map[string]any{"type": "string"}},
 					{"name": "_elements", "in": "query", "required": false, "description": "Comma-separated top-level elements to project", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
-					"200": map[string]any{"description": rt + " resource with weak ETag header"},
+					"200": map[string]any{"description": rt + " resource with weak ETag and Last-Modified headers"},
+					"304": map[string]any{"description": "Not Modified (Conditional Read satisfied)"},
 					"404": map[string]any{"description": "Not found"},
 					"410": map[string]any{"description": "Soft-deleted tombstone"},
 				},

@@ -190,7 +190,7 @@ func ClassifyHTTPInteraction(method string, parts []string, statusCode int) (act
 	}
 
 	switch method {
-	case http.MethodGet:
+	case http.MethodGet, http.MethodHead:
 		if len(parts) >= 7 && parts[5] == "_history" {
 			return ActionRead, "vread", resType, parts[4], parts[6]
 		}

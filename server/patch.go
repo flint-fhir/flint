@@ -303,6 +303,10 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 			"conditional update requires at least one search parameter in the query string")
 		return
 	}
+	if err := s.expandTerminologySearchParams(r.Context(), tenant, &condParams); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
 
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
 	if hasSecCtx && auth.IsPatientRestricted(secCtx) {
@@ -488,6 +492,10 @@ func (s *Server) handleConditionalPatch(w http.ResponseWriter, r *http.Request) 
 			"conditional patch requires at least one search parameter in the query string")
 		return
 	}
+	if err := s.expandTerminologySearchParams(r.Context(), tenant, &condParams); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
 
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
 	if hasSecCtx && auth.IsPatientRestricted(secCtx) {
@@ -558,6 +566,10 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 	if !postgres.HasSearchCriteria(condParams) {
 		writeOperationOutcome(w, http.StatusBadRequest, "required",
 			"conditional delete requires at least one search parameter in the query string")
+		return
+	}
+	if err := s.expandTerminologySearchParams(r.Context(), tenant, &condParams); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
 

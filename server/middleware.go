@@ -118,7 +118,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 			if !isBulkExportOp {
 				switch r.Method {
-				case http.MethodGet:
+				case http.MethodGet, http.MethodHead:
 					if isTerminologyOp(parts) {
 						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionSearch) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
@@ -799,9 +799,9 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 			arw.statusCode,
 		)
 
-		// Skip recording successful GET reads/searches on AuditEvent itself to prevent
+		// Skip recording successful GET/HEAD reads/searches on AuditEvent itself to prevent
 		// self-referential audit log inflation while still auditing 401/403 attempts.
-		if entityType == "AuditEvent" && r.Method == http.MethodGet && arw.statusCode < 400 {
+		if entityType == "AuditEvent" && (r.Method == http.MethodGet || r.Method == http.MethodHead) && arw.statusCode < 400 {
 			return
 		}
 

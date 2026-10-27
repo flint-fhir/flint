@@ -320,6 +320,26 @@ func TestParseCompositeTokenQuantity(t *testing.T) {
 		assert.Equal(t, "http://loinc.org", sp.URIs["system"])
 		assert.True(t, postgres.HasSearchCriteria(sp))
 	})
+
+	t.Run("BuildSearchParamsFromQuery routes token :in, :not-in, :below, :above and reference :identifier", func(t *testing.T) {
+		q := map[string][]string{
+			"code:in":            {"http://hl7.org/fhir/ValueSet/observation-vitalsignresult"},
+			"status:not-in":      {"http://hl7.org/fhir/ValueSet/administrative-gender"},
+			"code:below":         {"http://snomed.info/sct|73211009"},
+			"code:above":         {"http://snomed.info/sct|44054006"},
+			"patient:identifier": {"http://hospital.example.org/mrn|MRN-001"},
+			"_profile:below":     {"http://hl7.org/fhir/us/core/StructureDefinition/"},
+		}
+		require.NoError(t, postgres.ValidateSearchQuery(q))
+		sp := postgres.BuildSearchParamsFromQuery("t1", "Observation", q)
+		assert.Equal(t, "http://hl7.org/fhir/ValueSet/observation-vitalsignresult", sp.Tokens["code:in"])
+		assert.Equal(t, "http://hl7.org/fhir/ValueSet/administrative-gender", sp.Tokens["status:not-in"])
+		assert.Equal(t, "http://snomed.info/sct|73211009", sp.Tokens["code:below"])
+		assert.Equal(t, "http://snomed.info/sct|44054006", sp.Tokens["code:above"])
+		assert.Equal(t, "http://hospital.example.org/mrn|MRN-001", sp.References["patient:identifier"])
+		assert.Equal(t, "http://hl7.org/fhir/us/core/StructureDefinition/", sp.URIs["_profile:below"])
+		assert.True(t, postgres.HasSearchCriteria(sp))
+	})
 }
 
 func TestTenantIsolationConfiguration(t *testing.T) {

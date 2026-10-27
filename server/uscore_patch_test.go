@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -1378,5 +1379,333 @@ func TestWave8FHIRPathPatchAndConditionalOps(t *testing.T) {
 	evParamsJSON, _ := json.Marshal(evGet["parameters"])
 	if !strings.Contains(string(evParamsJSON), `"_typeFilter"`) {
 		t.Errorf("expected OpenAPI /Patient/{id}/$everything to advertise _typeFilter parameter, got %s", evParamsJSON)
+	}
+}
+
+func TestWave9TerminologyModifiersReferenceIdentifierAndConditionalRead(t *testing.T) {
+	srv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(srv)
+	h := srv.Handler()
+
+	// 1. Verify ExpandTerminologySearchParams expands :in, :not-in, :below, and :above
+	q := map[string][]string{
+		"gender:in":             {"http://hl7.org/fhir/ValueSet/administrative-gender"},
+		"status:not-in":         {"http://hl7.org/fhir/ValueSet/administrative-gender"},
+		"code:below":            {"http://snomed.info/sct|73211009"},
+		"component-code:below":  {"http://loinc.org|85354-9"},
+		"clinical-status:above": {"http://terminology.hl7.org/CodeSystem/condition-clinical|recurrence"},
+		"subject:Patient.gender:in": {
+			"http://hl7.org/fhir/ValueSet/administrative-gender",
+		},
+	}
+	params := postgres.BuildSearchParamsFromQuery("t1", "Observation", q)
+	if err := srv.ExpandTerminologySearchParams(context.Background(), "t1", &params); err != nil {
+		t.Fatalf("ExpandTerminologySearchParams failed: %v", err)
+	}
+
+	// gender:in should expand into TokenFilters["gender"] containing administrative-gender codes
+	genderExpanded := strings.Join(params.TokenFilters["gender"], ",")
+	for _, expectedCode := range []string{
+		"http://hl7.org/fhir/administrative-gender|female",
+		"http://hl7.org/fhir/administrative-gender|male",
+		"http://hl7.org/fhir/administrative-gender|other",
+		"http://hl7.org/fhir/administrative-gender|unknown",
+	} {
+		if !strings.Contains(genderExpanded, expectedCode) {
+			t.Errorf("expected gender:in expansion to include %s, got %s", expectedCode, genderExpanded)
+		}
+	}
+	if _, stillHasIn := params.TokenFilters["gender:in"]; stillHasIn {
+		t.Errorf("expected gender:in key to be rewritten to gender")
+	}
+
+	// status:not-in should expand into TokenFilters["status:not"]
+	statusNotExpanded := strings.Join(params.TokenFilters["status:not"], ",")
+	if !strings.Contains(statusNotExpanded, "http://hl7.org/fhir/administrative-gender|female") {
+		t.Errorf("expected status:not-in expansion to populate status:not, got %s", statusNotExpanded)
+	}
+
+	// code:below=http://snomed.info/sct|73211009 (Diabetes mellitus) should include 73211009 and child 44054006 (Type 2 diabetes mellitus)
+	snomedBelow := strings.Join(params.TokenFilters["code"], ",")
+	if !strings.Contains(snomedBelow, "http://snomed.info/sct|73211009") || !strings.Contains(snomedBelow, "http://snomed.info/sct|44054006") {
+		t.Errorf("expected code:below=http://snomed.info/sct|73211009 to include 73211009 and 44054006, got %s", snomedBelow)
+	}
+
+	// component-code:below=http://loinc.org|85354-9 (Blood pressure panel) should include 85354-9, 8480-6 (Systolic), and 8462-4 (Diastolic)
+	loincBelow := strings.Join(params.TokenFilters["component-code"], ",")
+	if !strings.Contains(loincBelow, "http://loinc.org|85354-9") ||
+		!strings.Contains(loincBelow, "http://loinc.org|8480-6") ||
+		!strings.Contains(loincBelow, "http://loinc.org|8462-4") {
+		t.Errorf("expected component-code:below=http://loinc.org|85354-9 to include 85354-9, 8480-6, 8462-4, got %s", loincBelow)
+	}
+
+	// clinical-status:above=recurrence should include recurrence and ancestor active
+	clinAbove := strings.Join(params.TokenFilters["clinical-status"], ",")
+	if !strings.Contains(clinAbove, "http://terminology.hl7.org/CodeSystem/condition-clinical|recurrence") ||
+		!strings.Contains(clinAbove, "http://terminology.hl7.org/CodeSystem/condition-clinical|active") {
+		t.Errorf("expected clinical-status:above=recurrence to include recurrence and active, got %s", clinAbove)
+	}
+
+	// Chained subject:Patient.gender:in should rewrite TargetParam from gender:in to gender
+	if len(params.Chained) != 1 || params.Chained[0].TargetParam != "gender" || !strings.Contains(params.Chained[0].Value, "female") {
+		t.Errorf("expected chained subject:Patient.gender:in to expand to TargetParam=gender with female, got %+v", params.Chained)
+	}
+
+	// Unknown ValueSet on :in must return an error
+	badParams := postgres.BuildSearchParamsFromQuery("t1", "Observation", map[string][]string{
+		"code:in": {"http://example.org/fhir/ValueSet/does-not-exist"},
+	})
+	if err := srv.ExpandTerminologySearchParams(context.Background(), "t1", &badParams); err == nil {
+		t.Errorf("expected error for unknown ValueSet in :in modifier")
+	}
+
+	// 2. Verify extractors index inline Reference.identifier tokens under <spName>:identifier
+	obsWithInlineRefIdent := []byte(`{
+		"resourceType": "Observation",
+		"id": "obs-inline-ref-1",
+		"status": "final",
+		"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+		"subject": {
+			"type": "Patient",
+			"identifier": {
+				"system": "http://hospital.example.org/mrn",
+				"value": "MRN-INLINE-999"
+			}
+		}
+	}`)
+	var obsIdx *postgres.SearchIndexes
+	// Use dynamic extractor via ExtractDynamicResource or ExtractObservation
+	md, ok := fhirutil.AllR4ResourceDescriptors()["Observation"]
+	if !ok {
+		t.Fatalf("Observation descriptor not found")
+	}
+	normBytes, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, obsWithInlineRefIdent)
+	if err != nil {
+		t.Fatalf("normalize Observation: %v", err)
+	}
+	dynMsg := dynamicpb.NewMessage(md)
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(normBytes, dynMsg); err != nil {
+		t.Fatalf("unmarshal Observation proto: %v", err)
+	}
+	protoBytes, err := proto.Marshal(dynMsg)
+	if err != nil {
+		t.Fatalf("marshal Observation proto: %v", err)
+	}
+	obsIdx, err = postgres.ExtractObservation("t1", "obs-inline-ref-1", protoBytes)
+	if err != nil {
+		t.Fatalf("ExtractObservation failed: %v", err)
+	}
+	hasSubjectIdentToken := false
+	hasPatientIdentToken := false
+	for _, tok := range obsIdx.Tokens {
+		if tok.SpName == "subject:identifier" && tok.SpSystem == "http://hospital.example.org/mrn" && tok.SpValue == "MRN-INLINE-999" {
+			hasSubjectIdentToken = true
+		}
+		if tok.SpName == "patient:identifier" && tok.SpSystem == "http://hospital.example.org/mrn" && tok.SpValue == "MRN-INLINE-999" {
+			hasPatientIdentToken = true
+		}
+	}
+	if !hasSubjectIdentToken || !hasPatientIdentToken {
+		t.Errorf("expected ExtractObservation to index subject:identifier and patient:identifier tokens, got %+v", obsIdx.Tokens)
+	}
+
+	// 3. Verify CapabilityStatement and OpenAPI 3.1.0 declare conditionalRead: full-support and If-None-Match / If-Modified-Since / 304
+	metaReq := httptest.NewRequest(http.MethodHead, "/fhir/r4/t1/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	h.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from HEAD /metadata, got %d", metaRec.Code)
+	}
+
+	metaGetReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/t1/metadata", nil)
+	metaGetRec := httptest.NewRecorder()
+	h.ServeHTTP(metaGetRec, metaGetReq)
+	if !strings.Contains(metaGetRec.Body.String(), `"conditionalRead":"full-support"`) {
+		t.Errorf("expected CapabilityStatement to declare conditionalRead:full-support")
+	}
+
+	oaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/t1/openapi.json", nil)
+	oaRec := httptest.NewRecorder()
+	h.ServeHTTP(oaRec, oaReq)
+	oaStr := oaRec.Body.String()
+	for _, expected := range []string{`"If-None-Match"`, `"If-Modified-Since"`, `"304"`} {
+		if !strings.Contains(oaStr, expected) {
+			t.Errorf("expected OpenAPI spec to contain %s", expected)
+		}
+	}
+
+	// 4. End-to-End Postgres verification for Conditional Read, HEAD, Bundle ifNoneMatch/ifModifiedSince,
+	//    Terminology Search Modifiers (:in, :not-in, :below, :above), and Reference :identifier
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+	tenant := "test-wave9-e2e"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// Seed a Patient, Condition (Type 2 diabetes mellitus 44054006, recurrence), and two Observations (one with reference, one with inline Reference.identifier)
+	seedBundle := `{
+		"resourceType": "Bundle",
+		"type": "transaction",
+		"entry": [
+			{
+				"resource": {
+					"resourceType": "Patient",
+					"id": "pat-w9-1",
+					"active": true,
+					"gender": "female",
+					"name": [{"family": "WaveNine", "given": ["Ada"]}],
+					"identifier": [{"system": "http://hospital.example.org/mrn", "value": "MRN-W9-001"}]
+				},
+				"request": {"method": "PUT", "url": "Patient/pat-w9-1"}
+			},
+			{
+				"resource": {
+					"resourceType": "Condition",
+					"id": "cond-w9-1",
+					"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "recurrence"}]},
+					"verificationStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"}]},
+					"code": {"coding": [{"system": "http://snomed.info/sct", "code": "44054006"}]},
+					"subject": {"reference": "Patient/pat-w9-1"}
+				},
+				"request": {"method": "PUT", "url": "Condition/cond-w9-1"}
+			},
+			{
+				"resource": {
+					"resourceType": "Observation",
+					"id": "obs-w9-inline",
+					"status": "final",
+					"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+					"subject": {
+						"type": "Patient",
+						"identifier": {"system": "http://hospital.example.org/mrn", "value": "MRN-W9-INLINE"}
+					},
+					"valueQuantity": {"value": 74.0, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+				},
+				"request": {"method": "PUT", "url": "Observation/obs-w9-inline"}
+			}
+		]
+	}`
+	seedReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant, strings.NewReader(seedBundle))
+	seedReq.Header.Set("Content-Type", "application/fhir+json")
+	seedRec := httptest.NewRecorder()
+	pgH.ServeHTTP(seedRec, seedReq)
+	if seedRec.Code != http.StatusOK {
+		t.Fatalf("seed bundle failed (%d): %s", seedRec.Code, seedRec.Body.String())
+	}
+
+	// 4a. Read Patient to capture ETag and Last-Modified, then verify 304 Not Modified on If-None-Match and If-Modified-Since
+	readReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w9-1", nil)
+	readRec := httptest.NewRecorder()
+	pgH.ServeHTTP(readRec, readReq)
+	if readRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on GET /Patient/pat-w9-1, got %d", readRec.Code)
+	}
+	etag := readRec.Header().Get("ETag")
+	lastMod := readRec.Header().Get("Last-Modified")
+
+	inmReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w9-1", nil)
+	inmReq.Header.Set("If-None-Match", etag)
+	inmRec := httptest.NewRecorder()
+	pgH.ServeHTTP(inmRec, inmReq)
+	if inmRec.Code != http.StatusNotModified || inmRec.Body.Len() != 0 {
+		t.Errorf("expected 304 Not Modified with empty body on matching If-None-Match, got %d body=%q", inmRec.Code, inmRec.Body.String())
+	}
+
+	imsReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w9-1", nil)
+	imsReq.Header.Set("If-Modified-Since", lastMod)
+	imsRec := httptest.NewRecorder()
+	pgH.ServeHTTP(imsRec, imsReq)
+	if imsRec.Code != http.StatusNotModified || imsRec.Body.Len() != 0 {
+		t.Errorf("expected 304 Not Modified with empty body on matching If-Modified-Since, got %d body=%q", imsRec.Code, imsRec.Body.String())
+	}
+
+	headReq := httptest.NewRequest(http.MethodHead, "/fhir/r4/"+tenant+"/Patient/pat-w9-1", nil)
+	headRec := httptest.NewRecorder()
+	pgH.ServeHTTP(headRec, headReq)
+	if headRec.Code != http.StatusOK || headRec.Header().Get("ETag") != etag || headRec.Body.Len() != 0 {
+		t.Errorf("expected 200 OK with ETag and empty body on HEAD /Patient/pat-w9-1, got %d etag=%q len=%d", headRec.Code, headRec.Header().Get("ETag"), headRec.Body.Len())
+	}
+
+	// 4b. Verify Batch Bundle with ifNoneMatch (304) and HEAD (200)
+	batchCondRead := `{
+		"resourceType": "Bundle",
+		"type": "batch",
+		"entry": [
+			{
+				"request": {
+					"method": "GET",
+					"url": "Patient/pat-w9-1",
+					"ifNoneMatch": ` + "`" + `"` + strings.ReplaceAll(etag, `"`, `\"`) + `"` + "`" + `
+				}
+			},
+			{
+				"request": {
+					"method": "HEAD",
+					"url": "Patient/pat-w9-1"
+				}
+			}
+		]
+	}`
+	// Build valid JSON with json.Marshal to avoid quote escaping issues
+	batchPayloadBytes, _ := json.Marshal(map[string]any{
+		"resourceType": "Bundle",
+		"type":         "batch",
+		"entry": []any{
+			map[string]any{
+				"request": map[string]any{
+					"method":      "GET",
+					"url":         "Patient/pat-w9-1",
+					"ifNoneMatch": etag,
+				},
+			},
+			map[string]any{
+				"request": map[string]any{
+					"method": "HEAD",
+					"url":    "Patient/pat-w9-1",
+				},
+			},
+		},
+	})
+	_ = batchCondRead
+	bReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant, strings.NewReader(string(batchPayloadBytes)))
+	bReq.Header.Set("Content-Type", "application/fhir+json")
+	bRec := httptest.NewRecorder()
+	pgH.ServeHTTP(bRec, bReq)
+	if bRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from batch bundle, got %d: %s", bRec.Code, bRec.Body.String())
+	}
+	if !strings.Contains(bRec.Body.String(), `"304 Not Modified"`) {
+		t.Errorf("expected batch response entry[0] to have status '304 Not Modified', got: %s", bRec.Body.String())
+	}
+
+	// 4c. Verify Condition search with code:below=http://snomed.info/sct|73211009 (parent of 44054006)
+	//     and patient:identifier=http://hospital.example.org/mrn|MRN-W9-001
+	condSearchReq := httptest.NewRequest(http.MethodGet,
+		"/fhir/r4/"+tenant+"/Condition?code:below=http://snomed.info/sct|73211009&clinical-status:below=http://terminology.hl7.org/CodeSystem/condition-clinical|active&patient:identifier=http://hospital.example.org/mrn|MRN-W9-001",
+		nil)
+	condSearchRec := httptest.NewRecorder()
+	pgH.ServeHTTP(condSearchRec, condSearchReq)
+	if condSearchRec.Code != http.StatusOK || !strings.Contains(condSearchRec.Body.String(), `"cond-w9-1"`) {
+		t.Errorf("expected Condition search with :below and patient:identifier to match cond-w9-1, got %d: %s", condSearchRec.Code, condSearchRec.Body.String())
+	}
+
+	// 4d. Verify Observation search with inline logical Reference.identifier (subject:identifier=MRN-W9-INLINE) and code:in
+	obsSearchReq := httptest.NewRequest(http.MethodGet,
+		"/fhir/r4/"+tenant+"/Observation?subject:identifier=http://hospital.example.org/mrn|MRN-W9-INLINE&code:in=http://hl7.org/fhir/ValueSet/observation-vitalsignresult",
+		nil)
+	obsSearchRec := httptest.NewRecorder()
+	pgH.ServeHTTP(obsSearchRec, obsSearchReq)
+	if obsSearchRec.Code != http.StatusOK || !strings.Contains(obsSearchRec.Body.String(), `"obs-w9-inline"`) {
+		t.Errorf("expected Observation search with inline subject:identifier and code:in to match obs-w9-inline, got %d: %s", obsSearchRec.Code, obsSearchRec.Body.String())
 	}
 }
