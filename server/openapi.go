@@ -1373,6 +1373,81 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/$import": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Bulk Data ($export)"},
+				"summary":     "HL7 Bulk Data Access NDJSON Import ($import — synchronous OperationOutcome or Prefer: respond-async 202 job)",
+				"operationId": "systemBulkImport",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OperationOutcome summarizing imported FHIR resources"},
+					"202": map[string]any{"description": "Async import job accepted (Content-Location polling URL)"},
+				},
+			},
+		},
+		"/$import-poll/{jobId}": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Bulk Data ($export)"},
+				"summary":     "Poll Bulk Data Import Job Status & Manifest",
+				"operationId": "pollBulkImportJob",
+				"parameters": []map[string]any{
+					{"name": "jobId", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "BulkImportManifest JSON"},
+				},
+			},
+			"delete": map[string]any{
+				"tags":        []string{"Bulk Data ($export)"},
+				"summary":     "Cancel / Delete Bulk Data Import Job",
+				"operationId": "cancelBulkImportJob",
+				"parameters": []map[string]any{
+					{"name": "jobId", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"202": map[string]any{"description": "Import job deleted"},
+				},
+			},
+		},
+		"/Patient/{id}/$purge": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "Purge a Patient and all clinical resources in their Patient compartment ($purge)",
+				"operationId": "patientPurge",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "expunge", "in": "query", "required": false, "description": "Physically remove resources, history, and indexes when true", "schema": map[string]any{"type": "boolean"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OperationOutcome summarizing purged compartment resources"},
+					"404": map[string]any{"description": "Patient not found"},
+				},
+			},
+		},
+		"/$expunge": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"System Operations"},
+				"summary":     "Physically expunge soft-deleted resources and/or historical versions across the tenant ($expunge)",
+				"operationId": "systemExpunge",
+				"parameters": []map[string]any{
+					{"name": "expungeDeletedResources", "in": "query", "required": false, "schema": map[string]any{"type": "boolean"}},
+					{"name": "expungePreviousVersions", "in": "query", "required": false, "schema": map[string]any{"type": "boolean"}},
+					{"name": "expungeEverything", "in": "query", "required": false, "schema": map[string]any{"type": "boolean"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OperationOutcome summarizing expunged records"},
+				},
+			},
+		},
+		"/$diff": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"System Operations"},
+				"summary":     "Compute structural FHIR Parameters diff between two inline FHIR resources ($diff)",
+				"operationId": "systemDiff",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters patch document"},
+				},
+			},
+		},
 		"/Patient/$match": map[string]any{
 			"post": map[string]any{
 				"tags":        []string{"Patient"},
@@ -1916,6 +1991,70 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "OperationOutcome validation result"},
+				},
+			},
+		}
+
+		paths["/"+rt+"/$diff"] = map[string]any{
+			"post": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Compute structural FHIR Parameters diff between two %s resources ($diff)", rt),
+				"operationId": "typeDiff" + rt,
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters patch document"},
+				},
+			},
+		}
+
+		paths["/"+rt+"/{id}/$diff"] = map[string]any{
+			"get": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Compare historical versions of %s/{id} and return a FHIR Parameters patch ($diff)", rt),
+				"operationId": "instanceDiffGet" + rt,
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "fromVersion", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "version", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters patch document"},
+					"404": map[string]any{"description": rt + " or version not found"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Compare historical versions of %s/{id} ($diff, POST Parameters)", rt),
+				"operationId": "instanceDiffPost" + rt,
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters patch document"},
+				},
+			},
+		}
+
+		paths["/"+rt+"/$expunge"] = map[string]any{
+			"post": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Physically expunge soft-deleted %s resources and/or historical versions ($expunge)", rt),
+				"operationId": "typeExpunge" + rt,
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OperationOutcome summarizing expunged records"},
+				},
+			},
+		}
+
+		paths["/"+rt+"/{id}/$expunge"] = map[string]any{
+			"post": map[string]any{
+				"tags":        []string{rt},
+				"summary":     fmt.Sprintf("Physically expunge %s/{id} versions or deleted state ($expunge)", rt),
+				"operationId": "instanceExpunge" + rt,
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OperationOutcome summarizing expunged records"},
 				},
 			},
 		}

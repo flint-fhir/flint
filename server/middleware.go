@@ -110,7 +110,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// Check SMART scopes based on request shape
 		if len(parts) >= 4 {
 			resType := parts[3]
-			isBulkExportOp := resType == "$export" || resType == "$export-poll" || resType == "$export-file" || resType == "$certify" ||
+			isBulkExportOp := resType == "$export" || resType == "$export-poll" || resType == "$export-file" ||
+				resType == "$import" || resType == "$import-poll" || resType == "$certify" ||
 				(strings.EqualFold(resType, "Patient") && len(parts) == 5 && parts[4] == "$export") ||
 				(strings.EqualFold(resType, "Patient") && len(parts) == 6 && parts[5] == "$export") ||
 				(strings.EqualFold(resType, "Group") && len(parts) == 6 && parts[5] == "$export")
@@ -435,6 +436,69 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								"insufficient scope for Subscription/$status")
 							return
+						}
+					} else if len(parts) == 6 && strings.EqualFold(resType, "Patient") && parts[5] == "$purge" {
+						id := parts[4]
+						if !auth.Allows(secCtx, "Patient", auth.ActionDelete) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Patient/$purge (requires Patient delete scope)")
+							return
+						}
+						if auth.IsPatientRestricted(secCtx) && cleanID(id) != cleanID(secCtx.GetPatientId()) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("patient-scoped token (%s) cannot purge patient %s",
+									secCtx.GetPatientId(), id))
+							return
+						}
+					} else if resType == "$expunge" || (len(parts) == 5 && parts[4] == "$expunge") || (len(parts) == 6 && parts[5] == "$expunge") {
+						if auth.IsPatientRestricted(secCtx) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"patient-scoped tokens cannot invoke $expunge")
+							return
+						}
+						targetType := resType
+						if resType == "$expunge" {
+							targetType = "*"
+						}
+						if !auth.Allows(secCtx, targetType, auth.ActionDelete) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("insufficient scope for $expunge on %s (requires delete scope)", targetType))
+							return
+						}
+					} else if resType == "$diff" || (len(parts) == 5 && parts[4] == "$diff") || (len(parts) == 6 && parts[5] == "$diff") {
+						if resType == "$diff" {
+							if len(secCtx.GetScopes()) == 0 {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for $diff")
+								return
+							}
+						} else {
+							if !auth.Allows(secCtx, resType, auth.ActionRead) {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("insufficient scope for $diff on %s", resType))
+								return
+							}
+							if len(parts) == 6 && auth.IsPatientRestricted(secCtx) {
+								id := parts[4]
+								if strings.EqualFold(resType, "Patient") && cleanID(id) != cleanID(secCtx.GetPatientId()) {
+									writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+										fmt.Sprintf("patient-scoped token (%s) cannot access $diff for patient %s",
+											secCtx.GetPatientId(), id))
+									return
+								}
+								if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+									exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
+									if err != nil {
+										writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+										return
+									}
+									if exists && !allowed {
+										writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+											fmt.Sprintf("patient-scoped token (%s) cannot access $diff for %s/%s outside patient compartment",
+												secCtx.GetPatientId(), resType, id))
+										return
+									}
+								}
+							}
 						}
 					} else if resType == "$validate" {
 						// System-level validate: POST /{tenant}/$validate

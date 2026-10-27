@@ -72,6 +72,8 @@ type Server struct {
 	cdcPublisher               automq.Publisher
 	exportMu                   sync.RWMutex
 	exportJobs                 map[string]*exportJob
+	importMu                   sync.RWMutex
+	importJobs                 map[string]*importJob
 	subSem                     chan struct{}
 	subStatsMu                 sync.RWMutex
 	subStats                   map[string]*subscriptionDeliveryStats
@@ -246,6 +248,13 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/{id}/$export", s.handleSinglePatientExport)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$export-poll/{jobId}", s.handleExportPoll)
 	mux.HandleFunc("DELETE /fhir/r4/{tenant}/$export-poll/{jobId}", s.handleExportCancel)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$import", s.handleBulkImport)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$import-poll/{jobId}", s.handleImportPoll)
+	mux.HandleFunc("DELETE /fhir/r4/{tenant}/$import-poll/{jobId}", s.handleImportCancel)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$expunge", s.handleExpunge)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$expunge", s.handleExpunge)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$diff", s.handleDiff)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$diff", s.handleDiff)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$certify", s.handleCertify)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$certify", s.handleCertify)
 
@@ -391,6 +400,27 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("resourceType", parts[3])
 					r.SetPathValue("id", parts[4])
 					s.handleValidate(w, r)
+					return
+				}
+				if parts[5] == "$diff" && !strings.HasPrefix(parts[3], "$") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					r.SetPathValue("id", parts[4])
+					s.handleDiff(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && parts[5] == "$expunge" && !strings.HasPrefix(parts[3], "$") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					r.SetPathValue("id", parts[4])
+					s.handleExpunge(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[5] == "$purge" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", "Patient")
+					r.SetPathValue("id", parts[4])
+					s.handlePatientPurge(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "Subscription") && parts[5] == "$status" {
@@ -2442,6 +2472,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					"name":       "export",
 					"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/patient-export",
 				},
+				{
+					"name":       "purge",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Patient-purge",
+				},
 			}
 		case "Encounter":
 			entry["operation"] = []map[string]string{
@@ -2738,6 +2772,22 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "export",
 						"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/export",
+					},
+					{
+						"name":       "import",
+						"definition": "http://hl7.org/fhir/uv/bulkdata/OperationDefinition/import",
+					},
+					{
+						"name":       "purge",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Patient-purge",
+					},
+					{
+						"name":       "expunge",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Resource-expunge",
+					},
+					{
+						"name":       "diff",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Resource-diff",
 					},
 					{
 						"name":       "expand",

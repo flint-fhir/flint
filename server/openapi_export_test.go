@@ -721,6 +721,124 @@ func TestServer_BulkExport(t *testing.T) {
 			t.Errorf("expected 200 OK on base instance GET /Patient/exp-pat-1/$validate, got %d", respBaseVal.StatusCode)
 		}
 	})
+
+	t.Run("Wave 7 Bulk Data $import, instance $diff, Patient/$purge compartment erasure, and $expunge", func(t *testing.T) {
+		// 1. Bulk $import (Parameters with inline NDJSON content + async Prefer: respond-async)
+		importParams := `{
+			"resourceType": "Parameters",
+			"parameter": [
+				{"name": "inputFormat", "valueCode": "application/fhir+ndjson"},
+				{
+					"name": "input",
+					"part": [
+						{"name": "type", "valueCode": "Patient"},
+						{"name": "content", "valueString": "{\"resourceType\":\"Patient\",\"id\":\"imp-pat-1\",\"active\":true,\"gender\":\"male\",\"birthDate\":\"1975-03-10\",\"name\":[{\"family\":\"ImportFamily\",\"given\":[\"Ian\"]}]}"}
+					]
+				},
+				{
+					"name": "input",
+					"part": [
+						{"name": "type", "valueCode": "Observation"},
+						{"name": "content", "valueString": "{\"resourceType\":\"Observation\",\"id\":\"imp-obs-1\",\"status\":\"final\",\"code\":{\"coding\":[{\"system\":\"http://loinc.org\",\"code\":\"8867-4\"}]},\"subject\":{\"reference\":\"Patient/imp-pat-1\"},\"performer\":[{\"reference\":\"Practitioner/exp-prac-1\"}],\"valueQuantity\":{\"value\":75,\"unit\":\"/min\",\"system\":\"http://unitsofmeasure.org\",\"code\":\"/min\"}}"}
+					]
+				}
+			]
+		}`
+		reqImp, _ := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/"+tenant+"/$import", strings.NewReader(importParams))
+		reqImp.Header.Set("Content-Type", "application/fhir+json")
+		reqImp.Header.Set("Prefer", "respond-async")
+		respImp, err := http.DefaultClient.Do(reqImp)
+		if err != nil {
+			t.Fatalf("POST /$import async: %v", err)
+		}
+		respImp.Body.Close()
+		if respImp.StatusCode != http.StatusAccepted {
+			t.Fatalf("expected 202 Accepted from async POST /$import, got %d", respImp.StatusCode)
+		}
+		impPollURL := respImp.Header.Get("Content-Location")
+		if impPollURL == "" {
+			t.Fatalf("missing Content-Location header on 202 Accepted from POST /$import")
+		}
+
+		respImpPoll, err := http.Get(impPollURL)
+		if err != nil {
+			t.Fatalf("GET $import-poll: %v", err)
+		}
+		impPollBytes, _ := io.ReadAll(respImpPoll.Body)
+		respImpPoll.Body.Close()
+		if respImpPoll.StatusCode != http.StatusOK || !strings.Contains(string(impPollBytes), `"importedCount":2`) {
+			t.Fatalf("expected 200 OK with importedCount:2 from $import-poll, got %d: %s", respImpPoll.StatusCode, string(impPollBytes))
+		}
+
+		// Delete import job via DELETE $import-poll/{jobId}
+		reqDelImp, _ := http.NewRequest(http.MethodDelete, impPollURL, nil)
+		respDelImp, err := http.DefaultClient.Do(reqDelImp)
+		if err != nil {
+			t.Fatalf("DELETE $import-poll: %v", err)
+		}
+		respDelImp.Body.Close()
+		if respDelImp.StatusCode != http.StatusAccepted {
+			t.Errorf("expected 202 Accepted on DELETE $import-poll, got %d", respDelImp.StatusCode)
+		}
+
+		// 2. Update Patient/imp-pat-1 to version 2 and run GET /Patient/imp-pat-1/$diff?fromVersion=1&version=2
+		updPat := `{"resourceType":"Patient","id":"imp-pat-1","active":true,"gender":"male","birthDate":"1975-03-15","telecom":[{"system":"phone","value":"555-0199"}],"name":[{"family":"ImportFamily","given":["Ian"]}]}`
+		reqUpd, _ := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/"+tenant+"/Patient/imp-pat-1", strings.NewReader(updPat))
+		reqUpd.Header.Set("Content-Type", "application/fhir+json")
+		respUpd, err := http.DefaultClient.Do(reqUpd)
+		if err != nil {
+			t.Fatalf("PUT Patient/imp-pat-1 v2: %v", err)
+		}
+		respUpd.Body.Close()
+
+		respDiff, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/Patient/imp-pat-1/$diff?fromVersion=1&version=2")
+		if err != nil {
+			t.Fatalf("GET /Patient/imp-pat-1/$diff: %v", err)
+		}
+		diffBytes, _ := io.ReadAll(respDiff.Body)
+		respDiff.Body.Close()
+		if respDiff.StatusCode != http.StatusOK || !strings.Contains(string(diffBytes), `"Patient.birthDate"`) || !strings.Contains(string(diffBytes), `"telecom"`) {
+			t.Fatalf("expected 200 OK Parameters diff containing Patient.birthDate and telecom, got %d: %s", respDiff.StatusCode, string(diffBytes))
+		}
+
+		// 3. POST /Patient/imp-pat-1/$purge deletes imp-pat-1 and imp-obs-1 while preserving shared Practitioner/exp-prac-1
+		respPurge, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/Patient/imp-pat-1/$purge", "application/fhir+json", nil)
+		if err != nil {
+			t.Fatalf("POST /Patient/imp-pat-1/$purge: %v", err)
+		}
+		purgeBytes, _ := io.ReadAll(respPurge.Body)
+		respPurge.Body.Close()
+		if respPurge.StatusCode != http.StatusOK || !strings.Contains(string(purgeBytes), "Purged 2 resource(s)") {
+			t.Fatalf("expected 200 OK with 'Purged 2 resource(s)' from Patient/$purge, got %d: %s", respPurge.StatusCode, string(purgeBytes))
+		}
+
+		// Verify Observation/imp-obs-1 is 410 Gone, while shared Practitioner/exp-prac-1 is still 200 OK
+		respObsGone, _ := http.Get(ts.URL + "/fhir/r4/" + tenant + "/Observation/imp-obs-1")
+		respObsGone.Body.Close()
+		if respObsGone.StatusCode != http.StatusGone {
+			t.Errorf("expected 410 Gone for purged Observation/imp-obs-1, got %d", respObsGone.StatusCode)
+		}
+		respPracOK, _ := http.Get(ts.URL + "/fhir/r4/" + tenant + "/Practitioner/exp-prac-1")
+		respPracOK.Body.Close()
+		if respPracOK.StatusCode != http.StatusOK {
+			t.Errorf("expected shared Practitioner/exp-prac-1 to remain 200 OK after Patient/$purge, got %d", respPracOK.StatusCode)
+		}
+
+		// 4. POST /$expunge physically removes soft-deleted resources so subsequent GET returns 404 Not Found
+		respExpunge, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/$expunge?expungeDeletedResources=true", "application/fhir+json", nil)
+		if err != nil {
+			t.Fatalf("POST /$expunge: %v", err)
+		}
+		respExpunge.Body.Close()
+		if respExpunge.StatusCode != http.StatusOK {
+			t.Fatalf("expected 200 OK from POST /$expunge, got %d", respExpunge.StatusCode)
+		}
+		respPat404, _ := http.Get(ts.URL + "/fhir/r4/" + tenant + "/Patient/imp-pat-1")
+		respPat404.Body.Close()
+		if respPat404.StatusCode != http.StatusNotFound {
+			t.Errorf("expected 404 Not Found after physical $expunge of Patient/imp-pat-1, got %d", respPat404.StatusCode)
+		}
+	})
 }
 
 func TestServer_ValidateUSCoreProfilesAndSubscriptionCriteria(t *testing.T) {
@@ -797,5 +915,44 @@ func TestServer_ValidateUSCoreProfilesAndSubscriptionCriteria(t *testing.T) {
 	respBadSub.Body.Close()
 	if respBadSub.StatusCode != http.StatusBadRequest {
 		t.Fatalf("expected 400 Bad Request for Subscription with unsupported criteria resourceType, got %d", respBadSub.StatusCode)
+	}
+
+	// 4. Inline POST /Patient/$diff with left and right Parameters computes FHIR Patch Operations
+	diffBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{
+				"name": "left",
+				"resource": {
+					"resourceType": "Patient",
+					"id": "pat-1",
+					"gender": "male",
+					"birthDate": "1970-01-01",
+					"deceasedBoolean": false
+				}
+			},
+			{
+				"name": "right",
+				"resource": {
+					"resourceType": "Patient",
+					"id": "pat-1",
+					"gender": "male",
+					"birthDate": "1970-01-02",
+					"active": true
+				}
+			}
+		]
+	}`
+	respDiff, err := http.Post(ts.URL+"/fhir/r4/demo/Patient/$diff", "application/fhir+json", strings.NewReader(diffBody))
+	if err != nil {
+		t.Fatalf("POST /Patient/$diff: %v", err)
+	}
+	diffBytes, _ := io.ReadAll(respDiff.Body)
+	respDiff.Body.Close()
+	if respDiff.StatusCode != http.StatusOK ||
+		!strings.Contains(string(diffBytes), `"Patient.birthDate"`) ||
+		!strings.Contains(string(diffBytes), `"Patient.deceasedBoolean"`) ||
+		!strings.Contains(string(diffBytes), `"active"`) {
+		t.Fatalf("expected 200 OK FHIR Patch Parameters with birthDate/deceasedBoolean/active operations, got %d: %s", respDiff.StatusCode, string(diffBytes))
 	}
 }
