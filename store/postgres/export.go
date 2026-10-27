@@ -73,7 +73,7 @@ func (s *Store) StreamExportResources(ctx context.Context, params ExportParams, 
 		whereConds = append(whereConds, fmt.Sprintf(`(
 			(r.res_type = 'Patient' AND r.res_id = ANY($%[1]d))
 			OR (
-				r.res_type != 'Patient'
+				r.res_type NOT IN ('Patient', 'Group')
 				AND (
 					EXISTS (
 						SELECT 1 FROM spidx_reference rf
@@ -115,6 +115,7 @@ func (s *Store) StreamExportResources(ctx context.Context, params ExportParams, 
 							 AND p.res_id = rf_pat.target_id
 							 AND p.is_deleted = FALSE
 							WHERE rf_clin.tenant_id = r.tenant_id
+							  AND rf_clin.res_type != 'Group'
 							  AND rf_clin.target_type = r.res_type
 							  AND rf_clin.target_id = r.res_id
 							  AND rf_pat.target_id = ANY($%[1]d)
@@ -138,6 +139,7 @@ func (s *Store) StreamExportResources(ctx context.Context, params ExportParams, 
 							  AND rf_prov.res_type = 'Provenance'
 							  AND rf_prov.res_id = r.res_id
 							  AND rf_prov.sp_name = 'target'
+							  AND rf_pat.res_type != 'Group'
 							  AND rf_pat.target_id = ANY($%[1]d)
 							  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
 						)
@@ -148,66 +150,73 @@ func (s *Store) StreamExportResources(ctx context.Context, params ExportParams, 
 	} else if params.PatientCompartment {
 		whereConds = append(whereConds, `(
 			r.res_type = 'Patient'
-			OR EXISTS (
-				SELECT 1 FROM spidx_reference rf
-				JOIN fhir_resource p
-				  ON p.tenant_id = rf.tenant_id
-				 AND p.res_type = 'Patient'
-				 AND p.res_id = rf.target_id
-				 AND p.is_deleted = FALSE
-				WHERE rf.tenant_id = r.tenant_id
-				  AND rf.res_type = r.res_type
-				  AND rf.res_id = r.res_id
-				  AND (rf.target_type = 'Patient' OR rf.target_type = '')
-			)
-			OR EXISTS (
-				SELECT 1 FROM spidx_reference rf
-				JOIN fhir_resource p
-				  ON p.tenant_id = rf.tenant_id
-				 AND p.res_type = 'Patient'
-				 AND p.res_id = rf.res_id
-				 AND p.is_deleted = FALSE
-				WHERE rf.tenant_id = r.tenant_id
-				  AND rf.target_type = r.res_type
-				  AND rf.target_id = r.res_id
-			)
 			OR (
-				r.res_type IN ('Organization', 'Practitioner', 'PractitionerRole', 'Location', 'Medication', 'HealthcareService', 'Endpoint', 'Substance')
-				AND EXISTS (
-					SELECT 1 FROM spidx_reference rf_clin
-					JOIN spidx_reference rf_pat
-					  ON rf_pat.tenant_id = rf_clin.tenant_id
-					 AND rf_pat.res_type = rf_clin.res_type
-					 AND rf_pat.res_id = rf_clin.res_id
-					JOIN fhir_resource p
-					  ON p.tenant_id = rf_pat.tenant_id
-					 AND p.res_type = 'Patient'
-					 AND p.res_id = rf_pat.target_id
-					 AND p.is_deleted = FALSE
-					WHERE rf_clin.tenant_id = r.tenant_id
-					  AND rf_clin.target_type = r.res_type
-					  AND rf_clin.target_id = r.res_id
-					  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
-				)
-			)
-			OR (
-				r.res_type = 'Provenance'
-				AND EXISTS (
-					SELECT 1 FROM spidx_reference rf_prov
-					JOIN spidx_reference rf_pat
-					  ON rf_pat.tenant_id = rf_prov.tenant_id
-					 AND rf_pat.res_type = rf_prov.target_type
-					 AND rf_pat.res_id = rf_prov.target_id
-					JOIN fhir_resource p
-					  ON p.tenant_id = rf_pat.tenant_id
-					 AND p.res_type = 'Patient'
-					 AND p.res_id = rf_pat.target_id
-					 AND p.is_deleted = FALSE
-					WHERE rf_prov.tenant_id = r.tenant_id
-					  AND rf_prov.res_type = 'Provenance'
-					  AND rf_prov.res_id = r.res_id
-					  AND rf_prov.sp_name = 'target'
-					  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+				r.res_type != 'Group'
+				AND (
+					EXISTS (
+						SELECT 1 FROM spidx_reference rf
+						JOIN fhir_resource p
+						  ON p.tenant_id = rf.tenant_id
+						 AND p.res_type = 'Patient'
+						 AND p.res_id = rf.target_id
+						 AND p.is_deleted = FALSE
+						WHERE rf.tenant_id = r.tenant_id
+						  AND rf.res_type = r.res_type
+						  AND rf.res_id = r.res_id
+						  AND (rf.target_type = 'Patient' OR rf.target_type = '')
+					)
+					OR EXISTS (
+						SELECT 1 FROM spidx_reference rf
+						JOIN fhir_resource p
+						  ON p.tenant_id = rf.tenant_id
+						 AND p.res_type = 'Patient'
+						 AND p.res_id = rf.res_id
+						 AND p.is_deleted = FALSE
+						WHERE rf.tenant_id = r.tenant_id
+						  AND rf.target_type = r.res_type
+						  AND rf.target_id = r.res_id
+					)
+					OR (
+						r.res_type IN ('Organization', 'Practitioner', 'PractitionerRole', 'Location', 'Medication', 'HealthcareService', 'Endpoint', 'Substance')
+						AND EXISTS (
+							SELECT 1 FROM spidx_reference rf_clin
+							JOIN spidx_reference rf_pat
+							  ON rf_pat.tenant_id = rf_clin.tenant_id
+							 AND rf_pat.res_type = rf_clin.res_type
+							 AND rf_pat.res_id = rf_clin.res_id
+							JOIN fhir_resource p
+							  ON p.tenant_id = rf_pat.tenant_id
+							 AND p.res_type = 'Patient'
+							 AND p.res_id = rf_pat.target_id
+							 AND p.is_deleted = FALSE
+							WHERE rf_clin.tenant_id = r.tenant_id
+							  AND rf_clin.res_type != 'Group'
+							  AND rf_clin.target_type = r.res_type
+							  AND rf_clin.target_id = r.res_id
+							  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+						)
+					)
+					OR (
+						r.res_type = 'Provenance'
+						AND EXISTS (
+							SELECT 1 FROM spidx_reference rf_prov
+							JOIN spidx_reference rf_pat
+							  ON rf_pat.tenant_id = rf_prov.tenant_id
+							 AND rf_pat.res_type = rf_prov.target_type
+							 AND rf_pat.res_id = rf_prov.target_id
+							JOIN fhir_resource p
+							  ON p.tenant_id = rf_pat.tenant_id
+							 AND p.res_type = 'Patient'
+							 AND p.res_id = rf_pat.target_id
+							 AND p.is_deleted = FALSE
+							WHERE rf_prov.tenant_id = r.tenant_id
+							  AND rf_prov.res_type = 'Provenance'
+							  AND rf_prov.res_id = r.res_id
+							  AND rf_prov.sp_name = 'target'
+							  AND rf_pat.res_type != 'Group'
+							  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+						)
+					)
 				)
 			)
 		)`)
