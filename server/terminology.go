@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -1612,4 +1613,274 @@ func (s *Server) expandSingleTerminologyTokenValue(ctx context.Context, tenant, 
 		return baseName, strings.Join(tokens, ","), nil
 	}
 	return baseName, rawVal, nil
+}
+
+type closureConceptEntry struct {
+	System         string
+	Code           string
+	Display        string
+	AddedAtVersion int
+}
+
+type closureTableState struct {
+	Version  int
+	Concepts []closureConceptEntry
+}
+
+var (
+	closureTablesMu sync.Mutex
+	closureTables   = map[string]*closureTableState{}
+)
+
+// handleClosure handles POST /fhir/r4/{tenant}/$closure per HL7 FHIR R4 OperationDefinition/ConceptMap-closure (§4.8.15.6).
+// Maintains a stateful transitive concept subsumption closure table identified by 'name',
+// accepting new 'concept' Codings and/or a 'version' resynchronization parameter and returning a ConceptMap.
+func (s *Server) handleClosure(w http.ResponseWriter, r *http.Request) {
+	tenant := strings.TrimSpace(r.PathValue("tenant"))
+	if tenant == "" {
+		tenant = "default"
+	}
+	q := r.URL.Query()
+	name := strings.TrimSpace(q.Get("name"))
+	reqVersion := strings.TrimSpace(q.Get("version"))
+	var inputConcepts []terminologyConcept
+
+	for _, rawC := range q["concept"] {
+		for part := range strings.SplitSeq(rawC, ",") {
+			trimmed := strings.TrimSpace(part)
+			if trimmed == "" {
+				continue
+			}
+			if p := strings.SplitN(trimmed, "|", 2); len(p) == 2 {
+				inputConcepts = append(inputConcepts, terminologyConcept{
+					System: strings.TrimSpace(p[0]),
+					Code:   strings.TrimSpace(p[1]),
+				})
+			} else {
+				inputConcepts = append(inputConcepts, terminologyConcept{
+					System: "http://snomed.info/sct",
+					Code:   trimmed,
+				})
+			}
+		}
+	}
+
+	if r.Body != nil && r.ContentLength != 0 {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 2*1024*1024))
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read $closure request body")
+			return
+		}
+		if len(strings.TrimSpace(string(body))) > 0 {
+			var raw map[string]any
+			if err := json.Unmarshal(body, &raw); err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid JSON in $closure request: %v", err))
+				return
+			}
+			if rt, _ := raw["resourceType"].(string); rt != "" && rt != "Parameters" {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("$closure body must be a Parameters resource (got %q)", rt))
+				return
+			}
+			if paramsArr, ok := raw["parameter"].([]any); ok {
+				for _, rawP := range paramsArr {
+					pm, ok := rawP.(map[string]any)
+					if !ok {
+						continue
+					}
+					pName, _ := pm["name"].(string)
+					switch pName {
+					case "name":
+						if name == "" {
+							for _, k := range []string{"valueString", "valueCode", "valueId"} {
+								if v, ok := pm[k].(string); ok && strings.TrimSpace(v) != "" {
+									name = strings.TrimSpace(v)
+									break
+								}
+							}
+						}
+					case "version":
+						if reqVersion == "" {
+							for _, k := range []string{"valueId", "valueString", "valueCode"} {
+								if v, ok := pm[k].(string); ok && strings.TrimSpace(v) != "" {
+									reqVersion = strings.TrimSpace(v)
+									break
+								}
+							}
+						}
+					case "concept":
+						if cm, ok := pm["valueCoding"].(map[string]any); ok {
+							sys, _ := cm["system"].(string)
+							code, _ := cm["code"].(string)
+							disp, _ := cm["display"].(string)
+							if strings.TrimSpace(code) != "" {
+								if strings.TrimSpace(sys) == "" {
+									sys = "http://snomed.info/sct"
+								}
+								inputConcepts = append(inputConcepts, terminologyConcept{
+									System:  strings.TrimSpace(sys),
+									Code:    strings.TrimSpace(code),
+									Display: strings.TrimSpace(disp),
+								})
+							}
+						} else if sVal, ok := pm["valueString"].(string); ok && strings.TrimSpace(sVal) != "" {
+							if p := strings.SplitN(strings.TrimSpace(sVal), "|", 2); len(p) == 2 {
+								inputConcepts = append(inputConcepts, terminologyConcept{
+									System: strings.TrimSpace(p[0]),
+									Code:   strings.TrimSpace(p[1]),
+								})
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if name == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "$closure requires 'name' parameter")
+		return
+	}
+
+	tableKey := tenant + "/" + name
+	closureTablesMu.Lock()
+	state, exists := closureTables[tableKey]
+	if !exists {
+		state = &closureTableState{Version: 1}
+		closureTables[tableKey] = state
+	}
+
+	minVersionFilter := 0
+	if reqVersion != "" {
+		vNum, err := strconv.Atoi(reqVersion)
+		if err != nil || vNum < 0 {
+			closureTablesMu.Unlock()
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid $closure version %q", reqVersion))
+			return
+		}
+		if vNum == 0 {
+			// Re-initialize / full resync from version 1
+			minVersionFilter = 1
+		} else {
+			minVersionFilter = vNum + 1
+		}
+	} else if len(inputConcepts) > 0 {
+		state.Version++
+		minVersionFilter = state.Version
+	}
+
+	curVersion := state.Version
+	for _, ic := range inputConcepts {
+		alreadyPresent := false
+		for i := range state.Concepts {
+			if strings.EqualFold(state.Concepts[i].System, ic.System) && strings.EqualFold(state.Concepts[i].Code, ic.Code) {
+				alreadyPresent = true
+				if reqVersion == "" {
+					// Include pairs involving re-submitted concepts in this delta response
+					state.Concepts[i].AddedAtVersion = curVersion
+				}
+				break
+			}
+		}
+		if !alreadyPresent {
+			state.Concepts = append(state.Concepts, closureConceptEntry{
+				System:         ic.System,
+				Code:           ic.Code,
+				Display:        ic.Display,
+				AddedAtVersion: curVersion,
+			})
+		}
+	}
+
+	snapshot := make([]closureConceptEntry, len(state.Concepts))
+	copy(snapshot, state.Concepts)
+	closureTablesMu.Unlock()
+
+	// Group snapshot concepts by system and compute subsumption pairs
+	bySystem := make(map[string][]closureConceptEntry)
+	var systemOrder []string
+	for _, c := range snapshot {
+		if _, seen := bySystem[c.System]; !seen {
+			systemOrder = append(systemOrder, c.System)
+		}
+		bySystem[c.System] = append(bySystem[c.System], c)
+	}
+
+	groups := make([]map[string]any, 0, len(systemOrder))
+	for _, sys := range systemOrder {
+		entries := bySystem[sys]
+		if len(entries) == 0 || minVersionFilter == 0 {
+			continue
+		}
+		csConcepts, _, err := s.resolveCodeSystemConcepts(r.Context(), tenant, "", sys)
+		if err != nil || len(csConcepts) == 0 {
+			continue
+		}
+		parentsMap := buildCodeSystemParentsMap(csConcepts)
+
+		var elements []map[string]any
+		for i := range entries {
+			src := entries[i]
+			var targets []map[string]any
+			for j := range entries {
+				if i == j {
+					continue
+				}
+				tgt := entries[j]
+				if src.AddedAtVersion < minVersionFilter && tgt.AddedAtVersion < minVersionFilter {
+					continue
+				}
+				if strings.EqualFold(src.Code, tgt.Code) {
+					targets = append(targets, map[string]any{
+						"code":        tgt.Code,
+						"equivalence": "equal",
+					})
+				} else if codeIsAncestorOrEqual(tgt.Code, src.Code, parentsMap, false) {
+					// tgt is an ancestor of src -> tgt subsumes src
+					targets = append(targets, map[string]any{
+						"code":        tgt.Code,
+						"equivalence": "subsumes",
+					})
+				} else if codeIsAncestorOrEqual(src.Code, tgt.Code, parentsMap, false) {
+					// src is an ancestor of tgt -> src specializes / subsumes tgt
+					targets = append(targets, map[string]any{
+						"code":        tgt.Code,
+						"equivalence": "specializes",
+					})
+				}
+			}
+			if len(targets) > 0 {
+				el := map[string]any{
+					"code":   src.Code,
+					"target": targets,
+				}
+				if src.Display != "" {
+					el["display"] = src.Display
+				}
+				elements = append(elements, el)
+			}
+		}
+		if len(elements) > 0 {
+			groups = append(groups, map[string]any{
+				"source":  sys,
+				"target":  sys,
+				"element": elements,
+			})
+		}
+	}
+
+	out := map[string]any{
+		"resourceType": "ConceptMap",
+		"id":           name,
+		"url":          fmt.Sprintf("http://flint.fhir.org/ConceptMap/%s", name),
+		"version":      strconv.Itoa(curVersion),
+		"name":         name,
+		"status":       "active",
+		"experimental": true,
+		"date":         time.Now().UTC().Format(time.RFC3339),
+		"group":        groups,
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(out)
 }

@@ -258,6 +258,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$reindex", s.handleReindex)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$diff", s.handleDiff)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$diff", s.handleDiff)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$closure", s.handleClosure)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$data-requirements", s.handleDataRequirements)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$data-requirements", s.handleDataRequirements)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$fhirpath", s.handleFHIRPath)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$fhirpath", s.handleFHIRPath)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$certify", s.handleCertify)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$certify", s.handleCertify)
 
@@ -393,6 +398,23 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleSubscriptionStatus(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Subscription") && parts[4] == "$events" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", "Subscription")
+					s.handleSubscriptionEvents(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ConceptMap") && parts[4] == "$closure" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleClosure(w, r)
+					return
+				}
+				if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition")) && parts[4] == "$data-requirements" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					s.handleDataRequirements(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "PlanDefinition") && parts[4] == "$apply" {
 					r.SetPathValue("tenant", parts[2])
 					s.handlePlanDefinitionApply(w, r)
@@ -471,6 +493,27 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("resourceType", "Subscription")
 					r.SetPathValue("id", parts[4])
 					s.handleSubscriptionStatus(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Subscription") && parts[5] == "$events" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", "Subscription")
+					r.SetPathValue("id", parts[4])
+					s.handleSubscriptionEvents(w, r)
+					return
+				}
+				if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition")) && parts[5] == "$data-requirements" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					r.SetPathValue("id", parts[4])
+					s.handleDataRequirements(w, r)
+					return
+				}
+				if parts[5] == "$fhirpath" && !strings.HasPrefix(parts[3], "$") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					r.SetPathValue("id", parts[4])
+					s.handleFHIRPath(w, r)
 					return
 				}
 				if r.Method == http.MethodGet && parts[5] == "$provenance" && !strings.HasPrefix(parts[3], "$") {
@@ -3441,6 +3484,17 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					"name":       "care-gaps",
 					"definition": "http://hl7.org/fhir/us/davinci-deqm/OperationDefinition/care-gaps",
 				},
+				{
+					"name":       "data-requirements",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Measure-data-requirements",
+				},
+			}
+		case "Library":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "data-requirements",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Library-data-requirements",
+				},
 			}
 		case "ValueSet":
 			entry["operation"] = []map[string]string{
@@ -3474,6 +3528,10 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					"name":       "translate",
 					"definition": "http://hl7.org/fhir/OperationDefinition/ConceptMap-translate",
 				},
+				{
+					"name":       "closure",
+					"definition": "http://hl7.org/fhir/OperationDefinition/ConceptMap-closure",
+				},
 			}
 		case "Subscription":
 			entry["operation"] = []map[string]string{
@@ -3481,12 +3539,20 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					"name":       "status",
 					"definition": "http://hl7.org/fhir/uv/subscriptions-backport/OperationDefinition/backport-subscription-status",
 				},
+				{
+					"name":       "events",
+					"definition": "http://hl7.org/fhir/uv/subscriptions-backport/OperationDefinition/backport-subscription-events",
+				},
 			}
 		case "PlanDefinition":
 			entry["operation"] = []map[string]string{
 				{
 					"name":       "apply",
 					"definition": "http://hl7.org/fhir/OperationDefinition/PlanDefinition-apply",
+				},
+				{
+					"name":       "data-requirements",
+					"definition": "http://hl7.org/fhir/OperationDefinition/PlanDefinition-data-requirements",
 				},
 			}
 		case "ActivityDefinition":
@@ -3675,6 +3741,22 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "translate",
 						"definition": "http://hl7.org/fhir/OperationDefinition/ConceptMap-translate",
+					},
+					{
+						"name":       "closure",
+						"definition": "http://hl7.org/fhir/OperationDefinition/ConceptMap-closure",
+					},
+					{
+						"name":       "data-requirements",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Library-data-requirements",
+					},
+					{
+						"name":       "fhirpath",
+						"definition": "http://flint.fhir.org/OperationDefinition/Resource-fhirpath",
+					},
+					{
+						"name":       "events",
+						"definition": "http://hl7.org/fhir/uv/subscriptions-backport/OperationDefinition/backport-subscription-events",
 					},
 				},
 			},

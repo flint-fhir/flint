@@ -212,8 +212,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for system operation "+resType)
 							return
 						}
-					} else if len(parts) == 5 && (parts[4] == "_history" || parts[4] == "$meta" || (strings.EqualFold(resType, "Subscription") && parts[4] == "$status")) {
-						// Type-level history, $meta, or Subscription/$status
+					} else if len(parts) == 5 && (parts[4] == "_history" || parts[4] == "$meta" || (strings.EqualFold(resType, "Subscription") && (parts[4] == "$status" || parts[4] == "$events"))) {
+						// Type-level history, $meta, Subscription/$status, or Subscription/$events
 						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionSearch) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("insufficient scope for %s on %s", parts[4], resType))
@@ -552,10 +552,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								fmt.Sprintf("insufficient scope for validate on %s", resType))
 							return
 						}
-					} else if strings.EqualFold(resType, "Subscription") && ((len(parts) == 5 && parts[4] == "$status") || (len(parts) == 6 && parts[5] == "$status")) {
+					} else if strings.EqualFold(resType, "Subscription") && ((len(parts) == 5 && (parts[4] == "$status" || parts[4] == "$events")) || (len(parts) == 6 && (parts[5] == "$status" || parts[5] == "$events"))) {
 						if !auth.Allows(secCtx, "Subscription", auth.ActionRead) && !auth.Allows(secCtx, "Subscription", auth.ActionSearch) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-								"insufficient scope for Subscription/$status")
+								"insufficient scope for Subscription operation")
 							return
 						}
 					} else if len(parts) == 6 && strings.EqualFold(resType, "Patient") && parts[5] == "$purge" {
@@ -1106,11 +1106,32 @@ func isQuestionnaireExtractOp(parts []string) bool {
 }
 
 func isPlanApplyOp(parts []string) bool {
+	if len(parts) == 4 {
+		return parts[3] == "$closure" || parts[3] == "$data-requirements" || parts[3] == "$fhirpath"
+	}
 	if len(parts) == 5 {
-		return (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition")) && parts[4] == "$apply"
+		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition")) && parts[4] == "$apply" {
+			return true
+		}
+		if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition")) && parts[4] == "$data-requirements" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "ConceptMap") && parts[4] == "$closure" {
+			return true
+		}
+		return false
 	}
 	if len(parts) == 6 {
-		return (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition")) && parts[5] == "$apply"
+		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition")) && parts[5] == "$apply" {
+			return true
+		}
+		if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition")) && parts[5] == "$data-requirements" {
+			return true
+		}
+		if parts[5] == "$fhirpath" {
+			return true
+		}
+		return false
 	}
 	return false
 }

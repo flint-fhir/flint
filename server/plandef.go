@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1204,6 +1205,960 @@ func codeableConceptMatchesLiterals(cc map[string]any, literals []string) bool {
 					if strings.EqualFold(code, lit) {
 						return true
 					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// handleDataRequirements handles GET/POST /fhir/r4/{tenant}/$data-requirements,
+// /Library/$data-requirements, /Library/{id}/$data-requirements,
+// /Measure/$data-requirements, /Measure/{id}/$data-requirements,
+// /PlanDefinition/$data-requirements, and /PlanDefinition/{id}/$data-requirements
+// per HL7 FHIR R4 Clinical Reasoning §12.10 (OperationDefinition/Library-data-requirements).
+func (s *Server) handleDataRequirements(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resType := strings.TrimSpace(r.PathValue("resourceType"))
+	if resType == "" {
+		// Infer from URL path if mounted on fixed type route
+		for _, cand := range []string{"Library", "Measure", "PlanDefinition"} {
+			if strings.Contains(r.URL.Path, "/"+cand+"/") {
+				resType = cand
+				break
+			}
+		}
+	}
+	defID := strings.TrimSpace(r.PathValue("id"))
+	canonical := ""
+	periodStart := strings.TrimSpace(r.URL.Query().Get("periodStart"))
+	periodEnd := strings.TrimSpace(r.URL.Query().Get("periodEnd"))
+
+	for _, k := range []string{"id", "target"} {
+		if defID == "" {
+			defID = strings.TrimSpace(r.URL.Query().Get(k))
+		}
+	}
+	for _, k := range []string{"url", "canonical", "measure", "library", "planDefinition"} {
+		if canonical == "" {
+			canonical = strings.TrimSpace(r.URL.Query().Get(k))
+		}
+	}
+
+	if r.Method == http.MethodPost && r.Body != nil && r.ContentLength != 0 {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024))
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read request body")
+			return
+		}
+		if len(bytes.TrimSpace(body)) > 0 {
+			var raw map[string]any
+			if err := json.Unmarshal(body, &raw); err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for $data-requirements")
+				return
+			}
+			if params, ok := raw["parameter"].([]any); ok {
+				for _, p := range params {
+					pm, ok := p.(map[string]any)
+					if !ok {
+						continue
+					}
+					name, _ := pm["name"].(string)
+					val := extractParamString(pm)
+					switch name {
+					case "id", "target":
+						if defID == "" {
+							defID = val
+						}
+					case "url", "canonical", "measure", "library", "planDefinition":
+						if canonical == "" {
+							canonical = val
+						}
+					case "periodStart":
+						if periodStart == "" {
+							periodStart = val
+						}
+					case "periodEnd":
+						if periodEnd == "" {
+							periodEnd = val
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if defID == "" && canonical == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required",
+			"$data-requirements requires an instance {id}, target, or canonical url parameter")
+		return
+	}
+
+	scopeTarget := resType
+	if scopeTarget == "" {
+		scopeTarget = "Library"
+	}
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+		if !auth.Allows(secCtx, scopeTarget, auth.ActionRead) &&
+			!auth.Allows(secCtx, scopeTarget, auth.ActionSearch) &&
+			!auth.Allows(secCtx, "Measure", auth.ActionRead) &&
+			!auth.Allows(secCtx, "PlanDefinition", auth.ActionRead) &&
+			!auth.Allows(secCtx, "Library", auth.ActionRead) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("insufficient scope to invoke $data-requirements on %s", scopeTarget))
+			return
+		}
+	}
+
+	lib, err := s.resolveDataRequirementsLibrary(r.Context(), tenant, resType, defID, canonical, periodStart, periodEnd)
+	if errors.Is(err, sql.ErrNoRows) {
+		target := defID
+		if target == "" {
+			target = canonical
+		}
+		writeOperationOutcome(w, http.StatusNotFound, "not-found",
+			fmt.Sprintf("knowledge artifact %q not found for $data-requirements", target))
+		return
+	}
+	if errors.Is(err, postgres.ErrResourceDeleted) {
+		writeOperationOutcome(w, http.StatusGone, "deleted",
+			fmt.Sprintf("%s/%s has been deleted", scopeTarget, defID))
+		return
+	}
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to compute $data-requirements")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(lib)
+}
+
+func (s *Server) resolveDataRequirementsLibrary(
+	ctx context.Context,
+	tenant, resType, defID, canonical, periodStart, periodEnd string,
+) (map[string]any, error) {
+	normKey := strings.ToLower(strings.TrimSpace(defID))
+	if normKey == "" && canonical != "" {
+		c := canonical
+		if idx := strings.IndexByte(c, '|'); idx != -1 {
+			c = c[:idx]
+		}
+		if slash := strings.LastIndexByte(c, '/'); slash != -1 {
+			normKey = strings.ToLower(strings.TrimSpace(c[slash+1:]))
+		} else {
+			normKey = strings.ToLower(strings.TrimSpace(c))
+		}
+	}
+
+	buildDateFilter := func(path string) []any {
+		if periodStart == "" && periodEnd == "" {
+			return nil
+		}
+		vp := map[string]any{}
+		if periodStart != "" {
+			vp["start"] = periodStart
+		}
+		if periodEnd != "" {
+			vp["end"] = periodEnd
+		}
+		return []any{
+			map[string]any{
+				"path":        path,
+				"valuePeriod": vp,
+			},
+		}
+	}
+
+	wrapModuleDef := func(idSuffix, title string, relatedURL string, dataReqs []any) map[string]any {
+		params := []any{
+			map[string]any{
+				"name": "Measurement Period",
+				"use":  "in",
+				"min":  0,
+				"max":  "1",
+				"type": "Period",
+			},
+		}
+		out := map[string]any{
+			"resourceType": "Library",
+			"id":           "data-requirements-" + idSuffix,
+			"url":          "http://flint.fhir.org/Library/data-requirements-" + idSuffix,
+			"version":      "1.0.0",
+			"name":         "DataRequirements_" + strings.ReplaceAll(idSuffix, "-", "_"),
+			"title":        "Data Requirements for " + title,
+			"status":       "active",
+			"date":         time.Now().UTC().Format(time.RFC3339),
+			"type": map[string]any{
+				"coding": []any{
+					map[string]any{
+						"system":  "http://terminology.hl7.org/CodeSystem/library-type",
+						"code":    "module-definition",
+						"display": "Module Definition",
+					},
+				},
+			},
+			"parameter":       params,
+			"dataRequirement": dataReqs,
+		}
+		if relatedURL != "" {
+			out["relatedArtifact"] = []any{
+				map[string]any{
+					"type":     "depends-on",
+					"resource": relatedURL,
+				},
+			}
+		}
+		return out
+	}
+
+	switch normKey {
+	case "cms165-bp-control", "plandef-hypertension-control":
+		obsReq := map[string]any{
+			"type":    "Observation",
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-blood-pressure"},
+			"codeFilter": []any{
+				map[string]any{
+					"path":     "code",
+					"valueSet": "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.464.1003.198.12.1013",
+					"code": []any{
+						map[string]any{
+							"system":  "http://loinc.org",
+							"code":    "85354-9",
+							"display": "Blood pressure panel with all children optional",
+						},
+						map[string]any{
+							"system":  "http://loinc.org",
+							"code":    "8480-6",
+							"display": "Systolic blood pressure",
+						},
+						map[string]any{
+							"system":  "http://loinc.org",
+							"code":    "8462-4",
+							"display": "Diastolic blood pressure",
+						},
+					},
+				},
+			},
+		}
+		if df := buildDateFilter("effective"); len(df) > 0 {
+			obsReq["dateFilter"] = df
+		}
+		reqs := []any{
+			map[string]any{
+				"type":    "Patient",
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"},
+			},
+			map[string]any{
+				"type":    "Condition",
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition"},
+				"codeFilter": []any{
+					map[string]any{
+						"path":     "code",
+						"valueSet": "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.464.1003.104.12.1011",
+						"code": []any{
+							map[string]any{
+								"system":  "http://snomed.info/sct",
+								"code":    "38341003",
+								"display": "Hypertensive disorder, systemic arterial",
+							},
+							map[string]any{
+								"system":  "http://hl7.org/fhir/sid/icd-10-cm",
+								"code":    "I10",
+								"display": "Essential (primary) hypertension",
+							},
+						},
+					},
+				},
+			},
+			obsReq,
+		}
+		if normKey == "plandef-hypertension-control" {
+			reqs = append(reqs, map[string]any{
+				"type":    "MedicationRequest",
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationrequest"},
+				"codeFilter": []any{
+					map[string]any{
+						"path": "medication",
+						"code": []any{
+							map[string]any{
+								"system":  "http://www.nlm.nih.gov/research/umls/rxnorm",
+								"code":    "314076",
+								"display": "Lisinopril 10 MG Oral Tablet",
+							},
+						},
+					},
+				},
+			})
+			return wrapModuleDef("plandef-hypertension-control", "Adult Hypertension Control Clinical Pathway", "http://flint.fhir.org/PlanDefinition/plandef-hypertension-control", reqs), nil
+		}
+		return wrapModuleDef("cms165-bp-control", "CMS165 Controlling High Blood Pressure", "http://flint.fhir.org/Measure/cms165-bp-control", reqs), nil
+
+	case "cms122-diabetes-hba1c", "plandef-diabetes-hba1c-care":
+		obsReq := map[string]any{
+			"type":    "Observation",
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab"},
+			"codeFilter": []any{
+				map[string]any{
+					"path":     "code",
+					"valueSet": "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.464.1003.198.12.1013",
+					"code": []any{
+						map[string]any{
+							"system":  "http://loinc.org",
+							"code":    "4548-4",
+							"display": "Hemoglobin A1c/Hemoglobin.total in Blood",
+						},
+					},
+				},
+			},
+		}
+		if df := buildDateFilter("effective"); len(df) > 0 {
+			obsReq["dateFilter"] = df
+		}
+		reqs := []any{
+			map[string]any{
+				"type":    "Patient",
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"},
+			},
+			map[string]any{
+				"type":    "Condition",
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition"},
+				"codeFilter": []any{
+					map[string]any{
+						"path":     "code",
+						"valueSet": "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.464.1003.103.12.1001",
+						"code": []any{
+							map[string]any{
+								"system":  "http://snomed.info/sct",
+								"code":    "44054006",
+								"display": "Diabetes mellitus type 2",
+							},
+							map[string]any{
+								"system":  "http://hl7.org/fhir/sid/icd-10-cm",
+								"code":    "E11.9",
+								"display": "Type 2 diabetes mellitus without complications",
+							},
+						},
+					},
+				},
+			},
+			obsReq,
+		}
+		if normKey == "plandef-diabetes-hba1c-care" {
+			return wrapModuleDef("plandef-diabetes-hba1c-care", "Type 2 Diabetes HbA1c Care Pathway", "http://flint.fhir.org/PlanDefinition/plandef-diabetes-hba1c-care", reqs), nil
+		}
+		return wrapModuleDef("cms122-diabetes-hba1c", "CMS122 Diabetes: Hemoglobin A1c (HbA1c) Poor Control (>9%)", "http://flint.fhir.org/Measure/cms122-diabetes-hba1c", reqs), nil
+	}
+
+	// Look up custom stored Library, Measure, or PlanDefinition in the store
+	if s.store == nil {
+		return nil, sql.ErrNoRows
+	}
+	candidateTypes := []string{"Library", "Measure", "PlanDefinition"}
+	if resType != "" {
+		candidateTypes = []string{resType}
+	}
+	for _, rt := range candidateTypes {
+		if defID != "" {
+			rec, err := s.store.ReadResourceWithMeta(ctx, tenant, rt, defID)
+			if errors.Is(err, postgres.ErrResourceDeleted) {
+				return nil, err
+			}
+			if err == nil && rec != nil {
+				if jb, jErr := s.protoToJSONWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); jErr == nil {
+					var m map[string]any
+					if json.Unmarshal(jb, &m) == nil {
+						return buildCustomArtifactDataRequirements(rt, defID, m, buildDateFilter("effective")), nil
+					}
+				}
+			}
+		}
+		if canonical != "" {
+			cleanCanon := canonical
+			if idx := strings.IndexByte(cleanCanon, '|'); idx != -1 {
+				cleanCanon = strings.TrimSpace(cleanCanon[:idx])
+			}
+			sr, err := s.store.Search(ctx, postgres.SearchParams{
+				TenantID: tenant,
+				ResType:  rt,
+				URIs:     map[string]string{"url": cleanCanon},
+				Count:    1,
+			})
+			if err == nil && sr != nil && len(sr.Matches) > 0 {
+				m0 := sr.Matches[0]
+				if jb, jErr := s.protoToJSONWithMeta(rt, m0.ResourceProto, m0.ResVersion, m0.LastUpdated); jErr == nil {
+					var m map[string]any
+					if json.Unmarshal(jb, &m) == nil {
+						return buildCustomArtifactDataRequirements(rt, m0.ResID, m, buildDateFilter("effective")), nil
+					}
+				}
+			}
+		}
+	}
+
+	return nil, sql.ErrNoRows
+}
+
+func buildCustomArtifactDataRequirements(resType, resID string, m map[string]any, dateFilter []any) map[string]any {
+	title, _ := m["title"].(string)
+	if title == "" {
+		title, _ = m["name"].(string)
+	}
+	if title == "" {
+		title = resType + "/" + resID
+	}
+	artURL, _ := m["url"].(string)
+	if artURL == "" {
+		artURL = resType + "/" + resID
+	}
+
+	var dataReqs []any
+	if existing, ok := m["dataRequirement"].([]any); ok && len(existing) > 0 {
+		dataReqs = append(dataReqs, existing...)
+	}
+	if actions, ok := m["action"].([]any); ok {
+		for _, a := range actions {
+			if am, ok := a.(map[string]any); ok {
+				if inputs, ok := am["input"].([]any); ok {
+					dataReqs = append(dataReqs, inputs...)
+				}
+			}
+		}
+	}
+	if len(dataReqs) == 0 {
+		obsReq := map[string]any{
+			"type": "Observation",
+		}
+		if len(dateFilter) > 0 {
+			obsReq["dateFilter"] = dateFilter
+		}
+		dataReqs = []any{
+			map[string]any{
+				"type": "Patient",
+			},
+			obsReq,
+		}
+	}
+
+	return map[string]any{
+		"resourceType": "Library",
+		"id":           "data-requirements-" + resID,
+		"url":          "http://flint.fhir.org/Library/data-requirements-" + resID,
+		"version":      "1.0.0",
+		"name":         "DataRequirements_" + strings.ReplaceAll(resID, "-", "_"),
+		"title":        "Data Requirements for " + title,
+		"status":       "active",
+		"date":         time.Now().UTC().Format(time.RFC3339),
+		"type": map[string]any{
+			"coding": []any{
+				map[string]any{
+					"system":  "http://terminology.hl7.org/CodeSystem/library-type",
+					"code":    "module-definition",
+					"display": "Module Definition",
+				},
+			},
+		},
+		"relatedArtifact": []any{
+			map[string]any{
+				"type":     "depends-on",
+				"resource": artURL,
+			},
+		},
+		"dataRequirement": dataReqs,
+	}
+}
+
+// handleFHIRPath handles GET/POST /fhir/r4/{tenant}/{resourceType}/{id}/$fhirpath
+// and GET/POST /fhir/r4/{tenant}/$fhirpath, evaluating a FHIRPath expression against
+// a stored or inline FHIR resource and returning a FHIR Parameters result.
+func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resType := strings.TrimSpace(r.PathValue("resourceType"))
+	resID := strings.TrimSpace(r.PathValue("id"))
+	expr := strings.TrimSpace(r.URL.Query().Get("expression"))
+	if refParam := strings.TrimSpace(r.URL.Query().Get("resource")); refParam != "" && resID == "" {
+		if parts := strings.SplitN(refParam, "/", 2); len(parts) == 2 {
+			resType = strings.TrimSpace(parts[0])
+			resID = strings.TrimSpace(parts[1])
+		}
+	}
+
+	var inlineResource map[string]any
+	if r.Method == http.MethodPost && r.Body != nil && r.ContentLength != 0 {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 2*1024*1024))
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read request body")
+			return
+		}
+		if len(bytes.TrimSpace(body)) > 0 {
+			var raw map[string]any
+			if err := json.Unmarshal(body, &raw); err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for $fhirpath")
+				return
+			}
+			if rt, _ := raw["resourceType"].(string); rt == "Parameters" {
+				if params, ok := raw["parameter"].([]any); ok {
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "expression":
+							if expr == "" {
+								expr = extractParamString(pm)
+							}
+						case "resource":
+							if rm, ok := pm["resource"].(map[string]any); ok {
+								inlineResource = rm
+							} else if refStr := extractParamString(pm); refStr != "" && resID == "" {
+								if parts := strings.SplitN(refStr, "/", 2); len(parts) == 2 {
+									resType = strings.TrimSpace(parts[0])
+									resID = strings.TrimSpace(parts[1])
+								}
+							}
+						}
+					}
+				}
+			} else if rt != "" {
+				inlineResource = raw
+			}
+		}
+	}
+
+	if expr == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "$fhirpath requires an expression parameter")
+		return
+	}
+
+	targetMap := inlineResource
+	if targetMap == nil {
+		if resType == "" || resID == "" {
+			writeOperationOutcome(w, http.StatusBadRequest, "required",
+				"$fhirpath requires either an instance path ({resourceType}/{id}/$fhirpath) or an inline resource parameter")
+			return
+		}
+		if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
+			if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope to read %s for $fhirpath", resType))
+				return
+			}
+			if auth.IsPatientRestricted(secCtx) && resType == "Patient" && cleanID(secCtx.GetPatientId()) != cleanID(resID) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("patient-scoped token (%s) cannot evaluate $fhirpath on Patient/%s",
+						secCtx.GetPatientId(), resID))
+				return
+			}
+		}
+		if s.store == nil {
+			writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+			return
+		}
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("%s/%s not found", resType, resID))
+			return
+		}
+		if errors.Is(err, postgres.ErrResourceDeleted) {
+			writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("%s/%s has been deleted", resType, resID))
+			return
+		}
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read resource for $fhirpath")
+			return
+		}
+		jb, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode resource for $fhirpath")
+			return
+		}
+		if err := json.Unmarshal(jb, &targetMap); err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to unmarshal resource for $fhirpath")
+			return
+		}
+	}
+
+	results := evaluateFHIRPathOnResource(targetMap, expr)
+	paramEntries := []map[string]any{
+		{
+			"name": "parameters",
+			"part": []map[string]any{
+				{
+					"name":        "evaluator",
+					"valueString": "Flint FHIRPath R4 Engine",
+				},
+				{
+					"name":        "expression",
+					"valueString": expr,
+				},
+			},
+		},
+	}
+	for _, item := range results {
+		switch v := item.(type) {
+		case bool:
+			paramEntries = append(paramEntries, map[string]any{
+				"name":         "result",
+				"valueBoolean": v,
+			})
+		case int:
+			paramEntries = append(paramEntries, map[string]any{
+				"name":         "result",
+				"valueInteger": v,
+			})
+		case int64:
+			paramEntries = append(paramEntries, map[string]any{
+				"name":         "result",
+				"valueInteger": v,
+			})
+		case float64:
+			if v == float64(int64(v)) {
+				paramEntries = append(paramEntries, map[string]any{
+					"name":         "result",
+					"valueInteger": int64(v),
+				})
+			} else {
+				paramEntries = append(paramEntries, map[string]any{
+					"name":         "result",
+					"valueDecimal": v,
+				})
+			}
+		case string:
+			paramEntries = append(paramEntries, map[string]any{
+				"name":        "result",
+				"valueString": v,
+			})
+		case map[string]any:
+			if rt, ok := v["resourceType"].(string); ok && rt != "" {
+				paramEntries = append(paramEntries, map[string]any{
+					"name":     "result",
+					"resource": v,
+				})
+			} else if jb, err := json.Marshal(v); err == nil {
+				paramEntries = append(paramEntries, map[string]any{
+					"name":        "result",
+					"valueString": string(jb),
+				})
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    paramEntries,
+	})
+}
+
+func evaluateFHIRPathOnResource(root map[string]any, expr string) []any {
+	expr = strings.TrimSpace(expr)
+	if expr == "" || root == nil {
+		return nil
+	}
+	// Check for top-level comparison outside parentheses (e.g., "Observation.component.where(...).valueQuantity.value >= 140")
+	if lhs, op, rhs, ok := splitTopLevelComparison(expr); ok {
+		lhsVals := evaluateFHIRPathTokens([]any{root}, root, lhs)
+		return []any{compareFHIRPathValues(lhsVals, op, rhs)}
+	}
+	return evaluateFHIRPathTokens([]any{root}, root, expr)
+}
+
+func splitTopLevelComparison(expr string) (string, string, string, bool) {
+	depth := 0
+	inQuote := byte(0)
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		if inQuote != 0 {
+			if ch == inQuote {
+				inQuote = 0
+			}
+			continue
+		}
+		if ch == '\'' || ch == '"' {
+			inQuote = ch
+			continue
+		}
+		switch ch {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth == 0 {
+				for _, op := range []string{"!=", ">=", "<=", "=", ">", "<"} {
+					if strings.HasPrefix(expr[i:], op) {
+						return strings.TrimSpace(expr[:i]), op, strings.TrimSpace(expr[i+len(op):]), true
+					}
+				}
+			}
+		}
+	}
+	return "", "", "", false
+}
+
+func splitFHIRPathSegments(expr string) []string {
+	var segs []string
+	var cur strings.Builder
+	depth := 0
+	inQuote := byte(0)
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		if inQuote != 0 {
+			cur.WriteByte(ch)
+			if ch == inQuote {
+				inQuote = 0
+			}
+			continue
+		}
+		if ch == '\'' || ch == '"' {
+			inQuote = ch
+			cur.WriteByte(ch)
+			continue
+		}
+		switch ch {
+		case '(':
+			depth++
+			cur.WriteByte(ch)
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+			cur.WriteByte(ch)
+		case '.':
+			if depth == 0 {
+				if s := strings.TrimSpace(cur.String()); s != "" {
+					segs = append(segs, s)
+				}
+				cur.Reset()
+				continue
+			}
+			cur.WriteByte(ch)
+		default:
+			cur.WriteByte(ch)
+		}
+	}
+	if s := strings.TrimSpace(cur.String()); s != "" {
+		segs = append(segs, s)
+	}
+	return segs
+}
+
+func evaluateFHIRPathTokens(items []any, root map[string]any, expr string) []any {
+	segs := splitFHIRPathSegments(expr)
+	if len(segs) == 0 {
+		return items
+	}
+	if rt, _ := root["resourceType"].(string); rt != "" && strings.EqualFold(segs[0], rt) {
+		segs = segs[1:]
+	}
+	current := items
+	for _, seg := range segs {
+		lowerSeg := strings.ToLower(seg)
+		switch {
+		case lowerSeg == "exists()":
+			return []any{len(current) > 0}
+		case lowerSeg == "empty()":
+			return []any{len(current) == 0}
+		case lowerSeg == "count()":
+			return []any{len(current)}
+		case lowerSeg == "first()":
+			if len(current) > 0 {
+				current = []any{current[0]}
+			} else {
+				current = nil
+			}
+		case lowerSeg == "last()":
+			if len(current) > 0 {
+				current = []any{current[len(current)-1]}
+			} else {
+				current = nil
+			}
+		case strings.HasPrefix(lowerSeg, "where(") && strings.HasSuffix(seg, ")"):
+			cond := strings.TrimSpace(seg[len("where(") : len(seg)-1])
+			var filtered []any
+			for _, it := range current {
+				if evaluateFHIRPathWhereItem(it, root, cond) {
+					filtered = append(filtered, it)
+				}
+			}
+			current = filtered
+		case strings.HasPrefix(lowerSeg, "extension(") && strings.HasSuffix(seg, ")"):
+			extURL := strings.Trim(strings.TrimSpace(seg[len("extension("):len(seg)-1]), "'\"")
+			var matched []any
+			for _, it := range current {
+				if m, ok := it.(map[string]any); ok {
+					if exts, ok := m["extension"].([]any); ok {
+						for _, e := range exts {
+							if em, ok := e.(map[string]any); ok {
+								if u, _ := em["url"].(string); u == extURL {
+									matched = append(matched, em)
+								}
+							}
+						}
+					}
+				}
+			}
+			current = matched
+		default:
+			var next []any
+			for _, it := range current {
+				m, ok := it.(map[string]any)
+				if !ok {
+					continue
+				}
+				if v, exists := m[seg]; exists {
+					if arr, isArr := v.([]any); isArr {
+						next = append(next, arr...)
+					} else if v != nil {
+						next = append(next, v)
+					}
+					continue
+				}
+				// Support polymorphic value[x] shorthand (e.g. "value" matching valueQuantity, valueString, valueCodeableConcept)
+				if seg == "value" {
+					for k, v := range m {
+						if strings.HasPrefix(k, "value") && len(k) > len("value") && v != nil {
+							next = append(next, v)
+						}
+					}
+				}
+			}
+			current = next
+		}
+	}
+	return current
+}
+
+func evaluateFHIRPathWhereItem(item any, root map[string]any, cond string) bool {
+	if lhs, op, rhs, ok := splitTopLevelComparison(cond); ok {
+		lhsVals := evaluateFHIRPathTokens([]any{item}, root, lhs)
+		return compareFHIRPathValues(lhsVals, op, rhs)
+	}
+	vals := evaluateFHIRPathTokens([]any{item}, root, cond)
+	if len(vals) == 0 {
+		return false
+	}
+	if b, ok := vals[0].(bool); ok {
+		return b
+	}
+	return true
+}
+
+func compareFHIRPathValues(lhsVals []any, op, rhsRaw string) bool {
+	rhs := strings.Trim(strings.TrimSpace(rhsRaw), "'\"")
+	rhsNum, numErr := strconv.ParseFloat(rhs, 64)
+	rhsIsNum := numErr == nil
+	rhsBool, boolErr := strconv.ParseBool(rhs)
+	rhsIsBool := boolErr == nil
+
+	for _, lv := range lhsVals {
+		switch v := lv.(type) {
+		case string:
+			switch op {
+			case "=":
+				if v == rhs {
+					return true
+				}
+			case "!=":
+				if v != rhs {
+					return true
+				}
+			case ">":
+				if v > rhs {
+					return true
+				}
+			case ">=":
+				if v >= rhs {
+					return true
+				}
+			case "<":
+				if v < rhs {
+					return true
+				}
+			case "<=":
+				if v <= rhs {
+					return true
+				}
+			}
+		case float64:
+			if !rhsIsNum {
+				continue
+			}
+			switch op {
+			case "=":
+				if v == rhsNum {
+					return true
+				}
+			case "!=":
+				if v != rhsNum {
+					return true
+				}
+			case ">":
+				if v > rhsNum {
+					return true
+				}
+			case ">=":
+				if v >= rhsNum {
+					return true
+				}
+			case "<":
+				if v < rhsNum {
+					return true
+				}
+			case "<=":
+				if v <= rhsNum {
+					return true
+				}
+			}
+		case int:
+			if !rhsIsNum {
+				continue
+			}
+			fv := float64(v)
+			switch op {
+			case "=":
+				if fv == rhsNum {
+					return true
+				}
+			case "!=":
+				if fv != rhsNum {
+					return true
+				}
+			case ">":
+				if fv > rhsNum {
+					return true
+				}
+			case ">=":
+				if fv >= rhsNum {
+					return true
+				}
+			case "<":
+				if fv < rhsNum {
+					return true
+				}
+			case "<=":
+				if fv <= rhsNum {
+					return true
+				}
+			}
+		case bool:
+			if !rhsIsBool {
+				continue
+			}
+			switch op {
+			case "=":
+				if v == rhsBool {
+					return true
+				}
+			case "!=":
+				if v != rhsBool {
+					return true
 				}
 			}
 		}

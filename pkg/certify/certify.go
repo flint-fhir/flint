@@ -1531,8 +1531,20 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected Reindexed 1 resource(s) from Patient/cert-pat-1/$reindex, got %d: %s", respReidx.StatusCode, string(bReidx))
 			}
 		}
+		if err == nil {
+			respDR, bDR, errDR := doReq(http.MethodGet, basePath+"/Measure/cms165-bp-control/$data-requirements?periodStart=2026-01-01&periodEnd=2026-12-31", "", nil, nil)
+			if errDR != nil || respDR.StatusCode != http.StatusOK || !strings.Contains(string(bDR), `"module-definition"`) {
+				err = fmt.Errorf("expected module-definition Library from Measure/cms165-bp-control/$data-requirements, got %d: %s", respDR.StatusCode, string(bDR))
+			}
+		}
+		if err == nil {
+			respFP, bFP, errFP := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$fhirpath?expression=Patient.name.family", "", nil, nil)
+			if errFP != nil || respFP.StatusCode != http.StatusOK || !strings.Contains(string(bFP), `"Certify"`) {
+				err = fmt.Errorf("expected Certify from Patient/cert-pat-1/$fhirpath?expression=Patient.name.family, got %d: %s", respFP.StatusCode, string(bFP))
+			}
+		}
 	}
-	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), X-Provenance / $provenance, PlanDefinition/$apply, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, X-Provenance + $provenance, PlanDefinition/$apply, $reindex & $everything start/end")
+	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/AuditEvent?_count=20", "", nil, nil)
