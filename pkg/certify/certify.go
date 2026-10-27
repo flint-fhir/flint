@@ -594,12 +594,31 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("CRUD-03", suite3, "RFC 6902 JSON Patch (test/replace/add) & If-Match 412 CAS", t0, err, "Patched and enforced 412 on stale ETag")
 
-	// 3.4 RFC 7396 JSON Merge Patch + vread/_history + Conditional Delete
+	// 3.4 RFC 7396 JSON Merge Patch, FHIRPath Parameters Conditional Patch + vread/_history + Conditional Delete
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodPatch, basePath+"/Organization/"+condOrgID, "application/merge-patch+json",
 		[]byte(`{"name":"Conditional Cert Org MergePatched"}`), nil)
 	if err == nil && resp.StatusCode != http.StatusOK {
 		err = fmt.Errorf("expected 200 OK on Merge Patch, got %d: %s", resp.StatusCode, string(b))
+	}
+	if err == nil {
+		fhirPatchBody := []byte(`{
+			"resourceType": "Parameters",
+			"parameter": [
+				{
+					"name": "operation",
+					"part": [
+						{"name": "type", "valueCode": "replace"},
+						{"name": "path", "valueString": "Organization.name"},
+						{"name": "value", "valueString": "Conditional Cert Org FHIRPatched"}
+					]
+				}
+			]
+		}`)
+		respFP, bFP, errFP := doReq(http.MethodPatch, basePath+"/Organization?identifier=http://hl7.org/fhir/sid/us-npi|7776665554", "application/fhir+json", fhirPatchBody, nil)
+		if errFP != nil || respFP.StatusCode != http.StatusOK || !strings.Contains(string(bFP), `"Conditional Cert Org FHIRPatched"`) {
+			err = fmt.Errorf("expected 200 OK on Conditional FHIRPath Patch, got %d: %s", respFP.StatusCode, string(bFP))
+		}
 	}
 	if err == nil {
 		// Verify _history has >= 3 versions
@@ -626,7 +645,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			err = fmt.Errorf("expected 410 Gone after conditional DELETE, got %d", respGone.StatusCode)
 		}
 	}
-	record("CRUD-04", suite3, "RFC 7396 Merge Patch, _history, Conditional DELETE & 410 Gone", t0, err, "Merge patch, version history, and 410 tombstone verified")
+	record("CRUD-04", suite3, "RFC 7396 Merge Patch, FHIRPath Conditional PATCH, _history, Conditional DELETE & 410 Gone", t0, err, "Merge patch, FHIRPath conditional patch, version history, and 410 tombstone verified")
 
 	// 3.5 FHIR R4 $meta, $meta-add & $meta-delete Operations
 	t0 = time.Now()
@@ -1335,9 +1354,9 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			if errComp != nil || (respComp.StatusCode != http.StatusOK && respComp.StatusCode != http.StatusCreated) {
 				err = fmt.Errorf("failed creating Composition/cert-comp-1: %d %s", respComp.StatusCode, string(bComp))
 			} else {
-				respDoc, bDoc, errDoc := doReq(http.MethodGet, basePath+"/Composition/cert-comp-1/$document", "", nil, nil)
-				if errDoc != nil || respDoc.StatusCode != http.StatusOK || !strings.Contains(string(bDoc), `"type":"document"`) || !strings.Contains(string(bDoc), `"cert-cond-1"`) {
-					err = fmt.Errorf("expected document Bundle containing Composition and cert-cond-1 from Composition/cert-comp-1/$document, got %d: %s", respDoc.StatusCode, string(bDoc))
+				respDoc, bDoc, errDoc := doReq(http.MethodGet, basePath+"/Composition/cert-comp-1/$document?persist=true", "", nil, nil)
+				if errDoc != nil || respDoc.StatusCode != http.StatusOK || !strings.Contains(string(bDoc), `"type":"document"`) || !strings.Contains(string(bDoc), `"cert-cond-1"`) || respDoc.Header.Get("Location") == "" {
+					err = fmt.Errorf("expected persisted document Bundle containing Composition and cert-cond-1 from Composition/cert-comp-1/$document?persist=true, got %d: %s", respDoc.StatusCode, string(bDoc))
 				}
 			}
 		}
@@ -1380,11 +1399,17 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			}
 		}
 
-		// 3. Patient/{id}/$everything pagination links & POST Parameters
+		// 3. Patient/{id}/$everything pagination links, _typeFilter & POST Parameters
 		if err == nil {
 			respEv, bEv, errEv := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$everything?_type=Observation&_count=1", "", nil, nil)
 			if errEv != nil || respEv.StatusCode != http.StatusOK || !strings.Contains(string(bEv), `"relation":"next"`) {
 				err = fmt.Errorf("expected next pagination link in Patient/cert-pat-1/$everything?_type=Observation&_count=1, got %d: %s", respEv.StatusCode, string(bEv))
+			}
+		}
+		if err == nil {
+			respEvTF, bEvTF, errEvTF := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$everything?_type=Observation&_typeFilter=Observation%3Fcode%3D8867-4", "", nil, nil)
+			if errEvTF != nil || respEvTF.StatusCode != http.StatusOK || !strings.Contains(string(bEvTF), `"cert-obs-1"`) {
+				err = fmt.Errorf("expected Observation/cert-obs-1 in Patient/cert-pat-1/$everything with _typeFilter, got %d: %s", respEvTF.StatusCode, string(bEvTF))
 			}
 		}
 	}

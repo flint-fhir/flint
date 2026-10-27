@@ -278,6 +278,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("DELETE /fhir/r4/{tenant}/{resourceType}/{id}", s.handleDelete)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}", s.handleSearch)
 	mux.HandleFunc("PUT /fhir/r4/{tenant}/{resourceType}", s.handleConditionalUpdate)
+	mux.HandleFunc("PATCH /fhir/r4/{tenant}/{resourceType}", s.handleConditionalPatch)
 	mux.HandleFunc("DELETE /fhir/r4/{tenant}/{resourceType}", s.handleConditionalDelete)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$validate", s.handleValidate)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$validate", s.handleValidate)
@@ -1579,6 +1580,14 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 	sinceRaw := strings.TrimSpace(q.Get("_since"))
 	countRaw := strings.TrimSpace(q.Get("_count"))
 	offsetRaw := strings.TrimSpace(q.Get("_offset"))
+	var typeFilters []string
+	for _, tf := range q["_typeFilter"] {
+		for part := range strings.SplitSeq(tf, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				typeFilters = append(typeFilters, trimmed)
+			}
+		}
+	}
 
 	if r.Method == http.MethodPost && r.ContentLength != 0 {
 		ct := strings.ToLower(r.Header.Get("Content-Type"))
@@ -1639,11 +1648,50 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 							if val != "" && offsetRaw == "" {
 								offsetRaw = val
 							}
+						case "_typeFilter":
+							for part := range strings.SplitSeq(val, ",") {
+								if trimmed := strings.TrimSpace(part); trimmed != "" {
+									typeFilters = append(typeFilters, trimmed)
+								}
+							}
 						}
 					}
 				}
 			}
 		}
+	}
+
+	var parsedTypeFilters []exportTypeFilter
+	for _, tf := range typeFilters {
+		parts := strings.SplitN(tf, "?", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _typeFilter %q: must be formatted as ResourceType?param=value", tf))
+			return
+		}
+		rt := strings.TrimSpace(parts[0])
+		if _, ok := s.protoRegistry[rt]; !ok {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("unsupported resource type %q in _typeFilter %q", rt, tf))
+			return
+		}
+		qVals, err := url.ParseQuery(strings.TrimSpace(parts[1]))
+		if err != nil || len(qVals) == 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid query in _typeFilter %q", tf))
+			return
+		}
+		if err := postgres.ValidateSearchQuery(qVals); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _typeFilter %q: %v", tf, err))
+			return
+		}
+		sp := postgres.BuildSearchParamsFromQuery(tenant, rt, qVals)
+		sp.Count = 10000
+		parsedTypeFilters = append(parsedTypeFilters, exportTypeFilter{
+			resType: rt,
+			params:  sp,
+		})
 	}
 
 	var resourceTypes []string
@@ -1742,6 +1790,41 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception",
 			fmt.Sprintf("failed to assemble %s/$everything", targetLabel))
 		return
+	}
+
+	if len(parsedTypeFilters) > 0 {
+		typeFilterAllowed, tfErr := s.resolveExportTypeFilterAllowedIDs(r.Context(), parsedTypeFilters)
+		if tfErr != nil {
+			s.logger.Error("$everything _typeFilter evaluation failed", "error", tfErr, "tenant", tenant)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to evaluate _typeFilter criteria")
+			return
+		}
+		removed := 0
+		if len(sr.Matches) > 0 {
+			filteredMatches := make([]postgres.SearchResult, 0, len(sr.Matches))
+			for _, m := range sr.Matches {
+				if matchesExportTypeFilter(typeFilterAllowed, m.ResType, m.ResID) {
+					filteredMatches = append(filteredMatches, m)
+				} else {
+					removed++
+				}
+			}
+			sr.Matches = filteredMatches
+		}
+		if len(sr.Includes) > 0 {
+			filteredIncludes := make([]postgres.SearchResult, 0, len(sr.Includes))
+			for _, inc := range sr.Includes {
+				if matchesExportTypeFilter(typeFilterAllowed, inc.ResType, inc.ResID) {
+					filteredIncludes = append(filteredIncludes, inc)
+				} else {
+					removed++
+				}
+			}
+			sr.Includes = filteredIncludes
+		}
+		if removed > 0 {
+			sr.Total = max(len(sr.Matches)+len(sr.Includes), sr.Total-removed)
+		}
 	}
 
 	if hasSecCtx && len(sr.Includes) > 0 {
@@ -2445,6 +2528,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			"updateCreate":      true,
 			"conditionalCreate": true,
 			"conditionalUpdate": true,
+			"conditionalPatch":  true,
 			"conditionalDelete": "single",
 			"interaction":       interactions,
 			"searchParam":       sp,
@@ -2517,6 +2601,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		"updateCreate":      true,
 		"conditionalCreate": true,
 		"conditionalUpdate": true,
+		"conditionalPatch":  true,
 		"conditionalDelete": "single",
 		"interaction":       interactions,
 		"operation": []map[string]string{
@@ -2562,6 +2647,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			"updateCreate":      true,
 			"conditionalCreate": true,
 			"conditionalUpdate": true,
+			"conditionalPatch":  true,
 			"conditionalDelete": "single",
 			"interaction":       interactions,
 			"searchParam":       sp,
@@ -2662,7 +2748,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 			"http://hl7.org/fhir/uv/bulkdata/CapabilityStatement/bulk-data",
 		},
 		"format":      []string{"json", "application/fhir+json", "application/fhir+ndjson"},
-		"patchFormat": []string{"application/json-patch+json", "application/merge-patch+json"},
+		"patchFormat": []string{"application/json-patch+json", "application/merge-patch+json", "application/fhir+json"},
 		"software": map[string]any{
 			"name":    "Flint FHIR Server",
 			"version": "0.1.0",
