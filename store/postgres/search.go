@@ -47,6 +47,8 @@ type PatientEverythingParams struct {
 	ResourceTypes []string   // Optional _type filter (e.g. ["Observation", "Condition"])
 	Since         *time.Time // Optional _since filter on last_updated
 	Until         *time.Time // Optional _until filter on last_updated
+	Start         *time.Time // Optional start clinical care-date filter on spidx_date
+	End           *time.Time // Optional end clinical care-date filter on spidx_date
 	Count         int
 	Offset        int
 }
@@ -58,6 +60,8 @@ type EncounterEverythingParams struct {
 	ResourceTypes []string   // Optional _type filter (e.g. ["Observation", "Condition"])
 	Since         *time.Time // Optional _since filter on last_updated
 	Until         *time.Time // Optional _until filter on last_updated
+	Start         *time.Time // Optional start clinical care-date filter on spidx_date
+	End           *time.Time // Optional end clinical care-date filter on spidx_date
 	Count         int
 	Offset        int
 }
@@ -72,6 +76,8 @@ type GroupEverythingParams struct {
 	ResourceTypes []string   // Optional _type filter (e.g. ["Patient", "Observation"])
 	Since         *time.Time // Optional _since filter on last_updated
 	Until         *time.Time // Optional _until filter on last_updated
+	Start         *time.Time // Optional start clinical care-date filter on spidx_date
+	End           *time.Time // Optional end clinical care-date filter on spidx_date
 	Count         int
 	Offset        int
 }
@@ -2620,6 +2626,10 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 			whereConds = append(whereConds, fmt.Sprintf("r.last_updated <= $%d", len(args)+1))
 			args = append(args, *params.Until)
 		}
+		if dateCond, dateArgs := buildEverythingClinicalDateCond(params.Start, params.End, len(args)); dateCond != "" {
+			whereConds = append(whereConds, dateCond)
+			args = append(args, dateArgs...)
+		}
 
 		whereClause := strings.Join(whereConds, " AND ")
 
@@ -2786,6 +2796,10 @@ func (s *Store) EncounterEverything(ctx context.Context, params EncounterEveryth
 		if params.Until != nil {
 			whereConds = append(whereConds, fmt.Sprintf("r.last_updated <= $%d", len(args)+1))
 			args = append(args, *params.Until)
+		}
+		if dateCond, dateArgs := buildEverythingClinicalDateCond(params.Start, params.End, len(args)); dateCond != "" {
+			whereConds = append(whereConds, dateCond)
+			args = append(args, dateArgs...)
 		}
 
 		whereClause := strings.Join(whereConds, " AND ")
@@ -3013,6 +3027,10 @@ func (s *Store) GroupEverything(ctx context.Context, params GroupEverythingParam
 			whereConds = append(whereConds, fmt.Sprintf("r.last_updated <= $%d", len(args)+1))
 			args = append(args, *params.Until)
 		}
+		if dateCond, dateArgs := buildEverythingClinicalDateCond(params.Start, params.End, len(args)); dateCond != "" {
+			whereConds = append(whereConds, dateCond)
+			args = append(args, dateArgs...)
+		}
 
 		whereClause := strings.Join(whereConds, " AND ")
 
@@ -3057,6 +3075,34 @@ func (s *Store) GroupEverything(ctx context.Context, params GroupEverythingParam
 		return nil, err
 	}
 	return out, nil
+}
+
+func buildEverythingClinicalDateCond(start, end *time.Time, startArgIdx int) (string, []any) {
+	if start == nil && end == nil {
+		return "", nil
+	}
+	var sdConds []string
+	var args []any
+	if start != nil {
+		args = append(args, *start)
+		sdConds = append(sdConds, fmt.Sprintf("sd.sp_high >= $%d", startArgIdx+len(args)))
+	}
+	if end != nil {
+		args = append(args, *end)
+		sdConds = append(sdConds, fmt.Sprintf("sd.sp_low <= $%d", startArgIdx+len(args)))
+	}
+	cond := fmt.Sprintf(`(
+		r.res_type IN ('Patient', 'Group', 'Organization', 'Practitioner', 'PractitionerRole', 'Location', 'Medication', 'HealthcareService', 'Endpoint', 'Substance', 'Device', 'RelatedPerson')
+		OR EXISTS (
+			SELECT 1 FROM spidx_date sd
+			WHERE sd.tenant_id = r.tenant_id
+			  AND sd.res_type = r.res_type
+			  AND sd.res_id = r.res_id
+			  AND sd.sp_name != 'birthdate'
+			  AND %s
+		)
+	)`, strings.Join(sdConds, " AND "))
+	return cond, args
 }
 
 var patientCompartmentTypes = map[string]bool{

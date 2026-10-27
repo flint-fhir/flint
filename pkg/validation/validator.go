@@ -385,7 +385,7 @@ func (e *Engine) validateNestedChildren(
 			continue
 		}
 		fieldPath := parentPath + "." + key
-		if string(childMD.FullName()) == "google.fhir.r4.core.ContainedResource" {
+		if string(childMD.FullName()) == "google.fhir.r4.core.ContainedResource" || string(childMD.FullName()) == "google.protobuf.Any" {
 			// Skip full resource schema check on PATCH entry payloads inside Bundles
 			if reqMap, hasReq := parentMap["request"].(map[string]any); hasReq {
 				if strings.EqualFold(extractStringOrWrapped(reqMap["method"]), "PATCH") {

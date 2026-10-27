@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -619,6 +620,7 @@ var (
 		"accession": true, "bodysite": true, "specialty": true,
 		"role": true, "relationship": true, "subscriber-id": true,
 		"value-concept": true, "component-value-concept": true, "combo-value-concept": true,
+		"race": true, "ethnicity": true, "birthsex": true, "marital-status": true,
 		"_tag": true, "_security": true,
 	}
 	knownRefSearchParams = map[string]bool{
@@ -685,6 +687,159 @@ var (
 		"_containedType": true, "_format": true, "_pretty": true, "_filter": true,
 	}
 )
+
+// CustomSearchParamDef describes a runtime-registered FHIR R4 SearchParameter.
+type CustomSearchParamDef struct {
+	ID          string   // Resource ID of the SearchParameter
+	URL         string   // Canonical URL
+	Code        string   // Query parameter name (e.g., "race", "ethnicity", "birthsex", "eye-color")
+	Base        []string // Target resource types (e.g., ["Patient"])
+	Type        string   // "string", "token", "date", "quantity", "reference", "uri"
+	Expression  string   // FHIRPath expression (e.g., "Patient.extension.where(url='...')" or "Patient.maritalStatus")
+	Description string
+}
+
+var (
+	customSearchParamMu     sync.RWMutex
+	customSearchParamsByID  = map[string]CustomSearchParamDef{}
+	builtinUSCoreExtensions = []CustomSearchParamDef{
+		{
+			ID:          "us-core-race",
+			URL:         "http://hl7.org/fhir/us/core/SearchParameter/us-core-race",
+			Code:        "race",
+			Base:        []string{"Patient"},
+			Type:        "token",
+			Expression:  "Patient.extension.where(url = 'http://hl7.org/fhir/us/core/StructureDefinition/us-core-race')",
+			Description: "Returns patients with a race extension matching the specified code.",
+		},
+		{
+			ID:          "us-core-ethnicity",
+			URL:         "http://hl7.org/fhir/us/core/SearchParameter/us-core-ethnicity",
+			Code:        "ethnicity",
+			Base:        []string{"Patient"},
+			Type:        "token",
+			Expression:  "Patient.extension.where(url = 'http://hl7.org/fhir/us/core/StructureDefinition/us-core-ethnicity')",
+			Description: "Returns patients with an ethnicity extension matching the specified code.",
+		},
+		{
+			ID:          "us-core-birthsex",
+			URL:         "http://hl7.org/fhir/us/core/SearchParameter/us-core-birthsex",
+			Code:        "birthsex",
+			Base:        []string{"Patient"},
+			Type:        "token",
+			Expression:  "Patient.extension.where(url = 'http://hl7.org/fhir/us/core/StructureDefinition/us-core-birthsex')",
+			Description: "Returns patients with a birthsex extension matching the specified code.",
+		},
+	}
+)
+
+func cloneBoolMapWithKey(src map[string]bool, key string) map[string]bool {
+	dst := make(map[string]bool, len(src)+1)
+	for k, v := range src {
+		dst[k] = v
+	}
+	dst[key] = true
+	return dst
+}
+
+// RegisterCustomSearchParam registers a custom FHIR R4 SearchParameter definition at runtime,
+// making its code searchable, validated, and dynamically extracted across its base resource types.
+func RegisterCustomSearchParam(def CustomSearchParamDef) {
+	def.Code = strings.TrimSpace(def.Code)
+	def.Type = strings.ToLower(strings.TrimSpace(def.Type))
+	def.Expression = strings.TrimSpace(def.Expression)
+	if def.Code == "" || def.Type == "" {
+		return
+	}
+	key := strings.TrimSpace(def.ID)
+	if key == "" {
+		key = strings.Join(def.Base, ",") + ":" + def.Code
+	}
+
+	customSearchParamMu.Lock()
+	defer customSearchParamMu.Unlock()
+	customSearchParamsByID[key] = def
+
+	switch def.Type {
+	case "string":
+		if !knownStringSearchParams[def.Code] {
+			knownStringSearchParams = cloneBoolMapWithKey(knownStringSearchParams, def.Code)
+		}
+	case "token":
+		if !knownTokenSearchParams[def.Code] {
+			knownTokenSearchParams = cloneBoolMapWithKey(knownTokenSearchParams, def.Code)
+		}
+	case "date":
+		if !knownDateSearchParams[def.Code] {
+			knownDateSearchParams = cloneBoolMapWithKey(knownDateSearchParams, def.Code)
+		}
+	case "quantity":
+		if !knownQuantitySearchParams[def.Code] {
+			knownQuantitySearchParams = cloneBoolMapWithKey(knownQuantitySearchParams, def.Code)
+		}
+	case "reference":
+		if !knownRefSearchParams[def.Code] {
+			knownRefSearchParams = cloneBoolMapWithKey(knownRefSearchParams, def.Code)
+		}
+	case "uri":
+		if !knownURISearchParams[def.Code] {
+			knownURISearchParams = cloneBoolMapWithKey(knownURISearchParams, def.Code)
+		}
+	}
+}
+
+// UnregisterCustomSearchParam removes a custom SearchParameter by its resource ID or code.
+func UnregisterCustomSearchParam(idOrCode string) {
+	idOrCode = strings.TrimSpace(idOrCode)
+	if idOrCode == "" {
+		return
+	}
+	customSearchParamMu.Lock()
+	defer customSearchParamMu.Unlock()
+	delete(customSearchParamsByID, idOrCode)
+	for k, def := range customSearchParamsByID {
+		if def.ID == idOrCode || def.Code == idOrCode {
+			delete(customSearchParamsByID, k)
+		}
+	}
+}
+
+// CustomSearchParamsForType returns all built-in US Core extension SearchParameters and
+// runtime-registered custom SearchParameters applicable to resType.
+func CustomSearchParamsForType(resType string) []CustomSearchParamDef {
+	var out []CustomSearchParamDef
+	seenCode := make(map[string]bool)
+	for _, b := range builtinUSCoreExtensions {
+		for _, base := range b.Base {
+			if strings.EqualFold(base, resType) || base == "Resource" || base == "DomainResource" {
+				out = append(out, b)
+				seenCode[b.Code] = true
+				break
+			}
+		}
+	}
+	customSearchParamMu.RLock()
+	defer customSearchParamMu.RUnlock()
+	for _, def := range customSearchParamsByID {
+		for _, base := range def.Base {
+			if strings.EqualFold(base, resType) || base == "Resource" || base == "DomainResource" {
+				if seenCode[def.Code] {
+					for i := range out {
+						if out[i].Code == def.Code {
+							out[i] = def
+							break
+						}
+					}
+				} else {
+					out = append(out, def)
+					seenCode[def.Code] = true
+				}
+				break
+			}
+		}
+	}
+	return out
+}
 
 type filterToken struct {
 	val    string

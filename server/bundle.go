@@ -691,6 +691,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				"status": "204 No Content",
 			}
 			if delRec != nil && delRec.ResVersion > 0 {
+				s.syncSearchParameterOnDelete(resType, resID)
 				respMap["etag"] = postgres.FormatETag(delRec.ResVersion)
 				s.publishCDC(r.Context(), automq.Message{
 					TenantID: tenant,
@@ -800,6 +801,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				http.StatusInternalServerError, fmt.Sprintf("entry[%d]: proto encode failed", i))
 			continue
 		}
+
+		s.syncSearchParameterOnWrite(resType, resID, entry.Resource)
 
 		var idx *postgres.SearchIndexes
 		if extractor, ok := s.extractors[resType]; ok {

@@ -254,6 +254,8 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("DELETE /fhir/r4/{tenant}/$import-poll/{jobId}", s.handleImportCancel)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$expunge", s.handleExpunge)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$expunge", s.handleExpunge)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$reindex", s.handleReindex)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$reindex", s.handleReindex)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$diff", s.handleDiff)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$diff", s.handleDiff)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$certify", s.handleCertify)
@@ -391,6 +393,16 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleSubscriptionStatus(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "PlanDefinition") && parts[4] == "$apply" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePlanDefinitionApply(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ActivityDefinition") && parts[4] == "$apply" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleActivityDefinitionApply(w, r)
+					return
+				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
 				if parts[5] == "$everything" {
@@ -398,6 +410,25 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("resourceType", parts[3])
 					r.SetPathValue("id", parts[4])
 					s.handlePatientEverything(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && parts[5] == "$reindex" && !strings.HasPrefix(parts[3], "$") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					r.SetPathValue("id", parts[4])
+					s.handleReindex(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "PlanDefinition") && parts[5] == "$apply" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePlanDefinitionApply(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ActivityDefinition") && parts[5] == "$apply" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleActivityDefinitionApply(w, r)
 					return
 				}
 				if parts[5] == "$validate" && !strings.HasPrefix(parts[3], "$") {
@@ -1114,6 +1145,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.syncSearchParameterOnWrite(resType, resID, body)
+
 	// Extract search indexes if available
 	var idx *postgres.SearchIndexes
 	if extractor, ok := s.extractors[resType]; ok {
@@ -1380,6 +1413,8 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.syncSearchParameterOnWrite(resType, resID, body)
+
 	var idx *postgres.SearchIndexes
 	if extractor, ok := s.extractors[resType]; ok {
 		var extractErr error
@@ -1478,6 +1513,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rec != nil && rec.ResVersion > 0 {
+		s.syncSearchParameterOnDelete(resType, resID)
 		w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 		s.publishCDC(r.Context(), automq.Message{
 			TenantID: tenant,
@@ -1813,6 +1849,8 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 	typeRaw := strings.TrimSpace(q.Get("_type"))
 	sinceRaw := strings.TrimSpace(q.Get("_since"))
 	untilRaw := strings.TrimSpace(q.Get("_until"))
+	startRaw := strings.TrimSpace(q.Get("start"))
+	endRaw := strings.TrimSpace(q.Get("end"))
 	countRaw := strings.TrimSpace(q.Get("_count"))
 	offsetRaw := strings.TrimSpace(q.Get("_offset"))
 	var elements []string
@@ -1886,6 +1924,14 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 						case "_until":
 							if val != "" && untilRaw == "" {
 								untilRaw = val
+							}
+						case "start":
+							if val != "" && startRaw == "" {
+								startRaw = val
+							}
+						case "end":
+							if val != "" && endRaw == "" {
+								endRaw = val
 							}
 						case "_count":
 							if val != "" && countRaw == "" {
@@ -2033,6 +2079,38 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	var startTime *time.Time
+	if startRaw != "" {
+		dOp, err := postgres.ParseDateOp(startRaw)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid start parameter %q: %v", startRaw, err))
+			return
+		}
+		t := dOp.Value
+		startTime = &t
+	}
+
+	var endTime *time.Time
+	if endRaw != "" {
+		dOp, err := postgres.ParseDateOp(endRaw)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid end parameter %q: %v", endRaw, err))
+			return
+		}
+		t := dOp.Value
+		if dOp.High.After(dOp.Value) {
+			t = dOp.High.Add(-time.Microsecond)
+		}
+		endTime = &t
+	}
+	if startTime != nil && endTime != nil && endTime.Before(*startTime) {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+			fmt.Sprintf("end (%s) must not be earlier than start (%s)", endRaw, startRaw))
+		return
+	}
+
 	count := 100
 	if countRaw != "" {
 		n, err := strconv.Atoi(countRaw)
@@ -2084,6 +2162,8 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 			ResourceTypes: resourceTypes,
 			Since:         sinceTime,
 			Until:         untilTime,
+			Start:         startTime,
+			End:           endTime,
 			Count:         count,
 			Offset:        offset,
 		})
@@ -2095,6 +2175,8 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 			ResourceTypes: resourceTypes,
 			Since:         sinceTime,
 			Until:         untilTime,
+			Start:         startTime,
+			End:           endTime,
 			Count:         count,
 			Offset:        offset,
 		})
@@ -2105,6 +2187,8 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 			ResourceTypes: resourceTypes,
 			Since:         sinceTime,
 			Until:         untilTime,
+			Start:         startTime,
+			End:           endTime,
 			Count:         count,
 			Offset:        offset,
 		})
@@ -3134,6 +3218,8 @@ func usCoreSupportedProfiles(rt string) []string {
 
 // handleMetadata returns the FHIR CapabilityStatement.
 func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
+	s.syncTenantCustomSearchParams(r.Context(), r.PathValue("tenant"))
+
 	interactions := []map[string]string{
 		{"code": "read"},
 		{"code": "vread"},
@@ -3174,6 +3260,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		if len(sp) == 0 {
 			sp = defaultSearchParams
 		}
+		sp = mergeCustomSearchParams(rt, sp)
 		entry := map[string]any{
 			"type":              rt,
 			"profile":           "http://hl7.org/fhir/StructureDefinition/" + rt,
@@ -3300,6 +3387,7 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 		if len(sp) == 0 {
 			sp = defaultSearchParams
 		}
+		sp = mergeCustomSearchParams(rt, sp)
 		entry := map[string]any{
 			"type":              rt,
 			"profile":           "http://hl7.org/fhir/StructureDefinition/" + rt,
@@ -3392,6 +3480,20 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 				{
 					"name":       "status",
 					"definition": "http://hl7.org/fhir/uv/subscriptions-backport/OperationDefinition/backport-subscription-status",
+				},
+			}
+		case "PlanDefinition":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "apply",
+					"definition": "http://hl7.org/fhir/OperationDefinition/PlanDefinition-apply",
+				},
+			}
+		case "ActivityDefinition":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "apply",
+					"definition": "http://hl7.org/fhir/OperationDefinition/ActivityDefinition-apply",
 				},
 			}
 		}
@@ -3541,6 +3643,14 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "expunge",
 						"definition": "http://hl7.org/fhir/OperationDefinition/Resource-expunge",
+					},
+					{
+						"name":       "reindex",
+						"definition": "http://flint.fhir.org/OperationDefinition/Resource-reindex",
+					},
+					{
+						"name":       "apply",
+						"definition": "http://hl7.org/fhir/OperationDefinition/PlanDefinition-apply",
 					},
 					{
 						"name":       "diff",

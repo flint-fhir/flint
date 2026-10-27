@@ -965,7 +965,96 @@ func (s *Store) deleteResourceInTx(ctx context.Context, tx *sql.Tx, tenantID, re
 	}, nil
 }
 
-// deleteSearchIndexes removes all search index rows for a resource.
+// ReindexParams specifies criteria and extractors for rebuilding search indexes via $reindex.
+type ReindexParams struct {
+	TenantID   string
+	ResType    string // Optional: restrict to a single resource type
+	ResID      string // Optional: restrict to a single resource ID
+	Extractors map[string]IndexExtractorFunc
+}
+
+// ReindexResult reports the number of resources reindexed by $reindex.
+type ReindexResult struct {
+	ReindexedResources int
+	ByResourceType     map[string]int
+}
+
+// Reindex rebuilds spidx_* search index rows for all matching active resources in PostgreSQL.
+func (s *Store) Reindex(ctx context.Context, params ReindexParams) (*ReindexResult, error) {
+	out := &ReindexResult{
+		ByResourceType: make(map[string]int),
+	}
+	err := s.withTenantTx(ctx, params.TenantID, func(tx *sql.Tx) error {
+		if params.ResType != "" && params.ResID != "" {
+			if _, err := s.readResourceWithMetaInTx(ctx, tx, params.TenantID, params.ResType, params.ResID); err != nil {
+				return err
+			}
+		}
+
+		where := "WHERE tenant_id = $1 AND is_deleted = FALSE"
+		args := []any{params.TenantID}
+		if params.ResType != "" {
+			args = append(args, params.ResType)
+			where += fmt.Sprintf(" AND res_type = $%d", len(args))
+		}
+		if params.ResID != "" {
+			args = append(args, params.ResID)
+			where += fmt.Sprintf(" AND res_id = $%d", len(args))
+		}
+
+		rows, err := tx.QueryContext(ctx, "SELECT res_type, res_id, resource_proto FROM fhir_resource "+where+" ORDER BY res_type, res_id", args...)
+		if err != nil {
+			return fmt.Errorf("query resources for reindex: %w", err)
+		}
+		type item struct {
+			resType string
+			resID   string
+			proto   []byte
+		}
+		var items []item
+		for rows.Next() {
+			var it item
+			if err := rows.Scan(&it.resType, &it.resID, &it.proto); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan resource for reindex: %w", err)
+			}
+			items = append(items, it)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+
+		for _, it := range items {
+			extractor := params.Extractors[it.resType]
+			if extractor == nil {
+				continue
+			}
+			idx, err := extractor(params.TenantID, it.resID, it.proto)
+			if err != nil {
+				return fmt.Errorf("extract indexes for %s/%s: %w", it.resType, it.resID, err)
+			}
+			if err := deleteSearchIndexes(ctx, tx, params.TenantID, it.resType, it.resID); err != nil {
+				return err
+			}
+			if idx != nil {
+				if err := insertSearchIndexes(ctx, tx, idx); err != nil {
+					return err
+				}
+			}
+			out.ReindexedResources++
+			out.ByResourceType[it.resType]++
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// deleteSearchIndexes removes all search index rows for a resource (and any inline #id contained resources).
 func deleteSearchIndexes(ctx context.Context, tx *sql.Tx, tenantID, resType, resID string) error {
 	tables := []string{
 		"spidx_string",
@@ -976,10 +1065,11 @@ func deleteSearchIndexes(ctx context.Context, tx *sql.Tx, tenantID, resType, res
 		"spidx_uri",
 	}
 
+	prefixPattern := resType + "/" + resID + "#%"
 	for _, table := range tables {
 		_, err := tx.ExecContext(ctx, fmt.Sprintf(
-			"DELETE FROM %s WHERE tenant_id = $1 AND res_type = $2 AND res_id = $3", table,
-		), tenantID, resType, resID)
+			"DELETE FROM %s WHERE tenant_id = $1 AND ((res_type = $2 AND res_id = $3) OR res_id LIKE $4)", table,
+		), tenantID, resType, resID, prefixPattern)
 		if err != nil {
 			return fmt.Errorf("delete from %s: %w", table, err)
 		}

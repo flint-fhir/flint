@@ -1514,13 +1514,25 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			}
 		}
 		if err == nil {
-			respEvTF, bEvTF, errEvTF := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$everything?_type=Observation&_typeFilter=Observation%3Fcode%3D8867-4", "", nil, nil)
+			respEvTF, bEvTF, errEvTF := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$everything?_type=Observation&_typeFilter=Observation%3Fcode%3D8867-4&start=2026-01-01&end=2026-01-31", "", nil, nil)
 			if errEvTF != nil || respEvTF.StatusCode != http.StatusOK || !strings.Contains(string(bEvTF), `"cert-obs-1"`) {
-				err = fmt.Errorf("expected Observation/cert-obs-1 in Patient/cert-pat-1/$everything with _typeFilter, got %d: %s", respEvTF.StatusCode, string(bEvTF))
+				err = fmt.Errorf("expected Observation/cert-obs-1 in Patient/cert-pat-1/$everything with _typeFilter and start/end dates, got %d: %s", respEvTF.StatusCode, string(bEvTF))
+			}
+		}
+		if err == nil {
+			respPlan, bPlan, errPlan := doReq(http.MethodGet, basePath+"/PlanDefinition/plandef-hypertension-control/$apply?subject=Patient/cert-pat-1", "", nil, nil)
+			if errPlan != nil || respPlan.StatusCode != http.StatusOK || !strings.Contains(string(bPlan), `"CarePlan"`) {
+				err = fmt.Errorf("expected CarePlan from PlanDefinition/plandef-hypertension-control/$apply, got %d: %s", respPlan.StatusCode, string(bPlan))
+			}
+		}
+		if err == nil {
+			respReidx, bReidx, errReidx := doReq(http.MethodPost, basePath+"/Patient/cert-pat-1/$reindex", "application/fhir+json", nil, nil)
+			if errReidx != nil || respReidx.StatusCode != http.StatusOK || !strings.Contains(string(bReidx), `"Reindexed 1 resource(s)"`) {
+				err = fmt.Errorf("expected Reindexed 1 resource(s) from Patient/cert-pat-1/$reindex, got %d: %s", respReidx.StatusCode, string(bReidx))
 			}
 		}
 	}
-	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), X-Provenance / $provenance Lineage & $everything Pagination", t0, err, "Verified DocumentReference/$docref, X-Provenance + $provenance & $everything pagination")
+	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), X-Provenance / $provenance, PlanDefinition/$apply, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, X-Provenance + $provenance, PlanDefinition/$apply, $reindex & $everything start/end")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/AuditEvent?_count=20", "", nil, nil)

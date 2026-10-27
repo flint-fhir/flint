@@ -2728,3 +2728,277 @@ func TestFilterUCUMContentBulkUntilAndGroupEverythingWave13(t *testing.T) {
 		t.Errorf("expected 400 Bad Request when _until < _since, got %d: %s", badUntilRec.Code, badUntilRec.Body.String())
 	}
 }
+
+func TestCustomSearchParamReindexPlanDefApplyAndEverythingDatesWave14(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "test-wave14-e2e"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	putRes := func(resType, id, body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/"+resType+"/"+id, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s/%s failed (%d): %s", resType, id, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. Seed a Patient with US Core race, ethnicity, birthsex extensions AND a custom extension (vip-tier) BEFORE the custom SearchParameter is registered
+	putRes("Patient", "pat-w14-1", `{
+		"resourceType": "Patient",
+		"id": "pat-w14-1",
+		"active": true,
+		"gender": "female",
+		"birthDate": "1980-06-15",
+		"name": [{"family": "Kowalski", "given": ["Elena"]}],
+		"maritalStatus": {
+			"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v3-MaritalStatus", "code": "M", "display": "Married"}]
+		},
+		"extension": [
+			{
+				"url": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-race",
+				"extension": [
+					{"url": "ombCategory", "valueCoding": {"system": "urn:oid:2.16.840.1.113883.6.238", "code": "2106-3", "display": "White"}},
+					{"url": "text", "valueString": "White"}
+				]
+			},
+			{
+				"url": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-ethnicity",
+				"extension": [
+					{"url": "ombCategory", "valueCoding": {"system": "urn:oid:2.16.840.1.113883.6.238", "code": "2186-5", "display": "Not Hispanic or Latino"}},
+					{"url": "text", "valueString": "Not Hispanic or Latino"}
+				]
+			},
+			{
+				"url": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-birthsex",
+				"valueCode": "F"
+			},
+			{
+				"url": "http://hospital.example.org/StructureDefinition/vip-tier",
+				"valueCode": "platinum"
+			}
+		]
+	}`)
+
+	// 1a. Built-in US Core extension search parameters (race, ethnicity, birthsex) work out-of-the-box
+	usCoreReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient?race=2106-3&ethnicity=2186-5&birthsex=F", nil)
+	usCoreRec := httptest.NewRecorder()
+	pgH.ServeHTTP(usCoreRec, usCoreReq)
+	if usCoreRec.Code != http.StatusOK || !strings.Contains(usCoreRec.Body.String(), `"pat-w14-1"`) {
+		t.Fatalf("expected US Core extension search (?race=2106-3&ethnicity=2186-5&birthsex=F) to match pat-w14-1, got %d: %s", usCoreRec.Code, usCoreRec.Body.String())
+	}
+
+	// 2. Register runtime custom SearchParameters (vip-tier extension + marital-status field)
+	putRes("SearchParameter", "sp-vip-tier", `{
+		"resourceType": "SearchParameter",
+		"id": "sp-vip-tier",
+		"url": "http://hospital.example.org/SearchParameter/Patient-vip-tier",
+		"name": "PatientVIPTier",
+		"status": "active",
+		"description": "Search Patients by hospital VIP tier extension",
+		"code": "vip-tier",
+		"base": ["Patient"],
+		"type": "token",
+		"expression": "Patient.extension.where(url='http://hospital.example.org/StructureDefinition/vip-tier')"
+	}`)
+	putRes("SearchParameter", "sp-marital-status", `{
+		"resourceType": "SearchParameter",
+		"id": "sp-marital-status",
+		"url": "http://hl7.org/fhir/SearchParameter/Patient-marital-status",
+		"name": "PatientMaritalStatus",
+		"status": "active",
+		"description": "Search Patients by maritalStatus",
+		"code": "marital-status",
+		"base": ["Patient"],
+		"type": "token",
+		"expression": "Patient.maritalStatus"
+	}`)
+
+	// 2a. Trigger $reindex on Patient so pre-existing pat-w14-1 is indexed under the newly registered SearchParameters
+	reidxReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/$reindex", nil)
+	reidxRec := httptest.NewRecorder()
+	pgH.ServeHTTP(reidxRec, reidxReq)
+	if reidxRec.Code != http.StatusOK || !strings.Contains(reidxRec.Body.String(), `"Reindexed 1 resource(s)"`) {
+		t.Fatalf("POST /Patient/$reindex expected 200 OK with Reindexed 1 resource(s), got %d: %s", reidxRec.Code, reidxRec.Body.String())
+	}
+
+	// 2b. Search using the newly reindexed custom SearchParameters (and inside _filter)
+	vipReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient?vip-tier=platinum&marital-status=M", nil)
+	vipRec := httptest.NewRecorder()
+	pgH.ServeHTTP(vipRec, vipReq)
+	if vipRec.Code != http.StatusOK || !strings.Contains(vipRec.Body.String(), `"pat-w14-1"`) {
+		t.Fatalf("GET /Patient?vip-tier=platinum&marital-status=M expected pat-w14-1 after $reindex, got %d: %s", vipRec.Code, vipRec.Body.String())
+	}
+
+	// 2c. Verify CapabilityStatement (/metadata) and OpenAPI (/openapi.json) advertise custom SearchParameters and $reindex / $apply
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK || !strings.Contains(metaRec.Body.String(), `"vip-tier"`) || !strings.Contains(metaRec.Body.String(), `"reindex"`) || !strings.Contains(metaRec.Body.String(), `"apply"`) {
+		t.Errorf("expected /metadata to advertise vip-tier, reindex, and apply, got %d", metaRec.Code)
+	}
+	oaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/openapi.json", nil)
+	oaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(oaRec, oaReq)
+	if oaRec.Code != http.StatusOK || !strings.Contains(oaRec.Body.String(), `"vip-tier"`) || !strings.Contains(oaRec.Body.String(), `"/PlanDefinition/$apply"`) || !strings.Contains(oaRec.Body.String(), `"/$reindex"`) {
+		t.Errorf("expected /openapi.json to advertise vip-tier, /PlanDefinition/$apply, and /$reindex, got %d", oaRec.Code)
+	}
+
+	// 3. Seed clinical Condition, dated Observations, Encounter, Group, and MedicationRequest with inline contained Medication (#med-inline-1)
+	putRes("Condition", "cond-w14-htn", `{
+		"resourceType": "Condition",
+		"id": "cond-w14-htn",
+		"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+		"verificationStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"}]},
+		"code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Essential hypertension"}]},
+		"subject": {"reference": "Patient/pat-w14-1"},
+		"onsetDateTime": "2026-03-10"
+	}`)
+	putRes("Encounter", "enc-w14-1", `{
+		"resourceType": "Encounter",
+		"id": "enc-w14-1",
+		"status": "finished",
+		"class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB"},
+		"subject": {"reference": "Patient/pat-w14-1"},
+		"period": {"start": "2026-03-15T09:00:00Z", "end": "2026-03-15T10:00:00Z"}
+	}`)
+	putRes("Observation", "obs-w14-jan", `{
+		"resourceType": "Observation",
+		"id": "obs-w14-jan",
+		"status": "final",
+		"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+		"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}]},
+		"subject": {"reference": "Patient/pat-w14-1"},
+		"encounter": {"reference": "Encounter/enc-w14-1"},
+		"effectiveDateTime": "2026-01-10T08:00:00Z",
+		"valueQuantity": {"value": 68.0, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+	}`)
+	putRes("Observation", "obs-w14-mar", `{
+		"resourceType": "Observation",
+		"id": "obs-w14-mar",
+		"status": "final",
+		"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+		"code": {"coding": [{"system": "http://loinc.org", "code": "85354-9", "display": "Blood pressure panel"}]},
+		"subject": {"reference": "Patient/pat-w14-1"},
+		"encounter": {"reference": "Encounter/enc-w14-1"},
+		"effectiveDateTime": "2026-03-15T09:30:00Z",
+		"valueQuantity": {"value": 148.0, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+	}`)
+	putRes("MedicationRequest", "medreq-w14-contained", `{
+		"resourceType": "MedicationRequest",
+		"id": "medreq-w14-contained",
+		"status": "active",
+		"intent": "order",
+		"contained": [
+			{
+				"resourceType": "Medication",
+				"id": "med-inline-1",
+				"code": {
+					"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "314076", "display": "Lisinopril 10 MG Oral Tablet"}],
+					"text": "Lisinopril 10 MG Oral Tablet"
+				}
+			}
+		],
+		"medicationReference": {"reference": "#med-inline-1"},
+		"subject": {"reference": "Patient/pat-w14-1"},
+		"authoredOn": "2026-03-15T09:45:00Z"
+	}`)
+
+	// 3a. Verify contained resource round-trip and chained search (?medication.code=314076 and ?_content=Lisinopril)
+	readMedReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/MedicationRequest/medreq-w14-contained", nil)
+	readMedRec := httptest.NewRecorder()
+	pgH.ServeHTTP(readMedRec, readMedReq)
+	if readMedRec.Code != http.StatusOK || !strings.Contains(readMedRec.Body.String(), `"#med-inline-1"`) || !strings.Contains(readMedRec.Body.String(), `"resourceType":"Medication"`) {
+		t.Fatalf("GET /MedicationRequest/medreq-w14-contained expected round-tripped contained Medication and #med-inline-1 reference, got %d: %s", readMedRec.Code, readMedRec.Body.String())
+	}
+
+	chainContainedReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/MedicationRequest?medication.code=314076&_content=Lisinopril", nil)
+	chainContainedRec := httptest.NewRecorder()
+	pgH.ServeHTTP(chainContainedRec, chainContainedReq)
+	if chainContainedRec.Code != http.StatusOK || !strings.Contains(chainContainedRec.Body.String(), `"medreq-w14-contained"`) {
+		t.Fatalf("GET /MedicationRequest?medication.code=314076&_content=Lisinopril expected medreq-w14-contained via inline #med-inline-1 index, got %d: %s", chainContainedRec.Code, chainContainedRec.Body.String())
+	}
+
+	// 4. Verify $everything clinical start & end date filtering on Patient, Encounter, and Group
+	patEvMarReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w14-1/$everything?start=2026-03-01&end=2026-03-31", nil)
+	patEvMarRec := httptest.NewRecorder()
+	pgH.ServeHTTP(patEvMarRec, patEvMarReq)
+	if patEvMarRec.Code != http.StatusOK {
+		t.Fatalf("GET /Patient/pat-w14-1/$everything?start=2026-03-01&end=2026-03-31 got %d: %s", patEvMarRec.Code, patEvMarRec.Body.String())
+	}
+	patEvMarBody := patEvMarRec.Body.String()
+	if !strings.Contains(patEvMarBody, `"Patient/pat-w14-1"`) || !strings.Contains(patEvMarBody, `"Observation/obs-w14-mar"`) || !strings.Contains(patEvMarBody, `"Condition/cond-w14-htn"`) {
+		t.Errorf("expected March $everything window to include Patient/pat-w14-1, obs-w14-mar, and cond-w14-htn, got %s", patEvMarBody)
+	}
+	if strings.Contains(patEvMarBody, `"Observation/obs-w14-jan"`) {
+		t.Errorf("expected March $everything window to exclude January obs-w14-jan, got %s", patEvMarBody)
+	}
+
+	encEvJanReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Encounter/enc-w14-1/$everything?start=2026-01-01&end=2026-01-31", nil)
+	encEvJanRec := httptest.NewRecorder()
+	pgH.ServeHTTP(encEvJanRec, encEvJanReq)
+	if encEvJanRec.Code != http.StatusOK || !strings.Contains(encEvJanRec.Body.String(), `"Observation/obs-w14-jan"`) || strings.Contains(encEvJanRec.Body.String(), `"Observation/obs-w14-mar"`) {
+		t.Errorf("expected January Encounter/$everything window to include obs-w14-jan and exclude obs-w14-mar, got %d: %s", encEvJanRec.Code, encEvJanRec.Body.String())
+	}
+
+	badEvDateReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w14-1/$everything?start=2026-04-01&end=2026-03-01", nil)
+	badEvDateRec := httptest.NewRecorder()
+	pgH.ServeHTTP(badEvDateRec, badEvDateReq)
+	if badEvDateRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request when $everything end < start, got %d", badEvDateRec.Code)
+	}
+
+	// 5. Verify PlanDefinition/$apply and ActivityDefinition/$apply (built-in and custom stored definitions)
+	planApplyReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/PlanDefinition/plandef-hypertension-control/$apply?subject=Patient/pat-w14-1&encounter=Encounter/enc-w14-1", nil)
+	planApplyRec := httptest.NewRecorder()
+	pgH.ServeHTTP(planApplyRec, planApplyReq)
+	if planApplyRec.Code != http.StatusOK {
+		t.Fatalf("GET /PlanDefinition/plandef-hypertension-control/$apply got %d: %s", planApplyRec.Code, planApplyRec.Body.String())
+	}
+	planApplyBody := planApplyRec.Body.String()
+	for _, want := range []string{`"resourceType":"CarePlan"`, `"RequestGroup"`, `"ServiceRequest"`, `"MedicationRequest"`, `"Patient/pat-w14-1"`, `"314076"`} {
+		if !strings.Contains(planApplyBody, want) {
+			t.Errorf("expected PlanDefinition/$apply CarePlan to contain %s, got %s", want, planApplyBody)
+		}
+	}
+
+	// POST /PlanDefinition/$apply with return=bundle
+	postPlanParams := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "planDefinition", "valueCanonical": "http://flint.fhir.org/PlanDefinition/plandef-hypertension-control"},
+			{"name": "subject", "valueString": "Patient/pat-w14-1"},
+			{"name": "return", "valueCode": "bundle"}
+		]
+	}`
+	postPlanReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/PlanDefinition/$apply", strings.NewReader(postPlanParams))
+	postPlanReq.Header.Set("Content-Type", "application/fhir+json")
+	postPlanRec := httptest.NewRecorder()
+	pgH.ServeHTTP(postPlanRec, postPlanReq)
+	if postPlanRec.Code != http.StatusOK || !strings.Contains(postPlanRec.Body.String(), `"resourceType":"Bundle"`) || !strings.Contains(postPlanRec.Body.String(), `"CarePlan"`) {
+		t.Fatalf("POST /PlanDefinition/$apply (return=bundle) expected 200 OK Bundle with CarePlan, got %d: %s", postPlanRec.Code, postPlanRec.Body.String())
+	}
+
+	// ActivityDefinition/$apply
+	actApplyReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/ActivityDefinition/activitydef-hba1c-lab-order/$apply?subject=Patient/pat-w14-1&encounter=Encounter/enc-w14-1", nil)
+	actApplyRec := httptest.NewRecorder()
+	pgH.ServeHTTP(actApplyRec, actApplyReq)
+	if actApplyRec.Code != http.StatusOK || !strings.Contains(actApplyRec.Body.String(), `"resourceType":"ServiceRequest"`) || !strings.Contains(actApplyRec.Body.String(), `"4548-4"`) {
+		t.Fatalf("GET /ActivityDefinition/activitydef-hba1c-lab-order/$apply expected ServiceRequest with LOINC 4548-4, got %d: %s", actApplyRec.Code, actApplyRec.Body.String())
+	}
+}
