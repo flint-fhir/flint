@@ -125,6 +125,17 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, status, code, err.Error())
 			return
 		}
+	} else if isFHIRParametersPatch(trimmedBody) {
+		var status int
+		patchedJSON, status, err = ApplyFHIRPatch(currentJSON, trimmedBody)
+		if err != nil {
+			code := "invalid"
+			if status == http.StatusUnprocessableEntity {
+				code = "invariant"
+			}
+			writeOperationOutcome(w, status, code, err.Error())
+			return
+		}
 	} else {
 		patchedJSON, err = ApplyMergePatch(currentJSON, trimmedBody)
 		if err != nil {
@@ -450,7 +461,90 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 	writePreferResourceResponse(w, r, status, resType, rec.ResID, rec.ResVersion, jsonBytes)
 }
 
+// handleConditionalPatch handles PATCH /fhir/r4/{tenant}/{resourceType}?{searchParams}
+// per HL7 FHIR R4 Conditional Patch (§3.1.0.7.1).
+func (s *Server) handleConditionalPatch(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resType := r.PathValue("resourceType")
+
+	if _, ok := s.protoRegistry[resType]; !ok {
+		writeOperationOutcome(w, http.StatusBadRequest, "not-supported",
+			fmt.Sprintf("resource type %s not registered", resType))
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		return
+	}
+
+	q := r.URL.Query()
+	if err := postgres.ValidateSearchQuery(q); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+	condParams := postgres.BuildSearchParamsFromQuery(tenant, resType, q)
+	if !postgres.HasSearchCriteria(condParams) {
+		writeOperationOutcome(w, http.StatusBadRequest, "required",
+			"conditional patch requires at least one search parameter in the query string")
+		return
+	}
+
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	if hasSecCtx && auth.IsPatientRestricted(secCtx) {
+		if err := validateAndScopeIfNoneExistForPatient(&condParams, resType, cleanID(secCtx.GetPatientId()), secCtx.GetPatientId()); err != nil {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", err.Error())
+			return
+		}
+	}
+
+	condParams.Count = 2
+	condParams.Offset = 0
+	sr, err := s.store.Search(r.Context(), condParams)
+	if err != nil {
+		s.logger.Error("conditional patch search", "error", err, "type", resType)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to evaluate conditional patch search")
+		return
+	}
+	if sr.Total == 0 || len(sr.Matches) == 0 {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found",
+			fmt.Sprintf("conditional patch matched 0 %s resources", resType))
+		return
+	}
+	if sr.Total > 1 {
+		writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict",
+			fmt.Sprintf("%v: conditional patch matched %d existing %s resources", postgres.ErrPreconditionFailed, sr.Total, resType))
+		return
+	}
+
+	matchedID := sr.Matches[0].ResID
+	if hasSecCtx && auth.IsPatientRestricted(secCtx) {
+		if strings.EqualFold(resType, "Patient") && cleanID(matchedID) != cleanID(secCtx.GetPatientId()) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot patch patient %s", secCtx.GetPatientId(), matchedID))
+			return
+		}
+		if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) {
+			exists, allowed, cErr := s.checkExistingResourceCompartment(r.Context(), tenant, resType, matchedID, secCtx.GetPatientId())
+			if cErr != nil {
+				writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+				return
+			}
+			if exists && !allowed {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("patient-scoped token (%s) cannot patch %s/%s outside patient compartment", secCtx.GetPatientId(), resType, matchedID))
+				return
+			}
+		}
+	}
+
+	w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, matchedID))
+	r.SetPathValue("id", matchedID)
+	s.handlePatch(w, r)
+}
+
 // handleConditionalDelete handles DELETE /fhir/r4/{tenant}/{resourceType}?{searchParams}.
+// Enforces single conditional delete (412 Precondition Failed on >1 matches) by default,
+// and supports multiple conditional delete when _count (>1) is explicitly specified.
 func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	resType := r.PathValue("resourceType")
@@ -467,6 +561,13 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	maxCount := 1
+	if rawCount := strings.TrimSpace(q.Get("_count")); rawCount != "" {
+		if n, cErr := strconv.Atoi(rawCount); cErr == nil && n > 1 {
+			maxCount = n
+		}
+	}
+
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
 	if hasSecCtx && auth.IsPatientRestricted(secCtx) {
 		if err := validateAndScopeIfNoneExistForPatient(&condParams, resType, cleanID(secCtx.GetPatientId()), secCtx.GetPatientId()); err != nil {
@@ -475,11 +576,12 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	rec, err := s.store.ConditionalDeleteResource(
+	recs, err := s.store.ConditionalDeleteResources(
 		r.Context(),
 		tenant,
 		resType,
 		condParams,
+		maxCount,
 		func(matchedID string) error {
 			if hasSecCtx && auth.IsPatientRestricted(secCtx) {
 				if strings.EqualFold(resType, "Patient") && cleanID(matchedID) != cleanID(secCtx.GetPatientId()) {
@@ -512,15 +614,37 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if rec != nil && rec.ResVersion > 0 {
-		w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
-		w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, rec.ResID))
-		s.publishCDC(r.Context(), automq.Message{
-			TenantID: tenant,
-			ResType:  resType,
-			ResID:    rec.ResID,
-			Op:       "D",
+	if len(recs) > 0 {
+		first := recs[0]
+		if first.ResVersion > 0 {
+			w.Header().Set("ETag", postgres.FormatETag(first.ResVersion))
+			w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, first.ResID))
+		}
+		for _, rec := range recs {
+			if rec.ResVersion > 0 {
+				s.publishCDC(r.Context(), automq.Message{
+					TenantID: tenant,
+					ResType:  resType,
+					ResID:    rec.ResID,
+					Op:       "D",
+				})
+			}
+		}
+	}
+	if parsePreferReturn(r) == "OperationOutcome" {
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resourceType": "OperationOutcome",
+			"issue": []map[string]any{
+				{
+					"severity":    "information",
+					"code":        "informational",
+					"diagnostics": fmt.Sprintf("Conditional delete soft-deleted %d %s resource(s)", len(recs), resType),
+				},
+			},
 		})
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -886,4 +1010,430 @@ func applyMergePatchMap(target map[string]any, patch map[string]any) map[string]
 		}
 	}
 	return target
+}
+
+func isFHIRParametersPatch(raw []byte) bool {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return false
+	}
+	var peek struct {
+		ResourceType string `json:"resourceType"`
+	}
+	if err := json.Unmarshal(trimmed, &peek); err != nil {
+		return false
+	}
+	return peek.ResourceType == "Parameters"
+}
+
+var knownRepeatingFHIRFields = map[string]bool{
+	"identifier":          true,
+	"name":                true,
+	"telecom":             true,
+	"address":             true,
+	"given":               true,
+	"prefix":              true,
+	"suffix":              true,
+	"line":                true,
+	"coding":              true,
+	"category":            true,
+	"performer":           true,
+	"participant":         true,
+	"reasonCode":          true,
+	"reasonReference":     true,
+	"note":                true,
+	"extension":           true,
+	"modifierExtension":   true,
+	"contained":           true,
+	"link":                true,
+	"communication":       true,
+	"generalPractitioner": true,
+	"contact":             true,
+	"entry":               true,
+	"section":             true,
+	"author":              true,
+	"target":              true,
+	"agent":               true,
+	"entity":              true,
+	"insurance":           true,
+	"item":                true,
+	"diagnosis":           true,
+	"careTeam":            true,
+	"supportingInfo":      true,
+	"basedOn":             true,
+	"partOf":              true,
+	"endpoint":            true,
+	"photo":               true,
+	"qualification":       true,
+	"profile":             true,
+	"security":            true,
+	"tag":                 true,
+}
+
+// ApplyFHIRPatch applies an HL7 FHIR R4 FHIRPath Patch (Parameters resource) to docJSON.
+// Supports operation types: add, insert, delete, replace, and move, including round-trip
+// compatibility with $diff Parameters documents.
+func ApplyFHIRPatch(docJSON []byte, patchJSON []byte) ([]byte, int, error) {
+	var root map[string]any
+	if err := json.Unmarshal(patchJSON, &root); err != nil {
+		return nil, http.StatusBadRequest, fmt.Errorf("malformed FHIRPath Patch JSON: %v", err)
+	}
+	if rt, _ := root["resourceType"].(string); rt != "Parameters" {
+		return nil, http.StatusBadRequest, fmt.Errorf("FHIRPath Patch must be a Parameters resource, got %q", rt)
+	}
+	rawParams, _ := root["parameter"].([]any)
+	var opMaps []map[string]any
+	for _, rp := range rawParams {
+		if pm, ok := rp.(map[string]any); ok && pm["name"] == "operation" {
+			opMaps = append(opMaps, pm)
+		}
+	}
+	if len(opMaps) == 0 {
+		return nil, http.StatusBadRequest, fmt.Errorf("FHIRPath Patch Parameters must contain at least one 'operation' parameter")
+	}
+
+	var doc any
+	if err := json.Unmarshal(docJSON, &doc); err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("unmarshal target document: %v", err)
+	}
+	docMap, ok := doc.(map[string]any)
+	if !ok {
+		return nil, http.StatusInternalServerError, fmt.Errorf("target document is not a JSON object")
+	}
+	rootResType, _ := docMap["resourceType"].(string)
+	origID, _ := docMap["id"].(string)
+
+	for i, opMap := range opMaps {
+		rawParts, _ := opMap["part"].([]any)
+		var opType, path, propName string
+		var index, source, destination int
+		var hasIndex, hasSource, hasDest, hasValue bool
+		var val any
+
+		for _, rp := range rawParts {
+			pm, ok := rp.(map[string]any)
+			if !ok {
+				continue
+			}
+			pName, _ := pm["name"].(string)
+			switch pName {
+			case "type":
+				opType = strings.ToLower(strings.TrimSpace(extractFHIRPatchString(pm)))
+			case "path":
+				path = strings.TrimSpace(extractFHIRPatchString(pm))
+			case "name":
+				propName = strings.TrimSpace(extractFHIRPatchString(pm))
+			case "index":
+				index, hasIndex = extractFHIRPatchInt(pm)
+			case "source":
+				source, hasSource = extractFHIRPatchInt(pm)
+			case "destination":
+				destination, hasDest = extractFHIRPatchInt(pm)
+			case "value":
+				val, hasValue = extractFHIRPatchValue(pm)
+			}
+		}
+
+		switch opType {
+		case "add":
+			if !hasValue {
+				return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch op[%d] (add): missing required 'value' part", i)
+			}
+			tokens, err := parseFHIRPathTokens(path, rootResType)
+			if err != nil {
+				return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch op[%d] (add): %v", i, err)
+			}
+			if propName == "" && len(tokens) > 0 {
+				propName = tokens[len(tokens)-1]
+				tokens = tokens[:len(tokens)-1]
+			}
+			if propName == "" {
+				return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch op[%d] (add): missing required 'name' part", i)
+			}
+			containerRaw, err := jsonPointerGet(doc, tokens)
+			if err != nil {
+				return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (add %s): %v", i, path, err)
+			}
+			container, ok := containerRaw.(map[string]any)
+			if !ok {
+				return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (add %s): target is not an object", i, path)
+			}
+			if existing, exists := container[propName]; exists {
+				if existingSlice, isSlice := existing.([]any); isSlice {
+					if valSlice, valIsSlice := val.([]any); valIsSlice {
+						container[propName] = append(existingSlice, valSlice...)
+					} else {
+						container[propName] = append(existingSlice, val)
+					}
+				} else {
+					container[propName] = val
+				}
+			} else {
+				if _, valIsSlice := val.([]any); !valIsSlice && knownRepeatingFHIRFields[propName] {
+					container[propName] = []any{val}
+				} else {
+					container[propName] = val
+				}
+			}
+
+		case "insert":
+			if path == "" || !hasIndex || !hasValue {
+				return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch op[%d] (insert): requires 'path', 'index', and 'value' parts", i)
+			}
+			tokens, err := parseFHIRPathTokens(path, rootResType)
+			if err != nil || len(tokens) == 0 {
+				return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch op[%d] (insert): invalid path %q", i, path)
+			}
+			arrRaw, err := jsonPointerGet(doc, tokens)
+			if err != nil {
+				if index == 0 {
+					doc, err = jsonPointerAdd(doc, tokens, []any{val})
+					if err != nil {
+						return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (insert %s): %v", i, path, err)
+					}
+					continue
+				}
+				return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (insert %s): %v", i, path, err)
+			}
+			arr, ok := arrRaw.([]any)
+			if !ok {
+				return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (insert %s): target is not an array", i, path)
+			}
+			if index < 0 || index > len(arr) {
+				return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (insert %s): index %d out of bounds (len %d)", i, path, index, len(arr))
+			}
+			arr = append(arr, nil)
+			copy(arr[index+1:], arr[index:])
+			arr[index] = val
+			doc, err = jsonPointerReplace(doc, tokens, arr)
+			if err != nil {
+				return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (insert %s): %v", i, path, err)
+			}
+
+		case "delete":
+			if path == "" {
+				return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch op[%d] (delete): missing required 'path' part", i)
+			}
+			tokens, err := parseFHIRPathTokens(path, rootResType)
+			if err != nil || len(tokens) == 0 {
+				return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch op[%d] (delete): invalid path %q", i, path)
+			}
+			doc, _, err = jsonPointerRemove(doc, tokens)
+			if err != nil {
+				return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (delete %s): %v", i, path, err)
+			}
+			// If removing an array element left the parent slice empty, remove the empty slice key from its parent map
+			if len(tokens) >= 2 {
+				if _, idxErr := strconv.Atoi(tokens[len(tokens)-1]); idxErr == nil {
+					parentTokens := tokens[:len(tokens)-1]
+					if remArr, gErr := jsonPointerGet(doc, parentTokens); gErr == nil {
+						if s, isSlice := remArr.([]any); isSlice && len(s) == 0 {
+							doc, _, _ = jsonPointerRemove(doc, parentTokens)
+						}
+					}
+				}
+			}
+
+		case "replace":
+			if path == "" || !hasValue {
+				return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch op[%d] (replace): requires 'path' and 'value' parts", i)
+			}
+			tokens, err := parseFHIRPathTokens(path, rootResType)
+			if err != nil || len(tokens) == 0 {
+				return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch op[%d] (replace): invalid path %q", i, path)
+			}
+			curVal, err := jsonPointerGet(doc, tokens)
+			if err != nil {
+				return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (replace %s): %v", i, path, err)
+			}
+			if curSlice, isSlice := curVal.([]any); isSlice {
+				if _, valIsSlice := val.([]any); !valIsSlice && len(curSlice) == 1 {
+					val = []any{val}
+				}
+			}
+			doc, err = jsonPointerReplace(doc, tokens, val)
+			if err != nil {
+				return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (replace %s): %v", i, path, err)
+			}
+
+		case "move":
+			if path == "" || !hasSource || !hasDest {
+				return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch op[%d] (move): requires 'path', 'source', and 'destination' parts", i)
+			}
+			tokens, err := parseFHIRPathTokens(path, rootResType)
+			if err != nil || len(tokens) == 0 {
+				return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch op[%d] (move): invalid path %q", i, path)
+			}
+			arrRaw, err := jsonPointerGet(doc, tokens)
+			if err != nil {
+				return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (move %s): %v", i, path, err)
+			}
+			arr, ok := arrRaw.([]any)
+			if !ok {
+				return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (move %s): target is not an array", i, path)
+			}
+			if source < 0 || source >= len(arr) || destination < 0 || destination >= len(arr) {
+				return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (move %s): source %d or destination %d out of bounds (len %d)", i, path, source, destination, len(arr))
+			}
+			if source != destination {
+				elem := arr[source]
+				arr = append(arr[:source], arr[source+1:]...)
+				arr = append(arr, nil)
+				copy(arr[destination+1:], arr[destination:])
+				arr[destination] = elem
+				doc, err = jsonPointerReplace(doc, tokens, arr)
+				if err != nil {
+					return nil, http.StatusUnprocessableEntity, fmt.Errorf("fhirpatch op[%d] (move %s): %v", i, path, err)
+				}
+			}
+
+		default:
+			return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch op[%d]: unsupported operation type %q", i, opType)
+		}
+	}
+
+	if finalMap, ok := doc.(map[string]any); ok {
+		if newRT, _ := finalMap["resourceType"].(string); rootResType != "" && newRT != rootResType {
+			return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch: cannot mutate immutable resourceType from %q to %q", rootResType, newRT)
+		}
+		if newID, _ := finalMap["id"].(string); origID != "" && newID != origID {
+			return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch: cannot mutate immutable resource id from %q to %q", origID, newID)
+		}
+	}
+
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	return out, http.StatusOK, nil
+}
+
+func parseFHIRPathTokens(path, rootResType string) ([]string, error) {
+	path = strings.TrimSpace(path)
+	if path == "" || path == rootResType {
+		return nil, nil
+	}
+	segments := strings.Split(path, ".")
+	var tokens []string
+	for segIdx, seg := range segments {
+		seg = strings.TrimSpace(seg)
+		if seg == "" {
+			return nil, fmt.Errorf("empty segment in FHIRPath %q", path)
+		}
+		if segIdx == 0 && seg == rootResType {
+			continue
+		}
+		for {
+			openIdx := strings.IndexByte(seg, '[')
+			if openIdx == -1 {
+				break
+			}
+			closeIdx := strings.IndexByte(seg[openIdx:], ']')
+			if closeIdx == -1 {
+				return nil, fmt.Errorf("unclosed bracket in FHIRPath %q", path)
+			}
+			closeIdx += openIdx
+			fieldPart := strings.TrimSpace(seg[:openIdx])
+			idxStr := strings.TrimSpace(seg[openIdx+1 : closeIdx])
+			n, err := strconv.Atoi(idxStr)
+			if err != nil || n < 0 {
+				return nil, fmt.Errorf("invalid array index %q in FHIRPath %q", idxStr, path)
+			}
+			if fieldPart != "" {
+				tokens = append(tokens, fieldPart)
+			}
+			tokens = append(tokens, strconv.Itoa(n))
+			seg = strings.TrimSpace(seg[closeIdx+1:])
+		}
+		if seg != "" {
+			tokens = append(tokens, seg)
+		}
+	}
+	return tokens, nil
+}
+
+func extractFHIRPatchString(pm map[string]any) string {
+	for _, k := range []string{"valueCode", "valueString", "valueUri", "valueId", "valueCanonical", "valueDate", "valueDateTime", "valueInstant"} {
+		if s, ok := pm[k].(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func extractFHIRPatchInt(pm map[string]any) (int, bool) {
+	for _, k := range []string{"valueInteger", "valueUnsignedInt", "valuePositiveInt"} {
+		if f, ok := pm[k].(float64); ok {
+			return int(f), true
+		}
+	}
+	if s, ok := pm["valueString"].(string); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+			return n, true
+		}
+	}
+	return 0, false
+}
+
+func extractFHIRPatchValue(pm map[string]any) (any, bool) {
+	if subParts, ok := pm["part"].([]any); ok && len(subParts) > 0 {
+		return fhirPatchPartsToMap(subParts), true
+	}
+	if resObj, ok := pm["resource"].(map[string]any); ok {
+		return resObj, true
+	}
+	for k, v := range pm {
+		if !strings.HasPrefix(k, "value") || len(k) <= len("value") || v == nil {
+			continue
+		}
+		if k == "valueString" {
+			if s, ok := v.(string); ok {
+				ts := strings.TrimSpace(s)
+				if (strings.HasPrefix(ts, "{") && strings.HasSuffix(ts, "}")) ||
+					(strings.HasPrefix(ts, "[") && strings.HasSuffix(ts, "]")) {
+					var decoded any
+					if json.Unmarshal([]byte(ts), &decoded) == nil {
+						return decoded, true
+					}
+				}
+				return s, true
+			}
+		}
+		return v, true
+	}
+	return nil, false
+}
+
+func fhirPatchPartsToMap(parts []any) map[string]any {
+	out := make(map[string]any)
+	for _, rp := range parts {
+		pm, ok := rp.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := pm["name"].(string)
+		if name == "" {
+			continue
+		}
+		v, ok := extractFHIRPatchValue(pm)
+		if !ok {
+			continue
+		}
+		if existing, exists := out[name]; exists {
+			if s, isSlice := existing.([]any); isSlice {
+				out[name] = append(s, v)
+			} else {
+				out[name] = []any{existing, v}
+			}
+		} else if knownRepeatingFHIRFields[name] {
+			if _, isSlice := v.([]any); isSlice {
+				out[name] = v
+			} else {
+				out[name] = []any{v}
+			}
+		} else {
+			out[name] = v
+		}
+	}
+	return out
 }

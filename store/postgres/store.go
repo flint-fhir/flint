@@ -296,41 +296,71 @@ func (s *Store) ConditionalDeleteResource(
 	condParams SearchParams,
 	verifyMatch func(matchedID string) error,
 ) (*ResourceRecord, error) {
-	var rec *ResourceRecord
+	recs, err := s.ConditionalDeleteResources(ctx, tenantID, resType, condParams, 1, verifyMatch)
+	if err != nil {
+		return nil, err
+	}
+	if len(recs) == 0 {
+		return nil, nil
+	}
+	return &recs[0], nil
+}
+
+// ConditionalDeleteResources evaluates a conditional search query inside a transaction guarded by
+// a transaction-scoped advisory lock:
+//   - When maxCount <= 1: enforces single-match semantics (>1 matches returns ErrPreconditionFailed).
+//   - When maxCount > 1: soft-deletes up to maxCount matching resources atomically in the transaction.
+func (s *Store) ConditionalDeleteResources(
+	ctx context.Context,
+	tenantID, resType string,
+	condParams SearchParams,
+	maxCount int,
+	verifyMatch func(matchedID string) error,
+) ([]ResourceRecord, error) {
+	var deleted []ResourceRecord
 	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
 		lockKey := tenantID + ":" + resType
 		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", lockKey); err != nil {
 			return fmt.Errorf("acquire conditional delete lock: %w", err)
 		}
 
-		condParams.Count = 2
+		if maxCount <= 1 {
+			condParams.Count = 2
+		} else {
+			condParams.Count = maxCount
+		}
 		condParams.Offset = 0
 		sr, err := s.searchWithExecutor(ctx, tx, condParams)
 		if err != nil {
 			return err
 		}
-		if sr.Total > 1 {
+		if maxCount <= 1 && sr.Total > 1 {
 			return fmt.Errorf("%w: conditional delete matched %d existing %s resources", ErrPreconditionFailed, sr.Total, resType)
 		}
 		if sr.Total == 0 || len(sr.Matches) == 0 {
 			return nil
 		}
 
-		matchedID := sr.Matches[0].ResID
-		if verifyMatch != nil {
-			if err := verifyMatch(matchedID); err != nil {
-				return err
+		for _, m := range sr.Matches {
+			if verifyMatch != nil {
+				if err := verifyMatch(m.ResID); err != nil {
+					return err
+				}
+			}
+			rec, txErr := s.deleteResourceInTx(ctx, tx, tenantID, resType, m.ResID)
+			if txErr != nil {
+				return txErr
+			}
+			if rec != nil {
+				deleted = append(deleted, *rec)
 			}
 		}
-
-		var txErr error
-		rec, txErr = s.deleteResourceInTx(ctx, tx, tenantID, resType, matchedID)
-		return txErr
+		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return rec, nil
+	return deleted, nil
 }
 
 // ExecuteTransactionBundle executes a sequence of Bundle operations (POST, PUT, DELETE,

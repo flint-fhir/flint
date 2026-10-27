@@ -1159,13 +1159,24 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 	}
 
 	if persist {
-		if _, err := s.persistFHIRMapResource(r, tenant, "Bundle", docBundle); err != nil {
+		persistedID, err := s.persistFHIRMapResource(r, tenant, "Bundle", docBundle)
+		if err != nil {
 			if errors.Is(err, errForbiddenCompartment) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden", err.Error())
 				return
 			}
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("failed to persist document Bundle: %v", err))
 			return
+		}
+		if rec, rErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Bundle", persistedID); rErr == nil && rec != nil {
+			w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/Bundle/%s", tenant, persistedID))
+			w.Header().Set("Content-Location", fmt.Sprintf("/fhir/r4/%s/Bundle/%s/_history/%d", tenant, persistedID, rec.ResVersion))
+			w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+			w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+			docBundle["meta"] = map[string]any{
+				"versionId":   strconv.Itoa(rec.ResVersion),
+				"lastUpdated": rec.LastUpdated.UTC().Format(time.RFC3339Nano),
+			}
 		}
 	}
 

@@ -341,9 +341,9 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Parse Conditional PUT / Conditional DELETE when urlQuery is present
+		// Parse Conditional PUT / Conditional PATCH / Conditional DELETE when urlQuery is present
 		var entryCondParams *postgres.SearchParams
-		if urlQuery != "" && (method == "PUT" || method == "DELETE") && s.store != nil {
+		if urlQuery != "" && (method == "PUT" || method == "PATCH" || method == "DELETE") && s.store != nil {
 			condParams, err := postgres.ParseIfNoneExist(tenant, resType, urlQuery)
 			if err != nil {
 				if isTransaction {
@@ -363,22 +363,38 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			if isTransaction {
+			if isTransaction && method != "PATCH" {
 				entryCondParams = &condParams
 			} else {
 				condParams.Count = 2
 				sr, err := s.store.Search(r.Context(), condParams)
 				if err != nil {
+					if isTransaction {
+						writeOperationOutcome(w, http.StatusInternalServerError, "exception", fmt.Sprintf("entry[%d]: conditional search failed", i))
+						return
+					}
 					responseEntries[i] = bundleErrorResponse(http.StatusInternalServerError, fmt.Sprintf("entry[%d]: conditional search failed", i))
 					continue
 				}
 				if sr.Total > 1 {
 					msg := fmt.Sprintf("entry[%d]: conditional %s matched %d resources (expected 0 or 1)", i, method, sr.Total)
+					if isTransaction {
+						writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", msg)
+						return
+					}
 					responseEntries[i] = bundleErrorResponse(http.StatusPreconditionFailed, msg)
 					continue
 				}
 				if sr.Total == 1 {
 					resID = sr.Matches[0].ResID
+				} else if method == "PATCH" {
+					msg := fmt.Sprintf("entry[%d]: conditional PATCH matched 0 %s resources", i, resType)
+					if isTransaction {
+						writeOperationOutcome(w, http.StatusNotFound, "not-found", msg)
+						return
+					}
+					responseEntries[i] = bundleErrorResponse(http.StatusNotFound, msg)
+					continue
 				} else if method == "DELETE" {
 					// 0 matches on conditional DELETE is an idempotent 204 No Content
 					responseEntries[i] = map[string]any{
@@ -493,6 +509,17 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			if len(trimmedPatch) > 0 && trimmedPatch[0] == '[' {
 				var status int
 				patchedJSON, status, err = ApplyJSONPatch(currentJSON, trimmedPatch)
+				if err != nil {
+					if isTransaction {
+						writeOperationOutcome(w, status, "invalid", fmt.Sprintf("entry[%d]: %v", i, err))
+						return
+					}
+					responseEntries[i] = bundleErrorResponse(status, fmt.Sprintf("entry[%d]: %v", i, err))
+					continue
+				}
+			} else if isFHIRParametersPatch(trimmedPatch) {
+				var status int
+				patchedJSON, status, err = ApplyFHIRPatch(currentJSON, trimmedPatch)
 				if err != nil {
 					if isTransaction {
 						writeOperationOutcome(w, status, "invalid", fmt.Sprintf("entry[%d]: %v", i, err))

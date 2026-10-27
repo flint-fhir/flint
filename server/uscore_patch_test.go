@@ -690,6 +690,64 @@ func TestServer_PatchAndConditionalCRUD(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `"cov-hop"`) {
 		t.Errorf("expected Coverage?subscriber-id=SUB-HOP-777 to match cov-hop, got %d: %s", resp.StatusCode, b)
 	}
+
+	// 12. Wave 8: Conditional PATCH + FHIRPath Patch (Parameters) + Multiple Conditional DELETE (_count) + Composition/$document?persist=true + $everything _typeFilter
+	fhirPatchParams := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{
+				"name": "operation",
+				"part": [
+					{"name": "type", "valueCode": "replace"},
+					{"name": "path", "valueString": "Organization.name"},
+					{"name": "value", "valueString": "HopOrg FHIRPatched"}
+				]
+			}
+		]
+	}`
+	resp, b = doReq(http.MethodPatch, "/fhir/r4/"+tenant+"/Organization?_id=org-hop", "application/fhir+json", fhirPatchParams, sysToken, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `"HopOrg FHIRPatched"`) {
+		t.Fatalf("conditional PATCH with FHIRPath Parameters expected 200 OK with HopOrg FHIRPatched, got %d: %s", resp.StatusCode, b)
+	}
+	// Conditional PATCH with 0 matches -> 404 Not Found
+	resp, _ = doReq(http.MethodPatch, "/fhir/r4/"+tenant+"/Organization?_id=nonexistent-org-999", "application/fhir+json", fhirPatchParams, sysToken, nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("expected 404 Not Found on conditional PATCH with 0 matches, got %d", resp.StatusCode)
+	}
+	// Conditional PATCH with >1 matches (DupCity) -> 412 Precondition Failed
+	resp, _ = doReq(http.MethodPatch, "/fhir/r4/"+tenant+"/Organization?address-city=DupCity", "application/fhir+json", fhirPatchParams, sysToken, nil)
+	if resp.StatusCode != http.StatusPreconditionFailed {
+		t.Errorf("expected 412 Precondition Failed on conditional PATCH with >1 matches, got %d", resp.StatusCode)
+	}
+
+	// Multiple Conditional DELETE with _count=10 and Prefer: return=OperationOutcome on DupCity (2 matches)
+	resp, b = doReq(http.MethodDelete, "/fhir/r4/"+tenant+"/Organization?address-city=DupCity&_count=10", "", "", sysToken, map[string]string{"Prefer": "return=OperationOutcome"})
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), "Conditional delete soft-deleted 2 Organization resource(s)") {
+		t.Fatalf("expected 200 OK OperationOutcome deleting 2 DupCity Organizations with _count=10, got %d: %s", resp.StatusCode, b)
+	}
+
+	// Composition/$document?persist=true persists the assembled Bundle and sets Location + ETag
+	resp, b = doReq(http.MethodGet, "/fhir/r4/"+tenant+"/Composition/comp-hop/$document?persist=true", "", "", sysToken, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Composition/$document?persist=true expected 200, got %d: %s", resp.StatusCode, b)
+	}
+	if !strings.Contains(resp.Header.Get("Location"), "/Bundle/doc-comp-hop") || !strings.Contains(resp.Header.Get("Content-Location"), "/Bundle/doc-comp-hop/_history/1") {
+		t.Errorf("expected Location and Content-Location headers for persisted document Bundle, got Location=%q Content-Location=%q", resp.Header.Get("Location"), resp.Header.Get("Content-Location"))
+	}
+	resp, b = doReq(http.MethodGet, "/fhir/r4/"+tenant+"/Bundle/doc-comp-hop", "", "", sysToken, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `"type":"document"`) {
+		t.Errorf("expected persisted Bundle/doc-comp-hop to be readable via GET /Bundle/doc-comp-hop, got %d: %s", resp.StatusCode, b)
+	}
+
+	// Patient/$everything and Encounter/$everything with _typeFilter
+	resp, b = doReq(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-hop/$everything?_type=Observation&_typeFilter=Observation%3Fcode%3D8867-4", "", "", sysToken, nil)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(b), `"obs-hop"`) {
+		t.Errorf("expected Patient/$everything with matching _typeFilter to include obs-hop, got %d: %s", resp.StatusCode, b)
+	}
+	resp, b = doReq(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-hop/$everything?_type=Observation&_typeFilter=Observation%3Fcode%3Dnonexistent-loinc", "", "", sysToken, nil)
+	if resp.StatusCode != http.StatusOK || strings.Contains(string(b), `"obs-hop"`) {
+		t.Errorf("expected Patient/$everything with non-matching _typeFilter to exclude obs-hop, got %d: %s", resp.StatusCode, b)
+	}
 }
 
 func TestBundleOrderingConditionalRefsPreferAndSMART(t *testing.T) {
@@ -1142,5 +1200,183 @@ func TestWave5MetaSearchTerminologyAndSDC(t *testing.T) {
 	extStr := extRec.Body.String()
 	if !strings.Contains(extStr, `"MedicationRequest"`) || !strings.Contains(extStr, `"Procedure"`) || !strings.Contains(extStr, `"Provenance"`) {
 		t.Fatalf("expected extracted Bundle to include MedicationRequest, Procedure, and Provenance, got: %s", extStr)
+	}
+}
+
+func TestWave8FHIRPathPatchAndConditionalOps(t *testing.T) {
+	// 1. Unit test ApplyFHIRPatch (add, insert, replace, move, delete, complex part, $diff JSON string value)
+	origDoc := []byte(`{
+		"resourceType": "Patient",
+		"id": "pat-fp-1",
+		"active": true,
+		"gender": "male",
+		"name": [
+			{"family": "OrigFamily", "given": ["John", "Quincy"]}
+		],
+		"telecom": [
+			{"system": "phone", "value": "555-0100"}
+		]
+	}`)
+
+	patchParams := []byte(`{
+		"resourceType": "Parameters",
+		"parameter": [
+			{
+				"name": "operation",
+				"part": [
+					{"name": "type", "valueCode": "replace"},
+					{"name": "path", "valueString": "Patient.gender"},
+					{"name": "value", "valueCode": "other"}
+				]
+			},
+			{
+				"name": "operation",
+				"part": [
+					{"name": "type", "valueCode": "replace"},
+					{"name": "path", "valueString": "Patient.name[0].family"},
+					{"name": "value", "valueString": "PatchedFamily"}
+				]
+			},
+			{
+				"name": "operation",
+				"part": [
+					{"name": "type", "valueCode": "insert"},
+					{"name": "path", "valueString": "Patient.name[0].given"},
+					{"name": "index", "valueInteger": 0},
+					{"name": "value", "valueString": "Dr."}
+				]
+			},
+			{
+				"name": "operation",
+				"part": [
+					{"name": "type", "valueCode": "move"},
+					{"name": "path", "valueString": "Patient.name[0].given"},
+					{"name": "source", "valueInteger": 2},
+					{"name": "destination", "valueInteger": 1}
+				]
+			},
+			{
+				"name": "operation",
+				"part": [
+					{"name": "type", "valueCode": "add"},
+					{"name": "path", "valueString": "Patient"},
+					{"name": "name", "valueString": "birthDate"},
+					{"name": "value", "valueDate": "1980-06-15"}
+				]
+			},
+			{
+				"name": "operation",
+				"part": [
+					{"name": "type", "valueCode": "add"},
+					{"name": "path", "valueString": "Patient.address"},
+					{
+						"name": "value",
+						"part": [
+							{"name": "city", "valueString": "Boston"},
+							{"name": "state", "valueString": "MA"}
+						]
+					}
+				]
+			},
+			{
+				"name": "operation",
+				"part": [
+					{"name": "type", "valueCode": "delete"},
+					{"name": "path", "valueString": "Patient.telecom"}
+				]
+			}
+		]
+	}`)
+
+	patchedBytes, status, err := server.ApplyFHIRPatch(origDoc, patchParams)
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("ApplyFHIRPatch failed with status=%d err=%v", status, err)
+	}
+	var patched map[string]any
+	if err := json.Unmarshal(patchedBytes, &patched); err != nil {
+		t.Fatalf("unmarshal patched patient: %v", err)
+	}
+	if patched["gender"] != "other" {
+		t.Errorf("expected gender=other, got %v", patched["gender"])
+	}
+	if patched["birthDate"] != "1980-06-15" {
+		t.Errorf("expected birthDate=1980-06-15, got %v", patched["birthDate"])
+	}
+	if _, hasTelecom := patched["telecom"]; hasTelecom {
+		t.Errorf("expected telecom to be deleted, got %v", patched["telecom"])
+	}
+	names, _ := patched["name"].([]any)
+	name0, _ := names[0].(map[string]any)
+	if name0["family"] != "PatchedFamily" {
+		t.Errorf("expected name[0].family=PatchedFamily, got %v", name0["family"])
+	}
+	given, _ := name0["given"].([]any)
+	if len(given) != 3 || given[0] != "Dr." || given[1] != "Quincy" || given[2] != "John" {
+		t.Errorf("expected given=[Dr., Quincy, John] after insert+move, got %v", given)
+	}
+	addrs, _ := patched["address"].([]any)
+	if len(addrs) != 1 {
+		t.Fatalf("expected 1 address added via complex part, got %v", patched["address"])
+	}
+	addr0, _ := addrs[0].(map[string]any)
+	if addr0["city"] != "Boston" || addr0["state"] != "MA" {
+		t.Errorf("expected address Boston, MA, got %v", addr0)
+	}
+
+	// 2. Verify ApplyFHIRPatch rejects mutating immutable id or resourceType
+	badPatch := []byte(`{
+		"resourceType": "Parameters",
+		"parameter": [{
+			"name": "operation",
+			"part": [
+				{"name": "type", "valueCode": "replace"},
+				{"name": "path", "valueString": "Patient.id"},
+				{"name": "value", "valueString": "tampered-id"}
+			]
+		}]
+	}`)
+	if _, badStatus, badErr := server.ApplyFHIRPatch(origDoc, badPatch); badErr == nil || badStatus != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request when mutating Patient.id via FHIRPath Patch, got status=%d err=%v", badStatus, badErr)
+	}
+
+	// 3. Verify CapabilityStatement and OpenAPI 3.1.0 advertise Wave 8 capabilities
+	srv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(srv)
+	h := srv.Handler()
+
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/t1/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	h.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /metadata, got %d", metaRec.Code)
+	}
+	metaStr := metaRec.Body.String()
+	if !strings.Contains(metaStr, `"conditionalPatch":true`) {
+		t.Errorf("expected CapabilityStatement to declare conditionalPatch:true")
+	}
+	if !strings.Contains(metaStr, `"application/fhir+json"`) {
+		t.Errorf("expected CapabilityStatement patchFormat to include application/fhir+json")
+	}
+
+	oaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/t1/openapi.json", nil)
+	oaRec := httptest.NewRecorder()
+	h.ServeHTTP(oaRec, oaReq)
+	if oaRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from /openapi.json, got %d", oaRec.Code)
+	}
+	var oaDoc map[string]any
+	if err := json.Unmarshal(oaRec.Body.Bytes(), &oaDoc); err != nil {
+		t.Fatalf("unmarshal openapi.json: %v", err)
+	}
+	paths, _ := oaDoc["paths"].(map[string]any)
+	patPath, _ := paths["/Patient"].(map[string]any)
+	if _, hasCondPatch := patPath["patch"]; !hasCondPatch {
+		t.Errorf("expected OpenAPI /Patient path to expose conditional patch operation")
+	}
+	evPath, _ := paths["/Patient/{id}/$everything"].(map[string]any)
+	evGet, _ := evPath["get"].(map[string]any)
+	evParamsJSON, _ := json.Marshal(evGet["parameters"])
+	if !strings.Contains(string(evParamsJSON), `"_typeFilter"`) {
+		t.Errorf("expected OpenAPI /Patient/{id}/$everything to advertise _typeFilter parameter, got %s", evParamsJSON)
 	}
 }
