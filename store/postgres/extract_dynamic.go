@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,7 +47,12 @@ func extractFromMessage(idx *SearchIndexes, tenantID, resType, resID string, msg
 				extractMetaFromMessage(idx, tenantID, resType, resID, val.Message())
 			}
 			return true
-		case "id", "implicit_rules", "language", "text", "contained", "extension", "modifier_extension":
+		case "text":
+			if depth == 0 && fd.Kind() == protoreflect.MessageKind && !fd.IsList() {
+				extractNarrativeFromMessage(idx, tenantID, resType, resID, val.Message())
+			}
+			return true
+		case "id", "implicit_rules", "language", "contained", "extension", "modifier_extension":
 			return true
 		}
 
@@ -338,6 +344,9 @@ func extractSingleFieldValue(
 			}
 		}
 
+	case "google.fhir.r4.core.Quantity", "google.fhir.r4.core.SimpleQuantity", "google.fhir.r4.core.Age", "google.fhir.r4.core.Duration", "google.fhir.r4.core.Distance", "google.fhir.r4.core.Count", "google.fhir.r4.core.Money":
+		extractQuantityFromMessage(idx, tenantID, resType, resID, subMsg, fieldName, parentField)
+
 	case "google.fhir.r4.core.Boolean":
 		boolSpName := ""
 		switch {
@@ -582,7 +591,12 @@ func appendTokenTextFromMessage(idx *SearchIndexes, tenantID, resType, resID str
 	msg.Range(func(fd protoreflect.FieldDescriptor, val protoreflect.Value) bool {
 		fieldName := string(fd.Name())
 		switch fieldName {
-		case "id", "meta", "implicit_rules", "language", "text", "contained", "extension", "modifier_extension":
+		case "text":
+			if depth == 0 && fd.Kind() == protoreflect.MessageKind && !fd.IsList() {
+				extractNarrativeFromMessage(idx, tenantID, resType, resID, val.Message())
+			}
+			return true
+		case "id", "meta", "implicit_rules", "language", "contained", "extension", "modifier_extension":
 			return true
 		}
 		if fd.Kind() != protoreflect.MessageKind {
@@ -1003,4 +1017,109 @@ func snakeToPascal(s string) string {
 		b.WriteString(strings.ToUpper(p[:1]) + strings.ToLower(p[1:]))
 	}
 	return b.String()
+}
+
+func extractNarrativeFromMessage(idx *SearchIndexes, tenantID, resType, resID string, narrativeMsg protoreflect.Message) {
+	if idx == nil || !narrativeMsg.IsValid() {
+		return
+	}
+	divFD := narrativeMsg.Descriptor().Fields().ByName("div")
+	if divFD == nil || !narrativeMsg.Has(divFD) || divFD.Kind() != protoreflect.MessageKind {
+		return
+	}
+	rawDiv := extractWrappedString(narrativeMsg.Get(divFD).Message())
+	plain := fhirutil.NormalizeString(stripHTMLTags(rawDiv))
+	if plain == "" {
+		return
+	}
+	idx.Strings = append(idx.Strings, SpidxString{
+		TenantID: tenantID,
+		ResType:  resType,
+		ResID:    resID,
+		SpName:   "_text",
+		SpValue:  plain,
+	})
+}
+
+func stripHTMLTags(raw string) string {
+	var b strings.Builder
+	inTag := false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c == '<' {
+			inTag = true
+			b.WriteByte(' ')
+			continue
+		}
+		if c == '>' {
+			inTag = false
+			b.WriteByte(' ')
+			continue
+		}
+		if !inTag {
+			b.WriteByte(c)
+		}
+	}
+	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+func extractQuantityFromMessage(idx *SearchIndexes, tenantID, resType, resID string, qMsg protoreflect.Message, fieldName, parentField string) {
+	if idx == nil || !qMsg.IsValid() {
+		return
+	}
+	valFD := qMsg.Descriptor().Fields().ByName("value")
+	if valFD == nil || !qMsg.Has(valFD) || valFD.Kind() != protoreflect.MessageKind {
+		return
+	}
+	valStr := extractWrappedString(qMsg.Get(valFD).Message())
+	numVal, err := strconv.ParseFloat(valStr, 64)
+	if err != nil {
+		return
+	}
+	var sys, code, unit string
+	if sysFD := qMsg.Descriptor().Fields().ByName("system"); sysFD != nil && qMsg.Has(sysFD) {
+		sys = extractWrappedString(qMsg.Get(sysFD).Message())
+	}
+	if codeFD := qMsg.Descriptor().Fields().ByName("code"); codeFD != nil && qMsg.Has(codeFD) {
+		code = extractWrappedString(qMsg.Get(codeFD).Message())
+	}
+	if unitFD := qMsg.Descriptor().Fields().ByName("unit"); unitFD != nil && qMsg.Has(unitFD) {
+		unit = extractWrappedString(qMsg.Get(unitFD).Message())
+	}
+	primaryCode := code
+	if primaryCode == "" {
+		primaryCode = unit
+	}
+
+	var spNames []string
+	switch {
+	case parentField == "component":
+		spNames = []string{"component-value-quantity", "combo-value-quantity"}
+	case parentField == "value" || fieldName == "quantity" || fieldName == "value":
+		spNames = []string{"value-quantity", "combo-value-quantity"}
+	default:
+		spNames = []string{"value-quantity", strings.ReplaceAll(fieldName, "_", "-")}
+	}
+	for _, spName := range spNames {
+		idx.Quantities = append(idx.Quantities, SpidxQuantity{
+			TenantID: tenantID,
+			ResType:  resType,
+			ResID:    resID,
+			SpName:   spName,
+			SpSystem: sys,
+			SpCode:   primaryCode,
+			SpValue:  numVal,
+		})
+		if unit != "" && unit != primaryCode {
+			idx.Quantities = append(idx.Quantities, SpidxQuantity{
+				TenantID: tenantID,
+				ResType:  resType,
+				ResID:    resID,
+				SpName:   spName,
+				SpSystem: sys,
+				SpCode:   unit,
+				SpValue:  numVal,
+			})
+		}
+	}
 }

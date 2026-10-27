@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -45,6 +46,7 @@ type PatientEverythingParams struct {
 	PatientID     string
 	ResourceTypes []string   // Optional _type filter (e.g. ["Observation", "Condition"])
 	Since         *time.Time // Optional _since filter on last_updated
+	Until         *time.Time // Optional _until filter on last_updated
 	Count         int
 	Offset        int
 }
@@ -55,6 +57,21 @@ type EncounterEverythingParams struct {
 	EncounterID   string
 	ResourceTypes []string   // Optional _type filter (e.g. ["Observation", "Condition"])
 	Since         *time.Time // Optional _since filter on last_updated
+	Until         *time.Time // Optional _until filter on last_updated
+	Count         int
+	Offset        int
+}
+
+// GroupEverythingParams specifies parameters for the FHIR R4 Group/$everything operation.
+type GroupEverythingParams struct {
+	TenantID      string
+	GroupID       string
+	PatientIDs    []string   // Resolved active member Patient IDs
+	AllPatients   bool       // True for built-in Group/all or Group/all-patients
+	EmptyCohort   bool       // True when Group has 0 active Patient members
+	ResourceTypes []string   // Optional _type filter (e.g. ["Patient", "Observation"])
+	Since         *time.Time // Optional _since filter on last_updated
+	Until         *time.Time // Optional _until filter on last_updated
 	Count         int
 	Offset        int
 }
@@ -82,6 +99,9 @@ type SearchParams struct {
 	Chained                  []ChainedParam                  // chained search parameters (e.g. patient.name=Smith)
 	Has                      []HasParam                      // reverse-chained search parameters (e.g. _has:Observation:patient:code=8867-4)
 	List                     []string                        // _list cohort membership filters (e.g. _list=list-1)
+	Content                  []string                        // _content full-text search terms across indexed strings/tokens/id
+	Text                     []string                        // _text narrative search terms across text.div (_text index)
+	Filters                  []FilterExpr                    // _filter boolean search expression ASTs (§3.1.1.3.1)
 	CompositeTokenQuantities [][]CompositeTokenQuantityParam // token$quantity composite filters (e.g. code-value-quantity, component-code-value-quantity)
 	CompositeTokenTokens     [][]CompositeTokenTokenParam    // token$token composite filters (e.g. code-value-concept, component-code-value-concept)
 	CompositeTokenDates      [][]CompositeTokenDateParam     // token$date composite filters (e.g. code-value-date)
@@ -1075,6 +1095,24 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		whereExtra += " AND " + cond
 		args = append(args, luArgs...)
 	}
+	for _, contentVal := range params.Content {
+		if cond, cArgs := buildContentCondition(contentVal, len(args)); cond != "" {
+			whereExtra += " AND " + cond
+			args = append(args, cArgs...)
+		}
+	}
+	for _, textVal := range params.Text {
+		if cond, tArgs := buildTextCondition(textVal, len(args)); cond != "" {
+			whereExtra += " AND " + cond
+			args = append(args, tArgs...)
+		}
+	}
+	for _, filterExpr := range params.Filters {
+		if cond, fArgs := buildFilterExprCondition(filterExpr, len(args)); cond != "" {
+			whereExtra += " AND " + cond
+			args = append(args, fArgs...)
+		}
+	}
 
 	// Count query
 	var total int
@@ -1673,42 +1711,792 @@ func buildDateCondition(alias string, op DateOp, startIdx int) (string, []any) {
 	}
 }
 
-func buildQuantityCondition(alias string, op QuantityOp, startIdx int) (string, []any) {
-	conds := []string{}
-	args := []any{}
-	currIdx := startIdx + 1
+type ucumUnitConversion struct {
+	code  string
+	scale float64
+}
 
-	var compSQL string
-	switch op.Prefix {
-	case "lt":
-		compSQL = "<"
-	case "le":
-		compSQL = "<="
-	case "gt":
-		compSQL = ">"
-	case "ge":
-		compSQL = ">="
-	case "ne":
-		compSQL = "!="
-	default:
-		compSQL = "="
+var ucumLinearDimensions = [][]ucumUnitConversion{
+	// Mass (canonical base: g)
+	{
+		{code: "kg", scale: 1000.0},
+		{code: "g", scale: 1.0},
+		{code: "mg", scale: 1e-3},
+		{code: "ug", scale: 1e-6},
+		{code: "mcg", scale: 1e-6},
+		{code: "ng", scale: 1e-9},
+		{code: "[lb_av]", scale: 453.59237},
+		{code: "lb", scale: 453.59237},
+		{code: "lbs", scale: 453.59237},
+		{code: "[oz_av]", scale: 28.349523125},
+		{code: "oz", scale: 28.349523125},
+	},
+	// Length / Height (canonical base: m)
+	{
+		{code: "km", scale: 1000.0},
+		{code: "m", scale: 1.0},
+		{code: "cm", scale: 0.01},
+		{code: "mm", scale: 1e-3},
+		{code: "um", scale: 1e-6},
+		{code: "[in_i]", scale: 0.0254},
+		{code: "in", scale: 0.0254},
+		{code: "[ft_i]", scale: 0.3048},
+		{code: "ft", scale: 0.3048},
+		{code: "[yd_i]", scale: 0.9144},
+	},
+	// Volume (canonical base: L)
+	{
+		{code: "L", scale: 1.0},
+		{code: "l", scale: 1.0},
+		{code: "dL", scale: 0.1},
+		{code: "dl", scale: 0.1},
+		{code: "cL", scale: 0.01},
+		{code: "cl", scale: 0.01},
+		{code: "mL", scale: 1e-3},
+		{code: "ml", scale: 1e-3},
+		{code: "cm3", scale: 1e-3},
+		{code: "uL", scale: 1e-6},
+		{code: "ul", scale: 1e-6},
+		{code: "[foz_us]", scale: 0.0295735295625},
+		{code: "[gal_us]", scale: 3.785411784},
+	},
+	// Time / Duration (canonical base: s)
+	{
+		{code: "s", scale: 1.0},
+		{code: "ms", scale: 1e-3},
+		{code: "min", scale: 60.0},
+		{code: "h", scale: 3600.0},
+		{code: "hr", scale: 3600.0},
+		{code: "d", scale: 86400.0},
+		{code: "wk", scale: 604800.0},
+		{code: "mo", scale: 2629800.0},
+		{code: "a", scale: 31557600.0},
+		{code: "yr", scale: 31557600.0},
+	},
+	// Pressure (canonical base: Pa)
+	{
+		{code: "Pa", scale: 1.0},
+		{code: "kPa", scale: 1000.0},
+		{code: "mm[Hg]", scale: 133.322387415},
+		{code: "mmHg", scale: 133.322387415},
+	},
+	// Mass concentration (canonical base: g/L)
+	{
+		{code: "g/L", scale: 1.0},
+		{code: "g/l", scale: 1.0},
+		{code: "mg/mL", scale: 1.0},
+		{code: "g/dL", scale: 10.0},
+		{code: "g/dl", scale: 10.0},
+		{code: "mg/dL", scale: 0.01},
+		{code: "mg/dl", scale: 0.01},
+		{code: "mg/L", scale: 1e-3},
+		{code: "mg/l", scale: 1e-3},
+		{code: "ug/dL", scale: 1e-5},
+		{code: "ug/L", scale: 1e-6},
+	},
+	// Substance amount (canonical base: mol)
+	{
+		{code: "mol", scale: 1.0},
+		{code: "mmol", scale: 1e-3},
+		{code: "umol", scale: 1e-6},
+		{code: "nmol", scale: 1e-9},
+	},
+}
+
+type ucumEquivVal struct {
+	code string
+	val  float64
+}
+
+func ucumEquivalentQuantities(system, code string, val float64) []ucumEquivVal {
+	if code == "" {
+		return nil
+	}
+	if system != "" && system != "http://unitsofmeasure.org" {
+		return []ucumEquivVal{{code: code, val: val}}
 	}
 
-	conds = append(conds, fmt.Sprintf("%s.sp_value %s $%d", alias, compSQL, currIdx))
-	args = append(args, op.Value)
-	currIdx++
+	// Temperature affine conversions (Cel <-> [degF] <-> K)
+	switch code {
+	case "Cel", "C", "°C", "[degF]", "F", "°F", "K":
+		var kelvin float64
+		switch code {
+		case "Cel", "C", "°C":
+			kelvin = val + 273.15
+		case "[degF]", "F", "°F":
+			kelvin = (val-32.0)*5.0/9.0 + 273.15
+		default:
+			kelvin = val
+		}
+		cel := kelvin - 273.15
+		degF := (kelvin-273.15)*9.0/5.0 + 32.0
+		candidates := []ucumEquivVal{
+			{code: code, val: val},
+			{code: "Cel", val: cel},
+			{code: "C", val: cel},
+			{code: "°C", val: cel},
+			{code: "[degF]", val: degF},
+			{code: "F", val: degF},
+			{code: "°F", val: degF},
+			{code: "K", val: kelvin},
+		}
+		seen := make(map[string]bool, len(candidates))
+		out := make([]ucumEquivVal, 0, len(candidates))
+		for _, c := range candidates {
+			if !seen[c.code] {
+				seen[c.code] = true
+				out = append(out, c)
+			}
+		}
+		return out
+	}
+
+	for _, dim := range ucumLinearDimensions {
+		var srcScale float64
+		found := false
+		for _, u := range dim {
+			if u.code == code {
+				srcScale = u.scale
+				found = true
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+		canonicalVal := val * srcScale
+		out := make([]ucumEquivVal, 0, len(dim))
+		out = append(out, ucumEquivVal{code: code, val: val})
+		for _, u := range dim {
+			if u.code == code {
+				continue
+			}
+			out = append(out, ucumEquivVal{
+				code: u.code,
+				val:  canonicalVal / u.scale,
+			})
+		}
+		return out
+	}
+
+	return []ucumEquivVal{{code: code, val: val}}
+}
+
+func buildSingleQuantityValueCond(alias, prefix string, val float64, isConverted bool, startIdx int) (string, []any) {
+	switch prefix {
+	case "lt", "eb":
+		return fmt.Sprintf("%s.sp_value < $%d", alias, startIdx+1), []any{val}
+	case "le":
+		return fmt.Sprintf("%s.sp_value <= $%d", alias, startIdx+1), []any{val}
+	case "gt", "sa":
+		return fmt.Sprintf("%s.sp_value > $%d", alias, startIdx+1), []any{val}
+	case "ge":
+		return fmt.Sprintf("%s.sp_value >= $%d", alias, startIdx+1), []any{val}
+	case "ap":
+		margin := math.Abs(val) * 0.1
+		if margin == 0 {
+			margin = 0.1
+		}
+		return fmt.Sprintf("(%s.sp_value >= $%d AND %s.sp_value <= $%d)", alias, startIdx+1, alias, startIdx+2),
+			[]any{val - margin, val + margin}
+	case "ne":
+		if isConverted {
+			tol := math.Max(math.Abs(val)*1e-4, 1e-6)
+			return fmt.Sprintf("(%s.sp_value < $%d OR %s.sp_value > $%d)", alias, startIdx+1, alias, startIdx+2),
+				[]any{val - tol, val + tol}
+		}
+		return fmt.Sprintf("%s.sp_value != $%d", alias, startIdx+1), []any{val}
+	default: // "eq"
+		if isConverted {
+			tol := math.Max(math.Abs(val)*1e-4, 1e-6)
+			return fmt.Sprintf("(%s.sp_value >= $%d AND %s.sp_value <= $%d)", alias, startIdx+1, alias, startIdx+2),
+				[]any{val - tol, val + tol}
+		}
+		return fmt.Sprintf("%s.sp_value = $%d", alias, startIdx+1), []any{val}
+	}
+}
+
+func buildQuantityCondition(alias string, op QuantityOp, startIdx int) (string, []any) {
+	var conds []string
+	var args []any
+
+	if op.Code == "" {
+		vCond, vArgs := buildSingleQuantityValueCond(alias, op.Prefix, op.Value, false, startIdx+len(args))
+		conds = append(conds, vCond)
+		args = append(args, vArgs...)
+		if op.System != "" {
+			conds = append(conds, fmt.Sprintf("%s.sp_system = $%d", alias, startIdx+len(args)+1))
+			args = append(args, op.System)
+		}
+		return strings.Join(conds, " AND "), args
+	}
+
+	equivs := ucumEquivalentQuantities(op.System, op.Code, op.Value)
+	var unitBranches []string
+	for _, eqv := range equivs {
+		isConverted := eqv.code != op.Code
+		vCond, vArgs := buildSingleQuantityValueCond(alias, op.Prefix, eqv.val, isConverted, startIdx+len(args))
+		args = append(args, vArgs...)
+		codeIdx := startIdx + len(args) + 1
+		args = append(args, eqv.code)
+		unitBranches = append(unitBranches, fmt.Sprintf("(%s AND %s.sp_code = $%d)", vCond, alias, codeIdx))
+	}
+	if len(unitBranches) == 1 {
+		conds = append(conds, unitBranches[0])
+	} else if len(unitBranches) > 1 {
+		conds = append(conds, "("+strings.Join(unitBranches, " OR ")+")")
+	}
 
 	if op.System != "" {
-		conds = append(conds, fmt.Sprintf("%s.sp_system = $%d", alias, currIdx))
+		sysIdx := startIdx + len(args) + 1
 		args = append(args, op.System)
-		currIdx++
-	}
-	if op.Code != "" {
-		conds = append(conds, fmt.Sprintf("%s.sp_code = $%d", alias, currIdx))
-		args = append(args, op.Code)
+		if op.System == "http://unitsofmeasure.org" && len(equivs) > 1 {
+			conds = append(conds, fmt.Sprintf("(%s.sp_system = $%d OR %s.sp_system = '')", alias, sysIdx, alias))
+		} else {
+			conds = append(conds, fmt.Sprintf("%s.sp_system = $%d", alias, sysIdx))
+		}
 	}
 
 	return strings.Join(conds, " AND "), args
+}
+
+func buildTextCondition(rawVal string, startIdx int) (string, []any) {
+	var orParts []string
+	var args []any
+	for part := range strings.SplitSeq(rawVal, ",") {
+		words := strings.Fields(strings.ToLower(strings.TrimSpace(part)))
+		if len(words) == 0 {
+			continue
+		}
+		var wordConds []string
+		for _, w := range words {
+			idx := startIdx + len(args) + 1
+			args = append(args, "%"+escapeLikePattern(w)+"%")
+			wordConds = append(wordConds, fmt.Sprintf(`stx.sp_value LIKE $%d ESCAPE '\'`, idx))
+		}
+		orParts = append(orParts, "("+strings.Join(wordConds, " AND ")+")")
+	}
+	if len(orParts) == 0 {
+		return "", nil
+	}
+	return fmt.Sprintf(
+		"EXISTS (SELECT 1 FROM spidx_string stx WHERE stx.tenant_id = r.tenant_id AND stx.res_type = r.res_type AND stx.res_id = r.res_id AND stx.sp_name = '_text' AND (%s))",
+		strings.Join(orParts, " OR "),
+	), args
+}
+
+func buildContentCondition(rawVal string, startIdx int) (string, []any) {
+	var orParts []string
+	var args []any
+	for part := range strings.SplitSeq(rawVal, ",") {
+		words := strings.Fields(strings.ToLower(strings.TrimSpace(part)))
+		if len(words) == 0 {
+			continue
+		}
+		var wordConds []string
+		for _, w := range words {
+			idx := startIdx + len(args) + 1
+			args = append(args, "%"+escapeLikePattern(w)+"%")
+			wordConds = append(wordConds, fmt.Sprintf(
+				`(LOWER(r.res_id) LIKE $%[1]d ESCAPE '\' OR EXISTS (SELECT 1 FROM spidx_string scs WHERE scs.tenant_id = r.tenant_id AND scs.res_type = r.res_type AND scs.res_id = r.res_id AND scs.sp_value LIKE $%[1]d ESCAPE '\') OR EXISTS (SELECT 1 FROM spidx_token sct WHERE sct.tenant_id = r.tenant_id AND sct.res_type = r.res_type AND sct.res_id = r.res_id AND LOWER(sct.sp_value) LIKE $%[1]d ESCAPE '\'))`,
+				idx,
+			))
+		}
+		orParts = append(orParts, "("+strings.Join(wordConds, " AND ")+")")
+	}
+	if len(orParts) == 0 {
+		return "", nil
+	}
+	return "(" + strings.Join(orParts, " OR ") + ")", args
+}
+
+func mapFilterOpToDatePrefix(op string) string {
+	switch op {
+	case "lt", "le", "gt", "ge", "sa", "eb", "ap", "ne":
+		return op
+	default:
+		return "eq"
+	}
+}
+
+func mapFilterOpToQuantityPrefix(op string) string {
+	switch op {
+	case "lt", "le", "gt", "ge", "sa", "eb", "ap", "ne":
+		return op
+	default:
+		return "eq"
+	}
+}
+
+func buildFilterExprCondition(expr FilterExpr, startIdx int) (string, []any) {
+	switch expr.Kind {
+	case "and":
+		var parts []string
+		var args []any
+		for _, ch := range expr.Children {
+			cCond, cArgs := buildFilterExprCondition(ch, startIdx+len(args))
+			if cCond != "" {
+				parts = append(parts, cCond)
+				args = append(args, cArgs...)
+			}
+		}
+		if len(parts) == 0 {
+			return "", nil
+		}
+		if len(parts) == 1 {
+			return parts[0], args
+		}
+		return "(" + strings.Join(parts, " AND ") + ")", args
+
+	case "or":
+		var parts []string
+		var args []any
+		for _, ch := range expr.Children {
+			cCond, cArgs := buildFilterExprCondition(ch, startIdx+len(args))
+			if cCond != "" {
+				parts = append(parts, cCond)
+				args = append(args, cArgs...)
+			}
+		}
+		if len(parts) == 0 {
+			return "", nil
+		}
+		if len(parts) == 1 {
+			return parts[0], args
+		}
+		return "(" + strings.Join(parts, " OR ") + ")", args
+
+	case "not":
+		if len(expr.Children) == 0 {
+			return "", nil
+		}
+		cCond, cArgs := buildFilterExprCondition(expr.Children[0], startIdx)
+		if cCond == "" {
+			return "", nil
+		}
+		return "NOT (" + cCond + ")", cArgs
+
+	case "param":
+		return buildFilterLeafCondition(expr, startIdx)
+	default:
+		return "", nil
+	}
+}
+
+func buildFilterLeafCondition(expr FilterExpr, startIdx int) (string, []any) {
+	return buildFilterLeafConditionWithAlias(expr, "r.res_type", "r.res_id", startIdx)
+}
+
+func buildFilterLeafConditionWithAlias(expr FilterExpr, resTypeExpr, resIDExpr string, startIdx int) (string, []any) {
+	op := strings.ToLower(strings.TrimSpace(expr.Op))
+	val := strings.TrimSpace(expr.Value)
+	baseName, modifier := splitParamModifier(expr.Param)
+
+	if op == "pr" {
+		present := strings.EqualFold(val, "true")
+		if baseName == "_id" || baseName == "_lastUpdated" {
+			if present {
+				return "TRUE", nil
+			}
+			return "FALSE", nil
+		}
+		tables := missingTablesForParam(baseName)
+		spIdx := startIdx + 1
+		var existsParts []string
+		for _, tbl := range tables {
+			existsParts = append(existsParts, fmt.Sprintf(
+				"EXISTS (SELECT 1 FROM %s fm WHERE fm.tenant_id = r.tenant_id AND fm.res_type = %s AND fm.res_id = %s AND fm.sp_name = $%d)",
+				tbl, resTypeExpr, resIDExpr, spIdx,
+			))
+		}
+		combined := "(" + strings.Join(existsParts, " OR ") + ")"
+		if present {
+			return combined, []any{baseName}
+		}
+		return "NOT " + combined, []any{baseName}
+	}
+
+	if strings.Contains(expr.Param, ".") {
+		ch, ok := ParseChainedParam(expr.Param, val)
+		if !ok || ch == nil || len(ch.Hops) == 0 {
+			return "", nil
+		}
+		return buildFilterChainedCondition(*ch, op, resTypeExpr, resIDExpr, 0, startIdx)
+	}
+
+	switch baseName {
+	case "_id":
+		cleanVal := val
+		if idx := strings.LastIndex(cleanVal, "/"); idx != -1 {
+			cleanVal = cleanVal[idx+1:]
+		}
+		switch op {
+		case "ne":
+			return fmt.Sprintf("%s != $%d", resIDExpr, startIdx+1), []any{cleanVal}
+		case "co":
+			return fmt.Sprintf(`LOWER(%s) LIKE $%d ESCAPE '\'`, resIDExpr, startIdx+1), []any{"%" + escapeLikePattern(strings.ToLower(cleanVal)) + "%"}
+		case "sw":
+			return fmt.Sprintf(`LOWER(%s) LIKE $%d ESCAPE '\'`, resIDExpr, startIdx+1), []any{escapeLikePattern(strings.ToLower(cleanVal)) + "%"}
+		case "ew":
+			return fmt.Sprintf(`LOWER(%s) LIKE $%d ESCAPE '\'`, resIDExpr, startIdx+1), []any{"%" + escapeLikePattern(strings.ToLower(cleanVal))}
+		default:
+			return fmt.Sprintf("%s = $%d", resIDExpr, startIdx+1), []any{cleanVal}
+		}
+
+	case "_lastUpdated":
+		dOp, err := ParseDateOp(val)
+		if err != nil {
+			return "", nil
+		}
+		dOp.Prefix = mapFilterOpToDatePrefix(op)
+		return buildTimestampColumnCondition("r.last_updated", dOp, startIdx)
+
+	case "_content":
+		cond, cArgs := buildContentCondition(val, startIdx)
+		if op == "ne" && cond != "" {
+			return "NOT (" + cond + ")", cArgs
+		}
+		return cond, cArgs
+
+	case "_text":
+		cond, tArgs := buildTextCondition(val, startIdx)
+		if op == "ne" && cond != "" {
+			return "NOT (" + cond + ")", tArgs
+		}
+		return cond, tArgs
+	}
+
+	if knownDateSearchParams[baseName] {
+		dOp, err := ParseDateOp(val)
+		if err != nil {
+			return "", nil
+		}
+		spIdx := startIdx + 1
+		if op == "ne" {
+			dOp.Prefix = "eq"
+			dCond, dArgs := buildDateCondition("fd", dOp, spIdx)
+			args := append([]any{baseName}, dArgs...)
+			return fmt.Sprintf(
+				"NOT EXISTS (SELECT 1 FROM spidx_date fd WHERE fd.tenant_id = r.tenant_id AND fd.res_type = %s AND fd.res_id = %s AND fd.sp_name = $%d AND %s)",
+				resTypeExpr, resIDExpr, spIdx, dCond,
+			), args
+		}
+		dOp.Prefix = mapFilterOpToDatePrefix(op)
+		dCond, dArgs := buildDateCondition("fd", dOp, spIdx)
+		args := append([]any{baseName}, dArgs...)
+		return fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM spidx_date fd WHERE fd.tenant_id = r.tenant_id AND fd.res_type = %s AND fd.res_id = %s AND fd.sp_name = $%d AND %s)",
+			resTypeExpr, resIDExpr, spIdx, dCond,
+		), args
+	}
+
+	if knownQuantitySearchParams[baseName] {
+		qOp, err := ParseQuantityOp(val)
+		if err != nil {
+			return "", nil
+		}
+		spIdx := startIdx + 1
+		if op == "ne" {
+			qOp.Prefix = "eq"
+			qCond, qArgs := buildQuantityCondition("fq", qOp, spIdx)
+			args := append([]any{baseName}, qArgs...)
+			return fmt.Sprintf(
+				"NOT EXISTS (SELECT 1 FROM spidx_quantity fq WHERE fq.tenant_id = r.tenant_id AND fq.res_type = %s AND fq.res_id = %s AND fq.sp_name = $%d AND %s)",
+				resTypeExpr, resIDExpr, spIdx, qCond,
+			), args
+		}
+		qOp.Prefix = mapFilterOpToQuantityPrefix(op)
+		qCond, qArgs := buildQuantityCondition("fq", qOp, spIdx)
+		args := append([]any{baseName}, qArgs...)
+		return fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM spidx_quantity fq WHERE fq.tenant_id = r.tenant_id AND fq.res_type = %s AND fq.res_id = %s AND fq.sp_name = $%d AND %s)",
+			resTypeExpr, resIDExpr, spIdx, qCond,
+		), args
+	}
+
+	if knownStringSearchParams[baseName] || modifier == "text" {
+		var args []any
+		var spNameCond string
+		if modifier == "text" {
+			p1 := startIdx + 1
+			p2 := startIdx + 2
+			args = append(args, baseName+":text", baseName)
+			spNameCond = fmt.Sprintf("(fs.sp_name = $%d OR fs.sp_name = $%d)", p1, p2)
+		} else {
+			p1 := startIdx + 1
+			args = append(args, baseName)
+			spNameCond = fmt.Sprintf("fs.sp_name = $%d", p1)
+		}
+		normVal := strings.ToLower(val)
+		valIdx := startIdx + len(args) + 1
+		var valCond string
+		switch op {
+		case "co":
+			args = append(args, "%"+escapeLikePattern(normVal)+"%")
+			valCond = fmt.Sprintf(`fs.sp_value LIKE $%d ESCAPE '\'`, valIdx)
+		case "sw":
+			args = append(args, escapeLikePattern(normVal)+"%")
+			valCond = fmt.Sprintf(`fs.sp_value LIKE $%d ESCAPE '\'`, valIdx)
+		case "ew":
+			args = append(args, "%"+escapeLikePattern(normVal))
+			valCond = fmt.Sprintf(`fs.sp_value LIKE $%d ESCAPE '\'`, valIdx)
+		case "gt":
+			args = append(args, normVal)
+			valCond = fmt.Sprintf("fs.sp_value > $%d", valIdx)
+		case "ge":
+			args = append(args, normVal)
+			valCond = fmt.Sprintf("fs.sp_value >= $%d", valIdx)
+		case "lt":
+			args = append(args, normVal)
+			valCond = fmt.Sprintf("fs.sp_value < $%d", valIdx)
+		case "le":
+			args = append(args, normVal)
+			valCond = fmt.Sprintf("fs.sp_value <= $%d", valIdx)
+		default: // eq, ne
+			args = append(args, normVal)
+			valCond = fmt.Sprintf("fs.sp_value = $%d", valIdx)
+		}
+		existsSQL := fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM spidx_string fs WHERE fs.tenant_id = r.tenant_id AND fs.res_type = %s AND fs.res_id = %s AND %s AND %s)",
+			resTypeExpr, resIDExpr, spNameCond, valCond,
+		)
+		if op == "ne" {
+			return "NOT " + existsSQL, args
+		}
+		return existsSQL, args
+	}
+
+	if knownRefSearchParams[baseName] {
+		spIdx := startIdx + 1
+		args := []any{baseName}
+		var orConds []string
+		for part := range strings.SplitSeq(val, ",") {
+			item := strings.TrimSpace(part)
+			if item == "" {
+				continue
+			}
+			if parts := strings.SplitN(item, "/", 2); len(parts) == 2 {
+				orConds = append(orConds, fmt.Sprintf("(frf.target_type = $%d AND frf.target_id = $%d)", startIdx+len(args)+1, startIdx+len(args)+2))
+				args = append(args, parts[0], parts[1])
+			} else if modifier != "" && modifier != "not" {
+				orConds = append(orConds, fmt.Sprintf("(frf.target_type = $%d AND frf.target_id = $%d)", startIdx+len(args)+1, startIdx+len(args)+2))
+				args = append(args, modifier, item)
+			} else {
+				orConds = append(orConds, fmt.Sprintf("(frf.target_id = $%d)", startIdx+len(args)+1))
+				args = append(args, item)
+			}
+		}
+		if len(orConds) == 0 {
+			return "", nil
+		}
+		existsSQL := fmt.Sprintf(
+			"EXISTS (SELECT 1 FROM spidx_reference frf WHERE frf.tenant_id = r.tenant_id AND frf.res_type = %s AND frf.res_id = %s AND frf.sp_name = $%d AND (%s))",
+			resTypeExpr, resIDExpr, spIdx, strings.Join(orConds, " OR "),
+		)
+		if op == "ne" || modifier == "not" {
+			return "NOT " + existsSQL, args
+		}
+		return existsSQL, args
+	}
+
+	if knownURISearchParams[baseName] {
+		spIdx := startIdx + 1
+		args := []any{baseName}
+		var uConds []string
+		var utConds []string
+		effMod := modifier
+		switch op {
+		case "sb":
+			effMod = "below"
+		case "ss":
+			effMod = "above"
+		}
+		for part := range strings.SplitSeq(val, ",") {
+			v := strings.TrimSpace(part)
+			if v == "" {
+				continue
+			}
+			switch effMod {
+			case "below":
+				baseURI := strings.TrimSuffix(v, "/")
+				p1 := startIdx + len(args) + 1
+				p2 := startIdx + len(args) + 2
+				p3 := startIdx + len(args) + 3
+				args = append(args, v, baseURI, escapeLikePattern(baseURI)+"/%")
+				uConds = append(uConds, fmt.Sprintf(`(fu.sp_value = $%d OR fu.sp_value = $%d OR fu.sp_value LIKE $%d ESCAPE '\')`, p1, p2, p3))
+				utConds = append(utConds, fmt.Sprintf(`(fut.sp_value = $%d OR fut.sp_value = $%d OR fut.sp_value LIKE $%d ESCAPE '\')`, p1, p2, p3))
+			case "above":
+				ancestors := uriHierarchyAncestors(v)
+				p1 := startIdx + len(args) + 1
+				args = append(args, pq.Array(ancestors))
+				uConds = append(uConds, fmt.Sprintf("(fu.sp_value = ANY($%d))", p1))
+				utConds = append(utConds, fmt.Sprintf("(fut.sp_value = ANY($%d))", p1))
+			default:
+				p1 := startIdx + len(args) + 1
+				switch op {
+				case "co":
+					args = append(args, "%"+escapeLikePattern(v)+"%")
+					uConds = append(uConds, fmt.Sprintf(`(fu.sp_value LIKE $%d ESCAPE '\')`, p1))
+					utConds = append(utConds, fmt.Sprintf(`(fut.sp_value LIKE $%d ESCAPE '\')`, p1))
+				case "sw":
+					args = append(args, escapeLikePattern(v)+"%")
+					uConds = append(uConds, fmt.Sprintf(`(fu.sp_value LIKE $%d ESCAPE '\')`, p1))
+					utConds = append(utConds, fmt.Sprintf(`(fut.sp_value LIKE $%d ESCAPE '\')`, p1))
+				case "ew":
+					args = append(args, "%"+escapeLikePattern(v))
+					uConds = append(uConds, fmt.Sprintf(`(fu.sp_value LIKE $%d ESCAPE '\')`, p1))
+					utConds = append(utConds, fmt.Sprintf(`(fut.sp_value LIKE $%d ESCAPE '\')`, p1))
+				default:
+					args = append(args, v)
+					uConds = append(uConds, fmt.Sprintf("(fu.sp_value = $%d)", p1))
+					utConds = append(utConds, fmt.Sprintf("(fut.sp_value = $%d)", p1))
+				}
+			}
+		}
+		if len(uConds) == 0 {
+			return "", nil
+		}
+		combined := fmt.Sprintf(
+			"(EXISTS (SELECT 1 FROM spidx_uri fu WHERE fu.tenant_id = r.tenant_id AND fu.res_type = %s AND fu.res_id = %s AND fu.sp_name = $%d AND (%s)) OR EXISTS (SELECT 1 FROM spidx_token fut WHERE fut.tenant_id = r.tenant_id AND fut.res_type = %s AND fut.res_id = %s AND fut.sp_name = $%d AND (%s)))",
+			resTypeExpr, resIDExpr, spIdx, strings.Join(uConds, " OR "),
+			resTypeExpr, resIDExpr, spIdx, strings.Join(utConds, " OR "),
+		)
+		if op == "ne" || modifier == "not" {
+			return "NOT " + combined, args
+		}
+		return combined, args
+	}
+
+	// Default: Token search parameter (spidx_token)
+	spColName := baseName
+	if modifier == "of-type" {
+		spColName = baseName + ":of-type"
+	}
+	spIdx := startIdx + 1
+	args := []any{spColName}
+	var orConds []string
+	for part := range strings.SplitSeq(val, ",") {
+		item := strings.TrimSpace(part)
+		if item == "" {
+			continue
+		}
+		currIdx := startIdx + len(args)
+		if modifier == "of-type" {
+			if cond, otArgs := buildOfTypeTokenOrCond("ft", item, currIdx); cond != "" {
+				orConds = append(orConds, cond)
+				args = append(args, otArgs...)
+			}
+			continue
+		}
+		switch op {
+		case "co":
+			orConds = append(orConds, fmt.Sprintf(`(LOWER(ft.sp_value) LIKE $%d ESCAPE '\')`, currIdx+1))
+			args = append(args, "%"+escapeLikePattern(strings.ToLower(item))+"%")
+			continue
+		case "sw":
+			orConds = append(orConds, fmt.Sprintf(`(LOWER(ft.sp_value) LIKE $%d ESCAPE '\')`, currIdx+1))
+			args = append(args, escapeLikePattern(strings.ToLower(item))+"%")
+			continue
+		case "ew":
+			orConds = append(orConds, fmt.Sprintf(`(LOWER(ft.sp_value) LIKE $%d ESCAPE '\')`, currIdx+1))
+			args = append(args, "%"+escapeLikePattern(strings.ToLower(item)))
+			continue
+		}
+		if parts := strings.SplitN(item, "|", 2); len(parts) == 2 {
+			sys, code := parts[0], parts[1]
+			if sys == "" {
+				orConds = append(orConds, fmt.Sprintf("(ft.sp_system = '' AND ft.sp_value = $%d)", currIdx+1))
+				args = append(args, code)
+			} else if code == "" {
+				orConds = append(orConds, fmt.Sprintf("(ft.sp_system = $%d)", currIdx+1))
+				args = append(args, sys)
+			} else if isEnumTokenParam(baseName) {
+				normVal := strings.ToLower(strings.ReplaceAll(code, "_", "-"))
+				upperVal := strings.ToUpper(strings.ReplaceAll(code, "-", "_"))
+				orConds = append(orConds, fmt.Sprintf("((ft.sp_system = $%d OR ft.sp_system = '') AND ft.sp_value IN ($%d, $%d, $%d))",
+					currIdx+1, currIdx+2, currIdx+3, currIdx+4))
+				args = append(args, sys, code, normVal, upperVal)
+			} else {
+				orConds = append(orConds, fmt.Sprintf("(ft.sp_system = $%d AND ft.sp_value = $%d)", currIdx+1, currIdx+2))
+				args = append(args, sys, code)
+			}
+		} else if isEnumTokenParam(baseName) {
+			normVal := strings.ToLower(strings.ReplaceAll(item, "_", "-"))
+			upperVal := strings.ToUpper(strings.ReplaceAll(item, "-", "_"))
+			orConds = append(orConds, fmt.Sprintf("(ft.sp_value IN ($%d, $%d, $%d))", currIdx+1, currIdx+2, currIdx+3))
+			args = append(args, item, normVal, upperVal)
+		} else {
+			orConds = append(orConds, fmt.Sprintf("(ft.sp_value = $%d)", currIdx+1))
+			args = append(args, item)
+		}
+	}
+	if len(orConds) == 0 {
+		return "", nil
+	}
+	existsSQL := fmt.Sprintf(
+		"EXISTS (SELECT 1 FROM spidx_token ft WHERE ft.tenant_id = r.tenant_id AND ft.res_type = %s AND ft.res_id = %s AND ft.sp_name = $%d AND (%s))",
+		resTypeExpr, resIDExpr, spIdx, strings.Join(orConds, " OR "),
+	)
+	if op == "ne" || op == "ni" || modifier == "not" {
+		return "NOT " + existsSQL, args
+	}
+	return existsSQL, args
+}
+
+func buildFilterChainedCondition(ch ChainedParam, op, parentTypeExpr, parentIDExpr string, hopIdx, startIdx int) (string, []any) {
+	if hopIdx >= len(ch.Hops) {
+		return "", nil
+	}
+	hop := ch.Hops[hopIdx]
+	rfAlias := fmt.Sprintf("fcrf%d", hopIdx)
+	var args []any
+	refSpIdx := startIdx + 1
+	args = append(args, hop.RefParam)
+
+	var targetTypeCond string
+	var nextTypeExpr string
+	if hop.TargetType != "" {
+		tTypeIdx := startIdx + 2
+		args = append(args, hop.TargetType)
+		targetTypeCond = fmt.Sprintf("AND (%s.target_type = $%d OR %s.target_type = '')", rfAlias, tTypeIdx, rfAlias)
+		nextTypeExpr = fmt.Sprintf("$%d", tTypeIdx)
+	} else {
+		nextTypeExpr = rfAlias + ".target_type"
+	}
+	nextIDExpr := rfAlias + ".target_id"
+
+	var innerCond string
+	var innerArgs []any
+	if hopIdx+1 < len(ch.Hops) {
+		innerCond, innerArgs = buildFilterChainedCondition(ch, op, nextTypeExpr, nextIDExpr, hopIdx+1, startIdx+len(args))
+	} else {
+		leafParam := ch.TargetParam
+		if ch.TargetModifier != "" {
+			leafParam = ch.TargetParam + ":" + ch.TargetModifier
+		}
+		leafOp := op
+		if op == "ne" {
+			leafOp = "eq"
+		}
+		innerCond, innerArgs = buildFilterLeafConditionWithAlias(FilterExpr{
+			Kind:  "param",
+			Param: leafParam,
+			Op:    leafOp,
+			Value: ch.Value,
+		}, nextTypeExpr, nextIDExpr, startIdx+len(args))
+	}
+	if innerCond == "" {
+		return "", nil
+	}
+	args = append(args, innerArgs...)
+	existsSQL := fmt.Sprintf(
+		"EXISTS (SELECT 1 FROM spidx_reference %s WHERE %s.tenant_id = r.tenant_id AND %s.res_type = %s AND %s.res_id = %s AND %s.sp_name = $%d %s AND %s)",
+		rfAlias, rfAlias, rfAlias, parentTypeExpr, rfAlias, parentIDExpr, rfAlias, refSpIdx, targetTypeCond, innerCond,
+	)
+	if hopIdx == 0 && op == "ne" {
+		return "NOT " + existsSQL, args
+	}
+	return existsSQL, args
 }
 
 // PatientEverything implements the HL7 FHIR R4 Patient/$everything operation,
@@ -1741,6 +2529,9 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 			}
 		}
 		if params.Since != nil && patRec.LastUpdated.Before(*params.Since) {
+			includePatient = false
+		}
+		if params.Until != nil && patRec.LastUpdated.After(*params.Until) {
 			includePatient = false
 		}
 
@@ -1825,6 +2616,10 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 			whereConds = append(whereConds, fmt.Sprintf("r.last_updated >= $%d", len(args)+1))
 			args = append(args, *params.Since)
 		}
+		if params.Until != nil {
+			whereConds = append(whereConds, fmt.Sprintf("r.last_updated <= $%d", len(args)+1))
+			args = append(args, *params.Until)
+		}
 
 		whereClause := strings.Join(whereConds, " AND ")
 
@@ -1902,6 +2697,9 @@ func (s *Store) EncounterEverything(ctx context.Context, params EncounterEveryth
 			}
 		}
 		if params.Since != nil && encRec.LastUpdated.Before(*params.Since) {
+			includeEncounter = false
+		}
+		if params.Until != nil && encRec.LastUpdated.After(*params.Until) {
 			includeEncounter = false
 		}
 
@@ -1985,6 +2783,10 @@ func (s *Store) EncounterEverything(ctx context.Context, params EncounterEveryth
 			whereConds = append(whereConds, fmt.Sprintf("r.last_updated >= $%d", len(args)+1))
 			args = append(args, *params.Since)
 		}
+		if params.Until != nil {
+			whereConds = append(whereConds, fmt.Sprintf("r.last_updated <= $%d", len(args)+1))
+			args = append(args, *params.Until)
+		}
 
 		whereClause := strings.Join(whereConds, " AND ")
 
@@ -2016,6 +2818,232 @@ func (s *Store) EncounterEverything(ctx context.Context, params EncounterEveryth
 		}
 		if err := rows.Err(); err != nil {
 			return fmt.Errorf("encounter everything rows: %w", err)
+		}
+
+		out = &SearchResults{
+			Matches:  matches,
+			Includes: includes,
+			Total:    len(matches) + compTotal,
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GroupEverything implements the HL7 FHIR R4 Group/$everything cohort operation,
+// returning the focal Group resource (if stored) plus all active Patient members and
+// their compartment-linked resources via spidx_reference.
+func (s *Store) GroupEverything(ctx context.Context, params GroupEverythingParams) (*SearchResults, error) {
+	if params.Count <= 0 {
+		params.Count = 100
+	}
+	if params.Count > 1000 {
+		params.Count = 1000
+	}
+	offset := max(params.Offset, 0)
+
+	var out *SearchResults
+	err := s.withTenantTx(ctx, params.TenantID, func(tx *sql.Tx) error {
+		grpRec, err := s.readResourceWithMetaInTx(ctx, tx, params.TenantID, "Group", params.GroupID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) && params.AllPatients {
+				grpRec = nil
+			} else {
+				return err
+			}
+		}
+
+		var matches []SearchResult
+		if grpRec != nil {
+			includeGroup := true
+			if len(params.ResourceTypes) > 0 {
+				includeGroup = false
+				for _, rt := range params.ResourceTypes {
+					if strings.EqualFold(rt, "Group") {
+						includeGroup = true
+						break
+					}
+				}
+			}
+			if params.Since != nil && grpRec.LastUpdated.Before(*params.Since) {
+				includeGroup = false
+			}
+			if params.Until != nil && grpRec.LastUpdated.After(*params.Until) {
+				includeGroup = false
+			}
+			if includeGroup {
+				matches = append(matches, SearchResult{
+					ResType:       "Group",
+					ResID:         params.GroupID,
+					ResVersion:    grpRec.ResVersion,
+					LastUpdated:   grpRec.LastUpdated,
+					ResourceProto: grpRec.ResourceProto,
+				})
+			}
+		}
+
+		if params.EmptyCohort && !params.AllPatients {
+			out = &SearchResults{
+				Matches: matches,
+				Total:   len(matches),
+			}
+			return nil
+		}
+
+		whereConds := []string{
+			"r.tenant_id = $1",
+			"r.is_deleted = FALSE",
+			"r.res_type != 'Group'",
+		}
+		args := []any{params.TenantID}
+
+		if !params.AllPatients {
+			cleanCohort := make([]string, 0, len(params.PatientIDs))
+			seen := make(map[string]bool, len(params.PatientIDs))
+			for _, pid := range params.PatientIDs {
+				pid = strings.TrimSpace(pid)
+				if slash := strings.LastIndexByte(pid, '/'); slash != -1 {
+					pid = pid[slash+1:]
+				}
+				if pid != "" && !seen[pid] {
+					seen[pid] = true
+					cleanCohort = append(cleanCohort, pid)
+				}
+			}
+			if len(cleanCohort) == 0 {
+				out = &SearchResults{
+					Matches: matches,
+					Total:   len(matches),
+				}
+				return nil
+			}
+			patIdx := len(args) + 1
+			args = append(args, pq.Array(cleanCohort))
+			whereConds = append(whereConds, fmt.Sprintf(`(
+				(r.res_type = 'Patient' AND r.res_id = ANY($%[1]d))
+				OR (
+					r.res_type NOT IN ('Patient', 'Group')
+					AND (
+						EXISTS (
+							SELECT 1 FROM spidx_reference rf
+							JOIN fhir_resource p
+							  ON p.tenant_id = rf.tenant_id
+							 AND p.res_type = 'Patient'
+							 AND p.res_id = rf.target_id
+							 AND p.is_deleted = FALSE
+							WHERE rf.tenant_id = r.tenant_id
+							  AND rf.res_type = r.res_type
+							  AND rf.res_id = r.res_id
+							  AND rf.target_id = ANY($%[1]d)
+							  AND (rf.target_type = 'Patient' OR rf.target_type = '')
+						)
+						OR EXISTS (
+							SELECT 1 FROM spidx_reference rf
+							JOIN fhir_resource p
+							  ON p.tenant_id = rf.tenant_id
+							 AND p.res_type = 'Patient'
+							 AND p.res_id = rf.res_id
+							 AND p.is_deleted = FALSE
+							WHERE rf.tenant_id = r.tenant_id
+							  AND rf.res_type = 'Patient'
+							  AND rf.res_id = ANY($%[1]d)
+							  AND rf.target_type = r.res_type
+							  AND rf.target_id = r.res_id
+						)
+						OR (
+							r.res_type IN ('Organization', 'Practitioner', 'PractitionerRole', 'Location', 'Medication', 'HealthcareService', 'Endpoint', 'Substance')
+							AND EXISTS (
+								SELECT 1 FROM spidx_reference rf_clin
+								JOIN spidx_reference rf_pat
+								  ON rf_pat.tenant_id = rf_clin.tenant_id
+								 AND rf_pat.res_type = rf_clin.res_type
+								 AND rf_pat.res_id = rf_clin.res_id
+								JOIN fhir_resource p
+								  ON p.tenant_id = rf_pat.tenant_id
+								 AND p.res_type = 'Patient'
+								 AND p.res_id = rf_pat.target_id
+								 AND p.is_deleted = FALSE
+								WHERE rf_clin.tenant_id = r.tenant_id
+								  AND rf_clin.res_type != 'Group'
+								  AND rf_clin.target_type = r.res_type
+								  AND rf_clin.target_id = r.res_id
+								  AND rf_pat.target_id = ANY($%[1]d)
+								  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+							)
+						)
+						OR (
+							r.res_type = 'Provenance'
+							AND EXISTS (
+								SELECT 1 FROM spidx_reference rf_prov
+								JOIN spidx_reference rf_pat
+								  ON rf_pat.tenant_id = rf_prov.tenant_id
+								 AND rf_pat.res_type = rf_prov.target_type
+								 AND rf_pat.res_id = rf_prov.target_id
+								JOIN fhir_resource p
+								  ON p.tenant_id = rf_pat.tenant_id
+								 AND p.res_type = 'Patient'
+								 AND p.res_id = rf_pat.target_id
+								 AND p.is_deleted = FALSE
+								WHERE rf_prov.tenant_id = r.tenant_id
+								  AND rf_prov.res_type = 'Provenance'
+								  AND rf_prov.res_id = r.res_id
+								  AND rf_prov.sp_name = 'target'
+								  AND rf_pat.res_type != 'Group'
+								  AND rf_pat.target_id = ANY($%[1]d)
+								  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
+							)
+						)
+					)
+				)
+			)`, patIdx))
+		}
+
+		if len(params.ResourceTypes) > 0 {
+			whereConds = append(whereConds, fmt.Sprintf("r.res_type = ANY($%d)", len(args)+1))
+			args = append(args, pq.Array(params.ResourceTypes))
+		}
+		if params.Since != nil {
+			whereConds = append(whereConds, fmt.Sprintf("r.last_updated >= $%d", len(args)+1))
+			args = append(args, *params.Since)
+		}
+		if params.Until != nil {
+			whereConds = append(whereConds, fmt.Sprintf("r.last_updated <= $%d", len(args)+1))
+			args = append(args, *params.Until)
+		}
+
+		whereClause := strings.Join(whereConds, " AND ")
+
+		var compTotal int
+		countSQL := "SELECT COUNT(*) FROM fhir_resource r WHERE " + whereClause
+		if err := tx.QueryRowContext(ctx, countSQL, args...).Scan(&compTotal); err != nil {
+			return fmt.Errorf("group everything count: %w", err)
+		}
+
+		dataSQL := fmt.Sprintf(
+			"SELECT r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto FROM fhir_resource r WHERE %s ORDER BY r.res_type ASC, r.res_id ASC LIMIT $%d OFFSET $%d",
+			whereClause, len(args)+1, len(args)+2,
+		)
+		args = append(args, params.Count, offset)
+
+		rows, err := tx.QueryContext(ctx, dataSQL, args...)
+		if err != nil {
+			return fmt.Errorf("group everything query: %w", err)
+		}
+		defer rows.Close()
+
+		var includes []SearchResult
+		for rows.Next() {
+			var r SearchResult
+			if err := rows.Scan(&r.ResType, &r.ResID, &r.ResVersion, &r.LastUpdated, &r.ResourceProto); err != nil {
+				return fmt.Errorf("scan group everything row: %w", err)
+			}
+			includes = append(includes, r)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("group everything rows: %w", err)
 		}
 
 		out = &SearchResults{

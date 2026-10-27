@@ -20,6 +20,7 @@ type ExportParams struct {
 	PatientCompartment bool       // Optional: when true (and PatientID == ""), scopes export to active Patient compartments
 	ResourceTypes      []string   // Optional: _type filter (e.g. ["Patient", "Observation"])
 	Since              *time.Time // Optional: _since filter (last_updated >= Since)
+	Until              *time.Time // Optional: _until filter (last_updated <= Until)
 }
 
 // ExportResources retrieves all active FHIR resources matching ExportParams ordered
@@ -231,6 +232,10 @@ func (s *Store) StreamExportResources(ctx context.Context, params ExportParams, 
 		whereConds = append(whereConds, fmt.Sprintf("r.last_updated >= $%d", len(baseArgs)+1))
 		baseArgs = append(baseArgs, *params.Since)
 	}
+	if params.Until != nil {
+		whereConds = append(whereConds, fmt.Sprintf("r.last_updated <= $%d", len(baseArgs)+1))
+		baseArgs = append(baseArgs, *params.Until)
+	}
 
 	const exportBatchSize = 500
 	lastType := ""
@@ -298,6 +303,7 @@ func (s *Store) streamSinglePatientCompartment(ctx context.Context, params Expor
 			PatientID:     params.PatientID,
 			ResourceTypes: params.ResourceTypes,
 			Since:         params.Since,
+			Until:         params.Until,
 			Count:         pageSize,
 			Offset:        offset,
 		})

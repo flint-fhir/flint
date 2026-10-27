@@ -115,7 +115,23 @@ var knownDatePrefixes = map[string]bool{
 
 var knownQuantityPrefixes = map[string]bool{
 	"eq": true, "ne": true, "lt": true, "le": true,
-	"gt": true, "ge": true,
+	"gt": true, "ge": true, "sa": true, "eb": true, "ap": true,
+}
+
+// FilterExpr represents a node in a parsed FHIR R4 _filter boolean expression AST (§3.1.1.3.1).
+type FilterExpr struct {
+	Kind     string       // "and", "or", "not", "param"
+	Children []FilterExpr // Child expressions for "and", "or", "not"
+	Param    string       // Search parameter path for Kind == "param" (e.g. "code", "status", "patient.name")
+	Op       string       // Comparison operator: eq, ne, co, sw, ew, gt, lt, ge, le, sa, eb, ap, pr, po, ss, sb, in, ni, re
+	Value    string       // Comparison value (unquoted)
+}
+
+var knownFilterOps = map[string]bool{
+	"eq": true, "ne": true, "co": true, "sw": true, "ew": true,
+	"gt": true, "lt": true, "ge": true, "le": true,
+	"sa": true, "eb": true, "ap": true, "pr": true, "po": true,
+	"ss": true, "sb": true, "in": true, "ni": true, "re": true,
 }
 
 var dateLayouts = []string{
@@ -666,9 +682,221 @@ var (
 		"_list": true, "_has": true, "_type": true, "_sort": true,
 		"_count": true, "_offset": true, "_include": true, "_revinclude": true,
 		"_summary": true, "_total": true, "_elements": true, "_contained": true,
-		"_containedType": true, "_format": true, "_pretty": true,
+		"_containedType": true, "_format": true, "_pretty": true, "_filter": true,
 	}
 )
+
+type filterToken struct {
+	val    string
+	quoted bool
+}
+
+func tokenizeFilterExpr(raw string) ([]filterToken, error) {
+	var tokens []filterToken
+	n := len(raw)
+	for i := 0; i < n; {
+		ch := raw[i]
+		if ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' {
+			i++
+			continue
+		}
+		if ch == '(' || ch == ')' {
+			tokens = append(tokens, filterToken{val: string(ch)})
+			i++
+			continue
+		}
+		if ch == '"' || ch == '\'' {
+			quote := ch
+			i++
+			var sb strings.Builder
+			closed := false
+			for i < n {
+				c := raw[i]
+				if c == '\\' && i+1 < n {
+					sb.WriteByte(raw[i+1])
+					i += 2
+					continue
+				}
+				if c == quote {
+					closed = true
+					i++
+					break
+				}
+				sb.WriteByte(c)
+				i++
+			}
+			if !closed {
+				return nil, fmt.Errorf("unterminated quoted string in _filter %q", raw)
+			}
+			tokens = append(tokens, filterToken{val: sb.String(), quoted: true})
+			continue
+		}
+		start := i
+		for i < n {
+			c := raw[i]
+			if c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '(' || c == ')' || c == '"' || c == '\'' {
+				break
+			}
+			i++
+		}
+		tokens = append(tokens, filterToken{val: raw[start:i]})
+	}
+	return tokens, nil
+}
+
+// ParseFilterExpr parses a FHIR R4 _filter expression (§3.1.1.3.1) into a FilterExpr AST.
+func ParseFilterExpr(raw string) (FilterExpr, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return FilterExpr{}, fmt.Errorf("empty _filter expression")
+	}
+	tokens, err := tokenizeFilterExpr(trimmed)
+	if err != nil {
+		return FilterExpr{}, err
+	}
+	if len(tokens) == 0 {
+		return FilterExpr{}, fmt.Errorf("empty _filter expression")
+	}
+
+	pos := 0
+	var parseOr func() (FilterExpr, error)
+	var parseAnd func() (FilterExpr, error)
+	var parseUnary func() (FilterExpr, error)
+	var parseAtom func() (FilterExpr, error)
+
+	parseOr = func() (FilterExpr, error) {
+		left, err := parseAnd()
+		if err != nil {
+			return FilterExpr{}, err
+		}
+		children := []FilterExpr{left}
+		for pos < len(tokens) && !tokens[pos].quoted && strings.EqualFold(tokens[pos].val, "or") {
+			pos++
+			right, err := parseAnd()
+			if err != nil {
+				return FilterExpr{}, err
+			}
+			children = append(children, right)
+		}
+		if len(children) == 1 {
+			return children[0], nil
+		}
+		return FilterExpr{Kind: "or", Children: children}, nil
+	}
+
+	parseAnd = func() (FilterExpr, error) {
+		left, err := parseUnary()
+		if err != nil {
+			return FilterExpr{}, err
+		}
+		children := []FilterExpr{left}
+		for pos < len(tokens) && !tokens[pos].quoted && strings.EqualFold(tokens[pos].val, "and") {
+			pos++
+			right, err := parseUnary()
+			if err != nil {
+				return FilterExpr{}, err
+			}
+			children = append(children, right)
+		}
+		if len(children) == 1 {
+			return children[0], nil
+		}
+		return FilterExpr{Kind: "and", Children: children}, nil
+	}
+
+	parseUnary = func() (FilterExpr, error) {
+		if pos >= len(tokens) {
+			return FilterExpr{}, fmt.Errorf("unexpected end of _filter expression %q", raw)
+		}
+		tok := tokens[pos]
+		if !tok.quoted && strings.EqualFold(tok.val, "not") {
+			pos++
+			child, err := parseUnary()
+			if err != nil {
+				return FilterExpr{}, err
+			}
+			return FilterExpr{Kind: "not", Children: []FilterExpr{child}}, nil
+		}
+		if !tok.quoted && tok.val == "(" {
+			pos++
+			inner, err := parseOr()
+			if err != nil {
+				return FilterExpr{}, err
+			}
+			if pos >= len(tokens) || tokens[pos].quoted || tokens[pos].val != ")" {
+				return FilterExpr{}, fmt.Errorf("missing closing ')' in _filter expression %q", raw)
+			}
+			pos++
+			return inner, nil
+		}
+		return parseAtom()
+	}
+
+	parseAtom = func() (FilterExpr, error) {
+		if pos+2 >= len(tokens) {
+			return FilterExpr{}, fmt.Errorf("expected '<param> <op> <value>' in _filter expression %q", raw)
+		}
+		paramTok := tokens[pos]
+		opTok := tokens[pos+1]
+		valTok := tokens[pos+2]
+		pos += 3
+
+		if paramTok.quoted || paramTok.val == "(" || paramTok.val == ")" {
+			return FilterExpr{}, fmt.Errorf("invalid parameter path %q in _filter expression %q", paramTok.val, raw)
+		}
+		if !IsKnownSearchParam(paramTok.val) {
+			return FilterExpr{}, fmt.Errorf("unknown or unsupported search parameter %q in _filter", paramTok.val)
+		}
+		op := strings.ToLower(strings.TrimSpace(opTok.val))
+		if opTok.quoted || !knownFilterOps[op] {
+			return FilterExpr{}, fmt.Errorf("invalid comparison operator %q in _filter expression %q", opTok.val, raw)
+		}
+		if !valTok.quoted && (valTok.val == "(" || valTok.val == ")") {
+			return FilterExpr{}, fmt.Errorf("invalid comparison value %q in _filter expression %q", valTok.val, raw)
+		}
+		valStr := strings.TrimSpace(valTok.val)
+		if valStr == "" {
+			return FilterExpr{}, fmt.Errorf("empty comparison value for %s %s in _filter", paramTok.val, op)
+		}
+
+		baseParam, _ := splitParamModifier(paramTok.val)
+		if strings.Contains(paramTok.val, ".") {
+			if ch, ok := ParseChainedParam(paramTok.val, valStr); ok && ch != nil {
+				baseParam = ch.TargetParam
+			}
+		}
+		if op == "pr" {
+			lower := strings.ToLower(valStr)
+			if lower != "true" && lower != "false" {
+				return FilterExpr{}, fmt.Errorf("invalid 'pr' value %q for %s in _filter: expected true or false", valStr, paramTok.val)
+			}
+		} else if paramTok.val == "_lastUpdated" || knownDateSearchParams[baseParam] {
+			if _, err := ParseDateOp(valStr); err != nil {
+				return FilterExpr{}, fmt.Errorf("invalid date value %q for %s in _filter: %w", valStr, paramTok.val, err)
+			}
+		} else if knownQuantitySearchParams[baseParam] {
+			if _, err := ParseQuantityOp(valStr); err != nil {
+				return FilterExpr{}, fmt.Errorf("invalid quantity value %q for %s in _filter: %w", valStr, paramTok.val, err)
+			}
+		}
+
+		return FilterExpr{
+			Kind:  "param",
+			Param: paramTok.val,
+			Op:    op,
+			Value: valStr,
+		}, nil
+	}
+
+	expr, err := parseOr()
+	if err != nil {
+		return FilterExpr{}, err
+	}
+	if pos < len(tokens) {
+		return FilterExpr{}, fmt.Errorf("unexpected token %q in _filter expression %q", tokens[pos].val, raw)
+	}
+	return expr, nil
+}
 
 // IsKnownSearchParam reports whether key is a recognized FHIR R4 search or control parameter.
 // Used for Prefer: handling=strict / handling=lenient conformance.
@@ -802,6 +1030,21 @@ func ValidateSearchQuery(q url.Values) error {
 			}
 		}
 	}
+	for _, fVal := range q["_filter"] {
+		if _, err := ParseFilterExpr(fVal); err != nil {
+			return err
+		}
+	}
+	for _, cVal := range q["_content"] {
+		if strings.TrimSpace(cVal) == "" {
+			return fmt.Errorf("invalid _content parameter %q: empty value", cVal)
+		}
+	}
+	for _, tVal := range q["_text"] {
+		if strings.TrimSpace(tVal) == "" {
+			return fmt.Errorf("invalid _text parameter %q: empty value", tVal)
+		}
+	}
 	for key, values := range q {
 		if strings.HasPrefix(key, "_has:") {
 			for _, val := range values {
@@ -933,6 +1176,21 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 	for _, listRaw := range q["_list"] {
 		if trimmed := strings.TrimSpace(listRaw); trimmed != "" {
 			params.List = append(params.List, trimmed)
+		}
+	}
+	for _, contentRaw := range q["_content"] {
+		if trimmed := strings.TrimSpace(contentRaw); trimmed != "" {
+			params.Content = append(params.Content, trimmed)
+		}
+	}
+	for _, textRaw := range q["_text"] {
+		if trimmed := strings.TrimSpace(textRaw); trimmed != "" {
+			params.Text = append(params.Text, trimmed)
+		}
+	}
+	for _, filterRaw := range q["_filter"] {
+		if expr, err := ParseFilterExpr(filterRaw); err == nil {
+			params.Filters = append(params.Filters, expr)
 		}
 	}
 	for _, elRaw := range q["_elements"] {
@@ -1213,6 +1471,9 @@ func HasSearchCriteria(p SearchParams) bool {
 		len(p.Chained) > 0 ||
 		len(p.Has) > 0 ||
 		len(p.List) > 0 ||
+		len(p.Content) > 0 ||
+		len(p.Text) > 0 ||
+		len(p.Filters) > 0 ||
 		len(p.CompositeTokenQuantities) > 0 ||
 		len(p.CompositeTokenTokens) > 0 ||
 		len(p.CompositeTokenDates) > 0 ||

@@ -2442,3 +2442,289 @@ func TestHistoryAtListCompartmentsAndDeleteIfMatchWave12(t *testing.T) {
 		t.Fatalf("expected 204 No Content with ETag W/\"2\" on matching If-Match DELETE, got %d (ETag=%q): %s", delMatchRec.Code, delMatchRec.Header().Get("ETag"), delMatchRec.Body.String())
 	}
 }
+
+func TestFilterUCUMContentBulkUntilAndGroupEverythingWave13(t *testing.T) {
+	srv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(srv)
+	h := srv.Handler()
+
+	// 1. Verify ParseFilterExpr and ValidateSearchQuery for _filter, _content, _text, and quantity ap/sa/eb
+	expr, err := postgres.ParseFilterExpr(`(code eq http://loinc.org|8867-4 or code eq http://loinc.org|29463-7) and status ne "cancelled" and not (value-quantity lt 50|http://unitsofmeasure.org|kg)`)
+	if err != nil || expr.Kind != "and" {
+		t.Fatalf("expected ParseFilterExpr to parse nested boolean expression, got kind=%q err=%v", expr.Kind, err)
+	}
+	if _, err := postgres.ParseFilterExpr(`code invalidop "val"`); err == nil {
+		t.Fatalf("expected ParseFilterExpr to reject unknown operator")
+	}
+	if _, err := postgres.ParseFilterExpr(`(code eq "123"`); err == nil {
+		t.Fatalf("expected ParseFilterExpr to reject unclosed parenthesis")
+	}
+	if qOp, err := postgres.ParseQuantityOp("ap70|http://unitsofmeasure.org|kg"); err != nil || qOp.Prefix != "ap" || qOp.Value != 70 || qOp.Code != "kg" {
+		t.Fatalf("expected ParseQuantityOp to parse ap70|http://unitsofmeasure.org|kg, got %+v, err=%v", qOp, err)
+	}
+
+	// 2. Verify /metadata CapabilityStatement and /openapi.json advertise _filter, _content, _text, Group/$everything, and $export _until/_elements
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/demo/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	h.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK {
+		t.Fatalf("GET /metadata got %d", metaRec.Code)
+	}
+	metaBody := metaRec.Body.String()
+	for _, needle := range []string{`"_filter"`, `"_content"`, `"_text"`, `"http://hl7.org/fhir/OperationDefinition/Group-everything"`} {
+		if !strings.Contains(metaBody, needle) {
+			t.Errorf("expected CapabilityStatement to contain %s", needle)
+		}
+	}
+
+	oaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/demo/openapi.json", nil)
+	oaRec := httptest.NewRecorder()
+	h.ServeHTTP(oaRec, oaReq)
+	if oaRec.Code != http.StatusOK {
+		t.Fatalf("GET /openapi.json got %d", oaRec.Code)
+	}
+	oaBody := oaRec.Body.String()
+	for _, needle := range []string{`"/Group/{id}/$everything"`, `"_filter"`, `"_content"`, `"_text"`, `"_until"`} {
+		if !strings.Contains(oaBody, needle) {
+			t.Errorf("expected OpenAPI spec to contain %s", needle)
+		}
+	}
+
+	// 3. End-to-End PostgreSQL Verification
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+	tenant := "test-wave13-e2e"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	putRes := func(resType, id, body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/"+resType+"/"+id, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s/%s failed (%d): %s", resType, id, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Seed Patient, narrative Condition, weight & temperature Observations, and a cohort Group
+	putRes("Patient", "pat-w13-1", `{
+		"resourceType": "Patient",
+		"id": "pat-w13-1",
+		"active": true,
+		"gender": "female",
+		"birthDate": "1985-04-12",
+		"name": [{"family": "Chalmers", "given": ["Alice"]}],
+		"text": {
+			"status": "generated",
+			"div": "<div xmlns=\"http://www.w3.org/1999/xhtml\"> Longitudinal cardiology cohort patient <b>Alice Chalmers</b> </div>"
+		}
+	}`)
+	putRes("Patient", "pat-w13-2", `{
+		"resourceType": "Patient",
+		"id": "pat-w13-2",
+		"active": true,
+		"gender": "male",
+		"birthDate": "1978-09-20",
+		"name": [{"family": "Baggins", "given": ["Bilbo"]}]
+	}`)
+	putRes("Condition", "cond-w13-1", `{
+		"resourceType": "Condition",
+		"id": "cond-w13-1",
+		"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+		"verificationStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"}]},
+		"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-category", "code": "problem-list-item"}]}],
+		"code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Essential hypertension"}]},
+		"subject": {"reference": "Patient/pat-w13-1"},
+		"text": {
+			"status": "generated",
+			"div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">Refractory nocturnal migraine aura with photophobia</div>"
+		}
+	}`)
+	// Weight Observation stored as 70 kg
+	putRes("Observation", "obs-w13-weight", `{
+		"resourceType": "Observation",
+		"id": "obs-w13-weight",
+		"status": "final",
+		"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+		"code": {"coding": [{"system": "http://loinc.org", "code": "29463-7", "display": "Body weight"}]},
+		"subject": {"reference": "Patient/pat-w13-1"},
+		"effectiveDateTime": "2026-03-01T10:00:00Z",
+		"valueQuantity": {"value": 70.0, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg"}
+	}`)
+	// Temperature Observation stored as 37 Cel
+	putRes("Observation", "obs-w13-temp", `{
+		"resourceType": "Observation",
+		"id": "obs-w13-temp",
+		"status": "final",
+		"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+		"code": {"coding": [{"system": "http://loinc.org", "code": "8310-5", "display": "Body temperature"}]},
+		"subject": {"reference": "Patient/pat-w13-1"},
+		"effectiveDateTime": "2026-03-02T10:00:00Z",
+		"valueQuantity": {"value": 37.0, "unit": "Cel", "system": "http://unitsofmeasure.org", "code": "Cel"}
+	}`)
+	putRes("Group", "grp-w13-1", `{
+		"resourceType": "Group",
+		"id": "grp-w13-1",
+		"active": true,
+		"type": "person",
+		"actual": true,
+		"name": "Wave 13 Cohort",
+		"member": [
+			{"entity": {"reference": "Patient/pat-w13-1"}}
+		]
+	}`)
+
+	// 3a. Verify _text and _content full-text / narrative search
+	for _, tc := range []struct {
+		query   string
+		wantID  string
+		exclude string
+	}{
+		{"/Condition?_text=photophobia", `"cond-w13-1"`, ""},
+		{"/Condition?_content=photophobia", `"cond-w13-1"`, ""},
+		{"/Condition?_content=hypertension", `"cond-w13-1"`, ""},
+		{"/Patient?_text=cardiology", `"pat-w13-1"`, `"pat-w13-2"`},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+tc.query, nil)
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tc.wantID) {
+			t.Errorf("GET %s expected 200 OK containing %s, got %d: %s", tc.query, tc.wantID, rec.Code, rec.Body.String())
+		}
+		if tc.exclude != "" && strings.Contains(rec.Body.String(), tc.exclude) {
+			t.Errorf("GET %s expected to exclude %s, got %s", tc.query, tc.exclude, rec.Body.String())
+		}
+	}
+
+	// 3b. Verify Canonical UCUM Quantity Conversion & ap / sa / eb prefixes
+	for _, tc := range []struct {
+		desc   string
+		query  string
+		wantID string
+	}{
+		{"kg stored, queried as 70000 g", "/Observation?code=29463-7&value-quantity=70000|http://unitsofmeasure.org|g", `"obs-w13-weight"`},
+		{"kg stored, queried as gt150 [lb_av] (70 kg ≈ 154.32 lb)", "/Observation?code=29463-7&value-quantity=gt150|http://unitsofmeasure.org|[lb_av]", `"obs-w13-weight"`},
+		{"kg stored, queried with ap72 (±10%)", "/Observation?code=29463-7&value-quantity=ap72|http://unitsofmeasure.org|kg", `"obs-w13-weight"`},
+		{"kg stored, queried with sa65", "/Observation?code=29463-7&value-quantity=sa65|http://unitsofmeasure.org|kg", `"obs-w13-weight"`},
+		{"kg stored, queried with eb75", "/Observation?code=29463-7&value-quantity=eb75|http://unitsofmeasure.org|kg", `"obs-w13-weight"`},
+		{"composite code-value-quantity with UCUM g conversion", "/Observation?code-value-quantity=http://loinc.org|29463-7$70000|http://unitsofmeasure.org|g", `"obs-w13-weight"`},
+		{"Cel stored (37 °C), queried as ap98.6 [degF]", "/Observation?code=8310-5&value-quantity=ap98.6|http://unitsofmeasure.org|[degF]", `"obs-w13-temp"`},
+		{"Cel stored (37 °C = 310.15 K), queried as gt300 K", "/Observation?code=8310-5&value-quantity=gt300|http://unitsofmeasure.org|K", `"obs-w13-temp"`},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+tc.query, nil)
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tc.wantID) {
+			t.Errorf("%s (%s) expected 200 OK containing %s, got %d: %s", tc.desc, tc.query, tc.wantID, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 3c. Verify FHIR R4 _filter boolean search expressions (and, or, not, parentheses, co, sw, ew, eq, ne, gt, ap, pr, re, chained)
+	for _, tc := range []struct {
+		desc    string
+		resType string
+		filter  string
+		wantID  string
+		exclude string
+	}{
+		{
+			"boolean OR + AND + NOT on Patient",
+			"Patient",
+			`(family sw "Chal" or family eq "NonExistent") and gender eq "female" and not (gender eq "male")`,
+			`"pat-w13-1"`,
+			`"pat-w13-2"`,
+		},
+		{
+			"string co / ew andbirthDate ge/le on Patient",
+			"Patient",
+			`family co "alm" and family ew "mers" and birthdate ge 1980-01-01 and birthdate le 1990-12-31`,
+			`"pat-w13-1"`,
+			`"pat-w13-2"`,
+		},
+		{
+			"quantity UCUM conversion + chained patient.name inside _filter on Observation",
+			"Observation",
+			`(code eq http://loinc.org|29463-7 and value-quantity eq 70000|http://unitsofmeasure.org|g) and subject:Patient.family eq "Chalmers" and status pr true`,
+			`"obs-w13-weight"`,
+			`"obs-w13-temp"`,
+		},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/"+tc.resType+"?_filter="+url.QueryEscape(tc.filter), nil)
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tc.wantID) {
+			t.Errorf("_filter %s expected 200 OK containing %s, got %d: %s", tc.desc, tc.wantID, rec.Code, rec.Body.String())
+		}
+		if tc.exclude != "" && strings.Contains(rec.Body.String(), tc.exclude) {
+			t.Errorf("_filter %s expected to exclude %s, got %s", tc.desc, tc.exclude, rec.Body.String())
+		}
+	}
+
+	// 3d. Verify Group/{id}/$everything cohort operation + _until & _elements on $everything and $export
+	grpEvReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Group/grp-w13-1/$everything?_until=2099-12-31&_elements=Patient.name,Observation.code", nil)
+	grpEvRec := httptest.NewRecorder()
+	pgH.ServeHTTP(grpEvRec, grpEvReq)
+	if grpEvRec.Code != http.StatusOK {
+		t.Fatalf("GET /Group/grp-w13-1/$everything got %d: %s", grpEvRec.Code, grpEvRec.Body.String())
+	}
+	grpEvBody := grpEvRec.Body.String()
+	for _, want := range []string{`"Group/grp-w13-1"`, `"Patient/pat-w13-1"`, `"Observation/obs-w13-weight"`, `"Condition/cond-w13-1"`, `"SUBSETTED"`} {
+		if !strings.Contains(grpEvBody, want) {
+			t.Errorf("expected Group/grp-w13-1/$everything to contain %s, got %s", want, grpEvBody)
+		}
+	}
+	if strings.Contains(grpEvBody, `"Patient/pat-w13-2"`) {
+		t.Errorf("expected Group/grp-w13-1/$everything to exclude non-member pat-w13-2")
+	}
+
+	// Group/$everything with _until in the past (2000-01-01) should exclude clinical compartment resources created today
+	grpEvPastReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Group/grp-w13-1/$everything?_until=2000-01-01", nil)
+	grpEvPastRec := httptest.NewRecorder()
+	pgH.ServeHTTP(grpEvPastRec, grpEvPastReq)
+	if grpEvPastRec.Code != http.StatusOK || strings.Contains(grpEvPastRec.Body.String(), `"Observation/obs-w13-weight"`) {
+		t.Errorf("expected Group/$everything?_until=2000-01-01 to exclude obs-w13-weight, got %d: %s", grpEvPastRec.Code, grpEvPastRec.Body.String())
+	}
+
+	// Group/$export with _until=2099-12-31&_elements=Patient.name,Observation.code
+	grpExpReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Group/grp-w13-1/$export?_until=2099-12-31&_elements=Patient.name,Observation.code", nil)
+	grpExpRec := httptest.NewRecorder()
+	pgH.ServeHTTP(grpExpRec, grpExpReq)
+	if grpExpRec.Code != http.StatusOK {
+		t.Fatalf("GET /Group/grp-w13-1/$export got %d: %s", grpExpRec.Code, grpExpRec.Body.String())
+	}
+	grpExpBody := grpExpRec.Body.String()
+	if !strings.Contains(grpExpBody, `"pat-w13-1"`) || !strings.Contains(grpExpBody, `"obs-w13-weight"`) || !strings.Contains(grpExpBody, `"SUBSETTED"`) {
+		t.Errorf("expected Group/$export with _until and _elements to include pat-w13-1, obs-w13-weight, and SUBSETTED tag, got %s", grpExpBody)
+	}
+	if strings.Contains(grpExpBody, `"birthDate"`) {
+		t.Errorf("expected Group/$export?_elements=Patient.name,Observation.code to strip Patient.birthDate, got %s", grpExpBody)
+	}
+
+	// Group/$export with _until=2000-01-01 should yield 0 NDJSON lines
+	grpExpPastReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Group/grp-w13-1/$export?_until=2000-01-01", nil)
+	grpExpPastRec := httptest.NewRecorder()
+	pgH.ServeHTTP(grpExpPastRec, grpExpPastReq)
+	if grpExpPastRec.Code != http.StatusOK || strings.TrimSpace(grpExpPastRec.Body.String()) != "" {
+		t.Errorf("expected empty NDJSON on Group/$export?_until=2000-01-01, got %d: %q", grpExpPastRec.Code, grpExpPastRec.Body.String())
+	}
+
+	// Invalid _until earlier than _since must return 400 Bad Request
+	badUntilReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/$export?_since=2026-06-01&_until=2026-01-01", nil)
+	badUntilRec := httptest.NewRecorder()
+	pgH.ServeHTTP(badUntilRec, badUntilReq)
+	if badUntilRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request when _until < _since, got %d: %s", badUntilRec.Code, badUntilRec.Body.String())
+	}
+}

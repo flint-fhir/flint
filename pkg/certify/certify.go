@@ -541,15 +541,25 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			}
 		}
 
-		// d) Type-level and system-level _history (with _at, _summary, Bundle.link & response.location)
+		// d) Type-level and system-level _history (with _at, _summary, Bundle.link & response.location), _filter, _content, and ap quantity prefix
 		if err == nil {
 			respHist, bHist, errHist := doReq(http.MethodGet, basePath+"/Patient/_history?_count=5&_at=ge2020-01-01", "", nil, nil)
+			filterExpr := url.QueryEscape(`(family eq "Certify" or family eq "NonExistent") and gender eq "female" and not (gender eq "male")`)
+			respFlt, bFlt, errFlt := doReq(http.MethodGet, basePath+"/Patient?_filter="+filterExpr, "", nil, nil)
+			respCntTxt, bCntTxt, errCntTxt := doReq(http.MethodGet, basePath+"/Observation?_content=digital", "", nil, nil)
+			respApQty, bApQty, errApQty := doReq(http.MethodGet, basePath+"/Observation?value-quantity=ap72", "", nil, nil)
 			if errHist != nil || respHist.StatusCode != http.StatusOK || !strings.Contains(string(bHist), `"history"`) || !strings.Contains(string(bHist), `"location"`) || !strings.Contains(string(bHist), `"link"`) {
 				err = fmt.Errorf("expected 200 OK history Bundle with Bundle.link and entry.response.location on GET /Patient/_history?_at=ge2020-01-01")
+			} else if errFlt != nil || respFlt.StatusCode != http.StatusOK || !strings.Contains(string(bFlt), `"cert-pat-1"`) {
+				err = fmt.Errorf("expected 200 OK with cert-pat-1 on _filter boolean expression search, got %d: %s", respFlt.StatusCode, string(bFlt))
+			} else if errCntTxt != nil || respCntTxt.StatusCode != http.StatusOK || !strings.Contains(string(bCntTxt), `"cert-obs-care-pref"`) {
+				err = fmt.Errorf("expected 200 OK with cert-obs-care-pref on _content=digital, got %d: %s", respCntTxt.StatusCode, string(bCntTxt))
+			} else if errApQty != nil || respApQty.StatusCode != http.StatusOK || !strings.Contains(string(bApQty), `"cert-obs-1"`) {
+				err = fmt.Errorf("expected 200 OK with cert-obs-1 on value-quantity=ap72, got %d: %s", respApQty.StatusCode, string(bApQty))
 			}
 		}
 	}
-	record("SEARCH-04", suite2, "FHIR R4 _sort, _has Reverse Chaining, _summary/_elements, Bundle.link, All 5 Compartments (/*) & _history?_at=", t0, err, "Verified _sort, _has, _summary=count, _elements SUBSETTED, Bundle.link, /Patient/{id}/*, /Encounter/{id}/Observation, and /_history?_at=")
+	record("SEARCH-04", suite2, "FHIR R4 _filter, _content, ap Quantity, _sort, _has, _summary/_elements, Bundle.link, All 5 Compartments (/*) & _history?_at=", t0, err, "Verified _filter, _content, ap quantity, _sort, _has, _summary=count, _elements SUBSETTED, Bundle.link, /Patient/{id}/*, /Encounter/{id}/Observation, and /_history?_at=")
 
 	// 2.23 Patient/$match (MPI) Probabilistic & Deterministic Matching
 	t0 = time.Now()
@@ -813,11 +823,14 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	if err == nil {
 		respEncEv, bEncEv, errEncEv := doReq(http.MethodGet, basePath+"/Encounter/cert-enc-1/$everything", "", nil, nil)
+		respGrpEv, bGrpEv, errGrpEv := doReq(http.MethodGet, basePath+"/Group/all/$everything?_until=2099-12-31&_elements=Patient.name,Observation.code", "", nil, nil)
 		if errEncEv != nil || respEncEv.StatusCode != http.StatusOK || !strings.Contains(string(bEncEv), `"Encounter/cert-enc-1"`) || !strings.Contains(string(bEncEv), `"Location/cert-loc-1"`) {
 			err = fmt.Errorf("expected Encounter/cert-enc-1/$everything to include Encounter and Location/cert-loc-1, got %d: %s", respEncEv.StatusCode, string(bEncEv))
+		} else if errGrpEv != nil || respGrpEv.StatusCode != http.StatusOK || !strings.Contains(string(bGrpEv), `"Patient/cert-pat-1"`) || !strings.Contains(string(bGrpEv), `"SUBSETTED"`) {
+			err = fmt.Errorf("expected Group/all/$everything?_until=2099-12-31&_elements=... to include Patient/cert-pat-1 with SUBSETTED tag, got %d: %s", respGrpEv.StatusCode, string(bGrpEv))
 		}
 	}
-	record("EXP-01", suite4, "Patient/$everything & Encounter/$everything Compartment Closure (All 26 US Core Types)", t0, err, "All 26 US Core resource types + Encounter/$everything verified")
+	record("EXP-01", suite4, "Patient/$everything, Encounter/$everything & Group/$everything Compartment Closure (All 26 US Core Types, _until & _elements)", t0, err, "All 26 US Core resource types + Encounter/$everything + Group/$everything verified")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/Group/all/$export", "", nil, map[string]string{

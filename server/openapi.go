@@ -449,6 +449,9 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 		{"name": "_tag", "type": "token"},
 		{"name": "_security", "type": "token"},
 		{"name": "_source", "type": "uri"},
+		{"name": "_filter", "type": "special"},
+		{"name": "_content", "type": "string"},
+		{"name": "_text", "type": "string"},
 	}
 	for rt, sp := range defs {
 		defs[rt] = append(sp, metaParams...)
@@ -1226,6 +1229,8 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				"parameters": []map[string]any{
 					{"name": "_type", "in": "query", "description": "Comma-separated FHIR resource types (e.g. Patient,Observation)", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "Only include resources updated at or after this ISO-8601 timestamp", "schema": map[string]any{"type": "string"}},
+					{"name": "_until", "in": "query", "description": "Only include resources updated at or before this ISO-8601 timestamp", "schema": map[string]any{"type": "string"}},
+					{"name": "_elements", "in": "query", "description": "Comma-separated FHIR elements or ResourceType.element tokens to project (adds SUBSETTED tag)", "schema": map[string]any{"type": "string"}},
 					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters (e.g. Observation?category=vital-signs)", "schema": map[string]any{"type": "string"}},
 					{"name": "_outputFormat", "in": "query", "description": "NDJSON output format (default application/fhir+ndjson)", "schema": map[string]any{"type": "string"}},
 				},
@@ -1252,6 +1257,8 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				"parameters": []map[string]any{
 					{"name": "_type", "in": "query", "description": "Comma-separated FHIR resource types", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_until", "in": "query", "description": "ISO-8601 timestamp upper bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_elements", "in": "query", "description": "Comma-separated FHIR elements or ResourceType.element tokens to project", "schema": map[string]any{"type": "string"}},
 					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters", "schema": map[string]any{"type": "string"}},
 					{"name": "patient", "in": "query", "description": "Optional patient cohort filter (e.g. Patient/pat-1,Patient/pat-2)", "schema": map[string]any{"type": "string"}},
 					{"name": "_outputFormat", "in": "query", "description": "NDJSON output format (application/fhir+ndjson)", "schema": map[string]any{"type": "string"}},
@@ -1280,6 +1287,8 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 					{"name": "_type", "in": "query", "description": "Comma-separated FHIR resource types", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_until", "in": "query", "description": "ISO-8601 timestamp upper bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_elements", "in": "query", "description": "Comma-separated FHIR elements or ResourceType.element tokens to project", "schema": map[string]any{"type": "string"}},
 					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters", "schema": map[string]any{"type": "string"}},
 					{"name": "patient", "in": "query", "description": "Optional patient subset filter within the Group cohort", "schema": map[string]any{"type": "string"}},
 					{"name": "_outputFormat", "in": "query", "description": "NDJSON output format (application/fhir+ndjson)", "schema": map[string]any{"type": "string"}},
@@ -1312,6 +1321,8 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 					{"name": "_type", "in": "query", "description": "Comma-separated FHIR resource types", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_until", "in": "query", "description": "ISO-8601 timestamp upper bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_elements", "in": "query", "description": "Comma-separated FHIR elements or ResourceType.element tokens to project", "schema": map[string]any{"type": "string"}},
 					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
@@ -1678,6 +1689,8 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 					{"name": "_type", "in": "query", "description": "Comma-separated resource types", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_until", "in": "query", "description": "ISO-8601 timestamp upper bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_elements", "in": "query", "description": "Comma-separated FHIR elements or ResourceType.element tokens to project", "schema": map[string]any{"type": "string"}},
 					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters (e.g. Observation?category=vital-signs)", "schema": map[string]any{"type": "string"}},
 					{"name": "_count", "in": "query", "schema": map[string]any{"type": "integer"}},
 					{"name": "_offset", "in": "query", "schema": map[string]any{"type": "integer"}},
@@ -1707,6 +1720,8 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 					{"name": "_type", "in": "query", "description": "Comma-separated resource types", "schema": map[string]any{"type": "string"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_until", "in": "query", "description": "ISO-8601 timestamp upper bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_elements", "in": "query", "description": "Comma-separated FHIR elements or ResourceType.element tokens to project", "schema": map[string]any{"type": "string"}},
 					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters (e.g. Observation?category=vital-signs)", "schema": map[string]any{"type": "string"}},
 					{"name": "_count", "in": "query", "schema": map[string]any{"type": "integer"}},
 					{"name": "_offset", "in": "query", "schema": map[string]any{"type": "integer"}},
@@ -1724,6 +1739,37 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "Bundle (type: searchset) containing Encounter, clinical resources, and referenced participants/locations"},
+				},
+			},
+		},
+		"/Group/{id}/$everything": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Group"},
+				"summary":     "Assemble full Group cohort longitudinal Bundle across all active Patient members ($everything)",
+				"operationId": "groupEverything",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "_type", "in": "query", "description": "Comma-separated resource types", "schema": map[string]any{"type": "string"}},
+					{"name": "_since", "in": "query", "description": "ISO-8601 timestamp lower bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_until", "in": "query", "description": "ISO-8601 timestamp upper bound", "schema": map[string]any{"type": "string"}},
+					{"name": "_elements", "in": "query", "description": "Comma-separated FHIR elements or ResourceType.element tokens to project", "schema": map[string]any{"type": "string"}},
+					{"name": "_typeFilter", "in": "query", "description": "Comma-separated FHIR search criteria filters", "schema": map[string]any{"type": "string"}},
+					{"name": "_count", "in": "query", "schema": map[string]any{"type": "integer"}},
+					{"name": "_offset", "in": "query", "schema": map[string]any{"type": "integer"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: searchset) containing Group, active cohort Patients, and compartment resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Group"},
+				"summary":     "Assemble full Group cohort longitudinal Bundle ($everything, POST Parameters)",
+				"operationId": "groupEverythingPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: searchset) containing Group, active cohort Patients, and compartment resources"},
 				},
 			},
 		},
@@ -1794,8 +1840,11 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			{"name": "_revinclude:iterate", "in": "query", "description": "Iterative multi-hop reverse reference include", "schema": map[string]any{"type": "string"}},
 			{"name": "_has", "in": "query", "description": "Reverse chained search filter (e.g. _has:Observation:patient:code=8867-4)", "schema": map[string]any{"type": "string"}},
 			{"name": "_list", "in": "query", "description": "Cohort membership search against a FHIR List or Group ID", "schema": map[string]any{"type": "string"}},
+			{"name": "_filter", "in": "query", "description": "FHIR R4 boolean search filter expression (and, or, not, parentheses, eq, ne, co, sw, ew, gt, lt, ge, le, sa, eb, ap, pr, po, ss, sb, in, ni, re)", "schema": map[string]any{"type": "string"}},
+			{"name": "_content", "in": "query", "description": "Full-text search across indexed string and token display values", "schema": map[string]any{"type": "string"}},
+			{"name": "_text", "in": "query", "description": "Narrative text.div search", "schema": map[string]any{"type": "string"}},
 		}
-		seenParam := map[string]bool{"_id": true, "_lastUpdated": true, "_profile": true, "_tag": true, "_security": true, "_source": true}
+		seenParam := map[string]bool{"_id": true, "_lastUpdated": true, "_profile": true, "_tag": true, "_security": true, "_source": true, "_filter": true, "_content": true, "_text": true}
 		for _, sp := range spDefs[rt] {
 			if seenParam[sp["name"]] {
 				continue
