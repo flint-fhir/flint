@@ -333,6 +333,21 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handlePatientMemberMatch(w, r)
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$merge" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientMerge(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Observation") && parts[4] == "$lastn" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleObservationLastN(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Observation") && parts[4] == "$stats" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleObservationStats(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Claim") && parts[4] == "$submit" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleClaimSubmit(w, r)
@@ -3451,6 +3466,21 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					"name":       "purge",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Patient-purge",
 				},
+				{
+					"name":       "merge",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Patient-merge",
+				},
+			}
+		case "Observation":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "lastn",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Observation-lastn",
+				},
+				{
+					"name":       "stats",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Observation-stats",
+				},
 			}
 		case "Encounter":
 			entry["operation"] = []map[string]string{
@@ -3894,6 +3924,18 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					{
 						"name":       "remove",
 						"definition": "http://hl7.org/fhir/OperationDefinition/Group-remove",
+					},
+					{
+						"name":       "lastn",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Observation-lastn",
+					},
+					{
+						"name":       "stats",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Observation-stats",
+					},
+					{
+						"name":       "merge",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Patient-merge",
 					},
 				},
 			},
