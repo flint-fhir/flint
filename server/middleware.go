@@ -99,7 +99,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		isValidateReq := r.Method == http.MethodPost && ((len(parts) >= 4 && parts[3] == "$validate") || (len(parts) >= 5 && parts[4] == "$validate"))
+		isValidateReq := (len(parts) >= 4 && parts[3] == "$validate") ||
+			(len(parts) >= 5 && parts[4] == "$validate") ||
+			(len(parts) >= 6 && parts[5] == "$validate")
 		if auth.IsPatientRestricted(secCtx) && !isValidateReq && cleanID(secCtx.GetPatientId()) == "" {
 			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token is missing required patient_id claim")
 			return
@@ -110,6 +112,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			resType := parts[3]
 			isBulkExportOp := resType == "$export" || resType == "$export-poll" || resType == "$export-file" || resType == "$certify" ||
 				(strings.EqualFold(resType, "Patient") && len(parts) == 5 && parts[4] == "$export") ||
+				(strings.EqualFold(resType, "Patient") && len(parts) == 6 && parts[5] == "$export") ||
 				(strings.EqualFold(resType, "Group") && len(parts) == 6 && parts[5] == "$export")
 
 			if !isBulkExportOp {
@@ -200,8 +203,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for system operation "+resType)
 							return
 						}
-					} else if len(parts) == 5 && (parts[4] == "_history" || parts[4] == "$meta") {
-						// Type-level history or $meta: GET /{tenant}/{resourceType}/_history or GET /{tenant}/{resourceType}/$meta
+					} else if len(parts) == 5 && (parts[4] == "_history" || parts[4] == "$meta" || (strings.EqualFold(resType, "Subscription") && parts[4] == "$status")) {
+						// Type-level history, $meta, or Subscription/$status
 						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionSearch) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("insufficient scope for %s on %s", parts[4], resType))
@@ -420,11 +423,17 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						if !s.enforceSearchScopeAndCompartment(w, r, secCtx, resType) {
 							return
 						}
-					} else if len(parts) >= 5 && parts[4] == "$validate" {
-						// Validate operation: POST /{tenant}/{resourceType}/$validate
-						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionCreate) {
+					} else if len(parts) >= 5 && (parts[4] == "$validate" || (len(parts) == 6 && parts[5] == "$validate")) {
+						// Validate operation: POST /{tenant}/{resourceType}/$validate or /{tenant}/{resourceType}/{id}/$validate
+						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionCreate) && !auth.Allows(secCtx, resType, auth.ActionUpdate) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("insufficient scope for validate on %s", resType))
+							return
+						}
+					} else if strings.EqualFold(resType, "Subscription") && ((len(parts) == 5 && parts[4] == "$status") || (len(parts) == 6 && parts[5] == "$status")) {
+						if !auth.Allows(secCtx, "Subscription", auth.ActionRead) && !auth.Allows(secCtx, "Subscription", auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient scope for Subscription/$status")
 							return
 						}
 					} else if resType == "$validate" {

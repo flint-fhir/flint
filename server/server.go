@@ -5,6 +5,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -72,6 +73,8 @@ type Server struct {
 	exportMu                   sync.RWMutex
 	exportJobs                 map[string]*exportJob
 	subSem                     chan struct{}
+	subStatsMu                 sync.RWMutex
+	subStats                   map[string]*subscriptionDeliveryStats
 	disallowPrivateWebhooks    bool
 	clientJWKs                 map[string]auth.JWK
 	requireRegisteredClientJWK bool
@@ -236,8 +239,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 
 	// FHIR Bulk Data Access ($export — ONC (g)(10)) & Automated Conformance Certification ($certify)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$export", s.handleSystemExport)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$export", s.handleSystemExport)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/Patient/$export", s.handlePatientGroupExport)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/Patient/$export", s.handlePatientGroupExport)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/{resourceType}/{id}/$export", s.handleSinglePatientExport)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/{id}/$export", s.handleSinglePatientExport)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$export-poll/{jobId}", s.handleExportPoll)
 	mux.HandleFunc("DELETE /fhir/r4/{tenant}/$export-poll/{jobId}", s.handleExportCancel)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$certify", s.handleCertify)
@@ -365,6 +371,12 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleQuestionnaireResponseExtract(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Subscription") && parts[4] == "$status" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", "Subscription")
+					s.handleSubscriptionStatus(w, r)
+					return
+				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
 				if parts[5] == "$everything" {
@@ -372,6 +384,20 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("resourceType", parts[3])
 					r.SetPathValue("id", parts[4])
 					s.handlePatientEverything(w, r)
+					return
+				}
+				if parts[5] == "$validate" && !strings.HasPrefix(parts[3], "$") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					r.SetPathValue("id", parts[4])
+					s.handleValidate(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Subscription") && parts[5] == "$status" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", "Subscription")
+					r.SetPathValue("id", parts[4])
+					s.handleSubscriptionStatus(w, r)
 					return
 				}
 				if r.Method == http.MethodGet && parts[5] == "$provenance" && !strings.HasPrefix(parts[3], "$") {
@@ -1227,47 +1253,119 @@ func setProtoResourceID(msg *dynamicpb.Message, resID string) {
 	}
 }
 
-// handleValidate handles POST /{tenant}/{resourceType}/$validate and POST /{tenant}/$validate.
-// Validates the incoming resource against FHIR R4 StructureDefinitions and ValueSets
+// handleValidate handles POST /{tenant}/{resourceType}/$validate, POST /{tenant}/$validate,
+// and GET/POST /{tenant}/{resourceType}/{id}/$validate.
+// Validates the target resource against FHIR R4 StructureDefinitions, ValueSets,
+// optional $validate mode (create/update/delete), and US Core v6.1.0/v7.0.0 profiles
 // without persisting to the database, returning an OperationOutcome.
 func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
-	_ = tenant
-	resType := r.PathValue("resourceType")
+	resType := strings.TrimSpace(r.PathValue("resourceType"))
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // 10MB max
-	if err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read body")
-		return
+	var profiles []string
+	for _, p := range q["profile"] {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			profiles = append(profiles, trimmed)
+		}
+	}
+	mode := strings.TrimSpace(q.Get("mode"))
+
+	var body []byte
+	if r.Body != nil {
+		var err error
+		body, err = io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // 10MB max
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read body")
+			return
+		}
 	}
 
-	if len(body) == 0 {
-		writeOperationOutcome(w, http.StatusBadRequest, "required", "empty request body for $validate")
-		return
-	}
+	targetJSON := bytes.TrimSpace(body)
+	if len(targetJSON) > 0 {
+		var rootMap map[string]any
+		if err := json.Unmarshal(targetJSON, &rootMap); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed JSON: %v", err))
+			return
+		}
 
-	targetJSON := body
-	var rootMap map[string]any
-	if err := json.Unmarshal(body, &rootMap); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed JSON: %v", err))
-		return
-	}
-
-	// Support FHIR Parameters resource wrapper (e.g. { resourceType: "Parameters", parameter: [{ name: "resource", resource: ... }] })
-	if rootType, _ := rootMap["resourceType"].(string); rootType == "Parameters" {
-		if params, ok := rootMap["parameter"].([]any); ok {
-			for _, p := range params {
-				if pMap, ok := p.(map[string]any); ok {
-					if pMap["name"] == "resource" {
+		// Support FHIR Parameters resource wrapper (e.g. { resourceType: "Parameters", parameter: [{ name: "resource", resource: ... }, { name: "profile", valueUri: ... }, { name: "mode", valueCode: ... }] })
+		if rootType, _ := rootMap["resourceType"].(string); rootType == "Parameters" {
+			foundResourceParam := false
+			if params, ok := rootMap["parameter"].([]any); ok {
+				for _, p := range params {
+					pMap, ok := p.(map[string]any)
+					if !ok {
+						continue
+					}
+					pName, _ := pMap["name"].(string)
+					switch pName {
+					case "resource":
 						if resObj, ok := pMap["resource"].(map[string]any); ok {
 							if marshaled, err := json.Marshal(resObj); err == nil {
 								targetJSON = marshaled
+								foundResourceParam = true
+							}
+						}
+					case "profile":
+						for _, k := range []string{"valueUri", "valueCanonical", "valueString", "valueCode"} {
+							if v, ok := pMap[k].(string); ok && strings.TrimSpace(v) != "" {
+								profiles = append(profiles, strings.TrimSpace(v))
+								break
+							}
+						}
+					case "mode":
+						if mode == "" {
+							for _, k := range []string{"valueCode", "valueString"} {
+								if v, ok := pMap[k].(string); ok && strings.TrimSpace(v) != "" {
+									mode = strings.TrimSpace(v)
+									break
+								}
 							}
 						}
 					}
 				}
 			}
+			if !foundResourceParam && resID != "" {
+				targetJSON = nil
+			}
 		}
+	}
+
+	// Instance-level $validate (GET/POST /{tenant}/{resourceType}/{id}/$validate without an inline resource body):
+	// load the stored resource from Postgres and validate it against the requested profile/mode.
+	if len(targetJSON) == 0 && resID != "" && resType != "" {
+		if s.store == nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "operational store is not configured")
+			return
+		}
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found",
+				fmt.Sprintf("%s/%s not found", resType, resID))
+			return
+		}
+		if errors.Is(err, postgres.ErrResourceDeleted) {
+			writeOperationOutcome(w, http.StatusGone, "deleted",
+				fmt.Sprintf("%s/%s has been deleted", resType, resID))
+			return
+		}
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read resource for $validate")
+			return
+		}
+		jb, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize resource for $validate")
+			return
+		}
+		targetJSON = jb
+	}
+
+	if len(targetJSON) == 0 {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "empty request body for $validate")
+		return
 	}
 
 	if s.validator == nil {
@@ -1276,7 +1374,37 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outcome := s.validator.ValidateJSON(resType, targetJSON)
+	var outcome *validation.Outcome
+	if pv, ok := s.validator.(validation.ProfileValidator); ok {
+		outcome = pv.ValidateJSONWithProfiles(resType, targetJSON, profiles, mode)
+	} else {
+		outcome = s.validator.ValidateJSON(resType, targetJSON)
+	}
+
+	if resID != "" {
+		var resMap map[string]any
+		if json.Unmarshal(targetJSON, &resMap) == nil {
+			if bodyID, ok := resMap["id"].(string); ok && strings.TrimSpace(bodyID) != "" && bodyID != resID {
+				outcome.AddError(validation.CodeInvariant,
+					fmt.Sprintf("Resource id %q does not match instance endpoint id %q", bodyID, resID),
+					resType+".id")
+			}
+		}
+	}
+
+	effectiveType := resType
+	if effectiveType == "" {
+		var resMap map[string]any
+		if json.Unmarshal(targetJSON, &resMap) == nil {
+			effectiveType, _ = resMap["resourceType"].(string)
+		}
+	}
+	if effectiveType == "Subscription" {
+		if err := s.validateSubscriptionResourceJSON("Subscription", targetJSON); err != nil {
+			outcome.AddError(validation.CodeValue, err.Error(), "Subscription")
+		}
+	}
+
 	outcome.WriteHTTP(w, http.StatusOK)
 }
 
@@ -2475,6 +2603,13 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 				{
 					"name":       "translate",
 					"definition": "http://hl7.org/fhir/OperationDefinition/ConceptMap-translate",
+				},
+			}
+		case "Subscription":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "status",
+					"definition": "http://hl7.org/fhir/uv/subscriptions-backport/OperationDefinition/backport-subscription-status",
 				},
 			}
 		}

@@ -1379,7 +1379,7 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 		whereConds := []string{
 			"r.tenant_id = $1",
 			"r.is_deleted = FALSE",
-			"r.res_type != 'Patient'",
+			"r.res_type NOT IN ('Patient', 'Group')",
 			`(
 				EXISTS (
 					SELECT 1 FROM spidx_reference rf
@@ -1406,6 +1406,7 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 						 AND rf_pat.res_type = rf_clin.res_type
 						 AND rf_pat.res_id = rf_clin.res_id
 						WHERE rf_clin.tenant_id = r.tenant_id
+						  AND rf_clin.res_type != 'Group'
 						  AND rf_clin.target_type = r.res_type
 						  AND rf_clin.target_id = r.res_id
 						  AND rf_pat.target_id = $2
@@ -1424,6 +1425,7 @@ func (s *Store) PatientEverything(ctx context.Context, params PatientEverythingP
 						  AND rf_prov.res_type = 'Provenance'
 						  AND rf_prov.res_id = r.res_id
 						  AND rf_prov.sp_name = 'target'
+						  AND rf_pat.res_type != 'Group'
 						  AND rf_pat.target_id = $2
 						  AND (rf_pat.target_type = 'Patient' OR rf_pat.target_type = '')
 					)

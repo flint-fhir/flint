@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -129,23 +131,24 @@ func isValidNDJSONFormat(raw string) bool {
 	}
 }
 
-// handleSystemExport handles GET /fhir/r4/{tenant}/$export (System-level FHIR Bulk Data Access).
+// handleSystemExport handles GET/POST /fhir/r4/{tenant}/$export (System-level FHIR Bulk Data Access).
 func (s *Server) handleSystemExport(w http.ResponseWriter, r *http.Request) {
-	s.executeBulkExport(w, r, false, "")
+	s.executeBulkExport(w, r, false, "", "")
 }
 
-// handlePatientGroupExport handles GET /fhir/r4/{tenant}/Patient/$export (Patient-level FHIR Bulk Data Access).
+// handlePatientGroupExport handles GET/POST /fhir/r4/{tenant}/Patient/$export (Patient-level FHIR Bulk Data Access).
 func (s *Server) handlePatientGroupExport(w http.ResponseWriter, r *http.Request) {
-	s.executeBulkExport(w, r, true, "")
+	s.executeBulkExport(w, r, true, "", "")
 }
 
-// handleSinglePatientExport handles GET /fhir/r4/{tenant}/{resourceType}/{id}/$export
+// handleSinglePatientExport handles GET/POST /fhir/r4/{tenant}/{resourceType}/{id}/$export
 // Supports Patient/{id}/$export (Single-Patient Compartment Bulk Export) and
 // Group/{id}/$export (ONC (g)(10) Group Cohort Bulk Export).
 func (s *Server) handleSinglePatientExport(w http.ResponseWriter, r *http.Request) {
 	resType := r.PathValue("resourceType")
 	if resType == "Group" {
-		s.executeBulkExport(w, r, true, "")
+		groupID := strings.TrimSpace(r.PathValue("id"))
+		s.executeBulkExport(w, r, true, "", groupID)
 		return
 	}
 	if resType != "" && resType != "Patient" {
@@ -154,21 +157,156 @@ func (s *Server) handleSinglePatientExport(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	patientID := strings.TrimSpace(r.PathValue("id"))
-	s.executeBulkExport(w, r, true, patientID)
+	s.executeBulkExport(w, r, true, patientID, "")
 }
 
-func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPatientExport bool, patientID string) {
-	tenant := r.PathValue("tenant")
-	q := r.URL.Query()
+type exportTypeFilter struct {
+	resType string
+	params  postgres.SearchParams
+}
 
-	if outputFormat := q.Get("_outputFormat"); !isValidNDJSONFormat(outputFormat) {
+type parsedExportRequest struct {
+	outputFormat string
+	typeRaw      string
+	sinceRaw     string
+	typeFilters  []string
+	patientRefs  []string
+	asyncParam   string
+	formatParam  string
+}
+
+func parseExportRequest(r *http.Request) (parsedExportRequest, error) {
+	q := mergedSearchQuery(r)
+	req := parsedExportRequest{
+		outputFormat: q.Get("_outputFormat"),
+		typeRaw:      strings.Join(q["_type"], ","),
+		sinceRaw:     q.Get("_since"),
+		asyncParam:   q.Get("_async"),
+		formatParam:  q.Get("_format"),
+	}
+	for _, tf := range q["_typeFilter"] {
+		for part := range strings.SplitSeq(tf, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				req.typeFilters = append(req.typeFilters, trimmed)
+			}
+		}
+	}
+	for _, pat := range q["patient"] {
+		for part := range strings.SplitSeq(pat, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				req.patientRefs = append(req.patientRefs, trimmed)
+			}
+		}
+	}
+
+	if r.Method == http.MethodPost && r.Body != nil && r.ContentLength != 0 {
+		ct := strings.ToLower(r.Header.Get("Content-Type"))
+		if !strings.Contains(ct, "application/x-www-form-urlencoded") {
+			body, err := io.ReadAll(io.LimitReader(r.Body, 4*1024*1024))
+			if err != nil {
+				return req, fmt.Errorf("failed to read $export request body")
+			}
+			if strings.TrimSpace(string(body)) != "" {
+				var raw map[string]any
+				if err := json.Unmarshal(body, &raw); err != nil {
+					return req, fmt.Errorf("invalid JSON in $export request: %v", err)
+				}
+				if rt, _ := raw["resourceType"].(string); rt != "Parameters" {
+					return req, fmt.Errorf("$export POST body must be a Parameters resource (got %q)", rt)
+				}
+				var bodyTypes []string
+				if paramsArr, ok := raw["parameter"].([]any); ok {
+					for _, p := range paramsArr {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						val := ""
+						for _, k := range []string{"valueString", "valueCode", "valueUri", "valueCanonical", "valueInstant", "valueDateTime", "valueDate"} {
+							if sVal, ok := pm[k].(string); ok && strings.TrimSpace(sVal) != "" {
+								val = strings.TrimSpace(sVal)
+								break
+							}
+						}
+						if val == "" {
+							if refMap, ok := pm["valueReference"].(map[string]any); ok {
+								if refStr, ok := refMap["reference"].(string); ok && strings.TrimSpace(refStr) != "" {
+									val = strings.TrimSpace(refStr)
+								}
+							}
+						}
+						if val == "" {
+							if bVal, ok := pm["valueBoolean"].(bool); ok {
+								if bVal {
+									val = "true"
+								} else {
+									val = "false"
+								}
+							}
+						}
+						if val == "" {
+							continue
+						}
+						switch name {
+						case "_outputFormat":
+							if req.outputFormat == "" {
+								req.outputFormat = val
+							}
+						case "_type":
+							bodyTypes = append(bodyTypes, val)
+						case "_since":
+							if req.sinceRaw == "" {
+								req.sinceRaw = val
+							}
+						case "_typeFilter":
+							for part := range strings.SplitSeq(val, ",") {
+								if trimmed := strings.TrimSpace(part); trimmed != "" {
+									req.typeFilters = append(req.typeFilters, trimmed)
+								}
+							}
+						case "patient":
+							for part := range strings.SplitSeq(val, ",") {
+								if trimmed := strings.TrimSpace(part); trimmed != "" {
+									req.patientRefs = append(req.patientRefs, trimmed)
+								}
+							}
+						case "_async":
+							if req.asyncParam == "" {
+								req.asyncParam = val
+							}
+						case "_format":
+							if req.formatParam == "" {
+								req.formatParam = val
+							}
+						}
+					}
+				}
+				if len(bodyTypes) > 0 && req.typeRaw == "" {
+					req.typeRaw = strings.Join(bodyTypes, ",")
+				}
+			}
+		}
+	}
+	return req, nil
+}
+
+func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPatientExport bool, patientID string, groupID string) {
+	tenant := r.PathValue("tenant")
+	reqParams, err := parseExportRequest(r)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+
+	if !isValidNDJSONFormat(reqParams.outputFormat) {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid",
-			fmt.Sprintf("unsupported _outputFormat %q: only application/fhir+ndjson is supported", outputFormat))
+			fmt.Sprintf("unsupported _outputFormat %q: only application/fhir+ndjson is supported", reqParams.outputFormat))
 		return
 	}
 
 	var requestedTypes []string
-	if typeRaw := strings.TrimSpace(q.Get("_type")); typeRaw != "" {
+	if typeRaw := strings.TrimSpace(reqParams.typeRaw); typeRaw != "" {
 		seen := make(map[string]bool)
 		for part := range strings.SplitSeq(typeRaw, ",") {
 			trimmed := strings.TrimSpace(part)
@@ -188,7 +326,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 	}
 
 	var since *time.Time
-	if sinceRaw := strings.TrimSpace(q.Get("_since")); sinceRaw != "" {
+	if sinceRaw := strings.TrimSpace(reqParams.sinceRaw); sinceRaw != "" {
 		dOp, err := postgres.ParseDateOp(sinceRaw)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
@@ -197,6 +335,45 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		}
 		t := dOp.Value
 		since = &t
+	}
+
+	var parsedTypeFilters []exportTypeFilter
+	for _, tf := range reqParams.typeFilters {
+		parts := strings.SplitN(tf, "?", 2)
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _typeFilter %q: must be formatted as ResourceType?param=value", tf))
+			return
+		}
+		rt := strings.TrimSpace(parts[0])
+		if _, ok := s.protoRegistry[rt]; !ok {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("unsupported resource type %q in _typeFilter %q", rt, tf))
+			return
+		}
+		qVals, err := url.ParseQuery(strings.TrimSpace(parts[1]))
+		if err != nil || len(qVals) == 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid query in _typeFilter %q", tf))
+			return
+		}
+		if err := postgres.ValidateSearchQuery(qVals); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("invalid _typeFilter %q: %v", tf, err))
+			return
+		}
+		sp := postgres.BuildSearchParamsFromQuery(tenant, rt, qVals)
+		sp.Count = 10000
+		parsedTypeFilters = append(parsedTypeFilters, exportTypeFilter{
+			resType: rt,
+			params:  sp,
+		})
+	}
+
+	if len(reqParams.patientRefs) > 0 && (!isPatientExport || patientID != "") {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+			"the patient parameter is only supported on Patient/$export and Group/{id}/$export")
+		return
 	}
 
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
@@ -208,7 +385,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 					"patient-scoped token is missing required patient_id claim")
 				return
 			}
-			if !isPatientExport || patientID == "" {
+			if !isPatientExport || patientID == "" || groupID != "" {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 					"patient-scoped token cannot invoke system-level or multi-patient $export; use /Patient/{id}/$export")
 				return
@@ -269,19 +446,91 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		}
 	}
 
+	var cohortPatientIDs []string
+	var emptyCohort bool
+
+	if groupID != "" {
+		groupPatIDs, isBuiltinAll, err := s.resolveExportGroupCohort(r.Context(), tenant, groupID, 0, make(map[string]bool))
+		if errors.Is(err, sql.ErrNoRows) {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found",
+				fmt.Sprintf("Group/%s not found", groupID))
+			return
+		}
+		if errors.Is(err, postgres.ErrResourceDeleted) {
+			writeOperationOutcome(w, http.StatusGone, "deleted",
+				fmt.Sprintf("Group/%s has been deleted", groupID))
+			return
+		}
+		if err != nil {
+			s.logger.Error("bulk export group lookup failed", "error", err, "tenant", tenant, "group", groupID)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to execute bulk export")
+			return
+		}
+		if !isBuiltinAll {
+			cohortPatientIDs = groupPatIDs
+			if len(cohortPatientIDs) == 0 {
+				emptyCohort = true
+			}
+		}
+	}
+
+	if len(reqParams.patientRefs) > 0 {
+		var requestedPatIDs []string
+		seenReq := make(map[string]bool)
+		for _, ref := range reqParams.patientRefs {
+			cid := cleanExportPatientRef(ref)
+			if cid != "" && !seenReq[cid] {
+				seenReq[cid] = true
+				requestedPatIDs = append(requestedPatIDs, cid)
+			}
+		}
+		if emptyCohort {
+			// Group already has 0 active patients
+		} else if len(cohortPatientIDs) > 0 {
+			groupSet := make(map[string]bool, len(cohortPatientIDs))
+			for _, pid := range cohortPatientIDs {
+				groupSet[pid] = true
+			}
+			var intersected []string
+			for _, pid := range requestedPatIDs {
+				if groupSet[pid] {
+					intersected = append(intersected, pid)
+				}
+			}
+			cohortPatientIDs = intersected
+			if len(cohortPatientIDs) == 0 {
+				emptyCohort = true
+			}
+		} else {
+			cohortPatientIDs = requestedPatIDs
+			if len(cohortPatientIDs) == 0 {
+				emptyCohort = true
+			}
+		}
+	}
+
+	typeFilterAllowed, err := s.resolveExportTypeFilterAllowedIDs(r.Context(), parsedTypeFilters)
+	if err != nil {
+		s.logger.Error("bulk export _typeFilter evaluation failed", "error", err, "tenant", tenant)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to evaluate _typeFilter criteria")
+		return
+	}
+
 	exportParams := postgres.ExportParams{
 		TenantID:           tenant,
 		PatientID:          patientID,
-		PatientCompartment: isPatientExport && patientID == "",
+		PatientIDs:         cohortPatientIDs,
+		EmptyCohort:        emptyCohort,
+		PatientCompartment: isPatientExport && patientID == "" && len(cohortPatientIDs) == 0 && !emptyCohort,
 		ResourceTypes:      requestedTypes,
 		Since:              since,
 	}
 
 	prefer := strings.ToLower(r.Header.Get("Prefer"))
-	isAsync := strings.Contains(prefer, "respond-async") || strings.EqualFold(q.Get("_async"), "true")
+	isAsync := strings.Contains(prefer, "respond-async") || strings.EqualFold(reqParams.asyncParam, "true")
 	accept := strings.ToLower(r.Header.Get("Accept"))
 	wantsManifest := (strings.Contains(accept, "application/json") || strings.Contains(accept, "application/fhir+json")) &&
-		!strings.Contains(accept, "ndjson") || strings.EqualFold(q.Get("_format"), "manifest")
+		!strings.Contains(accept, "ndjson") || strings.EqualFold(reqParams.formatParam, "manifest")
 
 	// Fast path for direct NDJSON streaming (neither async nor manifest requested):
 	// stream each resource line directly to the response writer in paginated DB batches
@@ -295,6 +544,9 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 			allowedPat = cleanID(secCtx.GetPatientId())
 		}
 		_ = s.store.StreamExportResources(r.Context(), exportParams, func(res postgres.SearchResult) error {
+			if !matchesExportTypeFilter(typeFilterAllowed, res.ResType, res.ResID) {
+				return nil
+			}
 			if hasSecCtx {
 				if patientRestricted && patientID != "" && strings.EqualFold(res.ResType, "Patient") && cleanID(res.ResID) != allowedPat {
 					return nil
@@ -337,7 +589,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		s.storeExportJob(job)
 
 		asyncCtx := context.WithoutCancel(r.Context())
-		go s.populateExportJob(asyncCtx, job, exportParams, hasSecCtx, secCtx, patientID)
+		go s.populateExportJob(asyncCtx, job, exportParams, typeFilterAllowed, hasSecCtx, secCtx, patientID)
 
 		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 		w.WriteHeader(http.StatusAccepted)
@@ -364,12 +616,153 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		Status:     "in-progress",
 		done:       make(chan struct{}),
 	}
-	s.populateExportJob(r.Context(), job, exportParams, hasSecCtx, secCtx, patientID)
+	s.populateExportJob(r.Context(), job, exportParams, typeFilterAllowed, hasSecCtx, secCtx, patientID)
 	if job.Err != "" {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to execute bulk export")
 		return
 	}
 	s.writeExportManifest(w, r, job)
+}
+
+func cleanExportPatientRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(ref, "Patient/"); idx != -1 {
+		return strings.TrimSpace(ref[idx+len("Patient/"):])
+	}
+	return cleanID(ref)
+}
+
+func (s *Server) resolveExportGroupCohort(
+	ctx context.Context,
+	tenant, groupID string,
+	depth int,
+	visited map[string]bool,
+) ([]string, bool, error) {
+	if depth > 4 || visited[groupID] {
+		return nil, false, nil
+	}
+	visited[groupID] = true
+
+	res, err := s.store.ReadResourceWithMeta(ctx, tenant, "Group", groupID)
+	if errors.Is(err, sql.ErrNoRows) {
+		if depth == 0 && (strings.EqualFold(groupID, "all") || strings.EqualFold(groupID, "all-patients")) {
+			return nil, true, nil
+		}
+		return nil, false, err
+	}
+	if err != nil {
+		return nil, false, err
+	}
+
+	jsonBytes, err := s.protoToJSONWithMeta("Group", res.ResourceProto, res.ResVersion, res.LastUpdated)
+	if err != nil {
+		return nil, false, err
+	}
+
+	var groupDoc struct {
+		Member []struct {
+			Entity struct {
+				Reference string `json:"reference"`
+				Type      string `json:"type"`
+			} `json:"entity"`
+			Period struct {
+				End string `json:"end"`
+			} `json:"period"`
+			Inactive bool `json:"inactive"`
+		} `json:"member"`
+	}
+	if err := json.Unmarshal(jsonBytes, &groupDoc); err != nil {
+		return nil, false, err
+	}
+
+	now := time.Now().UTC()
+	var patientIDs []string
+	seen := make(map[string]bool)
+
+	for _, m := range groupDoc.Member {
+		if m.Inactive {
+			continue
+		}
+		if endStr := strings.TrimSpace(m.Period.End); endStr != "" {
+			if dOp, err := postgres.ParseDateOp(endStr); err == nil {
+				if dOp.Value.Before(now) {
+					continue
+				}
+			}
+		}
+		ref := strings.TrimSpace(m.Entity.Reference)
+		if ref == "" {
+			continue
+		}
+		if idx := strings.LastIndex(ref, "Patient/"); idx != -1 {
+			pid := strings.TrimSpace(ref[idx+len("Patient/"):])
+			if pid != "" && !seen[pid] {
+				seen[pid] = true
+				patientIDs = append(patientIDs, pid)
+			}
+			continue
+		}
+		if idx := strings.LastIndex(ref, "Group/"); idx != -1 {
+			subGroupID := strings.TrimSpace(ref[idx+len("Group/"):])
+			if subGroupID != "" {
+				subPats, _, subErr := s.resolveExportGroupCohort(ctx, tenant, subGroupID, depth+1, visited)
+				if subErr == nil {
+					for _, pid := range subPats {
+						if !seen[pid] {
+							seen[pid] = true
+							patientIDs = append(patientIDs, pid)
+						}
+					}
+				}
+			}
+			continue
+		}
+		if strings.EqualFold(m.Entity.Type, "Patient") && !strings.Contains(ref, "/") {
+			if !seen[ref] {
+				seen[ref] = true
+				patientIDs = append(patientIDs, ref)
+			}
+		}
+	}
+
+	return patientIDs, false, nil
+}
+
+func (s *Server) resolveExportTypeFilterAllowedIDs(
+	ctx context.Context,
+	filters []exportTypeFilter,
+) (map[string]map[string]bool, error) {
+	if len(filters) == 0 {
+		return nil, nil
+	}
+	allowed := make(map[string]map[string]bool)
+	for _, f := range filters {
+		if _, exists := allowed[f.resType]; !exists {
+			allowed[f.resType] = make(map[string]bool)
+		}
+		sr, err := s.store.Search(ctx, f.params)
+		if err != nil {
+			return nil, err
+		}
+		for _, match := range sr.Matches {
+			allowed[f.resType][match.ResID] = true
+		}
+	}
+	return allowed, nil
+}
+
+func matchesExportTypeFilter(allowed map[string]map[string]bool, resType, resID string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	idSet, hasFilterForType := allowed[resType]
+	if !hasFilterForType {
+		return true
+	}
+	return idSet[resID]
 }
 
 func (s *Server) formatExportNDJSONLine(res postgres.SearchResult) ([]byte, bool) {
@@ -391,6 +784,7 @@ func (s *Server) populateExportJob(
 	ctx context.Context,
 	job *exportJob,
 	exportParams postgres.ExportParams,
+	typeFilterAllowed map[string]map[string]bool,
 	hasSecCtx bool,
 	secCtx *auth.SecurityContext,
 	patientID string,
@@ -412,6 +806,9 @@ func (s *Server) populateExportJob(
 	}
 
 	err := s.store.StreamExportResources(ctx, exportParams, func(res postgres.SearchResult) error {
+		if !matchesExportTypeFilter(typeFilterAllowed, res.ResType, res.ResID) {
+			return nil
+		}
 		if hasSecCtx {
 			if patientRestricted && patientID != "" && strings.EqualFold(res.ResType, "Patient") && cleanID(res.ResID) != allowedPat {
 				return nil

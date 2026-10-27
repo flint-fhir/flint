@@ -375,4 +375,74 @@ func TestValidationEngine_StrictUnknownAndTypes(t *testing.T) {
 			t.Fatal("expected Bundle with invalid embedded Observation to fail validation")
 		}
 	})
+
+	t.Run("US Core v6.1.0 & v7.0.0 Profile-Aware Validation and $validate modes", func(t *testing.T) {
+		// 1. Valid US Core Patient
+		validUSCorePat := strictEngine.ValidateJSONWithProfiles(
+			"Patient",
+			[]byte(`{
+				"resourceType": "Patient",
+				"id": "pat-uscore-1",
+				"identifier": [{"system": "http://hospital.example.org/mrn", "value": "MRN-100"}],
+				"name": [{"family": "Smith", "given": ["Jane"]}],
+				"gender": "female"
+			}`),
+			[]string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient|7.0.0"},
+			"update",
+		)
+		if !validUSCorePat.IsValid() {
+			t.Fatalf("expected valid US Core Patient to pass, got %+v", validUSCorePat.Issues)
+		}
+
+		// 2. US Core Patient missing identifier/name/gender
+		invalidUSCorePat := strictEngine.ValidateJSONWithProfiles(
+			"Patient",
+			[]byte(`{"resourceType": "Patient", "id": "pat-uscore-2", "active": true}`),
+			[]string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"},
+			"create",
+		)
+		if invalidUSCorePat.IsValid() || len(invalidUSCorePat.Issues) < 3 {
+			t.Fatalf("expected US Core Patient missing identifier, name, and gender to fail with >=3 issues, got %+v", invalidUSCorePat.Issues)
+		}
+
+		// 3. US Core Blood Pressure via meta.profile missing diastolic component
+		bpMissingDiastolic := strictEngine.ValidateJSONWithProfiles(
+			"Observation",
+			[]byte(`{
+				"resourceType": "Observation",
+				"meta": {"profile": ["http://hl7.org/fhir/us/core/StructureDefinition/us-core-blood-pressure"]},
+				"status": "final",
+				"category": [{"coding": [{"code": "vital-signs"}]}],
+				"code": {"coding": [{"system": "http://loinc.org", "code": "85354-9"}]},
+				"subject": {"reference": "Patient/1"},
+				"effectiveDateTime": "2026-01-15T10:00:00Z",
+				"component": [
+					{
+						"code": {"coding": [{"system": "http://loinc.org", "code": "8480-6"}]},
+						"valueQuantity": {"value": 120, "unit": "mmHg"}
+					}
+				]
+			}`),
+			nil,
+			"",
+		)
+		if bpMissingDiastolic.IsValid() {
+			t.Fatal("expected US Core Blood Pressure missing diastolic (8462-4) component to fail")
+		}
+
+		// 4. Profile target resourceType mismatch & mode=update missing id
+		mismatch := strictEngine.ValidateJSONWithProfiles(
+			"Observation",
+			[]byte(`{
+				"resourceType": "Observation",
+				"status": "final",
+				"code": {"coding": [{"code": "8867-4"}]}
+			}`),
+			[]string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"},
+			"update",
+		)
+		if mismatch.IsValid() || len(mismatch.Issues) < 2 {
+			t.Fatalf("expected profile resourceType mismatch and mode=update missing id to fail, got %+v", mismatch.Issues)
+		}
+	})
 }
