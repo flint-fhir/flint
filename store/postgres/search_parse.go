@@ -54,13 +54,15 @@ type ChainedParam struct {
 }
 
 // HasParam represents a FHIR R4 reverse-chaining parameter (_has:SourceType:refParam:searchParam=value).
-// Example: _has:Observation:patient:code=8867-4 on a Patient search.
+// Example: _has:Observation:patient:code=8867-4 on a Patient search, or multi-hop
+// _has:Encounter:patient:_has:Observation:encounter:code=8867-4.
 type HasParam struct {
-	SourceType  string // e.g. "Observation"
-	RefParam    string // e.g. "patient" or "subject"
-	SearchParam string // e.g. "code", "date", "value-quantity"
-	ParamType   string // "id", "string", "token", "date", "quantity", "reference"
-	Value       string // Search value
+	SourceType  string    // e.g. "Observation"
+	RefParam    string    // e.g. "patient" or "subject"
+	SearchParam string    // e.g. "code", "date", "value-quantity", or nested "_has:..."
+	ParamType   string    // "id", "string", "token", "date", "quantity", "reference", "uri", "has"
+	Value       string    // Search value
+	Child       *HasParam // Optional nested _has hop when SearchParam starts with "_has:"
 }
 
 // SortSpec represents a single sort directive parsed from _sort.
@@ -76,6 +78,34 @@ type CompositeTokenQuantityParam struct {
 	TokenSystem string     // Optional coding system before '|'
 	TokenCode   string     // Coding code
 	Quantity    QuantityOp // Parsed quantity operation after '$'
+}
+
+// CompositeTokenTokenParam represents a FHIR R4 token$token composite search parameter
+// (e.g., code-value-concept=http://loinc.org|72166-2$http://snomed.info/sct|449868002).
+type CompositeTokenTokenParam struct {
+	ParamName   string // "code-value-concept", "component-code-value-concept", or "combo-code-value-concept"
+	TokenSystem string // Optional coding system before '|' on the first token
+	TokenCode   string // Coding code on the first token
+	ValueSystem string // Optional coding system before '|' on the second token
+	ValueCode   string // Coding code on the second token
+}
+
+// CompositeTokenDateParam represents a FHIR R4 token$date composite search parameter
+// (e.g., code-value-date=http://loinc.org|11778-8$ge2026-01-01).
+type CompositeTokenDateParam struct {
+	ParamName   string // "code-value-date"
+	TokenSystem string // Optional coding system before '|'
+	TokenCode   string // Coding code
+	Date        DateOp // Parsed date operation after '$'
+}
+
+// CompositeTokenStringParam represents a FHIR R4 token$string composite search parameter
+// (e.g., code-value-string=http://loinc.org|95541-9$digital).
+type CompositeTokenStringParam struct {
+	ParamName   string // "code-value-string"
+	TokenSystem string // Optional coding system before '|'
+	TokenCode   string // Coding code
+	Value       string // Normalized string prefix/value after '$'
 }
 
 var knownDatePrefixes = map[string]bool{
@@ -192,19 +222,26 @@ func ParseQuantityOp(raw string) (QuantityOp, error) {
 }
 
 // ParseInclude parses an _include or _revinclude parameter.
-// Format: Source:param or Source:param:Target
+// Format: "*", "Source:param", or "Source:param:Target" (where Source or param may be "*").
 func ParseInclude(raw string) (IncludeParam, error) {
-	parts := strings.Split(strings.TrimSpace(raw), ":")
-	if len(parts) < 2 {
-		return IncludeParam{}, fmt.Errorf("invalid include format %q (expected Source:param)", raw)
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "*" {
+		return IncludeParam{
+			SourceType: "*",
+			ParamName:  "*",
+		}, nil
+	}
+	parts := strings.Split(trimmed, ":")
+	if len(parts) < 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return IncludeParam{}, fmt.Errorf("invalid include format %q (expected Source:param or *)", raw)
 	}
 
 	param := IncludeParam{
-		SourceType: parts[0],
-		ParamName:  parts[1],
+		SourceType: strings.TrimSpace(parts[0]),
+		ParamName:  strings.TrimSpace(parts[1]),
 	}
 	if len(parts) >= 3 {
-		param.TargetType = parts[2]
+		param.TargetType = strings.TrimSpace(parts[2])
 	}
 
 	return param, nil
@@ -306,7 +343,8 @@ func inferChainedTargetType(refParam string) string {
 	}
 }
 
-// ParseHasParam parses a FHIR R4 reverse-chaining parameter (_has:SourceType:refParam:searchParam=value).
+// ParseHasParam parses a FHIR R4 reverse-chaining parameter (_has:SourceType:refParam:searchParam=value),
+// including multi-hop recursive chains (_has:Encounter:patient:_has:Observation:encounter:code=8867-4).
 func ParseHasParam(key, value string) (*HasParam, bool, error) {
 	if !strings.HasPrefix(key, "_has:") {
 		return nil, false, nil
@@ -322,7 +360,33 @@ func ParseHasParam(key, value string) (*HasParam, bool, error) {
 	sourceType := strings.TrimSpace(parts[0])
 	refParam := strings.TrimSpace(parts[1])
 	searchParam := strings.TrimSpace(parts[2])
+
+	if strings.HasPrefix(searchParam, "_has:") {
+		child, ok, err := ParseHasParam(searchParam, value)
+		if err != nil {
+			return nil, true, err
+		}
+		if !ok || child == nil {
+			return nil, true, fmt.Errorf("invalid nested _has parameter %q", key)
+		}
+		return &HasParam{
+			SourceType:  sourceType,
+			RefParam:    refParam,
+			SearchParam: searchParam,
+			ParamType:   "has",
+			Value:       value,
+			Child:       child,
+		}, true, nil
+	}
+
 	searchBase, searchMod := splitParamModifier(searchParam)
+	if searchMod == "of-type" {
+		for part := range strings.SplitSeq(value, ",") {
+			if err := validateOfTypeValue(key, part); err != nil {
+				return nil, true, err
+			}
+		}
+	}
 
 	paramType := "token"
 	switch {
@@ -353,6 +417,15 @@ func ParseHasParam(key, value string) (*HasParam, bool, error) {
 		ParamType:   paramType,
 		Value:       value,
 	}, true, nil
+}
+
+func validateOfTypeValue(paramName, raw string) error {
+	s := strings.TrimSpace(raw)
+	parts := strings.SplitN(s, "|", 3)
+	if len(parts) != 3 || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(parts[2]) == "" {
+		return fmt.Errorf("invalid :of-type parameter %s=%q: expected [system]|[code]|[value]", paramName, raw)
+	}
+	return nil
 }
 
 // ParseSortSpecs parses comma-separated _sort directives (e.g. "-date,family,_lastUpdated:desc").
@@ -422,6 +495,88 @@ func ParseCompositeTokenQuantity(paramName, raw string) (CompositeTokenQuantityP
 	}, nil
 }
 
+// ParseCompositeTokenToken parses a single FHIR R4 token$token composite search parameter item.
+func ParseCompositeTokenToken(paramName, raw string) (CompositeTokenTokenParam, error) {
+	s := strings.TrimSpace(raw)
+	parts := strings.SplitN(s, "$", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return CompositeTokenTokenParam{}, fmt.Errorf("invalid composite parameter %s=%q: expected <token>$<token>", paramName, raw)
+	}
+	parseTok := func(p string) (string, string) {
+		if tParts := strings.SplitN(p, "|", 2); len(tParts) == 2 {
+			return strings.TrimSpace(tParts[0]), strings.TrimSpace(tParts[1])
+		}
+		return "", strings.TrimSpace(p)
+	}
+	tSys, tCode := parseTok(parts[0])
+	vSys, vCode := parseTok(parts[1])
+	if tCode == "" || vCode == "" {
+		return CompositeTokenTokenParam{}, fmt.Errorf("invalid composite parameter %s=%q: missing token code", paramName, raw)
+	}
+	return CompositeTokenTokenParam{
+		ParamName:   paramName,
+		TokenSystem: tSys,
+		TokenCode:   tCode,
+		ValueSystem: vSys,
+		ValueCode:   vCode,
+	}, nil
+}
+
+// ParseCompositeTokenDate parses a single FHIR R4 token$date composite search parameter item.
+func ParseCompositeTokenDate(paramName, raw string) (CompositeTokenDateParam, error) {
+	s := strings.TrimSpace(raw)
+	parts := strings.SplitN(s, "$", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return CompositeTokenDateParam{}, fmt.Errorf("invalid composite parameter %s=%q: expected <token>$<date>", paramName, raw)
+	}
+	var tSys, tCode string
+	if tParts := strings.SplitN(strings.TrimSpace(parts[0]), "|", 2); len(tParts) == 2 {
+		tSys = strings.TrimSpace(tParts[0])
+		tCode = strings.TrimSpace(tParts[1])
+	} else {
+		tCode = strings.TrimSpace(parts[0])
+	}
+	if tCode == "" {
+		return CompositeTokenDateParam{}, fmt.Errorf("invalid composite parameter %s=%q: missing token code", paramName, raw)
+	}
+	dOp, err := ParseDateOp(parts[1])
+	if err != nil {
+		return CompositeTokenDateParam{}, fmt.Errorf("invalid composite date in %s=%q: %w", paramName, raw, err)
+	}
+	return CompositeTokenDateParam{
+		ParamName:   paramName,
+		TokenSystem: tSys,
+		TokenCode:   tCode,
+		Date:        dOp,
+	}, nil
+}
+
+// ParseCompositeTokenString parses a single FHIR R4 token$string composite search parameter item.
+func ParseCompositeTokenString(paramName, raw string) (CompositeTokenStringParam, error) {
+	s := strings.TrimSpace(raw)
+	parts := strings.SplitN(s, "$", 2)
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return CompositeTokenStringParam{}, fmt.Errorf("invalid composite parameter %s=%q: expected <token>$<string>", paramName, raw)
+	}
+	var tSys, tCode string
+	if tParts := strings.SplitN(strings.TrimSpace(parts[0]), "|", 2); len(tParts) == 2 {
+		tSys = strings.TrimSpace(tParts[0])
+		tCode = strings.TrimSpace(tParts[1])
+	} else {
+		tCode = strings.TrimSpace(parts[0])
+	}
+	valStr := strings.TrimSpace(parts[1])
+	if tCode == "" || valStr == "" {
+		return CompositeTokenStringParam{}, fmt.Errorf("invalid composite parameter %s=%q: missing token code or string value", paramName, raw)
+	}
+	return CompositeTokenStringParam{
+		ParamName:   paramName,
+		TokenSystem: tSys,
+		TokenCode:   tCode,
+		Value:       valStr,
+	}, nil
+}
+
 var (
 	knownStringSearchParams = map[string]bool{
 		"family": true, "given": true, "name": true,
@@ -429,6 +584,7 @@ var (
 		"address-postalcode": true, "address-country": true,
 		"phonetic": true, "lot-number": true, "series": true,
 		"title": true, "description": true, "udi-carrier": true, "device-name": true,
+		"value-string": true,
 	}
 	knownTokenSearchParams = map[string]bool{
 		"identifier": true, "gender": true, "active": true,
@@ -442,9 +598,11 @@ var (
 		"severity": true, "manifestation": true, "route": true,
 		"reason-code": true, "conclusion": true, "vaccine-code": true,
 		"status-reason": true, "target-disease": true,
-		"intended-performertype": true, "address-use": true,
+		"intended-performertype": true, "performer-type": true,
+		"address-use": true, "telecom-use": true,
 		"accession": true, "bodysite": true, "specialty": true,
 		"role": true, "relationship": true, "subscriber-id": true,
+		"value-concept": true, "component-value-concept": true, "combo-value-concept": true,
 		"_tag": true, "_security": true,
 	}
 	knownRefSearchParams = map[string]bool{
@@ -469,6 +627,7 @@ var (
 		"collected": true, "period": true, "recorded": true, "created": true,
 		"indexed": true, "target-date": true, "start-date": true,
 		"occurrence": true, "whenhandedover": true, "whenprepared": true,
+		"value-date": true,
 	}
 	knownQuantitySearchParams = map[string]bool{
 		"value-quantity":           true,
@@ -480,6 +639,17 @@ var (
 		"component-code-value-quantity": true,
 		"combo-code-value-quantity":     true,
 	}
+	knownCompositeTokenTokenParams = map[string]bool{
+		"code-value-concept":           true,
+		"component-code-value-concept": true,
+		"combo-code-value-concept":     true,
+	}
+	knownCompositeTokenDateParams = map[string]bool{
+		"code-value-date": true,
+	}
+	knownCompositeTokenStringParams = map[string]bool{
+		"code-value-string": true,
+	}
 	knownURISearchParams = map[string]bool{
 		"url":              true,
 		"system":           true,
@@ -490,7 +660,53 @@ var (
 		"_profile":         true,
 		"_source":          true,
 	}
+	knownControlUnderscoreParams = map[string]bool{
+		"_id": true, "_lastUpdated": true, "_tag": true, "_profile": true,
+		"_security": true, "_source": true, "_text": true, "_content": true,
+		"_list": true, "_has": true, "_type": true, "_sort": true,
+		"_count": true, "_offset": true, "_include": true, "_revinclude": true,
+		"_summary": true, "_total": true, "_elements": true, "_contained": true,
+		"_containedType": true, "_format": true, "_pretty": true,
+	}
 )
+
+// IsKnownSearchParam reports whether key is a recognized FHIR R4 search or control parameter.
+// Used for Prefer: handling=strict / handling=lenient conformance.
+func IsKnownSearchParam(key string) bool {
+	if strings.HasPrefix(key, "_has:") {
+		return true
+	}
+	base, mod := splitParamModifier(key)
+	if strings.HasPrefix(base, "_") {
+		return knownControlUnderscoreParams[base] || isSearchableUnderscoreParam(key)
+	}
+	if strings.Contains(key, ".") {
+		ch, ok := ParseChainedParam(key, "x")
+		if !ok || ch == nil {
+			return false
+		}
+		return IsKnownSearchParam(ch.TargetParam)
+	}
+	if mod != "" {
+		switch mod {
+		case "exact", "contains", "text", "not", "missing", "in", "not-in", "below", "above", "of-type", "identifier":
+		default:
+			if len(mod) == 0 || mod[0] < 'A' || mod[0] > 'Z' {
+				return false
+			}
+		}
+	}
+	return knownStringSearchParams[base] ||
+		knownTokenSearchParams[base] ||
+		knownRefSearchParams[base] ||
+		knownDateSearchParams[base] ||
+		knownQuantitySearchParams[base] ||
+		knownCompositeTokenQuantityParams[base] ||
+		knownCompositeTokenTokenParams[base] ||
+		knownCompositeTokenDateParams[base] ||
+		knownCompositeTokenStringParams[base] ||
+		knownURISearchParams[base]
+}
 
 // isSearchableUnderscoreParam returns true for standard FHIR R4 Resource.meta search
 // parameters (_profile, _tag, _security, _source, and any modifier variants such as :missing, :not, :below, :above).
@@ -607,7 +823,22 @@ func ValidateSearchQuery(q url.Values) error {
 				}
 				continue
 			}
+			if mod == "of-type" {
+				for part := range strings.SplitSeq(val, ",") {
+					if err := validateOfTypeValue(key, part); err != nil {
+						return err
+					}
+				}
+				continue
+			}
 			if chained, ok := ParseChainedParam(key, val); ok {
+				if chained.TargetModifier == "of-type" {
+					for part := range strings.SplitSeq(chained.Value, ",") {
+						if err := validateOfTypeValue(key, part); err != nil {
+							return err
+						}
+					}
+				}
 				switch chained.ParamType {
 				case "date":
 					if _, err := ParseDateOp(chained.Value); err != nil {
@@ -623,6 +854,30 @@ func ValidateSearchQuery(q url.Values) error {
 			if knownCompositeTokenQuantityParams[baseKey] {
 				for part := range strings.SplitSeq(val, ",") {
 					if _, err := ParseCompositeTokenQuantity(baseKey, part); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			if knownCompositeTokenTokenParams[baseKey] {
+				for part := range strings.SplitSeq(val, ",") {
+					if _, err := ParseCompositeTokenToken(baseKey, part); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			if knownCompositeTokenDateParams[baseKey] {
+				for part := range strings.SplitSeq(val, ",") {
+					if _, err := ParseCompositeTokenDate(baseKey, part); err != nil {
+						return err
+					}
+				}
+				continue
+			}
+			if knownCompositeTokenStringParams[baseKey] {
+				for part := range strings.SplitSeq(val, ",") {
+					if _, err := ParseCompositeTokenString(baseKey, part); err != nil {
 						return err
 					}
 				}
@@ -799,6 +1054,42 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 					params.CompositeTokenQuantities = append(params.CompositeTokenQuantities, orGroup)
 				}
 			}
+		case knownCompositeTokenTokenParams[baseKey]:
+			for _, rawVal := range values {
+				var orGroup []CompositeTokenTokenParam
+				for part := range strings.SplitSeq(rawVal, ",") {
+					if cp, err := ParseCompositeTokenToken(baseKey, part); err == nil {
+						orGroup = append(orGroup, cp)
+					}
+				}
+				if len(orGroup) > 0 {
+					params.CompositeTokenTokens = append(params.CompositeTokenTokens, orGroup)
+				}
+			}
+		case knownCompositeTokenDateParams[baseKey]:
+			for _, rawVal := range values {
+				var orGroup []CompositeTokenDateParam
+				for part := range strings.SplitSeq(rawVal, ",") {
+					if cp, err := ParseCompositeTokenDate(baseKey, part); err == nil {
+						orGroup = append(orGroup, cp)
+					}
+				}
+				if len(orGroup) > 0 {
+					params.CompositeTokenDates = append(params.CompositeTokenDates, orGroup)
+				}
+			}
+		case knownCompositeTokenStringParams[baseKey]:
+			for _, rawVal := range values {
+				var orGroup []CompositeTokenStringParam
+				for part := range strings.SplitSeq(rawVal, ",") {
+					if cp, err := ParseCompositeTokenString(baseKey, part); err == nil {
+						orGroup = append(orGroup, cp)
+					}
+				}
+				if len(orGroup) > 0 {
+					params.CompositeTokenStrings = append(params.CompositeTokenStrings, orGroup)
+				}
+			}
 		case knownURISearchParams[baseKey]:
 			params.URIs[key] = value
 			params.URIFilters[key] = append(params.URIFilters[key], values...)
@@ -921,5 +1212,8 @@ func HasSearchCriteria(p SearchParams) bool {
 		len(p.Chained) > 0 ||
 		len(p.Has) > 0 ||
 		len(p.List) > 0 ||
-		len(p.CompositeTokenQuantities) > 0
+		len(p.CompositeTokenQuantities) > 0 ||
+		len(p.CompositeTokenTokens) > 0 ||
+		len(p.CompositeTokenDates) > 0 ||
+		len(p.CompositeTokenStrings) > 0
 }

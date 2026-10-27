@@ -564,6 +564,39 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !hasSecCtx && s.store != nil {
+		if agg, err := s.store.AggregateMeta(r.Context(), tenant, resType); err == nil && agg != nil {
+			for _, p := range agg.Profiles {
+				if p != "" && !seenProfiles[p] {
+					seenProfiles[p] = true
+					profiles = append(profiles, p)
+				}
+			}
+			for _, sec := range agg.Security {
+				key := sec.System + "|" + sec.Code
+				if key != "|" && !seenSecurity[key] {
+					seenSecurity[key] = true
+					m := map[string]any{"code": sec.Code}
+					if sec.System != "" {
+						m["system"] = sec.System
+					}
+					securities = append(securities, m)
+				}
+			}
+			for _, tg := range agg.Tags {
+				key := tg.System + "|" + tg.Code
+				if key != "|" && !seenTags[key] {
+					seenTags[key] = true
+					m := map[string]any{"code": tg.Code}
+					if tg.System != "" {
+						m["system"] = tg.System
+					}
+					tags = append(tags, m)
+				}
+			}
+		}
+	}
+
 	metaOut := make(map[string]any)
 	if len(profiles) > 0 {
 		metaOut["profile"] = profiles

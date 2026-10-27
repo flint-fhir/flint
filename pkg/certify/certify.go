@@ -459,30 +459,42 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		if err == nil {
 			respSys, bSys, errSys := doReq(http.MethodGet, basePath+"?_type=Patient,Condition&_id=cert-pat-1,cert-cond-1", "", nil, nil)
 			respGraph, bGraph, errGraph := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$graph", "", nil, nil)
+			respOfType, bOfType, errOfType := doReq(http.MethodGet, basePath+"/Patient?identifier:of-type=http://terminology.hl7.org/CodeSystem/v2-0203|MR|CERT-MRN-1", "", nil, nil)
+			respLenient, bLenient, errLenient := doReq(http.MethodGet, basePath+"/Patient?family=Certify&unrecognized_param=1", "", nil, map[string]string{
+				"Prefer": "handling=lenient",
+			})
 			if errSys != nil || respSys.StatusCode != http.StatusOK || !strings.Contains(string(bSys), `"cert-pat-1"`) || !strings.Contains(string(bSys), `"cert-cond-1"`) {
 				err = fmt.Errorf("expected 200 OK with cert-pat-1 and cert-cond-1 from system-level _type search, got %d: %s", respSys.StatusCode, string(bSys))
 			} else if errGraph != nil || respGraph.StatusCode != http.StatusOK || !strings.Contains(string(bGraph), `"collection"`) || !strings.Contains(string(bGraph), `"cert-obs-1"`) {
 				err = fmt.Errorf("expected 200 OK collection Bundle with linked resources from Patient/cert-pat-1/$graph, got %d: %s", respGraph.StatusCode, string(bGraph))
+			} else if errOfType != nil || respOfType.StatusCode != http.StatusOK || !strings.Contains(string(bOfType), `"cert-pat-1"`) {
+				err = fmt.Errorf("expected 200 OK with cert-pat-1 on identifier:of-type search, got %d: %s", respOfType.StatusCode, string(bOfType))
+			} else if errLenient != nil || respLenient.StatusCode != http.StatusOK || respLenient.Header.Get("Preference-Applied") != "handling=lenient" || !strings.Contains(string(bLenient), `"OperationOutcome"`) || !strings.Contains(string(bLenient), `"cert-pat-1"`) {
+				err = fmt.Errorf("expected 200 OK with Preference-Applied: handling=lenient, cert-pat-1, and warning OperationOutcome on lenient search, got %d: %s", respLenient.StatusCode, string(bLenient))
 			}
 		}
 	}
-	record("SEARCH-03", suite2, "FHIR R4 Search Modifiers (:exact, :contains, :text, :not, :missing, :in, :not-in, :below, :identifier, _type & $graph)", t0, err, "Verified :exact, :contains, :text, :not, :missing, :in, :not-in, :below, :identifier, system _type search & $graph")
+	record("SEARCH-03", suite2, "FHIR R4 Search Modifiers (:exact, :contains, :text, :not, :missing, :in, :not-in, :below, :identifier, :of-type, Prefer: handling=lenient, _type & $graph)", t0, err, "Verified :exact, :contains, :text, :not, :missing, :in, :not-in, :below, :identifier, :of-type, Prefer: handling=lenient, system _type search & $graph")
 
 	// 2.22 FHIR R4 _sort, _has Reverse Chaining, _summary/_elements, Bundle.link & Compartment Search
 	t0 = time.Now()
 	{
 		err = nil
-		// a) _has reverse chaining: Patient?_has:Observation:patient:code=8867-4
-		respHas, bHas, errHas := doReq(http.MethodGet, basePath+"/Patient?_has:Observation:patient:code=8867-4", "", nil, nil)
+		// a) _has single-hop & multi-hop reverse chaining + wildcard _include=*
+		respHas, bHas, errHas := doReq(http.MethodGet, basePath+"/Patient?_has:Encounter:patient:_has:Observation:encounter:code=8867-4", "", nil, nil)
+		respWildInc, bWildInc, errWildInc := doReq(http.MethodGet, basePath+"/Observation?_id=cert-obs-1&_include=*", "", nil, nil)
 		if errHas != nil || respHas.StatusCode != http.StatusOK {
-			err = fmt.Errorf("expected 200 OK on _has search, got %d: %s", respHas.StatusCode, string(bHas))
+			err = fmt.Errorf("expected 200 OK on multi-hop _has search, got %d: %s", respHas.StatusCode, string(bHas))
 		} else {
 			var hasBundle map[string]any
 			if uErr := json.Unmarshal(bHas, &hasBundle); uErr != nil {
 				err = uErr
 			} else if tot, _ := hasBundle["total"].(float64); tot < 1 {
-				err = fmt.Errorf("expected total >= 1 on Patient?_has:Observation:patient:code=8867-4, got %v", hasBundle["total"])
+				err = fmt.Errorf("expected total >= 1 on Patient?_has:Encounter:patient:_has:Observation:encounter:code=8867-4, got %v", hasBundle["total"])
 			}
+		}
+		if err == nil && (errWildInc != nil || respWildInc.StatusCode != http.StatusOK || !strings.Contains(string(bWildInc), `"cert-pat-1"`) || !strings.Contains(string(bWildInc), `"cert-enc-1"`)) {
+			err = fmt.Errorf("expected Observation?_id=cert-obs-1&_include=* to include Patient/cert-pat-1 and Encounter/cert-enc-1, got %d: %s", respWildInc.StatusCode, string(bWildInc))
 		}
 
 		// b) _summary=count on Observation
@@ -721,9 +733,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 		if err == nil {
 			respMeta, bMeta, errMeta := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$meta", "", nil, nil)
+			respTypeMeta, bTypeMeta, errTypeMeta := doReq(http.MethodGet, basePath+"/Patient/$meta", "", nil, nil)
+			respSysMeta, bSysMeta, errSysMeta := doReq(http.MethodGet, basePath+"/$meta", "", nil, nil)
 			respTagQ, bTagQ, errTagQ := doReq(http.MethodGet, basePath+"/Patient?_tag=http://example.org/tags|vip-cohort&_profile:below=http://hl7.org/fhir/us/core/StructureDefinition/&_security=http://terminology.hl7.org/CodeSystem/v3-Confidentiality|R", "", nil, nil)
 			if errMeta != nil || respMeta.StatusCode != http.StatusOK || !strings.Contains(string(bMeta), `"vip-cohort"`) {
 				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$meta to contain vip-cohort, got %s", string(bMeta))
+			} else if errTypeMeta != nil || respTypeMeta.StatusCode != http.StatusOK || !strings.Contains(string(bTypeMeta), `"vip-cohort"`) {
+				err = fmt.Errorf("expected GET /Patient/$meta to aggregate vip-cohort, got %s", string(bTypeMeta))
+			} else if errSysMeta != nil || respSysMeta.StatusCode != http.StatusOK || !strings.Contains(string(bSysMeta), `"vip-cohort"`) {
+				err = fmt.Errorf("expected GET /$meta to aggregate vip-cohort, got %s", string(bSysMeta))
 			} else if errTagQ != nil || respTagQ.StatusCode != http.StatusOK || !strings.Contains(string(bTagQ), `"cert-pat-1"`) {
 				err = fmt.Errorf("expected GET /Patient?_tag=...|vip-cohort&_profile:below=...&_security=... to return cert-pat-1, got %s", string(bTagQ))
 			}
@@ -1092,10 +1110,10 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		respTr, bTr, errTr := doReq(http.MethodGet, basePath+"/ConceptMap/$translate?system=http://snomed.info/sct&code=38341003", "", nil, nil)
 		// 2. ConceptMap/$translate reverse (ICD-10-CM I10 -> SNOMED CT 38341003)
 		respRevTr, bRevTr, errRevTr := doReq(http.MethodGet, basePath+"/ConceptMap/$translate?system=http://hl7.org/fhir/sid/icd-10-cm&code=I10&reverse=true", "", nil, nil)
-		// 3. Composite search: code-value-quantity
+		// 3. Composite search: code-value-quantity, component-code-value-quantity, code-value-string
 		respCVQ, bCVQ, errCVQ := doReq(http.MethodGet, basePath+"/Observation?code-value-quantity=http://loinc.org|8867-4$gt70", "", nil, nil)
-		// 4. Composite search: component-code-value-quantity
 		respCCVQ, bCCVQ, errCCVQ := doReq(http.MethodGet, basePath+"/Observation?component-code-value-quantity=http://loinc.org|96608-5$le130", "", nil, nil)
+		respCVS, bCVS, errCVS := doReq(http.MethodGet, basePath+"/Observation?code-value-string=http://loinc.org|95541-9$Prefers", "", nil, nil)
 
 		if errTr != nil || respTr.StatusCode != http.StatusOK || !strings.Contains(string(bTr), `"I10"`) {
 			err = fmt.Errorf("expected 200 OK with ICD-10-CM I10 from ConceptMap/$translate, got %s", string(bTr))
@@ -1105,9 +1123,11 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			err = fmt.Errorf("expected Observation?code-value-quantity=http://loinc.org|8867-4$gt70 to return cert-obs-1, got %s", string(bCVQ))
 		} else if errCCVQ != nil || respCCVQ.StatusCode != http.StatusOK || !strings.Contains(string(bCCVQ), `"cert-obs-avg-bp"`) {
 			err = fmt.Errorf("expected Observation?component-code-value-quantity=http://loinc.org|96608-5$le130 to return cert-obs-avg-bp, got %s", string(bCCVQ))
+		} else if errCVS != nil || respCVS.StatusCode != http.StatusOK || !strings.Contains(string(bCVS), `"cert-obs-care-pref"`) {
+			err = fmt.Errorf("expected Observation?code-value-string=http://loinc.org|95541-9$Prefers to return cert-obs-care-pref, got %s", string(bCVS))
 		}
 	}
-	record("TERM-02", suite5, "ConceptMap/$translate & Composite Search (code-value-quantity, component-code-value-quantity)", t0, err, "Verified SNOMED<->ICD-10 ConceptMap/$translate & paired composite search")
+	record("TERM-02", suite5, "ConceptMap/$translate & Composite Search (code-value-quantity, component-code-value-quantity, code-value-string)", t0, err, "Verified SNOMED<->ICD-10 ConceptMap/$translate & paired composite search")
 
 	t0 = time.Now()
 	{
@@ -1541,7 +1561,7 @@ func defaultCertifyCohortBundle() []byte {
 					"gender": "female",
 					"birthDate": "1985-04-12",
 					"name": [{"use": "official", "family": "Certify", "given": ["Alice"]}],
-					"identifier": [{"system": "http://hospital.example.org/mrn", "value": "CERT-MRN-1"}],
+					"identifier": [{"type": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "MR"}]}, "system": "http://hospital.example.org/mrn", "value": "CERT-MRN-1"}],
 					"managingOrganization": {"reference": "Organization/cert-org-1"},
 					"generalPractitioner": [{"reference": "Practitioner/cert-prac-1"}]
 				},
@@ -1584,6 +1604,7 @@ func defaultCertifyCohortBundle() []byte {
 					"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
 					"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
 					"subject": {"reference": "Patient/cert-pat-1"},
+					"encounter": {"reference": "Encounter/cert-enc-1"},
 					"effectiveDateTime": "2026-01-15T09:15:00Z",
 					"valueQuantity": {"value": 72.0, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
 				},
