@@ -223,17 +223,38 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 									secCtx.GetPatientId(), parts[4], resType))
 							return
 						}
-					} else if len(parts) == 6 && strings.EqualFold(resType, "Patient") && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" {
-						// Compartment search: GET /{tenant}/Patient/{patientId}/{compartmentType}
-						patientID := parts[4]
-						compartmentType := parts[5]
-						if auth.IsPatientRestricted(secCtx) && cleanID(patientID) != cleanID(secCtx.GetPatientId()) {
-							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-								fmt.Sprintf("patient-scoped token (%s) cannot access patient %s",
-									secCtx.GetPatientId(), patientID))
-							return
+					} else if len(parts) == 6 && postgres.IsCompartmentType(resType) && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" {
+						// Compartment search: GET /{tenant}/{compartmentType}/{compartmentId}/{targetType}
+						compType := postgres.CanonicalCompartmentType(resType)
+						compID := parts[4]
+						targetType := parts[5]
+						if auth.IsPatientRestricted(secCtx) {
+							if strings.EqualFold(compType, "Patient") && cleanID(compID) != cleanID(secCtx.GetPatientId()) {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("patient-scoped token (%s) cannot access patient %s",
+										secCtx.GetPatientId(), compID))
+								return
+							}
+							if !strings.EqualFold(compType, "Patient") && postgres.IsPatientCompartmentResourceType(compType) && s.store != nil {
+								exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, compType, compID, secCtx.GetPatientId())
+								if err != nil {
+									writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+									return
+								}
+								if exists && !allowed {
+									writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+										fmt.Sprintf("patient-scoped token (%s) cannot access %s/%s outside patient compartment",
+											secCtx.GetPatientId(), compType, compID))
+									return
+								}
+							}
 						}
-						if !s.enforceSearchScopeAndCompartment(w, r, secCtx, compartmentType) {
+						if targetType == "*" {
+							if len(secCtx.GetScopes()) == 0 {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for wildcard compartment search")
+								return
+							}
+						} else if !s.enforceSearchScopeAndCompartment(w, r, secCtx, targetType) {
 							return
 						}
 					} else if len(parts) >= 5 {
@@ -458,6 +479,40 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 									return
 								}
 							}
+						}
+					} else if len(parts) == 7 && postgres.IsCompartmentType(resType) && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" && parts[6] == "_search" {
+						// POST-based compartment search: POST /{tenant}/{compartmentType}/{compartmentId}/{targetType}/_search
+						compType := postgres.CanonicalCompartmentType(resType)
+						compID := parts[4]
+						targetType := parts[5]
+						if auth.IsPatientRestricted(secCtx) {
+							if strings.EqualFold(compType, "Patient") && cleanID(compID) != cleanID(secCtx.GetPatientId()) {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("patient-scoped token (%s) cannot access patient %s",
+										secCtx.GetPatientId(), compID))
+								return
+							}
+							if !strings.EqualFold(compType, "Patient") && postgres.IsPatientCompartmentResourceType(compType) && s.store != nil {
+								exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, compType, compID, secCtx.GetPatientId())
+								if err != nil {
+									writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
+									return
+								}
+								if exists && !allowed {
+									writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+										fmt.Sprintf("patient-scoped token (%s) cannot access %s/%s outside patient compartment",
+											secCtx.GetPatientId(), compType, compID))
+									return
+								}
+							}
+						}
+						if targetType == "*" {
+							if len(secCtx.GetScopes()) == 0 {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for wildcard compartment search")
+								return
+							}
+						} else if !s.enforceSearchScopeAndCompartment(w, r, secCtx, targetType) {
+							return
 						}
 					} else if len(parts) >= 5 && parts[4] == "_search" {
 						// POST-based search: POST /{tenant}/{resourceType}/_search

@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lib/pq"
+
 	genpostgres "github.com/flint-fhir/flint/gen/go/store/postgres"
 )
 
@@ -338,6 +340,9 @@ func (s *Store) ConditionalDeleteResources(
 			return fmt.Errorf("%w: conditional delete matched %d existing %s resources", ErrPreconditionFailed, sr.Total, resType)
 		}
 		if sr.Total == 0 || len(sr.Matches) == 0 {
+			if condParams.ExpectedVersion > 0 {
+				return fmt.Errorf("%w: conditional delete matched 0 resources (expected version %d)", ErrVersionConflict, condParams.ExpectedVersion)
+			}
 			return nil
 		}
 
@@ -347,7 +352,7 @@ func (s *Store) ConditionalDeleteResources(
 					return err
 				}
 			}
-			rec, txErr := s.deleteResourceInTx(ctx, tx, tenantID, resType, m.ResID)
+			rec, txErr := s.deleteResourceInTx(ctx, tx, tenantID, resType, m.ResID, condParams.ExpectedVersion)
 			if txErr != nil {
 				return txErr
 			}
@@ -399,6 +404,9 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []BundleOperat
 						return fmt.Errorf("entry[%d] conditional delete %s: %w: matched %d existing resources", i, op.Input.ResType, ErrPreconditionFailed, sr.Total)
 					}
 					if sr.Total == 0 || len(sr.Matches) == 0 {
+						if op.Input.ExpectedVersion > 0 {
+							return fmt.Errorf("entry[%d] conditional delete %s: %w: resource does not exist (expected version %d)", i, op.Input.ResType, ErrVersionConflict, op.Input.ExpectedVersion)
+						}
 						results = append(results, BundleOpResult{
 							Status:  "204 No Content",
 							ResType: op.Input.ResType,
@@ -412,7 +420,7 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []BundleOperat
 						}
 					}
 				}
-				rec, err := s.deleteResourceInTx(ctx, tx, op.Input.TenantID, op.Input.ResType, targetID)
+				rec, err := s.deleteResourceInTx(ctx, tx, op.Input.TenantID, op.Input.ResType, targetID, op.Input.ExpectedVersion)
 				if err != nil && !errors.Is(err, sql.ErrNoRows) {
 					return fmt.Errorf("entry[%d] delete %s/%s: %w", i, op.Input.ResType, targetID, err)
 				}
@@ -706,6 +714,18 @@ func (s *Store) ReadResourceVersion(ctx context.Context, tenantID, resType, resI
 	return rec, nil
 }
 
+// HistoryParams specifies parameters for querying FHIR resource version history (_history).
+type HistoryParams struct {
+	TenantID string
+	ResType  string
+	ResID    string
+	Since    *time.Time
+	At       []DateOp
+	List     []string
+	Limit    int
+	Offset   int
+}
+
 // ListResourceHistory returns the version history of a resource ordered by version descending.
 func (s *Store) ListResourceHistory(ctx context.Context, tenantID, resType, resID string, limit, offset int) ([]ResourceRecord, int, error) {
 	return s.ListHistory(ctx, tenantID, resType, resID, nil, limit, offset)
@@ -715,46 +735,109 @@ func (s *Store) ListResourceHistory(ctx context.Context, tenantID, resType, resI
 // type (resType != "" && resID == ""), or system (resType == "" && resID == "") level,
 // with an optional _since filter on last_updated.
 func (s *Store) ListHistory(ctx context.Context, tenantID, resType, resID string, since *time.Time, limit, offset int) ([]ResourceRecord, int, error) {
+	return s.ListHistoryWithParams(ctx, HistoryParams{
+		TenantID: tenantID,
+		ResType:  resType,
+		ResID:    resID,
+		Since:    since,
+		Limit:    limit,
+		Offset:   offset,
+	})
+}
+
+// ListHistoryWithParams returns version history records at the instance, type, or system level,
+// supporting _since, _at (point-in-time/period version currency and timestamp comparators), and _list cohort filtering.
+func (s *Store) ListHistoryWithParams(ctx context.Context, params HistoryParams) ([]ResourceRecord, int, error) {
+	limit := params.Limit
 	if limit <= 0 {
 		limit = 100
 	}
 	if limit > MaxSearchCount {
 		limit = MaxSearchCount
 	}
+	offset := params.Offset
 	if offset < 0 {
 		offset = 0
 	}
 
-	where := "WHERE tenant_id = $1"
-	args := []any{tenantID}
-	if resType != "" {
-		args = append(args, resType)
-		where += fmt.Sprintf(" AND res_type = $%d", len(args))
+	where := "WHERE h.tenant_id = $1"
+	args := []any{params.TenantID}
+	if params.ResType != "" {
+		args = append(args, params.ResType)
+		where += fmt.Sprintf(" AND h.res_type = $%d", len(args))
 	}
-	if resID != "" {
-		args = append(args, resID)
-		where += fmt.Sprintf(" AND res_id = $%d", len(args))
+	if params.ResID != "" {
+		args = append(args, params.ResID)
+		where += fmt.Sprintf(" AND h.res_id = $%d", len(args))
 	}
-	if since != nil && !since.IsZero() {
-		args = append(args, *since)
-		where += fmt.Sprintf(" AND last_updated >= $%d", len(args))
+	if params.Since != nil && !params.Since.IsZero() {
+		args = append(args, *params.Since)
+		where += fmt.Sprintf(" AND h.last_updated >= $%d", len(args))
+	}
+	for _, atOp := range params.At {
+		if atOp.Prefix == "" || atOp.Prefix == "eq" {
+			low := atOp.Value
+			high := atOp.High
+			if high.After(low) {
+				lowIdx := len(args) + 1
+				highIdx := len(args) + 2
+				args = append(args, low, high)
+				where += fmt.Sprintf(
+					" AND h.last_updated < $%d AND NOT EXISTS (SELECT 1 FROM fhir_resource_history h2 WHERE h2.tenant_id = h.tenant_id AND h2.res_type = h.res_type AND h2.res_id = h.res_id AND h2.res_version > h.res_version AND h2.last_updated <= $%d)",
+					highIdx, lowIdx,
+				)
+			} else {
+				tIdx := len(args) + 1
+				args = append(args, low)
+				where += fmt.Sprintf(
+					" AND h.last_updated <= $%d AND NOT EXISTS (SELECT 1 FROM fhir_resource_history h2 WHERE h2.tenant_id = h.tenant_id AND h2.res_type = h.res_type AND h2.res_id = h.res_id AND h2.res_version > h.res_version AND h2.last_updated <= $%d)",
+					tIdx, tIdx,
+				)
+			}
+		} else {
+			cond, atArgs := buildTimestampColumnCondition("h.last_updated", atOp, len(args))
+			where += " AND " + cond
+			args = append(args, atArgs...)
+		}
+	}
+	for _, rawListVal := range params.List {
+		var listIDs []string
+		for part := range strings.SplitSeq(rawListVal, ",") {
+			lid := strings.TrimSpace(part)
+			if lid == "" {
+				continue
+			}
+			if slashIdx := strings.LastIndex(lid, "/"); slashIdx != -1 {
+				lid = lid[slashIdx+1:]
+			}
+			listIDs = append(listIDs, lid)
+		}
+		if len(listIDs) == 0 {
+			continue
+		}
+		listIdx := len(args) + 1
+		args = append(args, pq.Array(listIDs))
+		where += fmt.Sprintf(
+			" AND EXISTS (SELECT 1 FROM spidx_reference lrf JOIN fhir_resource lr ON lr.tenant_id = lrf.tenant_id AND lr.res_type = lrf.res_type AND lr.res_id = lrf.res_id AND lr.is_deleted = FALSE WHERE lrf.tenant_id = h.tenant_id AND lrf.res_type IN ('List', 'Group') AND lrf.res_id = ANY($%d) AND lrf.sp_name IN ('item', 'member', 'entity') AND lrf.target_id = h.res_id AND (lrf.target_type = h.res_type OR lrf.target_type = ''))",
+			listIdx,
+		)
 	}
 
 	var total int
 	var records []ResourceRecord
-	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
-		countSQL := "SELECT COUNT(*) FROM fhir_resource_history " + where
+	err := s.withTenantTx(ctx, params.TenantID, func(tx *sql.Tx) error {
+		countSQL := "SELECT COUNT(*) FROM fhir_resource_history h " + where
 		if err := tx.QueryRowContext(ctx, countSQL, args...).Scan(&total); err != nil {
 			return fmt.Errorf("count resource history: %w", err)
 		}
 
-		orderBy := "ORDER BY last_updated DESC, res_version DESC"
-		if resType != "" && resID != "" {
-			orderBy = "ORDER BY res_version DESC"
+		orderBy := "ORDER BY h.last_updated DESC, h.res_version DESC"
+		if params.ResType != "" && params.ResID != "" {
+			orderBy = "ORDER BY h.res_version DESC"
 		}
 		dataArgs := append(append([]any{}, args...), limit, offset)
 		dataSQL := fmt.Sprintf(
-			"SELECT res_type, res_id, resource_proto, res_version, last_updated, is_deleted FROM fhir_resource_history %s %s LIMIT $%d OFFSET $%d",
+			"SELECT h.res_type, h.res_id, h.resource_proto, h.res_version, h.last_updated, h.is_deleted FROM fhir_resource_history h %s %s LIMIT $%d OFFSET $%d",
 			where, orderBy, len(args)+1, len(args)+2,
 		)
 
@@ -766,7 +849,7 @@ func (s *Store) ListHistory(ctx context.Context, tenantID, resType, resID string
 
 		for rows.Next() {
 			rec := ResourceRecord{
-				TenantID: tenantID,
+				TenantID: params.TenantID,
 			}
 			if err := rows.Scan(&rec.ResType, &rec.ResID, &rec.ResourceProto, &rec.ResVersion, &rec.LastUpdated, &rec.IsDeleted); err != nil {
 				return fmt.Errorf("scan resource history: %w", err)
@@ -794,10 +877,16 @@ func (s *Store) DeleteResource(ctx context.Context, tenantID, resType, resID str
 // records a deletion tombstone in fhir_resource_history, and clears search indexes.
 // Returns sql.ErrNoRows if the resource does not exist.
 func (s *Store) DeleteResourceWithMeta(ctx context.Context, tenantID, resType, resID string) (*ResourceRecord, error) {
+	return s.DeleteResourceWithExpectedVersion(ctx, tenantID, resType, resID, 0)
+}
+
+// DeleteResourceWithExpectedVersion marks a resource as deleted while optionally enforcing
+// optimistic concurrency control (when expectedVersion > 0, returns ErrVersionConflict on mismatch or if absent/deleted).
+func (s *Store) DeleteResourceWithExpectedVersion(ctx context.Context, tenantID, resType, resID string, expectedVersion int) (*ResourceRecord, error) {
 	var rec *ResourceRecord
 	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
 		var txErr error
-		rec, txErr = s.deleteResourceInTx(ctx, tx, tenantID, resType, resID)
+		rec, txErr = s.deleteResourceInTx(ctx, tx, tenantID, resType, resID, expectedVersion)
 		return txErr
 	})
 	if err != nil {
@@ -806,7 +895,7 @@ func (s *Store) DeleteResourceWithMeta(ctx context.Context, tenantID, resType, r
 	return rec, nil
 }
 
-func (s *Store) deleteResourceInTx(ctx context.Context, tx *sql.Tx, tenantID, resType, resID string) (*ResourceRecord, error) {
+func (s *Store) deleteResourceInTx(ctx context.Context, tx *sql.Tx, tenantID, resType, resID string, expectedVersion int) (*ResourceRecord, error) {
 	var curVersion int
 	var curUpdated time.Time
 	var curDeleted bool
@@ -817,7 +906,14 @@ func (s *Store) deleteResourceInTx(ctx context.Context, tx *sql.Tx, tenantID, re
 		FOR UPDATE
 	`, tenantID, resType, resID).Scan(&curVersion, &curUpdated, &curDeleted)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) && expectedVersion > 0 {
+			return nil, fmt.Errorf("%w: resource does not exist (expected version %d)", ErrVersionConflict, expectedVersion)
+		}
 		return nil, err
+	}
+
+	if expectedVersion > 0 && (curDeleted || curVersion != expectedVersion) {
+		return nil, fmt.Errorf("%w: expected version %d, current version %d", ErrVersionConflict, expectedVersion, curVersion)
 	}
 
 	if curDeleted {

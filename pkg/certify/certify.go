@@ -261,6 +261,11 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitionerrole",
 				"http://hl7.org/fhir/us/core/StructureDefinition/us-core-relatedperson",
 				"http://fhir-registry.smarthealthit.org/StructureDefinition/oauth-uris",
+				"http://hl7.org/fhir/CompartmentDefinition/patient",
+				"http://hl7.org/fhir/CompartmentDefinition/encounter",
+				"http://hl7.org/fhir/CompartmentDefinition/practitioner",
+				"http://hl7.org/fhir/CompartmentDefinition/relatedPerson",
+				"http://hl7.org/fhir/CompartmentDefinition/device",
 			} {
 				if !strings.Contains(rawStr, reqToken) {
 					err = fmt.Errorf("CapabilityStatement missing canonical US Core / SMART declaration: %s", reqToken)
@@ -513,11 +518,17 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			}
 		}
 
-		// c) _sort=-date,_id + _elements=status,code + Bundle.link pagination + Compartment Search GET /Patient/cert-pat-1/Observation
+		// c) _sort=-date,_id + _elements=status,code + Bundle.link pagination + Compartment Search (Patient, Encounter & Wildcard /*)
 		if err == nil {
 			respComp, bComp, errComp := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/Observation?_sort=-date,_id&_elements=status,code&_count=1", "", nil, nil)
+			respEncComp, bEncComp, errEncComp := doReq(http.MethodGet, basePath+"/Encounter/cert-enc-1/Observation", "", nil, nil)
+			respWildComp, bWildComp, errWildComp := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/*?_type=Observation,Condition", "", nil, nil)
 			if errComp != nil || respComp.StatusCode != http.StatusOK {
 				err = fmt.Errorf("expected 200 OK on compartment search, got %d: %s", respComp.StatusCode, string(bComp))
+			} else if errEncComp != nil || respEncComp.StatusCode != http.StatusOK || !strings.Contains(string(bEncComp), `"cert-obs-1"`) {
+				err = fmt.Errorf("expected 200 OK with cert-obs-1 on Encounter compartment search, got %d: %s", respEncComp.StatusCode, string(bEncComp))
+			} else if errWildComp != nil || respWildComp.StatusCode != http.StatusOK || !strings.Contains(string(bWildComp), `"cert-obs-1"`) || !strings.Contains(string(bWildComp), `"cert-cond-1"`) {
+				err = fmt.Errorf("expected 200 OK with cert-obs-1 and cert-cond-1 on wildcard compartment search /Patient/cert-pat-1/*, got %d: %s", respWildComp.StatusCode, string(bWildComp))
 			} else {
 				var compBundle map[string]any
 				_ = json.Unmarshal(bComp, &compBundle)
@@ -530,15 +541,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			}
 		}
 
-		// d) Type-level and system-level _history
+		// d) Type-level and system-level _history (with _at, _summary, Bundle.link & response.location)
 		if err == nil {
-			respHist, bHist, errHist := doReq(http.MethodGet, basePath+"/Patient/_history?_count=5", "", nil, nil)
-			if errHist != nil || respHist.StatusCode != http.StatusOK || !strings.Contains(string(bHist), `"history"`) {
-				err = fmt.Errorf("expected 200 OK history Bundle on GET /Patient/_history")
+			respHist, bHist, errHist := doReq(http.MethodGet, basePath+"/Patient/_history?_count=5&_at=ge2020-01-01", "", nil, nil)
+			if errHist != nil || respHist.StatusCode != http.StatusOK || !strings.Contains(string(bHist), `"history"`) || !strings.Contains(string(bHist), `"location"`) || !strings.Contains(string(bHist), `"link"`) {
+				err = fmt.Errorf("expected 200 OK history Bundle with Bundle.link and entry.response.location on GET /Patient/_history?_at=ge2020-01-01")
 			}
 		}
 	}
-	record("SEARCH-04", suite2, "FHIR R4 _sort, _has Reverse Chaining, _summary/_elements, Bundle.link & Compartment Search", t0, err, "Verified _sort, _has, _summary=count, _elements SUBSETTED, Bundle.link, /Patient/{id}/{type}, and /_history")
+	record("SEARCH-04", suite2, "FHIR R4 _sort, _has Reverse Chaining, _summary/_elements, Bundle.link, All 5 Compartments (/*) & _history?_at=", t0, err, "Verified _sort, _has, _summary=count, _elements SUBSETTED, Bundle.link, /Patient/{id}/*, /Encounter/{id}/Observation, and /_history?_at=")
 
 	// 2.23 Patient/$match (MPI) Probabilistic & Deterministic Matching
 	t0 = time.Now()
@@ -684,16 +695,28 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	if err == nil {
-		// Verify _history has >= 3 versions
+		// Verify _history has >= 3 versions and vread supports _summary=true
 		respHist, bHist, errHist := doReq(http.MethodGet, basePath+"/Organization/"+condOrgID+"/_history", "", nil, nil)
+		respVReadSum, bVReadSum, errVReadSum := doReq(http.MethodGet, basePath+"/Organization/"+condOrgID+"/_history/1?_summary=true", "", nil, nil)
 		if errHist != nil || respHist.StatusCode != http.StatusOK {
 			err = fmt.Errorf("expected 200 OK on _history, got %d", respHist.StatusCode)
+		} else if errVReadSum != nil || respVReadSum.StatusCode != http.StatusOK || !strings.Contains(string(bVReadSum), `"SUBSETTED"`) {
+			err = fmt.Errorf("expected 200 OK with SUBSETTED tag on vread ?_summary=true, got %d: %s", respVReadSum.StatusCode, string(bVReadSum))
 		} else {
 			var histBundle map[string]any
 			_ = json.Unmarshal(bHist, &histBundle)
 			if tot, _ := histBundle["total"].(float64); tot < 3 {
 				err = fmt.Errorf("expected _history total >= 3, got %v", histBundle["total"])
 			}
+		}
+	}
+	if err == nil {
+		// Stale If-Match on DELETE must return 412 Precondition Failed
+		respDel412, _, errDel412 := doReq(http.MethodDelete, basePath+"/Organization/"+condOrgID, "", nil, map[string]string{
+			"If-Match": `W/"1"`,
+		})
+		if errDel412 != nil || respDel412.StatusCode != http.StatusPreconditionFailed {
+			err = fmt.Errorf("expected 412 Precondition Failed on DELETE with stale If-Match, got %d", respDel412.StatusCode)
 		}
 	}
 	if err == nil {
@@ -708,7 +731,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			err = fmt.Errorf("expected 410 Gone after conditional DELETE, got %d", respGone.StatusCode)
 		}
 	}
-	record("CRUD-04", suite3, "RFC 7396 Merge Patch, FHIRPath Conditional PATCH, _history, Conditional DELETE & 410 Gone", t0, err, "Merge patch, FHIRPath conditional patch, version history, and 410 tombstone verified")
+	record("CRUD-04", suite3, "RFC 7396 Merge Patch, FHIRPath Conditional PATCH, vread/_history, DELETE If-Match 412 CAS & 410 Gone", t0, err, "Merge patch, FHIRPath conditional patch, vread _summary, version history, DELETE If-Match 412 CAS, and 410 tombstone verified")
 
 	// 3.5 FHIR R4 $meta, $meta-add & $meta-delete Operations
 	t0 = time.Now()

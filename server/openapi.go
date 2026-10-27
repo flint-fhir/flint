@@ -735,12 +735,16 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		"/_history": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"System Operations"},
-				"summary":     "System-level version history Bundle across all FHIR resource types",
+				"summary":     "System-level version history Bundle across all FHIR resource types (supports _since, _at, _list, _summary, _elements)",
 				"operationId": "systemHistory",
 				"parameters": []map[string]any{
 					{"name": "_count", "in": "query", "schema": map[string]any{"type": "integer"}},
 					{"name": "_offset", "in": "query", "schema": map[string]any{"type": "integer"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 lower bound timestamp", "schema": map[string]any{"type": "string"}},
+					{"name": "_at", "in": "query", "description": "Point-in-time or period currency filter (with optional comparator prefix eq, lt, le, gt, ge)", "schema": map[string]any{"type": "string"}},
+					{"name": "_list", "in": "query", "description": "Cohort List or Group ID filter", "schema": map[string]any{"type": "string"}},
+					{"name": "_summary", "in": "query", "description": "Summary projection mode (true, text, data, count, false)", "schema": map[string]any{"type": "string"}},
+					{"name": "_elements", "in": "query", "description": "Comma-separated top-level elements to project", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "History Bundle (type: history)"},
@@ -1879,17 +1883,53 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		paths["/"+rt+"/_history"] = map[string]any{
 			"get": map[string]any{
 				"tags":        []string{rt},
-				"summary":     fmt.Sprintf("List type-level version history for all %s resources", rt),
+				"summary":     fmt.Sprintf("List type-level version history for all %s resources (supports _since, _at, _list, _summary, _elements)", rt),
 				"operationId": "typeHistory" + rt,
 				"parameters": []map[string]any{
 					{"name": "_count", "in": "query", "schema": map[string]any{"type": "integer"}},
 					{"name": "_offset", "in": "query", "schema": map[string]any{"type": "integer"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 lower bound timestamp", "schema": map[string]any{"type": "string"}},
+					{"name": "_at", "in": "query", "description": "Point-in-time or period currency filter (with optional comparator prefix eq, lt, le, gt, ge)", "schema": map[string]any{"type": "string"}},
+					{"name": "_list", "in": "query", "description": "Cohort List or Group ID filter", "schema": map[string]any{"type": "string"}},
+					{"name": "_summary", "in": "query", "description": "Summary projection mode (true, text, data, count, false)", "schema": map[string]any{"type": "string"}},
+					{"name": "_elements", "in": "query", "description": "Comma-separated top-level elements to project", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "History Bundle (type: history)"},
 				},
 			},
+		}
+
+		if postgres.IsCompartmentType(rt) {
+			paths["/"+rt+"/{id}/*"] = map[string]any{
+				"get": map[string]any{
+					"tags":        []string{rt},
+					"summary":     fmt.Sprintf("Wildcard multi-type search across all resources in %s/{id} compartment", rt),
+					"operationId": "searchWildcard" + rt + "Compartment",
+					"parameters": []map[string]any{
+						{"name": "id", "in": "path", "required": true, "description": rt + " logical ID", "schema": map[string]any{"type": "string"}},
+						{"name": "_type", "in": "query", "required": false, "description": "Optional comma-separated FHIR resource types", "schema": map[string]any{"type": "string"}},
+						{"name": "_count", "in": "query", "required": false, "schema": map[string]any{"type": "integer"}},
+						{"name": "_offset", "in": "query", "required": false, "schema": map[string]any{"type": "integer"}},
+					},
+					"responses": map[string]any{
+						"200": map[string]any{"description": "Searchset Bundle of resources in " + rt + "/{id} compartment"},
+					},
+				},
+			}
+			paths["/"+rt+"/{id}/*/_search"] = map[string]any{
+				"post": map[string]any{
+					"tags":        []string{rt},
+					"summary":     fmt.Sprintf("Wildcard multi-type search across all resources in %s/{id} compartment (POST _search)", rt),
+					"operationId": "postSearchWildcard" + rt + "Compartment",
+					"parameters": []map[string]any{
+						{"name": "id", "in": "path", "required": true, "description": rt + " logical ID", "schema": map[string]any{"type": "string"}},
+					},
+					"responses": map[string]any{
+						"200": map[string]any{"description": "Searchset Bundle of resources in " + rt + "/{id} compartment"},
+					},
+				},
+			}
 		}
 
 		if postgres.IsPatientCompartmentResourceType(rt) {
@@ -1961,13 +2001,15 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			},
 			"delete": map[string]any{
 				"tags":        []string{rt},
-				"summary":     fmt.Sprintf("Soft-delete %s and clear search indexes", rt),
+				"summary":     fmt.Sprintf("Soft-delete %s and clear search indexes (supports If-Match CAS)", rt),
 				"operationId": "delete" + rt,
 				"parameters": []map[string]any{
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "If-Match", "in": "header", "required": false, "description": `Expected version ETag (e.g. W/"1") for optimistic concurrency control`, "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"204": map[string]any{"description": "Deleted (tombstone version recorded in _history)"},
+					"412": map[string]any{"description": "If-Match version conflict"},
 				},
 			},
 		}
@@ -1975,13 +2017,17 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		paths["/"+rt+"/{id}/_history"] = map[string]any{
 			"get": map[string]any{
 				"tags":        []string{rt},
-				"summary":     fmt.Sprintf("List version history for %s/{id}", rt),
+				"summary":     fmt.Sprintf("List version history for %s/{id} (supports _since, _at, _list, _summary, _elements)", rt),
 				"operationId": "history" + rt,
 				"parameters": []map[string]any{
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 					{"name": "_count", "in": "query", "schema": map[string]any{"type": "integer"}},
 					{"name": "_offset", "in": "query", "schema": map[string]any{"type": "integer"}},
 					{"name": "_since", "in": "query", "description": "ISO-8601 lower bound timestamp", "schema": map[string]any{"type": "string"}},
+					{"name": "_at", "in": "query", "description": "Point-in-time or period currency filter (with optional comparator prefix eq, lt, le, gt, ge)", "schema": map[string]any{"type": "string"}},
+					{"name": "_list", "in": "query", "description": "Cohort List or Group ID filter", "schema": map[string]any{"type": "string"}},
+					{"name": "_summary", "in": "query", "description": "Summary projection mode (true, text, data, count, false)", "schema": map[string]any{"type": "string"}},
+					{"name": "_elements", "in": "query", "description": "Comma-separated top-level elements to project", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "History Bundle"},
@@ -1992,11 +2038,13 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		paths["/"+rt+"/{id}/_history/{vid}"] = map[string]any{
 			"get": map[string]any{
 				"tags":        []string{rt},
-				"summary":     fmt.Sprintf("Read specific version (vread) of %s/{id}", rt),
+				"summary":     fmt.Sprintf("Read specific version (vread) of %s/{id} (supports _summary and _elements projection)", rt),
 				"operationId": "vread" + rt,
 				"parameters": []map[string]any{
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 					{"name": "vid", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "_summary", "in": "query", "required": false, "description": "Summary projection mode (true, text, data, false)", "schema": map[string]any{"type": "string"}},
+					{"name": "_elements", "in": "query", "required": false, "description": "Comma-separated top-level elements to project", "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": rt + " historical version"},

@@ -407,6 +407,15 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					responseEntries[i] = bundleErrorResponse(http.StatusNotFound, msg)
 					continue
 				} else if method == "DELETE" {
+					if expectedVersion > 0 {
+						msg := fmt.Sprintf("entry[%d]: conditional DELETE matched 0 %s resources (expected version %d)", i, resType, expectedVersion)
+						if isTransaction {
+							writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", msg)
+							return
+						}
+						responseEntries[i] = bundleErrorResponse(http.StatusPreconditionFailed, msg)
+						continue
+					}
 					// 0 matches on conditional DELETE is an idempotent 204 No Content
 					responseEntries[i] = map[string]any{
 						"response": map[string]any{"status": "204 No Content"},
@@ -598,8 +607,9 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				ops = append(ops, postgres.BundleOperation{
 					Method: "DELETE",
 					Input: postgres.ResourceInput{
-						TenantID: tenant,
-						ResType:  resType,
+						TenantID:        tenant,
+						ResType:         resType,
+						ExpectedVersion: expectedVersion,
 					},
 					ConditionalParams: entryCondParams,
 					VerifyDeleteMatch: func(matchedID string) error {
@@ -656,9 +666,10 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				ops = append(ops, postgres.BundleOperation{
 					Method: "DELETE",
 					Input: postgres.ResourceInput{
-						TenantID: tenant,
-						ResType:  resType,
-						ResID:    resID,
+						TenantID:        tenant,
+						ResType:         resType,
+						ResID:           resID,
+						ExpectedVersion: expectedVersion,
 					},
 				})
 				opEntryIdx = append(opEntryIdx, i)
@@ -666,21 +677,30 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Batch mode: execute immediately
-			if err := s.store.DeleteResource(r.Context(), tenant, resType, resID); err != nil {
+			delRec, err := s.store.DeleteResourceWithExpectedVersion(r.Context(), tenant, resType, resID, expectedVersion)
+			if errors.Is(err, postgres.ErrVersionConflict) {
+				responseEntries[i] = bundleErrorResponse(http.StatusPreconditionFailed, err.Error())
+				continue
+			}
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				responseEntries[i] = bundleErrorResponse(
 					http.StatusInternalServerError, fmt.Sprintf("entry[%d]: delete failed: %v", i, err))
 				continue
 			}
-			s.publishCDC(r.Context(), automq.Message{
-				TenantID: tenant,
-				ResType:  resType,
-				ResID:    resID,
-				Op:       "D",
-			})
+			respMap := map[string]any{
+				"status": "204 No Content",
+			}
+			if delRec != nil && delRec.ResVersion > 0 {
+				respMap["etag"] = postgres.FormatETag(delRec.ResVersion)
+				s.publishCDC(r.Context(), automq.Message{
+					TenantID: tenant,
+					ResType:  resType,
+					ResID:    resID,
+					Op:       "D",
+				})
+			}
 			responseEntries[i] = map[string]any{
-				"response": map[string]any{
-					"status": "204 No Content",
-				},
+				"response": respMap,
 			}
 			continue
 		}

@@ -1194,6 +1194,7 @@ func ParseIfNoneExist(tenant, resType, rawHeader string) (SearchParams, error) {
 // HasSearchCriteria returns true if SearchParams contains at least one filter criterion.
 func HasSearchCriteria(p SearchParams) bool {
 	return p.ID != "" ||
+		(p.CompartmentType != "" && p.CompartmentID != "") ||
 		len(p.ResTypes) > 0 ||
 		len(p.LastUpdated) > 0 ||
 		len(p.Strings) > 0 ||

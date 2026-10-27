@@ -2120,3 +2120,325 @@ func TestWildcardIncludeOfTypeCompositeAndPreferHandlingWave11(t *testing.T) {
 		t.Errorf("expected lenient search Bundle to contain pat-w11-1 and warning OperationOutcome entry with mode=outcome, got: %s", lenientRec.Body.String())
 	}
 }
+
+func TestHistoryAtListCompartmentsAndDeleteIfMatchWave12(t *testing.T) {
+	srv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(srv)
+	h := srv.Handler()
+
+	// 1. Verify /metadata advertises all 5 FHIR R4 CompartmentDefinitions
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/test-tenant/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	h.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /metadata, got %d", metaRec.Code)
+	}
+	metaBody := metaRec.Body.String()
+	for _, compURL := range []string{
+		"http://hl7.org/fhir/CompartmentDefinition/patient",
+		"http://hl7.org/fhir/CompartmentDefinition/encounter",
+		"http://hl7.org/fhir/CompartmentDefinition/practitioner",
+		"http://hl7.org/fhir/CompartmentDefinition/relatedPerson",
+		"http://hl7.org/fhir/CompartmentDefinition/device",
+	} {
+		if !strings.Contains(metaBody, compURL) {
+			t.Errorf("expected /metadata CapabilityStatement to declare %s", compURL)
+		}
+	}
+
+	// 2. Verify /openapi.json declares _at, _list, wildcard compartment routes, and If-Match on DELETE
+	oaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/test-tenant/openapi.json", nil)
+	oaRec := httptest.NewRecorder()
+	h.ServeHTTP(oaRec, oaReq)
+	if oaRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on /openapi.json, got %d", oaRec.Code)
+	}
+	oaBody := oaRec.Body.String()
+	for _, token := range []string{
+		`"/Patient/{id}/*"`,
+		`"/Encounter/{id}/*"`,
+		`"/Practitioner/{id}/*"`,
+		`"/RelatedPerson/{id}/*"`,
+		`"/Device/{id}/*"`,
+		`"_at"`,
+	} {
+		if !strings.Contains(oaBody, token) {
+			t.Errorf("expected /openapi.json to include %s", token)
+		}
+	}
+
+	// 3. Verify malformed If-Match on DELETE and invalid _at / _summary on _history return 400 Bad Request
+	badDelReq := httptest.NewRequest(http.MethodDelete, "/fhir/r4/test-tenant/Patient/pat-1", nil)
+	badDelReq.Header.Set("If-Match", "bogus-etag")
+	badDelRec := httptest.NewRecorder()
+	h.ServeHTTP(badDelRec, badDelReq)
+	if badDelRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on malformed If-Match header for DELETE, got %d: %s", badDelRec.Code, badDelRec.Body.String())
+	}
+
+	badAtReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/test-tenant/Patient/_history?_at=not-a-valid-date", nil)
+	badAtRec := httptest.NewRecorder()
+	h.ServeHTTP(badAtRec, badAtReq)
+	if badAtRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on invalid _at parameter, got %d: %s", badAtRec.Code, badAtRec.Body.String())
+	}
+
+	badSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/test-tenant/Patient/_history?_summary=bogus", nil)
+	badSumRec := httptest.NewRecorder()
+	h.ServeHTTP(badSumRec, badSumReq)
+	if badSumRec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 Bad Request on invalid _summary parameter on _history, got %d: %s", badSumRec.Code, badSumRec.Body.String())
+	}
+
+	// 4. Postgres-backed integration checks
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+	tenant := "test-wave12-e2e"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	putRes := func(resType, id, body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/"+resType+"/"+id, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s/%s failed (%d): %s", resType, id, rec.Code, rec.Body.String())
+		}
+	}
+
+	putRes("Patient", "pat-w12-1", `{
+		"resourceType": "Patient",
+		"id": "pat-w12-1",
+		"name": [{"family": "Compartment", "given": ["Clara"]}],
+		"gender": "female",
+		"birthDate": "1990-03-15",
+		"text": {"status": "generated", "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">Clara Compartment v1</div>"}
+	}`)
+
+	// Update Patient/pat-w12-1 to create version 2
+	putRes("Patient", "pat-w12-1", `{
+		"resourceType": "Patient",
+		"id": "pat-w12-1",
+		"name": [{"family": "Compartment", "given": ["Clara", "Marie"]}],
+		"gender": "female",
+		"birthDate": "1990-03-15",
+		"text": {"status": "generated", "div": "<div xmlns=\"http://www.w3.org/1999/xhtml\">Clara Compartment v2</div>"}
+	}`)
+
+	putRes("Practitioner", "prac-w12-1", `{
+		"resourceType": "Practitioner",
+		"id": "prac-w12-1",
+		"name": [{"family": "Pasteur", "given": ["Louis"]}]
+	}`)
+
+	putRes("RelatedPerson", "rel-w12-1", `{
+		"resourceType": "RelatedPerson",
+		"id": "rel-w12-1",
+		"patient": {"reference": "Patient/pat-w12-1"},
+		"name": [{"family": "Compartment", "given": ["Robert"]}]
+	}`)
+
+	putRes("Device", "dev-w12-1", `{
+		"resourceType": "Device",
+		"id": "dev-w12-1",
+		"status": "active",
+		"type": {"coding": [{"system": "http://snomed.info/sct", "code": "706689003"}]},
+		"patient": {"reference": "Patient/pat-w12-1"}
+	}`)
+
+	putRes("Encounter", "enc-w12-1", `{
+		"resourceType": "Encounter",
+		"id": "enc-w12-1",
+		"status": "finished",
+		"class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB"},
+		"subject": {"reference": "Patient/pat-w12-1"},
+		"participant": [{"individual": {"reference": "Practitioner/prac-w12-1"}}]
+	}`)
+
+	putRes("Observation", "obs-w12-1", `{
+		"resourceType": "Observation",
+		"id": "obs-w12-1",
+		"status": "final",
+		"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+		"subject": {"reference": "Patient/pat-w12-1"},
+		"encounter": {"reference": "Encounter/enc-w12-1"},
+		"performer": [
+			{"reference": "Practitioner/prac-w12-1"},
+			{"reference": "RelatedPerson/rel-w12-1"}
+		],
+		"device": {"reference": "Device/dev-w12-1"},
+		"valueQuantity": {"value": 72, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+	}`)
+
+	putRes("MedicationRequest", "medreq-w12-1", `{
+		"resourceType": "MedicationRequest",
+		"id": "medreq-w12-1",
+		"status": "active",
+		"intent": "order",
+		"subject": {"reference": "Patient/pat-w12-1"},
+		"encounter": {"reference": "Encounter/enc-w12-1"},
+		"requester": {"reference": "Practitioner/prac-w12-1"},
+		"medicationCodeableConcept": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "197361"}]}
+	}`)
+
+	putRes("List", "list-w12-1", `{
+		"resourceType": "List",
+		"id": "list-w12-1",
+		"status": "current",
+		"mode": "working",
+		"entry": [
+			{"item": {"reference": "Patient/pat-w12-1"}},
+			{"item": {"reference": "Observation/obs-w12-1"}}
+		]
+	}`)
+
+	// 4a. Verify vread with _summary=true and _elements=gender,birthDate
+	vreadSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w12-1/_history/1?_summary=true", nil)
+	vreadSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(vreadSumRec, vreadSumReq)
+	if vreadSumRec.Code != http.StatusOK || !strings.Contains(vreadSumRec.Body.String(), `"SUBSETTED"`) || strings.Contains(vreadSumRec.Body.String(), `"Clara Compartment v1"`) {
+		t.Errorf("expected vread ?_summary=true to strip narrative text and add SUBSETTED tag, got %d: %s", vreadSumRec.Code, vreadSumRec.Body.String())
+	}
+
+	vreadElemReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w12-1/_history/2?_elements=gender,birthDate", nil)
+	vreadElemRec := httptest.NewRecorder()
+	pgH.ServeHTTP(vreadElemRec, vreadElemReq)
+	if vreadElemRec.Code != http.StatusOK || !strings.Contains(vreadElemRec.Body.String(), `"SUBSETTED"`) || strings.Contains(vreadElemRec.Body.String(), `"Compartment"`) {
+		t.Errorf("expected vread ?_elements=gender,birthDate to omit name and add SUBSETTED tag, got %d: %s", vreadElemRec.Code, vreadElemRec.Body.String())
+	}
+
+	// 4b. Verify _history pagination (Bundle.link), response.location, _summary=count, _at, and _list
+	histPageReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w12-1/_history?_count=1&_offset=0", nil)
+	histPageRec := httptest.NewRecorder()
+	pgH.ServeHTTP(histPageRec, histPageReq)
+	if histPageRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on _history, got %d: %s", histPageRec.Code, histPageRec.Body.String())
+	}
+	if !strings.Contains(histPageRec.Body.String(), `"Patient/pat-w12-1/_history/2"`) || !strings.Contains(histPageRec.Body.String(), `"relation":"next"`) {
+		t.Errorf("expected _history?_count=1 to include response.location Patient/pat-w12-1/_history/2 and next pagination link, got: %s", histPageRec.Body.String())
+	}
+
+	histCntReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w12-1/_history?_summary=count", nil)
+	histCntRec := httptest.NewRecorder()
+	pgH.ServeHTTP(histCntRec, histCntReq)
+	if histCntRec.Code != http.StatusOK || strings.Contains(histCntRec.Body.String(), `"entry"`) || !strings.Contains(histCntRec.Body.String(), `"total":2`) {
+		t.Errorf("expected _history?_summary=count to return total=2 and omit entry, got %d: %s", histCntRec.Code, histCntRec.Body.String())
+	}
+
+	// Point-in-time _at in the future should return only the version current at that instant (version 2, total=1)
+	histAtInstReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w12-1/_history?_at=2099-12-31T23:59:59Z", nil)
+	histAtInstRec := httptest.NewRecorder()
+	pgH.ServeHTTP(histAtInstRec, histAtInstReq)
+	if histAtInstRec.Code != http.StatusOK || !strings.Contains(histAtInstRec.Body.String(), `"total":1`) || !strings.Contains(histAtInstRec.Body.String(), `"Patient/pat-w12-1/_history/2"`) {
+		t.Errorf("expected point-in-time _at=2099-12-31T23:59:59Z to return only current version 2 (total=1), got %d: %s", histAtInstRec.Code, histAtInstRec.Body.String())
+	}
+
+	// Range _at with ge/le comparators should return all versions created within the window (total=2)
+	histAtRangeReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w12-1/_history?_at=ge2020-01-01&_at=le2099-12-31", nil)
+	histAtRangeRec := httptest.NewRecorder()
+	pgH.ServeHTTP(histAtRangeRec, histAtRangeReq)
+	if histAtRangeRec.Code != http.StatusOK || !strings.Contains(histAtRangeRec.Body.String(), `"total":2`) {
+		t.Errorf("expected range _at=ge2020-01-01&_at=le2099-12-31 to return total=2, got %d: %s", histAtRangeRec.Code, histAtRangeRec.Body.String())
+	}
+
+	// System _history filtered by _list=list-w12-1 should include pat-w12-1 (2 versions) + obs-w12-1 (1 version) = 3 versions, and exclude prac-w12-1
+	histListReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/_history?_list=list-w12-1", nil)
+	histListRec := httptest.NewRecorder()
+	pgH.ServeHTTP(histListRec, histListReq)
+	if histListRec.Code != http.StatusOK || !strings.Contains(histListRec.Body.String(), `"total":3`) || strings.Contains(histListRec.Body.String(), `"prac-w12-1"`) {
+		t.Errorf("expected /_history?_list=list-w12-1 to return total=3 (pat-w12-1 + obs-w12-1) and exclude prac-w12-1, got %d: %s", histListRec.Code, histListRec.Body.String())
+	}
+
+	// 4c. Verify all 5 FHIR R4 Compartments (Patient, Encounter, Practitioner, RelatedPerson, Device) + Wildcard /*
+	for _, tc := range []struct {
+		method string
+		path   string
+		body   string
+		wantID string
+	}{
+		{http.MethodGet, "/Encounter/enc-w12-1/Observation", "", `"obs-w12-1"`},
+		{http.MethodPost, "/Encounter/enc-w12-1/Observation/_search", "code=8867-4", `"obs-w12-1"`},
+		{http.MethodGet, "/Practitioner/prac-w12-1/MedicationRequest", "", `"medreq-w12-1"`},
+		{http.MethodGet, "/RelatedPerson/rel-w12-1/Observation", "", `"obs-w12-1"`},
+		{http.MethodGet, "/Device/dev-w12-1/Observation", "", `"obs-w12-1"`},
+		{http.MethodGet, "/Patient/pat-w12-1/*?_type=Observation,MedicationRequest", "", `"medreq-w12-1"`},
+		{http.MethodGet, "/Encounter/enc-w12-1/*", "", `"obs-w12-1"`},
+		{http.MethodGet, "/Practitioner/prac-w12-1/*", "", `"medreq-w12-1"`},
+	} {
+		var reqBody io.Reader
+		if tc.body != "" {
+			reqBody = strings.NewReader(tc.body)
+		}
+		req := httptest.NewRequest(tc.method, "/fhir/r4/"+tenant+tc.path, reqBody)
+		if tc.body != "" {
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		}
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), tc.wantID) {
+			t.Errorf("%s %s expected 200 OK containing %s, got %d: %s", tc.method, tc.path, tc.wantID, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 4d. Verify ETag Optimistic Concurrency Control (If-Match) on DELETE (Instance, Conditional, and Transaction Bundle)
+	// Instance DELETE with stale ETag W/"1" on pat-w12-1 (current version is 2) -> 412 Precondition Failed
+	delStaleReq := httptest.NewRequest(http.MethodDelete, "/fhir/r4/"+tenant+"/Patient/pat-w12-1", nil)
+	delStaleReq.Header.Set("If-Match", `W/"1"`)
+	delStaleRec := httptest.NewRecorder()
+	pgH.ServeHTTP(delStaleRec, delStaleReq)
+	if delStaleRec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412 Precondition Failed on DELETE with stale If-Match W/\"1\", got %d: %s", delStaleRec.Code, delStaleRec.Body.String())
+	}
+
+	// Conditional DELETE with stale ETag W/"1" on pat-w12-1 -> 412 Precondition Failed
+	condDelStaleReq := httptest.NewRequest(http.MethodDelete, "/fhir/r4/"+tenant+"/Patient?_id=pat-w12-1", nil)
+	condDelStaleReq.Header.Set("If-Match", `W/"1"`)
+	condDelStaleRec := httptest.NewRecorder()
+	pgH.ServeHTTP(condDelStaleRec, condDelStaleReq)
+	if condDelStaleRec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412 Precondition Failed on Conditional DELETE with stale If-Match W/\"1\", got %d: %s", condDelStaleRec.Code, condDelStaleRec.Body.String())
+	}
+
+	// Transaction Bundle DELETE entry with stale ifMatch W/"99" -> 412 Precondition Failed
+	txDelBundle := `{
+		"resourceType": "Bundle",
+		"type": "transaction",
+		"entry": [
+			{
+				"request": {
+					"method": "DELETE",
+					"url": "Observation/obs-w12-1",
+					"ifMatch": "W/\"99\""
+				}
+			}
+		]
+	}`
+	txDelReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant, strings.NewReader(txDelBundle))
+	txDelReq.Header.Set("Content-Type", "application/fhir+json")
+	txDelRec := httptest.NewRecorder()
+	pgH.ServeHTTP(txDelRec, txDelReq)
+	if txDelRec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("expected 412 Precondition Failed on transaction Bundle DELETE with stale ifMatch, got %d: %s", txDelRec.Code, txDelRec.Body.String())
+	}
+
+	// Instance DELETE with matching ETag W/"1" on Observation/obs-w12-1 -> 204 No Content with ETag W/"2"
+	delMatchReq := httptest.NewRequest(http.MethodDelete, "/fhir/r4/"+tenant+"/Observation/obs-w12-1", nil)
+	delMatchReq.Header.Set("If-Match", `W/"1"`)
+	delMatchRec := httptest.NewRecorder()
+	pgH.ServeHTTP(delMatchRec, delMatchReq)
+	if delMatchRec.Code != http.StatusNoContent || delMatchRec.Header().Get("ETag") != `W/"2"` {
+		t.Fatalf("expected 204 No Content with ETag W/\"2\" on matching If-Match DELETE, got %d (ETag=%q): %s", delMatchRec.Code, delMatchRec.Header().Get("ETag"), delMatchRec.Body.String())
+	}
+}

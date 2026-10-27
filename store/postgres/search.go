@@ -92,8 +92,36 @@ type SearchParams struct {
 	Summary                  string                          // _summary mode (true, text, data, count, false)
 	Elements                 []string                        // _elements projection fields
 	TotalMode                string                          // _total mode (none, estimate, accurate)
+	CompartmentType          string                          // Optional FHIR R4 compartment type (Patient, Encounter, Practitioner, RelatedPerson, Device)
+	CompartmentID            string                          // Optional FHIR R4 compartment resource ID
+	ExpectedVersion          int                             // Optional If-Match expected version for conditional write/delete
 	Count                    int                             // _count (default 20, max 1000)
 	Offset                   int                             // _offset (default 0)
+}
+
+// CanonicalCompartmentType returns the canonical HL7 FHIR R4 compartment resource type
+// ("Patient", "Encounter", "Practitioner", "RelatedPerson", or "Device"), or "" if s is not a compartment type.
+func CanonicalCompartmentType(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "patient":
+		return "Patient"
+	case "encounter":
+		return "Encounter"
+	case "practitioner":
+		return "Practitioner"
+	case "relatedperson":
+		return "RelatedPerson"
+	case "device":
+		return "Device"
+	default:
+		return ""
+	}
+}
+
+// IsCompartmentType returns true if s is one of the 5 HL7 FHIR R4 compartment types
+// (Patient, Encounter, Practitioner, RelatedPerson, Device).
+func IsCompartmentType(s string) bool {
+	return CanonicalCompartmentType(s) != ""
 }
 
 // Search executes a FHIR search query using the covering spidx_* tables.
@@ -145,6 +173,23 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 	if params.ResType != "" && len(params.ResTypes) > 0 {
 		whereExtra += fmt.Sprintf(" AND r.res_type = ANY($%d)", len(args)+1)
 		args = append(args, pq.Array(params.ResTypes))
+	}
+
+	if params.CompartmentType != "" && params.CompartmentID != "" {
+		compType := CanonicalCompartmentType(params.CompartmentType)
+		compID := strings.TrimSpace(params.CompartmentID)
+		if idx := strings.LastIndex(compID, "/"); idx != -1 {
+			compID = compID[idx+1:]
+		}
+		if compType != "" && compID != "" {
+			ctIdx := len(args) + 1
+			cidIdx := len(args) + 2
+			args = append(args, compType, compID)
+			whereExtra += fmt.Sprintf(
+				` AND ((r.res_type = $%d AND r.res_id = $%d) OR EXISTS (SELECT 1 FROM spidx_reference crf WHERE crf.tenant_id = r.tenant_id AND crf.res_type = r.res_type AND crf.res_id = r.res_id AND crf.target_id = $%d AND (crf.target_type = $%d OR crf.target_type = '')) OR (r.res_type = 'Provenance' AND EXISTS (SELECT 1 FROM spidx_reference rf_prov JOIN spidx_reference rf_comp ON rf_comp.tenant_id = rf_prov.tenant_id AND rf_comp.res_type = rf_prov.target_type AND rf_comp.res_id = rf_prov.target_id WHERE rf_prov.tenant_id = r.tenant_id AND rf_prov.res_type = 'Provenance' AND rf_prov.res_id = r.res_id AND rf_prov.sp_name = 'target' AND rf_comp.target_id = $%d AND (rf_comp.target_type = $%d OR rf_comp.target_type = ''))))`,
+				ctIdx, cidIdx, cidIdx, ctIdx, cidIdx, ctIdx,
+			)
+		}
 	}
 
 	// 1. String search parameters (spidx_string) — supports :exact, :contains, :text, multipleOr (comma), and multipleAnd
