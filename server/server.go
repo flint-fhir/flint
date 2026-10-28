@@ -481,6 +481,21 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleLibraryEvaluate(w, r)
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$health-cards-issue" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientHealthCardsIssue(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$pcde" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientPCDE(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ResearchStudy") && parts[4] == "$evaluate-eligibility" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleResearchStudyEvaluateEligibility(w, r)
+					return
+				}
 				if (strings.EqualFold(parts[3], "Patient") || strings.EqualFold(parts[3], "Encounter") || strings.EqualFold(parts[3], "Group")) && parts[4] == "$everything" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -688,6 +703,24 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleLibraryEvaluate(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[5] == "$health-cards-issue" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientHealthCardsIssue(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$pcde" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientPCDE(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ResearchStudy") && parts[5] == "$evaluate-eligibility" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleResearchStudyEvaluateEligibility(w, r)
 					return
 				}
 				if parts[5] == "$fhirpath" && !strings.HasPrefix(parts[3], "$") {
@@ -3691,6 +3724,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "merge",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Patient-merge",
 				},
+				{
+					"name":       "health-cards-issue",
+					"definition": "http://hl7.org/fhir/uv/shc-vaccination/OperationDefinition/Patient-i-health-cards-issue",
+				},
+				{
+					"name":       "pcde",
+					"definition": "http://hl7.org/fhir/us/davinci-pcde/OperationDefinition/PCDE",
+				},
 			}
 		case "Observation":
 			entry["operation"] = []map[string]string{
@@ -4054,6 +4095,13 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"definition": "http://hl7.org/fhir/OperationDefinition/ChargeItem-apply",
 				},
 			}
+		case "ResearchStudy":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "evaluate-eligibility",
+					"definition": "http://flint.fhir.org/OperationDefinition/ResearchStudy-evaluate-eligibility",
+				},
+			}
 		}
 		resEntries = append(resEntries, entry)
 	}
@@ -4337,6 +4385,18 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "evaluate",
 						"definition": "http://hl7.org/fhir/uv/cpg/OperationDefinition/cpg-library-evaluate",
+					},
+					{
+						"name":       "health-cards-issue",
+						"definition": "http://hl7.org/fhir/uv/shc-vaccination/OperationDefinition/Patient-i-health-cards-issue",
+					},
+					{
+						"name":       "pcde",
+						"definition": "http://hl7.org/fhir/us/davinci-pcde/OperationDefinition/PCDE",
+					},
+					{
+						"name":       "evaluate-eligibility",
+						"definition": "http://flint.fhir.org/OperationDefinition/ResearchStudy-evaluate-eligibility",
 					},
 				},
 			},

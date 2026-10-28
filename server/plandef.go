@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -7990,5 +7992,805 @@ func (s *Server) handleLibraryEvaluate(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    outParams,
+	})
+}
+
+// =============================================================================
+// Wave 24:
+// 1. HL7 SMART Health Cards Credential Issuance
+//    (POST /Patient/{id}/$health-cards-issue & /Patient/$health-cards-issue)
+// 2. HL7 Da Vinci Payer Coverage Decision Exchange (PCDE)
+//    (GET/POST /Patient/{id}/$pcde & /Patient/$pcde)
+// 3. HL7 FHIR R4 Clinical Trial Eligibility Evaluation
+//    (GET/POST /ResearchStudy/{id}/$evaluate-eligibility & /ResearchStudy/$evaluate-eligibility)
+// =============================================================================
+
+// handlePatientHealthCardsIssue implements HL7 SMART Health Cards $health-cards-issue
+// (POST /fhir/r4/{tenant}/Patient/{id}/$health-cards-issue and /fhir/r4/{tenant}/Patient/$health-cards-issue).
+func (s *Server) handlePatientHealthCardsIssue(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Patient/$health-cards-issue only supports POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusNotImplemented, "not-supported", "Patient/$health-cards-issue requires an operational store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	patID := strings.TrimPrefix(strings.TrimSpace(r.PathValue("id")), "Patient/")
+	q := r.URL.Query()
+	if patID == "" {
+		patID = strings.TrimPrefix(firstNonEmptyStr(
+			strings.TrimSpace(q.Get("patient")),
+			strings.TrimSpace(q.Get("subject")),
+			strings.TrimSpace(q.Get("id")),
+		), "Patient/")
+	}
+	var credTypes []string
+	for _, ct := range q["credentialType"] {
+		if trimmed := strings.TrimSpace(ct); trimmed != "" {
+			credTypes = append(credTypes, trimmed)
+		}
+	}
+
+	if r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			if bodyMap["resourceType"] == "Parameters" {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch strings.ToLower(strings.TrimSpace(name)) {
+						case "credentialtype", "credential-type":
+							if sVal := extractParamString(pm); sVal != "" {
+								credTypes = append(credTypes, sVal)
+							}
+						case "patient", "subject", "id":
+							if sVal := extractParamString(pm); sVal != "" && patID == "" {
+								patID = strings.TrimPrefix(sVal, "Patient/")
+							} else if refMap, ok := pm["valueReference"].(map[string]any); ok && patID == "" {
+								if refStr, _ := refMap["reference"].(string); refStr != "" {
+									patID = strings.TrimPrefix(refStr, "Patient/")
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	if patID == "" && hasSecCtx && secCtx != nil && secCtx.GetPatientId() != "" {
+		patID = cleanID(secCtx.GetPatientId())
+	}
+	if patID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Patient/$health-cards-issue requires a Patient {id} in the path or 'patient' parameter")
+		return
+	}
+
+	if hasSecCtx && secCtx != nil {
+		if !auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Patient/$health-cards-issue")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot issue SMART Health Card for Patient/%s",
+					secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	patRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found for $health-cards-issue", patID))
+		return
+	}
+	patJB, err := s.protoToJSONWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize Patient")
+		return
+	}
+	var patMap map[string]any
+	_ = json.Unmarshal(patJB, &patMap)
+
+	minPat := map[string]any{
+		"resourceType": "Patient",
+	}
+	for _, k := range []string{"name", "birthDate", "gender"} {
+		if v, ok := patMap[k]; ok {
+			minPat[k] = v
+		}
+	}
+
+	if len(credTypes) == 0 {
+		credTypes = []string{
+			"https://smarthealth.cards#health-card",
+			"https://smarthealth.cards#immunization",
+			"https://smarthealth.cards#laboratory",
+		}
+	} else {
+		hasBase := false
+		for _, ct := range credTypes {
+			if strings.Contains(ct, "#health-card") {
+				hasBase = true
+				break
+			}
+		}
+		if !hasBase {
+			credTypes = append([]string{"https://smarthealth.cards#health-card"}, credTypes...)
+		}
+	}
+
+	wantImm := false
+	wantLab := false
+	for _, ct := range credTypes {
+		lower := strings.ToLower(ct)
+		if strings.Contains(lower, "immunization") || strings.Contains(lower, "covid19") {
+			wantImm = true
+		}
+		if strings.Contains(lower, "laboratory") || strings.Contains(lower, "covid19") {
+			wantLab = true
+		}
+	}
+	if !wantImm && !wantLab {
+		wantImm = true
+		wantLab = true
+	}
+
+	entries := []map[string]any{
+		{
+			"fullUrl":  "resource:0",
+			"resource": minPat,
+		},
+	}
+	resIdx := 1
+
+	if wantImm {
+		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID:   tenant,
+			ResType:    "Immunization",
+			References: map[string]string{"patient": "Patient/" + patID},
+			Count:      50,
+		}); sErr == nil {
+			for _, m := range sr.Matches {
+				if jb, cErr := s.protoToJSONWithMeta("Immunization", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+					var imMap map[string]any
+					if json.Unmarshal(jb, &imMap) == nil {
+						minImm := map[string]any{
+							"resourceType": "Immunization",
+							"status":       firstNonEmptyStr(fmt.Sprintf("%v", imMap["status"]), "completed"),
+							"patient":      map[string]any{"reference": "resource:0"},
+						}
+						for _, k := range []string{"vaccineCode", "occurrenceDateTime", "lotNumber", "performer"} {
+							if v, ok := imMap[k]; ok {
+								minImm[k] = v
+							}
+						}
+						entries = append(entries, map[string]any{
+							"fullUrl":  fmt.Sprintf("resource:%d", resIdx),
+							"resource": minImm,
+						})
+						resIdx++
+					}
+				}
+			}
+		}
+	}
+
+	if wantLab {
+		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID:   tenant,
+			ResType:    "Observation",
+			References: map[string]string{"patient": "Patient/" + patID},
+			Count:      50,
+		}); sErr == nil {
+			for _, m := range sr.Matches {
+				if jb, cErr := s.protoToJSONWithMeta("Observation", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+					var obsMap map[string]any
+					if json.Unmarshal(jb, &obsMap) == nil {
+						minObs := map[string]any{
+							"resourceType": "Observation",
+							"status":       firstNonEmptyStr(fmt.Sprintf("%v", obsMap["status"]), "final"),
+							"subject":      map[string]any{"reference": "resource:0"},
+						}
+						for _, k := range []string{"code", "effectiveDateTime", "valueQuantity", "valueCodeableConcept", "valueString"} {
+							if v, ok := obsMap[k]; ok {
+								minObs[k] = v
+							}
+						}
+						entries = append(entries, map[string]any{
+							"fullUrl":  fmt.Sprintf("resource:%d", resIdx),
+							"resource": minObs,
+						})
+						resIdx++
+					}
+				}
+			}
+		}
+	}
+
+	shcBundle := map[string]any{
+		"resourceType": "Bundle",
+		"type":         "collection",
+		"entry":        entries,
+	}
+
+	vcPayload := map[string]any{
+		"iss": fmt.Sprintf("https://flint.fhir.org/fhir/r4/%s", tenant),
+		"nbf": time.Now().UTC().Unix(),
+		"vc": map[string]any{
+			"type": credTypes,
+			"credentialSubject": map[string]any{
+				"fhirVersion": "4.0.1",
+				"fhirBundle":  shcBundle,
+			},
+		},
+	}
+
+	jwsHeaderBytes, _ := json.Marshal(map[string]any{
+		"alg": "ES256",
+		"zip": "DEF",
+		"kid": "flint-shc-signing-key-1",
+	})
+	jwsPayloadBytes, _ := json.Marshal(vcPayload)
+	signingInput := base64.RawURLEncoding.EncodeToString(jwsHeaderBytes) + "." + base64.RawURLEncoding.EncodeToString(jwsPayloadBytes)
+	mac := hmac.New(sha256.New, []byte("flint-smart-health-cards-signing-key"))
+	_, _ = mac.Write([]byte(signingInput))
+	jwsToken := signingInput + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{
+				"name":        "verifiableCredential",
+				"valueString": jwsToken,
+			},
+			{
+				"name":     "resource",
+				"resource": shcBundle,
+			},
+		},
+	})
+}
+
+// handlePatientPCDE implements HL7 Da Vinci Payer Coverage Decision Exchange (PCDE)
+// (GET/POST /fhir/r4/{tenant}/Patient/{id}/$pcde and /fhir/r4/{tenant}/Patient/$pcde).
+func (s *Server) handlePatientPCDE(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Patient/$pcde only supports GET and POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusNotImplemented, "not-supported", "Patient/$pcde requires an operational store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	patID := strings.TrimPrefix(strings.TrimSpace(r.PathValue("id")), "Patient/")
+	q := r.URL.Query()
+	if patID == "" {
+		patID = strings.TrimPrefix(firstNonEmptyStr(
+			strings.TrimSpace(q.Get("patient")),
+			strings.TrimSpace(q.Get("subject")),
+			strings.TrimSpace(q.Get("memberId")),
+			strings.TrimSpace(q.Get("id")),
+		), "Patient/")
+	}
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			if bodyMap["resourceType"] == "Parameters" {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch strings.ToLower(strings.TrimSpace(name)) {
+						case "patient", "subject", "memberid", "id":
+							if sVal := extractParamString(pm); sVal != "" && patID == "" {
+								patID = strings.TrimPrefix(sVal, "Patient/")
+							} else if refMap, ok := pm["valueReference"].(map[string]any); ok && patID == "" {
+								if refStr, _ := refMap["reference"].(string); refStr != "" {
+									patID = strings.TrimPrefix(refStr, "Patient/")
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	if patID == "" && hasSecCtx && secCtx != nil && secCtx.GetPatientId() != "" {
+		patID = cleanID(secCtx.GetPatientId())
+	}
+	if patID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Patient/$pcde requires a Patient {id} in the path or 'patient' parameter")
+		return
+	}
+
+	if hasSecCtx && secCtx != nil {
+		if !auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) && !auth.Allows(secCtx, "Coverage", auth.ActionRead) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Patient/$pcde")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot request PCDE document for Patient/%s",
+					secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	patRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found for $pcde", patID))
+		return
+	}
+	patJB, err := s.protoToJSONWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode Patient")
+		return
+	}
+	var patMap map[string]any
+	_ = json.Unmarshal(patJB, &patMap)
+
+	var supportingEntries []map[string]any
+	var activeTreatmentRefs []map[string]any
+	var priorAuthRefs []map[string]any
+	var clinicalRefs []map[string]any
+
+	for _, rt := range []string{"Coverage", "CarePlan", "Claim", "ClaimResponse", "Condition", "ServiceRequest", "MedicationRequest"} {
+		sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID:   tenant,
+			ResType:    rt,
+			References: map[string]string{"patient": "Patient/" + patID},
+			Count:      50,
+		})
+		if sErr != nil {
+			continue
+		}
+		for _, m := range sr.Matches {
+			jb, cErr := s.protoToJSONWithMeta(rt, m.ResourceProto, m.ResVersion, m.LastUpdated)
+			if cErr != nil {
+				continue
+			}
+			var rm map[string]any
+			if json.Unmarshal(jb, &rm) != nil {
+				continue
+			}
+			refStr := rt + "/" + m.ResID
+			supportingEntries = append(supportingEntries, map[string]any{
+				"fullUrl":  refStr,
+				"resource": rm,
+			})
+			switch rt {
+			case "CarePlan", "Coverage":
+				activeTreatmentRefs = append(activeTreatmentRefs, map[string]any{"reference": refStr})
+			case "Claim", "ClaimResponse":
+				priorAuthRefs = append(priorAuthRefs, map[string]any{"reference": refStr})
+			default:
+				clinicalRefs = append(clinicalRefs, map[string]any{"reference": refStr})
+			}
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	var sections []map[string]any
+	if len(activeTreatmentRefs) > 0 {
+		sections = append(sections, map[string]any{
+			"title": "Active Treatments and Coverage",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/davinci-pcde/CodeSystem/PCDEtempCodes",
+						"code":    "activeTreatment",
+						"display": "Active Treatment",
+					},
+				},
+			},
+			"entry": activeTreatmentRefs,
+		})
+	}
+	if len(priorAuthRefs) > 0 {
+		sections = append(sections, map[string]any{
+			"title": "Prior Coverage and Authorizations",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/davinci-pcde/CodeSystem/PCDEtempCodes",
+						"code":    "priorCoverage",
+						"display": "Prior Coverage",
+					},
+				},
+			},
+			"entry": priorAuthRefs,
+		})
+	}
+	if len(clinicalRefs) > 0 {
+		sections = append(sections, map[string]any{
+			"title": "Supporting Clinical Information",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/davinci-pcde/CodeSystem/PCDEtempCodes",
+						"code":    "supportingInfo",
+						"display": "Supporting Information",
+					},
+				},
+			},
+			"entry": clinicalRefs,
+		})
+	}
+
+	compID := "pcde-composition-" + patID
+	compMap := map[string]any{
+		"resourceType": "Composition",
+		"id":           compID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pcde/StructureDefinition/profile-pcde-composition"},
+		},
+		"status": "final",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "11503-0",
+					"display": "Medical records",
+				},
+			},
+			"text": "Da Vinci PCDE Coverage Transition Document",
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"date":    nowStr,
+		"author":  []map[string]any{{"display": "Flint Da Vinci PCDE Service"}},
+		"title":   "Payer Coverage Decision Exchange (PCDE) Document for Patient/" + patID,
+		"section": sections,
+	}
+
+	allEntries := make([]map[string]any, 0, len(supportingEntries)+2)
+	allEntries = append(allEntries,
+		map[string]any{
+			"fullUrl":  "Composition/" + compID,
+			"resource": compMap,
+		},
+		map[string]any{
+			"fullUrl":  "Patient/" + patID,
+			"resource": patMap,
+		},
+	)
+	allEntries = append(allEntries, supportingEntries...)
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Bundle",
+		"id":           "pcde-bundle-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pcde/StructureDefinition/profile-pcde-bundle"},
+		},
+		"identifier": map[string]any{
+			"system": "urn:ietf:rfc:3986",
+			"value":  "urn:uuid:pcde-" + patID,
+		},
+		"type":      "document",
+		"timestamp": nowStr,
+		"total":     len(allEntries),
+		"entry":     allEntries,
+	})
+}
+
+// handleResearchStudyEvaluateEligibility implements HL7 FHIR R4 ResearchStudy/$evaluate-eligibility
+// (GET/POST /fhir/r4/{tenant}/ResearchStudy/{id}/$evaluate-eligibility and /fhir/r4/{tenant}/ResearchStudy/$evaluate-eligibility).
+func (s *Server) handleResearchStudyEvaluateEligibility(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "ResearchStudy/$evaluate-eligibility only supports GET and POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusNotImplemented, "not-supported", "ResearchStudy/$evaluate-eligibility requires an operational store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	studyID := strings.TrimPrefix(strings.TrimSpace(r.PathValue("id")), "ResearchStudy/")
+	q := r.URL.Query()
+	if studyID == "" {
+		studyID = strings.TrimPrefix(firstNonEmptyStr(
+			strings.TrimSpace(q.Get("study")),
+			strings.TrimSpace(q.Get("researchStudy")),
+			strings.TrimSpace(q.Get("id")),
+		), "ResearchStudy/")
+	}
+	subject := firstNonEmptyStr(
+		strings.TrimSpace(q.Get("subject")),
+		strings.TrimSpace(q.Get("patient")),
+	)
+
+	var inlineStudy map[string]any
+	var inlineGroup map[string]any
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "ResearchStudy":
+				inlineStudy = bodyMap
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch strings.ToLower(strings.TrimSpace(name)) {
+						case "study", "researchstudy", "research-study":
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "ResearchStudy" {
+								inlineStudy = res
+							} else if sVal := extractParamString(pm); sVal != "" && studyID == "" {
+								studyID = strings.TrimPrefix(sVal, "ResearchStudy/")
+							}
+						case "enrollment", "group":
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Group" {
+								inlineGroup = res
+							}
+						case "subject", "patient":
+							if sVal := extractParamString(pm); sVal != "" && subject == "" {
+								subject = sVal
+							} else if refMap, ok := pm["valueReference"].(map[string]any); ok && subject == "" {
+								subject, _ = refMap["reference"].(string)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := strings.TrimPrefix(strings.TrimSpace(subject), "Patient/")
+	if (studyID == "" && inlineStudy == nil) || patID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "ResearchStudy/$evaluate-eligibility requires a ResearchStudy ({id} or inline) and a 'subject' Patient reference")
+		return
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+		if !auth.Allows(secCtx, "ResearchStudy", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionRead) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for ResearchStudy/$evaluate-eligibility")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot evaluate eligibility for Patient/%s",
+					secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	studyMap := inlineStudy
+	if studyMap == nil && studyID != "" {
+		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "ResearchStudy", studyID); err == nil {
+			if jb, cErr := s.protoToJSONWithMeta("ResearchStudy", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+				_ = json.Unmarshal(jb, &studyMap)
+			}
+		}
+	}
+	if studyMap == nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("ResearchStudy/%s not found", studyID))
+		return
+	}
+	if studyID == "" {
+		studyID, _ = studyMap["id"].(string)
+		if studyID == "" {
+			studyID = "study-1"
+		}
+	}
+
+	patRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patID))
+		return
+	}
+	patJB, err := s.protoToJSONWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode Patient")
+		return
+	}
+	var patMap map[string]any
+	_ = json.Unmarshal(patJB, &patMap)
+
+	// Resolve enrollment Group(s)
+	var groupMaps []map[string]any
+	if inlineGroup != nil {
+		groupMaps = append(groupMaps, inlineGroup)
+	}
+	if enrollments, ok := studyMap["enrollment"].([]any); ok {
+		for _, rawE := range enrollments {
+			if em, ok := rawE.(map[string]any); ok {
+				refStr, _ := em["reference"].(string)
+				gid := strings.TrimPrefix(refStr, "Group/")
+				if gid != "" {
+					if gRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Group", gid); gErr == nil {
+						if gJB, cErr := s.protoToJSONWithMeta("Group", gRec.ResourceProto, gRec.ResVersion, gRec.LastUpdated); cErr == nil {
+							var gm map[string]any
+							if json.Unmarshal(gJB, &gm) == nil {
+								groupMaps = append(groupMaps, gm)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Load patient Conditions and Observations
+	var condMaps, obsMaps []map[string]any
+	if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		TenantID:   tenant,
+		ResType:    "Condition",
+		References: map[string]string{"patient": "Patient/" + patID},
+		Count:      50,
+	}); sErr == nil {
+		for _, m := range sr.Matches {
+			if jb, cErr := s.protoToJSONWithMeta("Condition", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+				var rm map[string]any
+				if json.Unmarshal(jb, &rm) == nil {
+					condMaps = append(condMaps, rm)
+				}
+			}
+		}
+	}
+	if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		TenantID:   tenant,
+		ResType:    "Observation",
+		References: map[string]string{"patient": "Patient/" + patID},
+		Count:      50,
+	}); sErr == nil {
+		for _, m := range sr.Matches {
+			if jb, cErr := s.protoToJSONWithMeta("Observation", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+				var rm map[string]any
+				if json.Unmarshal(jb, &rm) == nil {
+					obsMaps = append(obsMaps, rm)
+				}
+			}
+		}
+	}
+
+	eligible := true
+	var reasons []string
+	totalCharacteristics := 0
+
+	for _, gm := range groupMaps {
+		chars, _ := gm["characteristic"].([]any)
+		for _, rawCh := range chars {
+			chMap, ok := rawCh.(map[string]any)
+			if !ok {
+				continue
+			}
+			totalCharacteristics++
+			exclude, _ := chMap["exclude"].(bool)
+			codeCC, _ := chMap["code"].(map[string]any)
+			valCC, _ := chMap["valueCodeableConcept"].(map[string]any)
+
+			// Extract characteristic code string
+			var chCode string
+			if codings, ok := codeCC["coding"].([]any); ok && len(codings) > 0 {
+				if cm, ok := codings[0].(map[string]any); ok {
+					chCode, _ = cm["code"].(string)
+				}
+			}
+			if chCode == "" {
+				chCode, _ = codeCC["text"].(string)
+			}
+
+			var valCode string
+			if codings, ok := valCC["coding"].([]any); ok && len(codings) > 0 {
+				if cm, ok := codings[0].(map[string]any); ok {
+					valCode, _ = cm["code"].(string)
+				}
+			}
+			if valCode == "" {
+				valCode, _ = valCC["text"].(string)
+			}
+
+			matched := false
+			switch strings.ToLower(strings.TrimSpace(chCode)) {
+			case "gender", "sex", "263495000", "46098-0":
+				patGender, _ := patMap["gender"].(string)
+				matched = strings.EqualFold(patGender, valCode)
+			case "condition", "diagnosis", "64572001", "problem":
+				for _, cm := range condMaps {
+					if cc, ok := cm["code"].(map[string]any); ok && codeableConceptMatchesLiterals(cc, []string{valCode}) {
+						matched = true
+						break
+					}
+				}
+			default:
+				// Check if any Condition or Observation matches either chCode or valCode
+				targetCode := firstNonEmptyStr(valCode, chCode)
+				for _, cm := range condMaps {
+					if cc, ok := cm["code"].(map[string]any); ok && codeableConceptMatchesLiterals(cc, []string{targetCode}) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					for _, om := range obsMaps {
+						if cc, ok := om["code"].(map[string]any); ok && codeableConceptMatchesLiterals(cc, []string{chCode, targetCode}) {
+							matched = true
+							break
+						}
+					}
+				}
+			}
+
+			if exclude {
+				if matched {
+					eligible = false
+					reasons = append(reasons, fmt.Sprintf("Excluded by criterion %s=%s", chCode, valCode))
+				} else {
+					reasons = append(reasons, fmt.Sprintf("Passed exclusion criterion %s!=%s", chCode, valCode))
+				}
+			} else {
+				if matched {
+					reasons = append(reasons, fmt.Sprintf("Satisfied inclusion criterion %s=%s", chCode, valCode))
+				} else {
+					eligible = false
+					reasons = append(reasons, fmt.Sprintf("Failed inclusion criterion %s=%s", chCode, valCode))
+				}
+			}
+		}
+	}
+
+	if len(reasons) == 0 {
+		reasons = append(reasons, "Patient meets all study enrollment criteria")
+	}
+
+	subjStatus := "candidate"
+	if !eligible {
+		subjStatus = "ineligible"
+	}
+	resSubject := map[string]any{
+		"resourceType": "ResearchSubject",
+		"id":           fmt.Sprintf("rsubj-%s-%s", cleanID(studyID), cleanID(patID)),
+		"status":       subjStatus,
+		"study":        map[string]any{"reference": "ResearchStudy/" + studyID},
+		"individual":   map[string]any{"reference": "Patient/" + patID},
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{
+				"name":         "eligible",
+				"valueBoolean": eligible,
+			},
+			{
+				"name":         "characteristicCount",
+				"valueInteger": totalCharacteristics,
+			},
+			{
+				"name":        "reason",
+				"valueString": strings.Join(reasons, "; "),
+			},
+			{
+				"name":     "researchSubject",
+				"resource": resSubject,
+			},
+		},
 	})
 }

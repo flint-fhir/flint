@@ -4439,3 +4439,142 @@ func TestCDexSubmitAttachmentLibraryEvaluateAndEncounterEverythingWave23(t *test
 		t.Fatalf("GET /Encounter/$everything?id=enc-w23-1 expected Bundle with Encounter/enc-w23-1 and Observation/obs-w23-1, got %d: %s", encEvRec.Code, encEvRec.Body.String())
 	}
 }
+
+func TestSHCHealthCardsPCDEAndResearchStudyEligibilityWave24(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave24-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w24-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w24-1",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1985-04-12",
+			"name": [{"family": "Wonderland", "given": ["Alice"]}]
+		}`},
+		{"/Immunization/imm-w24-1", `{
+			"resourceType": "Immunization",
+			"id": "imm-w24-1",
+			"status": "completed",
+			"vaccineCode": {"coding": [{"system": "http://hl7.org/fhir/sid/cvx", "code": "208", "display": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, 30 mcg/0.3mL dose"}]},
+			"patient": {"reference": "Patient/pat-w24-1"},
+			"occurrenceDateTime": "2026-01-10",
+			"lotNumber": "EL9262"
+		}`},
+		{"/Coverage/cov-w24-1", `{
+			"resourceType": "Coverage",
+			"id": "cov-w24-1",
+			"status": "active",
+			"beneficiary": {"reference": "Patient/pat-w24-1"},
+			"payor": [{"display": "Acme Health Plan"}]
+		}`},
+		{"/CarePlan/cp-w24-1", `{
+			"resourceType": "CarePlan",
+			"id": "cp-w24-1",
+			"status": "active",
+			"intent": "plan",
+			"title": "Hypertension Continuity CarePlan",
+			"subject": {"reference": "Patient/pat-w24-1"}
+		}`},
+		{"/Condition/cond-w24-1", `{
+			"resourceType": "Condition",
+			"id": "cond-w24-1",
+			"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+			"code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}]},
+			"subject": {"reference": "Patient/pat-w24-1"}
+		}`},
+		{"/Group/grp-trial-w24", `{
+			"resourceType": "Group",
+			"id": "grp-trial-w24",
+			"type": "person",
+			"actual": false,
+			"characteristic": [
+				{
+					"code": {"coding": [{"system": "http://loinc.org", "code": "46098-0", "display": "Sex"}]},
+					"valueCodeableConcept": {"coding": [{"system": "http://hl7.org/fhir/administrative-gender", "code": "female"}]},
+					"exclude": false
+				},
+				{
+					"code": {"coding": [{"system": "http://snomed.info/sct", "code": "64572001", "display": "Condition"}]},
+					"valueCodeableConcept": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}]},
+					"exclude": false
+				}
+			]
+		}`},
+		{"/ResearchStudy/study-w24-1", `{
+			"resourceType": "ResearchStudy",
+			"id": "study-w24-1",
+			"title": "Phase III Resistant Hypertension Clinical Trial",
+			"status": "active",
+			"enrollment": [{"reference": "Group/grp-trial-w24"}]
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. POST /Patient/pat-w24-1/$health-cards-issue
+	shcBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "credentialType", "valueUri": "https://smarthealth.cards#immunization"},
+			{"name": "credentialType", "valueUri": "https://smarthealth.cards#covid19"}
+		]
+	}`
+	shcReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/pat-w24-1/$health-cards-issue", strings.NewReader(shcBody))
+	shcReq.Header.Set("Content-Type", "application/fhir+json")
+	shcRec := httptest.NewRecorder()
+	pgH.ServeHTTP(shcRec, shcReq)
+	if shcRec.Code != http.StatusOK ||
+		!strings.Contains(shcRec.Body.String(), `"verifiableCredential"`) ||
+		!strings.Contains(shcRec.Body.String(), `"resource:0"`) ||
+		!strings.Contains(shcRec.Body.String(), `"EL9262"`) {
+		t.Fatalf("POST /Patient/pat-w24-1/$health-cards-issue expected verifiableCredential and SHC Bundle with EL9262, got %d: %s", shcRec.Code, shcRec.Body.String())
+	}
+
+	// 2. GET /Patient/pat-w24-1/$pcde
+	pcdeReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w24-1/$pcde", nil)
+	pcdeRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pcdeRec, pcdeReq)
+	if pcdeRec.Code != http.StatusOK ||
+		!strings.Contains(pcdeRec.Body.String(), `"type":"document"`) ||
+		!strings.Contains(pcdeRec.Body.String(), `"11503-0"`) ||
+		!strings.Contains(pcdeRec.Body.String(), `"CarePlan/cp-w24-1"`) ||
+		!strings.Contains(pcdeRec.Body.String(), `"Coverage/cov-w24-1"`) {
+		t.Fatalf("GET /Patient/pat-w24-1/$pcde expected document Bundle with LOINC 11503-0, CarePlan/cp-w24-1, and Coverage/cov-w24-1, got %d: %s", pcdeRec.Code, pcdeRec.Body.String())
+	}
+
+	// 3. GET /ResearchStudy/study-w24-1/$evaluate-eligibility?patient=Patient/pat-w24-1
+	eligReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/ResearchStudy/study-w24-1/$evaluate-eligibility?patient=Patient/pat-w24-1", nil)
+	eligRec := httptest.NewRecorder()
+	pgH.ServeHTTP(eligRec, eligReq)
+	if eligRec.Code != http.StatusOK ||
+		!strings.Contains(eligRec.Body.String(), `"valueBoolean":true`) ||
+		!strings.Contains(eligRec.Body.String(), `"ResearchSubject"`) ||
+		!strings.Contains(eligRec.Body.String(), `"candidate"`) {
+		t.Fatalf("GET /ResearchStudy/study-w24-1/$evaluate-eligibility expected eligible=true and candidate ResearchSubject, got %d: %s", eligRec.Code, eligRec.Body.String())
+	}
+}
