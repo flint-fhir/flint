@@ -3098,6 +3098,169 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Composition/$document": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Composition"},
+				"summary":     "Generate a FHIR Document Bundle (type: document) from a Composition by id (HL7 FHIR R4 Composition/$document)",
+				"operationId": "compositionDocumentTypeGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "persist", "in": "query", "required": false, "schema": map[string]any{"type": "boolean"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle with Composition as entry[0] and referenced clinical resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Composition"},
+				"summary":     "Generate a FHIR Document Bundle (type: document) from an inline Composition or Parameters (POST)",
+				"operationId": "compositionDocumentTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle with Composition as entry[0] and referenced clinical resources"},
+				},
+			},
+		},
+		"/Group/{id}/$member-add": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Group"},
+				"summary":     "Add an attributed member (Patient) with attributionPeriod to a Da Vinci Member Attribution (ATR) Group roster",
+				"operationId": "groupATRMemberAddPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Updated Da Vinci ATR Group resource"},
+				},
+			},
+		},
+		"/Group/{id}/$member-remove": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Group"},
+				"summary":     "Mark an attributed member (Patient) inactive on a Da Vinci Member Attribution (ATR) Group roster",
+				"operationId": "groupATRMemberRemovePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Updated Da Vinci ATR Group resource"},
+				},
+			},
+		},
+		"/Group/{id}/$confirm-attribution-list": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Group"},
+				"summary":     "Confirm a Da Vinci Member Attribution (ATR) Group roster and return active/inactive member summary Parameters",
+				"operationId": "groupATRConfirmAttributionListGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status=confirmed, activeMemberCount, inactiveMemberCount, and Group resource"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Group"},
+				"summary":     "Confirm a Da Vinci Member Attribution (ATR) Group roster (POST)",
+				"operationId": "groupATRConfirmAttributionListPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status=confirmed, activeMemberCount, inactiveMemberCount, and Group resource"},
+				},
+			},
+		},
+		"/MedicationKnowledge/$lookup": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"MedicationKnowledge"},
+				"summary":     "Look up Da Vinci PDex US Drug Formulary tier & copay details by RxNorm code",
+				"operationId": "medicationKnowledgeLookupTypeGet",
+				"parameters": []map[string]any{
+					{"name": "code", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "MedicationKnowledge resource conforming to usdf-FormularyDrug profile"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"MedicationKnowledge"},
+				"summary":     "Look up Da Vinci PDex US Drug Formulary tier & copay details (POST)",
+				"operationId": "medicationKnowledgeLookupTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "MedicationKnowledge resource conforming to usdf-FormularyDrug profile"},
+				},
+			},
+		},
+		"/MedicationKnowledge/{id}/$lookup": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"MedicationKnowledge"},
+				"summary":     "Look up Da Vinci PDex US Drug Formulary MedicationKnowledge/{id}",
+				"operationId": "medicationKnowledgeLookupInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "MedicationKnowledge resource conforming to usdf-FormularyDrug profile"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"MedicationKnowledge"},
+				"summary":     "Look up Da Vinci PDex US Drug Formulary MedicationKnowledge/{id} (POST)",
+				"operationId": "medicationKnowledgeLookupInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "MedicationKnowledge resource conforming to usdf-FormularyDrug profile"},
+				},
+			},
+		},
+		"/MedicationRequest/$check-interactions": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"MedicationRequest"},
+				"summary":     "Evaluate candidate RxNorm medication against patient AllergyIntolerance records and emit DetectedIssue (DALG) alerts",
+				"operationId": "medicationRequestCheckInteractionsTypeGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "code", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing outcome, interactionCount, and DetectedIssue resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"MedicationRequest"},
+				"summary":     "Evaluate candidate MedicationRequest against patient AllergyIntolerance records (POST)",
+				"operationId": "medicationRequestCheckInteractionsTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing outcome, interactionCount, and DetectedIssue resources"},
+				},
+			},
+		},
+		"/MedicationRequest/{id}/$check-interactions": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"MedicationRequest"},
+				"summary":     "Evaluate stored MedicationRequest/{id} against patient AllergyIntolerance records",
+				"operationId": "medicationRequestCheckInteractionsInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing outcome, interactionCount, and DetectedIssue resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"MedicationRequest"},
+				"summary":     "Evaluate stored MedicationRequest/{id} against patient AllergyIntolerance records (POST)",
+				"operationId": "medicationRequestCheckInteractionsInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing outcome, interactionCount, and DetectedIssue resources"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

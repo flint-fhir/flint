@@ -1185,6 +1185,15 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "List") && parts[4] == "$find" {
 			return true
 		}
+		if strings.EqualFold(parts[3], "Composition") && parts[4] == "$document" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "MedicationKnowledge") && parts[4] == "$lookup" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "MedicationRequest") && parts[4] == "$check-interactions" {
+			return true
+		}
 		return false
 	}
 	if len(parts) == 6 {
@@ -1224,7 +1233,13 @@ func isPlanApplyOp(parts []string) bool {
 		if (strings.EqualFold(parts[3], "AdverseEvent") || strings.EqualFold(parts[3], "CarePlan") || strings.EqualFold(parts[3], "RiskAssessment")) && parts[5] == "$evaluate" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Group") && (parts[5] == "$add" || parts[5] == "$remove") {
+		if strings.EqualFold(parts[3], "Group") && (parts[5] == "$add" || parts[5] == "$remove" || parts[5] == "$member-add" || parts[5] == "$member-remove" || parts[5] == "$confirm-attribution-list") {
+			return true
+		}
+		if strings.EqualFold(parts[3], "MedicationKnowledge") && parts[5] == "$lookup" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "MedicationRequest") && parts[5] == "$check-interactions" {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Appointment") && (parts[5] == "$hold" || parts[5] == "$book") {
