@@ -4728,3 +4728,550 @@ func (s *Server) synthesizeSnapshotElements(resType string, sdMap map[string]any
 
 	return elements
 }
+
+// =============================================================================
+// HL7 FHIR R4 Messaging: $process-message (Wave 19)
+// =============================================================================
+
+func (s *Server) handleProcessMessage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$process-message only supports POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusNotImplemented, "not-supported", "$process-message requires an operational store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	asyncMode := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("async")), "true")
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && secCtx != nil {
+		if !auth.Allows(secCtx, "MessageHeader", auth.ActionCreate) && !auth.Allows(secCtx, "Bundle", auth.ActionCreate) && !auth.Allows(secCtx, "*", auth.ActionCreate) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for $process-message")
+			return
+		}
+	}
+
+	if r.Body == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "$process-message requires a message Bundle or Parameters body")
+		return
+	}
+
+	var bodyMap map[string]any
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&bodyMap); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON payload for $process-message: "+err.Error())
+		return
+	}
+
+	var msgBundle map[string]any
+	switch bodyMap["resourceType"] {
+	case "Bundle":
+		msgBundle = bodyMap
+	case "Parameters":
+		if params, ok := bodyMap["parameter"].([]any); ok {
+			for _, rawP := range params {
+				pm, ok := rawP.(map[string]any)
+				if !ok {
+					continue
+				}
+				name, _ := pm["name"].(string)
+				switch name {
+				case "content":
+					if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Bundle" {
+						msgBundle = res
+					}
+				case "async":
+					if b, ok := pm["valueBoolean"].(bool); ok {
+						asyncMode = b
+					}
+				}
+			}
+		}
+	}
+
+	if msgBundle == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "$process-message requires a FHIR Bundle of type 'message'")
+		return
+	}
+	if bType, _ := msgBundle["type"].(string); bType != "message" {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("$process-message requires Bundle.type == 'message', got %q", bType))
+		return
+	}
+
+	entries, _ := msgBundle["entry"].([]any)
+	if len(entries) == 0 {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "message Bundle must contain a leading MessageHeader entry")
+		return
+	}
+
+	firstEntry, _ := entries[0].(map[string]any)
+	msgHeader, _ := firstEntry["resource"].(map[string]any)
+	if msgHeader == nil || msgHeader["resourceType"] != "MessageHeader" {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "first entry in message Bundle must be a MessageHeader resource")
+		return
+	}
+
+	inMsgID, _ := msgHeader["id"].(string)
+	if strings.TrimSpace(inMsgID) == "" {
+		inMsgID = fmt.Sprintf("msg-%d", time.Now().UTC().UnixNano())
+		msgHeader["id"] = inMsgID
+	}
+
+	// Persist the incoming MessageHeader
+	_, _, _, _, _ = s.upsertResourceMap(r.Context(), tenant, msgHeader)
+
+	// Persist all clinical focus resources in entries[1:]
+	var persistedRefs []string
+	var focusList []any
+	for i := 1; i < len(entries); i++ {
+		em, ok := entries[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		resMap, ok := em["resource"].(map[string]any)
+		if !ok {
+			continue
+		}
+		rt, _ := resMap["resourceType"].(string)
+		if rt == "" || rt == "OperationOutcome" {
+			continue
+		}
+		_, rid, _, _, err := s.upsertResourceMap(r.Context(), tenant, resMap)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("failed to process message entry %s: %v", rt, err))
+			return
+		}
+		ref := rt + "/" + rid
+		persistedRefs = append(persistedRefs, ref)
+		focusList = append(focusList, map[string]any{"reference": ref})
+	}
+
+	if asyncMode {
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resourceType": "OperationOutcome",
+			"issue": []map[string]any{
+				{
+					"severity":    "information",
+					"code":        "informational",
+					"diagnostics": fmt.Sprintf("Accepted message %s (%d focus resource(s) persisted)", inMsgID, len(persistedRefs)),
+				},
+			},
+		})
+		return
+	}
+
+	ackHeader := map[string]any{
+		"resourceType": "MessageHeader",
+		"id":           "ack-" + inMsgID,
+		"source": map[string]any{
+			"name":     "Flint FHIR R4 Server",
+			"endpoint": "/fhir/r4/" + tenant,
+		},
+		"response": map[string]any{
+			"identifier": inMsgID,
+			"code":       "ok",
+		},
+	}
+	if evCoding, ok := msgHeader["eventCoding"]; ok {
+		ackHeader["eventCoding"] = evCoding
+	} else if evURI, ok := msgHeader["eventUri"]; ok {
+		ackHeader["eventUri"] = evURI
+	} else {
+		ackHeader["eventUri"] = "urn:flint:message-ack"
+	}
+	if len(focusList) > 0 {
+		ackHeader["focus"] = focusList
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Bundle",
+		"id":           "ack-bundle-" + inMsgID,
+		"type":         "message",
+		"timestamp":    time.Now().UTC().Format(time.RFC3339),
+		"entry": []any{
+			map[string]any{
+				"fullUrl":  "MessageHeader/ack-" + inMsgID,
+				"resource": ackHeader,
+			},
+			map[string]any{
+				"fullUrl": "OperationOutcome/ack-outcome-" + inMsgID,
+				"resource": map[string]any{
+					"resourceType": "OperationOutcome",
+					"id":           "ack-outcome-" + inMsgID,
+					"issue": []map[string]any{
+						{
+							"severity":    "information",
+							"code":        "informational",
+							"diagnostics": fmt.Sprintf("Processed MessageHeader/%s and persisted %d focus resource(s): %s", inMsgID, len(persistedRefs), strings.Join(persistedRefs, ", ")),
+						},
+					},
+				},
+			},
+		},
+	})
+}
+
+// =============================================================================
+// HL7 FHIR R4 StructureMap/$transform (Wave 19)
+// =============================================================================
+
+func (s *Server) handleStructureMapTransform(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "StructureMap/$transform only supports POST")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	pathID := strings.TrimSpace(r.PathValue("id"))
+	sourceURL := strings.TrimSpace(r.URL.Query().Get("source"))
+
+	if r.Body == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "StructureMap/$transform requires a request body")
+		return
+	}
+
+	var bodyMap map[string]any
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for StructureMap/$transform: "+err.Error())
+		return
+	}
+
+	var smMap map[string]any
+	var contentMap map[string]any
+
+	if bodyMap["resourceType"] == "Parameters" {
+		if params, ok := bodyMap["parameter"].([]any); ok {
+			for _, rawP := range params {
+				pm, ok := rawP.(map[string]any)
+				if !ok {
+					continue
+				}
+				name, _ := pm["name"].(string)
+				switch name {
+				case "source", "structureMap":
+					if v := extractParamString(pm); v != "" && sourceURL == "" {
+						sourceURL = v
+					}
+					if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "StructureMap" {
+						smMap = res
+					}
+				case "content", "resource", "input":
+					if res, ok := pm["resource"].(map[string]any); ok {
+						contentMap = res
+					}
+				}
+			}
+		}
+	} else {
+		contentMap = bodyMap
+	}
+
+	if smMap == nil && pathID != "" && s.store != nil {
+		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "StructureMap", pathID); err == nil {
+			if jb, convErr := s.protoToJSONWithMeta("StructureMap", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); convErr == nil {
+				_ = json.Unmarshal(jb, &smMap)
+			}
+		}
+	}
+
+	if smMap == nil && sourceURL != "" && s.store != nil {
+		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "StructureMap", Count: 50}); err == nil {
+			for _, m := range sr.Matches {
+				if jb, convErr := s.protoToJSONWithMeta("StructureMap", m.ResourceProto, m.ResVersion, m.LastUpdated); convErr == nil {
+					var cand map[string]any
+					if json.Unmarshal(jb, &cand) == nil {
+						if u, _ := cand["url"].(string); strings.EqualFold(u, sourceURL) || strings.EqualFold(m.ResID, cleanID(sourceURL)) {
+							smMap = cand
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if contentMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "StructureMap/$transform requires a 'content' source resource")
+		return
+	}
+	if smMap == nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", "StructureMap not found; provide an inline StructureMap, stored StructureMap/{id}, or ?source= canonical URL")
+		return
+	}
+
+	transformed := executeStructureMapRules(smMap, contentMap)
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(transformed)
+}
+
+func executeStructureMapRules(smMap, contentMap map[string]any) map[string]any {
+	targetType := ""
+	if structs, ok := smMap["structure"].([]any); ok {
+		for _, rawS := range structs {
+			if stMap, ok := rawS.(map[string]any); ok {
+				mode, _ := stMap["mode"].(string)
+				if mode == "target" {
+					if alias, _ := stMap["alias"].(string); alias != "" {
+						targetType = alias
+					} else if u, _ := stMap["url"].(string); u != "" {
+						if idx := strings.LastIndexByte(u, '/'); idx >= 0 {
+							targetType = u[idx+1:]
+						} else {
+							targetType = u
+						}
+					}
+				}
+			}
+		}
+	}
+	if targetType == "" {
+		if rt, _ := contentMap["resourceType"].(string); rt != "" {
+			targetType = rt
+		} else {
+			targetType = "Basic"
+		}
+	}
+
+	out := map[string]any{
+		"resourceType": targetType,
+	}
+	if srcID, _ := contentMap["id"].(string); srcID != "" {
+		out["id"] = "transformed-" + srcID
+	}
+
+	groups, _ := smMap["group"].([]any)
+	for _, rawG := range groups {
+		gm, ok := rawG.(map[string]any)
+		if !ok {
+			continue
+		}
+		rules, _ := gm["rule"].([]any)
+		for _, rawR := range rules {
+			rm, ok := rawR.(map[string]any)
+			if !ok {
+				continue
+			}
+			var extractedVal any
+			hasSourceVal := false
+			if sources, ok := rm["source"].([]any); ok && len(sources) > 0 {
+				if src0, ok := sources[0].(map[string]any); ok {
+					if elem, _ := src0["element"].(string); elem != "" {
+						if v, exists := contentMap[elem]; exists {
+							extractedVal = v
+							hasSourceVal = true
+						}
+					}
+					if !hasSourceVal {
+						for _, defKey := range []string{"defaultValueString", "defaultValueCode", "defaultValueBoolean"} {
+							if dv, ok := src0[defKey]; ok {
+								extractedVal = dv
+								hasSourceVal = true
+								break
+							}
+						}
+					}
+				}
+			}
+
+			targets, _ := rm["target"].([]any)
+			for _, rawT := range targets {
+				tm, ok := rawT.(map[string]any)
+				if !ok {
+					continue
+				}
+				tgtElem, _ := tm["element"].(string)
+				transform, _ := tm["transform"].(string)
+
+				if transform == "create" {
+					if tParams, ok := tm["parameter"].([]any); ok && len(tParams) > 0 {
+						if pm0, ok := tParams[0].(map[string]any); ok {
+							if vs, _ := pm0["valueString"].(string); vs != "" && tgtElem == "" {
+								out["resourceType"] = vs
+							}
+						}
+					}
+					continue
+				}
+
+				if tgtElem == "" {
+					continue
+				}
+
+				// Check if target has explicit constant parameter override
+				var paramVal any
+				if tParams, ok := tm["parameter"].([]any); ok && len(tParams) > 0 {
+					if pm0, ok := tParams[0].(map[string]any); ok {
+						for _, pk := range []string{"valueString", "valueBoolean", "valueInteger", "valueDecimal", "valueId"} {
+							if pv, exists := pm0[pk]; exists && pk != "valueId" {
+								paramVal = pv
+								break
+							}
+						}
+					}
+				}
+
+				if paramVal != nil {
+					out[tgtElem] = paramVal
+				} else if hasSourceVal {
+					out[tgtElem] = extractedVal
+				}
+			}
+		}
+	}
+
+	return out
+}
+
+// =============================================================================
+// HL7 FHIR R4 NamingSystem/$preferred-id (Wave 19)
+// =============================================================================
+
+type namingSystemEntry struct {
+	name         string
+	uri          string
+	oid          string
+	v2csmnemonic string
+}
+
+var builtinNamingSystems = []namingSystemEntry{
+	{name: "LOINC", uri: "http://loinc.org", oid: "2.16.840.1.113883.6.1", v2csmnemonic: "LN"},
+	{name: "SNOMED-CT", uri: "http://snomed.info/sct", oid: "2.16.840.1.113883.6.96", v2csmnemonic: "SCT"},
+	{name: "RxNorm", uri: "http://www.nlm.nih.gov/research/umls/rxnorm", oid: "2.16.840.1.113883.6.88", v2csmnemonic: "RXNORM"},
+	{name: "UCUM", uri: "http://unitsofmeasure.org", oid: "2.16.840.1.113883.6.8", v2csmnemonic: "UCUM"},
+	{name: "ICD-10-CM", uri: "http://hl7.org/fhir/sid/icd-10-cm", oid: "2.16.840.1.113883.6.90", v2csmnemonic: "I10C"},
+	{name: "CPT", uri: "http://www.ama-assn.org/go/cpt", oid: "2.16.840.1.113883.6.12", v2csmnemonic: "C4"},
+	{name: "CVX", uri: "http://hl7.org/fhir/sid/cvx", oid: "2.16.840.1.113883.12.292", v2csmnemonic: "CVX"},
+	{name: "US-NPI", uri: "http://hl7.org/fhir/sid/us-npi", oid: "2.16.840.1.113883.4.6"},
+	{name: "US-SSN", uri: "http://hl7.org/fhir/sid/us-ssn", oid: "2.16.840.1.113883.4.1"},
+}
+
+func (s *Server) handleNamingSystemPreferredID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "NamingSystem/$preferred-id only supports GET and POST")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	idParam := strings.TrimSpace(r.URL.Query().Get("id"))
+	typeParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type")))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&bodyMap); err == nil {
+			if bodyMap["resourceType"] == "Parameters" {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "id":
+							if idParam == "" {
+								idParam = extractParamString(pm)
+							}
+						case "type":
+							if typeParam == "" {
+								typeParam = strings.ToLower(extractParamString(pm))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if idParam == "" || typeParam == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "NamingSystem/$preferred-id requires both 'id' and 'type' (oid, uri, uuid, v2csmnemonic) parameters")
+		return
+	}
+
+	cleanInput := strings.TrimPrefix(idParam, "urn:oid:")
+	var resolved string
+
+	// 1. Check tenant-stored NamingSystem resources first
+	if s.store != nil {
+		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "NamingSystem", Count: 50}); err == nil {
+			for _, m := range sr.Matches {
+				jb, convErr := s.protoToJSONWithMeta("NamingSystem", m.ResourceProto, m.ResVersion, m.LastUpdated)
+				if convErr != nil {
+					continue
+				}
+				var nsMap map[string]any
+				if json.Unmarshal(jb, &nsMap) != nil {
+					continue
+				}
+				uids, _ := nsMap["uniqueId"].([]any)
+				matched := false
+				for _, rawU := range uids {
+					if um, ok := rawU.(map[string]any); ok {
+						v, _ := um["value"].(string)
+						if strings.EqualFold(v, idParam) || strings.EqualFold(strings.TrimPrefix(v, "urn:oid:"), cleanInput) {
+							matched = true
+							break
+						}
+					}
+				}
+				if matched {
+					for _, rawU := range uids {
+						if um, ok := rawU.(map[string]any); ok {
+							ut, _ := um["type"].(string)
+							uv, _ := um["value"].(string)
+							pref, _ := um["preferred"].(bool)
+							if strings.EqualFold(ut, typeParam) && uv != "" {
+								resolved = uv
+								if pref {
+									break
+								}
+							}
+						}
+					}
+				}
+				if resolved != "" {
+					break
+				}
+			}
+		}
+	}
+
+	// 2. Fallback to built-in HL7/US Core NamingSystem registry
+	if resolved == "" {
+		for _, ns := range builtinNamingSystems {
+			if strings.EqualFold(ns.uri, idParam) || strings.EqualFold(ns.oid, cleanInput) || strings.EqualFold(ns.v2csmnemonic, idParam) || strings.EqualFold(ns.name, idParam) {
+				switch typeParam {
+				case "uri":
+					resolved = ns.uri
+				case "oid":
+					resolved = ns.oid
+				case "v2csmnemonic":
+					resolved = ns.v2csmnemonic
+				}
+				break
+			}
+		}
+	}
+
+	if resolved == "" {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("No preferred %q identifier found for NamingSystem %q", typeParam, idParam))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{
+				"name":        "result",
+				"valueString": resolved,
+			},
+		},
+	})
+}

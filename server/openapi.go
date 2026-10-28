@@ -2268,6 +2268,63 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/$process-message": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"MessageHeader"},
+				"summary":     "HL7 FHIR R4 Messaging Framework $process-message ingesting a message Bundle (MessageHeader + focus resources) and returning an acknowledgment Bundle",
+				"operationId": "processMessagePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Acknowledgment Bundle (type: message) with response MessageHeader (code: ok)"},
+					"202": map[string]any{"description": "Async message accepted"},
+				},
+			},
+		},
+		"/MessageHeader/$process-message": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"MessageHeader"},
+				"summary":     "HL7 FHIR R4 MessageHeader/$process-message operation",
+				"operationId": "messageHeaderProcessMessagePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Acknowledgment Bundle (type: message) with response MessageHeader (code: ok)"},
+					"202": map[string]any{"description": "Async message accepted"},
+				},
+			},
+		},
+		"/StructureMap/$transform": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"StructureMap"},
+				"summary":     "HL7 FHIR R4 StructureMap/$transform executing declarative StructureMap group/rule transformations on a source FHIR resource",
+				"operationId": "structureMapTransformPost",
+				"parameters": []map[string]any{
+					{"name": "source", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Transformed target FHIR R4 resource"},
+				},
+			},
+		},
+		"/NamingSystem/$preferred-id": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology"},
+				"summary":     "HL7 FHIR R4 NamingSystem/$preferred-id translating between uri, oid, uuid, and v2csmnemonic identifier representations",
+				"operationId": "namingSystemPreferredIdGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "type", "in": "query", "required": true, "schema": map[string]any{"type": "string", "enum": []string{"oid", "uri", "uuid", "v2csmnemonic"}}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing resolved preferred identifier string"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology"},
+				"summary":     "HL7 FHIR R4 NamingSystem/$preferred-id (POST Parameters)",
+				"operationId": "namingSystemPreferredIdPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing resolved preferred identifier string"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

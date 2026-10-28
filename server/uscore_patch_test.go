@@ -3689,3 +3689,174 @@ func TestAppointmentSchedulingCapabilityImplementsAndSnapshotWave18(t *testing.T
 		t.Fatalf("POST /StructureDefinition/$snapshot expected synthesized snapshot containing Observation.status and differential override Observation.effectiveDateTime, got %d: %s", snapRec.Code, snapRec.Body.String())
 	}
 }
+
+func TestProcessMessageStructureMapTransformAndPreferredIDWave19(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave19-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. POST /$process-message with a FHIR message Bundle (MessageHeader + Patient + Observation)
+	msgBundle := `{
+		"resourceType": "Bundle",
+		"id": "msg-bundle-w19-1",
+		"type": "message",
+		"entry": [
+			{
+				"fullUrl": "MessageHeader/mh-w19-1",
+				"resource": {
+					"resourceType": "MessageHeader",
+					"id": "mh-w19-1",
+					"eventCoding": {
+						"system": "http://terminology.hl7.org/CodeSystem/v2-0003",
+						"code": "ORU_R01",
+						"display": "Unsolicited observational report"
+					},
+					"source": {
+						"name": "Lab Instrument Gateway",
+						"endpoint": "https://lab.example.org/fhir"
+					},
+					"focus": [
+						{"reference": "Patient/pat-w19-1"},
+						{"reference": "Observation/obs-w19-1"}
+					]
+				}
+			},
+			{
+				"fullUrl": "Patient/pat-w19-1",
+				"resource": {
+					"resourceType": "Patient",
+					"id": "pat-w19-1",
+					"active": true,
+					"name": [{"family": "Mercer", "given": ["Diana"]}],
+					"gender": "female",
+					"birthDate": "1991-12-04"
+				}
+			},
+			{
+				"fullUrl": "Observation/obs-w19-1",
+				"resource": {
+					"resourceType": "Observation",
+					"id": "obs-w19-1",
+					"status": "final",
+					"code": {"coding": [{"system": "http://loinc.org", "code": "4548-4", "display": "Hemoglobin A1c"}]},
+					"subject": {"reference": "Patient/pat-w19-1"},
+					"valueQuantity": {"value": 5.8, "unit": "%", "system": "http://unitsofmeasure.org", "code": "%"}
+				}
+			}
+		]
+	}`
+	pmReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/$process-message", strings.NewReader(msgBundle))
+	pmReq.Header.Set("Content-Type", "application/fhir+json")
+	pmRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pmRec, pmReq)
+	if pmRec.Code != http.StatusOK {
+		t.Fatalf("POST /$process-message got %d: %s", pmRec.Code, pmRec.Body.String())
+	}
+	pmBody := pmRec.Body.String()
+	for _, want := range []string{`"type":"message"`, `"ack-mh-w19-1"`, `"identifier":"mh-w19-1"`, `"code":"ok"`, `"Patient/pat-w19-1"`, `"Observation/obs-w19-1"`} {
+		if !strings.Contains(pmBody, want) {
+			t.Errorf("expected $process-message acknowledgment Bundle to contain %s, got %s", want, pmBody)
+		}
+	}
+
+	// Verify persisted Observation/obs-w19-1 is readable in the store
+	obsGetReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Observation/obs-w19-1", nil)
+	obsGetRec := httptest.NewRecorder()
+	pgH.ServeHTTP(obsGetRec, obsGetReq)
+	if obsGetRec.Code != http.StatusOK || !strings.Contains(obsGetRec.Body.String(), `"4548-4"`) {
+		t.Fatalf("expected persisted Observation/obs-w19-1 after $process-message, got %d: %s", obsGetRec.Code, obsGetRec.Body.String())
+	}
+
+	// 2. POST /StructureMap/$transform with inline StructureMap rules mapping Patient -> RelatedPerson
+	transformBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{
+				"name": "source",
+				"resource": {
+					"resourceType": "StructureMap",
+					"id": "smap-pat-to-rel",
+					"url": "http://example.org/fhir/StructureMap/pat-to-rel",
+					"name": "PatientToRelatedPerson",
+					"status": "active",
+					"structure": [
+						{"url": "http://hl7.org/fhir/StructureDefinition/Patient", "mode": "source", "alias": "Patient"},
+						{"url": "http://hl7.org/fhir/StructureDefinition/RelatedPerson", "mode": "target", "alias": "RelatedPerson"}
+					],
+					"group": [
+						{
+							"name": "main",
+							"typeMode": "none",
+							"input": [
+								{"name": "src", "type": "Patient", "mode": "source"},
+								{"name": "tgt", "type": "RelatedPerson", "mode": "target"}
+							],
+							"rule": [
+								{
+									"name": "copyName",
+									"source": [{"context": "src", "element": "name"}],
+									"target": [{"context": "tgt", "element": "name", "transform": "copy"}]
+								},
+								{
+									"name": "copyGender",
+									"source": [{"context": "src", "element": "gender"}],
+									"target": [{"context": "tgt", "element": "gender", "transform": "copy"}]
+								},
+								{
+									"name": "copyBirthDate",
+									"source": [{"context": "src", "element": "birthDate"}],
+									"target": [{"context": "tgt", "element": "birthDate", "transform": "copy"}]
+								}
+							]
+						}
+					]
+				}
+			},
+			{
+				"name": "content",
+				"resource": {
+					"resourceType": "Patient",
+					"id": "pat-w19-1",
+					"name": [{"family": "Mercer", "given": ["Diana"]}],
+					"gender": "female",
+					"birthDate": "1991-12-04"
+				}
+			}
+		]
+	}`
+	trReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/StructureMap/$transform", strings.NewReader(transformBody))
+	trReq.Header.Set("Content-Type", "application/fhir+json")
+	trRec := httptest.NewRecorder()
+	pgH.ServeHTTP(trRec, trReq)
+	if trRec.Code != http.StatusOK || !strings.Contains(trRec.Body.String(), `"resourceType":"RelatedPerson"`) || !strings.Contains(trRec.Body.String(), `"Mercer"`) || !strings.Contains(trRec.Body.String(), `"1991-12-04"`) {
+		t.Fatalf("POST /StructureMap/$transform expected RelatedPerson with Mercer and 1991-12-04, got %d: %s", trRec.Code, trRec.Body.String())
+	}
+
+	// 3. GET /NamingSystem/$preferred-id (both OID->URI and URI->OID)
+	nsReq1 := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/NamingSystem/$preferred-id?id=2.16.840.1.113883.6.96&type=uri", nil)
+	nsRec1 := httptest.NewRecorder()
+	pgH.ServeHTTP(nsRec1, nsReq1)
+	if nsRec1.Code != http.StatusOK || !strings.Contains(nsRec1.Body.String(), `"http://snomed.info/sct"`) {
+		t.Fatalf("GET /NamingSystem/$preferred-id OID->URI expected http://snomed.info/sct, got %d: %s", nsRec1.Code, nsRec1.Body.String())
+	}
+
+	nsReq2 := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/NamingSystem/$preferred-id?id=http://loinc.org&type=oid", nil)
+	nsRec2 := httptest.NewRecorder()
+	pgH.ServeHTTP(nsRec2, nsReq2)
+	if nsRec2.Code != http.StatusOK || !strings.Contains(nsRec2.Body.String(), `"2.16.840.1.113883.6.1"`) {
+		t.Fatalf("GET /NamingSystem/$preferred-id URI->OID expected 2.16.840.1.113883.6.1, got %d: %s", nsRec2.Code, nsRec2.Body.String())
+	}
+}

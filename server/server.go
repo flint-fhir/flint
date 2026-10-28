@@ -264,6 +264,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$data-requirements", s.handleDataRequirements)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$fhirpath", s.handleFHIRPath)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$fhirpath", s.handleFHIRPath)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$process-message", s.handleProcessMessage)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$certify", s.handleCertify)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$certify", s.handleCertify)
 
@@ -481,8 +482,29 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleStructureDefinitionSnapshot(w, r)
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "MessageHeader") && parts[4] == "$process-message" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleProcessMessage(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "StructureMap") && parts[4] == "$transform" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleStructureMapTransform(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "NamingSystem") && parts[4] == "$preferred-id" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleNamingSystemPreferredID(w, r)
+					return
+				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "StructureMap") && parts[5] == "$transform" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleStructureMapTransform(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Appointment") && parts[5] == "$hold" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -3801,6 +3823,27 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"definition": "http://hl7.org/fhir/OperationDefinition/StructureDefinition-snapshot",
 				},
 			}
+		case "MessageHeader":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "process-message",
+					"definition": "http://hl7.org/fhir/OperationDefinition/MessageHeader-process-message",
+				},
+			}
+		case "StructureMap":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "transform",
+					"definition": "http://hl7.org/fhir/OperationDefinition/StructureMap-transform",
+				},
+			}
+		case "NamingSystem":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "preferred-id",
+					"definition": "http://hl7.org/fhir/OperationDefinition/NamingSystem-preferred-id",
+				},
+			}
 		}
 		resEntries = append(resEntries, entry)
 	}
@@ -4048,6 +4091,18 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "snapshot",
 						"definition": "http://hl7.org/fhir/OperationDefinition/StructureDefinition-snapshot",
+					},
+					{
+						"name":       "process-message",
+						"definition": "http://hl7.org/fhir/OperationDefinition/MessageHeader-process-message",
+					},
+					{
+						"name":       "transform",
+						"definition": "http://hl7.org/fhir/OperationDefinition/StructureMap-transform",
+					},
+					{
+						"name":       "preferred-id",
+						"definition": "http://hl7.org/fhir/OperationDefinition/NamingSystem-preferred-id",
 					},
 				},
 			},

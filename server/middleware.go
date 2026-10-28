@@ -1107,7 +1107,7 @@ func isQuestionnaireExtractOp(parts []string) bool {
 
 func isPlanApplyOp(parts []string) bool {
 	if len(parts) == 4 {
-		return parts[3] == "$closure" || parts[3] == "$data-requirements" || parts[3] == "$fhirpath"
+		return parts[3] == "$closure" || parts[3] == "$data-requirements" || parts[3] == "$fhirpath" || parts[3] == "$process-message"
 	}
 	if len(parts) == 5 {
 		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition")) && parts[4] == "$apply" {
@@ -1137,6 +1137,15 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "StructureDefinition") && parts[4] == "$snapshot" {
 			return true
 		}
+		if strings.EqualFold(parts[3], "MessageHeader") && parts[4] == "$process-message" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "StructureMap") && parts[4] == "$transform" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "NamingSystem") && parts[4] == "$preferred-id" {
+			return true
+		}
 		return false
 	}
 	if len(parts) == 6 {
@@ -1156,6 +1165,9 @@ func isPlanApplyOp(parts []string) bool {
 			return true
 		}
 		if strings.EqualFold(parts[3], "StructureDefinition") && parts[5] == "$snapshot" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "StructureMap") && parts[5] == "$transform" {
 			return true
 		}
 		if parts[5] == "$fhirpath" {
