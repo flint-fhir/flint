@@ -265,6 +265,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$fhirpath", s.handleFHIRPath)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$fhirpath", s.handleFHIRPath)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$process-message", s.handleProcessMessage)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$submit-attachment", s.handleCDexSubmitAttachment)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$convert", s.handleResourceConvert)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$convert", s.handleResourceConvert)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$certify", s.handleCertify)
@@ -470,6 +471,22 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleResourceGraph(w, r)
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[4] == "$submit-attachment" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCDexSubmitAttachment(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Library") && parts[4] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleLibraryEvaluate(w, r)
+					return
+				}
+				if (strings.EqualFold(parts[3], "Patient") || strings.EqualFold(parts[3], "Encounter") || strings.EqualFold(parts[3], "Group")) && parts[4] == "$everything" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					s.handlePatientEverything(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "PlanDefinition") && parts[4] == "$apply" {
 					r.SetPathValue("tenant", parts[2])
 					s.handlePlanDefinitionApply(w, r)
@@ -659,6 +676,18 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleCoverageEligibilitySubmit(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[5] == "$submit-attachment" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCDexSubmitAttachment(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Library") && parts[5] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleLibraryEvaluate(w, r)
 					return
 				}
 				if parts[5] == "$fhirpath" && !strings.HasPrefix(parts[3], "$") {
@@ -2150,8 +2179,16 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 			fmt.Sprintf("$everything is only supported on Patient, Encounter, and Group (got %s)", resType))
 		return
 	}
-	resID := r.PathValue("id")
+	resID := strings.TrimSpace(r.PathValue("id"))
 	q := mergedSearchQuery(r)
+	if resID == "" {
+		for _, k := range []string{"id", "_id", "encounter", "patient", "subject", "group"} {
+			if v := strings.TrimSpace(q.Get(k)); v != "" {
+				resID = cleanID(v)
+				break
+			}
+		}
+	}
 
 	typeRaw := strings.TrimSpace(q.Get("_type"))
 	sinceRaw := strings.TrimSpace(q.Get("_since"))
@@ -2220,6 +2257,19 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 							}
 						}
 						switch name {
+						case "id", "_id", "encounter", "patient", "subject", "group":
+							if val == "" {
+								if sVal, ok := pm["valueId"].(string); ok && strings.TrimSpace(sVal) != "" {
+									val = strings.TrimSpace(sVal)
+								} else if refMap, ok := pm["valueReference"].(map[string]any); ok {
+									if refStr, _ := refMap["reference"].(string); strings.TrimSpace(refStr) != "" {
+										val = strings.TrimSpace(refStr)
+									}
+								}
+							}
+							if val != "" && resID == "" {
+								resID = cleanID(val)
+							}
 						case "_type":
 							if val != "" && typeRaw == "" {
 								typeRaw = val
@@ -2315,6 +2365,14 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 	}
 
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
+	if resID == "" && hasSecCtx && secCtx != nil && strings.EqualFold(resType, "Patient") && secCtx.GetPatientId() != "" {
+		resID = cleanID(secCtx.GetPatientId())
+	}
+	if resID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required",
+			fmt.Sprintf("%s/$everything requires a resource {id} in the path or an 'id' parameter", resType))
+		return
+	}
 	if hasSecCtx {
 		if strings.EqualFold(resType, "Group") {
 			if auth.IsPatientRestricted(secCtx) {
@@ -2325,6 +2383,18 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 			if !auth.Allows(secCtx, "Group", auth.ActionRead) && !auth.Allows(secCtx, "Group", auth.ActionSearch) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 					"insufficient scope for Group/$everything")
+				return
+			}
+		} else {
+			if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope for %s/$everything", resType))
+				return
+			}
+			if auth.IsPatientRestricted(secCtx) && strings.EqualFold(resType, "Patient") && cleanID(secCtx.GetPatientId()) != cleanID(resID) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("patient-scoped token (%s) cannot invoke Patient/$everything for Patient/%s",
+						secCtx.GetPatientId(), resID))
 				return
 			}
 		}
@@ -3809,6 +3879,24 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "data-requirements",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Library-data-requirements",
 				},
+				{
+					"name":       "evaluate",
+					"definition": "http://hl7.org/fhir/uv/cpg/OperationDefinition/cpg-library-evaluate",
+				},
+			}
+		case "Encounter":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "everything",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Encounter-everything",
+				},
+			}
+		case "Task":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "submit-attachment",
+					"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/submit-attachment",
+				},
 			}
 		case "ValueSet":
 			entry["operation"] = []map[string]string{
@@ -4241,6 +4329,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "convert",
 						"definition": "http://hl7.org/fhir/OperationDefinition/Resource-convert",
+					},
+					{
+						"name":       "submit-attachment",
+						"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/submit-attachment",
+					},
+					{
+						"name":       "evaluate",
+						"definition": "http://hl7.org/fhir/uv/cpg/OperationDefinition/cpg-library-evaluate",
 					},
 				},
 			},

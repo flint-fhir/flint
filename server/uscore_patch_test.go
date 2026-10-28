@@ -4279,3 +4279,163 @@ func TestCoverageEligibilityDataReqAndGraphDefWave22(t *testing.T) {
 		t.Fatalf("POST /GraphDefinition/$graph expected Bundle with Condition/cond-w22-1, got %d: %s", gdPostRec.Code, gdPostRec.Body.String())
 	}
 }
+
+func TestCDexSubmitAttachmentLibraryEvaluateAndEncounterEverythingWave23(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave23-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// Seed Patient, Encounter, Condition, Blood Pressure Observation, and CDex Task
+	patJSON := `{
+		"resourceType": "Patient",
+		"id": "pat-w23-1",
+		"active": true,
+		"name": [{"family": "Hopper", "given": ["Grace"]}],
+		"gender": "female",
+		"birthDate": "1975-12-09"
+	}`
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w23-1", patJSON},
+		{"/Encounter/enc-w23-1", `{
+			"resourceType": "Encounter",
+			"id": "enc-w23-1",
+			"status": "finished",
+			"class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "AMB"},
+			"subject": {"reference": "Patient/pat-w23-1"}
+		}`},
+		{"/Condition/cond-w23-1", `{
+			"resourceType": "Condition",
+			"id": "cond-w23-1",
+			"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+			"code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}]},
+			"subject": {"reference": "Patient/pat-w23-1"},
+			"encounter": {"reference": "Encounter/enc-w23-1"}
+		}`},
+		{"/Observation/obs-w23-1", `{
+			"resourceType": "Observation",
+			"id": "obs-w23-1",
+			"status": "final",
+			"code": {"coding": [{"system": "http://loinc.org", "code": "85354-9"}]},
+			"subject": {"reference": "Patient/pat-w23-1"},
+			"encounter": {"reference": "Encounter/enc-w23-1"},
+			"component": [
+				{
+					"code": {"coding": [{"system": "http://loinc.org", "code": "8480-6"}]},
+					"valueQuantity": {"value": 124.0, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+				},
+				{
+					"code": {"coding": [{"system": "http://loinc.org", "code": "8462-4"}]},
+					"valueQuantity": {"value": 78.0, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+				}
+			]
+		}`},
+		{"/Task/task-cdex-w23", `{
+			"resourceType": "Task",
+			"id": "task-cdex-w23",
+			"status": "in-progress",
+			"intent": "order",
+			"identifier": [{"system": "http://payer.example.org/cdex-tracking", "value": "TRACK-W23-001"}],
+			"for": {"reference": "Patient/pat-w23-1"}
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. POST /$submit-attachment (CDex attachment submission + Task completion)
+	cdexBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "TrackingId", "valueString": "TRACK-W23-001"},
+			{"name": "AttachTo", "valueCode": "claim"},
+			{"name": "MemberId", "valueString": "pat-w23-1"},
+			{
+				"name": "Attachment",
+				"part": [
+					{"name": "LineItem", "valueString": "1"},
+					{
+						"name": "Code",
+						"valueCodeableConcept": {
+							"coding": [{"system": "http://loinc.org", "code": "11506-3", "display": "Progress note"}]
+						}
+					},
+					{
+						"name": "Content",
+						"resource": {
+							"resourceType": "DocumentReference",
+							"id": "doc-cdex-w23-1",
+							"status": "current",
+							"content": [
+								{
+									"attachment": {
+										"contentType": "text/plain",
+										"url": "https://flint.example.org/cdex/doc-cdex-w23-1.txt"
+									}
+								}
+							]
+						}
+					}
+				]
+			}
+		]
+	}`
+	cdexReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/$submit-attachment", strings.NewReader(cdexBody))
+	cdexReq.Header.Set("Content-Type", "application/fhir+json")
+	cdexRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cdexRec, cdexReq)
+	if cdexRec.Code != http.StatusOK || !strings.Contains(cdexRec.Body.String(), `"DocumentReference/doc-cdex-w23-1"`) {
+		t.Fatalf("POST /$submit-attachment expected OperationOutcome with DocumentReference/doc-cdex-w23-1, got %d: %s", cdexRec.Code, cdexRec.Body.String())
+	}
+
+	// Verify Task/task-cdex-w23 transitioned to completed with output reference
+	getTaskReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Task/task-cdex-w23", nil)
+	getTaskRec := httptest.NewRecorder()
+	pgH.ServeHTTP(getTaskRec, getTaskReq)
+	if getTaskRec.Code != http.StatusOK ||
+		!strings.Contains(getTaskRec.Body.String(), `"status":"completed"`) ||
+		!strings.Contains(getTaskRec.Body.String(), `"DocumentReference/doc-cdex-w23-1"`) {
+		t.Fatalf("GET /Task/task-cdex-w23 expected status:completed and DocumentReference/doc-cdex-w23-1 output, got %d: %s", getTaskRec.Code, getTaskRec.Body.String())
+	}
+
+	// 2. GET /Library/CMS165-Logic/$evaluate?subject=Patient/pat-w23-1
+	evalReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Library/CMS165-Logic/$evaluate?subject=Patient/pat-w23-1", nil)
+	evalRec := httptest.NewRecorder()
+	pgH.ServeHTTP(evalRec, evalReq)
+	if evalRec.Code != http.StatusOK ||
+		!strings.Contains(evalRec.Body.String(), `"InNumerator"`) ||
+		!strings.Contains(evalRec.Body.String(), `"LatestSystolicBP"`) ||
+		!strings.Contains(evalRec.Body.String(), `124`) {
+		t.Fatalf("GET /Library/CMS165-Logic/$evaluate expected InNumerator and LatestSystolicBP=124, got %d: %s", evalRec.Code, evalRec.Body.String())
+	}
+
+	// 3. GET /Encounter/$everything?id=enc-w23-1
+	encEvReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Encounter/$everything?id=enc-w23-1", nil)
+	encEvRec := httptest.NewRecorder()
+	pgH.ServeHTTP(encEvRec, encEvReq)
+	if encEvRec.Code != http.StatusOK ||
+		!strings.Contains(encEvRec.Body.String(), `"Encounter/enc-w23-1"`) ||
+		!strings.Contains(encEvRec.Body.String(), `"Observation/obs-w23-1"`) {
+		t.Fatalf("GET /Encounter/$everything?id=enc-w23-1 expected Bundle with Encounter/enc-w23-1 and Observation/obs-w23-1, got %d: %s", encEvRec.Code, encEvRec.Body.String())
+	}
+}
