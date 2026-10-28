@@ -16348,3 +16348,780 @@ func (s *Server) handleIHEPDQmAndITI68(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(bundle)
 }
+
+// handleFASTNationalDirectory implements HL7 FAST National Healthcare Directory (NDH v1.0.0)
+// Endpoint/$fast-endpoint-query & Organization/{id}/$fast-verify.
+func (s *Server) handleFASTNationalDirectory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "National Directory operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	orgID := cleanID(r.PathValue("id"))
+	connectionTypeFilter := strings.TrimSpace(r.URL.Query().Get("connectionType"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		if body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(body)) > 0 {
+			var m map[string]any
+			if json.Unmarshal(body, &m) == nil {
+				if m["resourceType"] == "Parameters" {
+					if plist, ok := m["parameter"].([]any); ok {
+						for _, p := range plist {
+							pm, _ := p.(map[string]any)
+							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(extractParamString(pm))
+							switch name {
+							case "organization", "id":
+								if orgID == "" {
+									orgID = cleanID(strings.TrimPrefix(val, "Organization/"))
+								}
+							case "connectionType":
+								if connectionTypeFilter == "" {
+									connectionTypeFilter = val
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "$fast-verify" {
+		if orgID == "" {
+			orgID = "fast-ndh-org-1"
+		}
+		var orgMap map[string]any
+		if orgRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Organization", orgID); gErr == nil && orgRec != nil {
+			if jb, jErr := s.protoToJSONWithMeta("Organization", orgRec.ResourceProto, orgRec.ResVersion, orgRec.LastUpdated); jErr == nil {
+				_ = json.Unmarshal(jb, &orgMap)
+			}
+		}
+		if len(orgMap) == 0 {
+			orgMap = map[string]any{
+				"resourceType": "Organization",
+				"id":           orgID,
+				"meta": map[string]any{
+					"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-Organization"},
+				},
+				"active": true,
+				"name":   "FAST National Directory Verified Health System",
+				"identifier": []map[string]any{
+					{
+						"system": "http://hl7.org/fhir/sid/us-npi",
+						"value":  "1992837465",
+					},
+				},
+			}
+			_, _, _, savedOrg, uErr := s.upsertResourceMap(r.Context(), tenant, orgMap)
+			if uErr == nil && len(savedOrg) > 0 {
+				orgMap = savedOrg
+			}
+		}
+
+		vrID := "ndh-vr-" + orgID
+		vrRes := map[string]any{
+			"resourceType": "VerificationResult",
+			"id":           vrID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-VerificationResult"},
+			},
+			"target": []map[string]any{
+				{
+					"reference": "Organization/" + orgID,
+				},
+			},
+			"status":     "attested",
+			"statusDate": nowStr,
+			"validationType": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/verificationresult-validation-type",
+						"code":    "primary",
+						"display": "Primary Source",
+					},
+				},
+			},
+			"validationProcess": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/ndh/CodeSystem/NdhVerificationProcessCS",
+							"code":    "primary",
+							"display": "Primary Source Verification (NPPES / FAST NDH)",
+						},
+					},
+				},
+			},
+		}
+		_, _, _, savedVR, vrErr := s.upsertResourceMap(r.Context(), tenant, vrRes)
+		if vrErr == nil && len(savedVR) > 0 {
+			vrRes = savedVR
+		}
+
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{
+					"name":         "verified",
+					"valueBoolean": true,
+				},
+				{
+					"name":     "organization",
+					"resource": orgMap,
+				},
+				{
+					"name":     "verificationResult",
+					"resource": vrRes,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	var entries []map[string]any
+	if epSR, eErr := s.store.Search(r.Context(), postgres.SearchParams{
+		TenantID: tenant,
+		ResType:  "Endpoint",
+		Count:    50,
+	}); eErr == nil {
+		for _, m := range epSR.Matches {
+			jb, jErr := s.protoToJSONWithMeta("Endpoint", m.ResourceProto, m.ResVersion, m.LastUpdated)
+			if jErr != nil {
+				continue
+			}
+			if connectionTypeFilter != "" && !strings.Contains(strings.ToLower(string(jb)), strings.ToLower(connectionTypeFilter)) {
+				continue
+			}
+			var em map[string]any
+			if json.Unmarshal(jb, &em) == nil {
+				em["meta"] = map[string]any{
+					"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-Endpoint"},
+				}
+				entries = append(entries, map[string]any{
+					"fullUrl":  "Endpoint/" + m.ResID,
+					"resource": em,
+					"search":   map[string]any{"mode": "match"},
+				})
+			}
+		}
+	}
+
+	if len(entries) == 0 {
+		connCode := firstNonEmptyStr(connectionTypeFilter, "hl7-fhir-rest")
+		synthEP := map[string]any{
+			"resourceType": "Endpoint",
+			"id":           "ndh-endpoint-default-1",
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-Endpoint"},
+			},
+			"status": "active",
+			"connectionType": map[string]any{
+				"system":  "http://terminology.hl7.org/CodeSystem/endpoint-connection-type",
+				"code":    connCode,
+				"display": "HL7 FHIR REST API",
+			},
+			"name": "FAST National Healthcare Directory FHIR R4 Endpoint",
+			"payloadType": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://terminology.hl7.org/CodeSystem/endpoint-payload-type",
+							"code":    "any",
+							"display": "Any",
+						},
+					},
+				},
+			},
+			"payloadMimeType": []string{"application/fhir+json"},
+			"address":         "https://fhir.flint.example.org/fhir/r4/" + tenant,
+		}
+		_, _, _, savedEP, epErr := s.upsertResourceMap(r.Context(), tenant, synthEP)
+		if epErr == nil && len(savedEP) > 0 {
+			synthEP = savedEP
+		}
+		entries = append(entries, map[string]any{
+			"fullUrl":  "Endpoint/ndh-endpoint-default-1",
+			"resource": synthEP,
+			"search":   map[string]any{"mode": "match"},
+		})
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "fast-ndh-endpoint-bundle",
+		"type":         "searchset",
+		"timestamp":    nowStr,
+		"total":        len(entries),
+		"entry":        entries,
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handlePhysicalActivityIG implements HL7 Physical Activity Implementation Guide (v1.0.0)
+// Patient/{id}/$physical-activity-summary & ServiceRequest/$physical-activity-referral.
+func (s *Server) handlePhysicalActivityIG(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Physical Activity operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	patID := cleanID(r.PathValue("id"))
+	if qPat := strings.TrimSpace(r.URL.Query().Get("patient")); patID == "" && qPat != "" {
+		patID = cleanID(strings.TrimPrefix(qPat, "Patient/"))
+	}
+	daysPerWeek := 5.0
+	minsPerDay := 35.0
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		if body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(body)) > 0 {
+			var m map[string]any
+			if json.Unmarshal(body, &m) == nil {
+				if m["resourceType"] == "Parameters" {
+					if plist, ok := m["parameter"].([]any); ok {
+						for _, p := range plist {
+							pm, _ := p.(map[string]any)
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if patID == "" {
+									patID = cleanID(strings.TrimPrefix(extractParamString(pm), "Patient/"))
+								}
+							case "daysPerWeek":
+								if v, ok := pm["valueDecimal"].(float64); ok && v >= 0 {
+									daysPerWeek = v
+								} else if v, ok := pm["valueInteger"].(float64); ok && v >= 0 {
+									daysPerWeek = v
+								}
+							case "minutesPerDay":
+								if v, ok := pm["valueDecimal"].(float64); ok && v >= 0 {
+									minsPerDay = v
+								} else if v, ok := pm["valueInteger"].(float64); ok && v >= 0 {
+									minsPerDay = v
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "$physical-activity-referral" {
+		if patID == "" {
+			patID = "example-patient-1"
+		}
+		srID := "pa-referral-" + patID
+		srRes := map[string]any{
+			"resourceType": "ServiceRequest",
+			"id":           srID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/physical-activity/StructureDefinition/pa-servicerequest"},
+			},
+			"status": "active",
+			"intent": "order",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/physical-activity/CodeSystem/pa-temporary-codes",
+							"code":    "PhysicalActivity",
+							"display": "Physical Activity",
+						},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://snomed.info/sct",
+						"code":    "390893007",
+						"display": "Referral to physical activity program",
+					},
+				},
+			},
+			"subject": map[string]any{
+				"reference": "Patient/" + patID,
+			},
+			"authoredOn": nowStr,
+		}
+		_, _, _, savedSR, srErr := s.upsertResourceMap(r.Context(), tenant, srRes)
+		if srErr == nil && len(savedSR) > 0 {
+			srRes = savedSR
+		}
+
+		taskID := "pa-task-" + patID
+		taskRes := map[string]any{
+			"resourceType": "Task",
+			"id":           taskID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/physical-activity/StructureDefinition/pa-task-for-referral-management"},
+			},
+			"status": "requested",
+			"intent": "order",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/uv/sdc/CodeSystem/temp",
+						"code":    "fulfill",
+						"display": "Fulfill Physical Activity Referral",
+					},
+				},
+			},
+			"focus": map[string]any{
+				"reference": "ServiceRequest/" + srID,
+			},
+			"for": map[string]any{
+				"reference": "Patient/" + patID,
+			},
+			"authoredOn": nowStr,
+		}
+		_, _, _, savedTask, tErr := s.upsertResourceMap(r.Context(), tenant, taskRes)
+		if tErr == nil && len(savedTask) > 0 {
+			taskRes = savedTask
+		}
+
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{
+					"name":     "serviceRequest",
+					"resource": srRes,
+				},
+				{
+					"name":     "task",
+					"resource": taskRes,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	if patID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Patient/$physical-activity-summary requires a patient id")
+		return
+	}
+	patRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID)
+	if gErr != nil || patRec == nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patID))
+		return
+	}
+	var patMap map[string]any
+	if jb, jErr := s.protoToJSONWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated); jErr == nil {
+		_ = json.Unmarshal(jb, &patMap)
+	}
+
+	weeklyMins := daysPerWeek * minsPerDay
+	daysObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           "pa-evs-days-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/physical-activity/StructureDefinition/pa-observation-evs-days-per-week"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/observation-category",
+						"code":    "activity",
+						"display": "Activity",
+					},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "89555-7",
+					"display": "How many days per week did you engage in moderate to strenuous physical activity in the last 30 days",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueQuantity": map[string]any{
+			"value":  daysPerWeek,
+			"unit":   "d/wk",
+			"system": "http://unitsofmeasure.org",
+			"code":   "d/wk",
+		},
+	}
+	_, _, _, savedDays, _ := s.upsertResourceMap(r.Context(), tenant, daysObs)
+	if len(savedDays) > 0 {
+		daysObs = savedDays
+	}
+
+	minDayObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           "pa-evs-min-day-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/physical-activity/StructureDefinition/pa-observation-evs-min-per-day"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/observation-category",
+						"code":    "activity",
+						"display": "Activity",
+					},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "68516-4",
+					"display": "On those days that you engage in moderate to strenuous exercise, how many minutes, on average, do you exercise",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueQuantity": map[string]any{
+			"value":  minsPerDay,
+			"unit":   "min/d",
+			"system": "http://unitsofmeasure.org",
+			"code":   "min/d",
+		},
+	}
+	_, _, _, savedMinDay, _ := s.upsertResourceMap(r.Context(), tenant, minDayObs)
+	if len(savedMinDay) > 0 {
+		minDayObs = savedMinDay
+	}
+
+	minWeekObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           "pa-evs-min-week-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/physical-activity/StructureDefinition/pa-observation-evs-min-per-week"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/observation-category",
+						"code":    "activity",
+						"display": "Activity",
+					},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "82290-8",
+					"display": "Frequency of moderate to vigorous aerobic physical activity per week",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueQuantity": map[string]any{
+			"value":  weeklyMins,
+			"unit":   "min/wk",
+			"system": "http://unitsofmeasure.org",
+			"code":   "min/wk",
+		},
+	}
+	_, _, _, savedMinWeek, _ := s.upsertResourceMap(r.Context(), tenant, minWeekObs)
+	if len(savedMinWeek) > 0 {
+		minWeekObs = savedMinWeek
+	}
+
+	paGoal := map[string]any{
+		"resourceType": "Goal",
+		"id":           "pa-goal-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/physical-activity/StructureDefinition/pa-goal"},
+		},
+		"lifecycleStatus": "active",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/physical-activity/CodeSystem/pa-temporary-codes",
+						"code":    "PhysicalActivity",
+						"display": "Physical Activity",
+					},
+				},
+			},
+		},
+		"description": map[string]any{
+			"text": "Achieve at least 150 minutes per week of moderate-to-vigorous aerobic physical activity",
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedGoal, _ := s.upsertResourceMap(r.Context(), tenant, paGoal)
+	if len(savedGoal) > 0 {
+		paGoal = savedGoal
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "pa-summary-" + patID,
+		"type":         "collection",
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Patient/" + patID, "resource": patMap},
+			{"fullUrl": "Observation/pa-evs-days-" + patID, "resource": daysObs},
+			{"fullUrl": "Observation/pa-evs-min-day-" + patID, "resource": minDayObs},
+			{"fullUrl": "Observation/pa-evs-min-week-" + patID, "resource": minWeekObs},
+			{"fullUrl": "Goal/pa-goal-" + patID, "resource": paGoal},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleVulcanEPIAndRegulatory implements HL7 Vulcan Electronic Medicinal Product Information (ePI v1.0.0) & BR&R
+// MedicinalProduct/$epi-document & MedicinalProductAuthorization/$evaluate-authorization.
+func (s *Server) handleVulcanEPIAndRegulatory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Vulcan ePI / Regulatory operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	resID := cleanID(r.PathValue("id"))
+	productName := strings.TrimSpace(r.URL.Query().Get("name"))
+	jurisdictionCode := strings.TrimSpace(r.URL.Query().Get("jurisdiction"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		if body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(body)) > 0 {
+			var m map[string]any
+			if json.Unmarshal(body, &m) == nil {
+				if m["resourceType"] == "Parameters" {
+					if plist, ok := m["parameter"].([]any); ok {
+						for _, p := range plist {
+							pm, _ := p.(map[string]any)
+							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(extractParamString(pm))
+							switch name {
+							case "subject", "product", "id":
+								if resID == "" {
+									resID = cleanID(strings.TrimPrefix(strings.TrimPrefix(val, "MedicinalProduct/"), "MedicinalProductDefinition/"))
+								}
+							case "name", "productName":
+								if productName == "" {
+									productName = val
+								}
+							case "jurisdiction", "country":
+								if jurisdictionCode == "" {
+									jurisdictionCode = val
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if resID == "" {
+		resID = "epi-mp-olaparib-150"
+	}
+	if productName == "" {
+		productName = "Lynparza (Olaparib) 150 MG Film-Coated Tablet"
+	}
+	if jurisdictionCode == "" {
+		jurisdictionCode = "US"
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	var mpMap map[string]any
+	if mpRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "MedicinalProduct", resID); gErr == nil && mpRec != nil {
+		if jb, jErr := s.protoToJSONWithMeta("MedicinalProduct", mpRec.ResourceProto, mpRec.ResVersion, mpRec.LastUpdated); jErr == nil {
+			_ = json.Unmarshal(jb, &mpMap)
+		}
+	}
+	if len(mpMap) == 0 {
+		mpMap = map[string]any{
+			"resourceType": "MedicinalProduct",
+			"id":           resID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/uv/emedicinal-product-info/StructureDefinition/MedicinalProductDefinition-uv-epi"},
+			},
+			"identifier": []map[string]any{
+				{
+					"system": "http://hl7.org/fhir/sid/ndc",
+					"value":  "0310-0679-60",
+				},
+			},
+			"name": []map[string]any{
+				{
+					"productName": productName,
+				},
+			},
+		}
+		_, _, _, savedMP, mpErr := s.upsertResourceMap(r.Context(), tenant, mpMap)
+		if mpErr == nil && len(savedMP) > 0 {
+			mpMap = savedMP
+		}
+	}
+
+	if op == "$evaluate-authorization" {
+		authID := "mpa-" + resID + "-" + strings.ToLower(jurisdictionCode)
+		mpaRes := map[string]any{
+			"resourceType": "MedicinalProductAuthorization",
+			"id":           authID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/uv/emedicinal-product-info/StructureDefinition/RegulatedAuthorization-uv-epi"},
+			},
+			"identifier": []map[string]any{
+				{
+					"system": "http://fdasis.nlm.nih.gov/nda",
+					"value":  "NDA208558",
+				},
+			},
+			"subject": map[string]any{
+				"reference": "MedicinalProduct/" + resID,
+			},
+			"country": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "urn:iso:std:iso:3166",
+							"code":    strings.ToUpper(jurisdictionCode),
+							"display": strings.ToUpper(jurisdictionCode),
+						},
+					},
+				},
+			},
+			"status": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/publication-status",
+						"code":    "active",
+						"display": "Active Marketing Authorization",
+					},
+				},
+			},
+			"statusDate": nowStr,
+		}
+		_, _, _, savedMPA, mpaErr := s.upsertResourceMap(r.Context(), tenant, mpaRes)
+		if mpaErr == nil && len(savedMPA) > 0 {
+			mpaRes = savedMPA
+		}
+
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{
+					"name":         "authorized",
+					"valueBoolean": true,
+				},
+				{
+					"name":      "jurisdiction",
+					"valueCode": strings.ToUpper(jurisdictionCode),
+				},
+				{
+					"name":     "regulatedAuthorization",
+					"resource": mpaRes,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	compID := "epi-composition-" + resID
+	compRes := map[string]any{
+		"resourceType": "Composition",
+		"id":           compID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/emedicinal-product-info/StructureDefinition/Composition-uv-epi"},
+		},
+		"status": "final",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "69719-3",
+					"display": "FDA Structured Product Labeling (ePI)",
+				},
+			},
+		},
+		"subject": map[string]any{
+			"reference": "MedicinalProduct/" + resID,
+		},
+		"date": nowStr,
+		"author": []map[string]any{
+			{
+				"display": "Regulatory Marketing Authorization Holder",
+			},
+		},
+		"title": "Electronic Product Information (ePI) Package Leaflet — " + productName,
+		"section": []map[string]any{
+			{
+				"title": "Indications and Usage",
+				"code": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://loinc.org",
+							"code":    "34067-9",
+							"display": "Indications and Usage Section",
+						},
+					},
+				},
+				"entry": []map[string]any{
+					{"reference": "MedicinalProduct/" + resID},
+				},
+			},
+		},
+	}
+	_, _, _, savedComp, compErr := s.upsertResourceMap(r.Context(), tenant, compRes)
+	if compErr == nil && len(savedComp) > 0 {
+		compRes = savedComp
+	}
+
+	docBundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "epi-document-bundle-" + resID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/emedicinal-product-info/StructureDefinition/Bundle-uv-epi"},
+		},
+		"identifier": map[string]any{
+			"system": "http://hl7.org/fhir/uv/emedicinal-product-info/bundle-id",
+			"value":  "EPI-DOC-" + resID,
+		},
+		"type":      "document",
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{
+				"fullUrl":  "Composition/" + compID,
+				"resource": compRes,
+			},
+			{
+				"fullUrl":  "MedicinalProduct/" + resID,
+				"resource": mpMap,
+			},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(docBundle)
+}

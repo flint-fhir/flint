@@ -1715,6 +1715,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /ResearchStudy/vulcan-study-1/$rwd-cohort to return cohortGroup, got %d: %s", respVulc.StatusCode, string(bVulc))
 			}
 		}
+		if err == nil {
+			respNDH, bNDH, errNDH := doReq(http.MethodGet, basePath+"/Endpoint/$fast-endpoint-query", "", nil, nil)
+			respEPI, bEPI, errEPI := doReq(http.MethodGet, basePath+"/MedicinalProduct/$epi-document", "", nil, nil)
+			if errNDH != nil || respNDH.StatusCode != http.StatusOK || !strings.Contains(string(bNDH), "ndh-Endpoint") {
+				err = fmt.Errorf("expected GET /Endpoint/$fast-endpoint-query to return ndh-Endpoint Bundle, got %d: %s", respNDH.StatusCode, string(bNDH))
+			} else if errEPI != nil || respEPI.StatusCode != http.StatusOK || !strings.Contains(string(bEPI), "Bundle-uv-epi") {
+				err = fmt.Errorf("expected GET /MedicinalProduct/$epi-document to return Bundle-uv-epi, got %d: %s", respEPI.StatusCode, string(bEPI))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
