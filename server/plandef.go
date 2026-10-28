@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1471,7 +1472,7 @@ func (s *Server) resolveDataRequirementsLibrary(
 	}
 
 	switch normKey {
-	case "cms165-bp-control", "plandef-hypertension-control":
+	case "cms165-bp-control", "cms165-logic", "cms165", "library-cms165", "plandef-hypertension-control":
 		obsReq := map[string]any{
 			"type":    "Observation",
 			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-blood-pressure"},
@@ -1552,7 +1553,7 @@ func (s *Server) resolveDataRequirementsLibrary(
 		}
 		return wrapModuleDef("cms165-bp-control", "CMS165 Controlling High Blood Pressure", "http://flint.fhir.org/Measure/cms165-bp-control", reqs), nil
 
-	case "cms122-diabetes-hba1c", "plandef-diabetes-hba1c-care":
+	case "cms122-diabetes-hba1c", "cms122-logic", "cms122", "library-cms122", "plandef-diabetes-hba1c-care":
 		obsReq := map[string]any{
 			"type":    "Observation",
 			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab"},
@@ -7282,4 +7283,712 @@ func (s *Server) handleCoverageEligibilitySubmit(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(respMap)
+}
+
+// =============================================================================
+// Wave 23:
+// 1. HL7 Da Vinci CDex Clinical Data Exchange Attachment Submission
+//    (POST /$submit-attachment, /Task/$submit-attachment & /Task/{id}/$submit-attachment)
+// 2. HL7 FHIR R4 Clinical Reasoning Library/$evaluate
+//    (GET/POST /Library/$evaluate & /Library/{id}/$evaluate)
+// =============================================================================
+
+type cdexAttachmentItem struct {
+	LineItem string
+	Code     map[string]any
+	Resource map[string]any
+}
+
+// handleCDexSubmitAttachment implements HL7 Da Vinci CDex $submit-attachment
+// (POST /fhir/r4/{tenant}/$submit-attachment, /Task/$submit-attachment, and /Task/{id}/$submit-attachment).
+func (s *Server) handleCDexSubmitAttachment(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$submit-attachment only supports POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusNotImplemented, "not-supported", "$submit-attachment requires an operational store")
+		return
+	}
+	if r.Body == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "$submit-attachment requires a Parameters or clinical attachment body")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	taskID := strings.TrimPrefix(strings.TrimSpace(r.PathValue("id")), "Task/")
+
+	var bodyMap map[string]any
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&bodyMap); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid JSON body for $submit-attachment: %v", err))
+		return
+	}
+
+	var trackingID string
+	attachTo := "claim"
+	var memberID string
+	var attachments []cdexAttachmentItem
+
+	rt, _ := bodyMap["resourceType"].(string)
+	switch rt {
+	case "Parameters":
+		if params, ok := bodyMap["parameter"].([]any); ok {
+			for _, rawP := range params {
+				pm, ok := rawP.(map[string]any)
+				if !ok {
+					continue
+				}
+				name, _ := pm["name"].(string)
+				switch strings.ToLower(strings.TrimSpace(name)) {
+				case "trackingid", "tracking-id":
+					if sVal := extractParamString(pm); sVal != "" {
+						trackingID = sVal
+					} else if idMap, ok := pm["valueIdentifier"].(map[string]any); ok {
+						trackingID, _ = idMap["value"].(string)
+					}
+				case "attachto", "attach-to":
+					if sVal := extractParamString(pm); sVal != "" {
+						attachTo = strings.ToLower(sVal)
+					}
+				case "memberid", "member-id", "patient", "subject":
+					if sVal := extractParamString(pm); sVal != "" {
+						memberID = strings.TrimPrefix(sVal, "Patient/")
+					} else if idMap, ok := pm["valueIdentifier"].(map[string]any); ok {
+						memberID, _ = idMap["value"].(string)
+					} else if refMap, ok := pm["valueReference"].(map[string]any); ok {
+						if refStr, _ := refMap["reference"].(string); refStr != "" {
+							memberID = strings.TrimPrefix(refStr, "Patient/")
+						}
+					}
+				case "attachment", "resource":
+					if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] != nil {
+						attachments = append(attachments, cdexAttachmentItem{Resource: res})
+					} else if parts, ok := pm["part"].([]any); ok {
+						var item cdexAttachmentItem
+						for _, rawPart := range parts {
+							partMap, ok := rawPart.(map[string]any)
+							if !ok {
+								continue
+							}
+							pName, _ := partMap["name"].(string)
+							switch strings.ToLower(strings.TrimSpace(pName)) {
+							case "lineitem", "line-item":
+								item.LineItem = extractParamString(partMap)
+								if item.LineItem == "" {
+									for _, k := range []string{"valuePositiveInt", "valueInteger"} {
+										if fVal, ok := partMap[k].(float64); ok {
+											item.LineItem = strconv.Itoa(int(fVal))
+											break
+										}
+									}
+								}
+							case "code":
+								if cc, ok := partMap["valueCodeableConcept"].(map[string]any); ok {
+									item.Code = cc
+								} else if cm, ok := partMap["valueCoding"].(map[string]any); ok {
+									item.Code = map[string]any{"coding": []any{cm}}
+								} else if cStr := extractParamString(partMap); cStr != "" {
+									item.Code = map[string]any{
+										"coding": []any{
+											map[string]any{
+												"system": "http://loinc.org",
+												"code":   cStr,
+											},
+										},
+									}
+								}
+							case "content", "resource":
+								if res, ok := partMap["resource"].(map[string]any); ok && res["resourceType"] != nil {
+									item.Resource = res
+								}
+							}
+						}
+						if item.Resource != nil {
+							attachments = append(attachments, item)
+						}
+					}
+				}
+			}
+		}
+	case "DocumentReference", "QuestionnaireResponse", "DiagnosticReport", "Observation", "Condition", "Bundle":
+		attachments = append(attachments, cdexAttachmentItem{Resource: bodyMap})
+	default:
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "$submit-attachment requires a Parameters resource or clinical attachment resource")
+		return
+	}
+
+	if len(attachments) == 0 {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "$submit-attachment requires at least one Attachment with a Content resource")
+		return
+	}
+	if trackingID == "" {
+		trackingID = firstNonEmptyStr(taskID, "CDEX-TRACK-1")
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+		allowed := auth.Allows(secCtx, "DocumentReference", auth.ActionCreate) ||
+			auth.Allows(secCtx, "DocumentReference", auth.ActionUpdate) ||
+			auth.Allows(secCtx, "Task", auth.ActionUpdate) ||
+			auth.Allows(secCtx, "Claim", auth.ActionCreate) ||
+			auth.Allows(secCtx, "QuestionnaireResponse", auth.ActionCreate)
+		if !allowed {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for CDex $submit-attachment")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && memberID != "" && cleanID(secCtx.GetPatientId()) != cleanID(memberID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot submit attachments for Patient/%s",
+					secCtx.GetPatientId(), memberID))
+			return
+		}
+	}
+
+	var persistedRefs []string
+	var taskOutputs []map[string]any
+
+	for idx, att := range attachments {
+		resMap := att.Resource
+		if resMap == nil {
+			continue
+		}
+		resType, _ := resMap["resourceType"].(string)
+		if resType == "Bundle" {
+			if entries, ok := resMap["entry"].([]any); ok && len(entries) > 0 {
+				for _, rawE := range entries {
+					em, ok := rawE.(map[string]any)
+					if !ok {
+						continue
+					}
+					entryRes, ok := em["resource"].(map[string]any)
+					if !ok {
+						continue
+					}
+					eType, _ := entryRes["resourceType"].(string)
+					if eType == "" {
+						continue
+					}
+					if memberID != "" && entryRes["subject"] == nil && (eType == "DocumentReference" || eType == "Observation" || eType == "DiagnosticReport" || eType == "QuestionnaireResponse") {
+						entryRes["subject"] = map[string]any{"reference": "Patient/" + memberID}
+					}
+					_, savedID, _, _, uErr := s.upsertResourceMap(r.Context(), tenant, entryRes)
+					if uErr == nil && savedID != "" {
+						ref := eType + "/" + savedID
+						persistedRefs = append(persistedRefs, ref)
+						outCode := att.Code
+						if outCode == nil {
+							outCode = map[string]any{
+								"coding": []any{
+									map[string]any{
+										"system":  "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp",
+										"code":    "data-request-output",
+										"display": "CDex Data Request Output",
+									},
+								},
+							}
+						}
+						taskOutputs = append(taskOutputs, map[string]any{
+							"type":           outCode,
+							"valueReference": map[string]any{"reference": ref},
+						})
+					}
+				}
+				continue
+			}
+		}
+
+		if idStr, _ := resMap["id"].(string); idStr == "" {
+			resMap["id"] = fmt.Sprintf("cdex-att-%s-%d", cleanID(trackingID), idx+1)
+		}
+		if memberID != "" && resMap["subject"] == nil && (resType == "DocumentReference" || resType == "Observation" || resType == "DiagnosticReport" || resType == "QuestionnaireResponse") {
+			resMap["subject"] = map[string]any{"reference": "Patient/" + memberID}
+		}
+		if resType == "DocumentReference" {
+			if _, ok := resMap["status"]; !ok {
+				resMap["status"] = "current"
+			}
+			if resMap["type"] == nil && att.Code != nil {
+				resMap["type"] = att.Code
+			}
+		}
+		_, savedID, _, _, uErr := s.upsertResourceMap(r.Context(), tenant, resMap)
+		if uErr != nil {
+			writeOperationOutcome(w, http.StatusUnprocessableEntity, "processing", fmt.Sprintf("failed to persist %s attachment: %v", resType, uErr))
+			return
+		}
+		if savedID == "" {
+			savedID, _ = resMap["id"].(string)
+		}
+		ref := resType + "/" + savedID
+		persistedRefs = append(persistedRefs, ref)
+		outCode := att.Code
+		if outCode == nil {
+			outCode = map[string]any{
+				"coding": []any{
+					map[string]any{
+						"system":  "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp",
+						"code":    "data-request-output",
+						"display": "CDex Data Request Output",
+					},
+				},
+			}
+		}
+		taskOutputs = append(taskOutputs, map[string]any{
+			"type":           outCode,
+			"valueReference": map[string]any{"reference": ref},
+		})
+	}
+
+	// Resolve and complete any matching CDex data-request Task
+	var matchedTask map[string]any
+	candTaskID := firstNonEmptyStr(taskID, trackingID)
+	if candTaskID != "" {
+		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Task", candTaskID); err == nil {
+			if jb, cErr := s.protoToJSONWithMeta("Task", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+				_ = json.Unmarshal(jb, &matchedTask)
+			}
+		}
+	}
+	if matchedTask == nil && trackingID != "" {
+		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "Task", Count: 50}); err == nil {
+			for _, m := range sr.Matches {
+				jb, cErr := s.protoToJSONWithMeta("Task", m.ResourceProto, m.ResVersion, m.LastUpdated)
+				if cErr != nil {
+					continue
+				}
+				var candidate map[string]any
+				if json.Unmarshal(jb, &candidate) == nil {
+					if ids, ok := candidate["identifier"].([]any); ok {
+						for _, rawID := range ids {
+							if idm, ok := rawID.(map[string]any); ok {
+								if v, _ := idm["value"].(string); strings.EqualFold(v, trackingID) {
+									matchedTask = candidate
+									break
+								}
+							}
+						}
+					}
+					if matchedTask != nil {
+						break
+					}
+				}
+			}
+		}
+	}
+	if matchedTask != nil {
+		matchedTask["status"] = "completed"
+		matchedTask["lastModified"] = time.Now().UTC().Format(time.RFC3339)
+		existingOut, _ := matchedTask["output"].([]any)
+		for _, to := range taskOutputs {
+			existingOut = append(existingOut, to)
+		}
+		matchedTask["output"] = existingOut
+		_, _, _, _, _ = s.upsertResourceMap(r.Context(), tenant, matchedTask)
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "OperationOutcome",
+		"issue": []map[string]any{
+			{
+				"severity":    "information",
+				"code":        "informational",
+				"diagnostics": fmt.Sprintf("CDex $submit-attachment accepted %d attachment(s) for %s TrackingId=%s: %s", len(persistedRefs), attachTo, trackingID, strings.Join(persistedRefs, ", ")),
+				"location":    persistedRefs,
+				"expression":  persistedRefs,
+			},
+		},
+	})
+}
+
+// handleLibraryEvaluate implements HL7 FHIR R4 / CPG Library/$evaluate
+// (GET/POST /fhir/r4/{tenant}/Library/$evaluate and /fhir/r4/{tenant}/Library/{id}/$evaluate).
+func (s *Server) handleLibraryEvaluate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Library/$evaluate only supports GET and POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusNotImplemented, "not-supported", "Library/$evaluate requires an operational store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	libID := strings.TrimPrefix(strings.TrimSpace(r.PathValue("id")), "Library/")
+	q := r.URL.Query()
+	libCanonical := firstNonEmptyStr(
+		strings.TrimSpace(q.Get("library")),
+		strings.TrimSpace(q.Get("url")),
+		strings.TrimSpace(q.Get("target")),
+	)
+	subject := firstNonEmptyStr(
+		strings.TrimSpace(q.Get("subject")),
+		strings.TrimSpace(q.Get("patient")),
+	)
+	var requestedExprs []string
+	for _, rawE := range q["expression"] {
+		for part := range strings.SplitSeq(rawE, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				requestedExprs = append(requestedExprs, trimmed)
+			}
+		}
+	}
+
+	var inlineLib map[string]any
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "Library":
+				inlineLib = bodyMap
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch strings.ToLower(strings.TrimSpace(name)) {
+						case "library", "url", "target":
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Library" {
+								inlineLib = res
+							} else if sVal := extractParamString(pm); sVal != "" && libCanonical == "" {
+								libCanonical = sVal
+							}
+						case "subject", "patient":
+							if sVal := extractParamString(pm); sVal != "" && subject == "" {
+								subject = sVal
+							} else if refMap, ok := pm["valueReference"].(map[string]any); ok && subject == "" {
+								subject, _ = refMap["reference"].(string)
+							}
+						case "expression":
+							if sVal := extractParamString(pm); sVal != "" {
+								requestedExprs = append(requestedExprs, sVal)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if libID == "" && strings.HasPrefix(libCanonical, "Library/") {
+		libID = strings.TrimPrefix(libCanonical, "Library/")
+		libCanonical = ""
+	}
+	if libID == "" && libCanonical == "" && inlineLib == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Library/$evaluate requires a Library {id}, 'library' canonical URL, or inline Library resource")
+		return
+	}
+
+	patID := strings.TrimPrefix(strings.TrimSpace(subject), "Patient/")
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+		if !auth.Allows(secCtx, "Library", auth.ActionRead) && !auth.Allows(secCtx, "Library", auth.ActionSearch) && !auth.Allows(secCtx, "Patient", auth.ActionRead) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Library/$evaluate")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && patID != "" && cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot evaluate Library for Patient/%s",
+					secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	libMap := inlineLib
+	if libMap == nil {
+		if resolved, err := s.resolveDataRequirementsLibrary(r.Context(), tenant, "Library", libID, libCanonical, "", ""); err == nil && resolved != nil {
+			libMap = resolved
+		}
+	}
+	if libMap == nil && libID != "" {
+		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Library", libID); err == nil {
+			if jb, cErr := s.protoToJSONWithMeta("Library", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+				_ = json.Unmarshal(jb, &libMap)
+			}
+		}
+	}
+	if libMap == nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Library %q not found for $evaluate", firstNonEmptyStr(libID, libCanonical)))
+		return
+	}
+
+	wantExpr := func(name string) bool {
+		if len(requestedExprs) == 0 {
+			return true
+		}
+		for _, req := range requestedExprs {
+			if strings.EqualFold(req, name) {
+				return true
+			}
+		}
+		return false
+	}
+
+	var patMap map[string]any
+	if patID != "" {
+		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID); err == nil {
+			if jb, cErr := s.protoToJSONWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+				_ = json.Unmarshal(jb, &patMap)
+			}
+		}
+	}
+
+	var outParams []map[string]any
+	seenParamNames := make(map[string]bool)
+	appendValueParam := func(name string, val any) {
+		if !wantExpr(name) || seenParamNames[name] {
+			return
+		}
+		switch v := val.(type) {
+		case bool:
+			seenParamNames[name] = true
+			outParams = append(outParams, map[string]any{"name": name, "valueBoolean": v})
+		case int:
+			seenParamNames[name] = true
+			outParams = append(outParams, map[string]any{"name": name, "valueInteger": v})
+		case int64:
+			seenParamNames[name] = true
+			outParams = append(outParams, map[string]any{"name": name, "valueInteger": v})
+		case float64:
+			seenParamNames[name] = true
+			if v == float64(int64(v)) {
+				outParams = append(outParams, map[string]any{"name": name, "valueInteger": int64(v)})
+			} else {
+				outParams = append(outParams, map[string]any{"name": name, "valueDecimal": v})
+			}
+		case string:
+			seenParamNames[name] = true
+			outParams = append(outParams, map[string]any{"name": name, "valueString": v})
+		case map[string]any:
+			seenParamNames[name] = true
+			if v["resourceType"] != nil {
+				outParams = append(outParams, map[string]any{"name": name, "resource": v})
+			} else if jb, err := json.Marshal(v); err == nil {
+				outParams = append(outParams, map[string]any{"name": name, "valueString": string(jb)})
+			}
+		}
+	}
+
+	// 1. Evaluate any FHIRPath / CQL expressions in Library.content[]
+	if contents, ok := libMap["content"].([]any); ok {
+		for _, rawC := range contents {
+			cm, ok := rawC.(map[string]any)
+			if !ok {
+				continue
+			}
+			b64, _ := cm["data"].(string)
+			if b64 == "" {
+				continue
+			}
+			decoded, err := base64.StdEncoding.DecodeString(b64)
+			if err != nil {
+				continue
+			}
+			lines := strings.Split(string(decoded), "\n")
+			for _, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if trimmed == "" || strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "library ") || strings.HasPrefix(trimmed, "using ") {
+					continue
+				}
+				// Parse `define "ExprName": <fhirpath>` or `ExprName = <fhirpath>`
+				var exprName, exprBody string
+				if strings.HasPrefix(strings.ToLower(trimmed), "define ") {
+					rest := strings.TrimSpace(trimmed[len("define "):])
+					if idx := strings.IndexByte(rest, ':'); idx != -1 {
+						exprName = strings.Trim(strings.TrimSpace(rest[:idx]), `"'`)
+						exprBody = strings.TrimSpace(rest[idx+1:])
+					}
+				} else if idx := strings.IndexByte(trimmed, '='); idx != -1 && !strings.Contains(trimmed[:idx], ".") {
+					exprName = strings.Trim(strings.TrimSpace(trimmed[:idx]), `"'`)
+					exprBody = strings.TrimSpace(trimmed[idx+1:])
+				} else {
+					exprName = "result"
+					exprBody = trimmed
+				}
+				if exprName != "" && exprBody != "" && patMap != nil {
+					vals := evaluateFHIRPathOnResource(patMap, exprBody)
+					if len(vals) > 0 {
+						appendValueParam(exprName, vals[0])
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Evaluate built-in CQM logic expressions (CMS165 / CMS122) and dataRequirement queries
+	libIdentifier := strings.ToLower(firstNonEmptyStr(
+		libID,
+		libCanonical,
+		fmt.Sprintf("%v", libMap["id"]),
+		fmt.Sprintf("%v", libMap["name"]),
+		fmt.Sprintf("%v", libMap["url"]),
+	))
+
+	if patID != "" {
+		// Query patient Conditions and Observations when needed
+		var condMaps, obsMaps []map[string]any
+		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID:   tenant,
+			ResType:    "Condition",
+			References: map[string]string{"patient": "Patient/" + patID},
+			Count:      100,
+		}); err == nil {
+			for _, m := range sr.Matches {
+				if jb, cErr := s.protoToJSONWithMeta("Condition", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+					var rm map[string]any
+					if json.Unmarshal(jb, &rm) == nil {
+						condMaps = append(condMaps, rm)
+					}
+				}
+			}
+		}
+		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID:   tenant,
+			ResType:    "Observation",
+			References: map[string]string{"patient": "Patient/" + patID},
+			Count:      100,
+		}); err == nil {
+			for _, m := range sr.Matches {
+				if jb, cErr := s.protoToJSONWithMeta("Observation", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+					var rm map[string]any
+					if json.Unmarshal(jb, &rm) == nil {
+						obsMaps = append(obsMaps, rm)
+					}
+				}
+			}
+		}
+
+		if strings.Contains(libIdentifier, "cms165") || strings.Contains(libIdentifier, "hypertension") || strings.Contains(libIdentifier, "bp") {
+			hasHTN := false
+			for _, cm := range condMaps {
+				if cc, ok := cm["code"].(map[string]any); ok && codeableConceptMatchesLiterals(cc, []string{"38341003", "I10"}) {
+					hasHTN = true
+					break
+				}
+			}
+			var sysBP, diaBP float64
+			hasBP := false
+			for _, om := range obsMaps {
+				if comps, ok := om["component"].([]any); ok {
+					for _, rawComp := range comps {
+						compMap, ok := rawComp.(map[string]any)
+						if !ok {
+							continue
+						}
+						cc, _ := compMap["code"].(map[string]any)
+						vq, _ := compMap["valueQuantity"].(map[string]any)
+						val, hasVal := vq["value"].(float64)
+						if !hasVal {
+							continue
+						}
+						if codeableConceptMatchesLiterals(cc, []string{"8480-6", "96608-5"}) {
+							sysBP = val
+							hasBP = true
+						} else if codeableConceptMatchesLiterals(cc, []string{"8462-4", "96609-3"}) {
+							diaBP = val
+							hasBP = true
+						}
+					}
+				}
+			}
+			controlled := hasBP && sysBP > 0 && sysBP < 140.0 && diaBP > 0 && diaBP < 90.0
+			appendValueParam("HasHypertensionDiagnosis", hasHTN)
+			appendValueParam("InInitialPopulation", hasHTN)
+			appendValueParam("InDenominator", hasHTN)
+			appendValueParam("InNumerator", hasHTN && controlled)
+			if hasBP {
+				appendValueParam("LatestSystolicBP", sysBP)
+				appendValueParam("LatestDiastolicBP", diaBP)
+			}
+		}
+
+		if strings.Contains(libIdentifier, "cms122") || strings.Contains(libIdentifier, "diabetes") || strings.Contains(libIdentifier, "hba1c") {
+			hasDM := false
+			for _, cm := range condMaps {
+				if cc, ok := cm["code"].(map[string]any); ok && codeableConceptMatchesLiterals(cc, []string{"44054006", "E11.9", "E11"}) {
+					hasDM = true
+					break
+				}
+			}
+			var latestA1c float64
+			hasA1c := false
+			for _, om := range obsMaps {
+				if cc, ok := om["code"].(map[string]any); ok && codeableConceptMatchesLiterals(cc, []string{"4548-4"}) {
+					if vq, ok := om["valueQuantity"].(map[string]any); ok {
+						if val, ok := vq["value"].(float64); ok {
+							latestA1c = val
+							hasA1c = true
+						}
+					}
+				}
+			}
+			poorControl := !hasA1c || latestA1c > 9.0
+			appendValueParam("HasDiabetesDiagnosis", hasDM)
+			appendValueParam("InInitialPopulation", hasDM)
+			appendValueParam("InDenominator", hasDM)
+			appendValueParam("InNumerator", hasDM && poorControl)
+			if hasA1c {
+				appendValueParam("LatestHbA1c", latestA1c)
+			}
+		}
+
+		// 3. Evaluate Library.dataRequirement[] against the patient's clinical record
+		if drs, ok := libMap["dataRequirement"].([]any); ok {
+			for _, rawDR := range drs {
+				drm, ok := rawDR.(map[string]any)
+				if !ok {
+					continue
+				}
+				drType, _ := drm["type"].(string)
+				if drType == "" || strings.EqualFold(drType, "Patient") {
+					continue
+				}
+				if !wantExpr(drType) {
+					continue
+				}
+				var candidates []map[string]any
+				switch drType {
+				case "Condition":
+					candidates = condMaps
+				case "Observation":
+					candidates = obsMaps
+				default:
+					if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+						TenantID:   tenant,
+						ResType:    drType,
+						References: map[string]string{"patient": "Patient/" + patID},
+						Count:      25,
+					}); err == nil {
+						for _, m := range sr.Matches {
+							if jb, cErr := s.protoToJSONWithMeta(drType, m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+								var rm map[string]any
+								if json.Unmarshal(jb, &rm) == nil {
+									candidates = append(candidates, rm)
+								}
+							}
+						}
+					}
+				}
+				for _, cand := range candidates {
+					outParams = append(outParams, map[string]any{
+						"name":     drType,
+						"resource": cand,
+					})
+				}
+			}
+		}
+	}
+
+	if patMap != nil && len(outParams) == 0 {
+		appendValueParam("Patient", patMap)
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    outParams,
+	})
 }

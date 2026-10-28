@@ -1588,6 +1588,19 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected CoverageEligibilityRequest/$submit to return CoverageEligibilityResponse with inforce:true, got %d: %s", respCER.StatusCode, string(bCER))
 			}
 		}
+		if err == nil {
+			respLibEval, bLibEval, errLibEval := doReq(http.MethodGet, basePath+"/Library/CMS165-Logic/$evaluate?subject=Patient/cert-pat-1", "", nil, nil)
+			respEncEv, bEncEv, errEncEv := doReq(http.MethodGet, basePath+"/Encounter/$everything?id=cert-enc-1", "", nil, nil)
+			cdexPayload := []byte(`{"resourceType":"Parameters","parameter":[{"name":"TrackingId","valueString":"cert-task-1"},{"name":"MemberId","valueString":"cert-pat-1"},{"name":"Attachment","part":[{"name":"LineItem","valueString":"1"},{"name":"Code","valueCodeableConcept":{"coding":[{"system":"http://loinc.org","code":"11506-3","display":"Progress note"}]}},{"name":"Content","resource":{"resourceType":"DocumentReference","id":"cert-cdex-doc-1","status":"current","content":[{"attachment":{"contentType":"text/plain","url":"https://flint.example.org/cdex/note.txt"}}]}}]}]}`)
+			respCDex, bCDex, errCDex := doReq(http.MethodPost, basePath+"/$submit-attachment", "application/fhir+json", cdexPayload, nil)
+			if errLibEval != nil || respLibEval.StatusCode != http.StatusOK || !strings.Contains(string(bLibEval), `"InInitialPopulation"`) {
+				err = fmt.Errorf("expected Library/CMS165-Logic/$evaluate?subject=Patient/cert-pat-1 to return Parameters with InInitialPopulation, got %d: %s", respLibEval.StatusCode, string(bLibEval))
+			} else if errEncEv != nil || respEncEv.StatusCode != http.StatusOK || !strings.Contains(string(bEncEv), `"cert-enc-1"`) {
+				err = fmt.Errorf("expected Encounter/$everything?id=cert-enc-1 to return Bundle with cert-enc-1, got %d: %s", respEncEv.StatusCode, string(bEncEv))
+			} else if errCDex != nil || respCDex.StatusCode != http.StatusOK || !strings.Contains(string(bCDex), `"DocumentReference/cert-cdex-doc-1"`) {
+				err = fmt.Errorf("expected POST /$submit-attachment to return OperationOutcome with DocumentReference/cert-cdex-doc-1, got %d: %s", respCDex.StatusCode, string(bCDex))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

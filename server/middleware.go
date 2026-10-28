@@ -1107,10 +1107,19 @@ func isQuestionnaireExtractOp(parts []string) bool {
 
 func isPlanApplyOp(parts []string) bool {
 	if len(parts) == 4 {
-		return parts[3] == "$closure" || parts[3] == "$data-requirements" || parts[3] == "$fhirpath" || parts[3] == "$process-message" || parts[3] == "$convert"
+		return parts[3] == "$closure" || parts[3] == "$data-requirements" || parts[3] == "$fhirpath" || parts[3] == "$process-message" || parts[3] == "$convert" || parts[3] == "$submit-attachment"
 	}
 	if len(parts) == 5 {
 		if parts[4] == "$convert" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Task") && parts[4] == "$submit-attachment" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Library") && parts[4] == "$evaluate" {
+			return true
+		}
+		if (strings.EqualFold(parts[3], "Patient") || strings.EqualFold(parts[3], "Encounter") || strings.EqualFold(parts[3], "Group")) && parts[4] == "$everything" {
 			return true
 		}
 		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "ChargeItem")) && parts[4] == "$apply" {
@@ -1177,6 +1186,12 @@ func isPlanApplyOp(parts []string) bool {
 			return true
 		}
 		if strings.EqualFold(parts[3], "GraphDefinition") && parts[5] == "$graph" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Task") && parts[5] == "$submit-attachment" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Library") && parts[5] == "$evaluate" {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Measure") && (parts[5] == "$collect-data" || parts[5] == "$submit-data") {

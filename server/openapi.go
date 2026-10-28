@@ -2513,6 +2513,71 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/$submit-attachment": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Claim", "Task", "DocumentReference"},
+				"summary":     "HL7 Da Vinci CDex $submit-attachment persisting clinical attachments for a Claim or PreAuthorization and completing matching CDex Tasks",
+				"operationId": "cdexSubmitAttachmentPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OperationOutcome confirming persisted clinical attachments"},
+				},
+			},
+		},
+		"/Task/$submit-attachment": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Task", "DocumentReference"},
+				"summary":     "HL7 Da Vinci CDex Task/$submit-attachment operation",
+				"operationId": "taskSubmitAttachmentPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "OperationOutcome confirming persisted clinical attachments and Task completion"},
+				},
+			},
+		},
+		"/Library/$evaluate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Library"},
+				"summary":     "HL7 FHIR R4 / CPG Library/$evaluate evaluating clinical logic, FHIRPath expressions, and dataRequirements against a subject Patient",
+				"operationId": "libraryEvaluateGet",
+				"parameters": []map[string]any{
+					{"name": "library", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "subject", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "expression", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing evaluated expression values and matching clinical resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Library"},
+				"summary":     "HL7 FHIR R4 / CPG Library/$evaluate (POST Parameters or Library)",
+				"operationId": "libraryEvaluatePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing evaluated expression values and matching clinical resources"},
+				},
+			},
+		},
+		"/Encounter/$everything": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Encounter"},
+				"summary":     "HL7 FHIR R4 Encounter/$everything assembling all clinical resources in an Encounter compartment",
+				"operationId": "encounterEverythingTypeGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "_type", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of Encounter and compartment resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Encounter"},
+				"summary":     "HL7 FHIR R4 Encounter/$everything (POST Parameters)",
+				"operationId": "encounterEverythingTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of Encounter and compartment resources"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()
