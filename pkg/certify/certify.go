@@ -1611,6 +1611,16 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$pcde to return PCDE document Bundle with LOINC 11503-0 and cert-cp-1, got %d: %s", respPCDE.StatusCode, string(bPCDE))
 			}
 		}
+		if err == nil {
+			predetPayload := []byte(`{"resourceType":"Claim","id":"cert-claim-predet-1","status":"active","use":"predetermination","patient":{"reference":"Patient/cert-pat-1"},"insurer":{"reference":"Organization/cert-org-1"},"provider":{"reference":"Practitioner/cert-prac-1"},"item":[{"sequence":1,"productOrService":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"99214"}]},"net":{"value":250.0,"currency":"USD"}}]}`)
+			respPredet, bPredet, errPredet := doReq(http.MethodPost, basePath+"/Claim/$predetermine", "application/fhir+json", predetPayload, nil)
+			respRA, bRA, errRA := doReq(http.MethodGet, basePath+"/Measure/$evaluate-risk-condition-category?subject=Patient/cert-pat-1", "", nil, nil)
+			if errPredet != nil || respPredet.StatusCode != http.StatusOK || !strings.Contains(string(bPredet), `"use":"predetermination"`) || !strings.Contains(string(bPredet), `"PREDET-CERT-CLAIM-PREDET-1"`) {
+				err = fmt.Errorf("expected POST /Claim/$predetermine to return predetermination ClaimResponse with PREDET-CERT-CLAIM-PREDET-1, got %d: %s", respPredet.StatusCode, string(bPredet))
+			} else if errRA != nil || respRA.StatusCode != http.StatusOK || !strings.Contains(string(bRA), "ra-measurereport") || !strings.Contains(string(bRA), "CMS-HCC 85") {
+				err = fmt.Errorf("expected GET /Measure/$evaluate-risk-condition-category to return Risk Adjustment Bundle with CMS-HCC 85, got %d: %s", respRA.StatusCode, string(bRA))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
