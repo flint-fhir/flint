@@ -1908,6 +1908,73 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/PractitionerRole/$find-providers": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"PractitionerRole"},
+				"summary":     "HL7 Da Vinci PDex Plan-Net v1.1.0 PractitionerRole/$find-providers provider directory search",
+				"operationId": "practitionerRoleFindProvidersGet",
+				"parameters": []map[string]any{
+					{"name": "specialty", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "organization", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "location", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: searchset) of Plan-Net PractitionerRole and included Practitioner/Organization/Location entries"},
+				},
+			},
+		},
+		"/HealthcareService/$find-services": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"HealthcareService"},
+				"summary":     "HL7 Da Vinci PDex Plan-Net v1.1.0 HealthcareService/$find-services directory search",
+				"operationId": "healthcareServiceFindServicesGet",
+				"parameters": []map[string]any{
+					{"name": "category", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "specialty", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: searchset) of Plan-Net HealthcareService entries"},
+				},
+			},
+		},
+		"/ServiceRequest/$sdoh-referral": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ServiceRequest"},
+				"summary":     "HL7 Gravity SDOH Clinical Care v2.1.0 ServiceRequest/$sdoh-referral closed-loop community referral & Task creation",
+				"operationId": "serviceRequestSDOHReferral",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing SDOHCC-ServiceRequest and SDOHCC-TaskForReferralManagement"},
+				},
+			},
+		},
+		"/Patient/{id}/$sdoh-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "HL7 Gravity SDOH Clinical Care v2.1.0 Patient/{id}/$sdoh-summary social determinants summary Bundle",
+				"operationId": "patientSDOHSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: collection) of SDOH clinical screenings, health concerns, goals, and referrals"},
+				},
+			},
+		},
+		"/Consent/$evaluate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Consent"},
+				"summary":     "HL7 FHIR R4 Consent/$evaluate privacy directive & confidentiality security label evaluation",
+				"operationId": "consentEvaluateGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "actor", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "purpose", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing decision (permit|deny), securityLabel, and matchedConsent"},
+				},
+			},
+		},
 		"/Patient/{id}/$everything": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Patient"},

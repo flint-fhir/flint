@@ -1670,6 +1670,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected POST /MedicationRequest/cert-medreq-1/$dispense to return MedicationDispense, got %d: %s", respDisp.StatusCode, string(bDisp))
 			}
 		}
+		if err == nil {
+			respPN, bPN, errPN := doReq(http.MethodGet, basePath+"/PractitionerRole/$find-providers?specialty=207RC0000X", "", nil, nil)
+			respCon, bCon, errCon := doReq(http.MethodGet, basePath+"/Consent/$evaluate?patient=Patient/cert-pat-1", "", nil, nil)
+			if errPN != nil || respPN.StatusCode != http.StatusOK || !strings.Contains(string(bPN), "plannet-PractitionerRole") {
+				err = fmt.Errorf("expected GET /PractitionerRole/$find-providers to return Plan-Net Bundle, got %d: %s", respPN.StatusCode, string(bPN))
+			} else if errCon != nil || respCon.StatusCode != http.StatusOK || !strings.Contains(string(bCon), `"valueCode":"permit"`) {
+				err = fmt.Errorf("expected GET /Consent/$evaluate to return decision=permit Parameters, got %d: %s", respCon.StatusCode, string(bCon))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
