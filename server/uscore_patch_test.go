@@ -5769,3 +5769,124 @@ func TestMCODEFormularyAndIHEMHDWave33(t *testing.T) {
 		t.Fatalf("GET /DocumentReference/$iti-67 expected FindDocumentReferencesComprehensiveResponseMessage with mhd-doc-w33-1, got %d: %s", iti67Rec.Code, iti67Rec.Body.String())
 	}
 }
+
+func TestClinicalGenomicsPACIOAndNHSNWave34(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave34-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w34-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w34-1",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1951-08-20",
+			"name": [{"family": "Franklin", "given": ["Rosalind"]}]
+		}`},
+		{"/QuestionnaireResponse/qr-w34-1", `{
+			"resourceType": "QuestionnaireResponse",
+			"id": "qr-w34-1",
+			"status": "completed",
+			"subject": {"reference": "Patient/pat-w34-1"}
+		}`},
+		{"/Encounter/enc-w34-1", `{
+			"resourceType": "Encounter",
+			"id": "enc-w34-1",
+			"status": "in-progress",
+			"class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "IMP"},
+			"subject": {"reference": "Patient/pat-w34-1"}
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. HL7 Clinical Genomics v3.0.0: GET /Patient/pat-w34-1/$find-subject-variants & $find-subject-tx-implications
+	cgVarReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w34-1/$find-subject-variants?genes=BRCA1", nil)
+	cgVarRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cgVarRec, cgVarReq)
+	if cgVarRec.Code != http.StatusOK ||
+		!strings.Contains(cgVarRec.Body.String(), `"69548-6"`) ||
+		!strings.Contains(cgVarRec.Body.String(), `"BRCA1"`) ||
+		!strings.Contains(cgVarRec.Body.String(), `"LA6668-3"`) {
+		t.Fatalf("GET /Patient/pat-w34-1/$find-subject-variants expected variant 69548-6 with BRCA1 and LA6668-3, got %d: %s", cgVarRec.Code, cgVarRec.Body.String())
+	}
+
+	cgTxReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w34-1/$find-subject-tx-implications?treatments=Olaparib", nil)
+	cgTxRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cgTxRec, cgTxReq)
+	if cgTxRec.Code != http.StatusOK ||
+		!strings.Contains(cgTxRec.Body.String(), `"51963-7"`) ||
+		!strings.Contains(cgTxRec.Body.String(), `"Olaparib"`) ||
+		!strings.Contains(cgTxRec.Body.String(), "therapeutic-implication") {
+		t.Fatalf("GET /Patient/pat-w34-1/$find-subject-tx-implications expected 51963-7 with Olaparib, got %d: %s", cgTxRec.Code, cgTxRec.Body.String())
+	}
+
+	// 2. HL7 PACIO Post-Acute Care v2.0.0: POST /QuestionnaireResponse/qr-w34-1/$pacio-assess & GET /Patient/pat-w34-1/$pacio-summary
+	pacioAssBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "bimsScore", "valueInteger": 15},
+			{"name": "functionalCode", "valueCode": "06"}
+		]
+	}`
+	pacioAssReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/QuestionnaireResponse/qr-w34-1/$pacio-assess", strings.NewReader(pacioAssBody))
+	pacioAssReq.Header.Set("Content-Type", "application/fhir+json")
+	pacioAssRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pacioAssRec, pacioAssReq)
+	if pacioAssRec.Code != http.StatusOK ||
+		!strings.Contains(pacioAssRec.Body.String(), `"83254-3"`) ||
+		!strings.Contains(pacioAssRec.Body.String(), `"52491-8"`) ||
+		!strings.Contains(pacioAssRec.Body.String(), `"valueInteger":15`) {
+		t.Fatalf("POST /QuestionnaireResponse/qr-w34-1/$pacio-assess expected Section GG (83254-3) and BIMS 15 (52491-8), got %d: %s", pacioAssRec.Code, pacioAssRec.Body.String())
+	}
+
+	pacioSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w34-1/$pacio-summary", nil)
+	pacioSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pacioSumRec, pacioSumReq)
+	if pacioSumRec.Code != http.StatusOK ||
+		!strings.Contains(pacioSumRec.Body.String(), "pacio-fs-bundle") ||
+		!strings.Contains(pacioSumRec.Body.String(), `"83254-3"`) ||
+		!strings.Contains(pacioSumRec.Body.String(), `"52491-8"`) {
+		t.Fatalf("GET /Patient/pat-w34-1/$pacio-summary expected pacio-fs-bundle with 83254-3 and 52491-8, got %d: %s", pacioSumRec.Code, pacioSumRec.Body.String())
+	}
+
+	// 3. CDC NHSN HAI / dQM v1.1.0: POST /Encounter/enc-w34-1/$nhsn-hai-report & GET /Measure/$nhsn-acute-care
+	nhsnRepReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Encounter/enc-w34-1/$nhsn-hai-report", nil)
+	nhsnRepRec := httptest.NewRecorder()
+	pgH.ServeHTTP(nhsnRepRec, nhsnRepReq)
+	if nhsnRepRec.Code != http.StatusOK ||
+		!strings.Contains(nhsnRepRec.Body.String(), `"haiDetected"`) ||
+		!strings.Contains(nhsnRepRec.Body.String(), "nhsn-hai-aur-measure") {
+		t.Fatalf("POST /Encounter/enc-w34-1/$nhsn-hai-report expected haiDetected and nhsn-hai-aur-measure MeasureReport, got %d: %s", nhsnRepRec.Code, nhsnRepRec.Body.String())
+	}
+
+	nhsnMeasReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Measure/$nhsn-acute-care", nil)
+	nhsnMeasRec := httptest.NewRecorder()
+	pgH.ServeHTTP(nhsnMeasRec, nhsnMeasReq)
+	if nhsnMeasRec.Code != http.StatusOK || !strings.Contains(nhsnMeasRec.Body.String(), "nhsn-hai-aur-measure") {
+		t.Fatalf("GET /Measure/$nhsn-acute-care expected nhsn-hai-aur-measure, got %d: %s", nhsnMeasRec.Code, nhsnMeasRec.Body.String())
+	}
+}

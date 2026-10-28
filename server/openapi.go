@@ -2115,6 +2115,83 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Patient/{id}/$find-subject-variants": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "HL7 Clinical Genomics v3.0.0 Patient/{id}/$find-subject-variants genomic variant discovery",
+				"operationId": "patientFindSubjectVariantsGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "genes", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing presence (boolean) and variants (LOINC 69548-6)"},
+				},
+			},
+		},
+		"/Patient/{id}/$find-subject-tx-implications": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "HL7 Clinical Genomics v3.0.0 Patient/{id}/$find-subject-tx-implications pharmacogenomic & oncology therapeutic implications",
+				"operationId": "patientFindSubjectTxImplicationsGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "treatments", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing implications (therapeutic-implication Observation, LOINC 51963-7)"},
+				},
+			},
+		},
+		"/Patient/{id}/$pacio-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "HL7 PACIO v2.0.0 Patient/{id}/$pacio-summary Functional & Cognitive Status Bundle",
+				"operationId": "patientPACIOSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "PACIO Bundle (pacio-fs-bundle) containing Section GG functional mobility (83254-3) and BIMS cognitive status (52491-8) Observations"},
+				},
+			},
+		},
+		"/QuestionnaireResponse/{id}/$pacio-assess": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"QuestionnaireResponse"},
+				"summary":     "HL7 PACIO v2.0.0 QuestionnaireResponse/{id}/$pacio-assess post-acute functional & BIMS cognitive assessment",
+				"operationId": "questionnaireResponsePACIOAssessPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing bimsScore, functionalObservation, and cognitiveObservation"},
+				},
+			},
+		},
+		"/Encounter/{id}/$nhsn-hai-report": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Encounter"},
+				"summary":     "CDC NHSN HAI / dQM v1.1.0 Encounter/{id}/$nhsn-hai-report Healthcare-Associated Infection & AUR reporting",
+				"operationId": "encounterNHSNHAIReportPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing haiDetected and NHSN DEQM MeasureReport"},
+				},
+			},
+		},
+		"/Measure/$nhsn-acute-care": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Measure"},
+				"summary":     "CDC NHSN v1.1.0 Measure/$nhsn-acute-care Acute Care Hospital HAI & AUR dQM Measure",
+				"operationId": "measureNHSNAcuteCareGet",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "CDC NHSN HAI & AUR Measure resource (nhsn-hai-aur-measure)"},
+				},
+			},
+		},
 		"/Patient/{id}/$everything": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Patient"},

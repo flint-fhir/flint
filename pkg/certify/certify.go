@@ -1697,6 +1697,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /MedicationKnowledge/$formulary-lookup to return usdf-FormularyDrug, got %d: %s", respFL.StatusCode, string(bFL))
 			}
 		}
+		if err == nil {
+			respCG, bCG, errCG := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$find-subject-variants?genes=BRCA1", "", nil, nil)
+			respNHSN, bNHSN, errNHSN := doReq(http.MethodGet, basePath+"/Measure/$nhsn-acute-care", "", nil, nil)
+			if errCG != nil || respCG.StatusCode != http.StatusOK || !strings.Contains(string(bCG), `"69548-6"`) {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$find-subject-variants to return variant 69548-6, got %d: %s", respCG.StatusCode, string(bCG))
+			} else if errNHSN != nil || respNHSN.StatusCode != http.StatusOK || !strings.Contains(string(bNHSN), "nhsn-hai-aur-measure") {
+				err = fmt.Errorf("expected GET /Measure/$nhsn-acute-care to return nhsn-hai-aur-measure, got %d: %s", respNHSN.StatusCode, string(bNHSN))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
