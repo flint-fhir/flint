@@ -4829,3 +4829,115 @@ func TestOrderCRDAdverseEventEvaluateAndCarePlanEvaluateWave26(t *testing.T) {
 		t.Fatalf("GET /CarePlan/cp-w26-1/$evaluate expected achievementStatus=achieved, Goal/goal-w26-1, and Observation/obs-w26-bp, got %d: %s", cpRec.Code, cpRec.Body.String())
 	}
 }
+
+func TestImmDSForecastPCTGFESubmitAndRiskAssessmentEvaluateWave27(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave27-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w27-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w27-1",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1968-11-05",
+			"name": [{"family": "Pasteur", "given": ["Louise"]}]
+		}`},
+		{"/Immunization/imm-w27-1", `{
+			"resourceType": "Immunization",
+			"id": "imm-w27-1",
+			"status": "completed",
+			"vaccineCode": {"coding": [{"system": "http://hl7.org/fhir/sid/cvx", "code": "208", "display": "SARS-COV-2 (COVID-19) vaccine, mRNA"}]},
+			"patient": {"reference": "Patient/pat-w27-1"},
+			"occurrenceDateTime": "2026-01-10"
+		}`},
+		{"/Condition/cond-w27-1", `{
+			"resourceType": "Condition",
+			"id": "cond-w27-1",
+			"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+			"code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}]},
+			"subject": {"reference": "Patient/pat-w27-1"}
+		}`},
+		{"/Coverage/cov-w27-1", `{
+			"resourceType": "Coverage",
+			"id": "cov-w27-1",
+			"status": "active",
+			"beneficiary": {"reference": "Patient/pat-w27-1"},
+			"payor": [{"display": "Shield Health Plan"}]
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. GET /Patient/pat-w27-1/$immds-forecast
+	immReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w27-1/$immds-forecast", nil)
+	immRec := httptest.NewRecorder()
+	pgH.ServeHTTP(immRec, immReq)
+	if immRec.Code != http.StatusOK ||
+		!strings.Contains(immRec.Body.String(), "ImmunizationEvaluation") ||
+		!strings.Contains(immRec.Body.String(), "ImmunizationRecommendation") ||
+		!strings.Contains(immRec.Body.String(), `"code":"complete"`) ||
+		!strings.Contains(immRec.Body.String(), `"code":"due"`) {
+		t.Fatalf("GET /Patient/pat-w27-1/$immds-forecast expected ImmunizationEvaluation (complete) and ImmunizationRecommendation (due), got %d: %s", immRec.Code, immRec.Body.String())
+	}
+
+	// 2. POST /Claim/$gfe-submit
+	gfeBody := `{
+		"resourceType": "Claim",
+		"id": "gfe-w27-1",
+		"status": "active",
+		"use": "predetermination",
+		"patient": {"reference": "Patient/pat-w27-1"},
+		"item": [
+			{
+				"sequence": 1,
+				"productOrService": {"coding": [{"system": "http://www.ama-assn.org/go/cpt", "code": "93306"}]},
+				"net": {"value": 600.0, "currency": "USD"}
+			}
+		]
+	}`
+	gfeReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Claim/$gfe-submit", strings.NewReader(gfeBody))
+	gfeReq.Header.Set("Content-Type", "application/fhir+json")
+	gfeRec := httptest.NewRecorder()
+	pgH.ServeHTTP(gfeRec, gfeReq)
+	if gfeRec.Code != http.StatusOK ||
+		!strings.Contains(gfeRec.Body.String(), "ExplanationOfBenefit") ||
+		!strings.Contains(gfeRec.Body.String(), "davinci-pct-aeob") ||
+		!strings.Contains(gfeRec.Body.String(), `480`) {
+		t.Fatalf("POST /Claim/$gfe-submit expected AEOB Bundle with 480 benefit amount, got %d: %s", gfeRec.Code, gfeRec.Body.String())
+	}
+
+	// 3. GET /RiskAssessment/$evaluate?subject=Patient/pat-w27-1
+	raReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/RiskAssessment/$evaluate?subject=Patient/pat-w27-1", nil)
+	raRec := httptest.NewRecorder()
+	pgH.ServeHTTP(raRec, raReq)
+	if raRec.Code != http.StatusOK ||
+		!strings.Contains(raRec.Body.String(), `"resourceType":"RiskAssessment"`) ||
+		!strings.Contains(raRec.Body.String(), `"probabilityDecimal":0.14`) ||
+		!strings.Contains(raRec.Body.String(), `"Condition/cond-w27-1"`) {
+		t.Fatalf("GET /RiskAssessment/$evaluate expected RiskAssessment with probabilityDecimal=0.14 and Condition/cond-w27-1, got %d: %s", raRec.Code, raRec.Body.String())
+	}
+}

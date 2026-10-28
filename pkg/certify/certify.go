@@ -1630,6 +1630,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /CarePlan/cert-cp-1/$evaluate to return Parameters with achievementStatus=achieved, got %d: %s", respCPEval.StatusCode, string(bCPEval))
 			}
 		}
+		if err == nil {
+			respImmDS, bImmDS, errImmDS := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$immds-forecast", "", nil, nil)
+			respRisk, bRisk, errRisk := doReq(http.MethodGet, basePath+"/RiskAssessment/$evaluate?subject=Patient/cert-pat-1", "", nil, nil)
+			if errImmDS != nil || respImmDS.StatusCode != http.StatusOK || !strings.Contains(string(bImmDS), "ImmunizationRecommendation") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$immds-forecast to return Parameters with ImmunizationRecommendation, got %d: %s", respImmDS.StatusCode, string(bImmDS))
+			} else if errRisk != nil || respRisk.StatusCode != http.StatusOK || !strings.Contains(string(bRisk), `"probabilityDecimal"`) {
+				err = fmt.Errorf("expected GET /RiskAssessment/$evaluate?subject=Patient/cert-pat-1 to return RiskAssessment with probabilityDecimal, got %d: %s", respRisk.StatusCode, string(bRisk))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
