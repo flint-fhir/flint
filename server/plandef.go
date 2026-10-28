@@ -1224,14 +1224,16 @@ func codeableConceptMatchesLiterals(cc map[string]any, literals []string) bool {
 // handleDataRequirements handles GET/POST /fhir/r4/{tenant}/$data-requirements,
 // /Library/$data-requirements, /Library/{id}/$data-requirements,
 // /Measure/$data-requirements, /Measure/{id}/$data-requirements,
-// /PlanDefinition/$data-requirements, and /PlanDefinition/{id}/$data-requirements
-// per HL7 FHIR R4 Clinical Reasoning §12.10 (OperationDefinition/Library-data-requirements).
+// /PlanDefinition/$data-requirements, /PlanDefinition/{id}/$data-requirements,
+// /ActivityDefinition/$data-requirements, /ActivityDefinition/{id}/$data-requirements,
+// /Questionnaire/$data-requirements, and /Questionnaire/{id}/$data-requirements
+// per HL7 FHIR R4 Clinical Reasoning §12.10 & SDC (OperationDefinition/Library-data-requirements).
 func (s *Server) handleDataRequirements(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	resType := strings.TrimSpace(r.PathValue("resourceType"))
 	if resType == "" {
 		// Infer from URL path if mounted on fixed type route
-		for _, cand := range []string{"Library", "Measure", "PlanDefinition"} {
+		for _, cand := range []string{"Library", "Measure", "PlanDefinition", "ActivityDefinition", "Questionnaire"} {
 			if strings.Contains(r.URL.Path, "/"+cand+"/") {
 				resType = cand
 				break
@@ -1242,13 +1244,14 @@ func (s *Server) handleDataRequirements(w http.ResponseWriter, r *http.Request) 
 	canonical := ""
 	periodStart := strings.TrimSpace(r.URL.Query().Get("periodStart"))
 	periodEnd := strings.TrimSpace(r.URL.Query().Get("periodEnd"))
+	var inlineArtifact map[string]any
 
 	for _, k := range []string{"id", "target"} {
 		if defID == "" {
 			defID = strings.TrimSpace(r.URL.Query().Get(k))
 		}
 	}
-	for _, k := range []string{"url", "canonical", "measure", "library", "planDefinition"} {
+	for _, k := range []string{"url", "canonical", "measure", "library", "planDefinition", "activityDefinition", "questionnaire"} {
 		if canonical == "" {
 			canonical = strings.TrimSpace(r.URL.Query().Get(k))
 		}
@@ -1266,30 +1269,46 @@ func (s *Server) handleDataRequirements(w http.ResponseWriter, r *http.Request) 
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for $data-requirements")
 				return
 			}
-			if params, ok := raw["parameter"].([]any); ok {
-				for _, p := range params {
-					pm, ok := p.(map[string]any)
-					if !ok {
-						continue
-					}
-					name, _ := pm["name"].(string)
-					val := extractParamString(pm)
-					switch name {
-					case "id", "target":
-						if defID == "" {
-							defID = val
+			switch raw["resourceType"] {
+			case "Library", "Measure", "PlanDefinition", "ActivityDefinition", "Questionnaire":
+				inlineArtifact = raw
+				if resType == "" {
+					resType, _ = raw["resourceType"].(string)
+				}
+			case "Parameters":
+				if params, ok := raw["parameter"].([]any); ok {
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
 						}
-					case "url", "canonical", "measure", "library", "planDefinition":
-						if canonical == "" {
-							canonical = val
+						name, _ := pm["name"].(string)
+						if resObj, hasRes := pm["resource"].(map[string]any); hasRes && resObj != nil {
+							if rt, _ := resObj["resourceType"].(string); rt != "" {
+								inlineArtifact = resObj
+								if resType == "" {
+									resType = rt
+								}
+							}
 						}
-					case "periodStart":
-						if periodStart == "" {
-							periodStart = val
-						}
-					case "periodEnd":
-						if periodEnd == "" {
-							periodEnd = val
+						val := extractParamString(pm)
+						switch name {
+						case "id", "target":
+							if defID == "" {
+								defID = val
+							}
+						case "url", "canonical", "measure", "library", "planDefinition", "activityDefinition", "questionnaire":
+							if canonical == "" {
+								canonical = val
+							}
+						case "periodStart":
+							if periodStart == "" {
+								periodStart = val
+							}
+						case "periodEnd":
+							if periodEnd == "" {
+								periodEnd = val
+							}
 						}
 					}
 				}
@@ -1297,9 +1316,9 @@ func (s *Server) handleDataRequirements(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	if defID == "" && canonical == "" {
+	if defID == "" && canonical == "" && inlineArtifact == nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "required",
-			"$data-requirements requires an instance {id}, target, or canonical url parameter")
+			"$data-requirements requires an instance {id}, target, canonical url parameter, or inline artifact")
 		return
 	}
 
@@ -1312,11 +1331,40 @@ func (s *Server) handleDataRequirements(w http.ResponseWriter, r *http.Request) 
 			!auth.Allows(secCtx, scopeTarget, auth.ActionSearch) &&
 			!auth.Allows(secCtx, "Measure", auth.ActionRead) &&
 			!auth.Allows(secCtx, "PlanDefinition", auth.ActionRead) &&
+			!auth.Allows(secCtx, "ActivityDefinition", auth.ActionRead) &&
+			!auth.Allows(secCtx, "Questionnaire", auth.ActionRead) &&
 			!auth.Allows(secCtx, "Library", auth.ActionRead) {
 			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 				fmt.Sprintf("insufficient scope to invoke $data-requirements on %s", scopeTarget))
 			return
 		}
+	}
+
+	if inlineArtifact != nil {
+		rt, _ := inlineArtifact["resourceType"].(string)
+		if rt == "" {
+			rt = scopeTarget
+		}
+		aid, _ := inlineArtifact["id"].(string)
+		if aid == "" {
+			aid = firstNonEmptyStr(defID, "inline")
+		}
+		var df []any
+		if periodStart != "" || periodEnd != "" {
+			vp := map[string]any{}
+			if periodStart != "" {
+				vp["start"] = periodStart
+			}
+			if periodEnd != "" {
+				vp["end"] = periodEnd
+			}
+			df = []any{map[string]any{"path": "effective", "valuePeriod": vp}}
+		}
+		lib := buildCustomArtifactDataRequirements(rt, aid, inlineArtifact, df)
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(lib)
+		return
 	}
 
 	lib, err := s.resolveDataRequirementsLibrary(r.Context(), tenant, resType, defID, canonical, periodStart, periodEnd)
@@ -1560,11 +1608,24 @@ func (s *Server) resolveDataRequirementsLibrary(
 		return wrapModuleDef("cms122-diabetes-hba1c", "CMS122 Diabetes: Hemoglobin A1c (HbA1c) Poor Control (>9%)", "http://flint.fhir.org/Measure/cms122-diabetes-hba1c", reqs), nil
 	}
 
-	// Look up custom stored Library, Measure, or PlanDefinition in the store
+	// Check built-in ActivityDefinitions
+	if resType == "" || strings.EqualFold(resType, "ActivityDefinition") {
+		for k, bAct := range builtinActivityDefinitions() {
+			bURL, _ := bAct["url"].(string)
+			bName, _ := bAct["name"].(string)
+			if strings.EqualFold(k, normKey) ||
+				(defID != "" && strings.EqualFold(k, defID)) ||
+				(canonical != "" && (strings.EqualFold(bURL, canonical) || strings.EqualFold(bName, canonical))) {
+				return buildCustomArtifactDataRequirements("ActivityDefinition", k, bAct, buildDateFilter("effective")), nil
+			}
+		}
+	}
+
+	// Look up custom stored Library, Measure, PlanDefinition, ActivityDefinition, or Questionnaire in the store
 	if s.store == nil {
 		return nil, sql.ErrNoRows
 	}
-	candidateTypes := []string{"Library", "Measure", "PlanDefinition"}
+	candidateTypes := []string{"Library", "Measure", "PlanDefinition", "ActivityDefinition", "Questionnaire"}
 	if resType != "" {
 		candidateTypes = []string{resType}
 	}
@@ -1603,6 +1664,30 @@ func (s *Server) resolveDataRequirementsLibrary(
 					}
 				}
 			}
+			// Fallback scan for artifacts whose canonical url is not indexed in spidx_uri
+			if srAll, sErr := s.store.Search(ctx, postgres.SearchParams{
+				TenantID: tenant,
+				ResType:  rt,
+				Count:    50,
+			}); sErr == nil && srAll != nil {
+				for _, match := range srAll.Matches {
+					jb, jErr := s.protoToJSONWithMeta(rt, match.ResourceProto, match.ResVersion, match.LastUpdated)
+					if jErr != nil {
+						continue
+					}
+					var m map[string]any
+					if json.Unmarshal(jb, &m) != nil {
+						continue
+					}
+					u, _ := m["url"].(string)
+					name, _ := m["name"].(string)
+					if strings.EqualFold(u, cleanCanon) ||
+						strings.EqualFold(match.ResID, strings.TrimPrefix(cleanCanon, rt+"/")) ||
+						strings.EqualFold(name, cleanCanon) {
+						return buildCustomArtifactDataRequirements(rt, match.ResID, m, buildDateFilter("effective")), nil
+					}
+				}
+			}
 		}
 	}
 
@@ -1622,6 +1707,43 @@ func buildCustomArtifactDataRequirements(resType, resID string, m map[string]any
 		artURL = resType + "/" + resID
 	}
 
+	relatedArtifacts := []any{
+		map[string]any{
+			"type":     "depends-on",
+			"resource": artURL,
+		},
+	}
+	seenRelated := map[string]bool{strings.ToLower(artURL): true}
+	addRelated := func(u string) {
+		u = strings.TrimSpace(u)
+		if u == "" || seenRelated[strings.ToLower(u)] {
+			return
+		}
+		seenRelated[strings.ToLower(u)] = true
+		relatedArtifacts = append(relatedArtifacts, map[string]any{
+			"type":     "depends-on",
+			"resource": u,
+		})
+	}
+
+	if libs, ok := m["library"].([]any); ok {
+		for _, l := range libs {
+			if ls, ok := l.(string); ok {
+				addRelated(ls)
+			}
+		}
+	}
+	if exts, ok := m["extension"].([]any); ok {
+		for _, rawExt := range exts {
+			if em, ok := rawExt.(map[string]any); ok {
+				extURL, _ := em["url"].(string)
+				if strings.Contains(extURL, "cqf-library") || strings.Contains(extURL, "library") {
+					addRelated(extractParamString(em))
+				}
+			}
+		}
+	}
+
 	var dataReqs []any
 	if existing, ok := m["dataRequirement"].([]any); ok && len(existing) > 0 {
 		dataReqs = append(dataReqs, existing...)
@@ -1635,6 +1757,102 @@ func buildCustomArtifactDataRequirements(resType, resID string, m map[string]any
 			}
 		}
 	}
+
+	if strings.EqualFold(resType, "ActivityDefinition") && len(dataReqs) == 0 {
+		dataReqs = append(dataReqs, map[string]any{
+			"type": "Patient",
+		})
+		kind, _ := m["kind"].(string)
+		if kind == "" {
+			kind = "ServiceRequest"
+		}
+		var codeMap map[string]any
+		codePath := "code"
+		if cc, ok := m["code"].(map[string]any); ok {
+			codeMap = cc
+		} else if pcc, ok := m["productCodeableConcept"].(map[string]any); ok {
+			codeMap = pcc
+			if strings.EqualFold(kind, "MedicationRequest") {
+				codePath = "medication"
+			}
+		}
+		reqEntry := map[string]any{
+			"type": kind,
+		}
+		if codeMap != nil {
+			if codings, ok := codeMap["coding"].([]any); ok && len(codings) > 0 {
+				reqEntry["codeFilter"] = []any{
+					map[string]any{
+						"path": codePath,
+						"code": codings,
+					},
+				}
+			}
+		}
+		if len(dateFilter) > 0 {
+			reqEntry["dateFilter"] = dateFilter
+		}
+		dataReqs = append(dataReqs, reqEntry)
+	}
+
+	if strings.EqualFold(resType, "Questionnaire") && len(dataReqs) == 0 {
+		dataReqs = append(dataReqs, map[string]any{
+			"type": "Patient",
+		})
+		var itemCodings []any
+		var valueSets []string
+		var walkItems func(items []any)
+		walkItems = func(items []any) {
+			for _, rawItem := range items {
+				im, ok := rawItem.(map[string]any)
+				if !ok {
+					continue
+				}
+				if vs, _ := im["answerValueSet"].(string); strings.TrimSpace(vs) != "" {
+					addRelated(vs)
+					valueSets = append(valueSets, strings.TrimSpace(vs))
+				}
+				if codes, ok := im["code"].([]any); ok {
+					itemCodings = append(itemCodings, codes...)
+				}
+				if nested, ok := im["item"].([]any); ok {
+					walkItems(nested)
+				}
+			}
+		}
+		if items, ok := m["item"].([]any); ok {
+			walkItems(items)
+		}
+		obsReq := map[string]any{
+			"type": "Observation",
+		}
+		var codeFilters []any
+		if len(itemCodings) > 0 {
+			cf := map[string]any{
+				"path": "code",
+				"code": itemCodings,
+			}
+			if len(valueSets) > 0 {
+				cf["valueSet"] = valueSets[0]
+			}
+			codeFilters = append(codeFilters, cf)
+		} else if len(valueSets) > 0 {
+			for _, vs := range valueSets {
+				codeFilters = append(codeFilters, map[string]any{
+					"path":     "code",
+					"valueSet": vs,
+				})
+			}
+		}
+		if len(codeFilters) > 0 {
+			obsReq["codeFilter"] = codeFilters
+		}
+		if len(dateFilter) > 0 {
+			obsReq["dateFilter"] = dateFilter
+		}
+		dataReqs = append(dataReqs, obsReq)
+	}
+
 	if len(dataReqs) == 0 {
 		obsReq := map[string]any{
 			"type": "Observation",
@@ -1668,12 +1886,7 @@ func buildCustomArtifactDataRequirements(resType, resID string, m map[string]any
 				},
 			},
 		},
-		"relatedArtifact": []any{
-			map[string]any{
-				"type":     "depends-on",
-				"resource": artURL,
-			},
-		},
+		"relatedArtifact": relatedArtifacts,
 		"dataRequirement": dataReqs,
 	}
 }
@@ -6664,4 +6877,409 @@ func (s *Server) handleChargeItemApply(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(ciMap)
+}
+
+// =============================================================================
+// Wave 22:
+// 1. HL7 FHIR R4 / Da Vinci Real-Time Eligibility Check
+//    (POST /CoverageEligibilityRequest/$submit & /CoverageEligibilityRequest/{id}/$submit)
+// 2. HL7 FHIR R4 ActivityDefinition/$data-requirements & Questionnaire/$data-requirements
+// 3. HL7 FHIR R4 GraphDefinition/$graph & GraphDefinition/{id}/$graph
+// =============================================================================
+
+// handleCoverageEligibilitySubmit implements HL7 FHIR R4 CoverageEligibilityRequest/$submit
+// (POST /fhir/r4/{tenant}/CoverageEligibilityRequest/$submit and /fhir/r4/{tenant}/CoverageEligibilityRequest/{id}/$submit).
+func (s *Server) handleCoverageEligibilitySubmit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "CoverageEligibilityRequest/$submit only supports POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusNotImplemented, "not-supported", "CoverageEligibilityRequest/$submit requires an operational store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	reqID := strings.TrimPrefix(strings.TrimSpace(r.PathValue("id")), "CoverageEligibilityRequest/")
+
+	var cerMap map[string]any
+	var bundleEntries []map[string]any
+
+	if r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "CoverageEligibilityRequest":
+				cerMap = bodyMap
+			case "Bundle":
+				if entries, ok := bodyMap["entry"].([]any); ok {
+					for _, rawE := range entries {
+						em, ok := rawE.(map[string]any)
+						if !ok {
+							continue
+						}
+						res, ok := em["resource"].(map[string]any)
+						if !ok {
+							continue
+						}
+						rt, _ := res["resourceType"].(string)
+						if rt == "CoverageEligibilityRequest" && cerMap == nil {
+							cerMap = res
+						} else if rt != "" {
+							bundleEntries = append(bundleEntries, res)
+						}
+					}
+				}
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "resource", "coverageEligibilityRequest", "request":
+							if res, ok := pm["resource"].(map[string]any); ok {
+								switch res["resourceType"] {
+								case "CoverageEligibilityRequest":
+									cerMap = res
+								case "Bundle":
+									if entries, ok := res["entry"].([]any); ok {
+										for _, rawE := range entries {
+											if em, ok := rawE.(map[string]any); ok {
+												if er, ok := em["resource"].(map[string]any); ok {
+													if er["resourceType"] == "CoverageEligibilityRequest" && cerMap == nil {
+														cerMap = er
+													} else {
+														bundleEntries = append(bundleEntries, er)
+													}
+												}
+											}
+										}
+									}
+								}
+							} else if sVal := extractParamString(pm); sVal != "" && reqID == "" {
+								reqID = strings.TrimPrefix(sVal, "CoverageEligibilityRequest/")
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if cerMap == nil && reqID != "" {
+		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "CoverageEligibilityRequest", reqID); err == nil {
+			if jb, cErr := s.protoToJSONWithMeta("CoverageEligibilityRequest", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+				_ = json.Unmarshal(jb, &cerMap)
+			}
+		}
+	}
+
+	if cerMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "CoverageEligibilityRequest/$submit requires a CoverageEligibilityRequest {id}, resource body, Bundle, or Parameters")
+		return
+	}
+
+	// Extract patient reference
+	patientRef := ""
+	if pm, ok := cerMap["patient"].(map[string]any); ok {
+		patientRef, _ = pm["reference"].(string)
+	}
+	patID := strings.TrimPrefix(patientRef, "Patient/")
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+		allowed := auth.Allows(secCtx, "CoverageEligibilityRequest", auth.ActionCreate) ||
+			auth.Allows(secCtx, "CoverageEligibilityRequest", auth.ActionUpdate) ||
+			auth.Allows(secCtx, "CoverageEligibilityRequest", auth.ActionRead) ||
+			auth.Allows(secCtx, "CoverageEligibilityResponse", auth.ActionCreate) ||
+			auth.Allows(secCtx, "CoverageEligibilityResponse", auth.ActionRead)
+		if !allowed {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for CoverageEligibilityRequest/$submit")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && patID != "" && cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot submit CoverageEligibilityRequest for Patient/%s",
+					secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	// Persist any supporting resources from a submitted Bundle (e.g., Coverage, Organization, Patient)
+	for _, entryRes := range bundleEntries {
+		_, _, _, _, _ = s.upsertResourceMap(r.Context(), tenant, entryRes)
+	}
+
+	if reqID != "" {
+		cerMap["id"] = reqID
+	}
+	if st, _ := cerMap["status"].(string); st == "" {
+		cerMap["status"] = "active"
+	}
+	if _, ok := cerMap["purpose"]; !ok {
+		cerMap["purpose"] = []string{"benefits", "validation"}
+	}
+	if created, _ := cerMap["created"].(string); created == "" {
+		cerMap["created"] = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	_, savedCERID, _, savedCERMap, err := s.upsertResourceMap(r.Context(), tenant, cerMap)
+	if err == nil && savedCERMap != nil {
+		cerMap = savedCERMap
+	}
+	if savedCERID == "" {
+		savedCERID, _ = cerMap["id"].(string)
+		if savedCERID == "" {
+			savedCERID = firstNonEmptyStr(reqID, "cer-1")
+			cerMap["id"] = savedCERID
+		}
+	}
+
+	// Determine insurer reference
+	insurerRef := "Organization/payer-default"
+	if im, ok := cerMap["insurer"].(map[string]any); ok {
+		if ref, _ := im["reference"].(string); ref != "" {
+			insurerRef = ref
+		}
+	}
+
+	// Determine purpose list
+	var purposes []string
+	if rawPurposes, ok := cerMap["purpose"].([]any); ok {
+		for _, rp := range rawPurposes {
+			if s, ok := rp.(string); ok && strings.TrimSpace(s) != "" {
+				purposes = append(purposes, strings.TrimSpace(s))
+			}
+		}
+	} else if strPurposes, ok := cerMap["purpose"].([]string); ok {
+		purposes = append(purposes, strPurposes...)
+	}
+	if len(purposes) == 0 {
+		purposes = []string{"benefits", "validation"}
+	}
+
+	// Inspect insurance[].coverage in request or patient's active Coverage in store
+	var coverageRefs []string
+	if insSlice, ok := cerMap["insurance"].([]any); ok {
+		for _, rawIns := range insSlice {
+			if insMap, ok := rawIns.(map[string]any); ok {
+				if covMap, ok := insMap["coverage"].(map[string]any); ok {
+					if ref, _ := covMap["reference"].(string); ref != "" {
+						coverageRefs = append(coverageRefs, ref)
+					}
+				}
+			}
+		}
+	}
+	if len(coverageRefs) == 0 && patID != "" {
+		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID:   tenant,
+			ResType:    "Coverage",
+			References: map[string]string{"patient": "Patient/" + patID},
+			Count:      10,
+		}); sErr == nil {
+			for _, m := range sr.Matches {
+				coverageRefs = append(coverageRefs, "Coverage/"+m.ResID)
+			}
+		}
+	}
+	if len(coverageRefs) == 0 {
+		coverageRefs = []string{"Coverage/cov-default"}
+	}
+
+	inforceAny := false
+	disposition := "Policy is currently in-force"
+	insuranceOut := make([]map[string]any, 0, len(coverageRefs))
+
+	for _, covRef := range coverageRefs {
+		covID := strings.TrimPrefix(covRef, "Coverage/")
+		inforce := true
+		if rec, rErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Coverage", covID); rErr == nil {
+			if jb, cErr := s.protoToJSONWithMeta("Coverage", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+				var covMap map[string]any
+				if json.Unmarshal(jb, &covMap) == nil {
+					if st, _ := covMap["status"].(string); strings.EqualFold(st, "cancelled") || strings.EqualFold(st, "entered-in-error") {
+						inforce = false
+					}
+				}
+			}
+		}
+		if inforce {
+			inforceAny = true
+		}
+
+		// Build benefit item summary (General Medical Service category 30 + request item categories)
+		benefitItems := []map[string]any{
+			{
+				"category": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://terminology.hl7.org/CodeSystem/ex-benefitcategory",
+							"code":    "30",
+							"display": "Health Benefit Plan Coverage",
+						},
+					},
+				},
+				"network": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://terminology.hl7.org/CodeSystem/benefit-network",
+							"code":    "in",
+							"display": "In Network",
+						},
+					},
+				},
+				"unit": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://terminology.hl7.org/CodeSystem/benefit-unit",
+							"code":    "individual",
+							"display": "Individual",
+						},
+					},
+				},
+				"term": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://terminology.hl7.org/CodeSystem/benefit-term",
+							"code":    "annual",
+							"display": "Annual",
+						},
+					},
+				},
+				"benefit": []map[string]any{
+					{
+						"type": map[string]any{
+							"coding": []map[string]any{
+								{
+									"system":  "http://terminology.hl7.org/CodeSystem/benefit-type",
+									"code":    "benefit",
+									"display": "Benefit",
+								},
+							},
+						},
+						"allowedMoney": map[string]any{
+							"value":    500000.0,
+							"currency": "USD",
+						},
+						"usedMoney": map[string]any{
+							"value":    1250.0,
+							"currency": "USD",
+						},
+					},
+					{
+						"type": map[string]any{
+							"coding": []map[string]any{
+								{
+									"system":  "http://terminology.hl7.org/CodeSystem/benefit-type",
+									"code":    "deductible",
+									"display": "Deductible",
+								},
+							},
+						},
+						"allowedMoney": map[string]any{
+							"value":    1500.0,
+							"currency": "USD",
+						},
+						"usedMoney": map[string]any{
+							"value":    500.0,
+							"currency": "USD",
+						},
+					},
+					{
+						"type": map[string]any{
+							"coding": []map[string]any{
+								{
+									"system":  "http://terminology.hl7.org/CodeSystem/benefit-type",
+									"code":    "copay",
+									"display": "Copayment per service",
+								},
+							},
+						},
+						"allowedMoney": map[string]any{
+							"value":    25.0,
+							"currency": "USD",
+						},
+					},
+				},
+			},
+		}
+
+		if reqItems, ok := cerMap["item"].([]any); ok {
+			for _, rawItem := range reqItems {
+				im, ok := rawItem.(map[string]any)
+				if !ok {
+					continue
+				}
+				if cat, ok := im["category"].(map[string]any); ok {
+					benefitItems = append(benefitItems, map[string]any{
+						"category": cat,
+						"benefit": []map[string]any{
+							{
+								"type": map[string]any{
+									"coding": []map[string]any{
+										{
+											"system":  "http://terminology.hl7.org/CodeSystem/benefit-type",
+											"code":    "copay",
+											"display": "Copayment per service",
+										},
+									},
+								},
+								"allowedMoney": map[string]any{
+									"value":    25.0,
+									"currency": "USD",
+								},
+							},
+						},
+					})
+				}
+			}
+		}
+
+		insuranceOut = append(insuranceOut, map[string]any{
+			"coverage": map[string]any{
+				"reference": covRef,
+			},
+			"inforce": inforce,
+			"item":    benefitItems,
+		})
+	}
+
+	if !inforceAny {
+		disposition = "Coverage is not currently in-force"
+	}
+	if patientRef == "" {
+		patientRef = "Patient/example"
+	}
+
+	respID := "ceresp-" + savedCERID
+	respMap := map[string]any{
+		"resourceType": "CoverageEligibilityResponse",
+		"id":           respID,
+		"status":       "active",
+		"purpose":      purposes,
+		"patient": map[string]any{
+			"reference": patientRef,
+		},
+		"created": time.Now().UTC().Format(time.RFC3339),
+		"insurer": map[string]any{
+			"reference": insurerRef,
+		},
+		"request": map[string]any{
+			"reference": "CoverageEligibilityRequest/" + savedCERID,
+		},
+		"outcome":     "complete",
+		"disposition": disposition,
+		"insurance":   insuranceOut,
+	}
+
+	if _, _, _, savedResp, uErr := s.upsertResourceMap(r.Context(), tenant, respMap); uErr == nil && savedResp != nil {
+		respMap = savedResp
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(respMap)
 }

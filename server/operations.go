@@ -940,7 +940,8 @@ type parsedGraphDefinition struct {
 	Link         []postgres.GraphLink `json:"link,omitempty"`
 }
 
-// handleResourceGraph handles GET/POST /fhir/r4/{tenant}/{resourceType}/{id}/$graph
+// handleResourceGraph handles GET/POST /fhir/r4/{tenant}/{resourceType}/{id}/$graph,
+// /fhir/r4/{tenant}/GraphDefinition/{id}/$graph, and /fhir/r4/{tenant}/GraphDefinition/$graph
 // per HL7 FHIR R4 OperationDefinition/Resource-graph (http://hl7.org/fhir/OperationDefinition/Resource-graph).
 func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
@@ -957,7 +958,18 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	graphRef := strings.TrimSpace(r.URL.Query().Get("graph"))
+	q := r.URL.Query()
+	graphRef := strings.TrimSpace(q.Get("graph"))
+	if graphRef == "" && strings.EqualFold(resType, "GraphDefinition") {
+		graphRef = strings.TrimSpace(q.Get("url"))
+	}
+	startParam := strings.TrimSpace(q.Get("start"))
+	if startParam == "" {
+		startParam = strings.TrimSpace(q.Get("resource"))
+	}
+	if startParam == "" {
+		startParam = strings.TrimSpace(q.Get("subject"))
+	}
 	var inlineGraph *parsedGraphDefinition
 
 	if r.Method == http.MethodPost && r.Body != nil {
@@ -989,7 +1001,9 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 						if !ok {
 							continue
 						}
-						if name, _ := pMap["name"].(string); name == "graph" {
+						name, _ := pMap["name"].(string)
+						switch name {
+						case "graph", "url", "graphDefinition":
 							if resObj, ok := pMap["resource"].(map[string]any); ok {
 								if b, err := json.Marshal(resObj); err == nil {
 									var gd parsedGraphDefinition
@@ -1002,6 +1016,20 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 								if v, ok := pMap[k].(string); ok && strings.TrimSpace(v) != "" {
 									graphRef = strings.TrimSpace(v)
 									break
+								}
+							}
+						case "start", "resource", "subject":
+							for _, k := range []string{"valueString", "valueUri", "valueCanonical", "valueId", "valueCode"} {
+								if v, ok := pMap[k].(string); ok && strings.TrimSpace(v) != "" && startParam == "" {
+									startParam = strings.TrimSpace(v)
+									break
+								}
+							}
+							if startParam == "" {
+								if refMap, ok := pMap["valueReference"].(map[string]any); ok {
+									if refStr, _ := refMap["reference"].(string); strings.TrimSpace(refStr) != "" {
+										startParam = strings.TrimSpace(refStr)
+									}
 								}
 							}
 						}
@@ -1018,25 +1046,113 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 	var startType string
 	var links []postgres.GraphLink
 
-	if inlineGraph != nil {
-		startType = strings.TrimSpace(inlineGraph.Start)
-		links = inlineGraph.Link
-	} else if graphRef != "" {
-		gd, found, err := s.resolveStoredOrBuiltinGraphDefinition(r, tenant, graphRef, resType)
-		if err != nil {
-			s.logger.Error("resolve GraphDefinition", "error", err, "tenant", tenant, "graph", graphRef)
-			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to resolve GraphDefinition")
+	if strings.EqualFold(resType, "GraphDefinition") {
+		if graphRef == "" && inlineGraph == nil && resID != "" {
+			graphRef = resID
+		}
+		if graphRef == "" && inlineGraph == nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "required",
+				"GraphDefinition/$graph requires a GraphDefinition {id}, 'graph' parameter, or inline GraphDefinition")
 			return
 		}
-		if !found {
+		if startParam == "" {
+			writeOperationOutcome(w, http.StatusBadRequest, "required",
+				"GraphDefinition/$graph requires a 'start' resource reference parameter (e.g., start=Patient/123)")
+			return
+		}
+
+		var targetType, targetID string
+		if strings.Contains(startParam, "/") {
+			parts := strings.Split(strings.Trim(startParam, "/"), "/")
+			if len(parts) >= 2 {
+				targetType = parts[len(parts)-2]
+				targetID = parts[len(parts)-1]
+			}
+		} else {
+			targetID = startParam
+		}
+
+		if inlineGraph != nil {
+			startType = strings.TrimSpace(inlineGraph.Start)
+			links = inlineGraph.Link
+		} else {
+			hintType := targetType
+			if hintType == "" {
+				hintType = "Patient"
+			}
+			gd, found, err := s.resolveStoredOrBuiltinGraphDefinition(r, tenant, graphRef, hintType)
+			if err != nil {
+				s.logger.Error("resolve GraphDefinition", "error", err, "tenant", tenant, "graph", graphRef)
+				writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to resolve GraphDefinition")
+				return
+			}
+			if !found {
+				writeOperationOutcome(w, http.StatusNotFound, "not-found",
+					fmt.Sprintf("GraphDefinition %q not found", graphRef))
+				return
+			}
+			startType = strings.TrimSpace(gd.Start)
+			links = gd.Link
+		}
+
+		if targetType == "" {
+			if startType != "" {
+				targetType = startType
+			} else {
+				targetType = "Patient"
+			}
+		}
+		if targetID == "" {
+			writeOperationOutcome(w, http.StatusBadRequest, "required",
+				"GraphDefinition/$graph 'start' parameter must include a resource ID")
+			return
+		}
+		if _, ok := s.protoRegistry[targetType]; !ok {
 			writeOperationOutcome(w, http.StatusNotFound, "not-found",
-				fmt.Sprintf("GraphDefinition %q not found", graphRef))
+				fmt.Sprintf("unknown or unsupported start resource type %q", targetType))
 			return
 		}
-		startType = strings.TrimSpace(gd.Start)
-		links = gd.Link
+
+		if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+			if !auth.Allows(secCtx, targetType, auth.ActionRead) && !auth.Allows(secCtx, targetType, auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("insufficient scope for GraphDefinition/$graph on %s", targetType))
+				return
+			}
+			if auth.IsPatientRestricted(secCtx) && strings.EqualFold(targetType, "Patient") && cleanID(secCtx.GetPatientId()) != cleanID(targetID) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("patient-scoped token (%s) cannot invoke GraphDefinition/$graph for Patient/%s",
+						secCtx.GetPatientId(), targetID))
+				return
+			}
+		}
+
+		resType = targetType
+		resID = targetID
+		if len(links) == 0 {
+			links = postgres.DefaultGraphLinksForResource(resType)
+		}
 	} else {
-		links = postgres.DefaultGraphLinksForResource(resType)
+		if inlineGraph != nil {
+			startType = strings.TrimSpace(inlineGraph.Start)
+			links = inlineGraph.Link
+		} else if graphRef != "" {
+			gd, found, err := s.resolveStoredOrBuiltinGraphDefinition(r, tenant, graphRef, resType)
+			if err != nil {
+				s.logger.Error("resolve GraphDefinition", "error", err, "tenant", tenant, "graph", graphRef)
+				writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to resolve GraphDefinition")
+				return
+			}
+			if !found {
+				writeOperationOutcome(w, http.StatusNotFound, "not-found",
+					fmt.Sprintf("GraphDefinition %q not found", graphRef))
+				return
+			}
+			startType = strings.TrimSpace(gd.Start)
+			links = gd.Link
+		} else {
+			links = postgres.DefaultGraphLinksForResource(resType)
+		}
 	}
 
 	if startType != "" && !strings.EqualFold(startType, resType) {
@@ -1140,6 +1256,25 @@ func (s *Server) resolveStoredOrBuiltinGraphDefinition(r *http.Request, tenant, 
 				var gd parsedGraphDefinition
 				if json.Unmarshal(jb, &gd) == nil {
 					return &gd, true, nil
+				}
+			}
+		}
+
+		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID: tenant,
+			ResType:  "GraphDefinition",
+			Count:    50,
+		}); err == nil && sr != nil {
+			for _, m := range sr.Matches {
+				jb, cErr := s.protoToJSONWithMeta("GraphDefinition", m.ResourceProto, m.ResVersion, m.LastUpdated)
+				if cErr != nil {
+					continue
+				}
+				var gd parsedGraphDefinition
+				if json.Unmarshal(jb, &gd) == nil {
+					if strings.EqualFold(gd.URL, graphRef) || strings.EqualFold(gd.Name, graphRef) || strings.EqualFold(gd.ID, candID) {
+						return &gd, true, nil
+					}
 				}
 			}
 		}
