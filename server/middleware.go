@@ -1122,10 +1122,16 @@ func isPlanApplyOp(parts []string) bool {
 		if (strings.EqualFold(parts[3], "Patient") || strings.EqualFold(parts[3], "Encounter") || strings.EqualFold(parts[3], "Group")) && parts[4] == "$everything" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Encounter") && parts[4] == "$admit" {
+		if strings.EqualFold(parts[3], "Encounter") && (parts[4] == "$admit" || parts[4] == "$ecr-report") {
 			return true
 		}
 		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "ChargeItem")) && parts[4] == "$apply" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "PlanDefinition") && parts[4] == "$ersd-lookup" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "ExplanationOfBenefit") && parts[4] == "$carin-bb-summary" {
 			return true
 		}
 		if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "Questionnaire")) && parts[4] == "$data-requirements" {
@@ -1146,7 +1152,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Observation") && (parts[4] == "$lastn" || parts[4] == "$stats") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Patient") && (parts[4] == "$merge" || parts[4] == "$health-cards-issue" || parts[4] == "$pcde" || parts[4] == "$immds-forecast" || parts[4] == "$gfe" || parts[4] == "$ihe-pix" || parts[4] == "$bulk-member-match" || parts[4] == "$sdoh-summary") {
+		if strings.EqualFold(parts[3], "Patient") && (parts[4] == "$merge" || parts[4] == "$health-cards-issue" || parts[4] == "$pcde" || parts[4] == "$immds-forecast" || parts[4] == "$gfe" || parts[4] == "$ihe-pix" || parts[4] == "$bulk-member-match" || parts[4] == "$sdoh-summary" || parts[4] == "$carin-bb" || parts[4] == "$decease") {
 			return true
 		}
 		if (strings.EqualFold(parts[3], "PractitionerRole") && parts[4] == "$find-providers") || (strings.EqualFold(parts[3], "HealthcareService") && parts[4] == "$find-services") {
@@ -1224,10 +1230,10 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Library") && parts[5] == "$evaluate" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Patient") && (parts[5] == "$health-cards-issue" || parts[5] == "$pcde" || parts[5] == "$immds-forecast" || parts[5] == "$gfe" || parts[5] == "$ihe-pix" || parts[5] == "$sdoh-summary") {
+		if strings.EqualFold(parts[3], "Patient") && (parts[5] == "$health-cards-issue" || parts[5] == "$pcde" || parts[5] == "$immds-forecast" || parts[5] == "$gfe" || parts[5] == "$ihe-pix" || parts[5] == "$sdoh-summary" || parts[5] == "$carin-bb" || parts[5] == "$decease") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Encounter") && (parts[5] == "$transfer" || parts[5] == "$discharge") {
+		if strings.EqualFold(parts[3], "Encounter") && (parts[5] == "$transfer" || parts[5] == "$discharge" || parts[5] == "$ecr-report") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "ResearchStudy") && parts[5] == "$evaluate-eligibility" {

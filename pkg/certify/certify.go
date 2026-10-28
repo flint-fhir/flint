@@ -1679,6 +1679,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /Consent/$evaluate to return decision=permit Parameters, got %d: %s", respCon.StatusCode, string(bCon))
 			}
 		}
+		if err == nil {
+			respCBB, bCBB, errCBB := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$carin-bb", "", nil, nil)
+			respERSD, bERSD, errERSD := doReq(http.MethodGet, basePath+"/PlanDefinition/$ersd-lookup", "", nil, nil)
+			if errCBB != nil || respCBB.StatusCode != http.StatusOK || !strings.Contains(string(bCBB), "C4BB-Bundle") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$carin-bb to return C4BB-Bundle, got %d: %s", respCBB.StatusCode, string(bCBB))
+			} else if errERSD != nil || respERSD.StatusCode != http.StatusOK || !strings.Contains(string(bERSD), "ersd-rctc-plan-1") {
+				err = fmt.Errorf("expected GET /PlanDefinition/$ersd-lookup to return ersd-rctc-plan-1, got %d: %s", respERSD.StatusCode, string(bERSD))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
