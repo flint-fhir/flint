@@ -1549,14 +1549,23 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		if err == nil {
 			respLN, bLN, errLN := doReq(http.MethodGet, basePath+"/Observation/$lastn?patient=Patient/cert-pat-1&category=vital-signs&max=1", "", nil, nil)
 			respSt, bSt, errSt := doReq(http.MethodGet, basePath+"/Observation/$stats?subject=Patient/cert-pat-1&code=8867-4&statistic=average&statistic=count", "", nil, nil)
+			respSubCap, bSubCap, errSubCap := doReq(http.MethodGet, basePath+"/CapabilityStatement/$subset?resource=Patient,Observation", "", nil, nil)
+			respImpl, bImpl, errImpl := doReq(http.MethodGet, basePath+"/CapabilityStatement/$implements?canonical=http://hl7.org/fhir/us/core/CapabilityStatement/us-core-server", "", nil, nil)
+			respSnap, bSnap, errSnap := doReq(http.MethodGet, basePath+"/StructureDefinition/$snapshot?url=http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient", "", nil, nil)
 			if errLN != nil || respLN.StatusCode != http.StatusOK || !strings.Contains(string(bLN), `"cert-obs-prov-1"`) {
 				err = fmt.Errorf("expected Observation/$lastn with max=1 to return latest heart rate cert-obs-prov-1, got %d: %s", respLN.StatusCode, string(bLN))
 			} else if errSt != nil || respSt.StatusCode != http.StatusOK || !strings.Contains(string(bSt), `"statistic"`) || !strings.Contains(string(bSt), `"average"`) {
 				err = fmt.Errorf("expected Observation/$stats to return statistic Observation with average, got %d: %s", respSt.StatusCode, string(bSt))
+			} else if errSubCap != nil || respSubCap.StatusCode != http.StatusOK || !strings.Contains(string(bSubCap), `"SUBSETTED"`) {
+				err = fmt.Errorf("expected CapabilityStatement/$subset to return SUBSETTED CapabilityStatement, got %d: %s", respSubCap.StatusCode, string(bSubCap))
+			} else if errImpl != nil || respImpl.StatusCode != http.StatusOK || !strings.Contains(string(bImpl), `"valueBoolean":true`) {
+				err = fmt.Errorf("expected CapabilityStatement/$implements to return valueBoolean:true, got %d: %s", respImpl.StatusCode, string(bImpl))
+			} else if errSnap != nil || respSnap.StatusCode != http.StatusOK || !strings.Contains(string(bSnap), `"snapshot"`) || !strings.Contains(string(bSnap), `"Patient.identifier"`) {
+				err = fmt.Errorf("expected StructureDefinition/$snapshot to return snapshot with Patient.identifier, got %d: %s", respSnap.StatusCode, string(bSnap))
 			}
 		}
 	}
-	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
+	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/AuditEvent?_count=20", "", nil, nil)

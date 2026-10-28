@@ -2157,6 +2157,117 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Appointment/$find": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Appointment"},
+				"summary":     "HL7 FHIR R4 / Argonaut Scheduling Appointment/$find searching free Slots and synthesizing proposed Appointments",
+				"operationId": "appointmentFindGet",
+				"parameters": []map[string]any{
+					{"name": "start", "in": "query", "required": false, "schema": map[string]any{"type": "string", "format": "date-time"}},
+					{"name": "end", "in": "query", "required": false, "schema": map[string]any{"type": "string", "format": "date-time"}},
+					{"name": "specialty", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "visit-type", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "practitioner", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "location", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: searchset) of proposed Appointments and free Slots"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Appointment"},
+				"summary":     "HL7 FHIR R4 / Argonaut Scheduling Appointment/$find (POST Parameters)",
+				"operationId": "appointmentFindPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: searchset) of proposed Appointments and free Slots"},
+				},
+			},
+		},
+		"/Appointment/$hold": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Appointment"},
+				"summary":     "HL7 FHIR R4 / Argonaut Scheduling Appointment/$hold tentatively reserving Slot(s) (status: pending / busy-tentative)",
+				"operationId": "appointmentHoldPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle containing pending Appointment and OperationOutcome"},
+					"422": map[string]any{"description": "Slot conflict (busy)"},
+				},
+			},
+		},
+		"/Appointment/$book": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Appointment"},
+				"summary":     "HL7 FHIR R4 / Argonaut Scheduling Appointment/$book atomically booking Slot(s) (status: booked / busy)",
+				"operationId": "appointmentBookPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle containing booked Appointment and OperationOutcome"},
+					"422": map[string]any{"description": "Slot conflict (busy)"},
+				},
+			},
+		},
+		"/CapabilityStatement/$subset": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Discovery & Docs"},
+				"summary":     "HL7 FHIR R4 CapabilityStatement/$subset returning a pruned CapabilityStatement for requested resource types",
+				"operationId": "capabilityStatementSubsetGet",
+				"parameters": []map[string]any{
+					{"name": "resource", "in": "query", "required": false, "description": "Comma-separated or repeated FHIR resource type names", "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Subsetted FHIR R4 CapabilityStatement"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Discovery & Docs"},
+				"summary":     "HL7 FHIR R4 CapabilityStatement/$subset (POST Parameters)",
+				"operationId": "capabilityStatementSubsetPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Subsetted FHIR R4 CapabilityStatement"},
+				},
+			},
+		},
+		"/CapabilityStatement/$implements": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Discovery & Docs"},
+				"summary":     "HL7 FHIR R4 CapabilityStatement/$implements conformance test verifying server satisfaction of a client/IG CapabilityStatement",
+				"operationId": "capabilityStatementImplementsGet",
+				"parameters": []map[string]any{
+					{"name": "canonical", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing result (boolean) and issues (OperationOutcome)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Discovery & Docs"},
+				"summary":     "HL7 FHIR R4 CapabilityStatement/$implements conformance test (POST Parameters or CapabilityStatement)",
+				"operationId": "capabilityStatementImplementsPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing result (boolean) and issues (OperationOutcome)"},
+				},
+			},
+		},
+		"/StructureDefinition/$snapshot": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"StructureDefinition"},
+				"summary":     "HL7 FHIR R4 StructureDefinition/$snapshot generating a complete snapshot.element table from Protobuf descriptors and differential rules",
+				"operationId": "structureDefinitionSnapshotGet",
+				"parameters": []map[string]any{
+					{"name": "url", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "StructureDefinition with populated snapshot.element"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"StructureDefinition"},
+				"summary":     "HL7 FHIR R4 StructureDefinition/$snapshot (POST StructureDefinition or Parameters)",
+				"operationId": "structureDefinitionSnapshotPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "StructureDefinition with populated snapshot.element"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

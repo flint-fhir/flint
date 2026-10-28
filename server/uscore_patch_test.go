@@ -3504,3 +3504,188 @@ func TestObservationLastNStatsAndPatientMergeWave17(t *testing.T) {
 		t.Fatalf("expected Condition?patient=Patient/pat-w17-target to return re-linked cond-w17-dup, got %d: %s", condGetRec.Code, condGetRec.Body.String())
 	}
 }
+
+func TestAppointmentSchedulingCapabilityImplementsAndSnapshotWave18(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave18-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	putRes := func(resType, id, body string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/"+resType+"/"+id, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s/%s expected 200/201, got %d: %s", resType, id, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. Seed Practitioner, Patient, Schedule, and free Slot, then run Appointment/$find -> $hold -> $book
+	putRes("Practitioner", "prac-w18-1", `{
+		"resourceType": "Practitioner",
+		"id": "prac-w18-1",
+		"active": true,
+		"name": [{"family": "Cardio", "given": ["Clara"]}]
+	}`)
+	putRes("Patient", "pat-w18-1", `{
+		"resourceType": "Patient",
+		"id": "pat-w18-1",
+		"active": true,
+		"name": [{"family": "Walker", "given": ["Liam"]}],
+		"gender": "male",
+		"birthDate": "1979-08-14"
+	}`)
+	putRes("Schedule", "sched-w18-1", `{
+		"resourceType": "Schedule",
+		"id": "sched-w18-1",
+		"active": true,
+		"specialty": [{"coding": [{"system": "http://snomed.info/sct", "code": "394579002", "display": "Cardiology"}]}],
+		"actor": [{"reference": "Practitioner/prac-w18-1"}]
+	}`)
+	putRes("Slot", "slot-w18-1", `{
+		"resourceType": "Slot",
+		"id": "slot-w18-1",
+		"schedule": {"reference": "Schedule/sched-w18-1"},
+		"status": "free",
+		"start": "2026-05-01T09:00:00Z",
+		"end": "2026-05-01T09:30:00Z"
+	}`)
+
+	// 1a. Appointment/$find
+	findReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Appointment/$find?start=2026-05-01T00:00:00Z&end=2026-05-02T00:00:00Z&specialty=394579002&practitioner=Practitioner/prac-w18-1", nil)
+	findRec := httptest.NewRecorder()
+	pgH.ServeHTTP(findRec, findReq)
+	if findRec.Code != http.StatusOK || !strings.Contains(findRec.Body.String(), `"proposed-slot-w18-1"`) || !strings.Contains(findRec.Body.String(), `"Slot/slot-w18-1"`) {
+		t.Fatalf("GET /Appointment/$find expected proposed-slot-w18-1 and Slot/slot-w18-1, got %d: %s", findRec.Code, findRec.Body.String())
+	}
+
+	// 1b. Appointment/$hold -> transitions Slot/slot-w18-1 to busy-tentative and Appointment to pending
+	holdBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "appt-id", "valueString": "proposed-slot-w18-1"},
+			{"name": "patient-id", "valueString": "Patient/pat-w18-1"}
+		]
+	}`
+	holdReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Appointment/$hold", strings.NewReader(holdBody))
+	holdReq.Header.Set("Content-Type", "application/fhir+json")
+	holdRec := httptest.NewRecorder()
+	pgH.ServeHTTP(holdRec, holdReq)
+	if holdRec.Code != http.StatusOK || !strings.Contains(holdRec.Body.String(), `"status":"pending"`) || !strings.Contains(holdRec.Body.String(), `"busy-tentative"`) {
+		t.Fatalf("POST /Appointment/$hold expected pending Appointment and busy-tentative Slot, got %d: %s", holdRec.Code, holdRec.Body.String())
+	}
+
+	// 1c. Appointment/$book -> transitions Slot/slot-w18-1 from busy-tentative to busy and Appointment to booked
+	bookBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "appt-id", "valueString": "appt-slot-w18-1"},
+			{"name": "patient-id", "valueString": "Patient/pat-w18-1"},
+			{"name": "comment", "valueString": "Annual cardiology follow-up"}
+		]
+	}`
+	bookReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Appointment/$book", strings.NewReader(bookBody))
+	bookReq.Header.Set("Content-Type", "application/fhir+json")
+	bookRec := httptest.NewRecorder()
+	pgH.ServeHTTP(bookRec, bookReq)
+	if bookRec.Code != http.StatusOK || !strings.Contains(bookRec.Body.String(), `"status":"booked"`) || !strings.Contains(bookRec.Body.String(), `"Annual cardiology follow-up"`) {
+		t.Fatalf("POST /Appointment/$book expected booked Appointment, got %d: %s", bookRec.Code, bookRec.Body.String())
+	}
+
+	// 1d. Re-booking the already-busy Slot/slot-w18-1 must return 422 Unprocessable Entity
+	conflictReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Appointment/$book", strings.NewReader(bookBody))
+	conflictReq.Header.Set("Content-Type", "application/fhir+json")
+	conflictRec := httptest.NewRecorder()
+	pgH.ServeHTTP(conflictRec, conflictReq)
+	if conflictRec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 422 Unprocessable Entity when booking already-busy Slot, got %d: %s", conflictRec.Code, conflictRec.Body.String())
+	}
+
+	// 2. CapabilityStatement/$subset and CapabilityStatement/$implements
+	subReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/CapabilityStatement/$subset?resource=Patient,Appointment", nil)
+	subRec := httptest.NewRecorder()
+	pgH.ServeHTTP(subRec, subReq)
+	if subRec.Code != http.StatusOK || !strings.Contains(subRec.Body.String(), `"SUBSETTED"`) || strings.Contains(subRec.Body.String(), `"type":"Immunization"`) {
+		t.Fatalf("GET /CapabilityStatement/$subset?resource=Patient,Appointment expected SUBSETTED CapabilityStatement without Immunization, got %d: %s", subRec.Code, subRec.Body.String())
+	}
+
+	implBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{
+				"name": "resource",
+				"resource": {
+					"resourceType": "CapabilityStatement",
+					"status": "active",
+					"kind": "requirements",
+					"fhirVersion": "4.0.1",
+					"rest": [
+						{
+							"mode": "server",
+							"resource": [
+								{
+									"type": "Patient",
+									"interaction": [{"code": "read"}, {"code": "search-type"}],
+									"searchParam": [{"name": "identifier", "type": "token"}, {"name": "family", "type": "string"}]
+								}
+							]
+						}
+					]
+				}
+			}
+		]
+	}`
+	implReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/CapabilityStatement/$implements", strings.NewReader(implBody))
+	implReq.Header.Set("Content-Type", "application/fhir+json")
+	implRec := httptest.NewRecorder()
+	pgH.ServeHTTP(implRec, implReq)
+	if implRec.Code != http.StatusOK || !strings.Contains(implRec.Body.String(), `"valueBoolean":true`) {
+		t.Fatalf("POST /CapabilityStatement/$implements expected valueBoolean:true, got %d: %s", implRec.Code, implRec.Body.String())
+	}
+
+	// 3. StructureDefinition/$snapshot (both via GET url and POST custom differential)
+	snapPostBody := `{
+		"resourceType": "StructureDefinition",
+		"id": "custom-cardio-obs",
+		"url": "http://example.org/fhir/StructureDefinition/custom-cardio-obs",
+		"name": "CustomCardioObservation",
+		"status": "active",
+		"kind": "resource",
+		"abstract": false,
+		"type": "Observation",
+		"baseDefinition": "http://hl7.org/fhir/StructureDefinition/Observation",
+		"derivation": "constraint",
+		"differential": {
+			"element": [
+				{
+					"id": "Observation.effectiveDateTime",
+					"path": "Observation.effectiveDateTime",
+					"min": 1,
+					"max": "1",
+					"mustSupport": true
+				}
+			]
+		}
+	}`
+	snapReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/StructureDefinition/$snapshot", strings.NewReader(snapPostBody))
+	snapReq.Header.Set("Content-Type", "application/fhir+json")
+	snapRec := httptest.NewRecorder()
+	pgH.ServeHTTP(snapRec, snapReq)
+	if snapRec.Code != http.StatusOK || !strings.Contains(snapRec.Body.String(), `"snapshot"`) || !strings.Contains(snapRec.Body.String(), `"Observation.status"`) || !strings.Contains(snapRec.Body.String(), `"Observation.effectiveDateTime"`) {
+		t.Fatalf("POST /StructureDefinition/$snapshot expected synthesized snapshot containing Observation.status and differential override Observation.effectiveDateTime, got %d: %s", snapRec.Code, snapRec.Body.String())
+	}
+}
