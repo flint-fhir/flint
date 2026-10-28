@@ -1706,6 +1706,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /Measure/$nhsn-acute-care to return nhsn-hai-aur-measure, got %d: %s", respNHSN.StatusCode, string(bNHSN))
 			}
 		}
+		if err == nil {
+			respPDQm, bPDQm, errPDQm := doReq(http.MethodGet, basePath+"/Patient/$ihe-pdqm?family=Certify", "", nil, nil)
+			respVulc, bVulc, errVulc := doReq(http.MethodGet, basePath+"/ResearchStudy/vulcan-study-1/$rwd-cohort", "", nil, nil)
+			if errPDQm != nil || respPDQm.StatusCode != http.StatusOK || !strings.Contains(string(bPDQm), "IHE.PDQm.QueryPatientResourceResponseMessage") {
+				err = fmt.Errorf("expected GET /Patient/$ihe-pdqm to return IHE.PDQm.QueryPatientResourceResponseMessage, got %d: %s", respPDQm.StatusCode, string(bPDQm))
+			} else if errVulc != nil || respVulc.StatusCode != http.StatusOK || !strings.Contains(string(bVulc), `"cohortGroup"`) {
+				err = fmt.Errorf("expected GET /ResearchStudy/vulcan-study-1/$rwd-cohort to return cohortGroup, got %d: %s", respVulc.StatusCode, string(bVulc))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

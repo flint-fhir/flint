@@ -791,6 +791,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleNHSNHAISurveillance(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "ResearchStudy") && parts[4] == "$rwd-cohort" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$rwd-cohort")
+					s.handleVulcanClinicalResearch(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ResearchSubject") && parts[4] == "$enroll" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$enroll")
+					s.handleVulcanClinicalResearch(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$birth-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$birth-report")
+					s.handleVitalRecordsBFDR(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Composition") && parts[4] == "$bfdr-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$bfdr-summary")
+					s.handleVitalRecordsBFDR(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$ihe-pdqm" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$ihe-pdqm")
+					s.handleIHEPDQmAndITI68(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "DocumentReference") && parts[4] == "$ihe-iti-68" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$ihe-iti-68")
+					s.handleIHEPDQmAndITI68(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -799,6 +835,34 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "ResearchStudy") && parts[5] == "$rwd-cohort" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$rwd-cohort")
+					s.handleVulcanClinicalResearch(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ResearchSubject") && parts[5] == "$enroll" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$enroll")
+					s.handleVulcanClinicalResearch(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[5] == "$birth-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$birth-report")
+					s.handleVitalRecordsBFDR(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "DocumentReference") && parts[5] == "$ihe-iti-68" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$ihe-iti-68")
+					s.handleIHEPDQmAndITI68(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Patient") && (parts[5] == "$find-subject-variants" || parts[5] == "$find-subject-tx-implications") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4194,6 +4258,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "pacio-summary",
 					"definition": "http://hl7.org/fhir/us/pacio-fs/OperationDefinition/pacio-summary",
 				},
+				{
+					"name":       "birth-report",
+					"definition": "http://hl7.org/fhir/us/bfdr/OperationDefinition/Patient-birth-report",
+				},
+				{
+					"name":       "ihe-pdqm",
+					"definition": "https://profiles.ihe.net/ITI/PDQm/OperationDefinition/IHE.PDQm.match",
+				},
 			}
 		case "Condition":
 			entry["operation"] = []map[string]string{
@@ -4267,6 +4339,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "document",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Composition-document",
 				},
+				{
+					"name":       "bfdr-summary",
+					"definition": "http://hl7.org/fhir/us/bfdr/OperationDefinition/Composition-bfdr-summary",
+				},
 			}
 		case "DocumentReference":
 			entry["operation"] = []map[string]string{
@@ -4277,6 +4353,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "iti-67",
 					"definition": "https://profiles.ihe.net/ITI/MHD/OperationDefinition/IHE.MHD.FindDocumentReferences",
+				},
+				{
+					"name":       "ihe-iti-68",
+					"definition": "https://profiles.ihe.net/ITI/MHD/OperationDefinition/IHE.MHD.RetrieveDocument",
 				},
 			}
 		case "QuestionnaireResponse":
@@ -4447,6 +4527,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "document",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Composition-document",
 				},
+				{
+					"name":       "bfdr-summary",
+					"definition": "http://hl7.org/fhir/us/bfdr/OperationDefinition/Composition-bfdr-summary",
+				},
 			}
 		case "DocumentReference":
 			entry["operation"] = []map[string]string{
@@ -4457,6 +4541,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "iti-67",
 					"definition": "https://profiles.ihe.net/ITI/MHD/OperationDefinition/IHE.MHD.FindDocumentReferences",
+				},
+				{
+					"name":       "ihe-iti-68",
+					"definition": "https://profiles.ihe.net/ITI/MHD/OperationDefinition/IHE.MHD.RetrieveDocument",
 				},
 			}
 		case "Questionnaire":
@@ -4699,6 +4787,17 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "evaluate-eligibility",
 					"definition": "http://flint.fhir.org/OperationDefinition/ResearchStudy-evaluate-eligibility",
+				},
+				{
+					"name":       "rwd-cohort",
+					"definition": "http://hl7.org/fhir/uv/vulcan-rwd/OperationDefinition/ResearchStudy-rwd-cohort",
+				},
+			}
+		case "ResearchSubject":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "enroll",
+					"definition": "http://hl7.org/fhir/uv/vulcan-schedule/OperationDefinition/ResearchSubject-enroll",
 				},
 			}
 		case "Schedule":

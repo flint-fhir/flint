@@ -2192,6 +2192,86 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/ResearchStudy/{id}/$rwd-cohort": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ResearchStudy", "Group"},
+				"summary":     "HL7 Vulcan Real-World Data v1.0.0 ResearchStudy/{id}/$rwd-cohort EHR clinical trial cohort extraction",
+				"operationId": "researchStudyRWDCohortGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing matchedCount, researchStudy, and Vulcan RWD cohortGroup (Group)"},
+				},
+			},
+		},
+		"/ResearchSubject/{id}/$enroll": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ResearchSubject", "CarePlan"},
+				"summary":     "HL7 Vulcan Schedule of Activities v1.0.0 ResearchSubject/{id}/$enroll subject enrollment & SoA CarePlan synthesis",
+				"operationId": "researchSubjectEnrollPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing enrolled ResearchSubject (status: on-study) and Vulcan Schedule of Activities CarePlan"},
+				},
+			},
+		},
+		"/Patient/{id}/$birth-report": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Composition", "Observation"},
+				"summary":     "HL7 Vital Records Birth and Fetal Death Reporting (BFDR v1.1.0) Patient/{id}/$birth-report live birth certificate & neonatal observations",
+				"operationId": "patientBirthReportPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing newborn Patient, birthWeight Observation (8339-4), apgarScore Observation (9274-2), and liveBirthCertificate Composition (68998-4)"},
+				},
+			},
+		},
+		"/Composition/$bfdr-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Composition", "Bundle"},
+				"summary":     "HL7 BFDR v1.1.0 Composition/$bfdr-summary Live Birth Certificate Document Bundle",
+				"operationId": "compositionBFDRSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "BFDR Live Birth Document Bundle (Bundle-document-live-birth-report, type: document)"},
+				},
+			},
+		},
+		"/Patient/$ihe-pdqm": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "IHE PDQm v3.0.0 ITI-78 Mobile Patient Demographics Query",
+				"operationId": "patientIHEPDQmGet",
+				"parameters": []map[string]any{
+					{"name": "family", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "given", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "gender", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "IHE.PDQm.QueryPatientResourceResponseMessage searchset Bundle"},
+				},
+			},
+		},
+		"/DocumentReference/{id}/$ihe-iti-68": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"DocumentReference", "Binary"},
+				"summary":     "IHE MHD v4.2.1 ITI-68 Retrieve Document operation",
+				"operationId": "documentReferenceIHEITI68Get",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing contentType, DocumentReference, and Binary document payload"},
+				},
+			},
+		},
 		"/Patient/{id}/$everything": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Patient"},
