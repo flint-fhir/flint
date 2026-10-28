@@ -761,6 +761,36 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleIHEMHDExchange(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Patient") && (parts[4] == "$find-subject-variants" || parts[4] == "$find-subject-tx-implications") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", parts[4])
+					s.handleClinicalGenomics(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$pacio-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$pacio-summary")
+					s.handlePACIOPostAcute(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[4] == "$pacio-assess" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$pacio-assess")
+					s.handlePACIOPostAcute(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Encounter") && parts[4] == "$nhsn-hai-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$nhsn-hai-report")
+					s.handleNHSNHAISurveillance(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Measure") && parts[4] == "$nhsn-acute-care" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$nhsn-acute-care")
+					s.handleNHSNHAISurveillance(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -769,6 +799,34 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Patient") && (parts[5] == "$find-subject-variants" || parts[5] == "$find-subject-tx-implications") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", parts[5])
+					s.handleClinicalGenomics(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$pacio-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$pacio-summary")
+					s.handlePACIOPostAcute(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[5] == "$pacio-assess" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$pacio-assess")
+					s.handlePACIOPostAcute(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Encounter") && parts[5] == "$nhsn-hai-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$nhsn-hai-report")
+					s.handleNHSNHAISurveillance(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$mcode-summary" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4124,6 +4182,18 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "mcode-summary",
 					"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/Patient-mcode-summary",
 				},
+				{
+					"name":       "find-subject-variants",
+					"definition": "http://hl7.org/fhir/uv/genomics-reporting/OperationDefinition/find-subject-variants",
+				},
+				{
+					"name":       "find-subject-tx-implications",
+					"definition": "http://hl7.org/fhir/uv/genomics-reporting/OperationDefinition/find-subject-tx-implications",
+				},
+				{
+					"name":       "pacio-summary",
+					"definition": "http://hl7.org/fhir/us/pacio-fs/OperationDefinition/pacio-summary",
+				},
 			}
 		case "Condition":
 			entry["operation"] = []map[string]string{
@@ -4186,6 +4256,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "ecr-report",
 					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/Encounter-ecr-report",
 				},
+				{
+					"name":       "nhsn-hai-report",
+					"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Encounter-nhsn-hai-report",
+				},
 			}
 		case "Composition":
 			entry["operation"] = []map[string]string{
@@ -4210,6 +4284,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "extract",
 					"definition": "http://hl7.org/fhir/uv/sdc/OperationDefinition/QuestionnaireResponse-extract",
+				},
+				{
+					"name":       "pacio-assess",
+					"definition": "http://hl7.org/fhir/us/pacio-fs/OperationDefinition/pacio-assess",
 				},
 			}
 		case "ServiceRequest":
@@ -4421,6 +4499,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "evaluate-risk-condition-category",
 					"definition": "http://hl7.org/fhir/us/davinci-ra/OperationDefinition/evaluate-risk-condition-category",
+				},
+				{
+					"name":       "nhsn-acute-care",
+					"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Measure-nhsn-acute-care",
 				},
 			}
 		case "Library":
@@ -5106,6 +5188,30 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "iti-67",
 						"definition": "https://profiles.ihe.net/ITI/MHD/OperationDefinition/IHE.MHD.FindDocumentReferences",
+					},
+					{
+						"name":       "find-subject-variants",
+						"definition": "http://hl7.org/fhir/uv/genomics-reporting/OperationDefinition/find-subject-variants",
+					},
+					{
+						"name":       "find-subject-tx-implications",
+						"definition": "http://hl7.org/fhir/uv/genomics-reporting/OperationDefinition/find-subject-tx-implications",
+					},
+					{
+						"name":       "pacio-summary",
+						"definition": "http://hl7.org/fhir/us/pacio-fs/OperationDefinition/pacio-summary",
+					},
+					{
+						"name":       "pacio-assess",
+						"definition": "http://hl7.org/fhir/us/pacio-fs/OperationDefinition/pacio-assess",
+					},
+					{
+						"name":       "nhsn-hai-report",
+						"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Encounter-nhsn-hai-report",
+					},
+					{
+						"name":       "nhsn-acute-care",
+						"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Measure-nhsn-acute-care",
 					},
 				},
 			},

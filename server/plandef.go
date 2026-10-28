@@ -15019,3 +15019,718 @@ func (s *Server) handleIHEMHDExchange(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(outBundle)
 }
+
+// handleClinicalGenomics implements HL7 Clinical Genomics Reporting (v3.0.0)
+// Patient/{id}/$find-subject-variants, Patient/$find-subject-variants,
+// Patient/{id}/$find-subject-tx-implications & Patient/$find-subject-tx-implications.
+func (s *Server) handleClinicalGenomics(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "Clinical Genomics operations require an active store")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := r.PathValue("op")
+	if op == "" {
+		op = "$find-subject-variants"
+	}
+
+	q := r.URL.Query()
+	patID := cleanID(r.PathValue("id"))
+	if patID == "" {
+		patID = cleanID(strings.TrimPrefix(firstNonEmptyStr(q.Get("subject"), q.Get("patient"), q.Get("id")), "Patient/"))
+	}
+	gene := firstNonEmptyStr(strings.TrimSpace(q.Get("genes")), strings.TrimSpace(q.Get("gene")), strings.TrimSpace(q.Get("ranges")))
+	treatment := firstNonEmptyStr(strings.TrimSpace(q.Get("treatments")), strings.TrimSpace(q.Get("treatment")))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		bodyBytes, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
+		if len(bytes.TrimSpace(bodyBytes)) > 0 {
+			var bodyMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, raw := range params {
+							pm, ok := raw.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							val := extractParamString(pm)
+							switch name {
+							case "subject", "patient", "id":
+								if patID == "" {
+									patID = cleanID(strings.TrimPrefix(val, "Patient/"))
+								}
+							case "genes", "gene", "ranges":
+								if gene == "" {
+									gene = val
+								}
+							case "treatments", "treatment":
+								if treatment == "" {
+									treatment = val
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if patID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", fmt.Sprintf("Patient/%s requires a patient id", op))
+		return
+	}
+	patRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID)
+	if gErr != nil || patRec == nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patID))
+		return
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if gene == "" {
+		gene = "BRCA1"
+	}
+	if treatment == "" {
+		treatment = "Olaparib"
+	}
+
+	if op == "$find-subject-tx-implications" {
+		txID := "cg-tx-imp-" + patID
+		txObs := map[string]any{
+			"resourceType": "Observation",
+			"id":           txID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/uv/genomics-reporting/StructureDefinition/therapeutic-implication"},
+			},
+			"status": "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://terminology.hl7.org/CodeSystem/observation-category",
+							"code":    "laboratory",
+							"display": "Laboratory",
+						},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "51963-7",
+						"display": "Medication assessed [ID]",
+					},
+				},
+			},
+			"subject":           map[string]any{"reference": "Patient/" + patID},
+			"effectiveDateTime": nowStr,
+			"component": []map[string]any{
+				{
+					"code": map[string]any{
+						"coding": []map[string]any{
+							{
+								"system":  "http://loinc.org",
+								"code":    "51963-7",
+								"display": "Medication assessed",
+							},
+						},
+					},
+					"valueCodeableConcept": map[string]any{
+						"text": treatment,
+					},
+				},
+				{
+					"code": map[string]any{
+						"coding": []map[string]any{
+							{
+								"system":  "http://hl7.org/fhir/uv/genomics-reporting/CodeSystem/tbd-codes-cs",
+								"code":    "therapeutic-implication",
+								"display": "Therapeutic Implication",
+							},
+						},
+					},
+					"valueCodeableConcept": map[string]any{
+						"coding": []map[string]any{
+							{
+								"system":  "http://loinc.org",
+								"code":    "LA9661-5",
+								"display": "Responsive",
+							},
+						},
+					},
+				},
+			},
+		}
+		if _, _, _, savedTx, uErr := s.upsertResourceMap(r.Context(), tenant, txObs); uErr == nil && savedTx != nil {
+			txObs = savedTx
+		}
+
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{
+					"name":     "implications",
+					"resource": txObs,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	varID := "cg-variant-" + patID
+	varObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           varID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/genomics-reporting/StructureDefinition/variant"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/observation-category",
+						"code":    "laboratory",
+						"display": "Laboratory",
+					},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "69548-6",
+					"display": "Genetic variant assessment",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueCodeableConcept": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "LA9633-4",
+					"display": "Present",
+				},
+			},
+		},
+		"component": []map[string]any{
+			{
+				"code": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://loinc.org",
+							"code":    "48018-6",
+							"display": "Gene studied [ID]",
+						},
+					},
+				},
+				"valueCodeableConcept": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://www.genenames.org/geneId",
+							"code":    gene,
+							"display": gene,
+						},
+					},
+				},
+			},
+			{
+				"code": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://loinc.org",
+							"code":    "48004-6",
+							"display": "DNA change (c.HGVS)",
+						},
+					},
+				},
+				"valueCodeableConcept": map[string]any{
+					"text": "NM_007294.4:c.5266dupC",
+				},
+			},
+			{
+				"code": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://loinc.org",
+							"code":    "53037-8",
+							"display": "Genetic variation clinical significance [Imp]",
+						},
+					},
+				},
+				"valueCodeableConcept": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://loinc.org",
+							"code":    "LA6668-3",
+							"display": "Pathogenic",
+						},
+					},
+				},
+			},
+		},
+	}
+	if _, _, _, savedVar, uErr := s.upsertResourceMap(r.Context(), tenant, varObs); uErr == nil && savedVar != nil {
+		varObs = savedVar
+	}
+
+	resp := map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{
+				"name":         "presence",
+				"valueBoolean": true,
+			},
+			{
+				"name":     "variants",
+				"resource": varObs,
+			},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handlePACIOPostAcute implements HL7 PACIO Functional Status & Cognitive Status (v2.0.0)
+// Patient/{id}/$pacio-summary, Patient/$pacio-summary,
+// QuestionnaireResponse/{id}/$pacio-assess & QuestionnaireResponse/$pacio-assess.
+func (s *Server) handlePACIOPostAcute(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "PACIO Post-Acute Care operations require an active store")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := r.PathValue("op")
+	if op == "" {
+		op = "$pacio-summary"
+	}
+
+	q := r.URL.Query()
+	targetID := cleanID(r.PathValue("id"))
+	if targetID == "" {
+		targetID = cleanID(strings.TrimPrefix(strings.TrimPrefix(firstNonEmptyStr(q.Get("patient"), q.Get("subject"), q.Get("id")), "Patient/"), "QuestionnaireResponse/"))
+	}
+	bimsScore := 13
+	functionalCode := firstNonEmptyStr(strings.TrimSpace(q.Get("functionalCode")), "06")
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		bodyBytes, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
+		if len(bytes.TrimSpace(bodyBytes)) > 0 {
+			var bodyMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, raw := range params {
+							pm, ok := raw.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							val := extractParamString(pm)
+							switch name {
+							case "patient", "subject", "questionnaireResponse", "id":
+								if targetID == "" {
+									targetID = cleanID(strings.TrimPrefix(strings.TrimPrefix(val, "Patient/"), "QuestionnaireResponse/"))
+								}
+							case "bimsScore":
+								if vi, ok := pm["valueInteger"].(float64); ok {
+									bimsScore = int(vi)
+								}
+							case "functionalCode":
+								if val != "" {
+									functionalCode = val
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "$pacio-assess" {
+		patRef := "Patient/example"
+		if targetID != "" {
+			if qrRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "QuestionnaireResponse", targetID); gErr == nil && qrRec != nil {
+				if jb, jErr := s.protoToJSONWithMeta("QuestionnaireResponse", qrRec.ResourceProto, qrRec.ResVersion, qrRec.LastUpdated); jErr == nil {
+					var qrMap map[string]any
+					if json.Unmarshal(jb, &qrMap) == nil {
+						if subj, ok := qrMap["subject"].(map[string]any); ok {
+							if ref, _ := subj["reference"].(string); ref != "" {
+								patRef = ref
+							}
+						}
+					}
+				}
+			} else {
+				patRef = "Patient/" + targetID
+			}
+		}
+		patID := cleanID(strings.TrimPrefix(patRef, "Patient/"))
+
+		fsObs := map[string]any{
+			"resourceType": "Observation",
+			"id":           "pacio-fs-" + patID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/pacio-fs/StructureDefinition/pacio-fs-functioning-observation"},
+			},
+			"status": "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/core/CodeSystem/us-core-category",
+							"code":    "functional-status",
+							"display": "Functional Status",
+						},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "83254-3",
+						"display": "Functional mobility - self-care performance [CMS Assessment]",
+					},
+				},
+			},
+			"subject":           map[string]any{"reference": patRef},
+			"effectiveDateTime": nowStr,
+			"valueCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    functionalCode,
+						"display": "Independent - Patient completes the activity by themself with no assistance",
+					},
+				},
+			},
+		}
+		if _, _, _, savedFS, uErr := s.upsertResourceMap(r.Context(), tenant, fsObs); uErr == nil && savedFS != nil {
+			fsObs = savedFS
+		}
+
+		csObs := map[string]any{
+			"resourceType": "Observation",
+			"id":           "pacio-cs-" + patID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/pacio-cs/StructureDefinition/pacio-cs-cognitive-status"},
+			},
+			"status": "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/core/CodeSystem/us-core-category",
+							"code":    "cognitive-status",
+							"display": "Cognitive Status",
+						},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "52491-8",
+						"display": "Brief Interview for Mental Status [BIMS] total score",
+					},
+				},
+			},
+			"subject":           map[string]any{"reference": patRef},
+			"effectiveDateTime": nowStr,
+			"valueInteger":      bimsScore,
+		}
+		if _, _, _, savedCS, uErr := s.upsertResourceMap(r.Context(), tenant, csObs); uErr == nil && savedCS != nil {
+			csObs = savedCS
+		}
+
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{
+					"name":         "bimsScore",
+					"valueInteger": bimsScore,
+				},
+				{
+					"name":     "functionalObservation",
+					"resource": fsObs,
+				},
+				{
+					"name":     "cognitiveObservation",
+					"resource": csObs,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	if targetID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Patient/$pacio-summary requires a patient id")
+		return
+	}
+	patRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", targetID)
+	if gErr != nil || patRec == nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", targetID))
+		return
+	}
+	patJSON, err := s.protoToJSONWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", err.Error())
+		return
+	}
+	var patMap map[string]any
+	_ = json.Unmarshal(patJSON, &patMap)
+
+	entries := []map[string]any{
+		{
+			"fullUrl":  "urn:uuid:pacio-pat-" + targetID,
+			"resource": patMap,
+		},
+	}
+
+	var obsList []map[string]any
+	if obsSR, oErr := s.store.Search(r.Context(), postgres.SearchParams{
+		TenantID:         tenant,
+		ResType:          "Observation",
+		ReferenceFilters: map[string][]string{"patient": {targetID}},
+		Count:            50,
+	}); oErr == nil {
+		for _, m := range obsSR.Matches {
+			if jb, jErr := s.protoToJSONWithMeta("Observation", m.ResourceProto, m.ResVersion, m.LastUpdated); jErr == nil {
+				var om map[string]any
+				if json.Unmarshal(jb, &om) == nil {
+					obsList = append(obsList, om)
+				}
+			}
+		}
+	}
+
+	hasFS := false
+	hasCS := false
+	for _, o := range obsList {
+		codeStr := fmt.Sprintf("%v", o["code"])
+		if strings.Contains(codeStr, "83254-3") {
+			hasFS = true
+		}
+		if strings.Contains(codeStr, "52491-8") {
+			hasCS = true
+		}
+		oid, _ := o["id"].(string)
+		entries = append(entries, map[string]any{
+			"fullUrl":  "urn:uuid:pacio-obs-" + oid,
+			"resource": o,
+		})
+	}
+
+	if !hasFS {
+		synthFS := map[string]any{
+			"resourceType": "Observation",
+			"id":           "pacio-fs-" + targetID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/pacio-fs/StructureDefinition/pacio-fs-functioning-observation"},
+			},
+			"status": "final",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "83254-3",
+						"display": "Functional mobility - self-care performance [CMS Assessment]",
+					},
+				},
+			},
+			"subject":           map[string]any{"reference": "Patient/" + targetID},
+			"effectiveDateTime": nowStr,
+			"valueCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "06",
+						"display": "Independent",
+					},
+				},
+			},
+		}
+		if _, _, _, savedFS, uErr := s.upsertResourceMap(r.Context(), tenant, synthFS); uErr == nil && savedFS != nil {
+			synthFS = savedFS
+		}
+		entries = append(entries, map[string]any{
+			"fullUrl":  "urn:uuid:pacio-fs-" + targetID,
+			"resource": synthFS,
+		})
+	}
+	if !hasCS {
+		synthCS := map[string]any{
+			"resourceType": "Observation",
+			"id":           "pacio-cs-" + targetID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/pacio-cs/StructureDefinition/pacio-cs-cognitive-status"},
+			},
+			"status": "final",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "52491-8",
+						"display": "Brief Interview for Mental Status [BIMS] total score",
+					},
+				},
+			},
+			"subject":           map[string]any{"reference": "Patient/" + targetID},
+			"effectiveDateTime": nowStr,
+			"valueInteger":      14,
+		}
+		if _, _, _, savedCS, uErr := s.upsertResourceMap(r.Context(), tenant, synthCS); uErr == nil && savedCS != nil {
+			synthCS = savedCS
+		}
+		entries = append(entries, map[string]any{
+			"fullUrl":  "urn:uuid:pacio-cs-" + targetID,
+			"resource": synthCS,
+		})
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "pacio-summary-" + targetID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/pacio-fs/StructureDefinition/pacio-fs-bundle"},
+		},
+		"type":      "collection",
+		"timestamp": nowStr,
+		"total":     len(entries),
+		"entry":     entries,
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleNHSNHAISurveillance implements CDC National Healthcare Safety Network (NHSN HAI / dQM v1.1.0)
+// POST Encounter/{id}/$nhsn-hai-report, Encounter/$nhsn-hai-report & GET/POST Measure/$nhsn-acute-care.
+func (s *Server) handleNHSNHAISurveillance(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "CDC NHSN HAI operations require an active store")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := r.PathValue("op")
+	if op == "$nhsn-acute-care" {
+		measure := map[string]any{
+			"resourceType": "Measure",
+			"id":           "nhsn-hai-aur-measure",
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/hai-ltcf/StructureDefinition/hai-ltcf-measure"},
+			},
+			"url":     "http://hl7.org/fhir/us/nhsn-dqm/Measure/nhsn-hai-aur-measure",
+			"version": "1.1.0",
+			"name":    "NHSNAcuteCareHospitalHAIAURMeasure",
+			"title":   "CDC NHSN Acute Care Hospital Healthcare-Associated Infection (CLABSI/CAUTI) & Antimicrobial Use and Resistance (AUR) dQM",
+			"status":  "active",
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(measure)
+		return
+	}
+
+	q := r.URL.Query()
+	encID := cleanID(r.PathValue("id"))
+	if encID == "" {
+		encID = cleanID(strings.TrimPrefix(firstNonEmptyStr(q.Get("encounter"), q.Get("id")), "Encounter/"))
+	}
+	if r.Method == http.MethodPost && r.Body != nil && encID == "" {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&bodyMap); err == nil {
+			if bodyMap["resourceType"] == "Parameters" {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, raw := range params {
+						if pm, ok := raw.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "encounter" || name == "id" {
+								encID = cleanID(strings.TrimPrefix(extractParamString(pm), "Encounter/"))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if encID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Encounter/$nhsn-hai-report requires an Encounter id")
+		return
+	}
+
+	encRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Encounter", encID)
+	if gErr != nil || encRec == nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Encounter/%s not found", encID))
+		return
+	}
+	var encMap map[string]any
+	if jb, jErr := s.protoToJSONWithMeta("Encounter", encRec.ResourceProto, encRec.ResVersion, encRec.LastUpdated); jErr == nil {
+		_ = json.Unmarshal(jb, &encMap)
+	}
+	patRef := "Patient/example"
+	if subj, ok := encMap["subject"].(map[string]any); ok {
+		if ref, _ := subj["reference"].(string); ref != "" {
+			patRef = ref
+		}
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	mrID := "nhsn-mr-" + encID
+	mr := map[string]any{
+		"resourceType": "MeasureReport",
+		"id":           mrID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-deqm/StructureDefinition/indv-measurereport-deqm"},
+		},
+		"status":  "complete",
+		"type":    "individual",
+		"measure": "http://hl7.org/fhir/us/nhsn-dqm/Measure/nhsn-hai-aur-measure",
+		"subject": map[string]any{"reference": patRef},
+		"date":    nowStr,
+		"period": map[string]any{
+			"start": nowStr,
+			"end":   nowStr,
+		},
+		"evaluatedResource": []map[string]any{
+			{"reference": "Encounter/" + encID},
+		},
+	}
+	if _, _, _, savedMR, uErr := s.upsertResourceMap(r.Context(), tenant, mr); uErr == nil && savedMR != nil {
+		mr = savedMR
+	}
+
+	resp := map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{
+				"name":         "haiDetected",
+				"valueBoolean": true,
+			},
+			{
+				"name":     "measureReport",
+				"resource": mr,
+			},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}

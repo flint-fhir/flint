@@ -1134,7 +1134,10 @@ func isPlanApplyOp(parts []string) bool {
 		if (strings.EqualFold(parts[3], "Patient") || strings.EqualFold(parts[3], "Encounter") || strings.EqualFold(parts[3], "Group")) && parts[4] == "$everything" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Encounter") && (parts[4] == "$admit" || parts[4] == "$ecr-report") {
+		if strings.EqualFold(parts[3], "Encounter") && (parts[4] == "$admit" || parts[4] == "$ecr-report" || parts[4] == "$nhsn-hai-report") {
+			return true
+		}
+		if strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[4] == "$pacio-assess" {
 			return true
 		}
 		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "ChargeItem")) && parts[4] == "$apply" {
@@ -1158,13 +1161,13 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "ConceptMap") && parts[4] == "$closure" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Measure") && (parts[4] == "$collect-data" || parts[4] == "$submit-data" || parts[4] == "$evaluate-risk-condition-category") {
+		if strings.EqualFold(parts[3], "Measure") && (parts[4] == "$collect-data" || parts[4] == "$submit-data" || parts[4] == "$evaluate-risk-condition-category" || parts[4] == "$nhsn-acute-care") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Observation") && (parts[4] == "$lastn" || parts[4] == "$stats") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Patient") && (parts[4] == "$merge" || parts[4] == "$health-cards-issue" || parts[4] == "$pcde" || parts[4] == "$immds-forecast" || parts[4] == "$gfe" || parts[4] == "$ihe-pix" || parts[4] == "$bulk-member-match" || parts[4] == "$sdoh-summary" || parts[4] == "$carin-bb" || parts[4] == "$decease" || parts[4] == "$mcode-summary") {
+		if strings.EqualFold(parts[3], "Patient") && (parts[4] == "$merge" || parts[4] == "$health-cards-issue" || parts[4] == "$pcde" || parts[4] == "$immds-forecast" || parts[4] == "$gfe" || parts[4] == "$ihe-pix" || parts[4] == "$bulk-member-match" || parts[4] == "$sdoh-summary" || parts[4] == "$carin-bb" || parts[4] == "$decease" || parts[4] == "$mcode-summary" || parts[4] == "$find-subject-variants" || parts[4] == "$find-subject-tx-implications" || parts[4] == "$pacio-summary") {
 			return true
 		}
 		if (strings.EqualFold(parts[3], "PractitionerRole") && parts[4] == "$find-providers") || (strings.EqualFold(parts[3], "HealthcareService") && parts[4] == "$find-services") {
@@ -1248,10 +1251,13 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Library") && parts[5] == "$evaluate" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Patient") && (parts[5] == "$health-cards-issue" || parts[5] == "$pcde" || parts[5] == "$immds-forecast" || parts[5] == "$gfe" || parts[5] == "$ihe-pix" || parts[5] == "$sdoh-summary" || parts[5] == "$carin-bb" || parts[5] == "$decease" || parts[5] == "$mcode-summary") {
+		if strings.EqualFold(parts[3], "Patient") && (parts[5] == "$health-cards-issue" || parts[5] == "$pcde" || parts[5] == "$immds-forecast" || parts[5] == "$gfe" || parts[5] == "$ihe-pix" || parts[5] == "$sdoh-summary" || parts[5] == "$carin-bb" || parts[5] == "$decease" || parts[5] == "$mcode-summary" || parts[5] == "$find-subject-variants" || parts[5] == "$find-subject-tx-implications" || parts[5] == "$pacio-summary") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Encounter") && (parts[5] == "$transfer" || parts[5] == "$discharge" || parts[5] == "$ecr-report") {
+		if strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[5] == "$pacio-assess" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Encounter") && (parts[5] == "$transfer" || parts[5] == "$discharge" || parts[5] == "$ecr-report" || parts[5] == "$nhsn-hai-report") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "ResearchStudy") && parts[5] == "$evaluate-eligibility" {
