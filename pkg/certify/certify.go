@@ -1639,6 +1639,18 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /RiskAssessment/$evaluate?subject=Patient/cert-pat-1 to return RiskAssessment with probabilityDecimal, got %d: %s", respRisk.StatusCode, string(bRisk))
 			}
 		}
+		if err == nil {
+			respTypeDoc, bTypeDoc, errTypeDoc := doReq(http.MethodGet, basePath+"/Composition/$document?id=cert-comp-1", "", nil, nil)
+			respMK, bMK, errMK := doReq(http.MethodGet, basePath+"/MedicationKnowledge/$lookup?code=723", "", nil, nil)
+			respInt, bInt, errInt := doReq(http.MethodGet, basePath+"/MedicationRequest/$check-interactions?patient=Patient/cert-pat-1&code=723", "", nil, nil)
+			if errTypeDoc != nil || respTypeDoc.StatusCode != http.StatusOK || !strings.Contains(string(bTypeDoc), `"type":"document"`) {
+				err = fmt.Errorf("expected GET /Composition/$document?id=cert-comp-1 to return document Bundle, got %d: %s", respTypeDoc.StatusCode, string(bTypeDoc))
+			} else if errMK != nil || respMK.StatusCode != http.StatusOK || !strings.Contains(string(bMK), "usdf-FormularyDrug") {
+				err = fmt.Errorf("expected GET /MedicationKnowledge/$lookup?code=723 to return usdf-FormularyDrug MedicationKnowledge, got %d: %s", respMK.StatusCode, string(bMK))
+			} else if errInt != nil || respInt.StatusCode != http.StatusOK || !strings.Contains(string(bInt), `"interactionCount"`) {
+				err = fmt.Errorf("expected GET /MedicationRequest/$check-interactions to return Parameters with interactionCount, got %d: %s", respInt.StatusCode, string(bInt))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

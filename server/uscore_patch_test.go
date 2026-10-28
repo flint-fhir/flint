@@ -4941,3 +4941,154 @@ func TestImmDSForecastPCTGFESubmitAndRiskAssessmentEvaluateWave27(t *testing.T) 
 		t.Fatalf("GET /RiskAssessment/$evaluate expected RiskAssessment with probabilityDecimal=0.14 and Condition/cond-w27-1, got %d: %s", raRec.Code, raRec.Body.String())
 	}
 }
+
+func TestCompositionDocumentATRGroupAndDrugInteractionsWave28(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave28-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w28-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w28-1",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1979-03-22",
+			"name": [{"family": "Fleming", "given": ["Alexander"]}]
+		}`},
+		{"/Condition/cond-w28-1", `{
+			"resourceType": "Condition",
+			"id": "cond-w28-1",
+			"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+			"code": {"coding": [{"system": "http://snomed.info/sct", "code": "195967001", "display": "Asthma"}]},
+			"subject": {"reference": "Patient/pat-w28-1"}
+		}`},
+		{"/Composition/comp-w28-1", `{
+			"resourceType": "Composition",
+			"id": "comp-w28-1",
+			"status": "final",
+			"type": {"coding": [{"system": "http://loinc.org", "code": "11506-3", "display": "Progress note"}]},
+			"subject": {"reference": "Patient/pat-w28-1"},
+			"date": "2026-02-01T09:00:00Z",
+			"title": "Outpatient Pulmonary Consult",
+			"section": [
+				{
+					"title": "Active Problems",
+					"entry": [{"reference": "Condition/cond-w28-1"}]
+				}
+			]
+		}`},
+		{"/Group/grp-atr-w28", `{
+			"resourceType": "Group",
+			"id": "grp-atr-w28",
+			"type": "person",
+			"actual": true,
+			"name": "Da Vinci ATR Value-Based Care Roster"
+		}`},
+		{"/AllergyIntolerance/allergy-w28-1", `{
+			"resourceType": "AllergyIntolerance",
+			"id": "allergy-w28-1",
+			"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical", "code": "active"}]},
+			"code": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "7980", "display": "Penicillin G"}]},
+			"patient": {"reference": "Patient/pat-w28-1"}
+		}`},
+		{"/MedicationRequest/medreq-w28-1", `{
+			"resourceType": "MedicationRequest",
+			"id": "medreq-w28-1",
+			"status": "active",
+			"intent": "order",
+			"medicationCodeableConcept": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "723", "display": "Amoxicillin 500 MG Oral Capsule"}]},
+			"subject": {"reference": "Patient/pat-w28-1"}
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. GET /Composition/$document?id=comp-w28-1&persist=true
+	docReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Composition/$document?id=comp-w28-1&persist=true", nil)
+	docRec := httptest.NewRecorder()
+	pgH.ServeHTTP(docRec, docReq)
+	if docRec.Code != http.StatusOK ||
+		!strings.Contains(docRec.Body.String(), `"type":"document"`) ||
+		!strings.Contains(docRec.Body.String(), `"Condition/cond-w28-1"`) ||
+		docRec.Header().Get("Location") == "" {
+		t.Fatalf("GET /Composition/$document?id=comp-w28-1&persist=true expected persisted document Bundle with Condition/cond-w28-1, got %d: %s", docRec.Code, docRec.Body.String())
+	}
+
+	// 2. Da Vinci ATR Group/{id}/$member-add, $confirm-attribution-list, and $member-remove
+	addBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "memberId", "valueReference": {"reference": "Patient/pat-w28-1"}},
+			{"name": "attributionPeriod", "valuePeriod": {"start": "2026-01-01", "end": "2026-12-31"}}
+		]
+	}`
+	addReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Group/grp-atr-w28/$member-add", strings.NewReader(addBody))
+	addReq.Header.Set("Content-Type", "application/fhir+json")
+	addRec := httptest.NewRecorder()
+	pgH.ServeHTTP(addRec, addReq)
+	if addRec.Code != http.StatusOK ||
+		!strings.Contains(addRec.Body.String(), "atr-group") ||
+		!strings.Contains(addRec.Body.String(), `"Patient/pat-w28-1"`) {
+		t.Fatalf("POST /Group/grp-atr-w28/$member-add expected atr-group with Patient/pat-w28-1, got %d: %s", addRec.Code, addRec.Body.String())
+	}
+
+	confReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Group/grp-atr-w28/$confirm-attribution-list", nil)
+	confRec := httptest.NewRecorder()
+	pgH.ServeHTTP(confRec, confReq)
+	if confRec.Code != http.StatusOK ||
+		!strings.Contains(confRec.Body.String(), `"valueCode":"confirmed"`) ||
+		!strings.Contains(confRec.Body.String(), `"valueInteger":1`) {
+		t.Fatalf("GET /Group/grp-atr-w28/$confirm-attribution-list expected confirmed Parameters with activeMemberCount=1, got %d: %s", confRec.Code, confRec.Body.String())
+	}
+
+	remReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Group/grp-atr-w28/$member-remove", strings.NewReader(addBody))
+	remReq.Header.Set("Content-Type", "application/fhir+json")
+	remRec := httptest.NewRecorder()
+	pgH.ServeHTTP(remRec, remReq)
+	if remRec.Code != http.StatusOK || !strings.Contains(remRec.Body.String(), `"inactive":true`) {
+		t.Fatalf("POST /Group/grp-atr-w28/$member-remove expected inactive=true, got %d: %s", remRec.Code, remRec.Body.String())
+	}
+
+	// 3. Da Vinci US Drug Formulary MedicationKnowledge/$lookup & MedicationRequest/$check-interactions
+	mkReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/MedicationKnowledge/$lookup?code=723", nil)
+	mkRec := httptest.NewRecorder()
+	pgH.ServeHTTP(mkRec, mkReq)
+	if mkRec.Code != http.StatusOK ||
+		!strings.Contains(mkRec.Body.String(), "usdf-FormularyDrug") ||
+		!strings.Contains(mkRec.Body.String(), "Amoxicillin 500 MG Oral Capsule") {
+		t.Fatalf("GET /MedicationKnowledge/$lookup?code=723 expected usdf-FormularyDrug MedicationKnowledge, got %d: %s", mkRec.Code, mkRec.Body.String())
+	}
+
+	intReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/MedicationRequest/medreq-w28-1/$check-interactions", nil)
+	intRec := httptest.NewRecorder()
+	pgH.ServeHTTP(intRec, intReq)
+	if intRec.Code != http.StatusOK ||
+		!strings.Contains(intRec.Body.String(), `"valueCode":"interaction-detected"`) ||
+		!strings.Contains(intRec.Body.String(), `"code":"DALG"`) ||
+		!strings.Contains(intRec.Body.String(), `"AllergyIntolerance/allergy-w28-1"`) {
+		t.Fatalf("GET /MedicationRequest/medreq-w28-1/$check-interactions expected interaction-detected with DALG DetectedIssue, got %d: %s", intRec.Code, intRec.Body.String())
+	}
+}

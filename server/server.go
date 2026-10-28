@@ -613,6 +613,23 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleChargeItemApply(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Composition") && parts[4] == "$document" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCompositionDocumentType(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "MedicationKnowledge") && parts[4] == "$lookup" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", "MedicationKnowledge")
+					s.handleMedicationKnowledgeAndInteractions(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "MedicationRequest") && parts[4] == "$check-interactions" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", "MedicationRequest")
+					s.handleMedicationKnowledgeAndInteractions(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -621,6 +638,27 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Group") && (parts[5] == "$member-add" || parts[5] == "$member-remove" || parts[5] == "$confirm-attribution-list") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", parts[5])
+					s.handleGroupATRMember(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "MedicationKnowledge") && parts[5] == "$lookup" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", "MedicationKnowledge")
+					r.SetPathValue("id", parts[4])
+					s.handleMedicationKnowledgeAndInteractions(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "MedicationRequest") && parts[5] == "$check-interactions" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", "MedicationRequest")
+					r.SetPathValue("id", parts[4])
+					s.handleMedicationKnowledgeAndInteractions(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ChargeItem") && parts[5] == "$apply" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -3881,11 +3919,22 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"definition": "http://hl7.org/fhir/uv/sdc/OperationDefinition/QuestionnaireResponse-extract",
 				},
 			}
-		case "ServiceRequest", "MedicationRequest":
+		case "ServiceRequest":
 			entry["operation"] = []map[string]string{
 				{
 					"name":       "crd",
 					"definition": "http://hl7.org/fhir/us/davinci-crd/OperationDefinition/crd",
+				},
+			}
+		case "MedicationRequest":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "crd",
+					"definition": "http://hl7.org/fhir/us/davinci-crd/OperationDefinition/crd",
+				},
+				{
+					"name":       "check-interactions",
+					"definition": "http://flint.fhir.org/OperationDefinition/MedicationRequest-check-interactions",
 				},
 			}
 		case "CarePlan":
@@ -3927,6 +3976,18 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			{
 				"name":       "remove",
 				"definition": "http://hl7.org/fhir/OperationDefinition/Group-remove",
+			},
+			{
+				"name":       "member-add",
+				"definition": "http://hl7.org/fhir/us/davinci-atr/OperationDefinition/member-add",
+			},
+			{
+				"name":       "member-remove",
+				"definition": "http://hl7.org/fhir/us/davinci-atr/OperationDefinition/member-remove",
+			},
+			{
+				"name":       "confirm-attribution-list",
+				"definition": "http://hl7.org/fhir/us/davinci-atr/OperationDefinition/confirm-attribution-list",
 			},
 		},
 	})
@@ -4258,6 +4319,13 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"definition": "http://flint.fhir.org/OperationDefinition/RiskAssessment-evaluate",
 				},
 			}
+		case "MedicationKnowledge":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "lookup",
+					"definition": "http://hl7.org/fhir/us/davinci-drug-formulary/OperationDefinition/MedicationKnowledge-lookup",
+				},
+			}
 		}
 		resEntries = append(resEntries, entry)
 	}
@@ -4573,6 +4641,22 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "gfe-submit",
 						"definition": "http://hl7.org/fhir/us/davinci-pct/OperationDefinition/gfe-submit",
+					},
+					{
+						"name":       "member-add",
+						"definition": "http://hl7.org/fhir/us/davinci-atr/OperationDefinition/member-add",
+					},
+					{
+						"name":       "member-remove",
+						"definition": "http://hl7.org/fhir/us/davinci-atr/OperationDefinition/member-remove",
+					},
+					{
+						"name":       "confirm-attribution-list",
+						"definition": "http://hl7.org/fhir/us/davinci-atr/OperationDefinition/confirm-attribution-list",
+					},
+					{
+						"name":       "check-interactions",
+						"definition": "http://flint.fhir.org/OperationDefinition/MedicationRequest-check-interactions",
 					},
 				},
 			},
