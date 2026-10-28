@@ -1107,7 +1107,7 @@ func isQuestionnaireExtractOp(parts []string) bool {
 
 func isPlanApplyOp(parts []string) bool {
 	if len(parts) == 4 {
-		return parts[3] == "$closure" || parts[3] == "$data-requirements" || parts[3] == "$fhirpath" || parts[3] == "$process-message" || parts[3] == "$process-notification" || parts[3] == "$convert" || parts[3] == "$submit-attachment"
+		return parts[3] == "$closure" || parts[3] == "$data-requirements" || parts[3] == "$fhirpath" || parts[3] == "$process-message" || parts[3] == "$process-notification" || parts[3] == "$davinci-data-export" || parts[3] == "$convert" || parts[3] == "$submit-attachment"
 	}
 	if len(parts) == 5 {
 		if parts[4] == "$convert" {
@@ -1120,6 +1120,9 @@ func isPlanApplyOp(parts []string) bool {
 			return true
 		}
 		if (strings.EqualFold(parts[3], "Patient") || strings.EqualFold(parts[3], "Encounter") || strings.EqualFold(parts[3], "Group")) && parts[4] == "$everything" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Encounter") && parts[4] == "$admit" {
 			return true
 		}
 		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "ChargeItem")) && parts[4] == "$apply" {
@@ -1143,7 +1146,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Observation") && (parts[4] == "$lastn" || parts[4] == "$stats") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Patient") && (parts[4] == "$merge" || parts[4] == "$health-cards-issue" || parts[4] == "$pcde" || parts[4] == "$immds-forecast" || parts[4] == "$gfe" || parts[4] == "$ihe-pix") {
+		if strings.EqualFold(parts[3], "Patient") && (parts[4] == "$merge" || parts[4] == "$health-cards-issue" || parts[4] == "$pcde" || parts[4] == "$immds-forecast" || parts[4] == "$gfe" || parts[4] == "$ihe-pix" || parts[4] == "$bulk-member-match") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "ResearchStudy") && parts[4] == "$evaluate-eligibility" {
@@ -1194,7 +1197,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "MedicationKnowledge") && parts[4] == "$lookup" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "MedicationRequest") && parts[4] == "$check-interactions" {
+		if strings.EqualFold(parts[3], "MedicationRequest") && (parts[4] == "$check-interactions" || parts[4] == "$dispense") {
 			return true
 		}
 		return false
@@ -1221,6 +1224,9 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Patient") && (parts[5] == "$health-cards-issue" || parts[5] == "$pcde" || parts[5] == "$immds-forecast" || parts[5] == "$gfe" || parts[5] == "$ihe-pix") {
 			return true
 		}
+		if strings.EqualFold(parts[3], "Encounter") && (parts[5] == "$transfer" || parts[5] == "$discharge") {
+			return true
+		}
 		if strings.EqualFold(parts[3], "ResearchStudy") && parts[5] == "$evaluate-eligibility" {
 			return true
 		}
@@ -1239,13 +1245,13 @@ func isPlanApplyOp(parts []string) bool {
 		if (strings.EqualFold(parts[3], "AdverseEvent") || strings.EqualFold(parts[3], "CarePlan") || strings.EqualFold(parts[3], "RiskAssessment") || strings.EqualFold(parts[3], "DiagnosticReport")) && parts[5] == "$evaluate" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Group") && (parts[5] == "$add" || parts[5] == "$remove" || parts[5] == "$member-add" || parts[5] == "$member-remove" || parts[5] == "$confirm-attribution-list") {
+		if strings.EqualFold(parts[3], "Group") && (parts[5] == "$add" || parts[5] == "$remove" || parts[5] == "$member-add" || parts[5] == "$member-remove" || parts[5] == "$confirm-attribution-list" || parts[5] == "$davinci-data-export") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "MedicationKnowledge") && parts[5] == "$lookup" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "MedicationRequest") && parts[5] == "$check-interactions" {
+		if strings.EqualFold(parts[3], "MedicationRequest") && (parts[5] == "$check-interactions" || parts[5] == "$dispense") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Appointment") && (parts[5] == "$hold" || parts[5] == "$book") {

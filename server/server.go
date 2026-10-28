@@ -266,6 +266,8 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$fhirpath", s.handleFHIRPath)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$process-message", s.handleProcessMessage)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$process-notification", s.handleProcessNotification)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$davinci-data-export", s.handleDaVinciDataExport)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$davinci-data-export", s.handleDaVinciDataExport)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$submit-attachment", s.handleCDexSubmitAttachment)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$convert", s.handleResourceConvert)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$convert", s.handleResourceConvert)
@@ -651,6 +653,22 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleDiagnosticReportEvaluate(w, r)
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$bulk-member-match" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientBulkMemberMatch(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Encounter") && parts[4] == "$admit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$admit")
+					s.handleEncounterADTOps(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "MedicationRequest") && parts[4] == "$dispense" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleMedicationRequestDispense(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -659,6 +677,25 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Group") && parts[5] == "$davinci-data-export" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDaVinciDataExport(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Encounter") && (parts[5] == "$transfer" || parts[5] == "$discharge") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", parts[5])
+					s.handleEncounterADTOps(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "MedicationRequest") && parts[5] == "$dispense" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleMedicationRequestDispense(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$ihe-pix" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -3922,6 +3959,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "ihe-pix",
 					"definition": "https://profiles.ihe.net/ITI/PIXm/OperationDefinition/IHE.PIXm.pix",
 				},
+				{
+					"name":       "bulk-member-match",
+					"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/BulkMemberMatch",
+				},
 			}
 		case "DiagnosticReport":
 			entry["operation"] = []map[string]string{
@@ -3946,6 +3987,18 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "everything",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Encounter-everything",
+				},
+				{
+					"name":       "admit",
+					"definition": "http://flint.fhir.org/OperationDefinition/Encounter-admit",
+				},
+				{
+					"name":       "transfer",
+					"definition": "http://flint.fhir.org/OperationDefinition/Encounter-transfer",
+				},
+				{
+					"name":       "discharge",
+					"definition": "http://flint.fhir.org/OperationDefinition/Encounter-discharge",
 				},
 			}
 		case "Composition":
@@ -3989,6 +4042,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "check-interactions",
 					"definition": "http://flint.fhir.org/OperationDefinition/MedicationRequest-check-interactions",
+				},
+				{
+					"name":       "dispense",
+					"definition": "http://flint.fhir.org/OperationDefinition/MedicationRequest-dispense",
 				},
 			}
 		case "CarePlan":
@@ -4042,6 +4099,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			{
 				"name":       "confirm-attribution-list",
 				"definition": "http://hl7.org/fhir/us/davinci-atr/OperationDefinition/confirm-attribution-list",
+			},
+			{
+				"name":       "davinci-data-export",
+				"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/DavinciDataExport",
 			},
 		},
 	})
@@ -4727,6 +4788,30 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "collect-specimen",
 						"definition": "http://flint.fhir.org/OperationDefinition/ServiceRequest-collect-specimen",
+					},
+					{
+						"name":       "bulk-member-match",
+						"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/BulkMemberMatch",
+					},
+					{
+						"name":       "davinci-data-export",
+						"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/DavinciDataExport",
+					},
+					{
+						"name":       "admit",
+						"definition": "http://flint.fhir.org/OperationDefinition/Encounter-admit",
+					},
+					{
+						"name":       "transfer",
+						"definition": "http://flint.fhir.org/OperationDefinition/Encounter-transfer",
+					},
+					{
+						"name":       "discharge",
+						"definition": "http://flint.fhir.org/OperationDefinition/Encounter-discharge",
+					},
+					{
+						"name":       "dispense",
+						"definition": "http://flint.fhir.org/OperationDefinition/MedicationRequest-dispense",
 					},
 				},
 			},

@@ -1660,6 +1660,16 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected POST /ServiceRequest/cert-sr-1/$collect-specimen to return Specimen with ACC-CERT-SR-1, got %d: %s", respSpec.StatusCode, string(bSpec))
 			}
 		}
+		if err == nil {
+			bmmPayload := []byte(`{"resourceType":"Parameters","parameter":[{"name":"MemberBundle","part":[{"name":"MemberPatient","resource":{"resourceType":"Patient","name":[{"family":"Certify","given":["Alice"]}],"birthDate":"1985-04-12","gender":"female"}}]}]}`)
+			respBMM, bBMM, errBMM := doReq(http.MethodPost, basePath+"/Patient/$bulk-member-match", "application/fhir+json", bmmPayload, nil)
+			respDisp, bDisp, errDisp := doReq(http.MethodPost, basePath+"/MedicationRequest/cert-medreq-1/$dispense", "application/fhir+json", nil, nil)
+			if errBMM != nil || respBMM.StatusCode != http.StatusOK || !strings.Contains(string(bBMM), `"MatchedMembers"`) {
+				err = fmt.Errorf("expected POST /Patient/$bulk-member-match to return Parameters with MatchedMembers, got %d: %s", respBMM.StatusCode, string(bBMM))
+			} else if errDisp != nil || respDisp.StatusCode != http.StatusOK || !strings.Contains(string(bDisp), `"resourceType":"MedicationDispense"`) {
+				err = fmt.Errorf("expected POST /MedicationRequest/cert-medreq-1/$dispense to return MedicationDispense, got %d: %s", respDisp.StatusCode, string(bDisp))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

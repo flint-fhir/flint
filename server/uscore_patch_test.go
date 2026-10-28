@@ -5236,3 +5236,151 @@ func TestDaVinciNotificationsIHEPixAndLabEvaluateWave29(t *testing.T) {
 		t.Fatalf("GET /DiagnosticReport/dr-w29-1/$evaluate expected critical-alert Parameters with LAB DetectedIssue, got %d: %s", drEvalRec.Code, drEvalRec.Body.String())
 	}
 }
+
+func TestDaVinciPDexBulkMatchADTAndDispenseWave30(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave30-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w30-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w30-1",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1982-09-14",
+			"name": [{"family": "Nightingale", "given": ["Florence"]}]
+		}`},
+		{"/Condition/cond-w30-1", `{
+			"resourceType": "Condition",
+			"id": "cond-w30-1",
+			"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+			"code": {"coding": [{"system": "http://snomed.info/sct", "code": "44054006", "display": "Type 2 diabetes mellitus"}]},
+			"subject": {"reference": "Patient/pat-w30-1"}
+		}`},
+		{"/MedicationRequest/medreq-w30-1", `{
+			"resourceType": "MedicationRequest",
+			"id": "medreq-w30-1",
+			"status": "active",
+			"intent": "order",
+			"medicationCodeableConcept": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "860975", "display": "Metformin hydrochloride 500 MG Oral Tablet"}]},
+			"subject": {"reference": "Patient/pat-w30-1"}
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. POST /Patient/$bulk-member-match & GET /Group/pdex-matched-group-1/$davinci-data-export
+	bmmBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{
+				"name": "MemberBundle",
+				"part": [
+					{
+						"name": "MemberPatient",
+						"resource": {
+							"resourceType": "Patient",
+							"name": [{"family": "Nightingale", "given": ["Florence"]}],
+							"birthDate": "1982-09-14",
+							"gender": "female"
+						}
+					}
+				]
+			}
+		]
+	}`
+	bmmReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/$bulk-member-match", strings.NewReader(bmmBody))
+	bmmReq.Header.Set("Content-Type", "application/fhir+json")
+	bmmRec := httptest.NewRecorder()
+	pgH.ServeHTTP(bmmRec, bmmReq)
+	if bmmRec.Code != http.StatusOK ||
+		!strings.Contains(bmmRec.Body.String(), `"Group/pdex-matched-group-1"`) ||
+		!strings.Contains(bmmRec.Body.String(), `"Patient/pat-w30-1"`) {
+		t.Fatalf("POST /Patient/$bulk-member-match expected Group/pdex-matched-group-1 with Patient/pat-w30-1, got %d: %s", bmmRec.Code, bmmRec.Body.String())
+	}
+
+	expReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Group/pdex-matched-group-1/$davinci-data-export", nil)
+	expRec := httptest.NewRecorder()
+	pgH.ServeHTTP(expRec, expReq)
+	if expRec.Code != http.StatusOK ||
+		!strings.Contains(expRec.Body.String(), `"type":"collection"`) ||
+		!strings.Contains(expRec.Body.String(), `"Condition/cond-w30-1"`) {
+		t.Fatalf("GET /Group/pdex-matched-group-1/$davinci-data-export expected collection Bundle with Condition/cond-w30-1, got %d: %s", expRec.Code, expRec.Body.String())
+	}
+
+	// 2. Inpatient ADT: POST /Encounter/$admit -> /Encounter/{id}/$transfer -> /Encounter/{id}/$discharge
+	admitBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "subject", "valueReference": {"reference": "Patient/pat-w30-1"}},
+			{"name": "location", "valueReference": {"reference": "Location/loc-ed-1"}}
+		]
+	}`
+	admitReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Encounter/$admit", strings.NewReader(admitBody))
+	admitReq.Header.Set("Content-Type", "application/fhir+json")
+	admitRec := httptest.NewRecorder()
+	pgH.ServeHTTP(admitRec, admitReq)
+	if admitRec.Code != http.StatusOK ||
+		!strings.Contains(admitRec.Body.String(), `"status":"in-progress"`) ||
+		!strings.Contains(admitRec.Body.String(), `"Location/loc-ed-1"`) {
+		t.Fatalf("POST /Encounter/$admit expected in-progress Encounter at Location/loc-ed-1, got %d: %s", admitRec.Code, admitRec.Body.String())
+	}
+
+	xferBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "location", "valueReference": {"reference": "Location/loc-icu-2"}}
+		]
+	}`
+	xferReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Encounter/enc-admit-pat-w30-1/$transfer", strings.NewReader(xferBody))
+	xferReq.Header.Set("Content-Type", "application/fhir+json")
+	xferRec := httptest.NewRecorder()
+	pgH.ServeHTTP(xferRec, xferReq)
+	if xferRec.Code != http.StatusOK ||
+		!strings.Contains(xferRec.Body.String(), `"Location/loc-icu-2"`) ||
+		!strings.Contains(xferRec.Body.String(), `"status":"completed"`) {
+		t.Fatalf("POST /Encounter/enc-admit-pat-w30-1/$transfer expected Location/loc-icu-2 and prior location completed, got %d: %s", xferRec.Code, xferRec.Body.String())
+	}
+
+	dischReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Encounter/enc-admit-pat-w30-1/$discharge", nil)
+	dischRec := httptest.NewRecorder()
+	pgH.ServeHTTP(dischRec, dischReq)
+	if dischRec.Code != http.StatusOK ||
+		!strings.Contains(dischRec.Body.String(), `"status":"finished"`) ||
+		!strings.Contains(dischRec.Body.String(), `"18842-5"`) {
+		t.Fatalf("POST /Encounter/enc-admit-pat-w30-1/$discharge expected finished Encounter and LOINC 18842-5 Discharge summary Composition, got %d: %s", dischRec.Code, dischRec.Body.String())
+	}
+
+	// 3. POST /MedicationRequest/medreq-w30-1/$dispense
+	dispReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/MedicationRequest/medreq-w30-1/$dispense", nil)
+	dispRec := httptest.NewRecorder()
+	pgH.ServeHTTP(dispRec, dispReq)
+	if dispRec.Code != http.StatusOK ||
+		!strings.Contains(dispRec.Body.String(), `"resourceType":"MedicationDispense"`) ||
+		!strings.Contains(dispRec.Body.String(), `"MedicationRequest/medreq-w30-1"`) {
+		t.Fatalf("POST /MedicationRequest/medreq-w30-1/$dispense expected MedicationDispense referencing MedicationRequest/medreq-w30-1, got %d: %s", dispRec.Code, dispRec.Body.String())
+	}
+}
