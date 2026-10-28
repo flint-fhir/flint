@@ -1152,6 +1152,12 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Schedule") && parts[4] == "$find" {
 			return true
 		}
+		if (strings.EqualFold(parts[3], "ServiceRequest") || strings.EqualFold(parts[3], "MedicationRequest")) && parts[4] == "$crd" {
+			return true
+		}
+		if (strings.EqualFold(parts[3], "AdverseEvent") || strings.EqualFold(parts[3], "CarePlan")) && parts[4] == "$evaluate" {
+			return true
+		}
 		if strings.EqualFold(parts[3], "Appointment") && (parts[4] == "$find" || parts[4] == "$hold" || parts[4] == "$book") {
 			return true
 		}
@@ -1210,6 +1216,12 @@ func isPlanApplyOp(parts []string) bool {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Schedule") && parts[5] == "$find" {
+			return true
+		}
+		if (strings.EqualFold(parts[3], "ServiceRequest") || strings.EqualFold(parts[3], "MedicationRequest")) && parts[5] == "$crd" {
+			return true
+		}
+		if (strings.EqualFold(parts[3], "AdverseEvent") || strings.EqualFold(parts[3], "CarePlan")) && parts[5] == "$evaluate" {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Group") && (parts[5] == "$add" || parts[5] == "$remove") {

@@ -4691,3 +4691,141 @@ func TestClaimPredetermineMeasureRiskAdjustmentAndScheduleFindWave25(t *testing.
 		t.Fatalf("GET /Schedule/$find expected Schedule/sched-w25-1 and synthesized open Slot, got %d: %s", schedRec.Code, schedRec.Body.String())
 	}
 }
+
+func TestOrderCRDAdverseEventEvaluateAndCarePlanEvaluateWave26(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave26-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w26-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w26-1",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1980-03-14",
+			"name": [{"family": "Curie", "given": ["Marie"]}]
+		}`},
+		{"/Coverage/cov-w26-1", `{
+			"resourceType": "Coverage",
+			"id": "cov-w26-1",
+			"status": "active",
+			"beneficiary": {"reference": "Patient/pat-w26-1"},
+			"payor": [{"display": "National Health Plan"}]
+		}`},
+		{"/AllergyIntolerance/allergy-w26-1", `{
+			"resourceType": "AllergyIntolerance",
+			"id": "allergy-w26-1",
+			"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical", "code": "active"}]},
+			"code": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "7980", "display": "Penicillin G"}]},
+			"patient": {"reference": "Patient/pat-w26-1"}
+		}`},
+		{"/MedicationRequest/medreq-w26-1", `{
+			"resourceType": "MedicationRequest",
+			"id": "medreq-w26-1",
+			"status": "active",
+			"intent": "order",
+			"subject": {"reference": "Patient/pat-w26-1"},
+			"medicationCodeableConcept": {"coding": [{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "7980", "display": "Penicillin G"}]}
+		}`},
+		{"/AdverseEvent/ae-w26-1", `{
+			"resourceType": "AdverseEvent",
+			"id": "ae-w26-1",
+			"actuality": "actual",
+			"subject": {"reference": "Patient/pat-w26-1"},
+			"severity": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/adverse-event-severity", "code": "severe"}]},
+			"suspectEntity": [
+				{"instance": {"reference": "MedicationRequest/medreq-w26-1"}}
+			]
+		}`},
+		{"/Goal/goal-w26-1", `{
+			"resourceType": "Goal",
+			"id": "goal-w26-1",
+			"lifecycleStatus": "active",
+			"description": {"text": "Maintain blood pressure below 130/80 mmHg"},
+			"subject": {"reference": "Patient/pat-w26-1"}
+		}`},
+		{"/CarePlan/cp-w26-1", `{
+			"resourceType": "CarePlan",
+			"id": "cp-w26-1",
+			"status": "active",
+			"intent": "plan",
+			"subject": {"reference": "Patient/pat-w26-1"},
+			"goal": [{"reference": "Goal/goal-w26-1"}]
+		}`},
+		{"/Observation/obs-w26-bp", `{
+			"resourceType": "Observation",
+			"id": "obs-w26-bp",
+			"status": "final",
+			"code": {"coding": [{"system": "http://loinc.org", "code": "85354-9"}]},
+			"subject": {"reference": "Patient/pat-w26-1"},
+			"component": [
+				{
+					"code": {"coding": [{"system": "http://loinc.org", "code": "8480-6"}]},
+					"valueQuantity": {"value": 122.0, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+				},
+				{
+					"code": {"coding": [{"system": "http://loinc.org", "code": "8462-4"}]},
+					"valueQuantity": {"value": 76.0, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}
+				}
+			]
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. POST /MedicationRequest/medreq-w26-1/$crd
+	crdReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/MedicationRequest/medreq-w26-1/$crd", nil)
+	crdRec := httptest.NewRecorder()
+	pgH.ServeHTTP(crdRec, crdReq)
+	if crdRec.Code != http.StatusOK ||
+		!strings.Contains(crdRec.Body.String(), "ext-coverage-information") ||
+		!strings.Contains(crdRec.Body.String(), "dtr-specialty-rx-prior-auth") ||
+		!strings.Contains(crdRec.Body.String(), `"Coverage/cov-w26-1"`) {
+		t.Fatalf("POST /MedicationRequest/medreq-w26-1/$crd expected ext-coverage-information and Coverage/cov-w26-1, got %d: %s", crdRec.Code, crdRec.Body.String())
+	}
+
+	// 2. GET /AdverseEvent/ae-w26-1/$evaluate
+	aeReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/AdverseEvent/ae-w26-1/$evaluate", nil)
+	aeRec := httptest.NewRecorder()
+	pgH.ServeHTTP(aeRec, aeReq)
+	if aeRec.Code != http.StatusOK ||
+		!strings.Contains(aeRec.Body.String(), `"valueCode":"certain"`) ||
+		!strings.Contains(aeRec.Body.String(), `"DetectedIssue"`) ||
+		!strings.Contains(aeRec.Body.String(), `"MedicationRequest/medreq-w26-1"`) {
+		t.Fatalf("GET /AdverseEvent/ae-w26-1/$evaluate expected causalityAssessment=certain and DetectedIssue implicating MedicationRequest/medreq-w26-1, got %d: %s", aeRec.Code, aeRec.Body.String())
+	}
+
+	// 3. GET /CarePlan/cp-w26-1/$evaluate
+	cpReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/CarePlan/cp-w26-1/$evaluate", nil)
+	cpRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cpRec, cpReq)
+	if cpRec.Code != http.StatusOK ||
+		!strings.Contains(cpRec.Body.String(), `"valueCode":"achieved"`) ||
+		!strings.Contains(cpRec.Body.String(), `"Goal/goal-w26-1"`) ||
+		!strings.Contains(cpRec.Body.String(), `"Observation/obs-w26-bp"`) {
+		t.Fatalf("GET /CarePlan/cp-w26-1/$evaluate expected achievementStatus=achieved, Goal/goal-w26-1, and Observation/obs-w26-bp, got %d: %s", cpRec.Code, cpRec.Body.String())
+	}
+}

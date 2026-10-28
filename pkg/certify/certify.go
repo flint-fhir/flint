@@ -1621,6 +1621,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /Measure/$evaluate-risk-condition-category to return Risk Adjustment Bundle with CMS-HCC 85, got %d: %s", respRA.StatusCode, string(bRA))
 			}
 		}
+		if err == nil {
+			respCRD, bCRD, errCRD := doReq(http.MethodGet, basePath+"/ServiceRequest/cert-sr-1/$crd", "", nil, nil)
+			respCPEval, bCPEval, errCPEval := doReq(http.MethodGet, basePath+"/CarePlan/cert-cp-1/$evaluate", "", nil, nil)
+			if errCRD != nil || respCRD.StatusCode != http.StatusOK || !strings.Contains(string(bCRD), "ext-coverage-information") {
+				err = fmt.Errorf("expected GET /ServiceRequest/cert-sr-1/$crd to return Parameters with ext-coverage-information, got %d: %s", respCRD.StatusCode, string(bCRD))
+			} else if errCPEval != nil || respCPEval.StatusCode != http.StatusOK || !strings.Contains(string(bCPEval), `"achievementStatus"`) || !strings.Contains(string(bCPEval), `"achieved"`) {
+				err = fmt.Errorf("expected GET /CarePlan/cert-cp-1/$evaluate to return Parameters with achievementStatus=achieved, got %d: %s", respCPEval.StatusCode, string(bCPEval))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
