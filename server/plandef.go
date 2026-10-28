@@ -6068,3 +6068,600 @@ func slicesContainsFold(list []string, target string) bool {
 	}
 	return false
 }
+
+// =============================================================================
+// Wave 21:
+// 1. HL7 FHIR R4 Resource/$convert (POST /$convert & /{resourceType}/$convert)
+// 2. HL7 FHIR R4 Functional Clinical Lists (GET/POST /List/$find)
+// 3. HL7 FHIR R4 Financial Pricing Engine (POST /ChargeItem/$apply & /ChargeItem/{id}/$apply)
+// =============================================================================
+
+// handleResourceConvert implements HL7 FHIR R4 Resource/$convert (§3.1.0.15)
+// (POST /fhir/r4/{tenant}/$convert and POST /fhir/r4/{tenant}/{resourceType}/$convert).
+func (s *Server) handleResourceConvert(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$convert only supports POST")
+		return
+	}
+	if r.Body == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "$convert requires a FHIR resource or Parameters body")
+		return
+	}
+
+	rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+	if err != nil || len(bytes.TrimSpace(rawBody)) == 0 {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "$convert requires a non-empty JSON payload")
+		return
+	}
+
+	var bodyMap map[string]any
+	if err := json.Unmarshal(rawBody, &bodyMap); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON in $convert payload: "+err.Error())
+		return
+	}
+
+	targetFormat := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
+	if targetFormat == "" {
+		targetFormat = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("_format")))
+	}
+
+	inputMap := bodyMap
+	if bodyMap["resourceType"] == "Parameters" {
+		inputMap = nil
+		if params, ok := bodyMap["parameter"].([]any); ok {
+			for _, rawP := range params {
+				pm, ok := rawP.(map[string]any)
+				if !ok {
+					continue
+				}
+				name, _ := pm["name"].(string)
+				switch name {
+				case "input", "resource", "content":
+					if res, ok := pm["resource"].(map[string]any); ok {
+						inputMap = res
+					} else if sVal := extractParamString(pm); sVal != "" {
+						var parsed map[string]any
+						if json.Unmarshal([]byte(sVal), &parsed) == nil {
+							inputMap = parsed
+						}
+					}
+				case "to", "format":
+					if sVal := extractParamString(pm); sVal != "" && targetFormat == "" {
+						targetFormat = strings.ToLower(sVal)
+					}
+				}
+			}
+		}
+	}
+
+	if inputMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "$convert requires an input FHIR resource")
+		return
+	}
+
+	resType, _ := inputMap["resourceType"].(string)
+	if resType == "" {
+		resType = strings.TrimSpace(r.PathValue("resourceType"))
+		if resType != "" {
+			inputMap["resourceType"] = resType
+		}
+	}
+	if pathRT := strings.TrimSpace(r.PathValue("resourceType")); pathRT != "" && !strings.HasPrefix(pathRT, "$") && !strings.EqualFold(pathRT, resType) {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("$convert path resourceType %q does not match payload resourceType %q", pathRT, resType))
+		return
+	}
+
+	md, ok := s.protoRegistry[resType]
+	if !ok {
+		writeOperationOutcome(w, http.StatusBadRequest, "not-supported", fmt.Sprintf("unsupported FHIR resourceType %q for $convert", resType))
+		return
+	}
+
+	inputBytes, err := json.Marshal(inputMap)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to serialize input resource: "+err.Error())
+		return
+	}
+
+	normJSON, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, inputBytes)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("failed to normalize %s JSON: %v", resType, err))
+		return
+	}
+
+	msg := dynamicpb.NewMessage(md)
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(normJSON, msg); err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("failed to parse %s into google.fhir.r4.core protobuf: %v", resType, err))
+		return
+	}
+	if rid, _ := inputMap["id"].(string); strings.TrimSpace(rid) != "" {
+		setProtoResourceID(msg, strings.TrimSpace(rid))
+	}
+
+	if strings.Contains(targetFormat, "proto") {
+		protoJSONBytes, mErr := (protojson.MarshalOptions{UseProtoNames: false}).Marshal(msg)
+		if mErr != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to marshal protojson: "+mErr.Error())
+			return
+		}
+		w.Header().Set("Content-Type", "application/fhir+proto+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(protoJSONBytes)
+		return
+	}
+
+	protoBytes, err := proto.Marshal(msg)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to marshal protobuf: "+err.Error())
+		return
+	}
+	canonicalJSON, err := fhirutil.DenormalizeProtoJSONToFHIRJSON(md, resType, protoBytes, 0, time.Time{})
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to denormalize protobuf to FHIR JSON: "+err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(canonicalJSON)
+}
+
+// handleListFind implements HL7 FHIR R4 List/$find (§9.3.8.1)
+// (GET/POST /fhir/r4/{tenant}/List/$find).
+func (s *Server) handleListFind(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "List/$find only supports GET and POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusNotImplemented, "not-supported", "List/$find requires an operational store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	patientParam := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("patient")), "Patient/")
+	if patientParam == "" {
+		patientParam = strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("subject")), "Patient/")
+	}
+	nameParam := strings.TrimSpace(r.URL.Query().Get("name"))
+	if nameParam == "" {
+		nameParam = strings.TrimSpace(r.URL.Query().Get("code"))
+	}
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&bodyMap); err == nil {
+			if bodyMap["resourceType"] == "Parameters" {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						pName, _ := pm["name"].(string)
+						switch pName {
+						case "patient", "subject":
+							if patientParam == "" {
+								patientParam = strings.TrimPrefix(extractParamString(pm), "Patient/")
+							}
+						case "name", "code":
+							if nameParam == "" {
+								nameParam = extractParamString(pm)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if patientParam == "" || nameParam == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "List/$find requires both 'patient' and 'name' parameters")
+		return
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+		if !auth.Allows(secCtx, "List", auth.ActionRead) && !auth.Allows(secCtx, "List", auth.ActionSearch) &&
+			!auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for List/$find")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && cleanID(secCtx.GetPatientId()) != cleanID(patientParam) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token cannot invoke List/$find outside own patient compartment")
+			return
+		}
+	}
+
+	// 1. Check stored List resources in the tenant matching patient + name/code/title
+	if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "List", Count: 50}); err == nil {
+		for _, m := range sr.Matches {
+			jb, cErr := s.protoToJSONWithMeta("List", m.ResourceProto, m.ResVersion, m.LastUpdated)
+			if cErr != nil {
+				continue
+			}
+			var lMap map[string]any
+			if json.Unmarshal(jb, &lMap) != nil {
+				continue
+			}
+			subjRef := ""
+			if sm, ok := lMap["subject"].(map[string]any); ok {
+				subjRef, _ = sm["reference"].(string)
+			}
+			if !strings.EqualFold(strings.TrimPrefix(subjRef, "Patient/"), patientParam) {
+				continue
+			}
+			lid, _ := lMap["id"].(string)
+			lTitle, _ := lMap["title"].(string)
+			codeMatch := strings.EqualFold(lid, nameParam) || strings.EqualFold(lTitle, nameParam)
+			if cm, ok := lMap["code"].(map[string]any); ok {
+				if codings, ok := cm["coding"].([]any); ok {
+					for _, rawC := range codings {
+						if cd, ok := rawC.(map[string]any); ok {
+							cCode, _ := cd["code"].(string)
+							cDisp, _ := cd["display"].(string)
+							if strings.EqualFold(cCode, nameParam) || strings.EqualFold(cDisp, nameParam) {
+								codeMatch = true
+								break
+							}
+						}
+					}
+				}
+			}
+			if codeMatch {
+				w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+				w.WriteHeader(http.StatusOK)
+				_ = json.NewEncoder(w).Encode(lMap)
+				return
+			}
+		}
+	}
+
+	// 2. Synthesize standard HL7 functional clinical lists from patient's active compartment resources
+	normName := strings.ToLower(strings.TrimSpace(nameParam))
+	var targetResType, loincCode, loincDisplay, listTitle string
+	switch normName {
+	case "current-medications", "medications", "10160-0":
+		targetResType = "MedicationRequest"
+		loincCode = "10160-0"
+		loincDisplay = "History of Medication use Narrative"
+		listTitle = "Current Medications"
+	case "current-problems", "problems", "11450-4":
+		targetResType = "Condition"
+		loincCode = "11450-4"
+		loincDisplay = "Problem list - Reported"
+		listTitle = "Current Problems"
+	case "current-allergies", "allergies", "48765-2":
+		targetResType = "AllergyIntolerance"
+		loincCode = "48765-2"
+		loincDisplay = "Allergies and adverse reactions Document"
+		listTitle = "Current Allergies"
+	case "current-immunizations", "immunizations", "11369-6":
+		targetResType = "Immunization"
+		loincCode = "11369-6"
+		loincDisplay = "History of Immunization Narrative"
+		listTitle = "Current Immunizations"
+	default:
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Functional List %q not found for Patient/%s", nameParam, patientParam))
+		return
+	}
+
+	var listEntries []map[string]any
+	if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		TenantID:   tenant,
+		ResType:    targetResType,
+		References: map[string]string{"patient": "Patient/" + patientParam},
+		Count:      100,
+	}); err == nil {
+		for _, m := range sr.Matches {
+			jb, cErr := s.protoToJSONWithMeta(targetResType, m.ResourceProto, m.ResVersion, m.LastUpdated)
+			if cErr != nil {
+				continue
+			}
+			var rMap map[string]any
+			if json.Unmarshal(jb, &rMap) != nil {
+				continue
+			}
+			if st, _ := rMap["status"].(string); strings.EqualFold(st, "entered-in-error") {
+				continue
+			}
+			disp := extractClinicalDisplay(rMap)
+			itemRef := map[string]any{
+				"reference": targetResType + "/" + m.ResID,
+			}
+			if disp != "" {
+				itemRef["display"] = disp
+			}
+			listEntries = append(listEntries, map[string]any{
+				"item": itemRef,
+			})
+		}
+	}
+
+	synthList := map[string]any{
+		"resourceType": "List",
+		"id":           fmt.Sprintf("list-%s-%s", strings.ReplaceAll(normName, "_", "-"), patientParam),
+		"status":       "current",
+		"mode":         "working",
+		"title":        listTitle,
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    loincCode,
+					"display": loincDisplay,
+				},
+			},
+			"text": listTitle,
+		},
+		"subject": map[string]any{
+			"reference": "Patient/" + patientParam,
+		},
+		"date": time.Now().UTC().Format(time.RFC3339),
+	}
+	if len(listEntries) > 0 {
+		synthList["entry"] = listEntries
+	} else {
+		synthList["emptyReason"] = map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://terminology.hl7.org/CodeSystem/list-empty-reason",
+					"code":    "nilknown",
+					"display": "Nil Known",
+				},
+			},
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(synthList)
+}
+
+func extractClinicalDisplay(rMap map[string]any) string {
+	for _, key := range []string{"code", "medicationCodeableConcept", "vaccineCode"} {
+		if cc, ok := rMap[key].(map[string]any); ok {
+			if txt, _ := cc["text"].(string); txt != "" {
+				return txt
+			}
+			if codings, ok := cc["coding"].([]any); ok && len(codings) > 0 {
+				if cm, ok := codings[0].(map[string]any); ok {
+					if d, _ := cm["display"].(string); d != "" {
+						return d
+					}
+					if c, _ := cm["code"].(string); c != "" {
+						return c
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// handleChargeItemApply implements HL7 FHIR R4 ChargeItem/$apply (§13.7.7.1)
+// (POST /fhir/r4/{tenant}/ChargeItem/$apply and POST /fhir/r4/{tenant}/ChargeItem/{id}/$apply).
+func (s *Server) handleChargeItemApply(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "ChargeItem/$apply only supports POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusNotImplemented, "not-supported", "ChargeItem/$apply requires an operational store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	ciID := strings.TrimPrefix(strings.TrimSpace(r.PathValue("id")), "ChargeItem/")
+	defCanonical := strings.TrimSpace(r.URL.Query().Get("definition"))
+
+	var inlineCI map[string]any
+	var inlineCIDef map[string]any
+	var accountRef string
+
+	if r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "ChargeItem":
+				inlineCI = bodyMap
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "chargeItem", "resource", "content":
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "ChargeItem" {
+								inlineCI = res
+							} else if sVal := extractParamString(pm); sVal != "" && ciID == "" {
+								ciID = strings.TrimPrefix(sVal, "ChargeItem/")
+							}
+						case "chargeItemDefinition", "definition":
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "ChargeItemDefinition" {
+								inlineCIDef = res
+							} else if sVal := extractParamString(pm); sVal != "" && defCanonical == "" {
+								defCanonical = sVal
+							}
+						case "account":
+							if refMap, ok := pm["valueReference"].(map[string]any); ok {
+								accountRef, _ = refMap["reference"].(string)
+							} else if sVal := extractParamString(pm); sVal != "" {
+								accountRef = sVal
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+		if !auth.Allows(secCtx, "ChargeItem", auth.ActionRead) && !auth.Allows(secCtx, "ChargeItem", auth.ActionUpdate) &&
+			!auth.Allows(secCtx, "ChargeItem", auth.ActionCreate) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for ChargeItem/$apply")
+			return
+		}
+	}
+
+	ciMap := inlineCI
+	persistToStore := false
+	if ciMap == nil && ciID != "" {
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "ChargeItem", ciID)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("ChargeItem/%s not found", ciID))
+			return
+		}
+		jb, cErr := s.protoToJSONWithMeta("ChargeItem", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if cErr != nil || json.Unmarshal(jb, &ciMap) != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode stored ChargeItem")
+			return
+		}
+		persistToStore = true
+	}
+
+	if ciMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "ChargeItem/$apply requires a ChargeItem {id} or ChargeItem resource")
+		return
+	}
+
+	if defCanonical == "" {
+		if defs, ok := ciMap["definitionCanonical"].([]any); ok && len(defs) > 0 {
+			defCanonical, _ = defs[0].(string)
+		} else if defs, ok := ciMap["definitionUri"].([]any); ok && len(defs) > 0 {
+			defCanonical, _ = defs[0].(string)
+		}
+	}
+
+	ciDef := inlineCIDef
+	if ciDef == nil && defCanonical != "" {
+		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "ChargeItemDefinition", Count: 50}); err == nil {
+			for _, m := range sr.Matches {
+				jb, cErr := s.protoToJSONWithMeta("ChargeItemDefinition", m.ResourceProto, m.ResVersion, m.LastUpdated)
+				if cErr != nil {
+					continue
+				}
+				var candidate map[string]any
+				if json.Unmarshal(jb, &candidate) == nil {
+					u, _ := candidate["url"].(string)
+					cid, _ := candidate["id"].(string)
+					if strings.EqualFold(u, defCanonical) || strings.EqualFold(cid, strings.TrimPrefix(defCanonical, "ChargeItemDefinition/")) {
+						ciDef = candidate
+						break
+					}
+				}
+			}
+		}
+	}
+
+	basePrice := 0.0
+	currency := "USD"
+	var surcharges, discounts, taxes float64
+	subTotalFactor := 1.0
+
+	if po, ok := ciMap["priceOverride"].(map[string]any); ok {
+		if v, ok := po["value"].(float64); ok {
+			basePrice = v
+		}
+		if c, ok := po["currency"].(string); ok && c != "" {
+			currency = c
+		}
+	}
+
+	if ciDef != nil {
+		if pgs, ok := ciDef["propertyGroup"].([]any); ok {
+			for _, rawPG := range pgs {
+				pgm, ok := rawPG.(map[string]any)
+				if !ok {
+					continue
+				}
+				pcs, _ := pgm["priceComponent"].([]any)
+				for _, rawPC := range pcs {
+					pcm, ok := rawPC.(map[string]any)
+					if !ok {
+						continue
+					}
+					pcType, _ := pcm["type"].(string)
+					var amt float64
+					hasAmt := false
+					if am, ok := pcm["amount"].(map[string]any); ok {
+						if v, ok := am["value"].(float64); ok {
+							amt = v
+							hasAmt = true
+						}
+						if c, ok := am["currency"].(string); ok && c != "" {
+							currency = c
+						}
+					}
+					var factor float64
+					hasFactor := false
+					if f, ok := pcm["factor"].(float64); ok {
+						factor = f
+						hasFactor = true
+					}
+
+					switch strings.ToLower(pcType) {
+					case "base":
+						if hasAmt {
+							basePrice += amt
+						}
+					case "surcharge":
+						if hasAmt {
+							surcharges += amt
+						} else if hasFactor {
+							surcharges += basePrice * factor
+						}
+					case "discount":
+						if hasAmt {
+							discounts += math.Abs(amt)
+						} else if hasFactor {
+							discounts += basePrice * math.Abs(factor)
+						}
+					case "tax":
+						if hasAmt {
+							taxes += amt
+						} else if hasFactor {
+							taxes += (basePrice + surcharges - discounts) * factor
+						}
+					}
+				}
+			}
+		}
+	}
+
+	qty := 1.0
+	if qm, ok := ciMap["quantity"].(map[string]any); ok {
+		if qv, ok := qm["value"].(float64); ok && qv > 0 {
+			qty = qv
+		}
+	}
+	if fo, ok := ciMap["factorOverride"].(float64); ok && fo > 0 {
+		subTotalFactor = fo
+	}
+
+	netPrice := ((basePrice + surcharges - discounts) * subTotalFactor * qty) + (taxes * qty)
+	netPrice = math.Round(netPrice*100) / 100
+
+	ciMap["priceOverride"] = map[string]any{
+		"value":    netPrice,
+		"currency": currency,
+	}
+	if st, _ := ciMap["status"].(string); st == "" || strings.EqualFold(st, "planned") {
+		ciMap["status"] = "billable"
+	}
+	if accountRef != "" {
+		ciMap["account"] = []map[string]any{{"reference": accountRef}}
+	}
+
+	if persistToStore {
+		if _, _, _, savedMap, uErr := s.upsertResourceMap(r.Context(), tenant, ciMap); uErr == nil && savedMap != nil {
+			ciMap = savedMap
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(ciMap)
+}

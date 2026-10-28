@@ -3985,3 +3985,117 @@ func TestClaimInquireQuestionnairePackageAndFindMatchesWave20(t *testing.T) {
 		t.Fatalf("POST /CodeSystem/$find-matches expected LOINC children 8480-6 and 8462-4 of 85354-9, got %d: %s", fmRec.Code, fmRec.Body.String())
 	}
 }
+
+func TestResourceConvertListFindAndChargeItemApplyWave21(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave21-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. POST /$convert (both canonical FHIR R4 JSON and google.fhir.r4.core ProtoJSON)
+	convInput := `{
+		"resourceType": "Patient",
+		"id": "pat-w21-1",
+		"active": false,
+		"name": [{"family": "Vance", "given": ["Eli"]}],
+		"gender": "male",
+		"birthDate": "1955-04-12"
+	}`
+	convReq1 := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/$convert", strings.NewReader(convInput))
+	convReq1.Header.Set("Content-Type", "application/fhir+json")
+	convRec1 := httptest.NewRecorder()
+	pgH.ServeHTTP(convRec1, convReq1)
+	if convRec1.Code != http.StatusOK || !strings.Contains(convRec1.Body.String(), `"Vance"`) || !strings.Contains(convRec1.Body.String(), `"active":false`) {
+		t.Fatalf("POST /$convert expected canonical Patient JSON with active:false, got %d: %s", convRec1.Code, convRec1.Body.String())
+	}
+
+	convReq2 := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/$convert?format=proto+json", strings.NewReader(convInput))
+	convReq2.Header.Set("Content-Type", "application/fhir+json")
+	convRec2 := httptest.NewRecorder()
+	pgH.ServeHTTP(convRec2, convReq2)
+	if convRec2.Code != http.StatusOK || !strings.Contains(convRec2.Header().Get("Content-Type"), "application/fhir+proto+json") {
+		t.Fatalf("POST /Patient/$convert?format=proto+json expected application/fhir+proto+json, got %d (%s): %s", convRec2.Code, convRec2.Header().Get("Content-Type"), convRec2.Body.String())
+	}
+
+	// 2. Seed a Condition for Patient/pat-w21-1 and invoke GET /List/$find?patient=pat-w21-1&name=current-problems
+	condJSON := `{
+		"resourceType": "Condition",
+		"id": "cond-w21-1",
+		"clinicalStatus": {
+			"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]
+		},
+		"code": {
+			"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}]
+		},
+		"subject": {"reference": "Patient/pat-w21-1"}
+	}`
+	putCondReq := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/Condition/cond-w21-1", strings.NewReader(condJSON))
+	putCondReq.Header.Set("Content-Type", "application/fhir+json")
+	putCondRec := httptest.NewRecorder()
+	pgH.ServeHTTP(putCondRec, putCondReq)
+	if putCondRec.Code != http.StatusOK && putCondRec.Code != http.StatusCreated {
+		t.Fatalf("PUT /Condition/cond-w21-1 expected 200/201, got %d: %s", putCondRec.Code, putCondRec.Body.String())
+	}
+
+	lfReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/List/$find?patient=pat-w21-1&name=current-problems", nil)
+	lfRec := httptest.NewRecorder()
+	pgH.ServeHTTP(lfRec, lfReq)
+	if lfRec.Code != http.StatusOK || !strings.Contains(lfRec.Body.String(), `"Condition/cond-w21-1"`) || !strings.Contains(lfRec.Body.String(), `"11450-4"`) {
+		t.Fatalf("GET /List/$find expected synthesized Current Problems List with Condition/cond-w21-1, got %d: %s", lfRec.Code, lfRec.Body.String())
+	}
+
+	// 3. POST /ChargeItem/$apply with ChargeItemDefinition pricing rules (base 200.00 - 10% discount + 5% tax = 189.00)
+	ciApplyBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{
+				"name": "chargeItem",
+				"resource": {
+					"resourceType": "ChargeItem",
+					"id": "ci-w21-1",
+					"status": "planned",
+					"code": {"coding": [{"system": "http://www.ama-assn.org/go/cpt", "code": "99214", "display": "Office visit"}]},
+					"subject": {"reference": "Patient/pat-w21-1"},
+					"quantity": {"value": 1}
+				}
+			},
+			{
+				"name": "chargeItemDefinition",
+				"resource": {
+					"resourceType": "ChargeItemDefinition",
+					"id": "cidef-w21-1",
+					"url": "http://flint.fhir.org/ChargeItemDefinition/cidef-w21-1",
+					"status": "active",
+					"propertyGroup": [
+						{
+							"priceComponent": [
+								{"type": "base", "amount": {"value": 200.0, "currency": "USD"}},
+								{"type": "discount", "factor": 0.10},
+								{"type": "tax", "factor": 0.05}
+							]
+						}
+					]
+				}
+			}
+		]
+	}`
+	ciReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/ChargeItem/$apply", strings.NewReader(ciApplyBody))
+	ciReq.Header.Set("Content-Type", "application/fhir+json")
+	ciRec := httptest.NewRecorder()
+	pgH.ServeHTTP(ciRec, ciReq)
+	if ciRec.Code != http.StatusOK || !strings.Contains(ciRec.Body.String(), `"value":189`) || !strings.Contains(ciRec.Body.String(), `"billable"`) {
+		t.Fatalf("POST /ChargeItem/$apply expected priceOverride=189 USD and status=billable, got %d: %s", ciRec.Code, ciRec.Body.String())
+	}
+}

@@ -2392,6 +2392,51 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/$convert": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Discovery & Docs"},
+				"summary":     "HL7 FHIR R4 Resource/$convert canonicalizing or converting between FHIR R4 JSON and google.fhir.r4.core ProtoJSON",
+				"operationId": "resourceConvertPost",
+				"parameters": []map[string]any{
+					{"name": "format", "in": "query", "required": false, "schema": map[string]any{"type": "string", "enum": []string{"fhir+json", "proto+json"}}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Converted FHIR R4 resource"},
+				},
+			},
+		},
+		"/List/$find": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"List"},
+				"summary":     "HL7 FHIR R4 List/$find retrieving or synthesizing functional clinical lists (current-medications, current-problems, current-allergies, current-immunizations)",
+				"operationId": "listFindGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "name", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 List resource"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"List"},
+				"summary":     "HL7 FHIR R4 List/$find (POST Parameters)",
+				"operationId": "listFindPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 List resource"},
+				},
+			},
+		},
+		"/ChargeItem/$apply": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ChargeItem"},
+				"summary":     "HL7 FHIR R4 ChargeItem/$apply evaluating ChargeItemDefinition priceComponent rules to compute priceOverride",
+				"operationId": "chargeItemApplyPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Priced FHIR R4 ChargeItem resource"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()
