@@ -1124,6 +1124,8 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		respCSVC, bCSVC, errCSVC := doReq(http.MethodGet, basePath+"/CodeSystem/$validate-code?url=http://snomed.info/sct&code=38341003", "", nil, nil)
 		// 5. CodeSystem/$subsumes (38341003 Hypertensive disorder subsumes 59621000 Essential hypertension)
 		respSubsumes, bSubsumes, errSubsumes := doReq(http.MethodGet, basePath+"/CodeSystem/$subsumes?system=http://snomed.info/sct&codeA=38341003&codeB=59621000", "", nil, nil)
+		// 6. CodeSystem/$find-matches (property parent=38341003 -> 59621000)
+		respFM, bFM, errFM := doReq(http.MethodGet, basePath+"/CodeSystem/$find-matches?system=http://snomed.info/sct&property=parent|38341003", "", nil, nil)
 
 		if errExp != nil || respExp.StatusCode != http.StatusOK || !strings.Contains(string(bExp), `"8867-4"`) {
 			err = fmt.Errorf("expected 200 OK with 8867-4 from ValueSet/$expand, got %s", string(bExp))
@@ -1135,9 +1137,11 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			err = fmt.Errorf("expected valueBoolean:true from CodeSystem/$validate-code, got %s", string(bCSVC))
 		} else if errSubsumes != nil || respSubsumes.StatusCode != http.StatusOK || !strings.Contains(string(bSubsumes), `"subsumes"`) {
 			err = fmt.Errorf("expected outcome=subsumes from CodeSystem/$subsumes, got %s", string(bSubsumes))
+		} else if errFM != nil || respFM.StatusCode != http.StatusOK || !strings.Contains(string(bFM), `"59621000"`) {
+			err = fmt.Errorf("expected 59621000 from CodeSystem/$find-matches, got %s", string(bFM))
 		}
 	}
-	record("TERM-01", suite5, "FHIR R4 Terminology Services (ValueSet/$expand, $validate-code, CodeSystem/$lookup, $validate-code & $subsumes)", t0, err, "Verified ValueSet/$expand, $validate-code, CodeSystem/$lookup, $validate-code & $subsumes")
+	record("TERM-01", suite5, "FHIR R4 Terminology Services (ValueSet/$expand, $validate-code, CodeSystem/$lookup, $validate-code, $subsumes & $find-matches)", t0, err, "Verified ValueSet/$expand, $validate-code, CodeSystem/$lookup, $validate-code, $subsumes & $find-matches")
 
 	t0 = time.Now()
 	{

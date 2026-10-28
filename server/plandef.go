@@ -5275,3 +5275,796 @@ func (s *Server) handleNamingSystemPreferredID(w http.ResponseWriter, r *http.Re
 		},
 	})
 }
+
+// =============================================================================
+// Wave 20:
+// 1. HL7 Da Vinci PAS Claim/$inquire (GET/POST /Claim/$inquire & /Claim/{id}/$inquire)
+// 2. HL7 Da Vinci DTR Questionnaire/$package (GET/POST /Questionnaire/$package & /Questionnaire/{id}/$package)
+// 3. HL7 FHIR R4 CodeSystem/$find-matches (GET/POST /CodeSystem/$find-matches & /CodeSystem/{id}/$find-matches)
+// =============================================================================
+
+// handleClaimInquire implements HL7 Da Vinci Prior Authorization Support (PAS) Claim/$inquire
+// (GET/POST /fhir/r4/{tenant}/Claim/$inquire and /fhir/r4/{tenant}/Claim/{id}/$inquire).
+func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Claim/$inquire only supports GET and POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusNotImplemented, "not-supported", "Claim/$inquire requires an operational store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	claimID := strings.TrimPrefix(strings.TrimSpace(r.PathValue("id")), "Claim/")
+	q := r.URL.Query()
+	if claimID == "" {
+		claimID = strings.TrimPrefix(strings.TrimSpace(q.Get("claim")), "Claim/")
+	}
+	patientParam := strings.TrimPrefix(strings.TrimSpace(q.Get("patient")), "Patient/")
+	preAuthRef := strings.TrimSpace(q.Get("preAuthRef"))
+	identifierParam := strings.TrimSpace(q.Get("identifier"))
+
+	var inlineClaim map[string]any
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "Claim":
+				inlineClaim = bodyMap
+			case "Bundle":
+				if entries, ok := bodyMap["entry"].([]any); ok {
+					for _, rawE := range entries {
+						if em, ok := rawE.(map[string]any); ok {
+							if res, ok := em["resource"].(map[string]any); ok && res["resourceType"] == "Claim" {
+								inlineClaim = res
+								break
+							}
+						}
+					}
+				}
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "resource", "claim":
+							if res, ok := pm["resource"].(map[string]any); ok {
+								if res["resourceType"] == "Claim" {
+									inlineClaim = res
+								} else if res["resourceType"] == "Bundle" {
+									if entries, ok := res["entry"].([]any); ok {
+										for _, rawE := range entries {
+											if em, ok := rawE.(map[string]any); ok {
+												if er, ok := em["resource"].(map[string]any); ok && er["resourceType"] == "Claim" {
+													inlineClaim = er
+													break
+												}
+											}
+										}
+									}
+								}
+							} else if sVal := extractParamString(pm); sVal != "" && claimID == "" {
+								claimID = strings.TrimPrefix(sVal, "Claim/")
+							}
+						case "patient":
+							if patientParam == "" {
+								patientParam = strings.TrimPrefix(extractParamString(pm), "Patient/")
+							}
+						case "preAuthRef":
+							if preAuthRef == "" {
+								preAuthRef = extractParamString(pm)
+							}
+						case "identifier":
+							if identifierParam == "" {
+								identifierParam = extractParamString(pm)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if inlineClaim != nil {
+		if cid, _ := inlineClaim["id"].(string); cid != "" && claimID == "" {
+			claimID = strings.TrimPrefix(strings.TrimSpace(cid), "Claim/")
+		}
+		if patMap, ok := inlineClaim["patient"].(map[string]any); ok && patientParam == "" {
+			if ref, _ := patMap["reference"].(string); ref != "" {
+				patientParam = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+			}
+		}
+		if ids, ok := inlineClaim["identifier"].([]any); ok && identifierParam == "" && len(ids) > 0 {
+			if idm, ok := ids[0].(map[string]any); ok {
+				if v, _ := idm["value"].(string); v != "" {
+					identifierParam = strings.TrimSpace(v)
+				}
+			}
+		}
+	}
+
+	if claimID == "" && patientParam == "" && preAuthRef == "" && identifierParam == "" && inlineClaim == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Claim/$inquire requires a Claim id, claim resource/reference, patient, preAuthRef, or identifier parameter")
+		return
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+		if !auth.Allows(secCtx, "Claim", auth.ActionRead) && !auth.Allows(secCtx, "Claim", auth.ActionSearch) &&
+			!auth.Allows(secCtx, "Claim", auth.ActionCreate) && !auth.Allows(secCtx, "ClaimResponse", auth.ActionRead) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Claim/$inquire")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && patientParam != "" && cleanID(secCtx.GetPatientId()) != cleanID(patientParam) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token cannot invoke Claim/$inquire outside own patient compartment")
+			return
+		}
+	}
+
+	var matchedResponses []map[string]any
+	if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "ClaimResponse", Count: 100}); err == nil {
+		for _, m := range sr.Matches {
+			jb, convErr := s.protoToJSONWithMeta("ClaimResponse", m.ResourceProto, m.ResVersion, m.LastUpdated)
+			if convErr != nil {
+				continue
+			}
+			var crMap map[string]any
+			if json.Unmarshal(jb, &crMap) != nil {
+				continue
+			}
+			crID, _ := crMap["id"].(string)
+			reqRef := ""
+			if reqMap, ok := crMap["request"].(map[string]any); ok {
+				reqRef, _ = reqMap["reference"].(string)
+			}
+			patRef := ""
+			if patMap, ok := crMap["patient"].(map[string]any); ok {
+				patRef, _ = patMap["reference"].(string)
+			}
+			crPreAuth, _ := crMap["preAuthRef"].(string)
+
+			if claimID != "" {
+				if !strings.EqualFold(reqRef, "Claim/"+claimID) && !strings.EqualFold(reqRef, claimID) && !strings.EqualFold(crID, "cr-"+claimID) && !strings.EqualFold(crID, "claimresponse-"+claimID) {
+					continue
+				}
+			}
+			if preAuthRef != "" && !strings.EqualFold(crPreAuth, preAuthRef) {
+				continue
+			}
+			if patientParam != "" && !strings.EqualFold(strings.TrimPrefix(patRef, "Patient/"), patientParam) {
+				continue
+			}
+			if identifierParam != "" {
+				idMatched := strings.EqualFold(crPreAuth, identifierParam)
+				if !idMatched {
+					if ids, ok := crMap["identifier"].([]any); ok {
+						for _, rawID := range ids {
+							if idm, ok := rawID.(map[string]any); ok {
+								if v, _ := idm["value"].(string); strings.EqualFold(v, identifierParam) {
+									idMatched = true
+									break
+								}
+							}
+						}
+					}
+				}
+				if !idMatched {
+					continue
+				}
+			}
+			matchedResponses = append(matchedResponses, crMap)
+		}
+	}
+
+	var resolvedClaim map[string]any
+	if claimID != "" {
+		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Claim", claimID); err == nil {
+			if jb, cErr := s.protoToJSONWithMeta("Claim", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+				_ = json.Unmarshal(jb, &resolvedClaim)
+			}
+		}
+	}
+	if resolvedClaim == nil && inlineClaim != nil {
+		resolvedClaim = inlineClaim
+	}
+
+	if len(matchedResponses) == 0 && resolvedClaim != nil {
+		cid, _ := resolvedClaim["id"].(string)
+		if strings.TrimSpace(cid) == "" {
+			cid = claimID
+		}
+		if strings.TrimSpace(cid) == "" {
+			cid = "pas-inquiry"
+		}
+		patRef := "Patient/unknown"
+		if patMap, ok := resolvedClaim["patient"].(map[string]any); ok {
+			if rStr, _ := patMap["reference"].(string); rStr != "" {
+				patRef = rStr
+			}
+		} else if patientParam != "" {
+			patRef = "Patient/" + patientParam
+		}
+		insurerRef := "Organization/payer-default"
+		if insMap, ok := resolvedClaim["insurer"].(map[string]any); ok {
+			if rStr, _ := insMap["reference"].(string); rStr != "" {
+				insurerRef = rStr
+			}
+		}
+		synthPreAuth := preAuthRef
+		if synthPreAuth == "" {
+			synthPreAuth = "AUTH-" + strings.ToUpper(cid)
+		}
+		synthCR := map[string]any{
+			"resourceType": "ClaimResponse",
+			"id":           "cr-" + cid,
+			"status":       "active",
+			"type": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/claim-type",
+						"code":    "professional",
+						"display": "Professional",
+					},
+				},
+			},
+			"use":         "preauthorization",
+			"patient":     map[string]any{"reference": patRef},
+			"created":     time.Now().UTC().Format(time.RFC3339),
+			"insurer":     map[string]any{"reference": insurerRef},
+			"request":     map[string]any{"reference": "Claim/" + cid},
+			"outcome":     "complete",
+			"disposition": "Prior Authorization Approved (PAS Inquiry)",
+			"preAuthRef":  synthPreAuth,
+		}
+		matchedResponses = append(matchedResponses, synthCR)
+	}
+
+	if len(matchedResponses) == 0 {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", "No matching Prior Authorization ClaimResponse or Claim found for $inquire")
+		return
+	}
+
+	entries := make([]map[string]any, 0, len(matchedResponses)+1)
+	for _, cr := range matchedResponses {
+		crID, _ := cr["id"].(string)
+		entries = append(entries, map[string]any{
+			"fullUrl":  "ClaimResponse/" + crID,
+			"resource": cr,
+		})
+	}
+	if resolvedClaim != nil {
+		cid, _ := resolvedClaim["id"].(string)
+		entries = append(entries, map[string]any{
+			"fullUrl":  "Claim/" + cid,
+			"resource": resolvedClaim,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Bundle",
+		"id":           "pas-inquiry-response-" + firstNonEmptyStr(claimID, preAuthRef, "bundle"),
+		"type":         "collection",
+		"timestamp":    time.Now().UTC().Format(time.RFC3339),
+		"total":        len(entries),
+		"entry":        entries,
+	})
+}
+
+// handleQuestionnairePackage implements HL7 Da Vinci DTR Questionnaire/$package
+// (GET/POST /fhir/r4/{tenant}/Questionnaire/$package and /fhir/r4/{tenant}/Questionnaire/{id}/$package).
+func (s *Server) handleQuestionnairePackage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Questionnaire/$package only supports GET and POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusNotImplemented, "not-supported", "Questionnaire/$package requires an operational store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	qID := strings.TrimPrefix(strings.TrimSpace(r.PathValue("id")), "Questionnaire/")
+	qCanonical := strings.TrimSpace(r.URL.Query().Get("questionnaire"))
+	if qCanonical == "" {
+		qCanonical = strings.TrimSpace(r.URL.Query().Get("url"))
+	}
+
+	var inlineQ map[string]any
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "Questionnaire":
+				inlineQ = bodyMap
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "questionnaire", "url":
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Questionnaire" {
+								inlineQ = res
+							} else if sVal := extractParamString(pm); sVal != "" && qCanonical == "" {
+								qCanonical = sVal
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if qID == "" && strings.HasPrefix(qCanonical, "Questionnaire/") {
+		qID = strings.TrimPrefix(qCanonical, "Questionnaire/")
+		qCanonical = ""
+	}
+
+	if qID == "" && qCanonical == "" && inlineQ == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Questionnaire/$package requires a Questionnaire {id}, 'questionnaire' canonical URL, or inline Questionnaire resource")
+		return
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+		if !auth.Allows(secCtx, "Questionnaire", auth.ActionRead) && !auth.Allows(secCtx, "Questionnaire", auth.ActionSearch) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Questionnaire/$package")
+			return
+		}
+	}
+
+	qMap := inlineQ
+	if qMap == nil && qID != "" {
+		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Questionnaire", qID); err == nil {
+			if jb, cErr := s.protoToJSONWithMeta("Questionnaire", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+				_ = json.Unmarshal(jb, &qMap)
+			}
+		}
+	}
+	if qMap == nil && qCanonical != "" {
+		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "Questionnaire", Count: 50}); err == nil {
+			for _, m := range sr.Matches {
+				jb, cErr := s.protoToJSONWithMeta("Questionnaire", m.ResourceProto, m.ResVersion, m.LastUpdated)
+				if cErr != nil {
+					continue
+				}
+				var candidate map[string]any
+				if json.Unmarshal(jb, &candidate) == nil {
+					u, _ := candidate["url"].(string)
+					cid, _ := candidate["id"].(string)
+					if strings.EqualFold(u, qCanonical) || strings.EqualFold(cid, qCanonical) {
+						qMap = candidate
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if qMap == nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Questionnaire %q not found for $package", firstNonEmptyStr(qID, qCanonical)))
+		return
+	}
+
+	resolvedQID, _ := qMap["id"].(string)
+	if resolvedQID == "" {
+		resolvedQID = firstNonEmptyStr(qID, "dtr-questionnaire")
+		qMap["id"] = resolvedQID
+	}
+
+	// Collect referenced Library canonicals (cqf-library extension) and ValueSet canonicals (item[].answerValueSet)
+	var libCanonicals []string
+	seenLibs := make(map[string]bool)
+	addLib := func(u string) {
+		u = strings.TrimSpace(u)
+		if u != "" && !seenLibs[u] {
+			seenLibs[u] = true
+			libCanonicals = append(libCanonicals, u)
+		}
+	}
+	if exts, ok := qMap["extension"].([]any); ok {
+		for _, rawExt := range exts {
+			if em, ok := rawExt.(map[string]any); ok {
+				extURL, _ := em["url"].(string)
+				if strings.Contains(strings.ToLower(extURL), "cqf-library") || strings.Contains(strings.ToLower(extURL), "launchcontext") {
+					for _, vk := range []string{"valueCanonical", "valueUri", "valueString"} {
+						if s, ok := em[vk].(string); ok && s != "" && !strings.Contains(strings.ToLower(extURL), "launchcontext") {
+							addLib(s)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	var vsCanonicals []string
+	seenVS := make(map[string]bool)
+	var collectItemValueSets func(items []any)
+	collectItemValueSets = func(items []any) {
+		for _, rawItem := range items {
+			im, ok := rawItem.(map[string]any)
+			if !ok {
+				continue
+			}
+			if avs, ok := im["answerValueSet"].(string); ok && strings.TrimSpace(avs) != "" {
+				u := strings.TrimSpace(avs)
+				if !seenVS[u] {
+					seenVS[u] = true
+					vsCanonicals = append(vsCanonicals, u)
+				}
+			}
+			if nested, ok := im["item"].([]any); ok {
+				collectItemValueSets(nested)
+			}
+		}
+	}
+	if items, ok := qMap["item"].([]any); ok {
+		collectItemValueSets(items)
+	}
+
+	entries := []map[string]any{
+		{
+			"fullUrl":  "Questionnaire/" + resolvedQID,
+			"resource": qMap,
+		},
+	}
+
+	// Resolve and append Library dependencies
+	for idx, libURL := range libCanonicals {
+		var libMap map[string]any
+		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "Library", Count: 50}); err == nil {
+			for _, m := range sr.Matches {
+				jb, cErr := s.protoToJSONWithMeta("Library", m.ResourceProto, m.ResVersion, m.LastUpdated)
+				if cErr != nil {
+					continue
+				}
+				var candidate map[string]any
+				if json.Unmarshal(jb, &candidate) == nil {
+					u, _ := candidate["url"].(string)
+					cid, _ := candidate["id"].(string)
+					if strings.EqualFold(u, libURL) || strings.EqualFold(cid, strings.TrimPrefix(libURL, "Library/")) {
+						libMap = candidate
+						break
+					}
+				}
+			}
+		}
+		if libMap == nil {
+			synthID := fmt.Sprintf("dtr-lib-%d", idx+1)
+			if parts := strings.Split(strings.TrimRight(libURL, "/"), "/"); len(parts) > 0 && parts[len(parts)-1] != "" {
+				synthID = parts[len(parts)-1]
+			}
+			libMap = map[string]any{
+				"resourceType": "Library",
+				"id":           synthID,
+				"url":          libURL,
+				"status":       "active",
+				"type": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://terminology.hl7.org/CodeSystem/library-type",
+							"code":    "logic-library",
+							"display": "Logic Library",
+						},
+					},
+				},
+			}
+		}
+		libID, _ := libMap["id"].(string)
+		entries = append(entries, map[string]any{
+			"fullUrl":  "Library/" + libID,
+			"resource": libMap,
+		})
+	}
+
+	// Resolve and append ValueSet dependencies
+	for idx, vsURL := range vsCanonicals {
+		var vsMap map[string]any
+		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "ValueSet", Count: 50}); err == nil {
+			for _, m := range sr.Matches {
+				jb, cErr := s.protoToJSONWithMeta("ValueSet", m.ResourceProto, m.ResVersion, m.LastUpdated)
+				if cErr != nil {
+					continue
+				}
+				var candidate map[string]any
+				if json.Unmarshal(jb, &candidate) == nil {
+					u, _ := candidate["url"].(string)
+					cid, _ := candidate["id"].(string)
+					if strings.EqualFold(u, vsURL) || strings.EqualFold(cid, strings.TrimPrefix(vsURL, "ValueSet/")) {
+						vsMap = candidate
+						break
+					}
+				}
+			}
+		}
+		if vsMap == nil {
+			if resolvedURL, resolvedName, concepts, err := s.resolveValueSetConcepts(r.Context(), tenant, "", vsURL, nil); err == nil {
+				contains := make([]map[string]any, 0, len(concepts))
+				for _, c := range concepts {
+					entry := map[string]any{
+						"system": c.System,
+						"code":   c.Code,
+					}
+					if c.Display != "" {
+						entry["display"] = c.Display
+					}
+					contains = append(contains, entry)
+				}
+				synthID := fmt.Sprintf("dtr-vs-%d", idx+1)
+				if parts := strings.Split(strings.TrimRight(vsURL, "/"), "/"); len(parts) > 0 && parts[len(parts)-1] != "" {
+					synthID = parts[len(parts)-1]
+				}
+				vsMap = map[string]any{
+					"resourceType": "ValueSet",
+					"id":           synthID,
+					"url":          firstNonEmptyStr(resolvedURL, vsURL),
+					"name":         firstNonEmptyStr(resolvedName, synthID),
+					"status":       "active",
+					"expansion": map[string]any{
+						"timestamp": time.Now().UTC().Format(time.RFC3339),
+						"total":     len(contains),
+						"contains":  contains,
+					},
+				}
+			}
+		}
+		if vsMap != nil {
+			vsID, _ := vsMap["id"].(string)
+			entries = append(entries, map[string]any{
+				"fullUrl":  "ValueSet/" + vsID,
+				"resource": vsMap,
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Bundle",
+		"id":           "dtr-package-" + resolvedQID,
+		"type":         "collection",
+		"timestamp":    time.Now().UTC().Format(time.RFC3339),
+		"total":        len(entries),
+		"entry":        entries,
+	})
+}
+
+type findMatchPropertyFilter struct {
+	Code  string
+	Value string
+}
+
+// handleCodeSystemFindMatches implements HL7 FHIR R4 CodeSystem/$find-matches (§4.8.16.4)
+// (GET/POST /fhir/r4/{tenant}/CodeSystem/$find-matches and /fhir/r4/{tenant}/CodeSystem/{id}/$find-matches).
+func (s *Server) handleCodeSystemFindMatches(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "CodeSystem/$find-matches only supports GET and POST")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	csID := strings.TrimPrefix(strings.TrimSpace(r.PathValue("id")), "CodeSystem/")
+	q := r.URL.Query()
+	systemURL := strings.TrimSpace(q.Get("system"))
+	if systemURL == "" {
+		systemURL = strings.TrimSpace(q.Get("url"))
+	}
+	exact := strings.EqualFold(strings.TrimSpace(q.Get("exact")), "true")
+
+	var propFilters []findMatchPropertyFilter
+	for _, rawP := range q["property"] {
+		trimmed := strings.TrimSpace(rawP)
+		if trimmed == "" {
+			continue
+		}
+		if k, v, ok := strings.Cut(trimmed, "|"); ok {
+			propFilters = append(propFilters, findMatchPropertyFilter{Code: strings.TrimSpace(k), Value: strings.TrimSpace(v)})
+		} else if k, v, ok := strings.Cut(trimmed, "="); ok {
+			propFilters = append(propFilters, findMatchPropertyFilter{Code: strings.TrimSpace(k), Value: strings.TrimSpace(v)})
+		} else {
+			propFilters = append(propFilters, findMatchPropertyFilter{Code: "display", Value: trimmed})
+		}
+	}
+	if f := strings.TrimSpace(q.Get("filter")); f != "" {
+		propFilters = append(propFilters, findMatchPropertyFilter{Code: "display", Value: f})
+	}
+	if c := strings.TrimSpace(q.Get("code")); c != "" {
+		propFilters = append(propFilters, findMatchPropertyFilter{Code: "code", Value: c})
+	}
+
+	var inlineCS map[string]any
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "CodeSystem":
+				inlineCS = bodyMap
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "system", "url":
+							if sVal := extractParamString(pm); sVal != "" && systemURL == "" {
+								systemURL = sVal
+							}
+						case "exact":
+							if b, ok := pm["valueBoolean"].(bool); ok {
+								exact = b
+							}
+						case "codeSystem":
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "CodeSystem" {
+								inlineCS = res
+							}
+						case "property":
+							if parts, ok := pm["part"].([]any); ok {
+								var pCode, pVal string
+								for _, rawPart := range parts {
+									partMap, ok := rawPart.(map[string]any)
+									if !ok {
+										continue
+									}
+									pName, _ := partMap["name"].(string)
+									switch pName {
+									case "code":
+										pCode = extractParamString(partMap)
+									case "value", "description":
+										pVal = extractParamString(partMap)
+										if pVal == "" {
+											if cm, ok := partMap["valueCoding"].(map[string]any); ok {
+												pVal, _ = cm["code"].(string)
+											} else if bVal, ok := partMap["valueBoolean"].(bool); ok {
+												pVal = strconv.FormatBool(bVal)
+											} else if iVal, ok := partMap["valueInteger"].(float64); ok {
+												pVal = strconv.Itoa(int(iVal))
+											}
+										}
+									}
+								}
+								if pCode != "" && pVal != "" {
+									propFilters = append(propFilters, findMatchPropertyFilter{Code: pCode, Value: pVal})
+								}
+							} else if sVal := extractParamString(pm); sVal != "" {
+								if k, v, ok := strings.Cut(sVal, "|"); ok {
+									propFilters = append(propFilters, findMatchPropertyFilter{Code: strings.TrimSpace(k), Value: strings.TrimSpace(v)})
+								} else {
+									propFilters = append(propFilters, findMatchPropertyFilter{Code: "display", Value: sVal})
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if csID == "" && systemURL == "" && inlineCS == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "CodeSystem/$find-matches requires 'system' URI, CodeSystem {id}, or inline CodeSystem")
+		return
+	}
+
+	concepts, csName, err := s.resolveCodeSystemConceptsWithInline(r.Context(), tenant, csID, systemURL, inlineCS)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", err.Error())
+		return
+	}
+
+	parentsByCode := make(map[string][]string, len(concepts))
+	for _, c := range concepts {
+		if len(c.Parents) > 0 {
+			parentsByCode[c.Code] = c.Parents
+		}
+	}
+
+	var matches []map[string]any
+	for _, c := range concepts {
+		allMatched := true
+		for _, pf := range propFilters {
+			pKey := strings.TrimSpace(pf.Code)
+			pVal := strings.TrimSpace(pf.Value)
+			if pKey == "" || pVal == "" {
+				continue
+			}
+			var propMatch bool
+			switch strings.ToLower(pKey) {
+			case "code", "concept":
+				if exact {
+					propMatch = c.Code == pVal
+				} else {
+					propMatch = strings.EqualFold(c.Code, pVal) || strings.Contains(strings.ToLower(c.Code), strings.ToLower(pVal))
+				}
+			case "display", "text", "filter", "description":
+				if exact {
+					propMatch = strings.EqualFold(c.Display, pVal)
+				} else {
+					propMatch = strings.Contains(strings.ToLower(c.Display), strings.ToLower(pVal)) || strings.Contains(strings.ToLower(c.Code), strings.ToLower(pVal))
+				}
+			case "parent", "ancestor", "is-a", "subsumedby":
+				propMatch = codeIsAncestorOrEqual(pVal, c.Code, parentsByCode, false) || slicesContainsFold(c.Parents, pVal)
+			default:
+				if c.Properties != nil {
+					actual, ok := c.Properties[pKey]
+					if !ok {
+						for k, v := range c.Properties {
+							if strings.EqualFold(k, pKey) {
+								actual = v
+								ok = true
+								break
+							}
+						}
+					}
+					if ok {
+						if exact {
+							propMatch = strings.EqualFold(actual, pVal)
+						} else {
+							propMatch = strings.Contains(strings.ToLower(actual), strings.ToLower(pVal))
+						}
+					}
+				}
+			}
+			if !propMatch {
+				allMatched = false
+				break
+			}
+		}
+		if !allMatched {
+			continue
+		}
+		sys := c.System
+		if sys == "" {
+			sys = systemURL
+		}
+		coding := map[string]any{
+			"system": sys,
+			"code":   c.Code,
+		}
+		if c.Display != "" {
+			coding["display"] = c.Display
+		}
+		matches = append(matches, map[string]any{
+			"name": "match",
+			"part": []map[string]any{
+				{
+					"name":        "code",
+					"valueCoding": coding,
+				},
+				{
+					"name":         "exact",
+					"valueBoolean": exact,
+				},
+				{
+					"name":        "comment",
+					"valueString": fmt.Sprintf("Matched in CodeSystem %s", firstNonEmptyStr(csName, sys, csID)),
+				},
+			},
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    matches,
+	})
+}
+
+func slicesContainsFold(list []string, target string) bool {
+	for _, s := range list {
+		if strings.EqualFold(s, target) {
+			return true
+		}
+	}
+	return false
+}

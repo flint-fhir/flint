@@ -1064,12 +1064,12 @@ func extractClientIP(r *http.Request) string {
 func isTerminologyOp(parts []string) bool {
 	if len(parts) == 5 {
 		return (strings.EqualFold(parts[3], "ValueSet") && (parts[4] == "$expand" || parts[4] == "$validate-code")) ||
-			(strings.EqualFold(parts[3], "CodeSystem") && (parts[4] == "$lookup" || parts[4] == "$validate-code" || parts[4] == "$subsumes")) ||
+			(strings.EqualFold(parts[3], "CodeSystem") && (parts[4] == "$lookup" || parts[4] == "$validate-code" || parts[4] == "$subsumes" || parts[4] == "$find-matches")) ||
 			(strings.EqualFold(parts[3], "ConceptMap") && parts[4] == "$translate")
 	}
 	if len(parts) == 6 {
 		return (strings.EqualFold(parts[3], "ValueSet") && (parts[5] == "$expand" || parts[5] == "$validate-code")) ||
-			(strings.EqualFold(parts[3], "CodeSystem") && (parts[5] == "$lookup" || parts[5] == "$validate-code" || parts[5] == "$subsumes")) ||
+			(strings.EqualFold(parts[3], "CodeSystem") && (parts[5] == "$lookup" || parts[5] == "$validate-code" || parts[5] == "$subsumes" || parts[5] == "$find-matches")) ||
 			(strings.EqualFold(parts[3], "ConceptMap") && parts[5] == "$translate")
 	}
 	return false
@@ -1146,6 +1146,12 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "NamingSystem") && parts[4] == "$preferred-id" {
 			return true
 		}
+		if strings.EqualFold(parts[3], "Claim") && parts[4] == "$inquire" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$package" {
+			return true
+		}
 		return false
 	}
 	if len(parts) == 6 {
@@ -1168,6 +1174,12 @@ func isPlanApplyOp(parts []string) bool {
 			return true
 		}
 		if strings.EqualFold(parts[3], "StructureMap") && parts[5] == "$transform" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Claim") && parts[5] == "$inquire" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Questionnaire") && parts[5] == "$package" {
 			return true
 		}
 		if parts[5] == "$fhirpath" {

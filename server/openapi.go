@@ -2325,6 +2325,73 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Claim/$inquire": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Claim"},
+				"summary":     "HL7 Da Vinci PAS Claim/$inquire querying Prior Authorization adjudication status",
+				"operationId": "claimInquireGet",
+				"parameters": []map[string]any{
+					{"name": "claim", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "preAuthRef", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: collection) containing adjudicated ClaimResponse and Claim"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Claim"},
+				"summary":     "HL7 Da Vinci PAS Claim/$inquire (POST Parameters, Bundle, or Claim)",
+				"operationId": "claimInquirePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: collection) containing adjudicated ClaimResponse and Claim"},
+				},
+			},
+		},
+		"/Questionnaire/$package": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Questionnaire"},
+				"summary":     "HL7 Da Vinci DTR Questionnaire/$package bundling Questionnaire, Library, and ValueSet dependencies",
+				"operationId": "questionnairePackageGet",
+				"parameters": []map[string]any{
+					{"name": "questionnaire", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: collection) containing Questionnaire, Library, and ValueSet resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Questionnaire"},
+				"summary":     "HL7 Da Vinci DTR Questionnaire/$package (POST Parameters or Questionnaire)",
+				"operationId": "questionnairePackagePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: collection) containing Questionnaire, Library, and ValueSet resources"},
+				},
+			},
+		},
+		"/CodeSystem/$find-matches": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Terminology"},
+				"summary":     "HL7 FHIR R4 CodeSystem/$find-matches property-based concept matching",
+				"operationId": "codeSystemFindMatchesGet",
+				"parameters": []map[string]any{
+					{"name": "system", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "property", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "exact", "in": "query", "required": false, "schema": map[string]any{"type": "boolean"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing matching Coding entries"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Terminology"},
+				"summary":     "HL7 FHIR R4 CodeSystem/$find-matches (POST Parameters)",
+				"operationId": "codeSystemFindMatchesPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing matching Coding entries"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()
