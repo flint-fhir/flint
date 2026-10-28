@@ -2973,6 +2973,131 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Patient/{id}/$immds-forecast": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Immunization", "ImmunizationRecommendation"},
+				"summary":     "HL7 Immunization Decision Support Forecast (ImmDS) evaluating vaccine history and ACIP/CDC forecast recommendations for Patient/{id}",
+				"operationId": "patientImmDSForecastInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "assessmentDate", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing ImmunizationEvaluation and ImmunizationRecommendation resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Immunization", "ImmunizationRecommendation"},
+				"summary":     "HL7 Immunization Decision Support Forecast (ImmDS) for Patient/{id} (POST Parameters)",
+				"operationId": "patientImmDSForecastInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing ImmunizationEvaluation and ImmunizationRecommendation resources"},
+				},
+			},
+		},
+		"/Patient/$immds-forecast": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Immunization", "ImmunizationRecommendation"},
+				"summary":     "HL7 Immunization Decision Support Forecast (ImmDS)",
+				"operationId": "patientImmDSForecastTypeGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing ImmunizationEvaluation and ImmunizationRecommendation resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Immunization", "ImmunizationRecommendation"},
+				"summary":     "HL7 Immunization Decision Support Forecast (ImmDS) (POST Parameters)",
+				"operationId": "patientImmDSForecastTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing ImmunizationEvaluation and ImmunizationRecommendation resources"},
+				},
+			},
+		},
+		"/Claim/$gfe-submit": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Claim", "ExplanationOfBenefit"},
+				"summary":     "HL7 Da Vinci Patient Cost Transparency (PCT) Good Faith Estimate submission returning an Advanced Explanation of Benefits (AEOB) Bundle",
+				"operationId": "claimGFESubmitTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle containing ExplanationOfBenefit (AEOB) and GFE Claim"},
+				},
+			},
+		},
+		"/Patient/{id}/$gfe": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Claim", "ExplanationOfBenefit"},
+				"summary":     "HL7 Da Vinci Patient Cost Transparency (PCT) Good Faith Estimate & AEOB for Patient/{id}",
+				"operationId": "patientGFEInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle containing ExplanationOfBenefit (AEOB) and GFE Claim"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Claim", "ExplanationOfBenefit"},
+				"summary":     "HL7 Da Vinci Patient Cost Transparency (PCT) Good Faith Estimate & AEOB for Patient/{id} (POST)",
+				"operationId": "patientGFEInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle containing ExplanationOfBenefit (AEOB) and GFE Claim"},
+				},
+			},
+		},
+		"/RiskAssessment/$evaluate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"RiskAssessment"},
+				"summary":     "Evaluate clinical ASCVD & LACE 30-day readmission RiskAssessment for a subject Patient",
+				"operationId": "riskAssessmentEvaluateTypeGet",
+				"parameters": []map[string]any{
+					{"name": "subject", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "RiskAssessment resource with prediction probabilityDecimal and qualitativeRisk"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"RiskAssessment"},
+				"summary":     "Evaluate clinical ASCVD & LACE 30-day readmission RiskAssessment (POST)",
+				"operationId": "riskAssessmentEvaluateTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "RiskAssessment resource with prediction probabilityDecimal and qualitativeRisk"},
+				},
+			},
+		},
+		"/RiskAssessment/{id}/$evaluate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"RiskAssessment"},
+				"summary":     "Evaluate clinical ASCVD & LACE 30-day readmission RiskAssessment/{id}",
+				"operationId": "riskAssessmentEvaluateInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "RiskAssessment resource with prediction probabilityDecimal and qualitativeRisk"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"RiskAssessment"},
+				"summary":     "Evaluate clinical ASCVD & LACE 30-day readmission RiskAssessment/{id} (POST)",
+				"operationId": "riskAssessmentEvaluateInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "RiskAssessment resource with prediction probabilityDecimal and qualitativeRisk"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

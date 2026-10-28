@@ -527,6 +527,21 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleCarePlanEvaluate(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$immds-forecast" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientImmDSForecast(w, r)
+					return
+				}
+				if (strings.EqualFold(parts[3], "Claim") && parts[4] == "$gfe-submit") || (strings.EqualFold(parts[3], "Patient") && parts[4] == "$gfe") {
+					r.SetPathValue("tenant", parts[2])
+					s.handleGFESubmit(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "RiskAssessment") && parts[4] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleRiskAssessmentEvaluate(w, r)
+					return
+				}
 				if (strings.EqualFold(parts[3], "Patient") || strings.EqualFold(parts[3], "Encounter") || strings.EqualFold(parts[3], "Group")) && parts[4] == "$everything" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -789,6 +804,24 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleCarePlanEvaluate(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$immds-forecast" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientImmDSForecast(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$gfe" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleGFESubmit(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "RiskAssessment") && parts[5] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleRiskAssessmentEvaluate(w, r)
 					return
 				}
 				if parts[5] == "$fhirpath" && !strings.HasPrefix(parts[3], "$") {
@@ -3800,6 +3833,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "pcde",
 					"definition": "http://hl7.org/fhir/us/davinci-pcde/OperationDefinition/PCDE",
 				},
+				{
+					"name":       "immds-forecast",
+					"definition": "http://hl7.org/fhir/us/immds/OperationDefinition/immds-forecast",
+				},
+				{
+					"name":       "gfe",
+					"definition": "http://hl7.org/fhir/us/davinci-pct/OperationDefinition/gfe-submit",
+				},
 			}
 		case "Observation":
 			entry["operation"] = []map[string]string{
@@ -3946,6 +3987,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "predetermine",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Claim-predetermine",
+				},
+				{
+					"name":       "gfe-submit",
+					"definition": "http://hl7.org/fhir/us/davinci-pct/OperationDefinition/gfe-submit",
 				},
 			}
 		case "Composition":
@@ -4204,6 +4249,13 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "evaluate",
 					"definition": "http://flint.fhir.org/OperationDefinition/AdverseEvent-evaluate",
+				},
+			}
+		case "RiskAssessment":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "evaluate",
+					"definition": "http://flint.fhir.org/OperationDefinition/RiskAssessment-evaluate",
 				},
 			}
 		}
@@ -4513,6 +4565,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "crd",
 						"definition": "http://hl7.org/fhir/us/davinci-crd/OperationDefinition/crd",
+					},
+					{
+						"name":       "immds-forecast",
+						"definition": "http://hl7.org/fhir/us/immds/OperationDefinition/immds-forecast",
+					},
+					{
+						"name":       "gfe-submit",
+						"definition": "http://hl7.org/fhir/us/davinci-pct/OperationDefinition/gfe-submit",
 					},
 				},
 			},
