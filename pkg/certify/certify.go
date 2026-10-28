@@ -1103,13 +1103,17 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		respProfFail, _, errPF := doReq(http.MethodPost, basePath+"/Patient/$validate?profile=http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient", "application/fhir+json",
 			[]byte(`{"resourceType":"Patient","id":"incomplete-pat","active":true}`), nil)
 		respInstOK, _, errInstOK := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$validate?profile=http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient", "", nil, nil)
+		respConv, bConv, errConv := doReq(http.MethodPost, basePath+"/$convert", "application/fhir+json",
+			[]byte(`{"resourceType":"Patient","id":"conv-pat-1","active":true,"gender":"female"}`), nil)
 		if errPF != nil || respProfFail.StatusCode != http.StatusBadRequest {
 			err = fmt.Errorf("expected 400 Bad Request when Patient violates us-core-patient profile, got %d", respProfFail.StatusCode)
 		} else if errInstOK != nil || respInstOK.StatusCode != http.StatusOK {
 			err = fmt.Errorf("expected 200 OK on instance GET /Patient/cert-pat-1/$validate against us-core-patient, got %d", respInstOK.StatusCode)
+		} else if errConv != nil || respConv.StatusCode != http.StatusOK || !strings.Contains(string(bConv), `"conv-pat-1"`) {
+			err = fmt.Errorf("expected 200 OK from POST /$convert, got %d: %s", respConv.StatusCode, string(bConv))
 		}
 	}
-	record("VAL-01", suite5, "StructureDefinition, US Core Profile & Instance Validation ($validate)", t0, err, "Verified choice-type medication[x], US Core profile enforcement, and instance $validate")
+	record("VAL-01", suite5, "StructureDefinition, US Core Profile, Instance Validation ($validate) & $convert", t0, err, "Verified choice-type medication[x], US Core profile enforcement, instance $validate, and $convert")
 
 	t0 = time.Now()
 	{

@@ -1107,10 +1107,13 @@ func isQuestionnaireExtractOp(parts []string) bool {
 
 func isPlanApplyOp(parts []string) bool {
 	if len(parts) == 4 {
-		return parts[3] == "$closure" || parts[3] == "$data-requirements" || parts[3] == "$fhirpath" || parts[3] == "$process-message"
+		return parts[3] == "$closure" || parts[3] == "$data-requirements" || parts[3] == "$fhirpath" || parts[3] == "$process-message" || parts[3] == "$convert"
 	}
 	if len(parts) == 5 {
-		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition")) && parts[4] == "$apply" {
+		if parts[4] == "$convert" {
+			return true
+		}
+		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "ChargeItem")) && parts[4] == "$apply" {
 			return true
 		}
 		if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition")) && parts[4] == "$data-requirements" {
@@ -1152,10 +1155,13 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$package" {
 			return true
 		}
+		if strings.EqualFold(parts[3], "List") && parts[4] == "$find" {
+			return true
+		}
 		return false
 	}
 	if len(parts) == 6 {
-		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition")) && parts[5] == "$apply" {
+		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "ChargeItem")) && parts[5] == "$apply" {
 			return true
 		}
 		if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition")) && parts[5] == "$data-requirements" {

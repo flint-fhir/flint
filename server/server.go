@@ -265,6 +265,8 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$fhirpath", s.handleFHIRPath)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$fhirpath", s.handleFHIRPath)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$process-message", s.handleProcessMessage)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$convert", s.handleResourceConvert)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$convert", s.handleResourceConvert)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$certify", s.handleCertify)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$certify", s.handleCertify)
 
@@ -512,8 +514,30 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleNamingSystemPreferredID(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "List") && parts[4] == "$find" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleListFind(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ChargeItem") && parts[4] == "$apply" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleChargeItemApply(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					s.handleResourceConvert(w, r)
+					return
+				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ChargeItem") && parts[5] == "$apply" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleChargeItemApply(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "StructureMap") && parts[5] == "$transform" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -3889,6 +3913,20 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"definition": "http://hl7.org/fhir/OperationDefinition/NamingSystem-preferred-id",
 				},
 			}
+		case "List":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "find",
+					"definition": "http://hl7.org/fhir/OperationDefinition/List-find",
+				},
+			}
+		case "ChargeItem":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "apply",
+					"definition": "http://hl7.org/fhir/OperationDefinition/ChargeItem-apply",
+				},
+			}
 		}
 		resEntries = append(resEntries, entry)
 	}
@@ -4160,6 +4198,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "find-matches",
 						"definition": "http://hl7.org/fhir/OperationDefinition/CodeSystem-find-matches",
+					},
+					{
+						"name":       "convert",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Resource-convert",
 					},
 				},
 			},
