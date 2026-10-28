@@ -511,6 +511,22 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleScheduleFind(w, r)
 					return
 				}
+				if (strings.EqualFold(parts[3], "ServiceRequest") || strings.EqualFold(parts[3], "MedicationRequest")) && parts[4] == "$crd" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					s.handleOrderCRD(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "AdverseEvent") && parts[4] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleAdverseEventEvaluate(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "CarePlan") && parts[4] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCarePlanEvaluate(w, r)
+					return
+				}
 				if (strings.EqualFold(parts[3], "Patient") || strings.EqualFold(parts[3], "Encounter") || strings.EqualFold(parts[3], "Group")) && parts[4] == "$everything" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -754,6 +770,25 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleScheduleFind(w, r)
+					return
+				}
+				if (strings.EqualFold(parts[3], "ServiceRequest") || strings.EqualFold(parts[3], "MedicationRequest")) && parts[5] == "$crd" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					r.SetPathValue("id", parts[4])
+					s.handleOrderCRD(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "AdverseEvent") && parts[5] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleAdverseEventEvaluate(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "CarePlan") && parts[5] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCarePlanEvaluate(w, r)
 					return
 				}
 				if parts[5] == "$fhirpath" && !strings.HasPrefix(parts[3], "$") {
@@ -3805,6 +3840,20 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"definition": "http://hl7.org/fhir/uv/sdc/OperationDefinition/QuestionnaireResponse-extract",
 				},
 			}
+		case "ServiceRequest", "MedicationRequest":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "crd",
+					"definition": "http://hl7.org/fhir/us/davinci-crd/OperationDefinition/crd",
+				},
+			}
+		case "CarePlan":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "evaluate",
+					"definition": "http://flint.fhir.org/OperationDefinition/CarePlan-evaluate",
+				},
+			}
 		}
 		resEntries = append(resEntries, entry)
 	}
@@ -4150,6 +4199,13 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"definition": "http://flint.fhir.org/OperationDefinition/Schedule-find",
 				},
 			}
+		case "AdverseEvent":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "evaluate",
+					"definition": "http://flint.fhir.org/OperationDefinition/AdverseEvent-evaluate",
+				},
+			}
 		}
 		resEntries = append(resEntries, entry)
 	}
@@ -4453,6 +4509,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "evaluate-risk-condition-category",
 						"definition": "http://hl7.org/fhir/us/davinci-ra/OperationDefinition/evaluate-risk-condition-category",
+					},
+					{
+						"name":       "crd",
+						"definition": "http://hl7.org/fhir/us/davinci-crd/OperationDefinition/crd",
 					},
 				},
 			},

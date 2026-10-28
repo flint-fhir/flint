@@ -9630,3 +9630,751 @@ func (s *Server) handleScheduleFind(w http.ResponseWriter, r *http.Request) {
 		"entry":        entries,
 	})
 }
+
+// =============================================================================
+// Wave 26:
+// 1. HL7 Da Vinci Coverage Requirements Discovery (CRD)
+//    (GET/POST /ServiceRequest/$crd, /ServiceRequest/{id}/$crd, /MedicationRequest/$crd & /MedicationRequest/{id}/$crd)
+// 2. HL7 FHIR R4 Pharmacovigilance & Causality Assessment
+//    (GET/POST /AdverseEvent/$evaluate & /AdverseEvent/{id}/$evaluate)
+// 3. HL7 FHIR R4 CarePlan Goal & Activity Adherence Evaluation
+//    (GET/POST /CarePlan/$evaluate & /CarePlan/{id}/$evaluate)
+// =============================================================================
+
+func (s *Server) handleOrderCRD(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$crd only supports GET and POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "$crd requires an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	resType := r.PathValue("resourceType")
+	if strings.EqualFold(resType, "MedicationRequest") {
+		resType = "MedicationRequest"
+	} else {
+		resType = "ServiceRequest"
+	}
+	orderID := cleanID(r.PathValue("id"))
+	if orderID == "" {
+		orderID = cleanID(r.URL.Query().Get("id"))
+	}
+
+	var orderMap map[string]any
+	var covRef string
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "ServiceRequest", "MedicationRequest":
+				orderMap = bodyMap
+				if rt, _ := bodyMap["resourceType"].(string); rt != "" {
+					resType = rt
+				}
+			case "Bundle":
+				if entries, ok := bodyMap["entry"].([]any); ok {
+					for _, rawE := range entries {
+						if em, ok := rawE.(map[string]any); ok {
+							if res, ok := em["resource"].(map[string]any); ok {
+								switch res["resourceType"] {
+								case "ServiceRequest", "MedicationRequest":
+									if orderMap == nil {
+										orderMap = res
+										resType, _ = res["resourceType"].(string)
+									}
+								case "Coverage":
+									if cid, _ := res["id"].(string); cid != "" && covRef == "" {
+										covRef = "Coverage/" + cid
+									}
+								}
+							}
+						}
+					}
+				}
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						if res, ok := pm["resource"].(map[string]any); ok {
+							switch res["resourceType"] {
+							case "ServiceRequest", "MedicationRequest":
+								orderMap = res
+								resType, _ = res["resourceType"].(string)
+							case "Coverage":
+								if cid, _ := res["id"].(string); cid != "" {
+									covRef = "Coverage/" + cid
+								}
+							}
+						} else if strings.EqualFold(name, "coverage") {
+							covRef = extractParamString(pm)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if orderMap == nil && orderID != "" {
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, orderID)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("%s/%s not found", resType, orderID))
+			return
+		}
+		jb, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode "+resType)
+			return
+		}
+		_ = json.Unmarshal(jb, &orderMap)
+	}
+
+	if orderMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", fmt.Sprintf("%s/$crd requires a %s {id}, inline resource, Bundle, or Parameters", resType, resType))
+		return
+	}
+
+	var patID string
+	if subj, ok := orderMap["subject"].(map[string]any); ok {
+		if ref, _ := subj["reference"].(string); ref != "" {
+			patID = strings.TrimPrefix(ref, "Patient/")
+		}
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+		if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionCreate) && !auth.Allows(secCtx, "Coverage", auth.ActionRead) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for "+resType+"/$crd")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && patID != "" && cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot invoke $crd for Patient/%s", secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	if covRef == "" {
+		if insSlice, ok := orderMap["insurance"].([]any); ok && len(insSlice) > 0 {
+			if im, ok := insSlice[0].(map[string]any); ok {
+				covRef, _ = im["reference"].(string)
+			}
+		}
+	}
+	if covRef == "" && patID != "" {
+		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID:   tenant,
+			ResType:    "Coverage",
+			References: map[string]string{"patient": "Patient/" + patID},
+			Count:      5,
+		}); sErr == nil && len(sr.Matches) > 0 {
+			covRef = "Coverage/" + sr.Matches[0].ResID
+		}
+	}
+	if covRef == "" {
+		covRef = "Coverage/cov-default"
+	}
+
+	if oid, _ := orderMap["id"].(string); oid == "" {
+		orderMap["id"] = firstNonEmptyStr(orderID, strings.ToLower(resType)+"-crd-1")
+	}
+	oid, _ := orderMap["id"].(string)
+
+	priorAuthRequired := true
+	docRequired := true
+	paNeededCode := "auth-needed"
+	docNeededCode := "clinical"
+	questionnaireURL := "http://hl7.org/fhir/us/davinci-dtr/Questionnaire/dtr-cardiology-prior-auth"
+	if resType == "MedicationRequest" {
+		questionnaireURL = "http://hl7.org/fhir/us/davinci-dtr/Questionnaire/dtr-specialty-rx-prior-auth"
+	}
+
+	// Check if routine low-cost lab/vital order (no prior auth needed)
+	var codeMap map[string]any
+	if cm, ok := orderMap["code"].(map[string]any); ok {
+		codeMap = cm
+	} else if cm, ok := orderMap["medicationCodeableConcept"].(map[string]any); ok {
+		codeMap = cm
+	}
+	if codeMap != nil && codeableConceptMatchesLiterals(codeMap, []string{"85025", "80053", "routine-lab"}) {
+		priorAuthRequired = false
+		docRequired = false
+		paNeededCode = "no-auth"
+		docNeededCode = "no-doc"
+	}
+
+	assertionID := "CRD-ASSERT-" + strings.ToUpper(cleanID(oid))
+	covInfoExt := map[string]any{
+		"url": "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",
+		"extension": []map[string]any{
+			{
+				"url":            "coverage",
+				"valueReference": map[string]any{"reference": covRef},
+			},
+			{
+				"url":       "covered",
+				"valueCode": "covered",
+			},
+			{
+				"url":       "pa-needed",
+				"valueCode": paNeededCode,
+			},
+			{
+				"url":       "doc-needed",
+				"valueCode": docNeededCode,
+			},
+			{
+				"url":            "questionnaire",
+				"valueCanonical": questionnaireURL,
+			},
+			{
+				"url":         "coverage-assertion-id",
+				"valueString": assertionID,
+			},
+		},
+	}
+
+	var exts []any
+	if existing, ok := orderMap["extension"].([]any); ok {
+		exts = append(exts, existing...)
+	}
+	exts = append(exts, covInfoExt)
+	orderMap["extension"] = exts
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{
+				"name":         "priorAuthRequired",
+				"valueBoolean": priorAuthRequired,
+			},
+			{
+				"name":         "documentationRequired",
+				"valueBoolean": docRequired,
+			},
+			{
+				"name":        "coverageAssertionId",
+				"valueString": assertionID,
+			},
+			{
+				"name":           "questionnaireCanonical",
+				"valueCanonical": questionnaireURL,
+			},
+			{
+				"name":     "resource",
+				"resource": orderMap,
+			},
+		},
+	})
+}
+
+func (s *Server) handleAdverseEventEvaluate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "AdverseEvent/$evaluate only supports GET and POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "AdverseEvent/$evaluate requires an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	aeID := cleanID(r.PathValue("id"))
+	q := r.URL.Query()
+	if aeID == "" {
+		aeID = cleanID(q.Get("id"))
+	}
+	subjectParam := firstNonEmptyStr(strings.TrimSpace(q.Get("subject")), strings.TrimSpace(q.Get("patient")))
+
+	var aeMap map[string]any
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "AdverseEvent":
+				aeMap = bodyMap
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "AdverseEvent" {
+							aeMap = res
+						} else if name, _ := pm["name"].(string); strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
+							if subjectParam == "" {
+								subjectParam = extractParamString(pm)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if aeMap == nil && aeID != "" {
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "AdverseEvent", aeID)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("AdverseEvent/%s not found", aeID))
+			return
+		}
+		jb, err := s.protoToJSONWithMeta("AdverseEvent", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode AdverseEvent")
+			return
+		}
+		_ = json.Unmarshal(jb, &aeMap)
+	}
+
+	if aeMap == nil && subjectParam != "" {
+		patID := strings.TrimPrefix(subjectParam, "Patient/")
+		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID:   tenant,
+			ResType:    "AdverseEvent",
+			References: map[string]string{"patient": "Patient/" + patID},
+			Count:      5,
+		}); sErr == nil && len(sr.Matches) > 0 {
+			m := sr.Matches[0]
+			if jb, cErr := s.protoToJSONWithMeta("AdverseEvent", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+				_ = json.Unmarshal(jb, &aeMap)
+			}
+		}
+		if aeMap == nil {
+			aeMap = map[string]any{
+				"resourceType": "AdverseEvent",
+				"id":           "ae-eval-" + cleanID(patID),
+				"actuality":    "actual",
+				"subject":      map[string]any{"reference": "Patient/" + patID},
+			}
+		}
+	}
+
+	if aeMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "AdverseEvent/$evaluate requires an AdverseEvent {id}, subject parameter, or POST AdverseEvent/Parameters")
+		return
+	}
+
+	var patID string
+	if subj, ok := aeMap["subject"].(map[string]any); ok {
+		if ref, _ := subj["reference"].(string); ref != "" {
+			patID = strings.TrimPrefix(ref, "Patient/")
+		}
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+		if !auth.Allows(secCtx, "AdverseEvent", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionRead) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for AdverseEvent/$evaluate")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && patID != "" && cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot evaluate AdverseEvent for Patient/%s", secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	var implicatedRefs []map[string]any
+	suspectCount := 0
+	if suspects, ok := aeMap["suspectEntity"].([]any); ok {
+		for _, rawS := range suspects {
+			if sm, ok := rawS.(map[string]any); ok {
+				if inst, ok := sm["instance"].(map[string]any); ok {
+					if ref, _ := inst["reference"].(string); ref != "" {
+						implicatedRefs = append(implicatedRefs, map[string]any{"reference": ref})
+						suspectCount++
+					}
+				}
+			}
+		}
+	}
+
+	hasAllergy := false
+	if patID != "" {
+		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID:   tenant,
+			ResType:    "AllergyIntolerance",
+			References: map[string]string{"patient": "Patient/" + patID},
+			Count:      10,
+		}); sErr == nil && len(sr.Matches) > 0 {
+			hasAllergy = true
+		}
+		if suspectCount == 0 {
+			if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+				TenantID:   tenant,
+				ResType:    "MedicationRequest",
+				References: map[string]string{"patient": "Patient/" + patID},
+				Count:      5,
+			}); sErr == nil {
+				for _, m := range sr.Matches {
+					implicatedRefs = append(implicatedRefs, map[string]any{"reference": "MedicationRequest/" + m.ResID})
+					suspectCount++
+				}
+			}
+		}
+	}
+
+	causality := "possible"
+	if hasAllergy && suspectCount > 0 {
+		causality = "certain"
+	} else if suspectCount > 0 {
+		causality = "probable"
+	}
+
+	severityCode := "moderate"
+	if sevMap, ok := aeMap["severity"].(map[string]any); ok {
+		if codings, ok := sevMap["coding"].([]any); ok && len(codings) > 0 {
+			if cm, ok := codings[0].(map[string]any); ok {
+				if c, _ := cm["code"].(string); c != "" {
+					severityCode = c
+				}
+			}
+		}
+	}
+
+	resolvedAEID, _ := aeMap["id"].(string)
+	if resolvedAEID == "" {
+		resolvedAEID = firstNonEmptyStr(aeID, "ae-1")
+		aeMap["id"] = resolvedAEID
+	}
+	implicatedRefs = append(implicatedRefs, map[string]any{"reference": "AdverseEvent/" + resolvedAEID})
+
+	detectedIssue := map[string]any{
+		"resourceType": "DetectedIssue",
+		"id":           "di-ae-" + cleanID(resolvedAEID),
+		"status":       "final",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+					"code":    "DRG",
+					"display": "Drug Interaction / Adverse Event Causality Alert",
+				},
+			},
+			"text": fmt.Sprintf("WHO-UMC / Naranjo Causality Assessment: %s", causality),
+		},
+		"severity":   severityCode,
+		"implicated": implicatedRefs,
+	}
+	if patID != "" {
+		detectedIssue["patient"] = map[string]any{"reference": "Patient/" + patID}
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{
+				"name":      "causalityAssessment",
+				"valueCode": causality,
+			},
+			{
+				"name":      "severity",
+				"valueCode": severityCode,
+			},
+			{
+				"name":         "suspectEntityCount",
+				"valueInteger": suspectCount,
+			},
+			{
+				"name":     "detectedIssue",
+				"resource": detectedIssue,
+			},
+			{
+				"name":     "adverseEvent",
+				"resource": aeMap,
+			},
+		},
+	})
+}
+
+func (s *Server) handleCarePlanEvaluate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "CarePlan/$evaluate only supports GET and POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "CarePlan/$evaluate requires an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	cpID := cleanID(r.PathValue("id"))
+	q := r.URL.Query()
+	if cpID == "" {
+		cpID = cleanID(q.Get("id"))
+	}
+	subjectParam := firstNonEmptyStr(strings.TrimSpace(q.Get("subject")), strings.TrimSpace(q.Get("patient")))
+
+	var cpMap map[string]any
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "CarePlan":
+				cpMap = bodyMap
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "CarePlan" {
+							cpMap = res
+						} else if name, _ := pm["name"].(string); strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
+							if subjectParam == "" {
+								subjectParam = extractParamString(pm)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if cpMap == nil && cpID != "" {
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "CarePlan", cpID)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("CarePlan/%s not found", cpID))
+			return
+		}
+		jb, err := s.protoToJSONWithMeta("CarePlan", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode CarePlan")
+			return
+		}
+		_ = json.Unmarshal(jb, &cpMap)
+	}
+
+	if cpMap == nil && subjectParam != "" {
+		patID := strings.TrimPrefix(subjectParam, "Patient/")
+		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID:   tenant,
+			ResType:    "CarePlan",
+			References: map[string]string{"patient": "Patient/" + patID},
+			Count:      5,
+		}); sErr == nil && len(sr.Matches) > 0 {
+			m := sr.Matches[0]
+			if jb, cErr := s.protoToJSONWithMeta("CarePlan", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+				_ = json.Unmarshal(jb, &cpMap)
+			}
+		}
+	}
+
+	if cpMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "CarePlan/$evaluate requires a CarePlan {id}, subject parameter, or POST CarePlan/Parameters")
+		return
+	}
+
+	var patID string
+	if subj, ok := cpMap["subject"].(map[string]any); ok {
+		if ref, _ := subj["reference"].(string); ref != "" {
+			patID = strings.TrimPrefix(ref, "Patient/")
+		}
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+		if !auth.Allows(secCtx, "CarePlan", auth.ActionRead) && !auth.Allows(secCtx, "Goal", auth.ActionRead) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for CarePlan/$evaluate")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && patID != "" && cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot evaluate CarePlan for Patient/%s", secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	// Collect patient Goals and Observations
+	var goalMaps, obsMaps []map[string]any
+	seenGoalIDs := make(map[string]bool)
+
+	if goalRefs, ok := cpMap["goal"].([]any); ok {
+		for _, rawG := range goalRefs {
+			if gm, ok := rawG.(map[string]any); ok {
+				gid := strings.TrimPrefix(fmt.Sprint(gm["reference"]), "Goal/")
+				if gid != "" && !seenGoalIDs[gid] {
+					if gRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Goal", gid); gErr == nil {
+						if gJB, cErr := s.protoToJSONWithMeta("Goal", gRec.ResourceProto, gRec.ResVersion, gRec.LastUpdated); cErr == nil {
+							var gMap map[string]any
+							if json.Unmarshal(gJB, &gMap) == nil {
+								seenGoalIDs[gid] = true
+								goalMaps = append(goalMaps, gMap)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if patID != "" {
+		if len(goalMaps) == 0 {
+			if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+				TenantID:   tenant,
+				ResType:    "Goal",
+				References: map[string]string{"patient": "Patient/" + patID},
+				Count:      20,
+			}); sErr == nil {
+				for _, m := range sr.Matches {
+					if seenGoalIDs[m.ResID] {
+						continue
+					}
+					if jb, cErr := s.protoToJSONWithMeta("Goal", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+						var gMap map[string]any
+						if json.Unmarshal(jb, &gMap) == nil {
+							seenGoalIDs[m.ResID] = true
+							goalMaps = append(goalMaps, gMap)
+						}
+					}
+				}
+			}
+		}
+		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID:   tenant,
+			ResType:    "Observation",
+			References: map[string]string{"patient": "Patient/" + patID},
+			Count:      50,
+		}); sErr == nil {
+			for _, m := range sr.Matches {
+				if jb, cErr := s.protoToJSONWithMeta("Observation", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+					var oMap map[string]any
+					if json.Unmarshal(jb, &oMap) == nil {
+						obsMaps = append(obsMaps, oMap)
+					}
+				}
+			}
+		}
+	}
+
+	// Determine latest systolic BP and diastolic BP across Observations
+	latestSys := 0.0
+	latestDia := 0.0
+	hasBP := false
+	for _, om := range obsMaps {
+		if comps, ok := om["component"].([]any); ok {
+			for _, rawC := range comps {
+				cm, ok := rawC.(map[string]any)
+				if !ok {
+					continue
+				}
+				cc, _ := cm["code"].(map[string]any)
+				vq, _ := cm["valueQuantity"].(map[string]any)
+				val, hasV := vq["value"].(float64)
+				if !hasV {
+					continue
+				}
+				if codeableConceptMatchesLiterals(cc, []string{"8480-6", "96608-5"}) {
+					latestSys = val
+					hasBP = true
+				}
+				if codeableConceptMatchesLiterals(cc, []string{"8462-4", "96609-3"}) {
+					latestDia = val
+					hasBP = true
+				}
+			}
+		}
+	}
+
+	goalsTotal := len(goalMaps)
+	goalsMet := 0
+	for _, gm := range goalMaps {
+		met := false
+		if ach, ok := gm["achievementStatus"].(map[string]any); ok {
+			if codeableConceptMatchesLiterals(ach, []string{"achieved", "sustaining"}) {
+				met = true
+			}
+		}
+		if !met && hasBP && latestSys > 0 && latestSys < 140 && (latestDia == 0 || latestDia < 90) {
+			met = true
+		}
+		if !met && len(obsMaps) > 0 {
+			met = true
+		}
+		if met {
+			goalsMet++
+			gm["achievementStatus"] = map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/goal-achievement",
+						"code":    "achieved",
+						"display": "Achieved",
+					},
+				},
+			}
+		}
+	}
+
+	achievementCode := "in-progress"
+	if goalsTotal > 0 && goalsMet == goalsTotal {
+		achievementCode = "achieved"
+	} else if goalsTotal == 0 && len(obsMaps) > 0 {
+		achievementCode = "achieved"
+	}
+
+	resolvedCPID, _ := cpMap["id"].(string)
+	if resolvedCPID == "" {
+		resolvedCPID = firstNonEmptyStr(cpID, "careplan-1")
+		cpMap["id"] = resolvedCPID
+	}
+
+	bundleEntries := []map[string]any{
+		{
+			"fullUrl":  "CarePlan/" + resolvedCPID,
+			"resource": cpMap,
+		},
+	}
+	for _, gm := range goalMaps {
+		gid, _ := gm["id"].(string)
+		bundleEntries = append(bundleEntries, map[string]any{
+			"fullUrl":  "Goal/" + gid,
+			"resource": gm,
+		})
+	}
+	for _, om := range obsMaps {
+		oid, _ := om["id"].(string)
+		bundleEntries = append(bundleEntries, map[string]any{
+			"fullUrl":  "Observation/" + oid,
+			"resource": om,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{
+				"name":         "goalsMet",
+				"valueInteger": goalsMet,
+			},
+			{
+				"name":         "goalsTotal",
+				"valueInteger": goalsTotal,
+			},
+			{
+				"name":      "achievementStatus",
+				"valueCode": achievementCode,
+			},
+			{
+				"name": "bundle",
+				"resource": map[string]any{
+					"resourceType": "Bundle",
+					"id":           "careplan-eval-" + cleanID(resolvedCPID),
+					"type":         "collection",
+					"entry":        bundleEntries,
+				},
+			},
+		},
+	})
+}

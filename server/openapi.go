@@ -2815,6 +2815,164 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/ServiceRequest/$crd": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ServiceRequest", "Coverage"},
+				"summary":     "HL7 Da Vinci Coverage Requirements Discovery (CRD) evaluating prior-authorization and documentation requirements for a ServiceRequest",
+				"operationId": "serviceRequestCRDTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with priorAuthRequired, documentationRequired, questionnaireCanonical, and ext-coverage-information"},
+				},
+			},
+		},
+		"/ServiceRequest/{id}/$crd": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ServiceRequest", "Coverage"},
+				"summary":     "HL7 Da Vinci Coverage Requirements Discovery (CRD) for ServiceRequest/{id}",
+				"operationId": "serviceRequestCRDInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with priorAuthRequired, documentationRequired, questionnaireCanonical, and ext-coverage-information"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ServiceRequest", "Coverage"},
+				"summary":     "HL7 Da Vinci Coverage Requirements Discovery (CRD) for ServiceRequest/{id} (POST Parameters)",
+				"operationId": "serviceRequestCRDInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with priorAuthRequired, documentationRequired, questionnaireCanonical, and ext-coverage-information"},
+				},
+			},
+		},
+		"/MedicationRequest/$crd": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"MedicationRequest", "Coverage"},
+				"summary":     "HL7 Da Vinci Coverage Requirements Discovery (CRD) evaluating prior-authorization and documentation requirements for a MedicationRequest",
+				"operationId": "medicationRequestCRDTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with priorAuthRequired, documentationRequired, questionnaireCanonical, and ext-coverage-information"},
+				},
+			},
+		},
+		"/MedicationRequest/{id}/$crd": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"MedicationRequest", "Coverage"},
+				"summary":     "HL7 Da Vinci Coverage Requirements Discovery (CRD) for MedicationRequest/{id}",
+				"operationId": "medicationRequestCRDInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with priorAuthRequired, documentationRequired, questionnaireCanonical, and ext-coverage-information"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"MedicationRequest", "Coverage"},
+				"summary":     "HL7 Da Vinci Coverage Requirements Discovery (CRD) for MedicationRequest/{id} (POST Parameters)",
+				"operationId": "medicationRequestCRDInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with priorAuthRequired, documentationRequired, questionnaireCanonical, and ext-coverage-information"},
+				},
+			},
+		},
+		"/AdverseEvent/$evaluate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"AdverseEvent", "DetectedIssue"},
+				"summary":     "Evaluate pharmacovigilance WHO-UMC / Naranjo causality for an AdverseEvent",
+				"operationId": "adverseEventEvaluateTypeGet",
+				"parameters": []map[string]any{
+					{"name": "subject", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with causalityAssessment, suspectEntityCount, and DetectedIssue"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"AdverseEvent", "DetectedIssue"},
+				"summary":     "Evaluate pharmacovigilance WHO-UMC / Naranjo causality for an AdverseEvent (POST)",
+				"operationId": "adverseEventEvaluateTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with causalityAssessment, suspectEntityCount, and DetectedIssue"},
+				},
+			},
+		},
+		"/AdverseEvent/{id}/$evaluate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"AdverseEvent", "DetectedIssue"},
+				"summary":     "Evaluate pharmacovigilance WHO-UMC / Naranjo causality for AdverseEvent/{id}",
+				"operationId": "adverseEventEvaluateInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with causalityAssessment, suspectEntityCount, and DetectedIssue"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"AdverseEvent", "DetectedIssue"},
+				"summary":     "Evaluate pharmacovigilance WHO-UMC / Naranjo causality for AdverseEvent/{id} (POST)",
+				"operationId": "adverseEventEvaluateInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with causalityAssessment, suspectEntityCount, and DetectedIssue"},
+				},
+			},
+		},
+		"/CarePlan/$evaluate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"CarePlan", "Goal"},
+				"summary":     "Evaluate CarePlan Goal targets and activity adherence against patient Observations",
+				"operationId": "carePlanEvaluateTypeGet",
+				"parameters": []map[string]any{
+					{"name": "subject", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with goalsMet, goalsTotal, achievementStatus, and collection Bundle"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"CarePlan", "Goal"},
+				"summary":     "Evaluate CarePlan Goal targets and activity adherence (POST)",
+				"operationId": "carePlanEvaluateTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with goalsMet, goalsTotal, achievementStatus, and collection Bundle"},
+				},
+			},
+		},
+		"/CarePlan/{id}/$evaluate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"CarePlan", "Goal"},
+				"summary":     "Evaluate CarePlan/{id} Goal targets and activity adherence against patient Observations",
+				"operationId": "carePlanEvaluateInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with goalsMet, goalsTotal, achievementStatus, and collection Bundle"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"CarePlan", "Goal"},
+				"summary":     "Evaluate CarePlan/{id} Goal targets and activity adherence (POST)",
+				"operationId": "carePlanEvaluateInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters with goalsMet, goalsTotal, achievementStatus, and collection Bundle"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()
