@@ -1825,6 +1825,89 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Patient/$bulk-member-match": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "HL7 Da Vinci PDex v2.0.0 Patient/$bulk-member-match multi-member cohort matching and Group persistence",
+				"operationId": "patientBulkMemberMatch",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing MatchedMembers Group reference, MatchedGroup, and NonMatchedMembers"},
+				},
+			},
+		},
+		"/Group/{id}/$davinci-data-export": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Group"},
+				"summary":     "HL7 Da Vinci PDex v2.0.0 Group/{id}/$davinci-data-export payer-to-payer clinical cohort Bundle export",
+				"operationId": "groupDaVinciDataExportGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: collection) of US Core clinical resources for matched Group members"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Group"},
+				"summary":     "HL7 Da Vinci PDex v2.0.0 Group/{id}/$davinci-data-export (POST)",
+				"operationId": "groupDaVinciDataExportPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Bundle (type: collection) of US Core clinical resources for matched Group members"},
+				},
+			},
+		},
+		"/Encounter/$admit": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Encounter"},
+				"summary":     "HL7 FHIR R4 Encounter/$admit inpatient admission workflow",
+				"operationId": "encounterAdmit",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted active inpatient Encounter resource"},
+				},
+			},
+		},
+		"/Encounter/{id}/$transfer": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Encounter"},
+				"summary":     "HL7 FHIR R4 Encounter/{id}/$transfer inpatient bed/location transfer workflow",
+				"operationId": "encounterTransfer",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Updated Encounter resource with location transfer history"},
+				},
+			},
+		},
+		"/Encounter/{id}/$discharge": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Encounter"},
+				"summary":     "HL7 FHIR R4 Encounter/{id}/$discharge inpatient discharge & LOINC 18842-5 Discharge Summary Composition synthesis",
+				"operationId": "encounterDischarge",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing finished Encounter and LOINC 18842-5 Discharge Summary Composition"},
+				},
+			},
+		},
+		"/MedicationRequest/{id}/$dispense": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"MedicationRequest"},
+				"summary":     "Fulfill a MedicationRequest by synthesizing and persisting a US Core MedicationDispense ($dispense)",
+				"operationId": "medicationRequestDispense",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted US Core MedicationDispense resource"},
+				},
+			},
+		},
 		"/Patient/{id}/$everything": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Patient"},
