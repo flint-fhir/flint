@@ -1651,6 +1651,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /MedicationRequest/$check-interactions to return Parameters with interactionCount, got %d: %s", respInt.StatusCode, string(bInt))
 			}
 		}
+		if err == nil {
+			respPix, bPix, errPix := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$ihe-pix", "", nil, nil)
+			respSpec, bSpec, errSpec := doReq(http.MethodPost, basePath+"/ServiceRequest/cert-sr-1/$collect-specimen", "application/fhir+json", nil, nil)
+			if errPix != nil || respPix.StatusCode != http.StatusOK || !strings.Contains(string(bPix), `"targetId"`) {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$ihe-pix to return Parameters with targetId, got %d: %s", respPix.StatusCode, string(bPix))
+			} else if errSpec != nil || respSpec.StatusCode != http.StatusOK || !strings.Contains(string(bSpec), `"ACC-CERT-SR-1"`) {
+				err = fmt.Errorf("expected POST /ServiceRequest/cert-sr-1/$collect-specimen to return Specimen with ACC-CERT-SR-1, got %d: %s", respSpec.StatusCode, string(bSpec))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

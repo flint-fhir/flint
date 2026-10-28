@@ -1107,7 +1107,7 @@ func isQuestionnaireExtractOp(parts []string) bool {
 
 func isPlanApplyOp(parts []string) bool {
 	if len(parts) == 4 {
-		return parts[3] == "$closure" || parts[3] == "$data-requirements" || parts[3] == "$fhirpath" || parts[3] == "$process-message" || parts[3] == "$convert" || parts[3] == "$submit-attachment"
+		return parts[3] == "$closure" || parts[3] == "$data-requirements" || parts[3] == "$fhirpath" || parts[3] == "$process-message" || parts[3] == "$process-notification" || parts[3] == "$convert" || parts[3] == "$submit-attachment"
 	}
 	if len(parts) == 5 {
 		if parts[4] == "$convert" {
@@ -1143,7 +1143,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Observation") && (parts[4] == "$lastn" || parts[4] == "$stats") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Patient") && (parts[4] == "$merge" || parts[4] == "$health-cards-issue" || parts[4] == "$pcde" || parts[4] == "$immds-forecast" || parts[4] == "$gfe") {
+		if strings.EqualFold(parts[3], "Patient") && (parts[4] == "$merge" || parts[4] == "$health-cards-issue" || parts[4] == "$pcde" || parts[4] == "$immds-forecast" || parts[4] == "$gfe" || parts[4] == "$ihe-pix") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "ResearchStudy") && parts[4] == "$evaluate-eligibility" {
@@ -1155,7 +1155,10 @@ func isPlanApplyOp(parts []string) bool {
 		if (strings.EqualFold(parts[3], "ServiceRequest") || strings.EqualFold(parts[3], "MedicationRequest")) && parts[4] == "$crd" {
 			return true
 		}
-		if (strings.EqualFold(parts[3], "AdverseEvent") || strings.EqualFold(parts[3], "CarePlan") || strings.EqualFold(parts[3], "RiskAssessment")) && parts[4] == "$evaluate" {
+		if strings.EqualFold(parts[3], "ServiceRequest") && parts[4] == "$collect-specimen" {
+			return true
+		}
+		if (strings.EqualFold(parts[3], "AdverseEvent") || strings.EqualFold(parts[3], "CarePlan") || strings.EqualFold(parts[3], "RiskAssessment") || strings.EqualFold(parts[3], "DiagnosticReport")) && parts[4] == "$evaluate" {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Appointment") && (parts[4] == "$find" || parts[4] == "$hold" || parts[4] == "$book") {
@@ -1167,7 +1170,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "StructureDefinition") && parts[4] == "$snapshot" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "MessageHeader") && parts[4] == "$process-message" {
+		if strings.EqualFold(parts[3], "MessageHeader") && (parts[4] == "$process-message" || parts[4] == "$process-notification") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "StructureMap") && parts[4] == "$transform" {
@@ -1215,7 +1218,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Library") && parts[5] == "$evaluate" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Patient") && (parts[5] == "$health-cards-issue" || parts[5] == "$pcde" || parts[5] == "$immds-forecast" || parts[5] == "$gfe") {
+		if strings.EqualFold(parts[3], "Patient") && (parts[5] == "$health-cards-issue" || parts[5] == "$pcde" || parts[5] == "$immds-forecast" || parts[5] == "$gfe" || parts[5] == "$ihe-pix") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "ResearchStudy") && parts[5] == "$evaluate-eligibility" {
@@ -1230,7 +1233,10 @@ func isPlanApplyOp(parts []string) bool {
 		if (strings.EqualFold(parts[3], "ServiceRequest") || strings.EqualFold(parts[3], "MedicationRequest")) && parts[5] == "$crd" {
 			return true
 		}
-		if (strings.EqualFold(parts[3], "AdverseEvent") || strings.EqualFold(parts[3], "CarePlan") || strings.EqualFold(parts[3], "RiskAssessment")) && parts[5] == "$evaluate" {
+		if strings.EqualFold(parts[3], "ServiceRequest") && parts[5] == "$collect-specimen" {
+			return true
+		}
+		if (strings.EqualFold(parts[3], "AdverseEvent") || strings.EqualFold(parts[3], "CarePlan") || strings.EqualFold(parts[3], "RiskAssessment") || strings.EqualFold(parts[3], "DiagnosticReport")) && parts[5] == "$evaluate" {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Group") && (parts[5] == "$add" || parts[5] == "$remove" || parts[5] == "$member-add" || parts[5] == "$member-remove" || parts[5] == "$confirm-attribution-list") {

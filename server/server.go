@@ -265,6 +265,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$fhirpath", s.handleFHIRPath)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$fhirpath", s.handleFHIRPath)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$process-message", s.handleProcessMessage)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$process-notification", s.handleProcessNotification)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$submit-attachment", s.handleCDexSubmitAttachment)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$convert", s.handleResourceConvert)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$convert", s.handleResourceConvert)
@@ -630,6 +631,26 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleMedicationKnowledgeAndInteractions(w, r)
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "MessageHeader") && parts[4] == "$process-notification" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleProcessNotification(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$ihe-pix" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientIHEPix(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ServiceRequest") && parts[4] == "$collect-specimen" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleServiceRequestCollectSpecimen(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "DiagnosticReport") && parts[4] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDiagnosticReportEvaluate(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -638,6 +659,24 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$ihe-pix" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientIHEPix(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ServiceRequest") && parts[5] == "$collect-specimen" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleServiceRequestCollectSpecimen(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "DiagnosticReport") && parts[5] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDiagnosticReportEvaluate(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Group") && (parts[5] == "$member-add" || parts[5] == "$member-remove" || parts[5] == "$confirm-attribution-list") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -3879,6 +3918,17 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "gfe",
 					"definition": "http://hl7.org/fhir/us/davinci-pct/OperationDefinition/gfe-submit",
 				},
+				{
+					"name":       "ihe-pix",
+					"definition": "https://profiles.ihe.net/ITI/PIXm/OperationDefinition/IHE.PIXm.pix",
+				},
+			}
+		case "DiagnosticReport":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "evaluate",
+					"definition": "http://flint.fhir.org/OperationDefinition/DiagnosticReport-evaluate",
+				},
 			}
 		case "Observation":
 			entry["operation"] = []map[string]string{
@@ -3924,6 +3974,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "crd",
 					"definition": "http://hl7.org/fhir/us/davinci-crd/OperationDefinition/crd",
+				},
+				{
+					"name":       "collect-specimen",
+					"definition": "http://flint.fhir.org/OperationDefinition/ServiceRequest-collect-specimen",
 				},
 			}
 		case "MedicationRequest":
@@ -4261,6 +4315,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "process-message",
 					"definition": "http://hl7.org/fhir/OperationDefinition/MessageHeader-process-message",
+				},
+				{
+					"name":       "process-notification",
+					"definition": "http://hl7.org/fhir/us/davinci-notifications/OperationDefinition/process-notification",
 				},
 			}
 		case "StructureMap":
@@ -4657,6 +4715,18 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "check-interactions",
 						"definition": "http://flint.fhir.org/OperationDefinition/MedicationRequest-check-interactions",
+					},
+					{
+						"name":       "process-notification",
+						"definition": "http://hl7.org/fhir/us/davinci-notifications/OperationDefinition/process-notification",
+					},
+					{
+						"name":       "ihe-pix",
+						"definition": "https://profiles.ihe.net/ITI/PIXm/OperationDefinition/IHE.PIXm.pix",
+					},
+					{
+						"name":       "collect-specimen",
+						"definition": "http://flint.fhir.org/OperationDefinition/ServiceRequest-collect-specimen",
 					},
 				},
 			},

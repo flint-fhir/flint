@@ -11187,7 +11187,7 @@ func (s *Server) handleCompositionDocumentType(w http.ResponseWriter, r *http.Re
 			compID = "comp-doc-1"
 		}
 		compMap["id"] = compID
-		if persistedID, _, _, _, uErr := s.upsertResourceMap(r.Context(), tenant, compMap); uErr == nil && persistedID != "" {
+		if _, persistedID, _, _, uErr := s.upsertResourceMap(r.Context(), tenant, compMap); uErr == nil && persistedID != "" {
 			compID = persistedID
 		}
 	}
@@ -11683,4 +11683,632 @@ func (s *Server) handleMedicationKnowledgeAndInteractions(w http.ResponseWriter,
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// =============================================================================
+// Wave 29:
+//   1. HL7 Da Vinci Unsolicited Notifications ($process-notification)
+//   2. IHE PIXm Patient Identifier Cross-Reference Lookup (Patient/$ihe-pix)
+//   3. Clinical Specimen Accessioning (ServiceRequest/{id}/$collect-specimen)
+//   4. DiagnosticReport Critical & Abnormal Lab Result Evaluation (DiagnosticReport/$evaluate)
+// =============================================================================
+
+// handleProcessNotification implements POST /fhir/r4/{tenant}/$process-notification
+// and POST /fhir/r4/{tenant}/MessageHeader/$process-notification per HL7 Da Vinci Notifications IG.
+func (s *Server) handleProcessNotification(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$process-notification only supports POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "$process-notification requires an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	var bundleMap map[string]any
+
+	if r.Body != nil {
+		var body map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&body); err == nil {
+			switch body["resourceType"] {
+			case "Bundle":
+				bundleMap = body
+			case "Parameters":
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Bundle" {
+							bundleMap = res
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if bundleMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "$process-notification requires a FHIR notification Bundle in the request body")
+		return
+	}
+
+	rawEntries, _ := bundleMap["entry"].([]any)
+	var msgHeaderMap map[string]any
+	msgHeaderID := "notif-msg-1"
+	eventCode := "notification-admit"
+	var persistedEntries []map[string]any
+
+	for _, rawE := range rawEntries {
+		em, ok := rawE.(map[string]any)
+		if !ok {
+			continue
+		}
+		res, ok := em["resource"].(map[string]any)
+		if !ok {
+			continue
+		}
+		rt, _ := res["resourceType"].(string)
+		if rt == "" {
+			continue
+		}
+		if rt == "MessageHeader" && msgHeaderMap == nil {
+			msgHeaderMap = res
+			if id, _ := res["id"].(string); id != "" {
+				msgHeaderID = id
+			}
+			if evCoding, ok := res["eventCoding"].(map[string]any); ok {
+				if c, _ := evCoding["code"].(string); c != "" {
+					eventCode = c
+				}
+			}
+			if _, _, _, savedMH, uErr := s.upsertResourceMap(r.Context(), tenant, res); uErr == nil && savedMH != nil {
+				msgHeaderMap = savedMH
+			}
+			continue
+		}
+		if _, persistedID, _, savedRes, uErr := s.upsertResourceMap(r.Context(), tenant, res); uErr == nil && savedRes != nil {
+			persistedEntries = append(persistedEntries, map[string]any{
+				"fullUrl":  rt + "/" + persistedID,
+				"resource": savedRes,
+			})
+		}
+	}
+
+	ackID := "notif-ack-" + cleanID(msgHeaderID)
+	ackHeader := map[string]any{
+		"resourceType": "MessageHeader",
+		"id":           ackID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-notifications/StructureDefinition/notifications-messageheader"},
+		},
+		"eventCoding": map[string]any{
+			"system":  "http://hl7.org/fhir/us/davinci-notifications/CodeSystem/notification-event",
+			"code":    eventCode,
+			"display": "Da Vinci Unsolicited Notification Acknowledgment",
+		},
+		"source": map[string]any{
+			"name":     "Flint FHIR R4 Notification Receiver",
+			"endpoint": "http://flint.fhir.org/fhir/r4/" + tenant,
+		},
+		"response": map[string]any{
+			"identifier": msgHeaderID,
+			"code":       "ok",
+		},
+	}
+	if _, _, _, savedAck, uErr := s.upsertResourceMap(r.Context(), tenant, ackHeader); uErr == nil && savedAck != nil {
+		ackHeader = savedAck
+	}
+
+	outEntries := []map[string]any{
+		{
+			"fullUrl":  "MessageHeader/" + ackID,
+			"resource": ackHeader,
+		},
+	}
+	outEntries = append(outEntries, persistedEntries...)
+
+	ackBundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "notif-bundle-ack-" + cleanID(msgHeaderID),
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-notifications/StructureDefinition/notifications-bundle"},
+		},
+		"type":      "message",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"entry":     outEntries,
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(ackBundle)
+}
+
+// handlePatientIHEPix implements GET/POST /fhir/r4/{tenant}/Patient/$ihe-pix
+// and /fhir/r4/{tenant}/Patient/{id}/$ihe-pix per IHE PIXm (ITI-83).
+func (s *Server) handlePatientIHEPix(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "Patient/$ihe-pix requires an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	patID := cleanID(r.PathValue("id"))
+	q := r.URL.Query()
+	sourceIdent := strings.TrimSpace(q.Get("sourceIdentifier"))
+	var targetSystems []string
+	for _, ts := range q["targetSystem"] {
+		for _, part := range strings.Split(ts, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				targetSystems = append(targetSystems, trimmed)
+			}
+		}
+	}
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		var body map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
+			if body["resourceType"] == "Parameters" {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "sourceIdentifier":
+							if vs := extractParamString(pm); vs != "" && sourceIdent == "" {
+								sourceIdent = strings.TrimSpace(vs)
+							}
+							if vi, ok := pm["valueIdentifier"].(map[string]any); ok && sourceIdent == "" {
+								sys, _ := vi["system"].(string)
+								val, _ := vi["value"].(string)
+								if sys != "" && val != "" {
+									sourceIdent = sys + "|" + val
+								} else if val != "" {
+									sourceIdent = val
+								}
+							}
+						case "targetSystem":
+							if vs := extractParamString(pm); vs != "" {
+								targetSystems = append(targetSystems, strings.TrimSpace(vs))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	var patMap map[string]any
+	if patID != "" {
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID)
+		if err != nil || rec == nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patID))
+			return
+		}
+		if jb, cErr := s.protoToJSONWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+			_ = json.Unmarshal(jb, &patMap)
+		}
+	} else if sourceIdent != "" {
+		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID: tenant,
+			ResType:  "Patient",
+			Tokens:   map[string]string{"identifier": sourceIdent},
+			Count:    5,
+		})
+		if err != nil || sr == nil || len(sr.Matches) == 0 {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("No Patient found matching sourceIdentifier %s", sourceIdent))
+			return
+		}
+		m := sr.Matches[0]
+		patID = m.ResID
+		if jb, cErr := s.protoToJSONWithMeta("Patient", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+			_ = json.Unmarshal(jb, &patMap)
+		}
+	} else {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Patient/$ihe-pix requires sourceIdentifier or Patient/{id}")
+		return
+	}
+
+	outParams := []map[string]any{
+		{
+			"name":           "targetId",
+			"valueReference": map[string]any{"reference": "Patient/" + patID},
+		},
+	}
+
+	rawIdents, _ := patMap["identifier"].([]any)
+	for _, ri := range rawIdents {
+		im, ok := ri.(map[string]any)
+		if !ok {
+			continue
+		}
+		sys, _ := im["system"].(string)
+		if len(targetSystems) > 0 {
+			matched := false
+			for _, ts := range targetSystems {
+				if strings.EqualFold(sys, ts) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+		outParams = append(outParams, map[string]any{
+			"name":            "targetIdentifier",
+			"valueIdentifier": im,
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    outParams,
+	})
+}
+
+// handleServiceRequestCollectSpecimen implements GET/POST /fhir/r4/{tenant}/ServiceRequest/{id}/$collect-specimen
+// and /fhir/r4/{tenant}/ServiceRequest/$collect-specimen.
+func (s *Server) handleServiceRequestCollectSpecimen(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "ServiceRequest/$collect-specimen requires an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	srID := cleanID(r.PathValue("id"))
+	if srID == "" {
+		srID = cleanID(r.URL.Query().Get("id"))
+	}
+	collectorRef := strings.TrimSpace(r.URL.Query().Get("collector"))
+
+	var srMap map[string]any
+	if r.Method == http.MethodPost && r.Body != nil {
+		var body map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
+			switch body["resourceType"] {
+			case "ServiceRequest":
+				srMap = body
+				if id, _ := body["id"].(string); id != "" && srID == "" {
+					srID = cleanID(id)
+				}
+			case "Parameters":
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "id", "serviceRequest":
+							if vs := extractParamString(pm); vs != "" && srID == "" {
+								srID = cleanID(strings.TrimPrefix(vs, "ServiceRequest/"))
+							}
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "ServiceRequest" {
+								srMap = res
+								if id, _ := res["id"].(string); id != "" && srID == "" {
+									srID = cleanID(id)
+								}
+							}
+						case "collector":
+							if vs := extractParamString(pm); vs != "" && collectorRef == "" {
+								collectorRef = strings.TrimSpace(vs)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if srMap == nil && srID != "" {
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "ServiceRequest", srID)
+		if err != nil || rec == nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("ServiceRequest/%s not found", srID))
+			return
+		}
+		if jb, cErr := s.protoToJSONWithMeta("ServiceRequest", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+			_ = json.Unmarshal(jb, &srMap)
+		}
+	}
+
+	if srMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "ServiceRequest/$collect-specimen requires a stored ServiceRequest/{id} or inline ServiceRequest")
+		return
+	}
+	if srID == "" {
+		srID = "sr-lab-1"
+	}
+
+	patRef := ""
+	if subj, ok := srMap["subject"].(map[string]any); ok {
+		patRef, _ = subj["reference"].(string)
+	}
+	if patRef == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "ServiceRequest must have a subject reference")
+		return
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	collectionMap := map[string]any{
+		"collectedDateTime": nowStr,
+	}
+	if collectorRef != "" {
+		if !strings.Contains(collectorRef, "/") {
+			collectorRef = "Practitioner/" + collectorRef
+		}
+		collectionMap["collector"] = map[string]any{"reference": collectorRef}
+	}
+
+	specID := "spec-" + cleanID(srID)
+	specMap := map[string]any{
+		"resourceType": "Specimen",
+		"id":           specID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-specimen"},
+		},
+		"accessionIdentifier": map[string]any{
+			"system": "http://flint.fhir.org/accession",
+			"value":  "ACC-" + strings.ToUpper(cleanID(srID)),
+		},
+		"status": "available",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "119297000",
+					"display": "Blood specimen",
+				},
+			},
+		},
+		"subject":      map[string]any{"reference": patRef},
+		"receivedTime": nowStr,
+		"request": []map[string]any{
+			{"reference": "ServiceRequest/" + srID},
+		},
+		"collection": collectionMap,
+	}
+
+	if _, _, _, savedSpec, uErr := s.upsertResourceMap(r.Context(), tenant, specMap); uErr == nil && savedSpec != nil {
+		specMap = savedSpec
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(specMap)
+}
+
+// handleDiagnosticReportEvaluate implements GET/POST /fhir/r4/{tenant}/DiagnosticReport/$evaluate
+// and /fhir/r4/{tenant}/DiagnosticReport/{id}/$evaluate.
+func (s *Server) handleDiagnosticReportEvaluate(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "DiagnosticReport/$evaluate requires an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	drID := cleanID(r.PathValue("id"))
+	if drID == "" {
+		drID = cleanID(r.URL.Query().Get("id"))
+	}
+
+	var drMap map[string]any
+	if r.Method == http.MethodPost && r.Body != nil {
+		var body map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
+			switch body["resourceType"] {
+			case "DiagnosticReport":
+				drMap = body
+				if id, _ := body["id"].(string); id != "" && drID == "" {
+					drID = cleanID(id)
+				}
+			case "Parameters":
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						if name == "id" || name == "diagnosticReport" || name == "resource" {
+							if vs := extractParamString(pm); vs != "" && drID == "" {
+								drID = cleanID(strings.TrimPrefix(vs, "DiagnosticReport/"))
+							}
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "DiagnosticReport" {
+								drMap = res
+								if id, _ := res["id"].(string); id != "" && drID == "" {
+									drID = cleanID(id)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if drMap == nil && drID != "" {
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "DiagnosticReport", drID)
+		if err != nil || rec == nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("DiagnosticReport/%s not found", drID))
+			return
+		}
+		if jb, cErr := s.protoToJSONWithMeta("DiagnosticReport", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+			_ = json.Unmarshal(jb, &drMap)
+		}
+	}
+
+	if drMap == nil {
+		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID: tenant,
+			ResType:  "DiagnosticReport",
+			Count:    1,
+		}); sErr == nil && len(sr.Matches) > 0 {
+			m := sr.Matches[0]
+			drID = m.ResID
+			if jb, cErr := s.protoToJSONWithMeta("DiagnosticReport", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+				_ = json.Unmarshal(jb, &drMap)
+			}
+		}
+	}
+
+	if drMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "DiagnosticReport/$evaluate requires a stored DiagnosticReport/{id} or inline DiagnosticReport")
+		return
+	}
+	if drID == "" {
+		drID = "dr-eval-1"
+	}
+
+	patRef := ""
+	if subj, ok := drMap["subject"].(map[string]any); ok {
+		patRef, _ = subj["reference"].(string)
+	}
+
+	rawResults, _ := drMap["result"].([]any)
+	evaluatedCount := 0
+	abnormalCount := 0
+	criticalCount := 0
+	var issueParams []map[string]any
+
+	for _, rr := range rawResults {
+		rm, ok := rr.(map[string]any)
+		if !ok {
+			continue
+		}
+		ref, _ := rm["reference"].(string)
+		obsID := cleanID(strings.TrimPrefix(strings.TrimSpace(ref), "Observation/"))
+		if obsID == "" {
+			continue
+		}
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Observation", obsID)
+		if err != nil || rec == nil {
+			continue
+		}
+		jb, cErr := s.protoToJSONWithMeta("Observation", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if cErr != nil {
+			continue
+		}
+		var obsMap map[string]any
+		if json.Unmarshal(jb, &obsMap) != nil {
+			continue
+		}
+		evaluatedCount++
+
+		isCritical := false
+		isAbnormal := false
+		if interps, ok := obsMap["interpretation"].([]any); ok {
+			for _, it := range interps {
+				if im, ok := it.(map[string]any); ok {
+					if codeableConceptMatchesLiterals(im, []string{"HH", "LL", "AA", "CRIT", "critical"}) {
+						isCritical = true
+						isAbnormal = true
+					} else if codeableConceptMatchesLiterals(im, []string{"H", "L", "A", "abnormal", "high", "low"}) {
+						isAbnormal = true
+					}
+				}
+			}
+		}
+		if vq, ok := obsMap["valueQuantity"].(map[string]any); ok {
+			if val, ok := vq["value"].(float64); ok {
+				obsCode, _ := obsMap["code"].(map[string]any)
+				if val >= 6.0 && codeableConceptMatchesLiterals(obsCode, []string{"2823-3", "6298-4", "4548-4"}) {
+					isCritical = true
+					isAbnormal = true
+				}
+			}
+		}
+
+		if isAbnormal {
+			abnormalCount++
+		}
+		if isCritical {
+			criticalCount++
+		}
+		if isAbnormal || isCritical {
+			sev := "moderate"
+			if isCritical {
+				sev = "high"
+			}
+			implicated := []map[string]any{
+				{"reference": "DiagnosticReport/" + drID},
+				{"reference": "Observation/" + obsID},
+			}
+			diMap := map[string]any{
+				"resourceType": "DetectedIssue",
+				"id":           "lab-alert-" + cleanID(drID) + "-" + cleanID(obsID),
+				"status":       "final",
+				"code": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+							"code":    "LAB",
+							"display": "Laboratory Panic / Abnormal Result Alert",
+						},
+					},
+				},
+				"severity":           sev,
+				"identifiedDateTime": time.Now().UTC().Format(time.RFC3339),
+				"implicated":         implicated,
+				"detail":             fmt.Sprintf("Laboratory result Observation/%s in DiagnosticReport/%s flagged as %s severity", obsID, drID, sev),
+			}
+			if patRef != "" {
+				diMap["patient"] = map[string]any{"reference": patRef}
+			}
+			if _, _, _, savedDI, uErr := s.upsertResourceMap(r.Context(), tenant, diMap); uErr == nil && savedDI != nil {
+				diMap = savedDI
+			}
+			issueParams = append(issueParams, map[string]any{
+				"name":     "detectedIssue",
+				"resource": diMap,
+			})
+		}
+	}
+
+	statusStr := "normal"
+	if criticalCount > 0 {
+		statusStr = "critical-alert"
+	} else if abnormalCount > 0 {
+		statusStr = "abnormal-alert"
+	}
+
+	outParams := []map[string]any{
+		{
+			"name":      "status",
+			"valueCode": statusStr,
+		},
+		{
+			"name":         "evaluatedObservationCount",
+			"valueInteger": evaluatedCount,
+		},
+		{
+			"name":         "abnormalCount",
+			"valueInteger": abnormalCount,
+		},
+		{
+			"name":         "criticalCount",
+			"valueInteger": criticalCount,
+		},
+		{
+			"name":     "diagnosticReport",
+			"resource": drMap,
+		},
+	}
+	outParams = append(outParams, issueParams...)
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    outParams,
+	})
 }
