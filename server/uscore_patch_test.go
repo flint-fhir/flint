@@ -5890,3 +5890,145 @@ func TestClinicalGenomicsPACIOAndNHSNWave34(t *testing.T) {
 		t.Fatalf("GET /Measure/$nhsn-acute-care expected nhsn-hai-aur-measure, got %d: %s", nhsnMeasRec.Code, nhsnMeasRec.Body.String())
 	}
 }
+
+func TestVulcanBFDRAndIHEPDQmWave35(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave35-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w35-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w35-1",
+			"active": true,
+			"gender": "female",
+			"birthDate": "2026-10-28",
+			"name": [{"family": "Apgar", "given": ["Virginia"]}]
+		}`},
+		{"/ResearchStudy/study-w35-1", `{
+			"resourceType": "ResearchStudy",
+			"id": "study-w35-1",
+			"status": "active",
+			"title": "Vulcan Oncology RWD Cohort Trial"
+		}`},
+		{"/DocumentReference/doc-w35-1", `{
+			"resourceType": "DocumentReference",
+			"id": "doc-w35-1",
+			"status": "current",
+			"type": {"coding": [{"system": "http://loinc.org", "code": "34117-2"}]},
+			"subject": {"reference": "Patient/pat-w35-1"},
+			"content": [
+				{
+					"attachment": {
+						"contentType": "text/plain",
+						"url": "Binary/bin-w35-1"
+					}
+				}
+			]
+		}`},
+		{"/Binary/bin-w35-1", `{
+			"resourceType": "Binary",
+			"id": "bin-w35-1",
+			"contentType": "text/plain",
+			"data": "SGVsbG8gSUhFIE1IRCBJVEktNjg="
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. HL7 Vulcan RWD & Schedule of Activities v1.0.0: GET /ResearchStudy/study-w35-1/$rwd-cohort & POST /ResearchSubject/sub-w35-1/$enroll
+	rwdReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/ResearchStudy/study-w35-1/$rwd-cohort", nil)
+	rwdRec := httptest.NewRecorder()
+	pgH.ServeHTTP(rwdRec, rwdReq)
+	if rwdRec.Code != http.StatusOK ||
+		!strings.Contains(rwdRec.Body.String(), `"cohortGroup"`) ||
+		!strings.Contains(rwdRec.Body.String(), "vulcan-rwd-cohort-study-w35-1") {
+		t.Fatalf("GET /ResearchStudy/study-w35-1/$rwd-cohort expected cohortGroup vulcan-rwd-cohort-study-w35-1, got %d: %s", rwdRec.Code, rwdRec.Body.String())
+	}
+
+	enrollBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w35-1"},
+			{"name": "study", "valueString": "ResearchStudy/study-w35-1"}
+		]
+	}`
+	enrollReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/ResearchSubject/sub-w35-1/$enroll", strings.NewReader(enrollBody))
+	enrollReq.Header.Set("Content-Type", "application/fhir+json")
+	enrollRec := httptest.NewRecorder()
+	pgH.ServeHTTP(enrollRec, enrollReq)
+	if enrollRec.Code != http.StatusOK ||
+		!strings.Contains(enrollRec.Body.String(), `"on-study"`) ||
+		!strings.Contains(enrollRec.Body.String(), "SoACarePlan") {
+		t.Fatalf("POST /ResearchSubject/sub-w35-1/$enroll expected on-study ResearchSubject and SoACarePlan, got %d: %s", enrollRec.Code, enrollRec.Body.String())
+	}
+
+	// 2. HL7 Vital Records BFDR v1.1.0: POST /Patient/pat-w35-1/$birth-report & GET /Composition/$bfdr-summary
+	birthBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "birthWeightGrams", "valueDecimal": 3450},
+			{"name": "apgar5Min", "valueInteger": 10}
+		]
+	}`
+	birthReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/pat-w35-1/$birth-report", strings.NewReader(birthBody))
+	birthReq.Header.Set("Content-Type", "application/fhir+json")
+	birthRec := httptest.NewRecorder()
+	pgH.ServeHTTP(birthRec, birthReq)
+	if birthRec.Code != http.StatusOK ||
+		!strings.Contains(birthRec.Body.String(), `"8339-4"`) ||
+		!strings.Contains(birthRec.Body.String(), `"9274-2"`) ||
+		!strings.Contains(birthRec.Body.String(), `"68998-4"`) {
+		t.Fatalf("POST /Patient/pat-w35-1/$birth-report expected birth weight (8339-4), Apgar (9274-2), and BFDR Composition (68998-4), got %d: %s", birthRec.Code, birthRec.Body.String())
+	}
+
+	bfdrSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Composition/$bfdr-summary?patient=Patient/pat-w35-1", nil)
+	bfdrSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(bfdrSumRec, bfdrSumReq)
+	if bfdrSumRec.Code != http.StatusOK ||
+		!strings.Contains(bfdrSumRec.Body.String(), "Bundle-document-live-birth-report") ||
+		!strings.Contains(bfdrSumRec.Body.String(), `"68998-4"`) {
+		t.Fatalf("GET /Composition/$bfdr-summary expected Bundle-document-live-birth-report with 68998-4, got %d: %s", bfdrSumRec.Code, bfdrSumRec.Body.String())
+	}
+
+	// 3. IHE PDQm v3.0.0 & MHD ITI-68: GET /Patient/$ihe-pdqm & GET /DocumentReference/doc-w35-1/$ihe-iti-68
+	pdqmReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/$ihe-pdqm?family=Apgar", nil)
+	pdqmRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pdqmRec, pdqmReq)
+	if pdqmRec.Code != http.StatusOK ||
+		!strings.Contains(pdqmRec.Body.String(), "IHE.PDQm.QueryPatientResourceResponseMessage") ||
+		!strings.Contains(pdqmRec.Body.String(), "IHE.PDQm.Patient") {
+		t.Fatalf("GET /Patient/$ihe-pdqm expected IHE.PDQm.QueryPatientResourceResponseMessage and IHE.PDQm.Patient, got %d: %s", pdqmRec.Code, pdqmRec.Body.String())
+	}
+
+	iti68Req := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/DocumentReference/doc-w35-1/$ihe-iti-68", nil)
+	iti68Rec := httptest.NewRecorder()
+	pgH.ServeHTTP(iti68Rec, iti68Req)
+	if iti68Rec.Code != http.StatusOK ||
+		!strings.Contains(iti68Rec.Body.String(), `"documentReference"`) ||
+		!strings.Contains(iti68Rec.Body.String(), "SGVsbG8gSUhFIE1IRCBJVEktNjg=") {
+		t.Fatalf("GET /DocumentReference/doc-w35-1/$ihe-iti-68 expected documentReference and Binary payload, got %d: %s", iti68Rec.Code, iti68Rec.Body.String())
+	}
+}
