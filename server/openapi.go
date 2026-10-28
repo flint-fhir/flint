@@ -2693,6 +2693,128 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Claim/$predetermine": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Claim", "ClaimResponse"},
+				"summary":     "HL7 FHIR R4 Claim/$predetermine evaluating pre-determination benefit and copay estimations and returning an adjudicated ClaimResponse",
+				"operationId": "claimPredetermineTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Adjudicated ClaimResponse (use: predetermination)"},
+				},
+			},
+		},
+		"/Claim/{id}/$predetermine": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Claim", "ClaimResponse"},
+				"summary":     "HL7 FHIR R4 Claim/{id}/$predetermine evaluating pre-determination benefit and copay estimations",
+				"operationId": "claimPredetermineInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Adjudicated ClaimResponse (use: predetermination)"},
+				},
+			},
+		},
+		"/Measure/$evaluate-risk-condition-category": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Measure", "MeasureReport"},
+				"summary":     "HL7 Da Vinci Risk Adjustment Measure/$evaluate-risk-condition-category evaluating HCC suspect/confirmed coding gaps",
+				"operationId": "measureEvaluateRiskConditionCategoryTypeGet",
+				"parameters": []map[string]any{
+					{"name": "subject", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "periodStart", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "periodEnd", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle containing Risk Adjustment MeasureReport and clinical evidence"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Measure", "MeasureReport"},
+				"summary":     "HL7 Da Vinci Risk Adjustment Measure/$evaluate-risk-condition-category (POST Parameters)",
+				"operationId": "measureEvaluateRiskConditionCategoryTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle containing Risk Adjustment MeasureReport and clinical evidence"},
+				},
+			},
+		},
+		"/Measure/{id}/$evaluate-risk-condition-category": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Measure", "MeasureReport"},
+				"summary":     "HL7 Da Vinci Risk Adjustment Measure/{id}/$evaluate-risk-condition-category evaluating HCC suspect/confirmed coding gaps",
+				"operationId": "measureEvaluateRiskConditionCategoryInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "subject", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle containing Risk Adjustment MeasureReport and clinical evidence"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Measure", "MeasureReport"},
+				"summary":     "HL7 Da Vinci Risk Adjustment Measure/{id}/$evaluate-risk-condition-category (POST Parameters)",
+				"operationId": "measureEvaluateRiskConditionCategoryInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle containing Risk Adjustment MeasureReport and clinical evidence"},
+				},
+			},
+		},
+		"/Schedule/$find": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Schedule", "Slot"},
+				"summary":     "Discover matching Schedules and free Slots across actor, specialty, service-type, and start/end windows",
+				"operationId": "scheduleFindTypeGet",
+				"parameters": []map[string]any{
+					{"name": "actor", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "specialty", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "service-type", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "start", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "end", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of matching Schedules and free Slots"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Schedule", "Slot"},
+				"summary":     "Discover matching Schedules and free Slots (POST Parameters)",
+				"operationId": "scheduleFindTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of matching Schedules and free Slots"},
+				},
+			},
+		},
+		"/Schedule/{id}/$find": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Schedule", "Slot"},
+				"summary":     "Discover free Slots for Schedule/{id} across start/end windows",
+				"operationId": "scheduleFindInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "start", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "end", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of Schedule/{id} and free Slots"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Schedule", "Slot"},
+				"summary":     "Discover free Slots for Schedule/{id} (POST Parameters)",
+				"operationId": "scheduleFindInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of Schedule/{id} and free Slots"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

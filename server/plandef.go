@@ -8794,3 +8794,839 @@ func (s *Server) handleResearchStudyEvaluateEligibility(w http.ResponseWriter, r
 		},
 	})
 }
+
+// =============================================================================
+// Wave 25:
+// 1. HL7 FHIR R4 Claim Pre-Determination
+//    (POST /Claim/$predetermine & POST /Claim/{id}/$predetermine)
+// 2. HL7 Da Vinci Risk Adjustment Coding Gap Evaluation
+//    (GET/POST /Measure/$evaluate-risk-condition-category & /Measure/{id}/$evaluate-risk-condition-category)
+// 3. HL7 FHIR R4 Schedule & Slot Availability Discovery
+//    (GET/POST /Schedule/$find & /Schedule/{id}/$find)
+// =============================================================================
+
+func (s *Server) handleClaimPredetermine(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Claim/$predetermine only supports POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "Claim/$predetermine requires an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	reqID := cleanID(r.PathValue("id"))
+
+	var claimMap map[string]any
+	var bundleEntries []map[string]any
+
+	if r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "Claim":
+				claimMap = bodyMap
+			case "Bundle":
+				if entries, ok := bodyMap["entry"].([]any); ok {
+					for _, rawE := range entries {
+						if em, ok := rawE.(map[string]any); ok {
+							if res, ok := em["resource"].(map[string]any); ok {
+								if res["resourceType"] == "Claim" && claimMap == nil {
+									claimMap = res
+								} else {
+									bundleEntries = append(bundleEntries, res)
+								}
+							}
+						}
+					}
+				}
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						if pm, ok := rawP.(map[string]any); ok {
+							if res, ok := pm["resource"].(map[string]any); ok {
+								switch res["resourceType"] {
+								case "Claim":
+									claimMap = res
+								case "Bundle":
+									if entries, ok := res["entry"].([]any); ok {
+										for _, rawE := range entries {
+											if em, ok := rawE.(map[string]any); ok {
+												if er, ok := em["resource"].(map[string]any); ok {
+													if er["resourceType"] == "Claim" && claimMap == nil {
+														claimMap = er
+													} else {
+														bundleEntries = append(bundleEntries, er)
+													}
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if claimMap == nil && reqID != "" {
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Claim", reqID)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Claim/%s not found", reqID))
+			return
+		}
+		jb, err := s.protoToJSONWithMeta("Claim", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode Claim")
+			return
+		}
+		_ = json.Unmarshal(jb, &claimMap)
+	}
+
+	if claimMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Claim/$predetermine requires a Claim {id}, Claim body, Bundle, or Parameters")
+		return
+	}
+
+	patientRef := ""
+	if pm, ok := claimMap["patient"].(map[string]any); ok {
+		patientRef, _ = pm["reference"].(string)
+	}
+	patID := strings.TrimPrefix(patientRef, "Patient/")
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+		if !auth.Allows(secCtx, "Claim", auth.ActionCreate) &&
+			!auth.Allows(secCtx, "Claim", auth.ActionRead) &&
+			!auth.Allows(secCtx, "ClaimResponse", auth.ActionCreate) &&
+			!auth.Allows(secCtx, "ClaimResponse", auth.ActionRead) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Claim/$predetermine")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && patID != "" && cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot predetermine Claim for Patient/%s", secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	for _, entryRes := range bundleEntries {
+		_, _, _, _, _ = s.upsertResourceMap(r.Context(), tenant, entryRes)
+	}
+
+	if reqID != "" {
+		claimMap["id"] = reqID
+	}
+	if st, _ := claimMap["status"].(string); st == "" {
+		claimMap["status"] = "active"
+	}
+	claimMap["use"] = "predetermination"
+	if _, ok := claimMap["type"]; !ok {
+		claimMap["type"] = map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://terminology.hl7.org/CodeSystem/claim-type", "code": "professional"},
+			},
+		}
+	}
+	if _, ok := claimMap["priority"]; !ok {
+		claimMap["priority"] = map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://terminology.hl7.org/CodeSystem/processpriority", "code": "normal"},
+			},
+		}
+	}
+	if created, _ := claimMap["created"].(string); created == "" {
+		claimMap["created"] = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	_, savedClaimID, _, savedClaimMap, err := s.upsertResourceMap(r.Context(), tenant, claimMap)
+	if err == nil && savedClaimMap != nil {
+		claimMap = savedClaimMap
+	}
+	if savedClaimID == "" {
+		savedClaimID, _ = claimMap["id"].(string)
+		if savedClaimID == "" {
+			savedClaimID = firstNonEmptyStr(reqID, "claim-predet-1")
+			claimMap["id"] = savedClaimID
+		}
+	}
+
+	insurerRef := "Organization/payer-default"
+	if im, ok := claimMap["insurer"].(map[string]any); ok {
+		if ref, _ := im["reference"].(string); ref != "" {
+			insurerRef = ref
+		}
+	}
+
+	// Build line-item pre-determination adjudication (80% benefit / 20% copay)
+	var adjItems []map[string]any
+	totalSubmitted := 0.0
+	totalBenefit := 0.0
+
+	if items, ok := claimMap["item"].([]any); ok {
+		for idx, rawIt := range items {
+			im, ok := rawIt.(map[string]any)
+			if !ok {
+				continue
+			}
+			seq := idx + 1
+			if sNum, ok := im["sequence"].(float64); ok && sNum > 0 {
+				seq = int(sNum)
+			}
+			itemVal := 200.0
+			if netMap, ok := im["net"].(map[string]any); ok {
+				if v, ok := netMap["value"].(float64); ok && v > 0 {
+					itemVal = v
+				}
+			} else if upMap, ok := im["unitPrice"].(map[string]any); ok {
+				if v, ok := upMap["value"].(float64); ok && v > 0 {
+					itemVal = v
+				}
+			}
+			copayVal := math.Round(itemVal*0.20*100) / 100
+			benefitVal := math.Round((itemVal-copayVal)*100) / 100
+			totalSubmitted += itemVal
+			totalBenefit += benefitVal
+
+			adjItems = append(adjItems, map[string]any{
+				"itemSequence": seq,
+				"adjudication": []map[string]any{
+					{
+						"category": map[string]any{
+							"coding": []map[string]any{
+								{"system": "http://terminology.hl7.org/CodeSystem/adjudication", "code": "submitted", "display": "Submitted Amount"},
+							},
+						},
+						"amount": map[string]any{"value": itemVal, "currency": "USD"},
+					},
+					{
+						"category": map[string]any{
+							"coding": []map[string]any{
+								{"system": "http://terminology.hl7.org/CodeSystem/adjudication", "code": "copay", "display": "CoPay"},
+							},
+						},
+						"amount": map[string]any{"value": copayVal, "currency": "USD"},
+					},
+					{
+						"category": map[string]any{
+							"coding": []map[string]any{
+								{"system": "http://terminology.hl7.org/CodeSystem/adjudication", "code": "benefit", "display": "Benefit Amount"},
+							},
+						},
+						"amount": map[string]any{"value": benefitVal, "currency": "USD"},
+					},
+				},
+			})
+		}
+	}
+
+	if len(adjItems) == 0 {
+		totalSubmitted = 200.0
+		totalBenefit = 160.0
+		adjItems = []map[string]any{
+			{
+				"itemSequence": 1,
+				"adjudication": []map[string]any{
+					{
+						"category": map[string]any{
+							"coding": []map[string]any{
+								{"system": "http://terminology.hl7.org/CodeSystem/adjudication", "code": "submitted", "display": "Submitted Amount"},
+							},
+						},
+						"amount": map[string]any{"value": 200.0, "currency": "USD"},
+					},
+					{
+						"category": map[string]any{
+							"coding": []map[string]any{
+								{"system": "http://terminology.hl7.org/CodeSystem/adjudication", "code": "benefit", "display": "Benefit Amount"},
+							},
+						},
+						"amount": map[string]any{"value": 160.0, "currency": "USD"},
+					},
+				},
+			},
+		}
+	}
+
+	if patientRef == "" {
+		patientRef = "Patient/example"
+	}
+
+	respID := "claimresp-predet-" + savedClaimID
+	preAuthRef := "PREDET-" + strings.ToUpper(cleanID(savedClaimID))
+	respMap := map[string]any{
+		"resourceType": "ClaimResponse",
+		"id":           respID,
+		"status":       "active",
+		"type":         claimMap["type"],
+		"use":          "predetermination",
+		"patient":      map[string]any{"reference": patientRef},
+		"created":      time.Now().UTC().Format(time.RFC3339),
+		"insurer":      map[string]any{"reference": insurerRef},
+		"request":      map[string]any{"reference": "Claim/" + savedClaimID},
+		"outcome":      "complete",
+		"disposition":  "Pre-determination benefit estimation complete; services eligible under active coverage.",
+		"preAuthRef":   preAuthRef,
+		"item":         adjItems,
+		"total": []map[string]any{
+			{
+				"category": map[string]any{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/adjudication", "code": "submitted", "display": "Submitted Amount"},
+					},
+				},
+				"amount": map[string]any{"value": totalSubmitted, "currency": "USD"},
+			},
+			{
+				"category": map[string]any{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/adjudication", "code": "benefit", "display": "Benefit Amount"},
+					},
+				},
+				"amount": map[string]any{"value": totalBenefit, "currency": "USD"},
+			},
+		},
+	}
+
+	if _, _, _, savedResp, uErr := s.upsertResourceMap(r.Context(), tenant, respMap); uErr == nil && savedResp != nil {
+		respMap = savedResp
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(respMap)
+}
+
+func (s *Server) handleMeasureEvaluateRiskConditionCategory(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Measure/$evaluate-risk-condition-category only supports GET and POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "Measure/$evaluate-risk-condition-category requires an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	measureID := cleanID(r.PathValue("id"))
+	q := r.URL.Query()
+	subjectParam := firstNonEmptyStr(strings.TrimSpace(q.Get("subject")), strings.TrimSpace(q.Get("patient")))
+	periodStart := strings.TrimSpace(q.Get("periodStart"))
+	periodEnd := strings.TrimSpace(q.Get("periodEnd"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&bodyMap); err == nil {
+			if bodyMap["resourceType"] == "Parameters" {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						val := extractParamString(pm)
+						switch strings.ToLower(strings.TrimSpace(name)) {
+						case "subject", "patient":
+							if subjectParam == "" {
+								subjectParam = val
+							}
+						case "periodstart":
+							if periodStart == "" {
+								periodStart = val
+							}
+						case "periodend":
+							if periodEnd == "" {
+								periodEnd = val
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := strings.TrimPrefix(strings.TrimSpace(subjectParam), "Patient/")
+	if patID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Measure/$evaluate-risk-condition-category requires a subject (Patient/{id}) parameter")
+		return
+	}
+
+	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx && secCtx != nil {
+		if !auth.Allows(secCtx, "Measure", auth.ActionRead) &&
+			!auth.Allows(secCtx, "MeasureReport", auth.ActionRead) &&
+			!auth.Allows(secCtx, "Patient", auth.ActionRead) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Measure/$evaluate-risk-condition-category")
+			return
+		}
+		if auth.IsPatientRestricted(secCtx) && cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot evaluate risk condition categories for Patient/%s", secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	patRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patID))
+		return
+	}
+	patJB, err := s.protoToJSONWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode Patient")
+		return
+	}
+	var patMap map[string]any
+	_ = json.Unmarshal(patJB, &patMap)
+
+	if periodStart == "" {
+		periodStart = "2026-01-01"
+	}
+	if periodEnd == "" {
+		periodEnd = "2026-12-31"
+	}
+	if measureID == "" {
+		measureID = "Measure-ra-cms-v24"
+	}
+
+	var evidenceEntries []map[string]any
+	var evaluatedRefs []map[string]any
+	var groups []map[string]any
+
+	// Inspect Patient's Conditions and Observations to classify HCC coding gaps
+	hasHypertension := false
+	hasDiabetes := false
+	hasElevatedBP := false
+	hasElevatedA1c := false
+
+	if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		TenantID:   tenant,
+		ResType:    "Condition",
+		References: map[string]string{"patient": "Patient/" + patID},
+		Count:      50,
+	}); sErr == nil {
+		for _, m := range sr.Matches {
+			if jb, cErr := s.protoToJSONWithMeta("Condition", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+				var rm map[string]any
+				if json.Unmarshal(jb, &rm) == nil {
+					evidenceEntries = append(evidenceEntries, map[string]any{
+						"fullUrl":  "Condition/" + m.ResID,
+						"resource": rm,
+					})
+					evaluatedRefs = append(evaluatedRefs, map[string]any{"reference": "Condition/" + m.ResID})
+					if cc, ok := rm["code"].(map[string]any); ok {
+						if codeableConceptMatchesLiterals(cc, []string{"38341003", "I10", "59621000"}) {
+							hasHypertension = true
+						}
+						if codeableConceptMatchesLiterals(cc, []string{"44054006", "E11.9", "E11", "73211009"}) {
+							hasDiabetes = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		TenantID:   tenant,
+		ResType:    "Observation",
+		References: map[string]string{"patient": "Patient/" + patID},
+		Count:      50,
+	}); sErr == nil {
+		for _, m := range sr.Matches {
+			if jb, cErr := s.protoToJSONWithMeta("Observation", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+				var rm map[string]any
+				if json.Unmarshal(jb, &rm) == nil {
+					evidenceEntries = append(evidenceEntries, map[string]any{
+						"fullUrl":  "Observation/" + m.ResID,
+						"resource": rm,
+					})
+					evaluatedRefs = append(evaluatedRefs, map[string]any{"reference": "Observation/" + m.ResID})
+					if cc, ok := rm["code"].(map[string]any); ok {
+						if codeableConceptMatchesLiterals(cc, []string{"85354-9", "8480-6", "96607-7"}) {
+							hasElevatedBP = true
+						}
+						if codeableConceptMatchesLiterals(cc, []string{"4548-4"}) {
+							hasElevatedA1c = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// HCC-85 / HCC-18 Risk Adjustment Condition Category Groups
+	if hasHypertension || hasElevatedBP {
+		evidenceStatus := "suspect"
+		if hasHypertension {
+			evidenceStatus = "confirmed"
+		}
+		groups = append(groups, map[string]any{
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/cmshcc",
+						"code":    "85",
+						"display": "Congestive Heart Failure / Hypertensive Heart Disease (HCC 85)",
+					},
+				},
+				"text": fmt.Sprintf("CMS-HCC 85 (%s)", evidenceStatus),
+			},
+			"population": []map[string]any{
+				{
+					"code": map[string]any{
+						"coding": []map[string]any{
+							{
+								"system":  "http://hl7.org/fhir/us/davinci-ra/CodeSystem/ra-coding-gap-type",
+								"code":    evidenceStatus,
+								"display": strings.ToUpper(evidenceStatus[:1]) + evidenceStatus[1:],
+							},
+						},
+					},
+					"count": 1,
+				},
+			},
+		})
+	}
+
+	if hasDiabetes || hasElevatedA1c {
+		evidenceStatus := "suspect"
+		if hasDiabetes {
+			evidenceStatus = "confirmed"
+		}
+		groups = append(groups, map[string]any{
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/cmshcc",
+						"code":    "19",
+						"display": "Diabetes without Complication (HCC 19)",
+					},
+				},
+				"text": fmt.Sprintf("CMS-HCC 19 (%s)", evidenceStatus),
+			},
+			"population": []map[string]any{
+				{
+					"code": map[string]any{
+						"coding": []map[string]any{
+							{
+								"system":  "http://hl7.org/fhir/us/davinci-ra/CodeSystem/ra-coding-gap-type",
+								"code":    evidenceStatus,
+								"display": strings.ToUpper(evidenceStatus[:1]) + evidenceStatus[1:],
+							},
+						},
+					},
+					"count": 1,
+				},
+			},
+		})
+	}
+
+	if len(groups) == 0 {
+		groups = append(groups, map[string]any{
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/cmshcc",
+						"code":    "19",
+						"display": "Diabetes without Complication (HCC 19)",
+					},
+				},
+				"text": "CMS-HCC 19 (open-gap)",
+			},
+			"population": []map[string]any{
+				{
+					"code": map[string]any{
+						"coding": []map[string]any{
+							{
+								"system":  "http://hl7.org/fhir/us/davinci-ra/CodeSystem/ra-coding-gap-type",
+								"code":    "open-gap",
+								"display": "Open Coding Gap",
+							},
+						},
+					},
+					"count": 0,
+				},
+			},
+		})
+	}
+
+	reportID := "ra-report-" + cleanID(patID)
+	reportMap := map[string]any{
+		"resourceType": "MeasureReport",
+		"id":           reportID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-ra/StructureDefinition/ra-measurereport"},
+		},
+		"status":  "complete",
+		"type":    "individual",
+		"measure": "http://hl7.org/fhir/us/davinci-ra/Measure/" + measureID,
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"date":    time.Now().UTC().Format(time.RFC3339),
+		"period": map[string]any{
+			"start": periodStart,
+			"end":   periodEnd,
+		},
+		"group":             groups,
+		"evaluatedResource": evaluatedRefs,
+	}
+
+	entries := make([]map[string]any, 0, len(evidenceEntries)+2)
+	entries = append(entries,
+		map[string]any{
+			"fullUrl":  "MeasureReport/" + reportID,
+			"resource": reportMap,
+		},
+		map[string]any{
+			"fullUrl":  "Patient/" + patID,
+			"resource": patMap,
+		},
+	)
+	entries = append(entries, evidenceEntries...)
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Bundle",
+		"id":           "ra-bundle-" + cleanID(patID),
+		"type":         "collection",
+		"timestamp":    time.Now().UTC().Format(time.RFC3339),
+		"entry":        entries,
+	})
+}
+
+func (s *Server) handleScheduleFind(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Schedule/$find only supports GET and POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "Schedule/$find requires an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	schedID := cleanID(r.PathValue("id"))
+	q := r.URL.Query()
+	startParam := strings.TrimSpace(q.Get("start"))
+	endParam := strings.TrimSpace(q.Get("end"))
+	actorParam := firstNonEmptyStr(strings.TrimSpace(q.Get("actor")), strings.TrimSpace(q.Get("practitioner")), strings.TrimSpace(q.Get("location")))
+	serviceTypeParam := firstNonEmptyStr(strings.TrimSpace(q.Get("service-type")), strings.TrimSpace(q.Get("visit-type")))
+	specialtyParam := strings.TrimSpace(q.Get("specialty"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&bodyMap); err == nil {
+			if bodyMap["resourceType"] == "Parameters" {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						val := extractParamString(pm)
+						switch strings.ToLower(strings.TrimSpace(name)) {
+						case "start":
+							if startParam == "" {
+								startParam = val
+							}
+						case "end":
+							if endParam == "" {
+								endParam = val
+							}
+						case "actor", "practitioner", "location":
+							if actorParam == "" {
+								actorParam = val
+							}
+						case "service-type", "visit-type":
+							if serviceTypeParam == "" {
+								serviceTypeParam = val
+							}
+						case "specialty":
+							if specialtyParam == "" {
+								specialtyParam = val
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && secCtx != nil {
+		if !auth.Allows(secCtx, "Schedule", auth.ActionRead) && !auth.Allows(secCtx, "Schedule", auth.ActionSearch) &&
+			!auth.Allows(secCtx, "Slot", auth.ActionRead) && !auth.Allows(secCtx, "Slot", auth.ActionSearch) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Schedule/$find")
+			return
+		}
+	}
+
+	var startBound, endBound time.Time
+	if startParam != "" {
+		if dOp, err := postgres.ParseDateOp(startParam); err == nil && !dOp.Value.IsZero() {
+			startBound = dOp.Value
+		}
+	}
+	if endParam != "" {
+		if dOp, err := postgres.ParseDateOp(endParam); err == nil && !dOp.Value.IsZero() {
+			endBound = dOp.Value
+		}
+	}
+
+	var schedMaps []map[string]any
+	if schedID != "" {
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Schedule", schedID)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Schedule/%s not found", schedID))
+			return
+		}
+		if jb, cErr := s.protoToJSONWithMeta("Schedule", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+			var sm map[string]any
+			if json.Unmarshal(jb, &sm) == nil {
+				schedMaps = append(schedMaps, sm)
+			}
+		}
+	} else {
+		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID: tenant,
+			ResType:  "Schedule",
+			Count:    100,
+		}); sErr == nil {
+			for _, m := range sr.Matches {
+				if jb, cErr := s.protoToJSONWithMeta("Schedule", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+					var sm map[string]any
+					if json.Unmarshal(jb, &sm) == nil {
+						schedMaps = append(schedMaps, sm)
+					}
+				}
+			}
+		}
+	}
+
+	var matchedSchedules []map[string]any
+	allowedSchedIDs := make(map[string]map[string]any)
+	for _, sm := range schedMaps {
+		if active, ok := sm["active"].(bool); ok && !active {
+			continue
+		}
+		if specialtyParam != "" && !matchesCodeableFilter(sm["specialty"], specialtyParam) {
+			continue
+		}
+		if serviceTypeParam != "" && !matchesCodeableFilter(sm["serviceType"], serviceTypeParam) {
+			continue
+		}
+		if actorParam != "" && !scheduleHasActor(sm, "", actorParam) {
+			continue
+		}
+		sid, _ := sm["id"].(string)
+		matchedSchedules = append(matchedSchedules, sm)
+		allowedSchedIDs[sid] = sm
+	}
+
+	var entries []map[string]any
+	matchCount := 0
+	for _, sm := range matchedSchedules {
+		sid, _ := sm["id"].(string)
+		matchCount++
+		entries = append(entries, map[string]any{
+			"fullUrl":  "Schedule/" + sid,
+			"resource": sm,
+			"search":   map[string]any{"mode": "match"},
+		})
+	}
+
+	// Include free Slots belonging to matched Schedules
+	slotCountForSched := make(map[string]int)
+	if slotRes, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		TenantID: tenant,
+		ResType:  "Slot",
+		Count:    200,
+	}); sErr == nil {
+		for _, sr := range slotRes.Matches {
+			jb, cErr := s.protoToJSONWithMeta("Slot", sr.ResourceProto, sr.ResVersion, sr.LastUpdated)
+			if cErr != nil {
+				continue
+			}
+			var slotMap map[string]any
+			if json.Unmarshal(jb, &slotMap) != nil {
+				continue
+			}
+			if st, _ := slotMap["status"].(string); st != "" && st != "free" {
+				continue
+			}
+			schedObj, _ := slotMap["schedule"].(map[string]any)
+			schedRef, _ := schedObj["reference"].(string)
+			refSchedID := cleanID(schedRef)
+			if _, ok := allowedSchedIDs[refSchedID]; !ok {
+				continue
+			}
+			slotStartStr, _ := slotMap["start"].(string)
+			slotEndStr, _ := slotMap["end"].(string)
+			if !startBound.IsZero() && slotStartStr != "" {
+				if stOp, err := postgres.ParseDateOp(slotStartStr); err == nil && !stOp.Value.IsZero() && stOp.Value.Before(startBound) {
+					continue
+				}
+			}
+			if !endBound.IsZero() && slotEndStr != "" {
+				if etOp, err := postgres.ParseDateOp(slotEndStr); err == nil && !etOp.Value.IsZero() && etOp.Value.After(endBound) {
+					continue
+				}
+			}
+			slotCountForSched[refSchedID]++
+			entries = append(entries, map[string]any{
+				"fullUrl":  "Slot/" + sr.ResID,
+				"resource": slotMap,
+				"search":   map[string]any{"mode": "include"},
+			})
+		}
+	}
+
+	// If a matched Schedule has a planningHorizon and no stored Slots, synthesize an open Slot window
+	for _, sm := range matchedSchedules {
+		sid, _ := sm["id"].(string)
+		if slotCountForSched[sid] > 0 {
+			continue
+		}
+		ph, ok := sm["planningHorizon"].(map[string]any)
+		if !ok {
+			continue
+		}
+		phStart, _ := ph["start"].(string)
+		phEnd, _ := ph["end"].(string)
+		if phStart == "" || phEnd == "" {
+			continue
+		}
+		synthSlotID := "slot-open-" + cleanID(sid)
+		synthSlot := map[string]any{
+			"resourceType": "Slot",
+			"id":           synthSlotID,
+			"schedule":     map[string]any{"reference": "Schedule/" + sid},
+			"status":       "free",
+			"start":        phStart,
+			"end":          phEnd,
+		}
+		if st, ok := sm["serviceType"]; ok {
+			synthSlot["serviceType"] = st
+		}
+		if sp, ok := sm["specialty"]; ok {
+			synthSlot["specialty"] = sp
+		}
+		entries = append(entries, map[string]any{
+			"fullUrl":  "Slot/" + synthSlotID,
+			"resource": synthSlot,
+			"search":   map[string]any{"mode": "include"},
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Bundle",
+		"type":         "searchset",
+		"total":        matchCount,
+		"entry":        entries,
+	})
+}

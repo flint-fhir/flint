@@ -1137,7 +1137,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "ConceptMap") && parts[4] == "$closure" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Measure") && (parts[4] == "$collect-data" || parts[4] == "$submit-data") {
+		if strings.EqualFold(parts[3], "Measure") && (parts[4] == "$collect-data" || parts[4] == "$submit-data" || parts[4] == "$evaluate-risk-condition-category") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Observation") && (parts[4] == "$lastn" || parts[4] == "$stats") {
@@ -1147,6 +1147,9 @@ func isPlanApplyOp(parts []string) bool {
 			return true
 		}
 		if strings.EqualFold(parts[3], "ResearchStudy") && parts[4] == "$evaluate-eligibility" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Schedule") && parts[4] == "$find" {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Appointment") && (parts[4] == "$find" || parts[4] == "$hold" || parts[4] == "$book") {
@@ -1167,7 +1170,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "NamingSystem") && parts[4] == "$preferred-id" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Claim") && parts[4] == "$inquire" {
+		if strings.EqualFold(parts[3], "Claim") && (parts[4] == "$inquire" || parts[4] == "$predetermine") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$package" {
@@ -1203,7 +1206,10 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "ResearchStudy") && parts[5] == "$evaluate-eligibility" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Measure") && (parts[5] == "$collect-data" || parts[5] == "$submit-data") {
+		if strings.EqualFold(parts[3], "Measure") && (parts[5] == "$collect-data" || parts[5] == "$submit-data" || parts[5] == "$evaluate-risk-condition-category") {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Schedule") && parts[5] == "$find" {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Group") && (parts[5] == "$add" || parts[5] == "$remove") {
@@ -1218,7 +1224,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "StructureMap") && parts[5] == "$transform" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Claim") && parts[5] == "$inquire" {
+		if strings.EqualFold(parts[3], "Claim") && (parts[5] == "$inquire" || parts[5] == "$predetermine") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Questionnaire") && parts[5] == "$package" {

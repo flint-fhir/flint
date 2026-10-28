@@ -4578,3 +4578,116 @@ func TestSHCHealthCardsPCDEAndResearchStudyEligibilityWave24(t *testing.T) {
 		t.Fatalf("GET /ResearchStudy/study-w24-1/$evaluate-eligibility expected eligible=true and candidate ResearchSubject, got %d: %s", eligRec.Code, eligRec.Body.String())
 	}
 }
+
+func TestClaimPredetermineMeasureRiskAdjustmentAndScheduleFindWave25(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave25-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w25-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w25-1",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1972-08-19",
+			"name": [{"family": "Lovelace", "given": ["Ada"]}]
+		}`},
+		{"/Condition/cond-w25-htn", `{
+			"resourceType": "Condition",
+			"id": "cond-w25-htn",
+			"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+			"code": {"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}]},
+			"subject": {"reference": "Patient/pat-w25-1"}
+		}`},
+		{"/Observation/obs-w25-a1c", `{
+			"resourceType": "Observation",
+			"id": "obs-w25-a1c",
+			"status": "final",
+			"code": {"coding": [{"system": "http://loinc.org", "code": "4548-4", "display": "Hemoglobin A1c/Hemoglobin.total in Blood"}]},
+			"subject": {"reference": "Patient/pat-w25-1"},
+			"valueQuantity": {"value": 7.8, "unit": "%", "system": "http://unitsofmeasure.org", "code": "%"}
+		}`},
+		{"/Schedule/sched-w25-1", `{
+			"resourceType": "Schedule",
+			"id": "sched-w25-1",
+			"active": true,
+			"specialty": [{"coding": [{"system": "http://snomed.info/sct", "code": "394579002", "display": "Cardiology"}]}],
+			"actor": [{"reference": "Practitioner/prac-w25-1", "display": "Dr. Sarah Cardiology"}],
+			"planningHorizon": {"start": "2026-06-01T09:00:00Z", "end": "2026-06-01T17:00:00Z"}
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. POST /Claim/$predetermine
+	predetBody := `{
+		"resourceType": "Claim",
+		"id": "claim-w25-1",
+		"status": "active",
+		"use": "predetermination",
+		"patient": {"reference": "Patient/pat-w25-1"},
+		"insurer": {"reference": "Organization/org-w25-1"},
+		"provider": {"reference": "Practitioner/prac-w25-1"},
+		"item": [
+			{
+				"sequence": 1,
+				"productOrService": {"coding": [{"system": "http://www.ama-assn.org/go/cpt", "code": "93306"}]},
+				"net": {"value": 500.0, "currency": "USD"}
+			}
+		]
+	}`
+	predetReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Claim/$predetermine", strings.NewReader(predetBody))
+	predetReq.Header.Set("Content-Type", "application/fhir+json")
+	predetRec := httptest.NewRecorder()
+	pgH.ServeHTTP(predetRec, predetReq)
+	if predetRec.Code != http.StatusOK ||
+		!strings.Contains(predetRec.Body.String(), `"resourceType":"ClaimResponse"`) ||
+		!strings.Contains(predetRec.Body.String(), `"use":"predetermination"`) ||
+		!strings.Contains(predetRec.Body.String(), `"PREDET-CLAIM-W25-1"`) ||
+		!strings.Contains(predetRec.Body.String(), `400`) {
+		t.Fatalf("POST /Claim/$predetermine expected predetermination ClaimResponse with 400 benefit and PREDET-CLAIM-W25-1, got %d: %s", predetRec.Code, predetRec.Body.String())
+	}
+
+	// 2. GET /Measure/$evaluate-risk-condition-category?subject=Patient/pat-w25-1
+	raReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Measure/$evaluate-risk-condition-category?subject=Patient/pat-w25-1", nil)
+	raRec := httptest.NewRecorder()
+	pgH.ServeHTTP(raRec, raReq)
+	if raRec.Code != http.StatusOK ||
+		!strings.Contains(raRec.Body.String(), `"CMS-HCC 85 (confirmed)"`) ||
+		!strings.Contains(raRec.Body.String(), `"CMS-HCC 19 (suspect)"`) {
+		t.Fatalf("GET /Measure/$evaluate-risk-condition-category expected CMS-HCC 85 (confirmed) and CMS-HCC 19 (suspect), got %d: %s", raRec.Code, raRec.Body.String())
+	}
+
+	// 3. GET /Schedule/$find?specialty=394579002&actor=Practitioner/prac-w25-1
+	schedReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Schedule/$find?specialty=394579002&actor=Practitioner/prac-w25-1", nil)
+	schedRec := httptest.NewRecorder()
+	pgH.ServeHTTP(schedRec, schedReq)
+	if schedRec.Code != http.StatusOK ||
+		!strings.Contains(schedRec.Body.String(), `"Schedule/sched-w25-1"`) ||
+		!strings.Contains(schedRec.Body.String(), `"Slot/slot-open-sched-w25-1"`) {
+		t.Fatalf("GET /Schedule/$find expected Schedule/sched-w25-1 and synthesized open Slot, got %d: %s", schedRec.Code, schedRec.Body.String())
+	}
+}

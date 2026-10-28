@@ -496,6 +496,21 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleResearchStudyEvaluateEligibility(w, r)
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Claim") && parts[4] == "$predetermine" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleClaimPredetermine(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Measure") && parts[4] == "$evaluate-risk-condition-category" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleMeasureEvaluateRiskConditionCategory(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Schedule") && parts[4] == "$find" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleScheduleFind(w, r)
+					return
+				}
 				if (strings.EqualFold(parts[3], "Patient") || strings.EqualFold(parts[3], "Encounter") || strings.EqualFold(parts[3], "Group")) && parts[4] == "$everything" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -721,6 +736,24 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleResearchStudyEvaluateEligibility(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Claim") && parts[5] == "$predetermine" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleClaimPredetermine(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Measure") && parts[5] == "$evaluate-risk-condition-category" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleMeasureEvaluateRiskConditionCategory(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Schedule") && parts[5] == "$find" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleScheduleFind(w, r)
 					return
 				}
 				if parts[5] == "$fhirpath" && !strings.HasPrefix(parts[3], "$") {
@@ -3861,6 +3894,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "inquire",
 					"definition": "http://hl7.org/fhir/us/davinci-pas/OperationDefinition/Claim-inquiry",
 				},
+				{
+					"name":       "predetermine",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Claim-predetermine",
+				},
 			}
 		case "Composition":
 			entry["operation"] = []map[string]string{
@@ -3912,6 +3949,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "submit-data",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Measure-submit-data",
+				},
+				{
+					"name":       "evaluate-risk-condition-category",
+					"definition": "http://hl7.org/fhir/us/davinci-ra/OperationDefinition/evaluate-risk-condition-category",
 				},
 			}
 		case "Library":
@@ -4100,6 +4141,13 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "evaluate-eligibility",
 					"definition": "http://flint.fhir.org/OperationDefinition/ResearchStudy-evaluate-eligibility",
+				},
+			}
+		case "Schedule":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "find",
+					"definition": "http://flint.fhir.org/OperationDefinition/Schedule-find",
 				},
 			}
 		}
@@ -4397,6 +4445,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "evaluate-eligibility",
 						"definition": "http://flint.fhir.org/OperationDefinition/ResearchStudy-evaluate-eligibility",
+					},
+					{
+						"name":       "predetermine",
+						"definition": "http://hl7.org/fhir/OperationDefinition/Claim-predetermine",
+					},
+					{
+						"name":       "evaluate-risk-condition-category",
+						"definition": "http://hl7.org/fhir/us/davinci-ra/OperationDefinition/evaluate-risk-condition-category",
 					},
 				},
 			},
