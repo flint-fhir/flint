@@ -669,6 +669,27 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleMedicationRequestDispense(w, r)
 					return
 				}
+				if (strings.EqualFold(parts[3], "PractitionerRole") && parts[4] == "$find-providers") || (strings.EqualFold(parts[3], "HealthcareService") && parts[4] == "$find-services") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", parts[3])
+					s.handlePlanNetDirectory(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ServiceRequest") && parts[4] == "$sdoh-referral" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleGravitySDOHReferral(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$sdoh-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientSDOHSummary(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Consent") && parts[4] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleConsentEvaluate(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -677,6 +698,18 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$sdoh-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientSDOHSummary(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Consent") && parts[5] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleConsentEvaluate(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Group") && parts[5] == "$davinci-data-export" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -3963,6 +3996,17 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "bulk-member-match",
 					"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/BulkMemberMatch",
 				},
+				{
+					"name":       "sdoh-summary",
+					"definition": "http://hl7.org/fhir/us/sdoh-clinicalcare/OperationDefinition/sdoh-summary",
+				},
+			}
+		case "PractitionerRole":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "find-providers",
+					"definition": "http://hl7.org/fhir/us/davinci-pdex-plan-net/OperationDefinition/find-providers",
+				},
 			}
 		case "DiagnosticReport":
 			entry["operation"] = []map[string]string{
@@ -4031,6 +4075,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "collect-specimen",
 					"definition": "http://flint.fhir.org/OperationDefinition/ServiceRequest-collect-specimen",
+				},
+				{
+					"name":       "sdoh-referral",
+					"definition": "http://hl7.org/fhir/us/sdoh-clinicalcare/OperationDefinition/sdoh-referral",
 				},
 			}
 		case "MedicationRequest":
@@ -4445,6 +4493,20 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"definition": "http://hl7.org/fhir/us/davinci-drug-formulary/OperationDefinition/MedicationKnowledge-lookup",
 				},
 			}
+		case "HealthcareService":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "find-services",
+					"definition": "http://hl7.org/fhir/us/davinci-pdex-plan-net/OperationDefinition/find-services",
+				},
+			}
+		case "Consent":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "evaluate",
+					"definition": "http://flint.fhir.org/OperationDefinition/Consent-evaluate",
+				},
+			}
 		}
 		resEntries = append(resEntries, entry)
 	}
@@ -4812,6 +4874,22 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "dispense",
 						"definition": "http://flint.fhir.org/OperationDefinition/MedicationRequest-dispense",
+					},
+					{
+						"name":       "find-providers",
+						"definition": "http://hl7.org/fhir/us/davinci-pdex-plan-net/OperationDefinition/find-providers",
+					},
+					{
+						"name":       "find-services",
+						"definition": "http://hl7.org/fhir/us/davinci-pdex-plan-net/OperationDefinition/find-services",
+					},
+					{
+						"name":       "sdoh-referral",
+						"definition": "http://hl7.org/fhir/us/sdoh-clinicalcare/OperationDefinition/sdoh-referral",
+					},
+					{
+						"name":       "sdoh-summary",
+						"definition": "http://hl7.org/fhir/us/sdoh-clinicalcare/OperationDefinition/sdoh-summary",
 					},
 				},
 			},

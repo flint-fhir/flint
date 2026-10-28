@@ -5384,3 +5384,121 @@ func TestDaVinciPDexBulkMatchADTAndDispenseWave30(t *testing.T) {
 		t.Fatalf("POST /MedicationRequest/medreq-w30-1/$dispense expected MedicationDispense referencing MedicationRequest/medreq-w30-1, got %d: %s", dispRec.Code, dispRec.Body.String())
 	}
 }
+
+func TestPlanNetGravitySDOHAndConsentEvaluateWave31(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave31-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w31-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w31-1",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1974-05-19",
+			"name": [{"family": "Barton", "given": ["Clara"]}]
+		}`},
+		{"/Practitioner/prac-w31-1", `{
+			"resourceType": "Practitioner",
+			"id": "prac-w31-1",
+			"active": true,
+			"name": [{"family": "Osler", "given": ["William"]}]
+		}`},
+		{"/PractitionerRole/pr-w31-1", `{
+			"resourceType": "PractitionerRole",
+			"id": "pr-w31-1",
+			"active": true,
+			"practitioner": {"reference": "Practitioner/prac-w31-1"},
+			"specialty": [{"coding": [{"system": "http://nucc.org/provider-taxonomy", "code": "207RC0000X", "display": "Cardiovascular Disease"}]}]
+		}`},
+		{"/Consent/con-deny-w31", `{
+			"resourceType": "Consent",
+			"id": "con-deny-w31",
+			"status": "active",
+			"scope": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/consentscope", "code": "patient-privacy"}]},
+			"category": [{"coding": [{"system": "http://loinc.org", "code": "59284-0"}]}],
+			"patient": {"reference": "Patient/pat-w31-1"},
+			"provision": {"type": "deny"}
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. Da Vinci Plan-Net Provider Directory: PractitionerRole/$find-providers & HealthcareService/$find-services
+	fpReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/PractitionerRole/$find-providers?specialty=207RC0000X", nil)
+	fpRec := httptest.NewRecorder()
+	pgH.ServeHTTP(fpRec, fpReq)
+	if fpRec.Code != http.StatusOK ||
+		!strings.Contains(fpRec.Body.String(), "plannet-PractitionerRole") ||
+		!strings.Contains(fpRec.Body.String(), `"Practitioner/prac-w31-1"`) {
+		t.Fatalf("GET /PractitionerRole/$find-providers expected plannet-PractitionerRole and included Practitioner/prac-w31-1, got %d: %s", fpRec.Code, fpRec.Body.String())
+	}
+
+	fsReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/HealthcareService/$find-services?specialty=207RC0000X", nil)
+	fsRec := httptest.NewRecorder()
+	pgH.ServeHTTP(fsRec, fsReq)
+	if fsRec.Code != http.StatusOK || !strings.Contains(fsRec.Body.String(), "plannet-HealthcareService") {
+		t.Fatalf("GET /HealthcareService/$find-services expected plannet-HealthcareService, got %d: %s", fsRec.Code, fsRec.Body.String())
+	}
+
+	// 2. Gravity SDOH Referral & Summary: POST /ServiceRequest/$sdoh-referral & GET /Patient/pat-w31-1/$sdoh-summary
+	sdohRefBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueReference": {"reference": "Patient/pat-w31-1"}},
+			{"name": "domain", "valueCode": "food-insecurity"}
+		]
+	}`
+	sdohReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/ServiceRequest/$sdoh-referral", strings.NewReader(sdohRefBody))
+	sdohReq.Header.Set("Content-Type", "application/fhir+json")
+	sdohRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sdohRec, sdohReq)
+	if sdohRec.Code != http.StatusOK ||
+		!strings.Contains(sdohRec.Body.String(), "SDOHCC-ServiceRequest") ||
+		!strings.Contains(sdohRec.Body.String(), "SDOHCC-TaskForReferralManagement") {
+		t.Fatalf("POST /ServiceRequest/$sdoh-referral expected SDOHCC-ServiceRequest and SDOHCC-TaskForReferralManagement, got %d: %s", sdohRec.Code, sdohRec.Body.String())
+	}
+
+	sumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w31-1/$sdoh-summary", nil)
+	sumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sumRec, sumReq)
+	if sumRec.Code != http.StatusOK ||
+		!strings.Contains(sumRec.Body.String(), "SDOHCC-Bundle") ||
+		!strings.Contains(sumRec.Body.String(), `"ServiceRequest/sdoh-sr-pat-w31-1"`) {
+		t.Fatalf("GET /Patient/pat-w31-1/$sdoh-summary expected SDOHCC-Bundle containing ServiceRequest/sdoh-sr-pat-w31-1, got %d: %s", sumRec.Code, sumRec.Body.String())
+	}
+
+	// 3. Consent/$evaluate with active deny provision
+	conReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Consent/$evaluate?patient=Patient/pat-w31-1", nil)
+	conRec := httptest.NewRecorder()
+	pgH.ServeHTTP(conRec, conReq)
+	if conRec.Code != http.StatusOK ||
+		!strings.Contains(conRec.Body.String(), `"valueCode":"deny"`) ||
+		!strings.Contains(conRec.Body.String(), `"code":"R"`) ||
+		!strings.Contains(conRec.Body.String(), `"Consent/con-deny-w31"`) {
+		t.Fatalf("GET /Consent/$evaluate expected decision=deny and securityLabel=R for Consent/con-deny-w31, got %d: %s", conRec.Code, conRec.Body.String())
+	}
+}

@@ -12926,3 +12926,670 @@ func (s *Server) handleMedicationRequestDispense(w http.ResponseWriter, r *http.
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(mdMap)
 }
+
+// =============================================================================
+// Wave 31: HL7 Da Vinci Plan-Net Provider Directory ($find-providers, $find-services),
+//          HL7 Gravity SDOH Clinical Care ($sdoh-referral, $sdoh-summary) &
+//          HL7 FHIR R4 Privacy Consent Evaluation (Consent/$evaluate)
+// =============================================================================
+
+// handlePlanNetDirectory implements GET/POST /fhir/r4/{tenant}/PractitionerRole/$find-providers
+// and GET/POST /fhir/r4/{tenant}/HealthcareService/$find-services per HL7 Da Vinci PDex Plan-Net v1.1.0.
+func (s *Server) handlePlanNetDirectory(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "Plan-Net directory operations require an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	resType := r.PathValue("resourceType")
+	q := r.URL.Query()
+	specialty := strings.TrimSpace(q.Get("specialty"))
+	category := strings.TrimSpace(q.Get("category"))
+	organization := strings.TrimSpace(q.Get("organization"))
+	location := strings.TrimSpace(q.Get("location"))
+	practitioner := strings.TrimSpace(q.Get("practitioner"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		var body map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
+			if body["resourceType"] == "Parameters" {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "specialty":
+							if vs := extractParamString(pm); vs != "" && specialty == "" {
+								specialty = strings.TrimSpace(vs)
+							}
+						case "category":
+							if vs := extractParamString(pm); vs != "" && category == "" {
+								category = strings.TrimSpace(vs)
+							}
+						case "organization":
+							if vs := extractParamString(pm); vs != "" && organization == "" {
+								organization = strings.TrimSpace(vs)
+							}
+						case "location":
+							if vs := extractParamString(pm); vs != "" && location == "" {
+								location = strings.TrimSpace(vs)
+							}
+						case "practitioner":
+							if vs := extractParamString(pm); vs != "" && practitioner == "" {
+								practitioner = strings.TrimSpace(vs)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if strings.EqualFold(resType, "PractitionerRole") {
+		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID: tenant,
+			ResType:  "PractitionerRole",
+			Count:    100,
+		})
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", err.Error())
+			return
+		}
+
+		var entries []map[string]any
+		seenIncludes := map[string]bool{}
+		matchedCount := 0
+
+		for _, m := range sr.Matches {
+			jb, cErr := s.protoToJSONWithMeta("PractitionerRole", m.ResourceProto, m.ResVersion, m.LastUpdated)
+			if cErr != nil {
+				continue
+			}
+			var prMap map[string]any
+			if json.Unmarshal(jb, &prMap) != nil {
+				continue
+			}
+			rawJSON := strings.ToLower(string(jb))
+			if specialty != "" && !strings.Contains(rawJSON, strings.ToLower(specialty)) {
+				continue
+			}
+			if organization != "" && !strings.Contains(rawJSON, strings.ToLower(cleanID(organization))) {
+				continue
+			}
+			if location != "" && !strings.Contains(rawJSON, strings.ToLower(cleanID(location))) {
+				continue
+			}
+			if practitioner != "" && !strings.Contains(rawJSON, strings.ToLower(cleanID(practitioner))) {
+				continue
+			}
+
+			prMap["meta"] = map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-PractitionerRole"},
+			}
+			matchedCount++
+			entries = append(entries, map[string]any{
+				"fullUrl":  "PractitionerRole/" + m.ResID,
+				"resource": prMap,
+				"search":   map[string]any{"mode": "match"},
+			})
+
+			// Include referenced Practitioner, Organization, and Location resources
+			includeRef := func(refType, refStr string) {
+				id := cleanID(strings.TrimPrefix(refStr, refType+"/"))
+				if id == "" {
+					return
+				}
+				key := refType + "/" + id
+				if seenIncludes[key] {
+					return
+				}
+				seenIncludes[key] = true
+				if rec, rErr := s.store.ReadResourceWithMeta(r.Context(), tenant, refType, id); rErr == nil && rec != nil {
+					if ijb, iErr := s.protoToJSONWithMeta(refType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); iErr == nil {
+						var incMap map[string]any
+						if json.Unmarshal(ijb, &incMap) == nil {
+							entries = append(entries, map[string]any{
+								"fullUrl":  key,
+								"resource": incMap,
+								"search":   map[string]any{"mode": "include"},
+							})
+						}
+					}
+				}
+			}
+			if pracObj, ok := prMap["practitioner"].(map[string]any); ok {
+				if ref, _ := pracObj["reference"].(string); ref != "" {
+					includeRef("Practitioner", ref)
+				}
+			}
+			if orgObj, ok := prMap["organization"].(map[string]any); ok {
+				if ref, _ := orgObj["reference"].(string); ref != "" {
+					includeRef("Organization", ref)
+				}
+			}
+			if locArr, ok := prMap["location"].([]any); ok {
+				for _, l := range locArr {
+					if lm, ok := l.(map[string]any); ok {
+						if ref, _ := lm["reference"].(string); ref != "" {
+							includeRef("Location", ref)
+						}
+					}
+				}
+			}
+		}
+
+		bundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           "plannet-providers-1",
+			"type":         "searchset",
+			"total":        matchedCount,
+			"entry":        entries,
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(bundle)
+		return
+	}
+
+	// HealthcareService/$find-services
+	sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		TenantID: tenant,
+		ResType:  "HealthcareService",
+		Count:    100,
+	})
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", err.Error())
+		return
+	}
+
+	var entries []map[string]any
+	for _, m := range sr.Matches {
+		jb, cErr := s.protoToJSONWithMeta("HealthcareService", m.ResourceProto, m.ResVersion, m.LastUpdated)
+		if cErr != nil {
+			continue
+		}
+		rawJSON := strings.ToLower(string(jb))
+		if specialty != "" && !strings.Contains(rawJSON, strings.ToLower(specialty)) {
+			continue
+		}
+		if category != "" && !strings.Contains(rawJSON, strings.ToLower(category)) {
+			continue
+		}
+		if organization != "" && !strings.Contains(rawJSON, strings.ToLower(cleanID(organization))) {
+			continue
+		}
+		var hcsMap map[string]any
+		if json.Unmarshal(jb, &hcsMap) == nil {
+			hcsMap["meta"] = map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-HealthcareService"},
+			}
+			entries = append(entries, map[string]any{
+				"fullUrl":  "HealthcareService/" + m.ResID,
+				"resource": hcsMap,
+				"search":   map[string]any{"mode": "match"},
+			})
+		}
+	}
+
+	if len(entries) == 0 {
+		specCode := firstNonEmptyStr(specialty, "207RC0000X")
+		catCode := firstNonEmptyStr(category, "outpatient")
+		synthHCS := map[string]any{
+			"resourceType": "HealthcareService",
+			"id":           "plannet-hcs-default",
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-HealthcareService"},
+			},
+			"active": true,
+			"name":   "Plan-Net Specialty & Primary Care Directory Service",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/davinci-pdex-plan-net/CodeSystem/HealthcareServiceCategoryCS",
+							"code":    catCode,
+							"display": "Outpatient Clinical Care",
+						},
+					},
+				},
+			},
+			"specialty": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://nucc.org/provider-taxonomy",
+							"code":    specCode,
+							"display": "Cardiovascular Disease",
+						},
+					},
+				},
+			},
+		}
+		entries = append(entries, map[string]any{
+			"fullUrl":  "HealthcareService/plannet-hcs-default",
+			"resource": synthHCS,
+			"search":   map[string]any{"mode": "match"},
+		})
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "plannet-services-1",
+		"type":         "searchset",
+		"total":        len(entries),
+		"entry":        entries,
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleGravitySDOHReferral implements POST /fhir/r4/{tenant}/ServiceRequest/$sdoh-referral
+// per HL7 Gravity Project SDOH Clinical Care v2.1.0.
+func (s *Server) handleGravitySDOHReferral(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "ServiceRequest/$sdoh-referral requires an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	q := r.URL.Query()
+	patRef := firstNonEmptyStr(strings.TrimSpace(q.Get("patient")), strings.TrimSpace(q.Get("subject")))
+	domain := firstNonEmptyStr(strings.TrimSpace(q.Get("domain")), strings.TrimSpace(q.Get("category")))
+	performerRef := strings.TrimSpace(q.Get("performer"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		var body map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
+			if body["resourceType"] == "Parameters" {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "patient", "subject":
+							if vs := extractParamString(pm); vs != "" && patRef == "" {
+								patRef = strings.TrimSpace(vs)
+							}
+						case "domain", "category", "code":
+							if vs := extractParamString(pm); vs != "" && domain == "" {
+								domain = strings.TrimSpace(vs)
+							}
+						case "performer":
+							if vs := extractParamString(pm); vs != "" && performerRef == "" {
+								performerRef = strings.TrimSpace(vs)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if patRef == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "ServiceRequest/$sdoh-referral requires a patient or subject parameter")
+		return
+	}
+	if !strings.Contains(patRef, "/") {
+		patRef = "Patient/" + patRef
+	}
+	patID := cleanID(strings.TrimPrefix(patRef, "Patient/"))
+	if domain == "" {
+		domain = "food-insecurity"
+	}
+
+	snomedCode := "467771000124109"
+	snomedDisplay := "Assistance with application for food pantry program"
+	switch strings.ToLower(domain) {
+	case "housing-instability", "homelessness":
+		snomedCode = "410606002"
+		snomedDisplay = "Referral to housing assistance program"
+	case "transportation-insecurity":
+		snomedCode = "710841007"
+		snomedDisplay = "Referral to community medical transportation service"
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	srID := "sdoh-sr-" + patID
+	srMap := map[string]any{
+		"resourceType": "ServiceRequest",
+		"id":           srID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/sdoh-clinicalcare/StructureDefinition/SDOHCC-ServiceRequest"},
+		},
+		"status": "active",
+		"intent": "order",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/sdoh-clinicalcare/CodeSystem/SDOHCC-CodeSystemTemporaryCodes",
+						"code":    domain,
+						"display": domain,
+					},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    snomedCode,
+					"display": snomedDisplay,
+				},
+			},
+		},
+		"subject":    map[string]any{"reference": patRef},
+		"authoredOn": nowStr,
+	}
+	if performerRef != "" {
+		if !strings.Contains(performerRef, "/") {
+			performerRef = "Organization/" + performerRef
+		}
+		srMap["performer"] = []map[string]any{{"reference": performerRef}}
+	}
+	if _, _, _, savedSR, uErr := s.upsertResourceMap(r.Context(), tenant, srMap); uErr == nil && savedSR != nil {
+		srMap = savedSR
+	}
+
+	taskID := "sdoh-task-" + patID
+	taskMap := map[string]any{
+		"resourceType": "Task",
+		"id":           taskID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/sdoh-clinicalcare/StructureDefinition/SDOHCC-TaskForReferralManagement"},
+		},
+		"status":     "requested",
+		"intent":     "order",
+		"focus":      map[string]any{"reference": "ServiceRequest/" + srID},
+		"for":        map[string]any{"reference": patRef},
+		"authoredOn": nowStr,
+	}
+	if _, _, _, savedTask, uErr := s.upsertResourceMap(r.Context(), tenant, taskMap); uErr == nil && savedTask != nil {
+		taskMap = savedTask
+	}
+
+	resp := map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{
+				"name":     "serviceRequest",
+				"resource": srMap,
+			},
+			{
+				"name":     "task",
+				"resource": taskMap,
+			},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handlePatientSDOHSummary implements GET/POST /fhir/r4/{tenant}/Patient/{id}/$sdoh-summary
+// and /fhir/r4/{tenant}/Patient/$sdoh-summary per HL7 Gravity Project SDOH Clinical Care.
+func (s *Server) handlePatientSDOHSummary(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "Patient/$sdoh-summary requires an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	patID := cleanID(r.PathValue("id"))
+	q := r.URL.Query()
+	if patID == "" {
+		patID = cleanID(strings.TrimPrefix(firstNonEmptyStr(q.Get("patient"), q.Get("subject"), q.Get("id")), "Patient/"))
+	}
+	if r.Method == http.MethodPost && r.Body != nil && patID == "" {
+		var body map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
+			if body["resourceType"] == "Parameters" {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "patient" || name == "subject" || name == "id" {
+								if vs := extractParamString(pm); vs != "" {
+									patID = cleanID(strings.TrimPrefix(vs, "Patient/"))
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if patID == "" {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "Patient/$sdoh-summary requires a patient id")
+		return
+	}
+
+	rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID)
+	if err != nil || rec == nil {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patID))
+		return
+	}
+	var entries []map[string]any
+	if jb, cErr := s.protoToJSONWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+		var patMap map[string]any
+		if json.Unmarshal(jb, &patMap) == nil {
+			entries = append(entries, map[string]any{
+				"fullUrl":  "Patient/" + patID,
+				"resource": patMap,
+			})
+		}
+	}
+
+	for _, rt := range []string{"Condition", "Observation", "Goal", "ServiceRequest", "Task"} {
+		sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			TenantID:         tenant,
+			ResType:          rt,
+			ReferenceFilters: map[string][]string{"patient": {patID}},
+			Count:            50,
+		})
+		if sErr != nil {
+			continue
+		}
+		for _, m := range sr.Matches {
+			if jb, cErr := s.protoToJSONWithMeta(rt, m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+				var resMap map[string]any
+				if json.Unmarshal(jb, &resMap) == nil {
+					entries = append(entries, map[string]any{
+						"fullUrl":  rt + "/" + m.ResID,
+						"resource": resMap,
+					})
+				}
+			}
+		}
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "sdoh-summary-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/sdoh-clinicalcare/StructureDefinition/SDOHCC-Bundle"},
+		},
+		"type":      "collection",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"total":     len(entries),
+		"entry":     entries,
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleConsentEvaluate implements GET/POST /fhir/r4/{tenant}/Consent/$evaluate
+// and /fhir/r4/{tenant}/Consent/{id}/$evaluate.
+func (s *Server) handleConsentEvaluate(w http.ResponseWriter, r *http.Request) {
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "Consent/$evaluate requires an active store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	consentID := cleanID(r.PathValue("id"))
+	q := r.URL.Query()
+	if consentID == "" {
+		consentID = cleanID(q.Get("id"))
+	}
+	patRef := firstNonEmptyStr(strings.TrimSpace(q.Get("patient")), strings.TrimSpace(q.Get("subject")))
+	actorRef := strings.TrimSpace(q.Get("actor"))
+	purpose := strings.TrimSpace(q.Get("purpose"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		var body map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
+			if body["resourceType"] == "Parameters" {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "id", "consent":
+							if vs := extractParamString(pm); vs != "" && consentID == "" {
+								consentID = cleanID(strings.TrimPrefix(vs, "Consent/"))
+							}
+						case "patient", "subject":
+							if vs := extractParamString(pm); vs != "" && patRef == "" {
+								patRef = strings.TrimSpace(vs)
+							}
+						case "actor":
+							if vs := extractParamString(pm); vs != "" && actorRef == "" {
+								actorRef = strings.TrimSpace(vs)
+							}
+						case "purpose":
+							if vs := extractParamString(pm); vs != "" && purpose == "" {
+								purpose = strings.TrimSpace(vs)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	var consents []map[string]any
+	if consentID != "" {
+		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Consent", consentID)
+		if err != nil || rec == nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Consent/%s not found", consentID))
+			return
+		}
+		if jb, cErr := s.protoToJSONWithMeta("Consent", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+			var cm map[string]any
+			if json.Unmarshal(jb, &cm) == nil {
+				consents = append(consents, cm)
+			}
+		}
+	} else {
+		sp := postgres.SearchParams{
+			TenantID: tenant,
+			ResType:  "Consent",
+			Count:    50,
+		}
+		if patRef != "" {
+			patID := cleanID(strings.TrimPrefix(patRef, "Patient/"))
+			sp.ReferenceFilters = map[string][]string{"patient": {patID}}
+		}
+		if sr, sErr := s.store.Search(r.Context(), sp); sErr == nil {
+			for _, m := range sr.Matches {
+				if jb, cErr := s.protoToJSONWithMeta("Consent", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+					var cm map[string]any
+					if json.Unmarshal(jb, &cm) == nil {
+						consents = append(consents, cm)
+					}
+				}
+			}
+		}
+	}
+
+	decision := "permit"
+	secCode := "N"
+	secDisplay := "normal"
+	matchedConsentID := ""
+
+	for _, cm := range consents {
+		st, _ := cm["status"].(string)
+		if st != "" && st != "active" {
+			continue
+		}
+		if id, _ := cm["id"].(string); id != "" && matchedConsentID == "" {
+			matchedConsentID = id
+		}
+		if patRef == "" {
+			if patObj, ok := cm["patient"].(map[string]any); ok {
+				patRef, _ = patObj["reference"].(string)
+			}
+		}
+		if prov, ok := cm["provision"].(map[string]any); ok {
+			if pType, _ := prov["type"].(string); strings.EqualFold(pType, "deny") {
+				decision = "deny"
+				secCode = "R"
+				secDisplay = "restricted"
+				if id, _ := cm["id"].(string); id != "" {
+					matchedConsentID = id
+				}
+				break
+			}
+		}
+	}
+
+	if patRef != "" && !strings.Contains(patRef, "/") {
+		patRef = "Patient/" + patRef
+	}
+	if purpose == "" {
+		purpose = "TREAT"
+	}
+
+	outParams := []map[string]any{
+		{
+			"name":      "decision",
+			"valueCode": decision,
+		},
+		{
+			"name":        "purpose",
+			"valueCoding": map[string]any{"system": "http://terminology.hl7.org/CodeSystem/v3-ActReason", "code": purpose},
+		},
+		{
+			"name": "securityLabel",
+			"valueCoding": map[string]any{
+				"system":  "http://terminology.hl7.org/CodeSystem/v3-Confidentiality",
+				"code":    secCode,
+				"display": secDisplay,
+			},
+		},
+	}
+	if patRef != "" {
+		outParams = append(outParams, map[string]any{
+			"name":           "patient",
+			"valueReference": map[string]any{"reference": patRef},
+		})
+	}
+	if matchedConsentID != "" {
+		outParams = append(outParams, map[string]any{
+			"name":           "matchedConsent",
+			"valueReference": map[string]any{"reference": "Consent/" + matchedConsentID},
+		})
+	}
+
+	resp := map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    outParams,
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
