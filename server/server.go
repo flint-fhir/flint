@@ -354,6 +354,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleClaimSubmit(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Claim") && parts[4] == "$inquire" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleClaimInquire(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Measure") && parts[4] == "$evaluate-measure" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleEvaluateMeasure(w, r)
@@ -399,6 +404,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleCodeSystemSubsumes(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "CodeSystem") && parts[4] == "$find-matches" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCodeSystemFindMatches(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "ConceptMap") && parts[4] == "$translate" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleConceptMapTranslate(w, r)
@@ -412,6 +422,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$populate" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleQuestionnairePopulate(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$package" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleQuestionnairePackage(w, r)
 					return
 				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[4] == "$extract" {
@@ -637,6 +652,18 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleQuestionnairePopulate(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Questionnaire") && parts[5] == "$package" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleQuestionnairePackage(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Claim") && parts[5] == "$inquire" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleClaimInquire(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[5] == "$extract" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -707,6 +734,12 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleCodeSystemSubsumes(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "CodeSystem") && parts[5] == "$find-matches" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCodeSystemFindMatches(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "ConceptMap") && parts[5] == "$translate" {
@@ -3672,6 +3705,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "submit",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Claim-submit",
 				},
+				{
+					"name":       "inquire",
+					"definition": "http://hl7.org/fhir/us/davinci-pas/OperationDefinition/Claim-inquiry",
+				},
 			}
 		case "Composition":
 			entry["operation"] = []map[string]string{
@@ -3692,6 +3729,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "populate",
 					"definition": "http://hl7.org/fhir/uv/sdc/OperationDefinition/Questionnaire-populate",
+				},
+				{
+					"name":       "package",
+					"definition": "http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/questionnaire-package",
 				},
 			}
 		case "Measure":
@@ -3748,6 +3789,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "subsumes",
 					"definition": "http://hl7.org/fhir/OperationDefinition/CodeSystem-subsumes",
+				},
+				{
+					"name":       "find-matches",
+					"definition": "http://hl7.org/fhir/OperationDefinition/CodeSystem-find-matches",
 				},
 			}
 		case "ConceptMap":
@@ -4103,6 +4148,18 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "preferred-id",
 						"definition": "http://hl7.org/fhir/OperationDefinition/NamingSystem-preferred-id",
+					},
+					{
+						"name":       "inquire",
+						"definition": "http://hl7.org/fhir/us/davinci-pas/OperationDefinition/Claim-inquiry",
+					},
+					{
+						"name":       "package",
+						"definition": "http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/questionnaire-package",
+					},
+					{
+						"name":       "find-matches",
+						"definition": "http://hl7.org/fhir/OperationDefinition/CodeSystem-find-matches",
 					},
 				},
 			},

@@ -3860,3 +3860,128 @@ func TestProcessMessageStructureMapTransformAndPreferredIDWave19(t *testing.T) {
 		t.Fatalf("GET /NamingSystem/$preferred-id URI->OID expected 2.16.840.1.113883.6.1, got %d: %s", nsRec2.Code, nsRec2.Body.String())
 	}
 }
+
+func TestClaimInquireQuestionnairePackageAndFindMatchesWave20(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave20-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. Submit a PAS Claim via POST /Claim/$submit, then query via GET /Claim/{id}/$inquire and POST /Claim/$inquire
+	claimJSON := `{
+		"resourceType": "Claim",
+		"id": "claim-w20-1",
+		"status": "active",
+		"type": {
+			"coding": [{"system": "http://terminology.hl7.org/CodeSystem/claim-type", "code": "professional"}]
+		},
+		"use": "preauthorization",
+		"patient": {"reference": "Patient/pat-w20-1"},
+		"created": "2026-10-27",
+		"provider": {"reference": "Practitioner/prac-w20-1"},
+		"priority": {"coding": [{"code": "normal"}]},
+		"insurance": [{"sequence": 1, "focal": true, "coverage": {"reference": "Coverage/cov-w20-1"}}]
+	}`
+	subReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Claim/$submit", strings.NewReader(claimJSON))
+	subReq.Header.Set("Content-Type", "application/fhir+json")
+	subRec := httptest.NewRecorder()
+	pgH.ServeHTTP(subRec, subReq)
+	if subRec.Code != http.StatusOK && subRec.Code != http.StatusCreated {
+		t.Fatalf("POST /Claim/$submit expected 200/201, got %d: %s", subRec.Code, subRec.Body.String())
+	}
+
+	inqReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Claim/claim-w20-1/$inquire", nil)
+	inqRec := httptest.NewRecorder()
+	pgH.ServeHTTP(inqRec, inqReq)
+	if inqRec.Code != http.StatusOK || !strings.Contains(inqRec.Body.String(), `"ClaimResponse"`) || !strings.Contains(inqRec.Body.String(), `"complete"`) {
+		t.Fatalf("GET /Claim/claim-w20-1/$inquire expected 200 OK with adjudicated ClaimResponse, got %d: %s", inqRec.Code, inqRec.Body.String())
+	}
+
+	inqPostBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w20-1"}
+		]
+	}`
+	inqPostReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Claim/$inquire", strings.NewReader(inqPostBody))
+	inqPostReq.Header.Set("Content-Type", "application/fhir+json")
+	inqPostRec := httptest.NewRecorder()
+	pgH.ServeHTTP(inqPostRec, inqPostReq)
+	if inqPostRec.Code != http.StatusOK || !strings.Contains(inqPostRec.Body.String(), `"ClaimResponse"`) {
+		t.Fatalf("POST /Claim/$inquire expected 200 OK with ClaimResponse, got %d: %s", inqPostRec.Code, inqPostRec.Body.String())
+	}
+
+	// 2. Create a DTR Questionnaire referencing a CQF Library and an answerValueSet, then invoke GET /Questionnaire/{id}/$package
+	qJSON := `{
+		"resourceType": "Questionnaire",
+		"id": "q-dtr-w20",
+		"url": "http://flint.fhir.org/Questionnaire/q-dtr-w20",
+		"status": "active",
+		"title": "DTR Home Oxygen Therapy Prior Authorization",
+		"extension": [
+			{
+				"url": "http://hl7.org/fhir/StructureDefinition/cqf-library",
+				"valueCanonical": "http://flint.fhir.org/Library/HomeOxygenRuleLib"
+			}
+		],
+		"item": [
+			{
+				"linkId": "1",
+				"text": "Primary Diagnosis",
+				"type": "choice",
+				"answerValueSet": "http://hl7.org/fhir/ValueSet/condition-clinical"
+			}
+		]
+	}`
+	putQReq := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/Questionnaire/q-dtr-w20", strings.NewReader(qJSON))
+	putQReq.Header.Set("Content-Type", "application/fhir+json")
+	putQRec := httptest.NewRecorder()
+	pgH.ServeHTTP(putQRec, putQReq)
+	if putQRec.Code != http.StatusOK && putQRec.Code != http.StatusCreated {
+		t.Fatalf("PUT /Questionnaire/q-dtr-w20 expected 200/201, got %d: %s", putQRec.Code, putQRec.Body.String())
+	}
+
+	pkgReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Questionnaire/q-dtr-w20/$package", nil)
+	pkgRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pkgRec, pkgReq)
+	if pkgRec.Code != http.StatusOK ||
+		!strings.Contains(pkgRec.Body.String(), `"Questionnaire/q-dtr-w20"`) ||
+		!strings.Contains(pkgRec.Body.String(), `"HomeOxygenRuleLib"`) ||
+		!strings.Contains(pkgRec.Body.String(), `"http://hl7.org/fhir/ValueSet/condition-clinical"`) {
+		t.Fatalf("GET /Questionnaire/q-dtr-w20/$package expected Bundle with Questionnaire, Library, and ValueSet, got %d: %s", pkgRec.Code, pkgRec.Body.String())
+	}
+
+	// 3. POST /CodeSystem/$find-matches with structured property filters
+	fmBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "system", "valueUri": "http://loinc.org"},
+			{
+				"name": "property",
+				"part": [
+					{"name": "code", "valueCode": "parent"},
+					{"name": "value", "valueCode": "85354-9"}
+				]
+			}
+		]
+	}`
+	fmReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/CodeSystem/$find-matches", strings.NewReader(fmBody))
+	fmReq.Header.Set("Content-Type", "application/fhir+json")
+	fmRec := httptest.NewRecorder()
+	pgH.ServeHTTP(fmRec, fmReq)
+	if fmRec.Code != http.StatusOK || !strings.Contains(fmRec.Body.String(), `"8480-6"`) || !strings.Contains(fmRec.Body.String(), `"8462-4"`) {
+		t.Fatalf("POST /CodeSystem/$find-matches expected LOINC children 8480-6 and 8462-4 of 85354-9, got %d: %s", fmRec.Code, fmRec.Body.String())
+	}
+}
