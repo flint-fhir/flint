@@ -17,10 +17,12 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
+	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -3550,4 +3552,1179 @@ func rewritePatientReferenceInMap(m map[string]any, oldRef, newRef string) bool 
 		}
 	}
 	return changed
+}
+
+// =============================================================================
+// HL7 FHIR R4 / Argonaut Scheduling: Appointment/$find, $hold, $book (Wave 18)
+// =============================================================================
+
+func (s *Server) handleAppointmentFind(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Appointment/$find only supports GET and POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusNotImplemented, "not-supported", "Appointment/$find requires an operational store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	q := r.URL.Query()
+	startParam := strings.TrimSpace(q.Get("start"))
+	endParam := strings.TrimSpace(q.Get("end"))
+	specialtyParam := strings.TrimSpace(q.Get("specialty"))
+	visitTypeParam := strings.TrimSpace(q.Get("visit-type"))
+	if visitTypeParam == "" {
+		visitTypeParam = strings.TrimSpace(q.Get("service-type"))
+	}
+	practitionerParam := strings.TrimSpace(q.Get("practitioner"))
+	organizationParam := strings.TrimSpace(q.Get("organization"))
+	locationParam := strings.TrimSpace(q.Get("location"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&bodyMap); err == nil {
+			if bodyMap["resourceType"] == "Parameters" {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						val := extractParamString(pm)
+						switch name {
+						case "start":
+							if startParam == "" {
+								startParam = val
+							}
+						case "end":
+							if endParam == "" {
+								endParam = val
+							}
+						case "specialty":
+							if specialtyParam == "" {
+								specialtyParam = val
+							}
+						case "visit-type", "service-type":
+							if visitTypeParam == "" {
+								visitTypeParam = val
+							}
+						case "practitioner":
+							if practitionerParam == "" {
+								practitionerParam = val
+							}
+						case "organization":
+							if organizationParam == "" {
+								organizationParam = val
+							}
+						case "location":
+							if locationParam == "" {
+								locationParam = val
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && secCtx != nil {
+		if !auth.Allows(secCtx, "Appointment", auth.ActionRead) && !auth.Allows(secCtx, "Appointment", auth.ActionSearch) &&
+			!auth.Allows(secCtx, "Slot", auth.ActionRead) && !auth.Allows(secCtx, "Slot", auth.ActionSearch) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Appointment/$find")
+			return
+		}
+	}
+
+	var startBound, endBound time.Time
+	if startParam != "" {
+		if dOp, err := postgres.ParseDateOp(startParam); err == nil && !dOp.Value.IsZero() {
+			startBound = dOp.Value
+		}
+	}
+	if endParam != "" {
+		if dOp, err := postgres.ParseDateOp(endParam); err == nil && !dOp.Value.IsZero() {
+			endBound = dOp.Value
+		}
+	}
+
+	slotRes, err := s.store.Search(r.Context(), postgres.SearchParams{
+		TenantID: tenant,
+		ResType:  "Slot",
+		Count:    200,
+	})
+	if err != nil {
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "Slot search failed: "+err.Error())
+		return
+	}
+
+	var proposedEntries []any
+	var includeEntries []any
+	matchCount := 0
+
+	for _, sr := range slotRes.Matches {
+		slotBytes, err := s.protoToJSONWithMeta("Slot", sr.ResourceProto, sr.ResVersion, sr.LastUpdated)
+		if err != nil {
+			continue
+		}
+		var slotMap map[string]any
+		if err := json.Unmarshal(slotBytes, &slotMap); err != nil {
+			continue
+		}
+		status, _ := slotMap["status"].(string)
+		if status != "" && status != "free" {
+			continue
+		}
+
+		slotStartStr, _ := slotMap["start"].(string)
+		slotEndStr, _ := slotMap["end"].(string)
+		if !startBound.IsZero() && slotStartStr != "" {
+			if stOp, err := postgres.ParseDateOp(slotStartStr); err == nil && !stOp.Value.IsZero() && stOp.Value.Before(startBound) {
+				continue
+			}
+		}
+		if !endBound.IsZero() && slotEndStr != "" {
+			if etOp, err := postgres.ParseDateOp(slotEndStr); err == nil && !etOp.Value.IsZero() && etOp.Value.After(endBound) {
+				continue
+			}
+		}
+
+		// Load associated Schedule if referenced
+		var schedMap map[string]any
+		if schedObj, ok := slotMap["schedule"].(map[string]any); ok {
+			if schedRef, _ := schedObj["reference"].(string); schedRef != "" {
+				schedID := cleanID(schedRef)
+				if schedRec, getErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Schedule", schedID); getErr == nil {
+					if sb, convErr := s.protoToJSONWithMeta("Schedule", schedRec.ResourceProto, schedRec.ResVersion, schedRec.LastUpdated); convErr == nil {
+						_ = json.Unmarshal(sb, &schedMap)
+					}
+				}
+			}
+		}
+
+		if specialtyParam != "" {
+			if !matchesCodeableFilter(slotMap["specialty"], specialtyParam) && (schedMap == nil || !matchesCodeableFilter(schedMap["specialty"], specialtyParam)) {
+				continue
+			}
+		}
+		if visitTypeParam != "" {
+			if !matchesCodeableFilter(slotMap["serviceType"], visitTypeParam) && !matchesCodeableFilter(slotMap["appointmentType"], visitTypeParam) &&
+				(schedMap == nil || !matchesCodeableFilter(schedMap["serviceType"], visitTypeParam)) {
+				continue
+			}
+		}
+		if practitionerParam != "" && !scheduleHasActor(schedMap, "Practitioner", practitionerParam) {
+			continue
+		}
+		if organizationParam != "" && !scheduleHasActor(schedMap, "Organization", organizationParam) {
+			continue
+		}
+		if locationParam != "" && !scheduleHasActor(schedMap, "Location", locationParam) {
+			continue
+		}
+
+		var participants []any
+		if schedMap != nil {
+			if actors, ok := schedMap["actor"].([]any); ok {
+				for _, a := range actors {
+					if am, ok := a.(map[string]any); ok {
+						participants = append(participants, map[string]any{
+							"actor":  am,
+							"status": "needs-action",
+						})
+					}
+				}
+			}
+		}
+		if len(participants) == 0 {
+			participants = []any{
+				map[string]any{
+					"status": "needs-action",
+				},
+			}
+		}
+
+		proposedAppt := map[string]any{
+			"resourceType": "Appointment",
+			"id":           "proposed-" + sr.ResID,
+			"status":       "proposed",
+			"start":        slotStartStr,
+			"end":          slotEndStr,
+			"slot": []any{
+				map[string]any{"reference": "Slot/" + sr.ResID},
+			},
+			"participant": participants,
+		}
+		if st, ok := slotMap["serviceType"]; ok {
+			proposedAppt["serviceType"] = st
+		} else if schedMap != nil && schedMap["serviceType"] != nil {
+			proposedAppt["serviceType"] = schedMap["serviceType"]
+		}
+		if sp, ok := slotMap["specialty"]; ok {
+			proposedAppt["specialty"] = sp
+		} else if schedMap != nil && schedMap["specialty"] != nil {
+			proposedAppt["specialty"] = schedMap["specialty"]
+		}
+
+		matchCount++
+		proposedEntries = append(proposedEntries, map[string]any{
+			"fullUrl":  "Appointment/proposed-" + sr.ResID,
+			"resource": proposedAppt,
+			"search":   map[string]any{"mode": "match"},
+		})
+		includeEntries = append(includeEntries, map[string]any{
+			"fullUrl":  "Slot/" + sr.ResID,
+			"resource": slotMap,
+			"search":   map[string]any{"mode": "include"},
+		})
+	}
+
+	entries := append(proposedEntries, includeEntries...)
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Bundle",
+		"id":           fmt.Sprintf("appointment-find-%d", time.Now().UTC().UnixNano()),
+		"type":         "searchset",
+		"total":        matchCount,
+		"entry":        entries,
+	})
+}
+
+func matchesCodeableFilter(raw any, filter string) bool {
+	if raw == nil || filter == "" {
+		return false
+	}
+	wantSys := ""
+	wantCode := strings.TrimSpace(filter)
+	if idx := strings.IndexByte(wantCode, '|'); idx >= 0 {
+		wantSys = strings.TrimSpace(wantCode[:idx])
+		wantCode = strings.TrimSpace(wantCode[idx+1:])
+	}
+	checkConcept := func(cm map[string]any) bool {
+		if codings, ok := cm["coding"].([]any); ok {
+			for _, rawC := range codings {
+				if cMap, ok := rawC.(map[string]any); ok {
+					sys, _ := cMap["system"].(string)
+					code, _ := cMap["code"].(string)
+					if strings.EqualFold(code, wantCode) && (wantSys == "" || strings.EqualFold(sys, wantSys)) {
+						return true
+					}
+				}
+			}
+		}
+		if txt, _ := cm["text"].(string); txt != "" && strings.EqualFold(txt, wantCode) {
+			return true
+		}
+		return false
+	}
+	switch v := raw.(type) {
+	case map[string]any:
+		return checkConcept(v)
+	case []any:
+		for _, elem := range v {
+			if cm, ok := elem.(map[string]any); ok && checkConcept(cm) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func scheduleHasActor(schedMap map[string]any, actorType, target string) bool {
+	if schedMap == nil {
+		return false
+	}
+	targetID := cleanID(target)
+	actors, ok := schedMap["actor"].([]any)
+	if !ok {
+		return false
+	}
+	for _, rawA := range actors {
+		if am, ok := rawA.(map[string]any); ok {
+			ref, _ := am["reference"].(string)
+			if strings.EqualFold(cleanID(ref), targetID) || strings.EqualFold(ref, actorType+"/"+targetID) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (s *Server) handleAppointmentHold(w http.ResponseWriter, r *http.Request) {
+	s.handleAppointmentHoldOrBook(w, r, false)
+}
+
+func (s *Server) handleAppointmentBook(w http.ResponseWriter, r *http.Request) {
+	s.handleAppointmentHoldOrBook(w, r, true)
+}
+
+func (s *Server) handleAppointmentHoldOrBook(w http.ResponseWriter, r *http.Request, isBook bool) {
+	opName := "$hold"
+	targetApptStatus := "pending"
+	targetSlotStatus := "busy-tentative"
+	if isBook {
+		opName = "$book"
+		targetApptStatus = "booked"
+		targetSlotStatus = "busy"
+	}
+
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Appointment/"+opName+" only supports POST")
+		return
+	}
+	if s.store == nil {
+		writeOperationOutcome(w, http.StatusNotImplemented, "not-supported", "Appointment/"+opName+" requires an operational store")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	pathApptID := strings.TrimSpace(r.PathValue("id"))
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && secCtx != nil {
+		if !auth.Allows(secCtx, "Appointment", auth.ActionCreate) && !auth.Allows(secCtx, "Appointment", auth.ActionUpdate) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Appointment/"+opName)
+			return
+		}
+	}
+
+	var apptMap map[string]any
+	var slotRefs []string
+	var patientRefs []string
+	var comment string
+	var apptIDParam string
+
+	if r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "Appointment":
+				apptMap = bodyMap
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "appt-resource", "appointment", "resource":
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Appointment" {
+								apptMap = res
+							}
+						case "appt-id", "appointment-id":
+							apptIDParam = extractParamString(pm)
+						case "slot-id", "slot":
+							if v := extractParamString(pm); v != "" {
+								slotRefs = append(slotRefs, v)
+							}
+						case "patient-id", "patient":
+							if v := extractParamString(pm); v != "" {
+								patientRefs = append(patientRefs, v)
+							}
+						case "comment":
+							comment = extractParamString(pm)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if apptMap == nil {
+		lookupID := pathApptID
+		if lookupID == "" {
+			lookupID = cleanID(apptIDParam)
+		}
+		if lookupID != "" && !strings.HasPrefix(lookupID, "proposed-") {
+			if apptRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Appointment", lookupID); err == nil {
+				if jb, convErr := s.protoToJSONWithMeta("Appointment", apptRec.ResourceProto, apptRec.ResVersion, apptRec.LastUpdated); convErr == nil {
+					_ = json.Unmarshal(jb, &apptMap)
+				}
+			}
+		}
+		if apptMap == nil && strings.HasPrefix(lookupID, "proposed-") {
+			slotRefs = append(slotRefs, "Slot/"+strings.TrimPrefix(lookupID, "proposed-"))
+		}
+	}
+
+	if apptMap == nil {
+		apptID := pathApptID
+		if apptID == "" {
+			apptID = cleanID(apptIDParam)
+		}
+		apptMap = map[string]any{
+			"resourceType": "Appointment",
+			"id":           apptID,
+		}
+	}
+
+	if existingSlots, ok := apptMap["slot"].([]any); ok {
+		for _, rawS := range existingSlots {
+			if sm, ok := rawS.(map[string]any); ok {
+				if ref, _ := sm["reference"].(string); ref != "" {
+					slotRefs = append(slotRefs, ref)
+				}
+			}
+		}
+	}
+
+	seenSlots := make(map[string]bool)
+	var uniqueSlotIDs []string
+	for _, sr := range slotRefs {
+		sid := cleanID(sr)
+		if sid != "" && !seenSlots[sid] {
+			seenSlots[sid] = true
+			uniqueSlotIDs = append(uniqueSlotIDs, sid)
+		}
+	}
+
+	// Validate and transition referenced Slots
+	var slotObjs []any
+	var updatedSlotEntries []any
+	var firstStart, lastEnd string
+	for _, sid := range uniqueSlotIDs {
+		slotRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Slot", sid)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Slot/%s not found", sid))
+			return
+		}
+		slotBytes, err := s.protoToJSONWithMeta("Slot", slotRec.ResourceProto, slotRec.ResVersion, slotRec.LastUpdated)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "decode Slot/"+sid+": "+err.Error())
+			return
+		}
+		var slotMap map[string]any
+		if err := json.Unmarshal(slotBytes, &slotMap); err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "unmarshal Slot/"+sid+": "+err.Error())
+			return
+		}
+		curStatus, _ := slotMap["status"].(string)
+		if curStatus == "busy" || curStatus == "busy-unavailable" || (!isBook && curStatus == "busy-tentative") {
+			writeOperationOutcome(w, http.StatusUnprocessableEntity, "conflict", fmt.Sprintf("Slot/%s is not available (current status: %s)", sid, curStatus))
+			return
+		}
+		if st, _ := slotMap["start"].(string); st != "" && firstStart == "" {
+			firstStart = st
+		}
+		if et, _ := slotMap["end"].(string); et != "" {
+			lastEnd = et
+		}
+		slotMap["status"] = targetSlotStatus
+		slotMap["resourceType"] = "Slot"
+		slotMap["id"] = sid
+		_, _, _, savedSlot, err := s.upsertResourceMap(r.Context(), tenant, slotMap)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "persist Slot/"+sid+": "+err.Error())
+			return
+		}
+		if savedSlot != nil {
+			slotMap = savedSlot
+		}
+		slotObjs = append(slotObjs, map[string]any{"reference": "Slot/" + sid})
+		updatedSlotEntries = append(updatedSlotEntries, map[string]any{
+			"fullUrl":  "Slot/" + sid,
+			"resource": slotMap,
+			"search":   map[string]any{"mode": "include"},
+		})
+	}
+
+	apptID, _ := apptMap["id"].(string)
+	if apptID == "" || strings.HasPrefix(apptID, "proposed-") {
+		if len(uniqueSlotIDs) > 0 {
+			apptID = "appt-" + uniqueSlotIDs[0]
+		} else {
+			apptID = fmt.Sprintf("appt-%d", time.Now().UTC().UnixNano())
+		}
+		apptMap["id"] = apptID
+	}
+	apptMap["resourceType"] = "Appointment"
+	apptMap["status"] = targetApptStatus
+	if len(slotObjs) > 0 {
+		apptMap["slot"] = slotObjs
+	}
+	if firstStart != "" && apptMap["start"] == nil {
+		apptMap["start"] = firstStart
+	}
+	if lastEnd != "" && apptMap["end"] == nil {
+		apptMap["end"] = lastEnd
+	}
+	if comment != "" {
+		apptMap["comment"] = comment
+	}
+
+	var participants []any
+	if existingP, ok := apptMap["participant"].([]any); ok {
+		participants = existingP
+	}
+	for _, patRef := range patientRefs {
+		normPatRef := patRef
+		if !strings.Contains(normPatRef, "/") {
+			normPatRef = "Patient/" + normPatRef
+		}
+		found := false
+		for _, rawP := range participants {
+			if pm, ok := rawP.(map[string]any); ok {
+				if actor, ok := pm["actor"].(map[string]any); ok {
+					if ref, _ := actor["reference"].(string); strings.EqualFold(ref, normPatRef) {
+						pm["status"] = "accepted"
+						found = true
+					}
+				}
+			}
+		}
+		if !found {
+			participants = append(participants, map[string]any{
+				"actor":  map[string]any{"reference": normPatRef},
+				"status": "accepted",
+			})
+		}
+	}
+	if len(participants) == 0 {
+		participants = []any{
+			map[string]any{
+				"status": "accepted",
+			},
+		}
+	}
+	apptMap["participant"] = participants
+
+	_, _, _, savedAppt, err := s.upsertResourceMap(r.Context(), tenant, apptMap)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "persist Appointment: "+err.Error())
+		return
+	}
+	if savedAppt != nil {
+		apptMap = savedAppt
+	}
+
+	bundleEntries := []any{
+		map[string]any{
+			"fullUrl":  "Appointment/" + apptID,
+			"resource": apptMap,
+			"search":   map[string]any{"mode": "match"},
+		},
+	}
+	bundleEntries = append(bundleEntries, updatedSlotEntries...)
+	bundleEntries = append(bundleEntries, map[string]any{
+		"resource": map[string]any{
+			"resourceType": "OperationOutcome",
+			"issue": []map[string]any{
+				{
+					"severity":    "information",
+					"code":        "informational",
+					"diagnostics": fmt.Sprintf("Appointment/%s transitioned to %s (%d slot(s) marked %s)", apptID, targetApptStatus, len(uniqueSlotIDs), targetSlotStatus),
+				},
+			},
+		},
+		"search": map[string]any{"mode": "outcome"},
+	})
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Bundle",
+		"id":           "appointment-" + strings.TrimPrefix(opName, "$") + "-" + apptID,
+		"type":         "searchset",
+		"total":        1,
+		"entry":        bundleEntries,
+	})
+}
+
+// =============================================================================
+// HL7 FHIR R4 CapabilityStatement/$subset & $implements (Wave 18)
+// =============================================================================
+
+func (s *Server) handleCapabilityStatementSubset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "CapabilityStatement/$subset only supports GET and POST")
+		return
+	}
+
+	wanted := make(map[string]bool)
+	for _, rawVal := range r.URL.Query()["resource"] {
+		for _, tok := range strings.Split(rawVal, ",") {
+			tok = strings.TrimSpace(tok)
+			if tok != "" {
+				wanted[strings.ToLower(tok)] = true
+			}
+		}
+	}
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&bodyMap); err == nil {
+			if bodyMap["resourceType"] == "Parameters" {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						if pm, ok := rawP.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "resource" || name == "type" {
+								for _, tok := range strings.Split(extractParamString(pm), ",") {
+									tok = strings.TrimSpace(tok)
+									if tok != "" {
+										wanted[strings.ToLower(tok)] = true
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	cap := s.buildCapabilityStatement(r)
+	if len(wanted) > 0 {
+		if rests, ok := cap["rest"].([]map[string]any); ok && len(rests) > 0 {
+			if resList, ok := rests[0]["resource"].([]map[string]any); ok {
+				filtered := make([]map[string]any, 0, len(wanted))
+				for _, entry := range resList {
+					rt, _ := entry["type"].(string)
+					if wanted[strings.ToLower(rt)] {
+						filtered = append(filtered, entry)
+					}
+				}
+				rests[0]["resource"] = filtered
+			}
+		}
+	}
+	cap["meta"] = map[string]any{
+		"tag": []map[string]string{
+			{
+				"system":  "http://terminology.hl7.org/CodeSystem/v3-ObservationValue",
+				"code":    "SUBSETTED",
+				"display": "subsetted",
+			},
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(cap)
+}
+
+func (s *Server) handleCapabilityStatementImplements(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "CapabilityStatement/$implements only supports GET and POST")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	canonicalParam := strings.TrimSpace(r.URL.Query().Get("canonical"))
+	if canonicalParam == "" {
+		canonicalParam = strings.TrimSpace(r.URL.Query().Get("url"))
+	}
+	var clientCap map[string]any
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "CapabilityStatement":
+				clientCap = bodyMap
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "canonical", "url", "client":
+							if canonicalParam == "" {
+								canonicalParam = extractParamString(pm)
+							}
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "CapabilityStatement" {
+								clientCap = res
+							}
+						case "resource":
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "CapabilityStatement" {
+								clientCap = res
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	serverCap := s.buildCapabilityStatement(r)
+
+	// If clientCap is not supplied inline, resolve from canonical URL or stored CapabilityStatement
+	if clientCap == nil && canonicalParam != "" {
+		if s.store != nil {
+			if csRes, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "CapabilityStatement", Count: 20}); err == nil {
+				for _, sr := range csRes.Matches {
+					if jb, convErr := s.protoToJSONWithMeta("CapabilityStatement", sr.ResourceProto, sr.ResVersion, sr.LastUpdated); convErr == nil {
+						var cm map[string]any
+						if json.Unmarshal(jb, &cm) == nil {
+							if u, _ := cm["url"].(string); strings.EqualFold(u, canonicalParam) || strings.EqualFold(sr.ResID, cleanID(canonicalParam)) {
+								clientCap = cm
+								break
+							}
+						}
+					}
+				}
+			}
+		}
+		if clientCap == nil {
+			switch strings.ToLower(strings.TrimSpace(canonicalParam)) {
+			case "http://hl7.org/fhir/us/core/capabilitystatement/us-core-server",
+				"http://hl7.org/fhir/uv/bulkdata/capabilitystatement/bulk-data",
+				"http://hl7.org/fhir/capabilitystatement/base":
+				clientCap = map[string]any{
+					"resourceType": "CapabilityStatement",
+					"url":          canonicalParam,
+					"fhirVersion":  "4.0.1",
+				}
+			default:
+				writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("CapabilityStatement %q not found", canonicalParam))
+				return
+			}
+		}
+	}
+
+	if clientCap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "CapabilityStatement/$implements requires a 'canonical' URL or inline CapabilityStatement 'resource'")
+		return
+	}
+
+	// Build lookup tables of server capabilities
+	serverResources := make(map[string]map[string]any)
+	if rests, ok := serverCap["rest"].([]map[string]any); ok && len(rests) > 0 {
+		if resList, ok := rests[0]["resource"].([]map[string]any); ok {
+			for _, rm := range resList {
+				if rt, _ := rm["type"].(string); rt != "" {
+					serverResources[rt] = rm
+				}
+			}
+		}
+	}
+
+	var issues []map[string]any
+	implementsAll := true
+
+	if reqVer, _ := clientCap["fhirVersion"].(string); reqVer != "" && !strings.HasPrefix(reqVer, "4.0") {
+		implementsAll = false
+		issues = append(issues, map[string]any{
+			"severity":    "error",
+			"code":        "not-supported",
+			"diagnostics": fmt.Sprintf("Required fhirVersion %q is not compatible with server fhirVersion 4.0.1", reqVer),
+		})
+	}
+
+	if reqRests, ok := clientCap["rest"].([]any); ok {
+		for _, rawRest := range reqRests {
+			restMap, ok := rawRest.(map[string]any)
+			if !ok {
+				continue
+			}
+			reqResList, _ := restMap["resource"].([]any)
+			for _, rawRes := range reqResList {
+				reqRes, ok := rawRes.(map[string]any)
+				if !ok {
+					continue
+				}
+				rt, _ := reqRes["type"].(string)
+				if rt == "" {
+					continue
+				}
+				srvRes, supported := serverResources[rt]
+				if !supported {
+					implementsAll = false
+					issues = append(issues, map[string]any{
+						"severity":    "error",
+						"code":        "not-supported",
+						"diagnostics": fmt.Sprintf("Server CapabilityStatement does not support resource type %q", rt),
+					})
+					continue
+				}
+
+				// Check required interactions
+				if reqInts, ok := reqRes["interaction"].([]any); ok {
+					srvIntSet := make(map[string]bool)
+					if srvInts, ok := srvRes["interaction"].([]map[string]string); ok {
+						for _, im := range srvInts {
+							srvIntSet[im["code"]] = true
+						}
+					}
+					for _, rawInt := range reqInts {
+						if im, ok := rawInt.(map[string]any); ok {
+							code, _ := im["code"].(string)
+							if code != "" && !srvIntSet[code] {
+								implementsAll = false
+								issues = append(issues, map[string]any{
+									"severity":    "error",
+									"code":        "not-supported",
+									"diagnostics": fmt.Sprintf("Resource %s does not support required interaction %q", rt, code),
+								})
+							}
+						}
+					}
+				}
+
+				// Check required search parameters
+				if reqSPs, ok := reqRes["searchParam"].([]any); ok {
+					srvSPSet := make(map[string]bool)
+					if srvSPs, ok := srvRes["searchParam"].([]map[string]string); ok {
+						for _, spm := range srvSPs {
+							srvSPSet[spm["name"]] = true
+						}
+					}
+					for _, rawSP := range reqSPs {
+						if spm, ok := rawSP.(map[string]any); ok {
+							spName, _ := spm["name"].(string)
+							if spName != "" && !srvSPSet[spName] {
+								implementsAll = false
+								issues = append(issues, map[string]any{
+									"severity":    "error",
+									"code":        "not-supported",
+									"diagnostics": fmt.Sprintf("Resource %s does not support required searchParam %q", rt, spName),
+								})
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if len(issues) == 0 {
+		issues = []map[string]any{
+			{
+				"severity":    "information",
+				"code":        "informational",
+				"diagnostics": "Server CapabilityStatement satisfies all requirements of the target CapabilityStatement",
+			},
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{
+				"name":         "result",
+				"valueBoolean": implementsAll,
+			},
+			{
+				"name": "issues",
+				"resource": map[string]any{
+					"resourceType": "OperationOutcome",
+					"issue":        issues,
+				},
+			},
+		},
+	})
+}
+
+// =============================================================================
+// HL7 FHIR R4 StructureDefinition/$snapshot (Wave 18)
+// =============================================================================
+
+func (s *Server) handleStructureDefinitionSnapshot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "StructureDefinition/$snapshot only supports GET and POST")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	pathID := strings.TrimSpace(r.PathValue("id"))
+	urlParam := strings.TrimSpace(r.URL.Query().Get("url"))
+
+	var sdMap map[string]any
+	if r.Method == http.MethodPost && r.Body != nil {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			switch bodyMap["resourceType"] {
+			case "StructureDefinition":
+				sdMap = bodyMap
+			case "Parameters":
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "definition", "resource":
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "StructureDefinition" {
+								sdMap = res
+							}
+						case "url":
+							if urlParam == "" {
+								urlParam = extractParamString(pm)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if sdMap == nil && pathID != "" && s.store != nil {
+		if sdRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "StructureDefinition", pathID); err == nil {
+			if jb, convErr := s.protoToJSONWithMeta("StructureDefinition", sdRec.ResourceProto, sdRec.ResVersion, sdRec.LastUpdated); convErr == nil {
+				_ = json.Unmarshal(jb, &sdMap)
+			}
+		}
+	}
+
+	if sdMap == nil && urlParam != "" && s.store != nil {
+		if sdRes, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "StructureDefinition", Count: 50}); err == nil {
+			for _, sr := range sdRes.Matches {
+				if jb, convErr := s.protoToJSONWithMeta("StructureDefinition", sr.ResourceProto, sr.ResVersion, sr.LastUpdated); convErr == nil {
+					var candidate map[string]any
+					if json.Unmarshal(jb, &candidate) == nil {
+						if u, _ := candidate["url"].(string); strings.EqualFold(u, urlParam) {
+							sdMap = candidate
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Determine target resourceType from sdMap, pathID, or urlParam
+	targetResType := ""
+	if sdMap != nil {
+		targetResType, _ = sdMap["type"].(string)
+		if targetResType == "" {
+			if baseDef, _ := sdMap["baseDefinition"].(string); baseDef != "" {
+				if idx := strings.LastIndexByte(baseDef, '/'); idx >= 0 {
+					targetResType = baseDef[idx+1:]
+				}
+			}
+		}
+	}
+	if targetResType == "" {
+		lookup := urlParam
+		if lookup == "" {
+			lookup = pathID
+		}
+		targetResType = resolveStructureDefinitionResourceType(lookup, s.protoRegistry)
+	}
+
+	if targetResType == "" {
+		writeOperationOutcome(w, http.StatusNotFound, "not-found", "StructureDefinition could not be resolved; specify a valid FHIR R4 resource type or StructureDefinition url")
+		return
+	}
+
+	if sdMap == nil {
+		sdID := pathID
+		if sdID == "" {
+			if idx := strings.LastIndexByte(urlParam, '/'); idx >= 0 {
+				sdID = urlParam[idx+1:]
+			} else {
+				sdID = targetResType
+			}
+		}
+		sdURL := urlParam
+		if sdURL == "" {
+			sdURL = "http://hl7.org/fhir/StructureDefinition/" + sdID
+		}
+		sdMap = map[string]any{
+			"resourceType":   "StructureDefinition",
+			"id":             sdID,
+			"url":            sdURL,
+			"name":           sdID,
+			"status":         "active",
+			"fhirVersion":    "4.0.1",
+			"kind":           "resource",
+			"abstract":       false,
+			"type":           targetResType,
+			"baseDefinition": "http://hl7.org/fhir/StructureDefinition/DomainResource",
+			"derivation":     "specialization",
+		}
+	}
+
+	elements := s.synthesizeSnapshotElements(targetResType, sdMap)
+	sdMap["snapshot"] = map[string]any{
+		"element": elements,
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(sdMap)
+}
+
+func resolveStructureDefinitionResourceType(lookup string, registry map[string]protoreflect.MessageDescriptor) string {
+	lookup = strings.TrimSpace(lookup)
+	if lookup == "" {
+		return ""
+	}
+	tail := lookup
+	if idx := strings.LastIndexByte(lookup, '/'); idx >= 0 {
+		tail = lookup[idx+1:]
+	}
+	for rt := range registry {
+		if strings.EqualFold(rt, tail) {
+			return rt
+		}
+	}
+	lowerTail := strings.ToLower(tail)
+	usCorePrefixMap := map[string]string{
+		"us-core-patient":               "Patient",
+		"us-core-encounter":             "Encounter",
+		"us-core-condition":             "Condition",
+		"us-core-vital-signs":           "Observation",
+		"us-core-observation-lab":       "Observation",
+		"us-core-blood-pressure":        "Observation",
+		"us-core-heart-rate":            "Observation",
+		"us-core-medicationrequest":     "MedicationRequest",
+		"us-core-allergyintolerance":    "AllergyIntolerance",
+		"us-core-procedure":             "Procedure",
+		"us-core-diagnosticreport-lab":  "DiagnosticReport",
+		"us-core-diagnosticreport-note": "DiagnosticReport",
+		"us-core-immunization":          "Immunization",
+		"us-core-organization":          "Organization",
+		"us-core-practitioner":          "Practitioner",
+		"us-core-practitionerrole":      "PractitionerRole",
+		"us-core-location":              "Location",
+		"us-core-specimen":              "Specimen",
+		"us-core-documentreference":     "DocumentReference",
+		"us-core-provenance":            "Provenance",
+		"us-core-careplan":              "CarePlan",
+		"us-core-careteam":              "CareTeam",
+		"us-core-goal":                  "Goal",
+		"us-core-servicerequest":        "ServiceRequest",
+		"us-core-coverage":              "Coverage",
+		"us-core-questionnaireresponse": "QuestionnaireResponse",
+		"us-core-medicationdispense":    "MedicationDispense",
+		"us-core-medication":            "Medication",
+		"us-core-implantable-device":    "Device",
+		"us-core-relatedperson":         "RelatedPerson",
+	}
+	if rt, ok := usCorePrefixMap[lowerTail]; ok {
+		return rt
+	}
+	for rt := range registry {
+		if strings.Contains(lowerTail, strings.ToLower(rt)) {
+			return rt
+		}
+	}
+	return ""
+}
+
+func (s *Server) synthesizeSnapshotElements(resType string, sdMap map[string]any) []map[string]any {
+	schemas := validation.DefaultSchemas()
+	sch := schemas[resType]
+	reqSet := make(map[string]bool, len(sch.RequiredFields))
+	for _, rf := range sch.RequiredFields {
+		reqSet[rf] = true
+	}
+
+	elements := []map[string]any{
+		{
+			"id":   resType,
+			"path": resType,
+			"min":  0,
+			"max":  "*",
+		},
+		{
+			"id":   resType + ".id",
+			"path": resType + ".id",
+			"min":  0,
+			"max":  "1",
+			"type": []map[string]string{{"code": "id"}},
+		},
+		{
+			"id":   resType + ".meta",
+			"path": resType + ".meta",
+			"min":  0,
+			"max":  "1",
+			"type": []map[string]string{{"code": "Meta"}},
+		},
+	}
+
+	seenPaths := map[string]int{
+		resType:           0,
+		resType + ".id":   1,
+		resType + ".meta": 2,
+	}
+
+	if md := s.protoRegistry[resType]; md != nil {
+		fields := md.Fields()
+		for i := 0; i < fields.Len(); i++ {
+			fd := fields.Get(i)
+			jsonName := fd.JSONName()
+			if jsonName == "id" || jsonName == "meta" {
+				continue
+			}
+			path := resType + "." + jsonName
+			minCard := 0
+			if reqSet[jsonName] {
+				minCard = 1
+			}
+			maxCard := "1"
+			if fd.IsList() {
+				maxCard = "*"
+			}
+			typeCode := "Element"
+			if fd.Kind() == protoreflect.MessageKind && fd.Message() != nil {
+				typeCode = string(fd.Message().Name())
+				if typeCode == "CodeType" || strings.HasSuffix(typeCode, "Code") {
+					typeCode = "code"
+				}
+			}
+			elem := map[string]any{
+				"id":          path,
+				"path":        path,
+				"min":         minCard,
+				"max":         maxCard,
+				"type":        []map[string]string{{"code": typeCode}},
+				"mustSupport": minCard == 1,
+			}
+			if vsURI, hasVS := sch.ValueSetURIs[jsonName]; hasVS && vsURI != "" {
+				elem["binding"] = map[string]any{
+					"strength": "required",
+					"valueSet": vsURI,
+				}
+			}
+			seenPaths[path] = len(elements)
+			elements = append(elements, elem)
+		}
+	}
+
+	// Merge any differential.element constraints into the synthesized snapshot
+	if diffObj, ok := sdMap["differential"].(map[string]any); ok {
+		if diffElems, ok := diffObj["element"].([]any); ok {
+			for _, rawDE := range diffElems {
+				deMap, ok := rawDE.(map[string]any)
+				if !ok {
+					continue
+				}
+				p, _ := deMap["path"].(string)
+				if p == "" {
+					continue
+				}
+				if idx, exists := seenPaths[p]; exists {
+					for k, v := range deMap {
+						elements[idx][k] = v
+					}
+				} else {
+					if deMap["id"] == nil {
+						deMap["id"] = p
+					}
+					if deMap["min"] == nil {
+						deMap["min"] = 0
+					}
+					if deMap["max"] == nil {
+						deMap["max"] = "1"
+					}
+					seenPaths[p] = len(elements)
+					elements = append(elements, deMap)
+				}
+			}
+		}
+	}
+
+	return elements
 }

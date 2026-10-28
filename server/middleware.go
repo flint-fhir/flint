@@ -1128,6 +1128,15 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Patient") && parts[4] == "$merge" {
 			return true
 		}
+		if strings.EqualFold(parts[3], "Appointment") && (parts[4] == "$find" || parts[4] == "$hold" || parts[4] == "$book") {
+			return true
+		}
+		if (strings.EqualFold(parts[3], "CapabilityStatement") || strings.EqualFold(parts[3], "metadata")) && (parts[4] == "$subset" || parts[4] == "$implements") {
+			return true
+		}
+		if strings.EqualFold(parts[3], "StructureDefinition") && parts[4] == "$snapshot" {
+			return true
+		}
 		return false
 	}
 	if len(parts) == 6 {
@@ -1141,6 +1150,12 @@ func isPlanApplyOp(parts []string) bool {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Group") && (parts[5] == "$add" || parts[5] == "$remove") {
+			return true
+		}
+		if strings.EqualFold(parts[3], "Appointment") && (parts[5] == "$hold" || parts[5] == "$book") {
+			return true
+		}
+		if strings.EqualFold(parts[3], "StructureDefinition") && parts[5] == "$snapshot" {
 			return true
 		}
 		if parts[5] == "$fhirpath" {

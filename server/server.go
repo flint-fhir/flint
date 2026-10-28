@@ -451,8 +451,56 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleActivityDefinitionApply(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Appointment") && parts[4] == "$find" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleAppointmentFind(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Appointment") && parts[4] == "$hold" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleAppointmentHold(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Appointment") && parts[4] == "$book" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleAppointmentBook(w, r)
+					return
+				}
+				if (strings.EqualFold(parts[3], "CapabilityStatement") || strings.EqualFold(parts[3], "metadata")) && parts[4] == "$subset" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCapabilityStatementSubset(w, r)
+					return
+				}
+				if (strings.EqualFold(parts[3], "CapabilityStatement") || strings.EqualFold(parts[3], "metadata")) && parts[4] == "$implements" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCapabilityStatementImplements(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "StructureDefinition") && parts[4] == "$snapshot" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleStructureDefinitionSnapshot(w, r)
+					return
+				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Appointment") && parts[5] == "$hold" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleAppointmentHold(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Appointment") && parts[5] == "$book" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleAppointmentBook(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "StructureDefinition") && parts[5] == "$snapshot" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleStructureDefinitionSnapshot(w, r)
+					return
+				}
 				if parts[5] == "$everything" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -3381,6 +3429,13 @@ func usCoreSupportedProfiles(rt string) []string {
 
 // handleMetadata returns the FHIR CapabilityStatement.
 func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
+	cap := s.buildCapabilityStatement(r)
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(cap)
+}
+
+func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 	s.syncTenantCustomSearchParams(r.Context(), r.PathValue("tenant"))
 
 	interactions := []map[string]string{
@@ -3713,6 +3768,39 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 					"definition": "http://hl7.org/fhir/OperationDefinition/ActivityDefinition-apply",
 				},
 			}
+		case "Appointment":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "find",
+					"definition": "http://fhir.org/guides/argonaut/scheduling/OperationDefinition/appointment-find",
+				},
+				{
+					"name":       "hold",
+					"definition": "http://fhir.org/guides/argonaut/scheduling/OperationDefinition/appointment-hold",
+				},
+				{
+					"name":       "book",
+					"definition": "http://fhir.org/guides/argonaut/scheduling/OperationDefinition/appointment-book",
+				},
+			}
+		case "CapabilityStatement":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "subset",
+					"definition": "http://hl7.org/fhir/OperationDefinition/CapabilityStatement-subset",
+				},
+				{
+					"name":       "implements",
+					"definition": "http://hl7.org/fhir/OperationDefinition/CapabilityStatement-implements",
+				},
+			}
+		case "StructureDefinition":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "snapshot",
+					"definition": "http://hl7.org/fhir/OperationDefinition/StructureDefinition-snapshot",
+				},
+			}
 		}
 		resEntries = append(resEntries, entry)
 	}
@@ -3937,14 +4025,36 @@ func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 						"name":       "merge",
 						"definition": "http://hl7.org/fhir/OperationDefinition/Patient-merge",
 					},
+					{
+						"name":       "find",
+						"definition": "http://fhir.org/guides/argonaut/scheduling/OperationDefinition/appointment-find",
+					},
+					{
+						"name":       "hold",
+						"definition": "http://fhir.org/guides/argonaut/scheduling/OperationDefinition/appointment-hold",
+					},
+					{
+						"name":       "book",
+						"definition": "http://fhir.org/guides/argonaut/scheduling/OperationDefinition/appointment-book",
+					},
+					{
+						"name":       "subset",
+						"definition": "http://hl7.org/fhir/OperationDefinition/CapabilityStatement-subset",
+					},
+					{
+						"name":       "implements",
+						"definition": "http://hl7.org/fhir/OperationDefinition/CapabilityStatement-implements",
+					},
+					{
+						"name":       "snapshot",
+						"definition": "http://hl7.org/fhir/OperationDefinition/StructureDefinition-snapshot",
+					},
 				},
 			},
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(cap)
+	return cap
 }
 
 // protoToJSONWithMeta converts proto bytes to standard flat HL7 FHIR R4 JSON using the registered message type.
