@@ -1975,6 +1975,68 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Patient/{id}/$carin-bb": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "HL7 CARIN Blue Button v2.0.0 Patient/{id}/$carin-bb Consumer-Directed Payer Data Exchange Bundle",
+				"operationId": "patientCarinBBGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "C4BB Bundle (type: searchset) of Patient, Coverage, and ExplanationOfBenefit resources"},
+				},
+			},
+		},
+		"/ExplanationOfBenefit/$carin-bb-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ExplanationOfBenefit"},
+				"summary":     "HL7 CARIN Blue Button v2.0.0 ExplanationOfBenefit/$carin-bb-summary financial benefit utilization summary",
+				"operationId": "eobCarinBBSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing claimCount, totalSubmitted, totalBenefitPaid, totalMemberLiability, and latestExplanationOfBenefit"},
+				},
+			},
+		},
+		"/Encounter/{id}/$ecr-report": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Encounter"},
+				"summary":     "HL7 Electronic Case Reporting (eCR v2.1.1) Encounter/{id}/$ecr-report eICR & Reportability Response generation",
+				"operationId": "encounterECRReportPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing eicrBundle (LOINC 55751-2) and reportabilityResponse Communication (LOINC 88085-6)"},
+				},
+			},
+		},
+		"/PlanDefinition/$ersd-lookup": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"PlanDefinition"},
+				"summary":     "HL7 eCR v2.1.1 PlanDefinition/$ersd-lookup Electronic Reporting and Surveillance Distribution (eRSD) RCTC trigger lookup",
+				"operationId": "planDefinitionERSDLookupGet",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "US Public Health eRSD PlanDefinition resource"},
+				},
+			},
+		},
+		"/Patient/{id}/$decease": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "HL7 Vital Records Death Reporting (VRDR v2.2.0) Patient/{id}/$decease death registration & certificate synthesis",
+				"operationId": "patientVRDRDeceasePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing updated Patient, VRDR Death Certificate Composition (LOINC 64297-5), and Cause of Death Observation (LOINC 69453-9)"},
+				},
+			},
+		},
 		"/Patient/{id}/$everything": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Patient"},

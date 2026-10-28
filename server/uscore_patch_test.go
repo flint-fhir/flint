@@ -5502,3 +5502,122 @@ func TestPlanNetGravitySDOHAndConsentEvaluateWave31(t *testing.T) {
 		t.Fatalf("GET /Consent/$evaluate expected decision=deny and securityLabel=R for Consent/con-deny-w31, got %d: %s", conRec.Code, conRec.Body.String())
 	}
 }
+
+func TestCarinBBeCRAndVRDRDeceaseWave32(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave32-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w32-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w32-1",
+			"active": true,
+			"gender": "male",
+			"birthDate": "1958-11-03",
+			"name": [{"family": "Snow", "given": ["John"]}]
+		}`},
+		{"/Coverage/cov-w32-1", `{
+			"resourceType": "Coverage",
+			"id": "cov-w32-1",
+			"status": "active",
+			"beneficiary": {"reference": "Patient/pat-w32-1"},
+			"payor": [{"display": "CARIN Blue Button Plan"}]
+		}`},
+		{"/Encounter/enc-w32-1", `{
+			"resourceType": "Encounter",
+			"id": "enc-w32-1",
+			"status": "finished",
+			"class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "IMP"},
+			"subject": {"reference": "Patient/pat-w32-1"}
+		}`},
+		{"/Condition/cond-w32-1", `{
+			"resourceType": "Condition",
+			"id": "cond-w32-1",
+			"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+			"code": {"coding": [{"system": "http://snomed.info/sct", "code": "840539006", "display": "Disease caused by 2019-nCoV"}]},
+			"subject": {"reference": "Patient/pat-w32-1"}
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. CARIN Blue Button: GET /Patient/pat-w32-1/$carin-bb & GET /ExplanationOfBenefit/$carin-bb-summary
+	cbbReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w32-1/$carin-bb", nil)
+	cbbRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cbbRec, cbbReq)
+	if cbbRec.Code != http.StatusOK ||
+		!strings.Contains(cbbRec.Body.String(), "C4BB-Bundle") ||
+		!strings.Contains(cbbRec.Body.String(), "C4BB-Coverage") ||
+		!strings.Contains(cbbRec.Body.String(), "C4BB-ExplanationOfBenefit") {
+		t.Fatalf("GET /Patient/pat-w32-1/$carin-bb expected C4BB-Bundle with C4BB-Coverage and C4BB-ExplanationOfBenefit, got %d: %s", cbbRec.Code, cbbRec.Body.String())
+	}
+
+	cbbSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/ExplanationOfBenefit/$carin-bb-summary?patient=Patient/pat-w32-1", nil)
+	cbbSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cbbSumRec, cbbSumReq)
+	if cbbSumRec.Code != http.StatusOK ||
+		!strings.Contains(cbbSumRec.Body.String(), `"totalBenefitPaid"`) ||
+		!strings.Contains(cbbSumRec.Body.String(), `"totalMemberLiability"`) {
+		t.Fatalf("GET /ExplanationOfBenefit/$carin-bb-summary expected totalBenefitPaid and totalMemberLiability, got %d: %s", cbbSumRec.Code, cbbSumRec.Body.String())
+	}
+
+	// 2. HL7 Public Health eCR: POST /Encounter/enc-w32-1/$ecr-report & GET /PlanDefinition/$ersd-lookup
+	ecrReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Encounter/enc-w32-1/$ecr-report", nil)
+	ecrRec := httptest.NewRecorder()
+	pgH.ServeHTTP(ecrRec, ecrReq)
+	if ecrRec.Code != http.StatusOK ||
+		!strings.Contains(ecrRec.Body.String(), `"55751-2"`) ||
+		!strings.Contains(ecrRec.Body.String(), `"88085-6"`) ||
+		!strings.Contains(ecrRec.Body.String(), `"Condition/cond-w32-1"`) {
+		t.Fatalf("POST /Encounter/enc-w32-1/$ecr-report expected eICR Bundle (55751-2), RR Communication (88085-6), and Condition/cond-w32-1, got %d: %s", ecrRec.Code, ecrRec.Body.String())
+	}
+
+	ersdReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/PlanDefinition/$ersd-lookup", nil)
+	ersdRec := httptest.NewRecorder()
+	pgH.ServeHTTP(ersdRec, ersdReq)
+	if ersdRec.Code != http.StatusOK || !strings.Contains(ersdRec.Body.String(), "ersd-rctc-plan-1") {
+		t.Fatalf("GET /PlanDefinition/$ersd-lookup expected ersd-rctc-plan-1, got %d: %s", ersdRec.Code, ersdRec.Body.String())
+	}
+
+	// 3. HL7 VRDR Death Reporting: POST /Patient/pat-w32-1/$decease
+	decBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "deceasedDateTime", "valueDateTime": "2026-03-01T14:30:00Z"},
+			{"name": "causeCode", "valueCode": "410429000"}
+		]
+	}`
+	decReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/pat-w32-1/$decease", strings.NewReader(decBody))
+	decReq.Header.Set("Content-Type", "application/fhir+json")
+	decRec := httptest.NewRecorder()
+	pgH.ServeHTTP(decRec, decReq)
+	if decRec.Code != http.StatusOK ||
+		!strings.Contains(decRec.Body.String(), `"deceasedDateTime":"2026-03-01T14:30:00Z"`) ||
+		!strings.Contains(decRec.Body.String(), `"64297-5"`) ||
+		!strings.Contains(decRec.Body.String(), `"69453-9"`) {
+		t.Fatalf("POST /Patient/pat-w32-1/$decease expected deceasedDateTime, VRDR Death Certificate (64297-5), and Cause of Death (69453-9), got %d: %s", decRec.Code, decRec.Body.String())
+	}
+}

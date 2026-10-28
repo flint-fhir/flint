@@ -690,6 +690,35 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleConsentEvaluate(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$carin-bb" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$carin-bb")
+					s.handleCarinBlueButton(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ExplanationOfBenefit") && parts[4] == "$carin-bb-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$carin-bb-summary")
+					s.handleCarinBlueButton(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Encounter") && parts[4] == "$ecr-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$ecr-report")
+					s.handlePublicHealthECR(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "PlanDefinition") && parts[4] == "$ersd-lookup" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$ersd-lookup")
+					s.handlePublicHealthECR(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$decease" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientVRDRDecease(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -698,6 +727,26 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$carin-bb" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$carin-bb")
+					s.handleCarinBlueButton(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Encounter") && parts[5] == "$ecr-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$ecr-report")
+					s.handlePublicHealthECR(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[5] == "$decease" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientVRDRDecease(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$sdoh-summary" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4000,6 +4049,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "sdoh-summary",
 					"definition": "http://hl7.org/fhir/us/sdoh-clinicalcare/OperationDefinition/sdoh-summary",
 				},
+				{
+					"name":       "carin-bb",
+					"definition": "http://hl7.org/fhir/us/carin-bb/OperationDefinition/carin-bb",
+				},
+				{
+					"name":       "decease",
+					"definition": "http://hl7.org/fhir/us/vrdr/OperationDefinition/Patient-decease",
+				},
 			}
 		case "PractitionerRole":
 			entry["operation"] = []map[string]string{
@@ -4043,6 +4100,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "discharge",
 					"definition": "http://flint.fhir.org/OperationDefinition/Encounter-discharge",
+				},
+				{
+					"name":       "ecr-report",
+					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/Encounter-ecr-report",
 				},
 			}
 		case "Composition":
@@ -4360,6 +4421,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "data-requirements",
 					"definition": "http://hl7.org/fhir/OperationDefinition/PlanDefinition-data-requirements",
 				},
+				{
+					"name":       "ersd-lookup",
+					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/ersd-lookup",
+				},
 			}
 		case "ActivityDefinition":
 			entry["operation"] = []map[string]string{
@@ -4505,6 +4570,13 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "evaluate",
 					"definition": "http://flint.fhir.org/OperationDefinition/Consent-evaluate",
+				},
+			}
+		case "ExplanationOfBenefit":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "carin-bb-summary",
+					"definition": "http://hl7.org/fhir/us/carin-bb/OperationDefinition/carin-bb-summary",
 				},
 			}
 		}
@@ -4890,6 +4962,26 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "sdoh-summary",
 						"definition": "http://hl7.org/fhir/us/sdoh-clinicalcare/OperationDefinition/sdoh-summary",
+					},
+					{
+						"name":       "carin-bb",
+						"definition": "http://hl7.org/fhir/us/carin-bb/OperationDefinition/carin-bb",
+					},
+					{
+						"name":       "carin-bb-summary",
+						"definition": "http://hl7.org/fhir/us/carin-bb/OperationDefinition/carin-bb-summary",
+					},
+					{
+						"name":       "ecr-report",
+						"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/Encounter-ecr-report",
+					},
+					{
+						"name":       "ersd-lookup",
+						"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/ersd-lookup",
+					},
+					{
+						"name":       "decease",
+						"definition": "http://hl7.org/fhir/us/vrdr/OperationDefinition/Patient-decease",
 					},
 				},
 			},
