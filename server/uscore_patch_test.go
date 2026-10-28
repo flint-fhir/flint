@@ -5092,3 +5092,147 @@ func TestCompositionDocumentATRGroupAndDrugInteractionsWave28(t *testing.T) {
 		t.Fatalf("GET /MedicationRequest/medreq-w28-1/$check-interactions expected interaction-detected with DALG DetectedIssue, got %d: %s", intRec.Code, intRec.Body.String())
 	}
 }
+
+func TestDaVinciNotificationsIHEPixAndLabEvaluateWave29(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave29-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w29-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w29-1",
+			"active": true,
+			"gender": "male",
+			"birthDate": "1964-07-12",
+			"identifier": [
+				{"system": "http://hospital.example.org/mrn", "value": "MRN-W29-001"},
+				{"system": "http://hl7.org/fhir/sid/us-ssn", "value": "999-29-0001"}
+			],
+			"name": [{"family": "Virchow", "given": ["Rudolf"]}]
+		}`},
+		{"/ServiceRequest/sr-w29-1", `{
+			"resourceType": "ServiceRequest",
+			"id": "sr-w29-1",
+			"status": "active",
+			"intent": "order",
+			"code": {"coding": [{"system": "http://loinc.org", "code": "2823-3", "display": "Potassium [Moles/volume] in Serum or Plasma"}]},
+			"subject": {"reference": "Patient/pat-w29-1"}
+		}`},
+		{"/Observation/obs-k-crit-w29", `{
+			"resourceType": "Observation",
+			"id": "obs-k-crit-w29",
+			"status": "final",
+			"code": {"coding": [{"system": "http://loinc.org", "code": "2823-3", "display": "Potassium [Moles/volume] in Serum or Plasma"}]},
+			"subject": {"reference": "Patient/pat-w29-1"},
+			"valueQuantity": {"value": 6.4, "unit": "mmol/L", "system": "http://unitsofmeasure.org", "code": "mmol/L"},
+			"interpretation": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation", "code": "HH", "display": "Critical high"}]}]
+		}`},
+		{"/DiagnosticReport/dr-w29-1", `{
+			"resourceType": "DiagnosticReport",
+			"id": "dr-w29-1",
+			"status": "final",
+			"code": {"coding": [{"system": "http://loinc.org", "code": "24323-8", "display": "Comprehensive metabolic 2000 panel"}]},
+			"subject": {"reference": "Patient/pat-w29-1"},
+			"result": [{"reference": "Observation/obs-k-crit-w29"}]
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. POST /$process-notification (Da Vinci Unsolicited Notification Bundle)
+	notifBody := `{
+		"resourceType": "Bundle",
+		"id": "notif-admit-w29",
+		"type": "history",
+		"entry": [
+			{
+				"fullUrl": "MessageHeader/mh-w29-1",
+				"resource": {
+					"resourceType": "MessageHeader",
+					"id": "mh-w29-1",
+					"eventCoding": {
+						"system": "http://hl7.org/fhir/us/davinci-notifications/CodeSystem/notification-event",
+						"code": "notification-admit",
+						"display": "Notification Admit"
+					},
+					"source": {"endpoint": "http://ehr.example.org/fhir"},
+					"focus": [{"reference": "Encounter/enc-admit-w29"}]
+				}
+			},
+			{
+				"fullUrl": "Encounter/enc-admit-w29",
+				"resource": {
+					"resourceType": "Encounter",
+					"id": "enc-admit-w29",
+					"status": "in-progress",
+					"class": {"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "IMP", "display": "inpatient encounter"},
+					"subject": {"reference": "Patient/pat-w29-1"}
+				}
+			}
+		]
+	}`
+	notifReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/$process-notification", strings.NewReader(notifBody))
+	notifReq.Header.Set("Content-Type", "application/fhir+json")
+	notifRec := httptest.NewRecorder()
+	pgH.ServeHTTP(notifRec, notifReq)
+	if notifRec.Code != http.StatusOK ||
+		!strings.Contains(notifRec.Body.String(), `"type":"message"`) ||
+		!strings.Contains(notifRec.Body.String(), `"code":"ok"`) ||
+		!strings.Contains(notifRec.Body.String(), `"Encounter/enc-admit-w29"`) {
+		t.Fatalf("POST /$process-notification expected message Bundle with code=ok and persisted Encounter/enc-admit-w29, got %d: %s", notifRec.Code, notifRec.Body.String())
+	}
+
+	// 2. GET /Patient/$ihe-pix?sourceIdentifier=http://hospital.example.org/mrn|MRN-W29-001&targetSystem=http://hl7.org/fhir/sid/us-ssn
+	pixReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/$ihe-pix?sourceIdentifier=http://hospital.example.org/mrn|MRN-W29-001&targetSystem=http://hl7.org/fhir/sid/us-ssn", nil)
+	pixRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pixRec, pixReq)
+	if pixRec.Code != http.StatusOK ||
+		!strings.Contains(pixRec.Body.String(), `"Patient/pat-w29-1"`) ||
+		!strings.Contains(pixRec.Body.String(), `"999-29-0001"`) {
+		t.Fatalf("GET /Patient/$ihe-pix expected Parameters with Patient/pat-w29-1 and SSN 999-29-0001, got %d: %s", pixRec.Code, pixRec.Body.String())
+	}
+
+	// 3. POST /ServiceRequest/sr-w29-1/$collect-specimen
+	specReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/ServiceRequest/sr-w29-1/$collect-specimen", nil)
+	specRec := httptest.NewRecorder()
+	pgH.ServeHTTP(specRec, specReq)
+	if specRec.Code != http.StatusOK ||
+		!strings.Contains(specRec.Body.String(), `"resourceType":"Specimen"`) ||
+		!strings.Contains(specRec.Body.String(), `"ACC-SR-W29-1"`) {
+		t.Fatalf("POST /ServiceRequest/sr-w29-1/$collect-specimen expected Specimen with ACC-SR-W29-1, got %d: %s", specRec.Code, specRec.Body.String())
+	}
+
+	// 4. GET /DiagnosticReport/dr-w29-1/$evaluate
+	drEvalReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/DiagnosticReport/dr-w29-1/$evaluate", nil)
+	drEvalRec := httptest.NewRecorder()
+	pgH.ServeHTTP(drEvalRec, drEvalReq)
+	if drEvalRec.Code != http.StatusOK ||
+		!strings.Contains(drEvalRec.Body.String(), `"valueCode":"critical-alert"`) ||
+		!strings.Contains(drEvalRec.Body.String(), `"code":"LAB"`) ||
+		!strings.Contains(drEvalRec.Body.String(), `"Observation/obs-k-crit-w29"`) {
+		t.Fatalf("GET /DiagnosticReport/dr-w29-1/$evaluate expected critical-alert Parameters with LAB DetectedIssue, got %d: %s", drEvalRec.Code, drEvalRec.Body.String())
+	}
+}

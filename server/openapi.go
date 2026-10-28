@@ -3261,6 +3261,131 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/$process-notification": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"MessageHeader", "Bundle"},
+				"summary":     "Process an HL7 Da Vinci Unsolicited Notification Bundle (admit, discharge, transfer, order)",
+				"operationId": "processNotificationSystemPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Acknowledgment Bundle (type: message) with response MessageHeader (code: ok)"},
+				},
+			},
+		},
+		"/MessageHeader/$process-notification": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"MessageHeader"},
+				"summary":     "Process an HL7 Da Vinci Unsolicited Notification Bundle on MessageHeader (POST)",
+				"operationId": "processNotificationTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Acknowledgment Bundle (type: message) with response MessageHeader (code: ok)"},
+				},
+			},
+		},
+		"/Patient/$ihe-pix": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "IHE PIXm (ITI-83) Patient Identifier Cross-Reference Lookup by sourceIdentifier and optional targetSystem",
+				"operationId": "patientIHEPixTypeGet",
+				"parameters": []map[string]any{
+					{"name": "sourceIdentifier", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "targetSystem", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing targetId (Patient reference) and targetIdentifier entries"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "IHE PIXm (ITI-83) Patient Identifier Cross-Reference Lookup (POST)",
+				"operationId": "patientIHEPixTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing targetId (Patient reference) and targetIdentifier entries"},
+				},
+			},
+		},
+		"/Patient/{id}/$ihe-pix": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "IHE PIXm (ITI-83) Patient Identifier Cross-Reference Lookup for Patient/{id}",
+				"operationId": "patientIHEPixInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "targetSystem", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing targetId (Patient reference) and targetIdentifier entries"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "IHE PIXm (ITI-83) Patient Identifier Cross-Reference Lookup for Patient/{id} (POST)",
+				"operationId": "patientIHEPixInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing targetId (Patient reference) and targetIdentifier entries"},
+				},
+			},
+		},
+		"/ServiceRequest/{id}/$collect-specimen": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ServiceRequest", "Specimen"},
+				"summary":     "Accession and persist a US Core Specimen linked to laboratory order ServiceRequest/{id}",
+				"operationId": "serviceRequestCollectSpecimenPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted US Core Specimen resource with accessionIdentifier"},
+				},
+			},
+		},
+		"/DiagnosticReport/$evaluate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"DiagnosticReport"},
+				"summary":     "Evaluate a DiagnosticReport and its linked Observation results for abnormal and critical panic values",
+				"operationId": "diagnosticReportEvaluateTypeGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, abnormalCount, criticalCount, and DetectedIssue alerts"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"DiagnosticReport"},
+				"summary":     "Evaluate a DiagnosticReport and its linked Observation results (POST)",
+				"operationId": "diagnosticReportEvaluateTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, abnormalCount, criticalCount, and DetectedIssue alerts"},
+				},
+			},
+		},
+		"/DiagnosticReport/{id}/$evaluate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"DiagnosticReport"},
+				"summary":     "Evaluate stored DiagnosticReport/{id} and its linked Observation results for abnormal and critical panic values",
+				"operationId": "diagnosticReportEvaluateInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, abnormalCount, criticalCount, and DetectedIssue alerts"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"DiagnosticReport"},
+				"summary":     "Evaluate stored DiagnosticReport/{id} and its linked Observation results (POST)",
+				"operationId": "diagnosticReportEvaluateInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, abnormalCount, criticalCount, and DetectedIssue alerts"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()
