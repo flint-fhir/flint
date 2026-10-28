@@ -1688,6 +1688,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /PlanDefinition/$ersd-lookup to return ersd-rctc-plan-1, got %d: %s", respERSD.StatusCode, string(bERSD))
 			}
 		}
+		if err == nil {
+			respMC, bMC, errMC := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$mcode-summary", "", nil, nil)
+			respFL, bFL, errFL := doReq(http.MethodGet, basePath+"/MedicationKnowledge/$formulary-lookup?code=860975", "", nil, nil)
+			if errMC != nil || respMC.StatusCode != http.StatusOK || !strings.Contains(string(bMC), "mcode-patient-bundle") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-summary to return mcode-patient-bundle, got %d: %s", respMC.StatusCode, string(bMC))
+			} else if errFL != nil || respFL.StatusCode != http.StatusOK || !strings.Contains(string(bFL), "usdf-FormularyDrug") {
+				err = fmt.Errorf("expected GET /MedicationKnowledge/$formulary-lookup to return usdf-FormularyDrug, got %d: %s", respFL.StatusCode, string(bFL))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

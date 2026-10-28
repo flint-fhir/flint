@@ -316,6 +316,12 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				s.handleCDSServiceInvoke(w, r)
 				return
 			}
+			if len(parts) == 4 && parts[0] == "fhir" && parts[1] == "r4" && parts[3] == "$iti-65" && r.Method == http.MethodPost {
+				r.SetPathValue("tenant", parts[2])
+				r.SetPathValue("op", "$iti-65")
+				s.handleIHEMHDExchange(w, r)
+				return
+			}
 			if len(parts) == 5 && parts[0] == "fhir" && parts[1] == "r4" {
 				if isGetOrHead && parts[4] == "_history" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
@@ -719,6 +725,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handlePatientVRDRDecease(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$mcode-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$mcode-summary")
+					s.handleMCODEOncology(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Condition") && parts[4] == "$stage-cancer" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$stage-cancer")
+					s.handleMCODEOncology(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "MedicationKnowledge") && parts[4] == "$formulary-lookup" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$formulary-lookup")
+					s.handleDaVinciDrugFormulary(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Coverage") && parts[4] == "$formulary-coverage" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$formulary-coverage")
+					s.handleDaVinciDrugFormulary(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && parts[4] == "$iti-65" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$iti-65")
+					s.handleIHEMHDExchange(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "DocumentReference") && parts[4] == "$iti-67" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$iti-67")
+					s.handleIHEMHDExchange(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -727,6 +769,27 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$mcode-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$mcode-summary")
+					s.handleMCODEOncology(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Condition") && parts[5] == "$stage-cancer" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$stage-cancer")
+					s.handleMCODEOncology(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Coverage") && parts[5] == "$formulary-coverage" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$formulary-coverage")
+					s.handleDaVinciDrugFormulary(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$carin-bb" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4057,6 +4120,24 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "decease",
 					"definition": "http://hl7.org/fhir/us/vrdr/OperationDefinition/Patient-decease",
 				},
+				{
+					"name":       "mcode-summary",
+					"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/Patient-mcode-summary",
+				},
+			}
+		case "Condition":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "stage-cancer",
+					"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/Condition-stage-cancer",
+				},
+			}
+		case "Coverage":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "formulary-coverage",
+					"definition": "http://hl7.org/fhir/us/davinci-drug-formulary/OperationDefinition/Coverage-formulary-coverage",
+				},
 			}
 		case "PractitionerRole":
 			entry["operation"] = []map[string]string{
@@ -4118,6 +4199,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "docref",
 					"definition": "http://hl7.org/fhir/us/core/OperationDefinition/docref",
+				},
+				{
+					"name":       "iti-67",
+					"definition": "https://profiles.ihe.net/ITI/MHD/OperationDefinition/IHE.MHD.FindDocumentReferences",
 				},
 			}
 		case "QuestionnaireResponse":
@@ -4290,6 +4375,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "docref",
 					"definition": "http://hl7.org/fhir/us/core/OperationDefinition/docref",
+				},
+				{
+					"name":       "iti-67",
+					"definition": "https://profiles.ihe.net/ITI/MHD/OperationDefinition/IHE.MHD.FindDocumentReferences",
 				},
 			}
 		case "Questionnaire":
@@ -4556,6 +4645,17 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "lookup",
 					"definition": "http://hl7.org/fhir/us/davinci-drug-formulary/OperationDefinition/MedicationKnowledge-lookup",
+				},
+				{
+					"name":       "formulary-lookup",
+					"definition": "http://hl7.org/fhir/us/davinci-drug-formulary/OperationDefinition/MedicationKnowledge-formulary-lookup",
+				},
+			}
+		case "Bundle":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "iti-65",
+					"definition": "https://profiles.ihe.net/ITI/MHD/OperationDefinition/IHE.MHD.ProvideBundle",
 				},
 			}
 		case "HealthcareService":
@@ -4982,6 +5082,30 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "decease",
 						"definition": "http://hl7.org/fhir/us/vrdr/OperationDefinition/Patient-decease",
+					},
+					{
+						"name":       "mcode-summary",
+						"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/Patient-mcode-summary",
+					},
+					{
+						"name":       "stage-cancer",
+						"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/Condition-stage-cancer",
+					},
+					{
+						"name":       "formulary-lookup",
+						"definition": "http://hl7.org/fhir/us/davinci-drug-formulary/OperationDefinition/MedicationKnowledge-formulary-lookup",
+					},
+					{
+						"name":       "formulary-coverage",
+						"definition": "http://hl7.org/fhir/us/davinci-drug-formulary/OperationDefinition/Coverage-formulary-coverage",
+					},
+					{
+						"name":       "iti-65",
+						"definition": "https://profiles.ihe.net/ITI/MHD/OperationDefinition/IHE.MHD.ProvideBundle",
+					},
+					{
+						"name":       "iti-67",
+						"definition": "https://profiles.ihe.net/ITI/MHD/OperationDefinition/IHE.MHD.FindDocumentReferences",
 					},
 				},
 			},

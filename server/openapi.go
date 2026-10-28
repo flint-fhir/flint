@@ -2037,6 +2037,84 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Patient/{id}/$mcode-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient"},
+				"summary":     "HL7 mCODE v3.0.0 Patient/{id}/$mcode-summary Oncology Patient Summary Bundle",
+				"operationId": "patientMCODESummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "mCODE Patient Bundle (collection) containing mcode-cancer-patient, mcode-primary-cancer-condition, and mcode-tnm-clinical-stage-group resources"},
+				},
+			},
+		},
+		"/Condition/{id}/$stage-cancer": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Condition"},
+				"summary":     "HL7 mCODE v3.0.0 Condition/{id}/$stage-cancer AJCC TNM clinical cancer staging operation",
+				"operationId": "conditionStageCancerPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing staged Condition and mcode-tnm-clinical-stage-group Observation (LOINC 21908-9)"},
+				},
+			},
+		},
+		"/MedicationKnowledge/$formulary-lookup": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"MedicationKnowledge"},
+				"summary":     "HL7 Da Vinci PDex US Drug Formulary v2.0.1 MedicationKnowledge/$formulary-lookup drug tier & copay lookup",
+				"operationId": "medicationKnowledgeFormularyLookupGet",
+				"parameters": []map[string]any{
+					{"name": "code", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "planId", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing drugTier, priorAuthorization, stepTherapyLimit, quantityLimit, copay, and usdf-FormularyDrug"},
+				},
+			},
+		},
+		"/Coverage/{id}/$formulary-coverage": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Coverage"},
+				"summary":     "HL7 Da Vinci PDex US Drug Formulary v2.0.1 Coverage/{id}/$formulary-coverage member benefit evaluation",
+				"operationId": "coverageFormularyCoverageGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "code", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing covered status, drugTier, copay, and utilization management flags"},
+				},
+			},
+		},
+		"/Bundle/$iti-65": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Bundle"},
+				"summary":     "IHE MHD v4.2.1 ITI-65 Provide Document Bundle transaction",
+				"operationId": "bundleIHEMHDITI65Post",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "IHE.MHD.Minimal.ProvideBundleResponse transaction-response Bundle"},
+				},
+			},
+		},
+		"/DocumentReference/$iti-67": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"DocumentReference"},
+				"summary":     "IHE MHD v4.2.1 ITI-67 Find Document References query",
+				"operationId": "documentReferenceIHEMHDITI67Get",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "status", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "IHE.MHD.FindDocumentReferencesComprehensiveResponseMessage searchset Bundle"},
+				},
+			},
+		},
 		"/Patient/{id}/$everything": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Patient"},

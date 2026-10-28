@@ -5621,3 +5621,151 @@ func TestCarinBBeCRAndVRDRDeceaseWave32(t *testing.T) {
 		t.Fatalf("POST /Patient/pat-w32-1/$decease expected deceasedDateTime, VRDR Death Certificate (64297-5), and Cause of Death (69453-9), got %d: %s", decRec.Code, decRec.Body.String())
 	}
 }
+
+func TestMCODEFormularyAndIHEMHDWave33(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave33-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w33-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w33-1",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1967-04-12",
+			"name": [{"family": "Curie", "given": ["Marie"]}]
+		}`},
+		{"/Condition/cond-w33-1", `{
+			"resourceType": "Condition",
+			"id": "cond-w33-1",
+			"clinicalStatus": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]},
+			"code": {"coding": [{"system": "http://snomed.info/sct", "code": "254837009", "display": "Malignant neoplasm of breast"}]},
+			"subject": {"reference": "Patient/pat-w33-1"}
+		}`},
+		{"/Coverage/cov-w33-1", `{
+			"resourceType": "Coverage",
+			"id": "cov-w33-1",
+			"status": "active",
+			"beneficiary": {"reference": "Patient/pat-w33-1"},
+			"payor": [{"display": "USDF Gold Plan"}]
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. HL7 mCODE Oncology: POST /Condition/cond-w33-1/$stage-cancer & GET /Patient/pat-w33-1/$mcode-summary
+	stageBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "tCategory", "valueString": "cT3"},
+			{"name": "nCategory", "valueString": "cN2"},
+			{"name": "mCategory", "valueString": "cM0"}
+		]
+	}`
+	stageReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Condition/cond-w33-1/$stage-cancer", strings.NewReader(stageBody))
+	stageReq.Header.Set("Content-Type", "application/fhir+json")
+	stageRec := httptest.NewRecorder()
+	pgH.ServeHTTP(stageRec, stageReq)
+	if stageRec.Code != http.StatusOK ||
+		!strings.Contains(stageRec.Body.String(), `"Stage IIIB"`) ||
+		!strings.Contains(stageRec.Body.String(), `"21908-9"`) ||
+		!strings.Contains(stageRec.Body.String(), "mcode-tnm-clinical-stage-group") {
+		t.Fatalf("POST /Condition/cond-w33-1/$stage-cancer expected Stage IIIB and mcode-tnm-clinical-stage-group (21908-9), got %d: %s", stageRec.Code, stageRec.Body.String())
+	}
+
+	mcodeReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w33-1/$mcode-summary", nil)
+	mcodeRec := httptest.NewRecorder()
+	pgH.ServeHTTP(mcodeRec, mcodeReq)
+	if mcodeRec.Code != http.StatusOK ||
+		!strings.Contains(mcodeRec.Body.String(), "mcode-patient-bundle") ||
+		!strings.Contains(mcodeRec.Body.String(), "mcode-primary-cancer-condition") ||
+		!strings.Contains(mcodeRec.Body.String(), `"Stage IIIB"`) {
+		t.Fatalf("GET /Patient/pat-w33-1/$mcode-summary expected mcode-patient-bundle with Stage IIIB, got %d: %s", mcodeRec.Code, mcodeRec.Body.String())
+	}
+
+	// 2. HL7 Da Vinci PDex US Drug Formulary: GET /MedicationKnowledge/$formulary-lookup & GET /Coverage/cov-w33-1/$formulary-coverage
+	flReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/MedicationKnowledge/$formulary-lookup?code=1049502&planId=usdf-platinum-2026", nil)
+	flRec := httptest.NewRecorder()
+	pgH.ServeHTTP(flRec, flReq)
+	if flRec.Code != http.StatusOK ||
+		!strings.Contains(flRec.Body.String(), `"valueCode":"5-specialty"`) ||
+		!strings.Contains(flRec.Body.String(), "usdf-FormularyDrug") {
+		t.Fatalf("GET /MedicationKnowledge/$formulary-lookup expected 5-specialty and usdf-FormularyDrug, got %d: %s", flRec.Code, flRec.Body.String())
+	}
+
+	fcReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Coverage/cov-w33-1/$formulary-coverage?code=860975", nil)
+	fcRec := httptest.NewRecorder()
+	pgH.ServeHTTP(fcRec, fcReq)
+	if fcRec.Code != http.StatusOK ||
+		!strings.Contains(fcRec.Body.String(), `"valueCode":"3-preferred-brand"`) ||
+		!strings.Contains(fcRec.Body.String(), `"valueBoolean":true`) {
+		t.Fatalf("GET /Coverage/cov-w33-1/$formulary-coverage expected 3-preferred-brand and covered=true, got %d: %s", fcRec.Code, fcRec.Body.String())
+	}
+
+	// 3. IHE MHD v4.2.1: POST /Bundle/$iti-65 (Provide Document Bundle) & GET /DocumentReference/$iti-67 (Find Document References)
+	iti65Body := `{
+		"resourceType": "Bundle",
+		"type": "transaction",
+		"entry": [
+			{
+				"resource": {
+					"resourceType": "List",
+					"id": "mhd-sub-w33-1",
+					"status": "current",
+					"mode": "working",
+					"title": "IHE MHD SubmissionSet"
+				}
+			},
+			{
+				"resource": {
+					"resourceType": "DocumentReference",
+					"id": "mhd-doc-w33-1",
+					"status": "current",
+					"subject": {"reference": "Patient/pat-w33-1"},
+					"content": [{"attachment": {"contentType": "application/pdf", "url": "Binary/mhd-bin-w33-1"}}]
+				}
+			}
+		]
+	}`
+	iti65Req := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Bundle/$iti-65", strings.NewReader(iti65Body))
+	iti65Req.Header.Set("Content-Type", "application/fhir+json")
+	iti65Rec := httptest.NewRecorder()
+	pgH.ServeHTTP(iti65Rec, iti65Req)
+	if iti65Rec.Code != http.StatusOK ||
+		!strings.Contains(iti65Rec.Body.String(), "IHE.MHD.Minimal.ProvideBundleResponse") ||
+		!strings.Contains(iti65Rec.Body.String(), "DocumentReference/mhd-doc-w33-1") {
+		t.Fatalf("POST /Bundle/$iti-65 expected ProvideBundleResponse with DocumentReference/mhd-doc-w33-1, got %d: %s", iti65Rec.Code, iti65Rec.Body.String())
+	}
+
+	iti67Req := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/DocumentReference/$iti-67?patient=Patient/pat-w33-1&status=current", nil)
+	iti67Rec := httptest.NewRecorder()
+	pgH.ServeHTTP(iti67Rec, iti67Req)
+	if iti67Rec.Code != http.StatusOK ||
+		!strings.Contains(iti67Rec.Body.String(), "IHE.MHD.FindDocumentReferencesComprehensiveResponseMessage") ||
+		!strings.Contains(iti67Rec.Body.String(), `"mhd-doc-w33-1"`) {
+		t.Fatalf("GET /DocumentReference/$iti-67 expected FindDocumentReferencesComprehensiveResponseMessage with mhd-doc-w33-1, got %d: %s", iti67Rec.Code, iti67Rec.Body.String())
+	}
+}
