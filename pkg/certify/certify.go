@@ -1552,6 +1552,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 			respSubCap, bSubCap, errSubCap := doReq(http.MethodGet, basePath+"/CapabilityStatement/$subset?resource=Patient,Observation", "", nil, nil)
 			respImpl, bImpl, errImpl := doReq(http.MethodGet, basePath+"/CapabilityStatement/$implements?canonical=http://hl7.org/fhir/us/core/CapabilityStatement/us-core-server", "", nil, nil)
 			respSnap, bSnap, errSnap := doReq(http.MethodGet, basePath+"/StructureDefinition/$snapshot?url=http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient", "", nil, nil)
+			respPrefID, bPrefID, errPrefID := doReq(http.MethodGet, basePath+"/NamingSystem/$preferred-id?id=2.16.840.1.113883.6.1&type=uri", "", nil, nil)
 			if errLN != nil || respLN.StatusCode != http.StatusOK || !strings.Contains(string(bLN), `"cert-obs-prov-1"`) {
 				err = fmt.Errorf("expected Observation/$lastn with max=1 to return latest heart rate cert-obs-prov-1, got %d: %s", respLN.StatusCode, string(bLN))
 			} else if errSt != nil || respSt.StatusCode != http.StatusOK || !strings.Contains(string(bSt), `"statistic"`) || !strings.Contains(string(bSt), `"average"`) {
@@ -1562,10 +1563,12 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected CapabilityStatement/$implements to return valueBoolean:true, got %d: %s", respImpl.StatusCode, string(bImpl))
 			} else if errSnap != nil || respSnap.StatusCode != http.StatusOK || !strings.Contains(string(bSnap), `"snapshot"`) || !strings.Contains(string(bSnap), `"Patient.identifier"`) {
 				err = fmt.Errorf("expected StructureDefinition/$snapshot to return snapshot with Patient.identifier, got %d: %s", respSnap.StatusCode, string(bSnap))
+			} else if errPrefID != nil || respPrefID.StatusCode != http.StatusOK || !strings.Contains(string(bPrefID), `"http://loinc.org"`) {
+				err = fmt.Errorf("expected NamingSystem/$preferred-id for OID 2.16.840.1.113883.6.1 to return http://loinc.org, got %d: %s", respPrefID.StatusCode, string(bPrefID))
 			}
 		}
 	}
-	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
+	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/AuditEvent?_count=20", "", nil, nil)
