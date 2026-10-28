@@ -453,10 +453,21 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleClosure(w, r)
 					return
 				}
-				if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition")) && parts[4] == "$data-requirements" {
+				if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "Questionnaire")) && parts[4] == "$data-requirements" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
 					s.handleDataRequirements(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "CoverageEligibilityRequest") && parts[4] == "$submit" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCoverageEligibilitySubmit(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "GraphDefinition") && parts[4] == "$graph" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", "GraphDefinition")
+					s.handleResourceGraph(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "PlanDefinition") && parts[4] == "$apply" {
@@ -637,11 +648,17 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleSubscriptionEvents(w, r)
 					return
 				}
-				if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition")) && parts[5] == "$data-requirements" {
+				if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "Questionnaire")) && parts[5] == "$data-requirements" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
 					r.SetPathValue("id", parts[4])
 					s.handleDataRequirements(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "CoverageEligibilityRequest") && parts[5] == "$submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCoverageEligibilitySubmit(w, r)
 					return
 				}
 				if parts[5] == "$fhirpath" && !strings.HasPrefix(parts[3], "$") {
@@ -3758,6 +3775,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "package",
 					"definition": "http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/questionnaire-package",
 				},
+				{
+					"name":       "data-requirements",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Questionnaire-data-requirements",
+				},
 			}
 		case "Measure":
 			entry["operation"] = []map[string]string{
@@ -3857,6 +3878,24 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "apply",
 					"definition": "http://hl7.org/fhir/OperationDefinition/ActivityDefinition-apply",
+				},
+				{
+					"name":       "data-requirements",
+					"definition": "http://hl7.org/fhir/OperationDefinition/ActivityDefinition-data-requirements",
+				},
+			}
+		case "CoverageEligibilityRequest":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "submit",
+					"definition": "http://hl7.org/fhir/OperationDefinition/CoverageEligibilityRequest-submit",
+				},
+			}
+		case "GraphDefinition":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "graph",
+					"definition": "http://hl7.org/fhir/OperationDefinition/Resource-graph",
 				},
 			}
 		case "Appointment":

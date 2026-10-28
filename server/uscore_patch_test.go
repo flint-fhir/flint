@@ -4099,3 +4099,183 @@ func TestResourceConvertListFindAndChargeItemApplyWave21(t *testing.T) {
 		t.Fatalf("POST /ChargeItem/$apply expected priceOverride=189 USD and status=billable, got %d: %s", ciRec.Code, ciRec.Body.String())
 	}
 }
+
+func TestCoverageEligibilityDataReqAndGraphDefWave22(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave22-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// Seed Patient, Organization, Coverage, and Condition
+	patJSON := `{
+		"resourceType": "Patient",
+		"id": "pat-w22-1",
+		"active": true,
+		"name": [{"family": "Eligibility", "given": ["Grace"]}],
+		"gender": "female",
+		"birthDate": "1980-08-20"
+	}`
+	putPatReq := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/Patient/pat-w22-1", strings.NewReader(patJSON))
+	putPatReq.Header.Set("Content-Type", "application/fhir+json")
+	putPatRec := httptest.NewRecorder()
+	pgH.ServeHTTP(putPatRec, putPatReq)
+	if putPatRec.Code != http.StatusOK && putPatRec.Code != http.StatusCreated {
+		t.Fatalf("PUT /Patient/pat-w22-1 expected 200/201, got %d: %s", putPatRec.Code, putPatRec.Body.String())
+	}
+
+	covJSON := `{
+		"resourceType": "Coverage",
+		"id": "cov-w22-1",
+		"status": "active",
+		"beneficiary": {"reference": "Patient/pat-w22-1"},
+		"payor": [{"reference": "Organization/org-w22-1"}]
+	}`
+	putCovReq := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/Coverage/cov-w22-1", strings.NewReader(covJSON))
+	putCovReq.Header.Set("Content-Type", "application/fhir+json")
+	putCovRec := httptest.NewRecorder()
+	pgH.ServeHTTP(putCovRec, putCovReq)
+	if putCovRec.Code != http.StatusOK && putCovRec.Code != http.StatusCreated {
+		t.Fatalf("PUT /Coverage/cov-w22-1 expected 200/201, got %d: %s", putCovRec.Code, putCovRec.Body.String())
+	}
+
+	condJSON := `{
+		"resourceType": "Condition",
+		"id": "cond-w22-1",
+		"clinicalStatus": {
+			"coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]
+		},
+		"code": {
+			"coding": [{"system": "http://snomed.info/sct", "code": "38341003", "display": "Hypertensive disorder"}]
+		},
+		"subject": {"reference": "Patient/pat-w22-1"}
+	}`
+	putCondReq := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/Condition/cond-w22-1", strings.NewReader(condJSON))
+	putCondReq.Header.Set("Content-Type", "application/fhir+json")
+	putCondRec := httptest.NewRecorder()
+	pgH.ServeHTTP(putCondRec, putCondReq)
+	if putCondRec.Code != http.StatusOK && putCondRec.Code != http.StatusCreated {
+		t.Fatalf("PUT /Condition/cond-w22-1 expected 200/201, got %d: %s", putCondRec.Code, putCondRec.Body.String())
+	}
+
+	// 1. POST /CoverageEligibilityRequest/$submit
+	cerBody := `{
+		"resourceType": "CoverageEligibilityRequest",
+		"id": "cer-w22-1",
+		"status": "active",
+		"purpose": ["benefits", "validation"],
+		"patient": {"reference": "Patient/pat-w22-1"},
+		"created": "2026-10-27T12:00:00Z",
+		"insurer": {"reference": "Organization/org-w22-1"},
+		"insurance": [
+			{"coverage": {"reference": "Coverage/cov-w22-1"}}
+		]
+	}`
+	cerReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/CoverageEligibilityRequest/$submit", strings.NewReader(cerBody))
+	cerReq.Header.Set("Content-Type", "application/fhir+json")
+	cerRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cerRec, cerReq)
+	if cerRec.Code != http.StatusOK ||
+		!strings.Contains(cerRec.Body.String(), `"CoverageEligibilityResponse"`) ||
+		!strings.Contains(cerRec.Body.String(), `"inforce":true`) ||
+		!strings.Contains(cerRec.Body.String(), `"deductible"`) {
+		t.Fatalf("POST /CoverageEligibilityRequest/$submit expected adjudicated CoverageEligibilityResponse with inforce:true and deductible, got %d: %s", cerRec.Code, cerRec.Body.String())
+	}
+
+	// Also verify instance-level POST /CoverageEligibilityRequest/cer-w22-1/$submit
+	cerInstReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/CoverageEligibilityRequest/cer-w22-1/$submit", nil)
+	cerInstRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cerInstRec, cerInstReq)
+	if cerInstRec.Code != http.StatusOK || !strings.Contains(cerInstRec.Body.String(), `"CoverageEligibilityRequest/cer-w22-1"`) {
+		t.Fatalf("POST /CoverageEligibilityRequest/cer-w22-1/$submit expected CoverageEligibilityResponse referencing cer-w22-1, got %d: %s", cerInstRec.Code, cerInstRec.Body.String())
+	}
+
+	// 2. GET /ActivityDefinition/$data-requirements & GET /Questionnaire/{id}/$data-requirements
+	adReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/ActivityDefinition/activitydef-bp-home-monitoring/$data-requirements", nil)
+	adRec := httptest.NewRecorder()
+	pgH.ServeHTTP(adRec, adReq)
+	if adRec.Code != http.StatusOK || !strings.Contains(adRec.Body.String(), `"module-definition"`) || !strings.Contains(adRec.Body.String(), `"ServiceRequest"`) {
+		t.Fatalf("GET /ActivityDefinition/activitydef-bp-home-monitoring/$data-requirements expected module-definition Library with ServiceRequest dataRequirement, got %d: %s", adRec.Code, adRec.Body.String())
+	}
+
+	qJSON := `{
+		"resourceType": "Questionnaire",
+		"id": "q-w22-1",
+		"url": "http://flint.fhir.org/Questionnaire/q-w22-1",
+		"name": "CardiologyIntakeQuestionnaire",
+		"status": "active",
+		"extension": [
+			{
+				"url": "http://hl7.org/fhir/StructureDefinition/cqf-library",
+				"valueCanonical": "http://flint.fhir.org/Library/CardiologyLogic"
+			}
+		],
+		"item": [
+			{
+				"linkId": "1",
+				"text": "Systolic Blood Pressure",
+				"type": "quantity",
+				"code": [{"system": "http://loinc.org", "code": "8480-6", "display": "Systolic blood pressure"}]
+			},
+			{
+				"linkId": "2",
+				"text": "Smoking Status",
+				"type": "choice",
+				"answerValueSet": "http://hl7.org/fhir/us/core/ValueSet/us-core-smoking-status-observation-codes"
+			}
+		]
+	}`
+	putQReq := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/Questionnaire/q-w22-1", strings.NewReader(qJSON))
+	putQReq.Header.Set("Content-Type", "application/fhir+json")
+	putQRec := httptest.NewRecorder()
+	pgH.ServeHTTP(putQRec, putQReq)
+	if putQRec.Code != http.StatusOK && putQRec.Code != http.StatusCreated {
+		t.Fatalf("PUT /Questionnaire/q-w22-1 expected 200/201, got %d: %s", putQRec.Code, putQRec.Body.String())
+	}
+
+	qDrReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Questionnaire/q-w22-1/$data-requirements", nil)
+	qDrRec := httptest.NewRecorder()
+	pgH.ServeHTTP(qDrRec, qDrReq)
+	if qDrRec.Code != http.StatusOK ||
+		!strings.Contains(qDrRec.Body.String(), "CardiologyLogic") ||
+		!strings.Contains(qDrRec.Body.String(), "us-core-smoking-status-observation-codes") ||
+		!strings.Contains(qDrRec.Body.String(), `"8480-6"`) {
+		t.Fatalf("GET /Questionnaire/q-w22-1/$data-requirements expected Library with CardiologyLogic, smoking status ValueSet, and 8480-6 Observation dataRequirement, got %d: %s", qDrRec.Code, qDrRec.Body.String())
+	}
+
+	// 3. GET /GraphDefinition/{id}/$graph?start=Patient/pat-w22-1 and POST /GraphDefinition/$graph
+	gdReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/GraphDefinition/us-core-patient-care-graph/$graph?start=Patient/pat-w22-1", nil)
+	gdRec := httptest.NewRecorder()
+	pgH.ServeHTTP(gdRec, gdReq)
+	if gdRec.Code != http.StatusOK ||
+		!strings.Contains(gdRec.Body.String(), `"Patient/pat-w22-1"`) ||
+		!strings.Contains(gdRec.Body.String(), `"Condition/cond-w22-1"`) {
+		t.Fatalf("GET /GraphDefinition/us-core-patient-care-graph/$graph?start=Patient/pat-w22-1 expected Bundle with Patient/pat-w22-1 and Condition/cond-w22-1, got %d: %s", gdRec.Code, gdRec.Body.String())
+	}
+
+	gdPostBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "graph", "valueUri": "http://hl7.org/fhir/us/core/graphdefinition/us-core-patient-care-graph"},
+			{"name": "start", "valueString": "Patient/pat-w22-1"}
+		]
+	}`
+	gdPostReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/GraphDefinition/$graph", strings.NewReader(gdPostBody))
+	gdPostReq.Header.Set("Content-Type", "application/fhir+json")
+	gdPostRec := httptest.NewRecorder()
+	pgH.ServeHTTP(gdPostRec, gdPostReq)
+	if gdPostRec.Code != http.StatusOK || !strings.Contains(gdPostRec.Body.String(), `"Condition/cond-w22-1"`) {
+		t.Fatalf("POST /GraphDefinition/$graph expected Bundle with Condition/cond-w22-1, got %d: %s", gdPostRec.Code, gdPostRec.Body.String())
+	}
+}

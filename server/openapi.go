@@ -2437,6 +2437,82 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/CoverageEligibilityRequest/$submit": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"CoverageEligibilityRequest"},
+				"summary":     "HL7 FHIR R4 / Da Vinci Real-Time Eligibility Check evaluating patient Coverage and returning an adjudicated CoverageEligibilityResponse",
+				"operationId": "coverageEligibilitySubmitPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Adjudicated FHIR R4 CoverageEligibilityResponse resource"},
+				},
+			},
+		},
+		"/ActivityDefinition/$data-requirements": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ActivityDefinition"},
+				"summary":     "HL7 FHIR R4 ActivityDefinition/$data-requirements returning a module-definition Library of required clinical resources, ValueSets, and Libraries",
+				"operationId": "activityDefinitionDataRequirementsGet",
+				"parameters": []map[string]any{
+					{"name": "target", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "url", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 module-definition Library resource"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ActivityDefinition"},
+				"summary":     "HL7 FHIR R4 ActivityDefinition/$data-requirements (POST Parameters or ActivityDefinition)",
+				"operationId": "activityDefinitionDataRequirementsPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 module-definition Library resource"},
+				},
+			},
+		},
+		"/Questionnaire/$data-requirements": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Questionnaire"},
+				"summary":     "HL7 FHIR R4 Questionnaire/$data-requirements analyzing Questionnaire items, answerValueSet bindings, and cqf-library extensions into a module-definition Library",
+				"operationId": "questionnaireDataRequirementsGet",
+				"parameters": []map[string]any{
+					{"name": "target", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "url", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 module-definition Library resource"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Questionnaire"},
+				"summary":     "HL7 FHIR R4 Questionnaire/$data-requirements (POST Parameters or Questionnaire)",
+				"operationId": "questionnaireDataRequirementsPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 module-definition Library resource"},
+				},
+			},
+		},
+		"/GraphDefinition/$graph": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"GraphDefinition"},
+				"summary":     "HL7 FHIR R4 GraphDefinition/$graph assembling a connected clinical resource Bundle from a start resource reference",
+				"operationId": "graphDefinitionGraphGet",
+				"parameters": []map[string]any{
+					{"name": "graph", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "start", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle containing the start resource and all GraphDefinition-linked resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"GraphDefinition"},
+				"summary":     "HL7 FHIR R4 GraphDefinition/$graph (POST Parameters with start and graph)",
+				"operationId": "graphDefinitionGraphPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle containing the start resource and all GraphDefinition-linked resources"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

@@ -1575,6 +1575,19 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected NamingSystem/$preferred-id for OID 2.16.840.1.113883.6.1 to return http://loinc.org, got %d: %s", respPrefID.StatusCode, string(bPrefID))
 			}
 		}
+		if err == nil {
+			respADReq, bADReq, errADReq := doReq(http.MethodGet, basePath+"/ActivityDefinition/activitydef-bp-home-monitoring/$data-requirements", "", nil, nil)
+			respGD, bGD, errGD := doReq(http.MethodGet, basePath+"/GraphDefinition/us-core-patient-care-graph/$graph?start=Patient/cert-pat-1", "", nil, nil)
+			cerPayload := []byte(`{"resourceType":"CoverageEligibilityRequest","id":"cert-cer-1","status":"active","purpose":["benefits","validation"],"patient":{"reference":"Patient/cert-pat-1"},"insurer":{"reference":"Organization/cert-org-1"},"insurance":[{"coverage":{"reference":"Coverage/cert-cov-1"}}]}`)
+			respCER, bCER, errCER := doReq(http.MethodPost, basePath+"/CoverageEligibilityRequest/$submit", "application/fhir+json", cerPayload, nil)
+			if errADReq != nil || respADReq.StatusCode != http.StatusOK || !strings.Contains(string(bADReq), `"module-definition"`) {
+				err = fmt.Errorf("expected ActivityDefinition/$data-requirements to return module-definition Library, got %d: %s", respADReq.StatusCode, string(bADReq))
+			} else if errGD != nil || respGD.StatusCode != http.StatusOK || !strings.Contains(string(bGD), `"cert-pat-1"`) {
+				err = fmt.Errorf("expected GraphDefinition/$graph?start=Patient/cert-pat-1 to return collection Bundle with cert-pat-1, got %d: %s", respGD.StatusCode, string(bGD))
+			} else if errCER != nil || respCER.StatusCode != http.StatusOK || !strings.Contains(string(bCER), `"CoverageEligibilityResponse"`) || !strings.Contains(string(bCER), `"inforce":true`) {
+				err = fmt.Errorf("expected CoverageEligibilityRequest/$submit to return CoverageEligibilityResponse with inforce:true, got %d: %s", respCER.StatusCode, string(bCER))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

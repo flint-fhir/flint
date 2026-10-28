@@ -1116,7 +1116,13 @@ func isPlanApplyOp(parts []string) bool {
 		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "ChargeItem")) && parts[4] == "$apply" {
 			return true
 		}
-		if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition")) && parts[4] == "$data-requirements" {
+		if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "Questionnaire")) && parts[4] == "$data-requirements" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "CoverageEligibilityRequest") && parts[4] == "$submit" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "GraphDefinition") && parts[4] == "$graph" {
 			return true
 		}
 		if strings.EqualFold(parts[3], "ConceptMap") && parts[4] == "$closure" {
@@ -1164,7 +1170,13 @@ func isPlanApplyOp(parts []string) bool {
 		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "ChargeItem")) && parts[5] == "$apply" {
 			return true
 		}
-		if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition")) && parts[5] == "$data-requirements" {
+		if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "Questionnaire")) && parts[5] == "$data-requirements" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "CoverageEligibilityRequest") && parts[5] == "$submit" {
+			return true
+		}
+		if strings.EqualFold(parts[3], "GraphDefinition") && parts[5] == "$graph" {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Measure") && (parts[5] == "$collect-data" || parts[5] == "$submit-data") {
