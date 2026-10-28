@@ -1601,6 +1601,16 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected POST /$submit-attachment to return OperationOutcome with DocumentReference/cert-cdex-doc-1, got %d: %s", respCDex.StatusCode, string(bCDex))
 			}
 		}
+		if err == nil {
+			shcPayload := []byte(`{"resourceType":"Parameters","parameter":[{"name":"credentialType","valueUri":"https://smarthealth.cards#immunization"}]}`)
+			respSHC, bSHC, errSHC := doReq(http.MethodPost, basePath+"/Patient/cert-pat-1/$health-cards-issue", "application/fhir+json", shcPayload, nil)
+			respPCDE, bPCDE, errPCDE := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$pcde", "", nil, nil)
+			if errSHC != nil || respSHC.StatusCode != http.StatusOK || !strings.Contains(string(bSHC), `"verifiableCredential"`) || !strings.Contains(string(bSHC), `"resource:0"`) {
+				err = fmt.Errorf("expected POST /Patient/cert-pat-1/$health-cards-issue to return Parameters with verifiableCredential and resource:0, got %d: %s", respSHC.StatusCode, string(bSHC))
+			} else if errPCDE != nil || respPCDE.StatusCode != http.StatusOK || !strings.Contains(string(bPCDE), `"11503-0"`) || !strings.Contains(string(bPCDE), `"cert-cp-1"`) {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$pcde to return PCDE document Bundle with LOINC 11503-0 and cert-cp-1, got %d: %s", respPCDE.StatusCode, string(bPCDE))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

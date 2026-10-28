@@ -2578,6 +2578,121 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Patient/{id}/$health-cards-issue": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Immunization"},
+				"summary":     "HL7 SMART Health Cards Patient/{id}/$health-cards-issue credential issuance returning signed JWS verifiableCredential and minimized SHC Bundle",
+				"operationId": "patientHealthCardsIssueInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing verifiableCredential (JWS) and resource (SHC Bundle)"},
+				},
+			},
+		},
+		"/Patient/$health-cards-issue": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Immunization"},
+				"summary":     "HL7 SMART Health Cards Patient/$health-cards-issue credential issuance",
+				"operationId": "patientHealthCardsIssueTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing verifiableCredential (JWS) and resource (SHC Bundle)"},
+				},
+			},
+		},
+		"/Patient/{id}/$pcde": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Coverage", "CarePlan", "Claim"},
+				"summary":     "HL7 Da Vinci Payer Coverage Decision Exchange (PCDE) Patient/{id}/$pcde assembling continuity-of-coverage document Bundle",
+				"operationId": "patientPCDEInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle anchored by a PCDE Composition (LOINC 11503-0) with active CarePlans, Coverage, and prior authorizations"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Coverage", "CarePlan", "Claim"},
+				"summary":     "HL7 Da Vinci Payer Coverage Decision Exchange (PCDE) Patient/{id}/$pcde (POST Parameters)",
+				"operationId": "patientPCDEInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle anchored by a PCDE Composition (LOINC 11503-0)"},
+				},
+			},
+		},
+		"/Patient/$pcde": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Coverage", "CarePlan", "Claim"},
+				"summary":     "HL7 Da Vinci Payer Coverage Decision Exchange (PCDE) Patient/$pcde",
+				"operationId": "patientPCDETypeGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle anchored by a PCDE Composition (LOINC 11503-0)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Coverage", "CarePlan", "Claim"},
+				"summary":     "HL7 Da Vinci Payer Coverage Decision Exchange (PCDE) Patient/$pcde (POST Parameters)",
+				"operationId": "patientPCDETypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle anchored by a PCDE Composition (LOINC 11503-0)"},
+				},
+			},
+		},
+		"/ResearchStudy/{id}/$evaluate-eligibility": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ResearchStudy", "ResearchSubject", "Group"},
+				"summary":     "Evaluate clinical trial eligibility criteria on ResearchStudy/{id} and its enrollment Group for a target Patient",
+				"operationId": "researchStudyEvaluateEligibilityInstanceGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "patient", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing eligible boolean, reason, and candidate ResearchSubject"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ResearchStudy", "ResearchSubject", "Group"},
+				"summary":     "Evaluate clinical trial eligibility criteria on ResearchStudy/{id} (POST Parameters)",
+				"operationId": "researchStudyEvaluateEligibilityInstancePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing eligible boolean, reason, and candidate ResearchSubject"},
+				},
+			},
+		},
+		"/ResearchStudy/$evaluate-eligibility": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ResearchStudy", "ResearchSubject", "Group"},
+				"summary":     "Evaluate clinical trial eligibility criteria on ResearchStudy/$evaluate-eligibility",
+				"operationId": "researchStudyEvaluateEligibilityTypeGet",
+				"parameters": []map[string]any{
+					{"name": "study", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+					{"name": "patient", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing eligible boolean, reason, and candidate ResearchSubject"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ResearchStudy", "ResearchSubject", "Group"},
+				"summary":     "Evaluate clinical trial eligibility criteria on ResearchStudy/$evaluate-eligibility (POST Parameters)",
+				"operationId": "researchStudyEvaluateEligibilityTypePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing eligible boolean, reason, and candidate ResearchSubject"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()
