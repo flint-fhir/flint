@@ -863,6 +863,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleVulcanEPIAndRegulatory(w, r)
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "DiagnosticReport") && parts[4] == "$elr-submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$elr-submit")
+					s.handlePublicHealthELR(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Observation") && parts[4] == "$reportable-labs" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$reportable-labs")
+					s.handlePublicHealthELR(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$adi-record" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$adi-record")
+					s.handlePACIOAdvanceDirectives(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Composition") && parts[4] == "$adi-document" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$adi-document")
+					s.handlePACIOAdvanceDirectives(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$ra-coding-gaps" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$ra-coding-gaps")
+					s.handleDaVinciRiskAdjustmentWave37(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "MeasureReport") && parts[4] == "$ra-remediate" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$ra-remediate")
+					s.handleDaVinciRiskAdjustmentWave37(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -871,6 +907,34 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "DiagnosticReport") && parts[5] == "$elr-submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$elr-submit")
+					s.handlePublicHealthELR(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[5] == "$adi-record" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$adi-record")
+					s.handlePACIOAdvanceDirectives(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$ra-coding-gaps" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$ra-coding-gaps")
+					s.handleDaVinciRiskAdjustmentWave37(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "MeasureReport") && parts[5] == "$ra-remediate" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$ra-remediate")
+					s.handleDaVinciRiskAdjustmentWave37(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Organization") && parts[5] == "$fast-verify" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4334,6 +4398,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "physical-activity-summary",
 					"definition": "http://hl7.org/fhir/us/physical-activity/OperationDefinition/Patient-physical-activity-summary",
 				},
+				{
+					"name":       "adi-record",
+					"definition": "http://hl7.org/fhir/us/pacio-adi/OperationDefinition/Patient-adi-record",
+				},
+				{
+					"name":       "ra-coding-gaps",
+					"definition": "http://hl7.org/fhir/us/davinci-ra/OperationDefinition/Patient-coding-gaps",
+				},
 			}
 		case "Organization":
 			entry["operation"] = []map[string]string{
@@ -4369,6 +4441,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "evaluate",
 					"definition": "http://flint.fhir.org/OperationDefinition/DiagnosticReport-evaluate",
 				},
+				{
+					"name":       "elr-submit",
+					"definition": "http://hl7.org/fhir/us/elr/OperationDefinition/DiagnosticReport-elr-submit",
+				},
 			}
 		case "Observation":
 			entry["operation"] = []map[string]string{
@@ -4379,6 +4455,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "stats",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Observation-stats",
+				},
+				{
+					"name":       "reportable-labs",
+					"definition": "http://hl7.org/fhir/us/elr/OperationDefinition/Observation-reportable-labs",
 				},
 			}
 		case "Encounter":
@@ -4417,6 +4497,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "bfdr-summary",
 					"definition": "http://hl7.org/fhir/us/bfdr/OperationDefinition/Composition-bfdr-summary",
+				},
+				{
+					"name":       "adi-document",
+					"definition": "http://hl7.org/fhir/us/pacio-adi/OperationDefinition/Composition-adi-document",
 				},
 			}
 		case "DocumentReference":
@@ -4609,6 +4693,17 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "bfdr-summary",
 					"definition": "http://hl7.org/fhir/us/bfdr/OperationDefinition/Composition-bfdr-summary",
+				},
+				{
+					"name":       "adi-document",
+					"definition": "http://hl7.org/fhir/us/pacio-adi/OperationDefinition/Composition-adi-document",
+				},
+			}
+		case "MeasureReport":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "ra-remediate",
+					"definition": "http://hl7.org/fhir/us/davinci-ra/OperationDefinition/MeasureReport-ra-remediate",
 				},
 			}
 		case "DocumentReference":

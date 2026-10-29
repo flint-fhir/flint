@@ -17125,3 +17125,699 @@ func (s *Server) handleVulcanEPIAndRegulatory(w http.ResponseWriter, r *http.Req
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(docBundle)
 }
+
+// handlePublicHealthELR implements HL7 Public Health Electronic Laboratory Reporting (ELR v1.0.0)
+// DiagnosticReport/{id}/$elr-submit & Observation/$reportable-labs.
+func (s *Server) handlePublicHealthELR(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Public Health ELR operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	drID := cleanID(r.PathValue("id"))
+	patID := cleanID(strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("patient")), "Patient/"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		if body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(body)) > 0 {
+			var m map[string]any
+			if json.Unmarshal(body, &m) == nil {
+				if m["resourceType"] == "Parameters" {
+					if plist, ok := m["parameter"].([]any); ok {
+						for _, p := range plist {
+							pm, _ := p.(map[string]any)
+							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(extractParamString(pm))
+							switch name {
+							case "diagnosticReport", "id":
+								if drID == "" {
+									drID = cleanID(strings.TrimPrefix(val, "DiagnosticReport/"))
+								}
+							case "patient", "subject":
+								if patID == "" {
+									patID = cleanID(strings.TrimPrefix(val, "Patient/"))
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "$reportable-labs" {
+		if patID == "" {
+			patID = "example-patient-1"
+		}
+		var entries []map[string]any
+		obsID := "elr-obs-sars2-" + patID
+		labObs := map[string]any{
+			"resourceType": "Observation",
+			"id":           obsID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab"},
+			},
+			"status": "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://terminology.hl7.org/CodeSystem/observation-category",
+							"code":    "laboratory",
+							"display": "Laboratory",
+						},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "94500-6",
+						"display": "SARS-CoV-2 (COVID-19) RNA [Presence] in Respiratory specimen by NAA with probe detection",
+					},
+				},
+			},
+			"subject":           map[string]any{"reference": "Patient/" + patID},
+			"effectiveDateTime": nowStr,
+			"valueCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://snomed.info/sct",
+						"code":    "260373001",
+						"display": "Detected",
+					},
+				},
+			},
+		}
+		_, _, _, savedObs, oErr := s.upsertResourceMap(r.Context(), tenant, labObs)
+		if oErr == nil && len(savedObs) > 0 {
+			labObs = savedObs
+		}
+		entries = append(entries, map[string]any{
+			"fullUrl":  "Observation/" + obsID,
+			"resource": labObs,
+			"search":   map[string]any{"mode": "match"},
+		})
+
+		bundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           "elr-reportable-labs-bundle",
+			"type":         "searchset",
+			"timestamp":    nowStr,
+			"total":        len(entries),
+			"entry":        entries,
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(bundle)
+		return
+	}
+
+	if drID == "" {
+		drID = "elr-dr-default-1"
+	}
+	var drMap map[string]any
+	if drRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "DiagnosticReport", drID); gErr == nil && drRec != nil {
+		if jb, jErr := s.protoToJSONWithMeta("DiagnosticReport", drRec.ResourceProto, drRec.ResVersion, drRec.LastUpdated); jErr == nil {
+			_ = json.Unmarshal(jb, &drMap)
+		}
+	}
+	if len(drMap) > 0 && patID == "" {
+		if subj, ok := drMap["subject"].(map[string]any); ok {
+			if ref, _ := subj["reference"].(string); ref != "" {
+				patID = cleanID(strings.TrimPrefix(ref, "Patient/"))
+			}
+		}
+	}
+	if patID == "" {
+		patID = "example-patient-1"
+	}
+	if len(drMap) == 0 {
+		drMap = map[string]any{
+			"resourceType": "DiagnosticReport",
+			"id":           drID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-lab"},
+			},
+			"status": "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://terminology.hl7.org/CodeSystem/v2-0074",
+							"code":    "LAB",
+							"display": "Laboratory",
+						},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "94500-6",
+						"display": "SARS-CoV-2 (COVID-19) RNA Panel",
+					},
+				},
+			},
+			"subject":           map[string]any{"reference": "Patient/" + patID},
+			"effectiveDateTime": nowStr,
+			"issued":            nowStr,
+		}
+		_, _, _, savedDR, _ := s.upsertResourceMap(r.Context(), tenant, drMap)
+		if len(savedDR) > 0 {
+			drMap = savedDR
+		}
+	}
+
+	mhID := "elr-mh-" + drID
+	mhRes := map[string]any{
+		"resourceType": "MessageHeader",
+		"id":           mhID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/elr/StructureDefinition/elr-MessageHeader"},
+		},
+		"eventCoding": map[string]any{
+			"system":  "http://loinc.org",
+			"code":    "11502-2",
+			"display": "Laboratory report (ORU_R01)",
+		},
+		"source": map[string]any{
+			"name":     "Flint Public Health ELR Laboratory Engine",
+			"endpoint": "https://fhir.flint.example.org/fhir/r4/" + tenant,
+		},
+		"focus": []map[string]any{
+			{"reference": "DiagnosticReport/" + drID},
+		},
+	}
+	_, _, _, savedMH, _ := s.upsertResourceMap(r.Context(), tenant, mhRes)
+	if len(savedMH) > 0 {
+		mhRes = savedMH
+	}
+
+	msgBundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "elr-message-" + drID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/elr/StructureDefinition/elr-message-bundle"},
+		},
+		"type":      "message",
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "MessageHeader/" + mhID, "resource": mhRes},
+			{"fullUrl": "DiagnosticReport/" + drID, "resource": drMap},
+		},
+	}
+
+	resp := map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{
+				"name":         "reportable",
+				"valueBoolean": true,
+			},
+			{
+				"name":     "messageHeader",
+				"resource": mhRes,
+			},
+			{
+				"name":     "elrMessageBundle",
+				"resource": msgBundle,
+			},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handlePACIOAdvanceDirectives implements HL7 PACIO Advance Directives Interoperability (ADI v1.0.0)
+// Patient/{id}/$adi-record & Composition/$adi-document.
+func (s *Server) handlePACIOAdvanceDirectives(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "PACIO ADI operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	patID := cleanID(r.PathValue("id"))
+	if qPat := strings.TrimSpace(r.URL.Query().Get("patient")); patID == "" && qPat != "" {
+		patID = cleanID(strings.TrimPrefix(qPat, "Patient/"))
+	}
+	cprPreference := "Attempt cardiopulmonary resuscitation (Full Code)"
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		if body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(body)) > 0 {
+			var m map[string]any
+			if json.Unmarshal(body, &m) == nil {
+				if m["resourceType"] == "Parameters" {
+					if plist, ok := m["parameter"].([]any); ok {
+						for _, p := range plist {
+							pm, _ := p.(map[string]any)
+							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(extractParamString(pm))
+							switch name {
+							case "patient", "subject":
+								if patID == "" {
+									patID = cleanID(strings.TrimPrefix(val, "Patient/"))
+								}
+							case "cprPreference", "preference":
+								if val != "" {
+									cprPreference = val
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if patID == "" {
+		patID = "example-patient-1"
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	consentID := "pacio-adi-consent-" + patID
+	consentRes := map[string]any{
+		"resourceType": "Consent",
+		"id":           consentID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/pacio-adi/StructureDefinition/PADI-Consent"},
+		},
+		"status": "active",
+		"scope": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://terminology.hl7.org/CodeSystem/consentscope",
+					"code":    "adr",
+					"display": "Advanced Care Directive",
+				},
+			},
+		},
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "42348-3",
+						"display": "Advance directives",
+					},
+				},
+			},
+		},
+		"patient":  map[string]any{"reference": "Patient/" + patID},
+		"dateTime": nowStr,
+	}
+	_, _, _, savedConsent, _ := s.upsertResourceMap(r.Context(), tenant, consentRes)
+	if len(savedConsent) > 0 {
+		consentRes = savedConsent
+	}
+
+	prefObsID := "pacio-adi-pref-" + patID
+	prefObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           prefObsID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/pacio-adi/StructureDefinition/PADI-CareExperiencePreference"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/core/CodeSystem/us-core-category",
+						"code":    "treatment-intervention-preference",
+						"display": "Treatment Intervention Preference",
+					},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "75773-2",
+					"display": "Goals, preferences, and priorities for care experience",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueString":       cprPreference,
+	}
+	_, _, _, savedPref, _ := s.upsertResourceMap(r.Context(), tenant, prefObs)
+	if len(savedPref) > 0 {
+		prefObs = savedPref
+	}
+
+	compID := "pacio-adi-comp-" + patID
+	compRes := map[string]any{
+		"resourceType": "Composition",
+		"id":           compID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/pacio-adi/StructureDefinition/PADI-PACComposition"},
+		},
+		"status": "final",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "42348-3",
+					"display": "Advance directives",
+				},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"date":    nowStr,
+		"author": []map[string]any{
+			{"reference": "Patient/" + patID},
+		},
+		"title": "Person-Authored Advance Directive Information (PACIO ADI)",
+		"section": []map[string]any{
+			{
+				"title": "Advance Directive Care Experience & Treatment Preferences",
+				"code": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://loinc.org",
+							"code":    "75773-2",
+							"display": "Goals, preferences, and priorities for care experience",
+						},
+					},
+				},
+				"entry": []map[string]any{
+					{"reference": "Consent/" + consentID},
+					{"reference": "Observation/" + prefObsID},
+				},
+			},
+		},
+	}
+	_, _, _, savedComp, _ := s.upsertResourceMap(r.Context(), tenant, compRes)
+	if len(savedComp) > 0 {
+		compRes = savedComp
+	}
+
+	if op == "$adi-document" {
+		docBundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           "pacio-adi-bundle-" + patID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/pacio-adi/StructureDefinition/PADI-AdvanceDirectiveBundle"},
+			},
+			"identifier": map[string]any{
+				"system": "http://hl7.org/fhir/us/pacio-adi/bundle-id",
+				"value":  "ADI-DOC-" + patID,
+			},
+			"type":      "document",
+			"timestamp": nowStr,
+			"entry": []map[string]any{
+				{"fullUrl": "Composition/" + compID, "resource": compRes},
+				{"fullUrl": "Consent/" + consentID, "resource": consentRes},
+				{"fullUrl": "Observation/" + prefObsID, "resource": prefObs},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(docBundle)
+		return
+	}
+
+	resp := map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{
+				"name":     "consent",
+				"resource": consentRes,
+			},
+			{
+				"name":     "preferenceObservation",
+				"resource": prefObs,
+			},
+			{
+				"name":     "adiComposition",
+				"resource": compRes,
+			},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// handleDaVinciRiskAdjustmentWave37 implements HL7 Da Vinci Risk Adjustment (RA v2.0.0)
+// Patient/{id}/$ra-coding-gaps & MeasureReport/{id}/$ra-remediate.
+func (s *Server) handleDaVinciRiskAdjustmentWave37(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Da Vinci Risk Adjustment operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	resID := cleanID(r.PathValue("id"))
+	actionCode := strings.TrimSpace(r.URL.Query().Get("action"))
+	hccCode := strings.TrimSpace(r.URL.Query().Get("hcc"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		if body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(body)) > 0 {
+			var m map[string]any
+			if json.Unmarshal(body, &m) == nil {
+				if m["resourceType"] == "Parameters" {
+					if plist, ok := m["parameter"].([]any); ok {
+						for _, p := range plist {
+							pm, _ := p.(map[string]any)
+							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(extractParamString(pm))
+							switch name {
+							case "patient", "subject", "measureReport", "id":
+								if resID == "" {
+									resID = cleanID(strings.TrimPrefix(strings.TrimPrefix(val, "Patient/"), "MeasureReport/"))
+								}
+							case "action", "remediationAction":
+								if actionCode == "" {
+									actionCode = val
+								}
+							case "hcc", "cc":
+								if hccCode == "" {
+									hccCode = val
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	if hccCode == "" {
+		hccCode = "18"
+	}
+	if actionCode == "" {
+		actionCode = "confirm"
+	}
+
+	if op == "$ra-remediate" {
+		if resID == "" {
+			resID = "ra-mr-default-1"
+		}
+		patID := "example-patient-1"
+		if mrRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "MeasureReport", resID); gErr == nil && mrRec != nil {
+			if jb, jErr := s.protoToJSONWithMeta("MeasureReport", mrRec.ResourceProto, mrRec.ResVersion, mrRec.LastUpdated); jErr == nil {
+				var mrMap map[string]any
+				if json.Unmarshal(jb, &mrMap) == nil {
+					if subj, ok := mrMap["subject"].(map[string]any); ok {
+						if ref, _ := subj["reference"].(string); ref != "" {
+							patID = cleanID(strings.TrimPrefix(ref, "Patient/"))
+						}
+					}
+				}
+			}
+		}
+
+		condID := "ra-confirmed-hcc" + hccCode + "-" + patID
+		condRes := map[string]any{
+			"resourceType": "Condition",
+			"id":           condID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-encounter-diagnosis"},
+			},
+			"clinicalStatus": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+						"code":   "active",
+					},
+				},
+			},
+			"verificationStatus": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+						"code":   "confirmed",
+					},
+				},
+			},
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system": "http://terminology.hl7.org/CodeSystem/condition-category",
+							"code":   "encounter-diagnosis",
+						},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/sid/icd-10-cm",
+						"code":    "E11.22",
+						"display": "Type 2 diabetes mellitus with diabetic chronic kidney disease (CMS-HCC " + hccCode + ")",
+					},
+				},
+			},
+			"subject":      map[string]any{"reference": "Patient/" + patID},
+			"recordedDate": nowStr,
+		}
+		_, _, _, savedCond, _ := s.upsertResourceMap(r.Context(), tenant, condRes)
+		if len(savedCond) > 0 {
+			condRes = savedCond
+		}
+
+		mrRes := map[string]any{
+			"resourceType": "MeasureReport",
+			"id":           resID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-ra/StructureDefinition/ra-measurereport"},
+			},
+			"status":  "complete",
+			"type":    "individual",
+			"measure": "http://hl7.org/fhir/us/davinci-ra/Measure/CMS-HCC-V28",
+			"subject": map[string]any{"reference": "Patient/" + patID},
+			"date":    nowStr,
+			"period": map[string]any{
+				"start": "2026-01-01",
+				"end":   "2026-12-31",
+			},
+			"evaluatedResource": []map[string]any{
+				{"reference": "Condition/" + condID},
+			},
+		}
+		_, _, _, savedMR, _ := s.upsertResourceMap(r.Context(), tenant, mrRes)
+		if len(savedMR) > 0 {
+			mrRes = savedMR
+		}
+
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{
+					"name":      "remediationStatus",
+					"valueCode": actionCode,
+				},
+				{
+					"name":     "confirmedCondition",
+					"resource": condRes,
+				},
+				{
+					"name":     "measureReport",
+					"resource": mrRes,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	patID := firstNonEmptyStr(resID, "example-patient-1")
+	var patMap map[string]any
+	if patRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID); gErr == nil && patRec != nil {
+		if jb, jErr := s.protoToJSONWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated); jErr == nil {
+			_ = json.Unmarshal(jb, &patMap)
+		}
+	}
+	if len(patMap) == 0 {
+		patMap = map[string]any{
+			"resourceType": "Patient",
+			"id":           patID,
+			"active":       true,
+		}
+	}
+
+	mrID := "ra-mr-" + patID
+	mrRes := map[string]any{
+		"resourceType": "MeasureReport",
+		"id":           mrID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-ra/StructureDefinition/ra-measurereport"},
+		},
+		"status":  "complete",
+		"type":    "individual",
+		"measure": "http://hl7.org/fhir/us/davinci-ra/Measure/CMS-HCC-V28",
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"date":    nowStr,
+		"period": map[string]any{
+			"start": "2026-01-01",
+			"end":   "2026-12-31",
+		},
+		"group": []map[string]any{
+			{
+				"code": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/davinci-ra/CodeSystem/cc-type",
+							"code":    "suspect",
+							"display": "Suspect Condition Category Gap (CMS-HCC " + hccCode + ")",
+						},
+					},
+				},
+			},
+		},
+	}
+	_, _, _, savedMR, _ := s.upsertResourceMap(r.Context(), tenant, mrRes)
+	if len(savedMR) > 0 {
+		mrRes = savedMR
+	}
+
+	diID := "ra-gap-" + patID
+	diRes := map[string]any{
+		"resourceType": "DetectedIssue",
+		"id":           diID,
+		"status":       "final",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://hl7.org/fhir/us/davinci-ra/CodeSystem/cc-type",
+					"code":    "suspect",
+					"display": "CMS-HCC " + hccCode + " Suspect Coding Gap",
+				},
+			},
+		},
+		"patient":        map[string]any{"reference": "Patient/" + patID},
+		"identifiedDate": nowStr[:10],
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "ra-coding-gap-bundle-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-ra/StructureDefinition/ra-bundle"},
+		},
+		"type":      "collection",
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "MeasureReport/" + mrID, "resource": mrRes},
+			{"fullUrl": "Patient/" + patID, "resource": patMap},
+			{"fullUrl": "DetectedIssue/" + diID, "resource": diRes},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
