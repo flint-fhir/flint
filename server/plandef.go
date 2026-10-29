@@ -19846,3 +19846,634 @@ func (s *Server) handlePACIOPFE(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(bundle)
 }
+
+// handlePublicHealthBFDRWave42 implements HL7 Public Health Vital Records Birth and Fetal Death Reporting (BFDR v1.1.0):
+//   - GET/POST /fhir/r4/{tenant}/Composition/$bfdr-document & /fhir/r4/{tenant}/Composition/{id}/$bfdr-document
+//   - POST /fhir/r4/{tenant}/Bundle/$bfdr-submit
+func (s *Server) handlePublicHealthBFDRWave42(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	op := strings.TrimSpace(r.PathValue("op"))
+
+	patientID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("patient")), "Patient/")
+	motherID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("mother")), "Patient/")
+	birthWeightGrams := 3400.0
+	gestationalAgeWeeks := 39.0
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err == nil {
+				rt, _ := body["resourceType"].(string)
+				switch rt {
+				case "Parameters":
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							if pm, ok := p.(map[string]any); ok {
+								name, _ := pm["name"].(string)
+								switch name {
+								case "patient", "child":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										patientID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+									}
+									if vr, ok := pm["valueReference"].(map[string]any); ok {
+										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+											patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+										}
+									}
+								case "mother":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										motherID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+									}
+								case "birthWeightGrams":
+									if vf, ok := pm["valueDecimal"].(float64); ok && vf > 0 {
+										birthWeightGrams = vf
+									}
+									if vi, ok := pm["valueInteger"].(float64); ok && vi > 0 {
+										birthWeightGrams = vi
+									}
+								case "gestationalAgeWeeks":
+									if vf, ok := pm["valueDecimal"].(float64); ok && vf > 0 {
+										gestationalAgeWeeks = vf
+									}
+									if vi, ok := pm["valueInteger"].(float64); ok && vi > 0 {
+										gestationalAgeWeeks = vi
+									}
+								}
+							}
+						}
+					}
+				case "Bundle":
+					if entries, ok := body["entry"].([]any); ok {
+						for _, e := range entries {
+							if em, ok := e.(map[string]any); ok {
+								if res, ok := em["resource"].(map[string]any); ok {
+									if rType, _ := res["resourceType"].(string); rType == "Patient" {
+										if pid, _ := res["id"].(string); strings.TrimSpace(pid) != "" && patientID == "" {
+											patientID = strings.TrimSpace(pid)
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	childID := firstNonEmptyStr(patientID, "bfdr-child-1")
+	momID := firstNonEmptyStr(motherID, "bfdr-mother-"+childID)
+	compID := firstNonEmptyStr(resID, "bfdr-comp-"+childID)
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	childPat := map[string]any{
+		"resourceType": "Patient",
+		"id":           childID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/bfdr/StructureDefinition/Patient-child-vr"},
+		},
+		"name":      []map[string]any{{"family": "Newborn", "given": []string{"Baby"}}},
+		"gender":    "female",
+		"birthDate": time.Now().UTC().Format("2006-01-02"),
+	}
+	_, _, _, savedChild, _ := s.upsertResourceMap(r.Context(), tenant, childPat)
+	if len(savedChild) > 0 {
+		childPat = savedChild
+	}
+
+	motherPat := map[string]any{
+		"resourceType": "Patient",
+		"id":           momID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/bfdr/StructureDefinition/Patient-mother-vr"},
+		},
+		"name":   []map[string]any{{"family": "Newborn", "given": []string{"Jane"}}},
+		"gender": "female",
+	}
+	_, _, _, savedMother, _ := s.upsertResourceMap(r.Context(), tenant, motherPat)
+	if len(savedMother) > 0 {
+		motherPat = savedMother
+	}
+
+	bwID := "bfdr-bw-" + childID
+	bwObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           bwID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/bfdr/StructureDefinition/Observation-birth-weight"},
+		},
+		"status": "final",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://loinc.org", "code": "8339-4", "display": "Birth weight Measured"},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + childID},
+		"effectiveDateTime": nowStr,
+		"valueQuantity": map[string]any{
+			"value":  birthWeightGrams,
+			"unit":   "g",
+			"system": "http://unitsofmeasure.org",
+			"code":   "g",
+		},
+	}
+	_, _, _, savedBW, _ := s.upsertResourceMap(r.Context(), tenant, bwObs)
+	if len(savedBW) > 0 {
+		bwObs = savedBW
+	}
+
+	gaID := "bfdr-ga-" + childID
+	gaObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           gaID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/bfdr/StructureDefinition/Observation-gestational-age-at-delivery"},
+		},
+		"status": "final",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://loinc.org", "code": "11884-4", "display": "Gestational age Estimated"},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + childID},
+		"effectiveDateTime": nowStr,
+		"valueQuantity": map[string]any{
+			"value":  gestationalAgeWeeks,
+			"unit":   "wk",
+			"system": "http://unitsofmeasure.org",
+			"code":   "wk",
+		},
+	}
+	_, _, _, savedGA, _ := s.upsertResourceMap(r.Context(), tenant, gaObs)
+	if len(savedGA) > 0 {
+		gaObs = savedGA
+	}
+
+	if op == "$bfdr-submit" {
+		msgID := "bfdr-ack-msg-" + childID
+		msgHeader := map[string]any{
+			"resourceType": "MessageHeader",
+			"id":           msgID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/bfdr/StructureDefinition/MessageHeader-live-birth-report"},
+			},
+			"eventUri": "http://nchs.cdc.gov/bfdr_acknowledgement",
+			"source": map[string]any{
+				"name":     "NCHS / STEVE Vital Records Birth Reporting Service",
+				"endpoint": "http://nchs.cdc.gov/bfdr_submission",
+			},
+			"response": map[string]any{
+				"identifier": "bfdr-sub-" + childID,
+				"code":       "ok",
+			},
+			"focus": []map[string]any{
+				{"reference": "Observation/" + bwID},
+				{"reference": "Observation/" + gaID},
+			},
+		}
+		_, _, _, savedMH, _ := s.upsertResourceMap(r.Context(), tenant, msgHeader)
+		if len(savedMH) > 0 {
+			msgHeader = savedMH
+		}
+
+		ackBundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           "bfdr-ack-bundle-" + childID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/bfdr/StructureDefinition/Bundle-ack-live-birth"},
+			},
+			"type":      "message",
+			"timestamp": nowStr,
+			"entry": []map[string]any{
+				{"fullUrl": "MessageHeader/" + msgID, "resource": msgHeader},
+				{"fullUrl": "Patient/" + childID, "resource": childPat},
+				{"fullUrl": "Observation/" + bwID, "resource": bwObs},
+				{"fullUrl": "Observation/" + gaID, "resource": gaObs},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(ackBundle)
+		return
+	}
+
+	compRes := map[string]any{
+		"resourceType": "Composition",
+		"id":           compID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/bfdr/StructureDefinition/Composition-provider-live-birth-report"},
+		},
+		"status": "final",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://loinc.org", "code": "68998-4", "display": "US standard certificate of live birth - 2003 revision"},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + childID},
+		"date":    nowStr,
+		"author":  []map[string]any{{"reference": "Patient/" + momID}},
+		"title":   "Provider Live Birth Report",
+		"section": []map[string]any{
+			{
+				"title": "Newborn Information",
+				"entry": []map[string]any{
+					{"reference": "Observation/" + bwID},
+					{"reference": "Observation/" + gaID},
+				},
+			},
+		},
+	}
+	_, _, _, savedComp, _ := s.upsertResourceMap(r.Context(), tenant, compRes)
+	if len(savedComp) > 0 {
+		compRes = savedComp
+	}
+
+	docBundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "bfdr-doc-bundle-" + childID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/bfdr/StructureDefinition/Bundle-document-live-birth-report"},
+		},
+		"type":      "document",
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Composition/" + compID, "resource": compRes},
+			{"fullUrl": "Patient/" + childID, "resource": childPat},
+			{"fullUrl": "Patient/" + momID, "resource": motherPat},
+			{"fullUrl": "Observation/" + bwID, "resource": bwObs},
+			{"fullUrl": "Observation/" + gaID, "resource": gaObs},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(docBundle)
+}
+
+// handleDaVinciCDexWave42 implements HL7 Da Vinci Clinical Data Exchange (CDex v2.0.0) Attachment Communication & Questionnaire Request:
+//   - POST /fhir/r4/{tenant}/Communication/$cdex-submit-attachment & /fhir/r4/{tenant}/Communication/{id}/$cdex-submit-attachment
+//   - POST /fhir/r4/{tenant}/Task/$cdex-questionnaire-request & /fhir/r4/{tenant}/Task/{id}/$cdex-questionnaire-request
+func (s *Server) handleDaVinciCDexWave42(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	op := strings.TrimSpace(r.PathValue("op"))
+
+	patientID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("patient")), "Patient/")
+	trackingID := strings.TrimSpace(r.URL.Query().Get("trackingId"))
+	questionnaireCanonical := "http://hl7.org/fhir/us/davinci-cdex/Questionnaire/cdex-questionnaire-example1"
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err == nil {
+				rt, _ := body["resourceType"].(string)
+				switch rt {
+				case "Parameters":
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							if pm, ok := p.(map[string]any); ok {
+								name, _ := pm["name"].(string)
+								switch name {
+								case "patient", "MemberId":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										patientID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+									}
+									if vr, ok := pm["valueReference"].(map[string]any); ok {
+										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+											patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+										}
+									}
+								case "TrackingId", "trackingId":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										trackingID = strings.TrimSpace(vs)
+									}
+								case "questionnaire":
+									if vc, ok := pm["valueCanonical"].(string); ok && strings.TrimSpace(vc) != "" {
+										questionnaireCanonical = strings.TrimSpace(vc)
+									}
+									if vu, ok := pm["valueUri"].(string); ok && strings.TrimSpace(vu) != "" {
+										questionnaireCanonical = strings.TrimSpace(vu)
+									}
+								}
+							}
+						}
+					}
+				case "Communication":
+					if subj, ok := body["subject"].(map[string]any); ok {
+						if ref, _ := subj["reference"].(string); strings.TrimSpace(ref) != "" {
+							patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+						}
+					}
+				case "Task":
+					if forMap, ok := body["for"].(map[string]any); ok {
+						if ref, _ := forMap["reference"].(string); strings.TrimSpace(ref) != "" {
+							patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := firstNonEmptyStr(patientID, "example-patient-1")
+	trackID := firstNonEmptyStr(trackingID, "cdex-track-"+patID)
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "$cdex-submit-attachment" {
+		commID := firstNonEmptyStr(resID, "cdex-comm-"+patID)
+		commRes := map[string]any{
+			"resourceType": "Communication",
+			"id":           commID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-cdex/StructureDefinition/cdex-attachment-communication"},
+			},
+			"identifier": []map[string]any{
+				{"system": "http://hl7.org/fhir/us/davinci-cdex/Identifier/tracking-id", "value": trackID},
+			},
+			"status": "completed",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp", "code": "attachment", "display": "Attachment"},
+					},
+				},
+			},
+			"subject": map[string]any{"reference": "Patient/" + patID},
+			"sent":    nowStr,
+			"payload": []map[string]any{
+				{"contentString": "Clinical progress note attachment for prior authorization / claim review"},
+			},
+		}
+		_, _, _, savedComm, _ := s.upsertResourceMap(r.Context(), tenant, commRes)
+		if len(savedComm) > 0 {
+			commRes = savedComm
+		}
+
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "status", "valueString": "accepted"},
+				{"name": "trackingId", "valueString": trackID},
+				{"name": "communication", "resource": commRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	taskID := firstNonEmptyStr(resID, "cdex-qtask-"+patID)
+	qrID := "cdex-sdc-qr-" + patID
+	qrRes := map[string]any{
+		"resourceType": "QuestionnaireResponse",
+		"id":           qrID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-cdex/StructureDefinition/cdex-sdc-questionnaireresponse"},
+		},
+		"questionnaire": questionnaireCanonical,
+		"status":        "completed",
+		"subject":       map[string]any{"reference": "Patient/" + patID},
+		"authored":      nowStr,
+		"item": []map[string]any{
+			{
+				"linkId": "1",
+				"text":   "Primary diagnosis active?",
+				"answer": []map[string]any{{"valueBoolean": true}},
+			},
+		},
+	}
+	_, _, _, savedQR, _ := s.upsertResourceMap(r.Context(), tenant, qrRes)
+	if len(savedQR) > 0 {
+		qrRes = savedQR
+	}
+	_ = qrRes
+
+	taskRes := map[string]any{
+		"resourceType": "Task",
+		"id":           taskID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-cdex/StructureDefinition/cdex-task-data-request"},
+		},
+		"status": "completed",
+		"intent": "order",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp",
+					"code":    "data-request-questionnaire",
+					"display": "Data Request Questionnaire",
+				},
+			},
+		},
+		"for":        map[string]any{"reference": "Patient/" + patID},
+		"authoredOn": nowStr,
+		"input": []map[string]any{
+			{
+				"type": map[string]any{
+					"coding": []map[string]any{
+						{"system": "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp", "code": "questionnaire"},
+					},
+				},
+				"valueCanonical": questionnaireCanonical,
+			},
+		},
+		"output": []map[string]any{
+			{
+				"type": map[string]any{
+					"coding": []map[string]any{
+						{"system": "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp", "code": "questionnaire-response"},
+					},
+				},
+				"valueReference": map[string]any{"reference": "QuestionnaireResponse/" + qrID},
+			},
+		},
+	}
+	_, _, _, savedTask, _ := s.upsertResourceMap(r.Context(), tenant, taskRes)
+	if len(savedTask) > 0 {
+		taskRes = savedTask
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(taskRes)
+}
+
+// handleMCODERadiotherapyWave42 implements HL7 CodeX / mCODE Radiation Therapy Treatment Data (CodeX RTTD v1.0.0 / mCODE v3.0.0):
+//   - POST /fhir/r4/{tenant}/Procedure/$mcode-radiotherapy-record & /fhir/r4/{tenant}/Procedure/{id}/$mcode-radiotherapy-record
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$mcode-radiotherapy-summary & /fhir/r4/{tenant}/Patient/$mcode-radiotherapy-summary
+func (s *Server) handleMCODERadiotherapyWave42(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	op := strings.TrimSpace(r.PathValue("op"))
+
+	patientID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("patient")), "Patient/")
+	totalDoseCGy := 5000.0
+	fractionsDelivered := 25
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err == nil {
+				rt, _ := body["resourceType"].(string)
+				switch rt {
+				case "Parameters":
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							if pm, ok := p.(map[string]any); ok {
+								name, _ := pm["name"].(string)
+								switch name {
+								case "patient", "subject":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										patientID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+									}
+									if vr, ok := pm["valueReference"].(map[string]any); ok {
+										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+											patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+										}
+									}
+								case "totalDoseCGy":
+									if vf, ok := pm["valueDecimal"].(float64); ok && vf > 0 {
+										totalDoseCGy = vf
+									}
+									if vi, ok := pm["valueInteger"].(float64); ok && vi > 0 {
+										totalDoseCGy = vi
+									}
+								case "fractionsDelivered":
+									if vi, ok := pm["valueInteger"].(float64); ok && vi > 0 {
+										fractionsDelivered = int(vi)
+									}
+								}
+							}
+						}
+					}
+				case "Procedure":
+					if subj, ok := body["subject"].(map[string]any); ok {
+						if ref, _ := subj["reference"].(string); strings.TrimSpace(ref) != "" {
+							patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := patientID
+	if op == "$mcode-radiotherapy-summary" && resID != "" {
+		patID = resID
+	}
+	patID = firstNonEmptyStr(patID, "example-patient-1")
+	procID := "mcode-rt-course-" + patID
+	if op == "$mcode-radiotherapy-record" && resID != "" {
+		procID = resID
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	condID := "mcode-primary-cancer-" + patID
+	condRes := map[string]any{
+		"resourceType": "Condition",
+		"id":           condID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-primary-cancer-condition"},
+		},
+		"clinicalStatus": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://snomed.info/sct", "code": "254837009", "display": "Malignant neoplasm of breast"},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedCond, _ := s.upsertResourceMap(r.Context(), tenant, condRes)
+	if len(savedCond) > 0 {
+		condRes = savedCond
+	}
+
+	procRes := map[string]any{
+		"resourceType": "Procedure",
+		"id":           procID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-radiotherapy-course-summary"},
+		},
+		"extension": []map[string]any{
+			{
+				"url":          "http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-radiotherapy-sessions",
+				"valueInteger": fractionsDelivered,
+			},
+			{
+				"url": "http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-radiotherapy-dose-delivered-to-volume",
+				"extension": []map[string]any{
+					{
+						"url": "totalDoseDelivered",
+						"valueQuantity": map[string]any{
+							"value":  totalDoseCGy,
+							"unit":   "cGy",
+							"system": "http://unitsofmeasure.org",
+							"code":   "cGy",
+						},
+					},
+					{
+						"url":          "fractionsDelivered",
+						"valueInteger": fractionsDelivered,
+					},
+				},
+			},
+		},
+		"status": "completed",
+		"category": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://snomed.info/sct", "code": "108290001", "display": "Radiation oncology AND/OR radiotherapy"},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://snomed.info/sct", "code": "1217123003", "display": "Radiotherapy course of treatment (regime/therapy)"},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"performedDateTime": nowStr,
+		"reasonReference": []map[string]any{
+			{"reference": "Condition/" + condID},
+		},
+		"bodySite": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://snomed.info/sct", "code": "76752008", "display": "Breast structure"},
+				},
+			},
+		},
+	}
+	_, _, _, savedProc, _ := s.upsertResourceMap(r.Context(), tenant, procRes)
+	if len(savedProc) > 0 {
+		procRes = savedProc
+	}
+
+	if op == "$mcode-radiotherapy-record" {
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(procRes)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "mcode-rt-summary-" + patID,
+		"type":         "searchset",
+		"total":        2,
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Procedure/" + procID, "resource": procRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Condition/" + condID, "resource": condRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}

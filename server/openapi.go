@@ -4418,6 +4418,91 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Composition/$bfdr-document": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Composition", "Patient", "Observation", "Bundle"},
+				"summary":     "Assemble an NCHS Vital Records Birth and Fetal Death Reporting (BFDR v1.1.0, LOINC 68998-4) live birth certificate document Bundle",
+				"operationId": "compositionBFDRDocumentGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle (Bundle-document-live-birth-report)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Composition", "Patient", "Observation", "Bundle"},
+				"summary":     "Assemble an NCHS Vital Records Birth and Fetal Death Reporting (BFDR v1.1.0) live birth certificate document Bundle (POST)",
+				"operationId": "compositionBFDRDocumentPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle (Bundle-document-live-birth-report)"},
+				},
+			},
+		},
+		"/Bundle/$bfdr-submit": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Bundle", "MessageHeader", "Observation"},
+				"summary":     "Submit a Vital Records Live Birth Record to NCHS/STEVE and receive BFDR acknowledgment message Bundle (BFDR v1.1.0)",
+				"operationId": "bundleBFDRSubmitPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Message Bundle (Bundle-ack-live-birth)"},
+				},
+			},
+		},
+		"/Communication/$cdex-submit-attachment": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Communication", "Parameters"},
+				"summary":     "Submit a Da Vinci CDex v2.0.0 clinical attachment Communication (cdex-attachment-communication)",
+				"operationId": "communicationCDexSubmitAttachmentPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, trackingId, and persisted Communication"},
+				},
+			},
+		},
+		"/Task/$cdex-questionnaire-request": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Task", "QuestionnaireResponse"},
+				"summary":     "Create and fulfill a Da Vinci CDex v2.0.0 Questionnaire Task data request (cdex-task-data-request / cdex-sdc-questionnaireresponse)",
+				"operationId": "taskCDexQuestionnaireRequestPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Completed Task with QuestionnaireResponse output"},
+				},
+			},
+		},
+		"/Procedure/$mcode-radiotherapy-record": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Procedure", "Condition"},
+				"summary":     "Record an HL7 CodeX / mCODE v3.0.0 Radiotherapy Course Summary Procedure (mcode-radiotherapy-course-summary)",
+				"operationId": "procedureMCODERadiotherapyRecordPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted mcode-radiotherapy-course-summary Procedure"},
+				},
+			},
+		},
+		"/Patient/{id}/$mcode-radiotherapy-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Procedure", "Condition", "Bundle"},
+				"summary":     "Assemble an HL7 CodeX / mCODE v3.0.0 Radiotherapy Course Summary Bundle for Patient/{id}",
+				"operationId": "patientMCODERadiotherapySummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of mCODE Radiotherapy Procedures and Primary Cancer Conditions"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Procedure", "Condition", "Bundle"},
+				"summary":     "Assemble an HL7 CodeX / mCODE v3.0.0 Radiotherapy Course Summary Bundle (POST)",
+				"operationId": "patientMCODERadiotherapySummaryPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of mCODE Radiotherapy Procedures and Primary Cancer Conditions"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

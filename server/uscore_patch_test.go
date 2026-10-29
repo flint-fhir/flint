@@ -6726,3 +6726,142 @@ func TestVRDRCDexPollAndPACIOPFEWave41(t *testing.T) {
 		t.Fatalf("GET /Patient/pat-w41-1/$pacio-pfe-summary expected pacio-pfe-observation-single and pacio-pfe-goal, got %d: %s", pfeSumRec.Code, pfeSumRec.Body.String())
 	}
 }
+
+func TestBFDRCDexAndMCODERadiotherapyWave42(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave42-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. Metadata & OpenAPI discovery
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK ||
+		!strings.Contains(metaRec.Body.String(), "bfdr-document") ||
+		!strings.Contains(metaRec.Body.String(), "bfdr-submit") ||
+		!strings.Contains(metaRec.Body.String(), "cdex-submit-attachment") ||
+		!strings.Contains(metaRec.Body.String(), "cdex-questionnaire-request") ||
+		!strings.Contains(metaRec.Body.String(), "mcode-radiotherapy-record") ||
+		!strings.Contains(metaRec.Body.String(), "mcode-radiotherapy-summary") {
+		t.Fatalf("CapabilityStatement missing Wave 42 operations: %s", metaRec.Body.String())
+	}
+
+	oaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/openapi.json", nil)
+	oaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(oaRec, oaReq)
+	if oaRec.Code != http.StatusOK ||
+		!strings.Contains(oaRec.Body.String(), "/Composition/$bfdr-document") ||
+		!strings.Contains(oaRec.Body.String(), "/Bundle/$bfdr-submit") ||
+		!strings.Contains(oaRec.Body.String(), "/Communication/$cdex-submit-attachment") ||
+		!strings.Contains(oaRec.Body.String(), "/Task/$cdex-questionnaire-request") ||
+		!strings.Contains(oaRec.Body.String(), "/Procedure/$mcode-radiotherapy-record") ||
+		!strings.Contains(oaRec.Body.String(), "/Patient/{id}/$mcode-radiotherapy-summary") {
+		t.Fatalf("OpenAPI missing Wave 42 paths: %s", oaRec.Body.String())
+	}
+
+	// 1. HL7 Public Health BFDR v1.1.0: GET /Composition/$bfdr-document & POST /Bundle/$bfdr-submit
+	bfdrDocReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Composition/$bfdr-document?patient=Patient/pat-w42-child-1", nil)
+	bfdrDocRec := httptest.NewRecorder()
+	pgH.ServeHTTP(bfdrDocRec, bfdrDocReq)
+	if bfdrDocRec.Code != http.StatusOK ||
+		!strings.Contains(bfdrDocRec.Body.String(), "Bundle-document-live-birth-report") ||
+		!strings.Contains(bfdrDocRec.Body.String(), `"68998-4"`) ||
+		!strings.Contains(bfdrDocRec.Body.String(), `"8339-4"`) {
+		t.Fatalf("GET /Composition/$bfdr-document expected Bundle-document-live-birth-report, LOINC 68998-4, and 8339-4, got %d: %s", bfdrDocRec.Code, bfdrDocRec.Body.String())
+	}
+
+	bfdrSubBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w42-child-1"},
+			{"name": "birthWeightGrams", "valueDecimal": 3520},
+			{"name": "gestationalAgeWeeks", "valueDecimal": 40}
+		]
+	}`
+	bfdrSubReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Bundle/$bfdr-submit", strings.NewReader(bfdrSubBody))
+	bfdrSubReq.Header.Set("Content-Type", "application/fhir+json")
+	bfdrSubRec := httptest.NewRecorder()
+	pgH.ServeHTTP(bfdrSubRec, bfdrSubReq)
+	if bfdrSubRec.Code != http.StatusOK ||
+		!strings.Contains(bfdrSubRec.Body.String(), "Bundle-ack-live-birth") ||
+		!strings.Contains(bfdrSubRec.Body.String(), "http://nchs.cdc.gov/bfdr_acknowledgement") {
+		t.Fatalf("POST /Bundle/$bfdr-submit expected Bundle-ack-live-birth and bfdr_acknowledgement, got %d: %s", bfdrSubRec.Code, bfdrSubRec.Body.String())
+	}
+
+	// 2. HL7 Da Vinci CDex v2.0.0: POST /Communication/$cdex-submit-attachment & POST /Task/$cdex-questionnaire-request
+	cdexAttBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w42-1"},
+			{"name": "TrackingId", "valueString": "TRACK-W42-001"}
+		]
+	}`
+	cdexAttReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Communication/$cdex-submit-attachment", strings.NewReader(cdexAttBody))
+	cdexAttReq.Header.Set("Content-Type", "application/fhir+json")
+	cdexAttRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cdexAttRec, cdexAttReq)
+	if cdexAttRec.Code != http.StatusOK ||
+		!strings.Contains(cdexAttRec.Body.String(), "cdex-attachment-communication") ||
+		!strings.Contains(cdexAttRec.Body.String(), `"TRACK-W42-001"`) {
+		t.Fatalf("POST /Communication/$cdex-submit-attachment expected cdex-attachment-communication and TRACK-W42-001, got %d: %s", cdexAttRec.Code, cdexAttRec.Body.String())
+	}
+
+	cdexQBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w42-1"},
+			{"name": "questionnaire", "valueCanonical": "http://hl7.org/fhir/us/davinci-cdex/Questionnaire/cdex-questionnaire-example1"}
+		]
+	}`
+	cdexQReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Task/$cdex-questionnaire-request", strings.NewReader(cdexQBody))
+	cdexQReq.Header.Set("Content-Type", "application/fhir+json")
+	cdexQRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cdexQRec, cdexQReq)
+	if cdexQRec.Code != http.StatusOK ||
+		!strings.Contains(cdexQRec.Body.String(), "cdex-task-data-request") ||
+		!strings.Contains(cdexQRec.Body.String(), `"data-request-questionnaire"`) ||
+		!strings.Contains(cdexQRec.Body.String(), `"questionnaire-response"`) {
+		t.Fatalf("POST /Task/$cdex-questionnaire-request expected cdex-task-data-request, data-request-questionnaire, and questionnaire-response, got %d: %s", cdexQRec.Code, cdexQRec.Body.String())
+	}
+
+	// 3. HL7 CodeX / mCODE v3.0.0 Radiotherapy: POST /Procedure/$mcode-radiotherapy-record & GET /Patient/pat-w42-1/$mcode-radiotherapy-summary
+	rtBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w42-1"},
+			{"name": "totalDoseCGy", "valueDecimal": 5000},
+			{"name": "fractionsDelivered", "valueInteger": 25}
+		]
+	}`
+	rtReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Procedure/$mcode-radiotherapy-record", strings.NewReader(rtBody))
+	rtReq.Header.Set("Content-Type", "application/fhir+json")
+	rtRec := httptest.NewRecorder()
+	pgH.ServeHTTP(rtRec, rtReq)
+	if rtRec.Code != http.StatusOK ||
+		!strings.Contains(rtRec.Body.String(), "mcode-radiotherapy-course-summary") ||
+		!strings.Contains(rtRec.Body.String(), `"1217123003"`) {
+		t.Fatalf("POST /Procedure/$mcode-radiotherapy-record expected mcode-radiotherapy-course-summary and SNOMED 1217123003, got %d: %s", rtRec.Code, rtRec.Body.String())
+	}
+
+	rtSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w42-1/$mcode-radiotherapy-summary", nil)
+	rtSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(rtSumRec, rtSumReq)
+	if rtSumRec.Code != http.StatusOK ||
+		!strings.Contains(rtSumRec.Body.String(), "mcode-radiotherapy-course-summary") ||
+		!strings.Contains(rtSumRec.Body.String(), "mcode-primary-cancer-condition") {
+		t.Fatalf("GET /Patient/pat-w42-1/$mcode-radiotherapy-summary expected mcode-radiotherapy-course-summary and mcode-primary-cancer-condition, got %d: %s", rtSumRec.Code, rtSumRec.Body.String())
+	}
+}

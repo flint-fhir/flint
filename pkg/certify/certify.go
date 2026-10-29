@@ -1769,6 +1769,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$pacio-pfe-summary to return pacio-pfe-observation-single, got %d: %s", respPFE.StatusCode, string(bPFE))
 			}
 		}
+		if err == nil {
+			respBFDR, bBFDR, errBFDR := doReq(http.MethodGet, basePath+"/Composition/$bfdr-document?patient=Patient/cert-pat-1", "", nil, nil)
+			respRT, bRT, errRT := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$mcode-radiotherapy-summary", "", nil, nil)
+			if errBFDR != nil || respBFDR.StatusCode != http.StatusOK || !strings.Contains(string(bBFDR), "Bundle-document-live-birth-report") {
+				err = fmt.Errorf("expected GET /Composition/$bfdr-document to return Bundle-document-live-birth-report, got %d: %s", respBFDR.StatusCode, string(bBFDR))
+			} else if errRT != nil || respRT.StatusCode != http.StatusOK || !strings.Contains(string(bRT), "mcode-radiotherapy-course-summary") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-radiotherapy-summary to return mcode-radiotherapy-course-summary, got %d: %s", respRT.StatusCode, string(bRT))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
