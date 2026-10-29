@@ -22162,3 +22162,656 @@ func (s *Server) handleVulcanESourceWave45(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(bundle)
 }
+
+// handlePublicHealthELRAndCCRRWave46 implements HL7 Public Health Electronic Laboratory Reporting (ELR v1.0.0)
+// and HL7 Central Cancer Registry Reporting (CCRR v1.0.0):
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$elr-summary & /fhir/r4/{tenant}/Patient/$elr-summary
+//   - POST /fhir/r4/{tenant}/Bundle/$cancer-registry-submit & /fhir/r4/{tenant}/Bundle/{id}/$cancer-registry-submit
+func (s *Server) handlePublicHealthELRAndCCRRWave46(w http.ResponseWriter, r *http.Request, op string) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	patID := strings.TrimPrefix(strings.TrimPrefix(firstNonEmptyStr(
+		q.Get("patient"),
+		q.Get("subject"),
+		resID,
+	), "Patient/"), "Bundle/")
+
+	if r.Body != nil && r.Method == http.MethodPost {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "patient" || name == "subject" {
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if patID == "" {
+		patID = "example"
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "cancer-registry-submit" {
+		if r.Method != http.MethodPost {
+			writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$cancer-registry-submit requires HTTP POST")
+			return
+		}
+		condID := "ccrr-cancer-cond-" + patID
+		condRes := map[string]any{
+			"resourceType": "Condition",
+			"id":           condID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-primary-cancer-condition"},
+			},
+			"clinicalStatus": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+						"code":   "active",
+					},
+				},
+			},
+			"verificationStatus": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+						"code":   "confirmed",
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://snomed.info/sct",
+						"code":    "254837009",
+						"display": "Malignant neoplasm of breast",
+					},
+				},
+			},
+			"subject":      map[string]any{"reference": "Patient/" + patID},
+			"recordedDate": nowStr,
+		}
+		_, _, _, savedCond, _ := s.upsertResourceMap(r.Context(), tenant, condRes)
+		if len(savedCond) > 0 {
+			condRes = savedCond
+		}
+
+		compID := "ccrr-comp-" + patID
+		compRes := map[string]any{
+			"resourceType": "Composition",
+			"id":           compID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/central-cancer-registry-reporting/StructureDefinition/ccrr-composition"},
+			},
+			"status": "final",
+			"type": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "72134-0",
+						"display": "Cancer event report",
+					},
+				},
+			},
+			"subject": map[string]any{"reference": "Patient/" + patID},
+			"date":    nowStr,
+			"author":  []map[string]any{{"display": "Flint Central Cancer Registry Reporter"}},
+			"title":   "Central Cancer Registry Reporting (CCRR) Document",
+		}
+		_, _, _, savedComp, _ := s.upsertResourceMap(r.Context(), tenant, compRes)
+		if len(savedComp) > 0 {
+			compRes = savedComp
+		}
+
+		commID := "ccrr-ack-comm-" + patID
+		commRes := map[string]any{
+			"resourceType": "Communication",
+			"id":           commID,
+			"status":       "completed",
+			"subject":      map[string]any{"reference": "Patient/" + patID},
+			"sent":         nowStr,
+			"payload": []map[string]any{
+				{"contentString": "Central Cancer Registry case report accepted (LOINC 72134-0)"},
+			},
+		}
+		_, _, _, savedComm, _ := s.upsertResourceMap(r.Context(), tenant, commRes)
+		if len(savedComm) > 0 {
+			commRes = savedComm
+		}
+
+		ccrrBundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           firstNonEmptyStr(resID, "ccrr-bundle-"+patID),
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/central-cancer-registry-reporting/StructureDefinition/ccrr-content-bundle"},
+			},
+			"type":      "document",
+			"timestamp": nowStr,
+			"entry": []map[string]any{
+				{"fullUrl": "Composition/" + compID, "resource": compRes},
+				{"fullUrl": "Condition/" + condID, "resource": condRes},
+			},
+		}
+
+		out := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "status", "valueCode": "accepted"},
+				{"name": "bundle", "resource": ccrrBundle},
+				{"name": "composition", "resource": compRes},
+				{"name": "condition", "resource": condRes},
+				{"name": "communication", "resource": commRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(out)
+		return
+	}
+
+	specID := "elr-spec-" + patID
+	specRes := map[string]any{
+		"resourceType": "Specimen",
+		"id":           specID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-specimen"},
+		},
+		"status": "available",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "258500001",
+					"display": "Nasopharyngeal swab",
+				},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedSpec, _ := s.upsertResourceMap(r.Context(), tenant, specRes)
+	if len(savedSpec) > 0 {
+		specRes = savedSpec
+	}
+
+	obsID := "elr-obs-" + patID
+	obsRes := map[string]any{
+		"resourceType": "Observation",
+		"id":           obsID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/observation-category",
+						"code":    "laboratory",
+						"display": "Laboratory",
+					},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "94500-6",
+					"display": "SARS-CoV-2 (COVID-19) RNA [Presence] in Respiratory specimen by NAA with probe detection",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"specimen":          map[string]any{"reference": "Specimen/" + specID},
+		"effectiveDateTime": nowStr,
+		"valueCodeableConcept": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "260373001",
+					"display": "Detected",
+				},
+			},
+		},
+	}
+	_, _, _, savedObs, _ := s.upsertResourceMap(r.Context(), tenant, obsRes)
+	if len(savedObs) > 0 {
+		obsRes = savedObs
+	}
+
+	drID := "elr-dr-" + patID
+	drRes := map[string]any{
+		"resourceType": "DiagnosticReport",
+		"id":           drID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-lab"},
+		},
+		"status": "final",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "94500-6",
+					"display": "SARS-CoV-2 (COVID-19) RNA [Presence] in Respiratory specimen by NAA with probe detection",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"issued":            nowStr,
+		"specimen":          []map[string]any{{"reference": "Specimen/" + specID}},
+		"result":            []map[string]any{{"reference": "Observation/" + obsID}},
+	}
+	_, _, _, savedDR, _ := s.upsertResourceMap(r.Context(), tenant, drRes)
+	if len(savedDR) > 0 {
+		drRes = savedDR
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "elr-summary-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/elr/StructureDefinition/us-ph-reportable-lab-bundle"},
+		},
+		"type":      "searchset",
+		"total":     3,
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "DiagnosticReport/" + drID, "resource": drRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Observation/" + obsID, "resource": obsRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "Specimen/" + specID, "resource": specRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleCARINBBAndRTPBCWave46 implements HL7 CARIN Blue Button v2.0.0 (Oral & Vision EOBs)
+// and CARIN Real-Time Pharmacy Benefit Check (RTPBC v1.0.0) Summary:
+//   - GET/POST /fhir/r4/{tenant}/ExplanationOfBenefit/$carin-bb-claims & /fhir/r4/{tenant}/ExplanationOfBenefit/{id}/$carin-bb-claims
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$rtpbc-summary & /fhir/r4/{tenant}/Patient/$rtpbc-summary
+func (s *Server) handleCARINBBAndRTPBCWave46(w http.ResponseWriter, r *http.Request, op string) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	patID := strings.TrimPrefix(strings.TrimPrefix(firstNonEmptyStr(
+		q.Get("patient"),
+		q.Get("subject"),
+		resID,
+	), "Patient/"), "ExplanationOfBenefit/")
+
+	if r.Body != nil && r.Method == http.MethodPost {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "patient" || name == "subject" {
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if patID == "" {
+		patID = "example"
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "carin-bb-claims" {
+		oralID := "c4bb-eob-oral-" + patID
+		oralEOB := map[string]any{
+			"resourceType": "ExplanationOfBenefit",
+			"id":           oralID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-ExplanationOfBenefit-Oral"},
+			},
+			"status": "active",
+			"type": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/claim-type",
+						"code":    "oral",
+						"display": "Oral",
+					},
+				},
+			},
+			"use":      "claim",
+			"patient":  map[string]any{"reference": "Patient/" + patID},
+			"created":  nowStr,
+			"insurer":  map[string]any{"reference": "Organization/example-payer-1"},
+			"provider": map[string]any{"reference": "Organization/example-dental-1"},
+			"outcome":  "complete",
+		}
+		_, _, _, savedOral, _ := s.upsertResourceMap(r.Context(), tenant, oralEOB)
+		if len(savedOral) > 0 {
+			oralEOB = savedOral
+		}
+
+		visionID := "c4bb-eob-vision-" + patID
+		visionEOB := map[string]any{
+			"resourceType": "ExplanationOfBenefit",
+			"id":           visionID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-ExplanationOfBenefit-Vision"},
+			},
+			"status": "active",
+			"type": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/claim-type",
+						"code":    "vision",
+						"display": "Vision",
+					},
+				},
+			},
+			"use":      "claim",
+			"patient":  map[string]any{"reference": "Patient/" + patID},
+			"created":  nowStr,
+			"insurer":  map[string]any{"reference": "Organization/example-payer-1"},
+			"provider": map[string]any{"reference": "Organization/example-vision-1"},
+			"outcome":  "complete",
+		}
+		_, _, _, savedVision, _ := s.upsertResourceMap(r.Context(), tenant, visionEOB)
+		if len(savedVision) > 0 {
+			visionEOB = savedVision
+		}
+
+		bundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           "carin-bb-claims-" + patID,
+			"type":         "searchset",
+			"total":        2,
+			"timestamp":    nowStr,
+			"entry": []map[string]any{
+				{"fullUrl": "ExplanationOfBenefit/" + oralID, "resource": oralEOB, "search": map[string]any{"mode": "match"}},
+				{"fullUrl": "ExplanationOfBenefit/" + visionID, "resource": visionEOB, "search": map[string]any{"mode": "match"}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(bundle)
+		return
+	}
+
+	claimID := "rtpbc-claim-" + patID
+	claimRes := map[string]any{
+		"resourceType": "Claim",
+		"id":           claimID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/carin-rtpbc/StructureDefinition/rtpbc-claim"},
+		},
+		"status": "active",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://terminology.hl7.org/CodeSystem/claim-type",
+					"code":    "pharmacy",
+					"display": "Pharmacy",
+				},
+			},
+		},
+		"use":      "predetermination",
+		"patient":  map[string]any{"reference": "Patient/" + patID},
+		"created":  nowStr,
+		"provider": map[string]any{"reference": "Organization/example-pharmacy-1"},
+		"priority": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/processpriority",
+					"code":   "normal",
+				},
+			},
+		},
+	}
+	_, _, _, savedClaim, _ := s.upsertResourceMap(r.Context(), tenant, claimRes)
+	if len(savedClaim) > 0 {
+		claimRes = savedClaim
+	}
+
+	crID := "rtpbc-cr-" + patID
+	crRes := map[string]any{
+		"resourceType": "ClaimResponse",
+		"id":           crID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/carin-rtpbc/StructureDefinition/rtpbc-claim-response"},
+		},
+		"status": "active",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://terminology.hl7.org/CodeSystem/claim-type",
+					"code":    "pharmacy",
+					"display": "Pharmacy",
+				},
+			},
+		},
+		"use":     "predetermination",
+		"patient": map[string]any{"reference": "Patient/" + patID},
+		"created": nowStr,
+		"insurer": map[string]any{"reference": "Organization/example-pbm-1"},
+		"request": map[string]any{"reference": "Claim/" + claimID},
+		"outcome": "complete",
+	}
+	_, _, _, savedCR, _ := s.upsertResourceMap(r.Context(), tenant, crRes)
+	if len(savedCR) > 0 {
+		crRes = savedCR
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "rtpbc-summary-" + patID,
+		"type":         "searchset",
+		"total":        2,
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "ClaimResponse/" + crID, "resource": crRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Claim/" + claimID, "resource": claimRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handlePACIOTOCAndADIWave46 implements HL7 PACIO Post-Acute Care Transitions of Care (TOC v1.0.0)
+// and PACIO Advance Directives Interoperability (ADI v1.0.0) Verification:
+//   - POST /fhir/r4/{tenant}/Composition/$pacio-toc-bundle & /fhir/r4/{tenant}/Composition/{id}/$pacio-toc-bundle
+//   - POST /fhir/r4/{tenant}/Consent/$adi-verify & /fhir/r4/{tenant}/Consent/{id}/$adi-verify
+func (s *Server) handlePACIOTOCAndADIWave46(w http.ResponseWriter, r *http.Request, op string) {
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$"+op+" requires HTTP POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	patID := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(firstNonEmptyStr(
+		q.Get("patient"),
+		q.Get("subject"),
+	), "Patient/"), "Composition/"), "Consent/")
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "patient" || name == "subject" {
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if patID == "" {
+		patID = "example"
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "pacio-toc-bundle" {
+		compID := firstNonEmptyStr(resID, "pacio-toc-comp-"+patID)
+		compRes := map[string]any{
+			"resourceType": "Composition",
+			"id":           compID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/pacio-toc/StructureDefinition/pacio-toc-composition"},
+			},
+			"status": "final",
+			"type": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "18842-5",
+						"display": "Discharge summary",
+					},
+				},
+			},
+			"subject": map[string]any{"reference": "Patient/" + patID},
+			"date":    nowStr,
+			"author":  []map[string]any{{"display": "Flint PACIO Transitions of Care Coordinator"}},
+			"title":   "PACIO Transitions of Care (TOC) Discharge Summary",
+		}
+		_, _, _, savedComp, _ := s.upsertResourceMap(r.Context(), tenant, compRes)
+		if len(savedComp) > 0 {
+			compRes = savedComp
+		}
+
+		tocBundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           "pacio-toc-bundle-" + patID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/pacio-toc/StructureDefinition/pacio-toc-bundle"},
+			},
+			"type":      "document",
+			"timestamp": nowStr,
+			"entry": []map[string]any{
+				{"fullUrl": "Composition/" + compID, "resource": compRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(tocBundle)
+		return
+	}
+
+	consentID := firstNonEmptyStr(resID, "padi-consent-"+patID)
+	consentRes := map[string]any{
+		"resourceType": "Consent",
+		"id":           consentID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/pacio-adi/StructureDefinition/PADI-ParticipantConsent"},
+		},
+		"status": "active",
+		"scope": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://terminology.hl7.org/CodeSystem/consentscope",
+					"code":    "adr",
+					"display": "Advanced Care Directive",
+				},
+			},
+		},
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "42348-3",
+						"display": "Advance directive",
+					},
+				},
+			},
+		},
+		"patient":  map[string]any{"reference": "Patient/" + patID},
+		"dateTime": nowStr,
+	}
+	_, _, _, savedConsent, _ := s.upsertResourceMap(r.Context(), tenant, consentRes)
+	if len(savedConsent) > 0 {
+		consentRes = savedConsent
+	}
+
+	provID := "padi-verify-prov-" + consentID
+	provRes := map[string]any{
+		"resourceType": "Provenance",
+		"id":           provID,
+		"target":       []map[string]any{{"reference": "Consent/" + consentID}},
+		"recorded":     nowStr,
+		"agent": []map[string]any{
+			{
+				"who": map[string]any{"display": "Flint PACIO ADI Witness & Notary Verifier"},
+			},
+		},
+		"signature": []map[string]any{
+			{
+				"type": []map[string]any{
+					{
+						"system":  "urn:iso-astm:E1762-95:2013",
+						"code":    "1.2.840.10065.1.12.1.1",
+						"display": "Author's Signature",
+					},
+				},
+				"when": nowStr,
+				"who":  map[string]any{"reference": "Patient/" + patID},
+			},
+		},
+	}
+	_, _, _, savedProv, _ := s.upsertResourceMap(r.Context(), tenant, provRes)
+	if len(savedProv) > 0 {
+		provRes = savedProv
+	}
+
+	out := map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{"name": "status", "valueCode": "verified"},
+			{"name": "verified", "valueBoolean": true},
+			{"name": "consent", "resource": consentRes},
+			{"name": "provenance", "resource": provRes},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(out)
+}

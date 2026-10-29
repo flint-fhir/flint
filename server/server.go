@@ -1175,6 +1175,36 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleVulcanESourceWave45(w, r, "vulcan-summary")
 					return
 				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$elr-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePublicHealthELRAndCCRRWave46(w, r, "elr-summary")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && parts[4] == "$cancer-registry-submit" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePublicHealthELRAndCCRRWave46(w, r, "cancer-registry-submit")
+					return
+				}
+				if strings.EqualFold(parts[3], "ExplanationOfBenefit") && parts[4] == "$carin-bb-claims" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCARINBBAndRTPBCWave46(w, r, "carin-bb-claims")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$rtpbc-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCARINBBAndRTPBCWave46(w, r, "rtpbc-summary")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Composition") && parts[4] == "$pacio-toc-bundle" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePACIOTOCAndADIWave46(w, r, "pacio-toc-bundle")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Consent") && parts[4] == "$adi-verify" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePACIOTOCAndADIWave46(w, r, "adi-verify")
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -1183,6 +1213,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$elr-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePublicHealthELRAndCCRRWave46(w, r, "elr-summary")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && parts[5] == "$cancer-registry-submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePublicHealthELRAndCCRRWave46(w, r, "cancer-registry-submit")
+					return
+				}
+				if strings.EqualFold(parts[3], "ExplanationOfBenefit") && parts[5] == "$carin-bb-claims" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCARINBBAndRTPBCWave46(w, r, "carin-bb-claims")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$rtpbc-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCARINBBAndRTPBCWave46(w, r, "rtpbc-summary")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Composition") && parts[5] == "$pacio-toc-bundle" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePACIOTOCAndADIWave46(w, r, "pacio-toc-bundle")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Consent") && parts[5] == "$adi-verify" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePACIOTOCAndADIWave46(w, r, "adi-verify")
+					return
+				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && parts[5] == "$ecr-submit" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -5040,6 +5106,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "ecr-summary",
 					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/Patient-ecr-summary",
 				},
+				{
+					"name":       "elr-summary",
+					"definition": "http://hl7.org/fhir/us/elr/OperationDefinition/Patient-elr-summary",
+				},
+				{
+					"name":       "rtpbc-summary",
+					"definition": "http://hl7.org/fhir/us/carin-rtpbc/OperationDefinition/Patient-rtpbc-summary",
+				},
 			}
 		case "Immunization":
 			entry["operation"] = []map[string]string{
@@ -5177,6 +5251,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "bfdr-document",
 					"definition": "http://hl7.org/fhir/us/bfdr/OperationDefinition/Composition-bfdr-document",
+				},
+				{
+					"name":       "pacio-toc-bundle",
+					"definition": "http://hl7.org/fhir/us/pacio-toc/OperationDefinition/Composition-pacio-toc-bundle",
 				},
 			}
 		case "DocumentReference":
@@ -5407,6 +5485,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "bfdr-document",
 					"definition": "http://hl7.org/fhir/us/bfdr/OperationDefinition/Composition-bfdr-document",
+				},
+				{
+					"name":       "pacio-toc-bundle",
+					"definition": "http://hl7.org/fhir/us/pacio-toc/OperationDefinition/Composition-pacio-toc-bundle",
 				},
 			}
 		case "MeasureReport":
@@ -5834,6 +5916,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "ecr-submit",
 					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/Bundle-ecr-submit",
 				},
+				{
+					"name":       "cancer-registry-submit",
+					"definition": "http://hl7.org/fhir/us/central-cancer-registry-reporting/OperationDefinition/Bundle-cancer-registry-submit",
+				},
 			}
 		case "HealthcareService":
 			entry["operation"] = []map[string]string{
@@ -5848,6 +5934,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "evaluate",
 					"definition": "http://flint.fhir.org/OperationDefinition/Consent-evaluate",
 				},
+				{
+					"name":       "adi-verify",
+					"definition": "http://hl7.org/fhir/us/pacio-adi/OperationDefinition/Consent-adi-verify",
+				},
 			}
 		case "ExplanationOfBenefit":
 			entry["operation"] = []map[string]string{
@@ -5858,6 +5948,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "pct-aeob-summary",
 					"definition": "http://hl7.org/fhir/us/davinci-pct/OperationDefinition/ExplanationOfBenefit-pct-aeob-summary",
+				},
+				{
+					"name":       "carin-bb-claims",
+					"definition": "http://hl7.org/fhir/us/carin-bb/OperationDefinition/ExplanationOfBenefit-carin-bb-claims",
 				},
 			}
 		}
