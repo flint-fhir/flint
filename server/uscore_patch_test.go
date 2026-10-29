@@ -6607,3 +6607,122 @@ func TestCarinRTPBCFASTIdentityAndPACIORTWave40(t *testing.T) {
 		t.Fatalf("GET /Encounter/enc-w40-1/$pacio-timepoints expected pacio-rt-reassessment-timepoint-encounter and pacio-rt-clinical-impression, got %d: %s", tpsRec.Code, tpsRec.Body.String())
 	}
 }
+
+func TestVRDRCDexPollAndPACIOPFEWave41(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave41-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	patBody := `{
+		"resourceType": "Patient",
+		"id": "pat-w41-1",
+		"active": true,
+		"gender": "female",
+		"birthDate": "1945-06-15",
+		"name": [{"family": "Graunt", "given": ["John"]}]
+	}`
+	putReq := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/Patient/pat-w41-1", strings.NewReader(patBody))
+	putReq.Header.Set("Content-Type", "application/fhir+json")
+	putRec := httptest.NewRecorder()
+	pgH.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK && putRec.Code != http.StatusCreated {
+		t.Fatalf("PUT /Patient/pat-w41-1 expected 200/201, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	// 1. HL7 VRDR v2.2.0: GET /Composition/$vrdr-document & POST /Bundle/$vrdr-submit
+	vrdrDocReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Composition/$vrdr-document?patient=Patient/pat-w41-1", nil)
+	vrdrDocRec := httptest.NewRecorder()
+	pgH.ServeHTTP(vrdrDocRec, vrdrDocReq)
+	if vrdrDocRec.Code != http.StatusOK ||
+		!strings.Contains(vrdrDocRec.Body.String(), "vrdr-death-certificate-document") ||
+		!strings.Contains(vrdrDocRec.Body.String(), `"64297-5"`) ||
+		!strings.Contains(vrdrDocRec.Body.String(), `"69449-7"`) {
+		t.Fatalf("GET /Composition/$vrdr-document expected vrdr-death-certificate-document, LOINC 64297-5, and 69449-7, got %d: %s", vrdrDocRec.Code, vrdrDocRec.Body.String())
+	}
+
+	vrdrSubBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w41-1"},
+			{"name": "causeOfDeathCode", "valueCode": "I21.9"}
+		]
+	}`
+	vrdrSubReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Bundle/$vrdr-submit", strings.NewReader(vrdrSubBody))
+	vrdrSubReq.Header.Set("Content-Type", "application/fhir+json")
+	vrdrSubRec := httptest.NewRecorder()
+	pgH.ServeHTTP(vrdrSubRec, vrdrSubReq)
+	if vrdrSubRec.Code != http.StatusOK ||
+		!strings.Contains(vrdrSubRec.Body.String(), "vrdr-cause-of-death-coded-bundle") ||
+		!strings.Contains(vrdrSubRec.Body.String(), `"http://nchs.cdc.gov/vrdr_coding"`) ||
+		!strings.Contains(vrdrSubRec.Body.String(), `"I21.9"`) {
+		t.Fatalf("POST /Bundle/$vrdr-submit expected vrdr-cause-of-death-coded-bundle, vrdr_coding, and I21.9, got %d: %s", vrdrSubRec.Code, vrdrSubRec.Body.String())
+	}
+
+	// 2. HL7 Da Vinci CDex v2.0.0 & HRex v1.0.0: POST /Task/$cdex-request & GET /Task/cdex-task-pat-w41-1/$cdex-poll
+	cdexBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w41-1"},
+			{"name": "query", "valueString": "Condition?patient=Patient/pat-w41-1"}
+		]
+	}`
+	cdexReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Task/$cdex-request", strings.NewReader(cdexBody))
+	cdexReq.Header.Set("Content-Type", "application/fhir+json")
+	cdexRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cdexRec, cdexReq)
+	if cdexRec.Code != http.StatusOK ||
+		!strings.Contains(cdexRec.Body.String(), "cdex-task-data-request") ||
+		!strings.Contains(cdexRec.Body.String(), `"data-request-query"`) {
+		t.Fatalf("POST /Task/$cdex-request expected cdex-task-data-request and data-request-query, got %d: %s", cdexRec.Code, cdexRec.Body.String())
+	}
+
+	pollReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Task/cdex-task-pat-w41-1/$cdex-poll", nil)
+	pollRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pollRec, pollReq)
+	if pollRec.Code != http.StatusOK ||
+		!strings.Contains(pollRec.Body.String(), "cdex-task-data-request") ||
+		!strings.Contains(pollRec.Body.String(), "hrex-provenance") {
+		t.Fatalf("GET /Task/cdex-task-pat-w41-1/$cdex-poll expected cdex-task-data-request and hrex-provenance, got %d: %s", pollRec.Code, pollRec.Body.String())
+	}
+
+	// 3. HL7 PACIO PFE v1.0.0: POST /Patient/pat-w41-1/$pacio-pfe-record & GET /Patient/pat-w41-1/$pacio-pfe-summary
+	pfeBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "icfCode", "valueCode": "d450"},
+			{"name": "goal", "valueString": "Walk 150 feet independently with cane"}
+		]
+	}`
+	pfeReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/pat-w41-1/$pacio-pfe-record", strings.NewReader(pfeBody))
+	pfeReq.Header.Set("Content-Type", "application/fhir+json")
+	pfeRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pfeRec, pfeReq)
+	if pfeRec.Code != http.StatusOK ||
+		!strings.Contains(pfeRec.Body.String(), "pacio-pfe-observation-single") ||
+		!strings.Contains(pfeRec.Body.String(), "pacio-pfe-goal") ||
+		!strings.Contains(pfeRec.Body.String(), `"89392-5"`) {
+		t.Fatalf("POST /Patient/pat-w41-1/$pacio-pfe-record expected pacio-pfe-observation-single, pacio-pfe-goal, and LOINC 89392-5, got %d: %s", pfeRec.Code, pfeRec.Body.String())
+	}
+
+	pfeSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w41-1/$pacio-pfe-summary", nil)
+	pfeSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pfeSumRec, pfeSumReq)
+	if pfeSumRec.Code != http.StatusOK ||
+		!strings.Contains(pfeSumRec.Body.String(), "pacio-pfe-observation-single") ||
+		!strings.Contains(pfeSumRec.Body.String(), "pacio-pfe-goal") {
+		t.Fatalf("GET /Patient/pat-w41-1/$pacio-pfe-summary expected pacio-pfe-observation-single and pacio-pfe-goal, got %d: %s", pfeSumRec.Code, pfeSumRec.Body.String())
+	}
+}

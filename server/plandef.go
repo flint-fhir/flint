@@ -19338,3 +19338,511 @@ func (s *Server) handlePACIOReassessmentTimepoints(w http.ResponseWriter, r *htt
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(bundle)
 }
+
+// handlePublicHealthVRDRWave41 implements HL7 Vital Records Death Reporting (VRDR v2.2.0):
+//   - GET/POST /fhir/r4/{tenant}/Composition/$vrdr-document
+//   - GET/POST /fhir/r4/{tenant}/Composition/{id}/$vrdr-document
+//   - POST /fhir/r4/{tenant}/Bundle/$vrdr-submit
+func (s *Server) handlePublicHealthVRDRWave41(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "VRDR operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	resID := strings.TrimSpace(r.PathValue("id"))
+	patParam := strings.TrimSpace(r.URL.Query().Get("patient"))
+	causeOfDeathCode := "I21.9"
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
+			var bodyMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, raw := range params {
+							pm, ok := raw.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" && patParam == "" {
+									patParam = strings.TrimSpace(vs)
+								}
+							case "causeOfDeathCode":
+								if vc, ok := pm["valueCode"].(string); ok && strings.TrimSpace(vc) != "" {
+									causeOfDeathCode = strings.TrimSpace(vc)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := strings.TrimPrefix(firstNonEmptyStr(patParam, "example-patient-1"), "Patient/")
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "$vrdr-submit" {
+		mhID := "vrdr-coding-mh-" + patID
+		mhRes := map[string]any{
+			"resourceType": "MessageHeader",
+			"id":           mhID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/vrdr/StructureDefinition/vrdr-coding-response"},
+			},
+			"eventUri": "http://nchs.cdc.gov/vrdr_coding",
+			"source": map[string]any{
+				"endpoint": "http://nchs.cdc.gov/vrdr_submission",
+			},
+			"response": map[string]any{
+				"identifier": "vrdr-sub-" + patID,
+				"code":       "ok",
+			},
+		}
+		_, _, _, savedMH, _ := s.upsertResourceMap(r.Context(), tenant, mhRes)
+		if len(savedMH) > 0 {
+			mhRes = savedMH
+		}
+
+		codID := "vrdr-entity-axis-cod-" + patID
+		codRes := map[string]any{
+			"resourceType": "Condition",
+			"id":           codID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/vrdr/StructureDefinition/vrdr-entity-axis-cause-of-death"},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/sid/icd-10",
+						"code":    causeOfDeathCode,
+						"display": "Acute myocardial infarction, unspecified",
+					},
+				},
+			},
+			"subject": map[string]any{"reference": "Patient/" + patID},
+		}
+		_, _, _, savedCOD, _ := s.upsertResourceMap(r.Context(), tenant, codRes)
+		if len(savedCOD) > 0 {
+			codRes = savedCOD
+		}
+
+		bundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           "vrdr-coding-bundle-" + patID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/vrdr/StructureDefinition/vrdr-cause-of-death-coded-bundle"},
+			},
+			"type":      "message",
+			"timestamp": nowStr,
+			"entry": []map[string]any{
+				{"fullUrl": "MessageHeader/" + mhID, "resource": mhRes},
+				{"fullUrl": "Condition/" + codID, "resource": codRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(bundle)
+		return
+	}
+
+	compID := firstNonEmptyStr(resID, "vrdr-dc-"+patID)
+	patRes := map[string]any{
+		"resourceType":    "Patient",
+		"id":              patID,
+		"meta":            map[string]any{"profile": []string{"http://hl7.org/fhir/us/vrdr/StructureDefinition/vrdr-decedent"}},
+		"active":          true,
+		"gender":          "female",
+		"birthDate":       "1945-06-15",
+		"deceasedBoolean": true,
+		"name":            []map[string]any{{"family": "Decedent", "given": []string{"Eleanor"}}},
+	}
+
+	codPart1ID := "vrdr-cod-part1-" + patID
+	codPart1Res := map[string]any{
+		"resourceType": "Condition",
+		"id":           codPart1ID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/vrdr/StructureDefinition/vrdr-cause-of-death-part1"},
+		},
+		"code": map[string]any{
+			"text": "Acute myocardial infarction",
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedCOD1, _ := s.upsertResourceMap(r.Context(), tenant, codPart1Res)
+	if len(savedCOD1) > 0 {
+		codPart1Res = savedCOD1
+	}
+
+	mannerID := "vrdr-manner-" + patID
+	mannerRes := map[string]any{
+		"resourceType": "Observation",
+		"id":           mannerID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/vrdr/StructureDefinition/vrdr-manner-of-death"},
+		},
+		"status": "final",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://loinc.org", "code": "69449-7", "display": "Manner of death"},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"valueCodeableConcept": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://snomed.info/sct", "code": "38605008", "display": "Natural death"},
+			},
+		},
+	}
+	_, _, _, savedManner, _ := s.upsertResourceMap(r.Context(), tenant, mannerRes)
+	if len(savedManner) > 0 {
+		mannerRes = savedManner
+	}
+
+	compRes := map[string]any{
+		"resourceType": "Composition",
+		"id":           compID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/vrdr/StructureDefinition/vrdr-death-certificate"},
+		},
+		"status": "final",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://loinc.org", "code": "64297-5", "display": "Death certificate"},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"date":    nowStr,
+		"author":  []map[string]any{{"reference": "Practitioner/vrdr-certifier-1"}},
+		"title":   "U.S. Standard Certificate of Death",
+		"section": []map[string]any{
+			{
+				"title": "Cause of Death",
+				"entry": []map[string]any{
+					{"reference": "Condition/" + codPart1ID},
+					{"reference": "Observation/" + mannerID},
+				},
+			},
+		},
+	}
+	_, _, _, savedComp, _ := s.upsertResourceMap(r.Context(), tenant, compRes)
+	if len(savedComp) > 0 {
+		compRes = savedComp
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "vrdr-doc-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/vrdr/StructureDefinition/vrdr-death-certificate-document"},
+		},
+		"type":      "document",
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Composition/" + compID, "resource": compRes},
+			{"fullUrl": "Patient/" + patID, "resource": patRes},
+			{"fullUrl": "Condition/" + codPart1ID, "resource": codPart1Res},
+			{"fullUrl": "Observation/" + mannerID, "resource": mannerRes},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleDaVinciCDexTaskRequestAndPoll implements HL7 Da Vinci CDex v2.0.0 & HRex v1.0.0 Task-Based Data Request:
+//   - POST /fhir/r4/{tenant}/Task/$cdex-request
+//   - POST /fhir/r4/{tenant}/Task/{id}/$cdex-request
+//   - GET/POST /fhir/r4/{tenant}/Task/{id}/$cdex-poll
+//   - GET/POST /fhir/r4/{tenant}/Task/$cdex-poll
+func (s *Server) handleDaVinciCDexTaskRequestAndPoll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Da Vinci CDex Task operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	resID := strings.TrimSpace(r.PathValue("id"))
+	patParam := strings.TrimSpace(r.URL.Query().Get("patient"))
+	fhirQuery := firstNonEmptyStr(strings.TrimSpace(r.URL.Query().Get("query")), "Condition?patient=Patient/example-patient-1")
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
+			var bodyMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, raw := range params {
+							pm, ok := raw.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" && patParam == "" {
+									patParam = strings.TrimSpace(vs)
+								}
+							case "query", "fhirQuery":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									fhirQuery = strings.TrimSpace(vs)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := strings.TrimPrefix(firstNonEmptyStr(patParam, "example-patient-1"), "Patient/")
+	taskID := firstNonEmptyStr(resID, "cdex-task-"+patID)
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	taskRes := map[string]any{
+		"resourceType": "Task",
+		"id":           taskID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-cdex/StructureDefinition/cdex-task-data-request"},
+		},
+		"status": "completed",
+		"intent": "order",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp",
+					"code":    "data-request-query",
+					"display": "Data Request Query",
+				},
+			},
+		},
+		"for":        map[string]any{"reference": "Patient/" + patID},
+		"authoredOn": nowStr,
+		"input": []map[string]any{
+			{
+				"type": map[string]any{
+					"coding": []map[string]any{
+						{"system": "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp", "code": "fhir-query"},
+					},
+				},
+				"valueString": fhirQuery,
+			},
+		},
+		"output": []map[string]any{
+			{
+				"type": map[string]any{
+					"coding": []map[string]any{
+						{"system": "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp", "code": "data-value"},
+					},
+				},
+				"valueReference": map[string]any{"reference": "Patient/" + patID},
+			},
+		},
+	}
+	_, _, _, savedTask, _ := s.upsertResourceMap(r.Context(), tenant, taskRes)
+	if len(savedTask) > 0 {
+		taskRes = savedTask
+	}
+
+	provID := "hrex-prov-" + taskID
+	provRes := map[string]any{
+		"resourceType": "Provenance",
+		"id":           provID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-provenance"},
+		},
+		"target": []map[string]any{
+			{"reference": "Task/" + taskID},
+		},
+		"recorded": nowStr,
+		"agent": []map[string]any{
+			{
+				"type": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://terminology.hl7.org/CodeSystem/provenance-participant-type",
+							"code":    "performer",
+							"display": "Performer",
+						},
+					},
+				},
+				"who": map[string]any{"reference": "Organization/cdex-provider-1"},
+			},
+		},
+	}
+	_, _, _, savedProv, _ := s.upsertResourceMap(r.Context(), tenant, provRes)
+	if len(savedProv) > 0 {
+		provRes = savedProv
+	}
+
+	if op == "$cdex-request" {
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(taskRes)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "cdex-poll-" + taskID,
+		"type":         "searchset",
+		"total":        2,
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Task/" + taskID, "resource": taskRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Provenance/" + provID, "resource": provRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handlePACIOPFE implements HL7 PACIO Personal Functioning and Engagement (PACIO PFE v1.0.0):
+//   - POST /fhir/r4/{tenant}/Patient/{id}/$pacio-pfe-record
+//   - POST /fhir/r4/{tenant}/Patient/$pacio-pfe-record
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$pacio-pfe-summary
+//   - GET/POST /fhir/r4/{tenant}/Patient/$pacio-pfe-summary
+func (s *Server) handlePACIOPFE(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "PACIO PFE operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	resID := strings.TrimSpace(r.PathValue("id"))
+	icfCode := "d450"
+	goalText := "Walk 150 feet independently with rolling walker within 14 days"
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
+			var bodyMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, raw := range params {
+							pm, ok := raw.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" && resID == "" {
+									resID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+							case "icfCode":
+								if vc, ok := pm["valueCode"].(string); ok && strings.TrimSpace(vc) != "" {
+									icfCode = strings.TrimSpace(vc)
+								}
+							case "goal":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									goalText = strings.TrimSpace(vs)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := firstNonEmptyStr(resID, "example-patient-1")
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	obsID := "pacio-pfe-obs-" + patID
+	obsRes := map[string]any{
+		"resourceType": "Observation",
+		"id":           obsID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/pacio-pfe/StructureDefinition/pacio-pfe-observation-single"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-category", "code": "functional-status", "display": "Functional Status"},
+					{"system": "http://hl7.org/fhir/sid/icf-nl", "code": icfCode, "display": "Walking"},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "89392-5",
+					"display": "Walk 150 feet - functional ability during 3 day assessment period [CMS Assessment]",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueCodeableConcept": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://loinc.org", "code": "LA10055-4", "display": "Supervision or touching assistance"},
+			},
+		},
+	}
+	_, _, _, savedObs, _ := s.upsertResourceMap(r.Context(), tenant, obsRes)
+	if len(savedObs) > 0 {
+		obsRes = savedObs
+	}
+
+	goalID := "pacio-pfe-goal-" + patID
+	goalRes := map[string]any{
+		"resourceType": "Goal",
+		"id":           goalID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/pacio-pfe/StructureDefinition/pacio-pfe-goal"},
+		},
+		"lifecycleStatus": "active",
+		"description": map[string]any{
+			"text": goalText,
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"addresses": []map[string]any{
+			{"reference": "Observation/" + obsID},
+		},
+	}
+	_, _, _, savedGoal, _ := s.upsertResourceMap(r.Context(), tenant, goalRes)
+	if len(savedGoal) > 0 {
+		goalRes = savedGoal
+	}
+
+	if op == "$pacio-pfe-record" {
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "pfeObservation", "resource": obsRes},
+				{"name": "pfeGoal", "resource": goalRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "pacio-pfe-summary-" + patID,
+		"type":         "searchset",
+		"total":        2,
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Observation/" + obsID, "resource": obsRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Goal/" + goalID, "resource": goalRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}

@@ -1007,6 +1007,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handlePACIOReassessmentTimepoints(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Composition") && parts[4] == "$vrdr-document" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$vrdr-document")
+					s.handlePublicHealthVRDRWave41(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && parts[4] == "$vrdr-submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$vrdr-submit")
+					s.handlePublicHealthVRDRWave41(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[4] == "$cdex-request" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$cdex-request")
+					s.handleDaVinciCDexTaskRequestAndPoll(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Task") && parts[4] == "$cdex-poll" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$cdex-poll")
+					s.handleDaVinciCDexTaskRequestAndPoll(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$pacio-pfe-record" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$pacio-pfe-record")
+					s.handlePACIOPFE(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$pacio-pfe-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$pacio-pfe-summary")
+					s.handlePACIOPFE(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -1015,6 +1051,41 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Composition") && parts[5] == "$vrdr-document" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$vrdr-document")
+					s.handlePublicHealthVRDRWave41(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[5] == "$cdex-request" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$cdex-request")
+					s.handleDaVinciCDexTaskRequestAndPoll(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Task") && parts[5] == "$cdex-poll" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$cdex-poll")
+					s.handleDaVinciCDexTaskRequestAndPoll(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[5] == "$pacio-pfe-record" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$pacio-pfe-record")
+					s.handlePACIOPFE(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$pacio-pfe-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$pacio-pfe-summary")
+					s.handlePACIOPFE(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Claim") && parts[5] == "$rtpbc-submit" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4661,6 +4732,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "idi-match",
 					"definition": "http://hl7.org/fhir/us/identity-matching/OperationDefinition/Patient-idi-match",
 				},
+				{
+					"name":       "pacio-pfe-record",
+					"definition": "http://hl7.org/fhir/us/pacio-pfe/OperationDefinition/Patient-pacio-pfe-record",
+				},
+				{
+					"name":       "pacio-pfe-summary",
+					"definition": "http://hl7.org/fhir/us/pacio-pfe/OperationDefinition/Patient-pacio-pfe-summary",
+				},
 			}
 		case "Organization":
 			entry["operation"] = []map[string]string{
@@ -4768,6 +4847,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "eicr-document",
 					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/Composition-eicr-document",
+				},
+				{
+					"name":       "vrdr-document",
+					"definition": "http://hl7.org/fhir/us/vrdr/OperationDefinition/Composition-vrdr-document",
 				},
 			}
 		case "DocumentReference":
@@ -4987,6 +5070,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "eicr-document",
 					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/Composition-eicr-document",
 				},
+				{
+					"name":       "vrdr-document",
+					"definition": "http://hl7.org/fhir/us/vrdr/OperationDefinition/Composition-vrdr-document",
+				},
 			}
 		case "MeasureReport":
 			entry["operation"] = []map[string]string{
@@ -5095,6 +5182,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "submit-attachment",
 					"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/submit-attachment",
+				},
+				{
+					"name":       "cdex-request",
+					"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/Task-cdex-request",
+				},
+				{
+					"name":       "cdex-poll",
+					"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/Task-cdex-poll",
 				},
 			}
 		case "ValueSet":
@@ -5352,6 +5447,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "iti-65",
 					"definition": "https://profiles.ihe.net/ITI/MHD/OperationDefinition/IHE.MHD.ProvideBundle",
+				},
+				{
+					"name":       "vrdr-submit",
+					"definition": "http://hl7.org/fhir/us/vrdr/OperationDefinition/Bundle-vrdr-submit",
 				},
 			}
 		case "HealthcareService":

@@ -1760,6 +1760,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /Encounter/cert-enc-1/$pacio-timepoints to return pacio-rt-reassessment-timepoint-encounter, got %d: %s", respPACIORT.StatusCode, string(bPACIORT))
 			}
 		}
+		if err == nil {
+			respVRDR, bVRDR, errVRDR := doReq(http.MethodGet, basePath+"/Composition/$vrdr-document?patient=Patient/cert-pat-1", "", nil, nil)
+			respPFE, bPFE, errPFE := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$pacio-pfe-summary", "", nil, nil)
+			if errVRDR != nil || respVRDR.StatusCode != http.StatusOK || !strings.Contains(string(bVRDR), "vrdr-death-certificate-document") {
+				err = fmt.Errorf("expected GET /Composition/$vrdr-document to return vrdr-death-certificate-document, got %d: %s", respVRDR.StatusCode, string(bVRDR))
+			} else if errPFE != nil || respPFE.StatusCode != http.StatusOK || !strings.Contains(string(bPFE), "pacio-pfe-observation-single") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$pacio-pfe-summary to return pacio-pfe-observation-single, got %d: %s", respPFE.StatusCode, string(bPFE))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
