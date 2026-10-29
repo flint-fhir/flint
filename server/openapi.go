@@ -4503,6 +4503,94 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Immunization/$iis-submit": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Immunization", "ImmunizationEvaluation", "ImmunizationRecommendation"},
+				"summary":     "Submit an administered Immunization to an Immunization Information System (IIS / HL7 ImmDS v2.0.0) and evaluate dose validity",
+				"operationId": "immunizationIISSubmitPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing accepted status, Immunization, ImmunizationEvaluation, and ImmunizationRecommendation"},
+				},
+			},
+		},
+		"/Patient/{id}/$iis-history": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Immunization", "ImmunizationEvaluation", "ImmunizationRecommendation", "Bundle"},
+				"summary":     "Query longitudinal Immunization Information System (IIS / HL7 ImmDS v2.0.0) history and evaluated forecast for Patient/{id}",
+				"operationId": "patientIISHistoryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of Immunizations, ImmunizationEvaluations, and ImmunizationRecommendations"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Immunization", "ImmunizationEvaluation", "ImmunizationRecommendation", "Bundle"},
+				"summary":     "Query longitudinal Immunization Information System (IIS) history and forecast (POST)",
+				"operationId": "patientIISHistoryPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of Immunizations, ImmunizationEvaluations, and ImmunizationRecommendations"},
+				},
+			},
+		},
+		"/Bundle/$cdex-sign": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Bundle", "Provenance"},
+				"summary":     "Digitally sign a clinical data Bundle per HL7 Da Vinci CDex v2.0.0 Digital Signatures (cdex-signature-bundle)",
+				"operationId": "bundleCDexSignPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Signed cdex-signature-bundle with JWS Bundle.signature and HRex Provenance"},
+				},
+			},
+		},
+		"/Bundle/$cdex-verify-signature": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Bundle", "Parameters", "OperationOutcome"},
+				"summary":     "Verify a cryptographic JWS digital signature on a Da Vinci CDex v2.0.0 signed Bundle",
+				"operationId": "bundleCDexVerifySignaturePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing verified boolean, signatureType, signer, and OperationOutcome"},
+				},
+			},
+		},
+		"/DiagnosticReport/$mcode-genomics-report": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"DiagnosticReport", "Observation"},
+				"summary":     "Record an HL7 CodeX / mCODE v3.0.0 Cancer Genomics Report (mcode-cancer-genomics-report, LOINC 81247-9) with genomic variant and tumor marker",
+				"operationId": "diagnosticReportMCODEGenomicsReportPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted mcode-cancer-genomics-report DiagnosticReport"},
+				},
+			},
+		},
+		"/Patient/{id}/$mcode-genomics-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "DiagnosticReport", "Observation", "Bundle"},
+				"summary":     "Assemble an HL7 CodeX / mCODE v3.0.0 Cancer Genomics and Tumor Marker Summary Bundle for Patient/{id}",
+				"operationId": "patientMCODEGenomicsSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of mCODE Cancer Genomics Reports, Genomic Variants, and Tumor Markers"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "DiagnosticReport", "Observation", "Bundle"},
+				"summary":     "Assemble an HL7 CodeX / mCODE v3.0.0 Cancer Genomics and Tumor Marker Summary Bundle (POST)",
+				"operationId": "patientMCODEGenomicsSummaryPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of mCODE Cancer Genomics Reports, Genomic Variants, and Tumor Markers"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

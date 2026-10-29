@@ -6865,3 +6865,132 @@ func TestBFDRCDexAndMCODERadiotherapyWave42(t *testing.T) {
 		t.Fatalf("GET /Patient/pat-w42-1/$mcode-radiotherapy-summary expected mcode-radiotherapy-course-summary and mcode-primary-cancer-condition, got %d: %s", rtSumRec.Code, rtSumRec.Body.String())
 	}
 }
+
+func TestIISCDexSignatureAndMCODEGenomicsWave43(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave43-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. Metadata & OpenAPI discovery
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK ||
+		!strings.Contains(metaRec.Body.String(), "iis-submit") ||
+		!strings.Contains(metaRec.Body.String(), "iis-history") ||
+		!strings.Contains(metaRec.Body.String(), "cdex-sign") ||
+		!strings.Contains(metaRec.Body.String(), "cdex-verify-signature") ||
+		!strings.Contains(metaRec.Body.String(), "mcode-genomics-report") ||
+		!strings.Contains(metaRec.Body.String(), "mcode-genomics-summary") {
+		t.Fatalf("CapabilityStatement missing Wave 43 operations: %s", metaRec.Body.String())
+	}
+
+	oaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/openapi.json", nil)
+	oaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(oaRec, oaReq)
+	if oaRec.Code != http.StatusOK ||
+		!strings.Contains(oaRec.Body.String(), "/Immunization/$iis-submit") ||
+		!strings.Contains(oaRec.Body.String(), "/Patient/{id}/$iis-history") ||
+		!strings.Contains(oaRec.Body.String(), "/Bundle/$cdex-sign") ||
+		!strings.Contains(oaRec.Body.String(), "/Bundle/$cdex-verify-signature") ||
+		!strings.Contains(oaRec.Body.String(), "/DiagnosticReport/$mcode-genomics-report") ||
+		!strings.Contains(oaRec.Body.String(), "/Patient/{id}/$mcode-genomics-summary") {
+		t.Fatalf("OpenAPI missing Wave 43 paths: %s", oaRec.Body.String())
+	}
+
+	// 1. HL7 IIS / ImmDS v2.0.0: POST /Immunization/$iis-submit & GET /Patient/pat-w43-1/$iis-history
+	iisBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w43-1"},
+			{"name": "cvx", "valueCode": "208"}
+		]
+	}`
+	iisReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Immunization/$iis-submit", strings.NewReader(iisBody))
+	iisReq.Header.Set("Content-Type", "application/fhir+json")
+	iisRec := httptest.NewRecorder()
+	pgH.ServeHTTP(iisRec, iisReq)
+	if iisRec.Code != http.StatusOK ||
+		!strings.Contains(iisRec.Body.String(), "immds-immunizationevaluation") ||
+		!strings.Contains(iisRec.Body.String(), "immds-immunizationrecommendation") {
+		t.Fatalf("POST /Immunization/$iis-submit expected immds-immunizationevaluation and immds-immunizationrecommendation, got %d: %s", iisRec.Code, iisRec.Body.String())
+	}
+
+	iisHistReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w43-1/$iis-history", nil)
+	iisHistRec := httptest.NewRecorder()
+	pgH.ServeHTTP(iisHistRec, iisHistReq)
+	if iisHistRec.Code != http.StatusOK ||
+		!strings.Contains(iisHistRec.Body.String(), "immds-immunizationevaluation") ||
+		!strings.Contains(iisHistRec.Body.String(), "immds-immunizationrecommendation") {
+		t.Fatalf("GET /Patient/pat-w43-1/$iis-history expected immds-immunizationevaluation and immds-immunizationrecommendation, got %d: %s", iisHistRec.Code, iisHistRec.Body.String())
+	}
+
+	// 2. HL7 Da Vinci CDex v2.0.0 Digital Signatures: POST /Bundle/$cdex-sign & POST /Bundle/$cdex-verify-signature
+	sigBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "bundleId", "valueString": "cdex-sig-w43-1"},
+			{"name": "signer", "valueString": "Practitioner/pract-w43-1"}
+		]
+	}`
+	sigReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Bundle/$cdex-sign", strings.NewReader(sigBody))
+	sigReq.Header.Set("Content-Type", "application/fhir+json")
+	sigRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sigRec, sigReq)
+	if sigRec.Code != http.StatusOK ||
+		!strings.Contains(sigRec.Body.String(), "cdex-signature-bundle") ||
+		!strings.Contains(sigRec.Body.String(), `"application/jose"`) {
+		t.Fatalf("POST /Bundle/$cdex-sign expected cdex-signature-bundle and application/jose, got %d: %s", sigRec.Code, sigRec.Body.String())
+	}
+
+	verReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Bundle/cdex-sig-w43-1/$cdex-verify-signature", strings.NewReader(sigRec.Body.String()))
+	verReq.Header.Set("Content-Type", "application/fhir+json")
+	verRec := httptest.NewRecorder()
+	pgH.ServeHTTP(verRec, verReq)
+	if verRec.Code != http.StatusOK ||
+		!strings.Contains(verRec.Body.String(), `"valueBoolean":true`) ||
+		!strings.Contains(verRec.Body.String(), `"1.2.840.10065.1.12.1.1"`) {
+		t.Fatalf("POST /Bundle/cdex-sig-w43-1/$cdex-verify-signature expected verified=true and ASTM signature code, got %d: %s", verRec.Code, verRec.Body.String())
+	}
+
+	// 3. HL7 CodeX / mCODE v3.0.0 Cancer Genomics: POST /DiagnosticReport/$mcode-genomics-report & GET /Patient/pat-w43-1/$mcode-genomics-summary
+	genBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w43-1"},
+			{"name": "gene", "valueString": "BRCA1"}
+		]
+	}`
+	genReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/DiagnosticReport/$mcode-genomics-report", strings.NewReader(genBody))
+	genReq.Header.Set("Content-Type", "application/fhir+json")
+	genRec := httptest.NewRecorder()
+	pgH.ServeHTTP(genRec, genReq)
+	if genRec.Code != http.StatusOK ||
+		!strings.Contains(genRec.Body.String(), "mcode-cancer-genomics-report") ||
+		!strings.Contains(genRec.Body.String(), `"81247-9"`) {
+		t.Fatalf("POST /DiagnosticReport/$mcode-genomics-report expected mcode-cancer-genomics-report and LOINC 81247-9, got %d: %s", genRec.Code, genRec.Body.String())
+	}
+
+	genSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w43-1/$mcode-genomics-summary", nil)
+	genSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(genSumRec, genSumReq)
+	if genSumRec.Code != http.StatusOK ||
+		!strings.Contains(genSumRec.Body.String(), "mcode-cancer-genomics-report") ||
+		!strings.Contains(genSumRec.Body.String(), "mcode-genomic-variant") ||
+		!strings.Contains(genSumRec.Body.String(), "mcode-tumor-marker") {
+		t.Fatalf("GET /Patient/pat-w43-1/$mcode-genomics-summary expected mcode-cancer-genomics-report, mcode-genomic-variant, and mcode-tumor-marker, got %d: %s", genSumRec.Code, genSumRec.Body.String())
+	}
+}

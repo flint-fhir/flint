@@ -1079,6 +1079,36 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleMCODERadiotherapyWave42(w, r)
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Immunization") && parts[4] == "$iis-submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$iis-submit")
+					s.handlePublicHealthIISWave43(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$iis-history" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$iis-history")
+					s.handlePublicHealthIISWave43(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && (parts[4] == "$cdex-sign" || parts[4] == "$cdex-verify-signature") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", parts[4])
+					s.handleDaVinciCDexSignatureWave43(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "DiagnosticReport") && parts[4] == "$mcode-genomics-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$mcode-genomics-report")
+					s.handleMCODEGenomicsWave43(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$mcode-genomics-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$mcode-genomics-summary")
+					s.handleMCODEGenomicsWave43(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -1087,6 +1117,41 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Immunization") && parts[5] == "$iis-submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$iis-submit")
+					s.handlePublicHealthIISWave43(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$iis-history" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$iis-history")
+					s.handlePublicHealthIISWave43(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && (parts[5] == "$cdex-sign" || parts[5] == "$cdex-verify-signature") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", parts[5])
+					s.handleDaVinciCDexSignatureWave43(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "DiagnosticReport") && parts[5] == "$mcode-genomics-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$mcode-genomics-report")
+					s.handleMCODEGenomicsWave43(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$mcode-genomics-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$mcode-genomics-summary")
+					s.handleMCODEGenomicsWave43(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Composition") && parts[5] == "$bfdr-document" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4815,6 +4880,21 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "mcode-radiotherapy-summary",
 					"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/Patient-mcode-radiotherapy-summary",
 				},
+				{
+					"name":       "iis-history",
+					"definition": "http://hl7.org/fhir/us/immds/OperationDefinition/Patient-iis-history",
+				},
+				{
+					"name":       "mcode-genomics-summary",
+					"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/Patient-mcode-genomics-summary",
+				},
+			}
+		case "Immunization":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "iis-submit",
+					"definition": "http://hl7.org/fhir/us/immds/OperationDefinition/Immunization-iis-submit",
+				},
 			}
 		case "Procedure":
 			entry["operation"] = []map[string]string{
@@ -4860,6 +4940,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "elr-submit",
 					"definition": "http://hl7.org/fhir/us/elr/OperationDefinition/DiagnosticReport-elr-submit",
+				},
+				{
+					"name":       "mcode-genomics-report",
+					"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/DiagnosticReport-mcode-genomics-report",
 				},
 			}
 		case "Observation":
@@ -5553,6 +5637,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "bfdr-submit",
 					"definition": "http://hl7.org/fhir/us/bfdr/OperationDefinition/Bundle-bfdr-submit",
+				},
+				{
+					"name":       "cdex-sign",
+					"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/Bundle-cdex-sign",
+				},
+				{
+					"name":       "cdex-verify-signature",
+					"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/Bundle-cdex-verify-signature",
 				},
 			}
 		case "HealthcareService":
