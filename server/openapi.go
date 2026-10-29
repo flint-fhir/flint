@@ -4316,6 +4316,108 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Composition/$vrdr-document": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Composition", "Patient", "Condition", "Observation", "Bundle"},
+				"summary":     "Assemble an NCHS Vital Records Death Reporting (VRDR v2.2.0, LOINC 64297-5) death certificate document Bundle",
+				"operationId": "compositionVRDRDocumentGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle (vrdr-death-certificate-document)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Composition", "Patient", "Condition", "Observation", "Bundle"},
+				"summary":     "Assemble an NCHS Vital Records Death Reporting (VRDR v2.2.0) death certificate document Bundle (POST)",
+				"operationId": "compositionVRDRDocumentPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle (vrdr-death-certificate-document)"},
+				},
+			},
+		},
+		"/Bundle/$vrdr-submit": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Bundle", "MessageHeader", "Condition"},
+				"summary":     "Submit a Vital Records Death Record to NCHS/STEVE and receive TRX/MRE coded cause-of-death response (VRDR v2.2.0)",
+				"operationId": "bundleVRDRSubmitPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Message Bundle (vrdr-cause-of-death-coded-bundle)"},
+				},
+			},
+		},
+		"/Task/$cdex-request": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Task", "Provenance"},
+				"summary":     "Create and fulfill a Da Vinci CDex v2.0.0 Task-based clinical data request (cdex-task-data-request)",
+				"operationId": "taskCDexRequestPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted Da Vinci CDex Task (cdex-task-data-request)"},
+				},
+			},
+		},
+		"/Task/{id}/$cdex-poll": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Task", "Provenance", "Bundle"},
+				"summary":     "Poll a Da Vinci CDex v2.0.0 Task-based data request and retrieve HRex Provenance and fulfilled clinical data",
+				"operationId": "taskCDexPollGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing cdex-task-data-request and hrex-provenance"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Task", "Provenance", "Bundle"},
+				"summary":     "Poll a Da Vinci CDex v2.0.0 Task-based data request (POST)",
+				"operationId": "taskCDexPollPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing cdex-task-data-request and hrex-provenance"},
+				},
+			},
+		},
+		"/Patient/{id}/$pacio-pfe-record": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Observation", "Goal"},
+				"summary":     "Record an ICF-coded Personal Functioning and Engagement observation and functional Goal (HL7 PACIO PFE v1.0.0)",
+				"operationId": "patientPACIOPFERecordPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing pfeObservation and pfeGoal"},
+				},
+			},
+		},
+		"/Patient/{id}/$pacio-pfe-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Observation", "Goal", "Bundle"},
+				"summary":     "Assemble a longitudinal HL7 PACIO Personal Functioning and Engagement (PACIO PFE v1.0.0) summary Bundle for Patient/{id}",
+				"operationId": "patientPACIOPFESummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of PACIO PFE Observations and Goals"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Observation", "Goal", "Bundle"},
+				"summary":     "Assemble a longitudinal HL7 PACIO Personal Functioning and Engagement summary Bundle (POST)",
+				"operationId": "patientPACIOPFESummaryPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of PACIO PFE Observations and Goals"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()
