@@ -1733,6 +1733,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$ra-coding-gaps to return ra-measurereport Bundle, got %d: %s", respRAGaps.StatusCode, string(bRAGaps))
 			}
 		}
+		if err == nil {
+			respEICR, bEICR, errEICR := doReq(http.MethodGet, basePath+"/Composition/$eicr-document?patient=Patient/cert-pat-1", "", nil, nil)
+			respODH, bODH, errODH := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$odh-summary", "", nil, nil)
+			if errEICR != nil || respEICR.StatusCode != http.StatusOK || !strings.Contains(string(bEICR), "eicr-document-bundle") {
+				err = fmt.Errorf("expected GET /Composition/$eicr-document to return eicr-document-bundle, got %d: %s", respEICR.StatusCode, string(bEICR))
+			} else if errODH != nil || respODH.StatusCode != http.StatusOK || !strings.Contains(string(bODH), `"11341-5"`) {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$odh-summary to return LOINC 11341-5 ODH Bundle, got %d: %s", respODH.StatusCode, string(bODH))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

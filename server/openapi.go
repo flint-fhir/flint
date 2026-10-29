@@ -4010,6 +4010,108 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Composition/$eicr-document": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Composition", "Bundle"},
+				"summary":     "Assemble an HL7 Public Health Electronic Initial Case Report (eICR v2.1.1, LOINC 55751-2) document Bundle",
+				"operationId": "compositionEICRDocumentGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle (eicr-document-bundle)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Composition", "Bundle"},
+				"summary":     "Assemble an HL7 Public Health Electronic Initial Case Report (eICR v2.1.1) document Bundle (POST)",
+				"operationId": "compositionEICRDocumentPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle (eicr-document-bundle)"},
+				},
+			},
+		},
+		"/Communication/$rr-process": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Communication", "DetectedIssue"},
+				"summary":     "Process an HL7 Public Health Reportability Response (RR, LOINC 88085-6) and persist rr-communication & DetectedIssue",
+				"operationId": "communicationRRProcessPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing reportabilityStatus, rr-communication, and DetectedIssue"},
+				},
+			},
+		},
+		"/Patient/{id}/$pdex-WriteData": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Provenance"},
+				"summary":     "Ingest payer-to-payer clinical/administrative data for Patient/{id} with US Core / Da Vinci PDex Provenance lineage",
+				"operationId": "patientPDexWriteDataPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing persistedCount, pdex-provenance, and OperationOutcome"},
+				},
+			},
+		},
+		"/MedicationKnowledge/$formulary-alternatives": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"MedicationKnowledge"},
+				"summary":     "Evaluate preferred lower-tier therapeutic formulary alternatives (HL7 Da Vinci US Drug Formulary v2.0.1)",
+				"operationId": "medicationKnowledgeFormularyAlternativesGet",
+				"parameters": []map[string]any{
+					{"name": "code", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of preferred tier-1 usdf-FormularyDrug MedicationKnowledge resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"MedicationKnowledge"},
+				"summary":     "Evaluate preferred lower-tier therapeutic formulary alternatives (POST)",
+				"operationId": "medicationKnowledgeFormularyAlternativesPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of preferred tier-1 usdf-FormularyDrug MedicationKnowledge resources"},
+				},
+			},
+		},
+		"/Patient/{id}/$record-occupation": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Observation"},
+				"summary":     "Record structured NIOSH/CDC Occupational Data for Health (ODH v1.3.0) PastOrPresentJob, EmploymentStatus, and CombatZonePeriod Observations",
+				"operationId": "patientRecordOccupationPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing jobObservation (LOINC 11341-5), employmentStatus (LOINC 74165-2), and militaryService (LOINC 87511-2)"},
+				},
+			},
+		},
+		"/Patient/{id}/$odh-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Observation"},
+				"summary":     "Assemble an HL7 Occupational Data for Health (ODH v1.3.0) and Military Service History summary Bundle for Patient/{id}",
+				"operationId": "patientODHSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of ODH Observations (LOINC 11341-5, 74165-2, 87511-2)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Observation"},
+				"summary":     "Assemble an HL7 Occupational Data for Health (ODH v1.3.0) and Military Service History summary Bundle (POST)",
+				"operationId": "patientODHSummaryPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of ODH Observations (LOINC 11341-5, 74165-2, 87511-2)"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()
