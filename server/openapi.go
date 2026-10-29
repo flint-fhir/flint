@@ -2272,6 +2272,78 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Endpoint/$fast-endpoint-query": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Endpoint"},
+				"summary":     "HL7 FAST National Healthcare Directory (NDH v1.0.0) Endpoint/$fast-endpoint-query discovery",
+				"operationId": "endpointFASTEndpointQueryGet",
+				"parameters": []map[string]any{
+					{"name": "connectionType", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of ndh-Endpoint resources"},
+				},
+			},
+		},
+		"/Organization/{id}/$fast-verify": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Organization", "VerificationResult"},
+				"summary":     "HL7 FAST National Healthcare Directory (NDH v1.0.0) Organization/{id}/$fast-verify attestation & primary source verification",
+				"operationId": "organizationFASTVerifyPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing verified (boolean), Organization, and ndh-VerificationResult (status: attested)"},
+				},
+			},
+		},
+		"/Patient/{id}/$physical-activity-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Observation", "Goal"},
+				"summary":     "HL7 Physical Activity v1.0.0 Patient/{id}/$physical-activity-summary Exercise Vital Sign (EVS) & Goal Bundle",
+				"operationId": "patientPhysicalActivitySummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle containing Patient, EVS Observations (89555-7, 68516-4, 82290-8), and physical activity Goal"},
+				},
+			},
+		},
+		"/ServiceRequest/$physical-activity-referral": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ServiceRequest", "Task"},
+				"summary":     "HL7 Physical Activity v1.0.0 ServiceRequest/$physical-activity-referral closed-loop exercise referral & Task synthesis",
+				"operationId": "serviceRequestPhysicalActivityReferralPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing pa-servicerequest (SNOMED 390893007) and pa-task-for-referral-management"},
+				},
+			},
+		},
+		"/MedicinalProduct/$epi-document": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"MedicinalProduct", "Composition", "Bundle"},
+				"summary":     "HL7 Vulcan Electronic Medicinal Product Information (ePI v1.0.0) MedicinalProduct/$epi-document package leaflet Document Bundle",
+				"operationId": "medicinalProductEPIDocumentGet",
+				"parameters": []map[string]any{
+					{"name": "name", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "ePI Document Bundle (Bundle-uv-epi, type: document) with SPL Composition (69719-3) and MedicinalProduct"},
+				},
+			},
+		},
+		"/MedicinalProductAuthorization/$evaluate-authorization": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"MedicinalProductAuthorization"},
+				"summary":     "HL7 Vulcan ePI / BR&R v1.0.0 MedicinalProductAuthorization/$evaluate-authorization regulatory marketing authorization check",
+				"operationId": "medicinalProductAuthorizationEvaluatePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing authorized (boolean), jurisdiction, and RegulatedAuthorization-uv-epi"},
+				},
+			},
+		},
 		"/Patient/{id}/$everything": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Patient"},

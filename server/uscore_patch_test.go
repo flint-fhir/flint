@@ -6032,3 +6032,124 @@ func TestVulcanBFDRAndIHEPDQmWave35(t *testing.T) {
 		t.Fatalf("GET /DocumentReference/doc-w35-1/$ihe-iti-68 expected documentReference and Binary payload, got %d: %s", iti68Rec.Code, iti68Rec.Body.String())
 	}
 }
+
+func TestFASTNDHPhysicalActivityAndVulcanEPIWave36(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave36-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w36-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w36-1",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1980-05-14",
+			"name": [{"family": "Bannister", "given": ["Roger"]}]
+		}`},
+		{"/Organization/org-w36-1", `{
+			"resourceType": "Organization",
+			"id": "org-w36-1",
+			"active": true,
+			"name": "National Directory Health System",
+			"identifier": [{"system": "http://hl7.org/fhir/sid/us-npi", "value": "1992837465"}]
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. HL7 FAST National Healthcare Directory v1.0.0: GET /Endpoint/$fast-endpoint-query & POST /Organization/org-w36-1/$fast-verify
+	epReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Endpoint/$fast-endpoint-query?connectionType=hl7-fhir-rest", nil)
+	epRec := httptest.NewRecorder()
+	pgH.ServeHTTP(epRec, epReq)
+	if epRec.Code != http.StatusOK ||
+		!strings.Contains(epRec.Body.String(), "ndh-Endpoint") ||
+		!strings.Contains(epRec.Body.String(), "hl7-fhir-rest") {
+		t.Fatalf("GET /Endpoint/$fast-endpoint-query expected ndh-Endpoint Bundle with hl7-fhir-rest, got %d: %s", epRec.Code, epRec.Body.String())
+	}
+
+	verReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Organization/org-w36-1/$fast-verify", nil)
+	verRec := httptest.NewRecorder()
+	pgH.ServeHTTP(verRec, verReq)
+	if verRec.Code != http.StatusOK ||
+		!strings.Contains(verRec.Body.String(), "ndh-VerificationResult") ||
+		!strings.Contains(verRec.Body.String(), `"attested"`) {
+		t.Fatalf("POST /Organization/org-w36-1/$fast-verify expected ndh-VerificationResult with status=attested, got %d: %s", verRec.Code, verRec.Body.String())
+	}
+
+	// 2. HL7 Physical Activity v1.0.0: GET /Patient/pat-w36-1/$physical-activity-summary & POST /ServiceRequest/$physical-activity-referral
+	paSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w36-1/$physical-activity-summary", nil)
+	paSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(paSumRec, paSumReq)
+	if paSumRec.Code != http.StatusOK ||
+		!strings.Contains(paSumRec.Body.String(), `"89555-7"`) ||
+		!strings.Contains(paSumRec.Body.String(), `"68516-4"`) ||
+		!strings.Contains(paSumRec.Body.String(), `"82290-8"`) {
+		t.Fatalf("GET /Patient/pat-w36-1/$physical-activity-summary expected EVS LOINC 89555-7, 68516-4, and 82290-8, got %d: %s", paSumRec.Code, paSumRec.Body.String())
+	}
+
+	paRefBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w36-1"}
+		]
+	}`
+	paRefReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/ServiceRequest/$physical-activity-referral", strings.NewReader(paRefBody))
+	paRefReq.Header.Set("Content-Type", "application/fhir+json")
+	paRefRec := httptest.NewRecorder()
+	pgH.ServeHTTP(paRefRec, paRefReq)
+	if paRefRec.Code != http.StatusOK ||
+		!strings.Contains(paRefRec.Body.String(), `"390893007"`) ||
+		!strings.Contains(paRefRec.Body.String(), "pa-task-for-referral-management") {
+		t.Fatalf("POST /ServiceRequest/$physical-activity-referral expected SNOMED 390893007 and pa-task-for-referral-management, got %d: %s", paRefRec.Code, paRefRec.Body.String())
+	}
+
+	// 3. HL7 Vulcan ePI & Regulatory Authorization v1.0.0: GET /MedicinalProduct/$epi-document & POST /MedicinalProductAuthorization/$evaluate-authorization
+	epiDocReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/MedicinalProduct/$epi-document?name=Olaparib", nil)
+	epiDocRec := httptest.NewRecorder()
+	pgH.ServeHTTP(epiDocRec, epiDocReq)
+	if epiDocRec.Code != http.StatusOK ||
+		!strings.Contains(epiDocRec.Body.String(), "Bundle-uv-epi") ||
+		!strings.Contains(epiDocRec.Body.String(), `"69719-3"`) {
+		t.Fatalf("GET /MedicinalProduct/$epi-document expected Bundle-uv-epi with LOINC 69719-3, got %d: %s", epiDocRec.Code, epiDocRec.Body.String())
+	}
+
+	epiAuthBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "subject", "valueString": "MedicinalProduct/epi-mp-olaparib-150"},
+			{"name": "jurisdiction", "valueCode": "US"}
+		]
+	}`
+	epiAuthReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/MedicinalProductAuthorization/$evaluate-authorization", strings.NewReader(epiAuthBody))
+	epiAuthReq.Header.Set("Content-Type", "application/fhir+json")
+	epiAuthRec := httptest.NewRecorder()
+	pgH.ServeHTTP(epiAuthRec, epiAuthReq)
+	if epiAuthRec.Code != http.StatusOK ||
+		!strings.Contains(epiAuthRec.Body.String(), "RegulatedAuthorization-uv-epi") ||
+		!strings.Contains(epiAuthRec.Body.String(), `"valueBoolean":true`) {
+		t.Fatalf("POST /MedicinalProductAuthorization/$evaluate-authorization expected RegulatedAuthorization-uv-epi and authorized=true, got %d: %s", epiAuthRec.Code, epiAuthRec.Body.String())
+	}
+}

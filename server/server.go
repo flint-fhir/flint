@@ -827,6 +827,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleIHEPDQmAndITI68(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Endpoint") && parts[4] == "$fast-endpoint-query" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$fast-endpoint-query")
+					s.handleFASTNationalDirectory(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Organization") && parts[4] == "$fast-verify" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$fast-verify")
+					s.handleFASTNationalDirectory(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$physical-activity-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$physical-activity-summary")
+					s.handlePhysicalActivityIG(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ServiceRequest") && parts[4] == "$physical-activity-referral" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$physical-activity-referral")
+					s.handlePhysicalActivityIG(w, r)
+					return
+				}
+				if (strings.EqualFold(parts[3], "MedicinalProduct") || strings.EqualFold(parts[3], "MedicinalProductDefinition")) && parts[4] == "$epi-document" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$epi-document")
+					s.handleVulcanEPIAndRegulatory(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && (strings.EqualFold(parts[3], "MedicinalProductAuthorization") || strings.EqualFold(parts[3], "RegulatedAuthorization")) && parts[4] == "$evaluate-authorization" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$evaluate-authorization")
+					s.handleVulcanEPIAndRegulatory(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -835,6 +871,34 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Organization") && parts[5] == "$fast-verify" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$fast-verify")
+					s.handleFASTNationalDirectory(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$physical-activity-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$physical-activity-summary")
+					s.handlePhysicalActivityIG(w, r)
+					return
+				}
+				if (strings.EqualFold(parts[3], "MedicinalProduct") || strings.EqualFold(parts[3], "MedicinalProductDefinition")) && parts[5] == "$epi-document" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$epi-document")
+					s.handleVulcanEPIAndRegulatory(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && (strings.EqualFold(parts[3], "MedicinalProductAuthorization") || strings.EqualFold(parts[3], "RegulatedAuthorization")) && parts[5] == "$evaluate-authorization" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$evaluate-authorization")
+					s.handleVulcanEPIAndRegulatory(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "ResearchStudy") && parts[5] == "$rwd-cohort" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4266,6 +4330,17 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "ihe-pdqm",
 					"definition": "https://profiles.ihe.net/ITI/PDQm/OperationDefinition/IHE.PDQm.match",
 				},
+				{
+					"name":       "physical-activity-summary",
+					"definition": "http://hl7.org/fhir/us/physical-activity/OperationDefinition/Patient-physical-activity-summary",
+				},
+			}
+		case "Organization":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "fast-verify",
+					"definition": "http://hl7.org/fhir/us/ndh/OperationDefinition/Organization-fast-verify",
+				},
 			}
 		case "Condition":
 			entry["operation"] = []map[string]string{
@@ -4383,6 +4458,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "sdoh-referral",
 					"definition": "http://hl7.org/fhir/us/sdoh-clinicalcare/OperationDefinition/sdoh-referral",
+				},
+				{
+					"name":       "physical-activity-referral",
+					"definition": "http://hl7.org/fhir/us/physical-activity/OperationDefinition/ServiceRequest-physical-activity-referral",
 				},
 			}
 		case "MedicationRequest":
@@ -4798,6 +4877,27 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "enroll",
 					"definition": "http://hl7.org/fhir/uv/vulcan-schedule/OperationDefinition/ResearchSubject-enroll",
+				},
+			}
+		case "Endpoint":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "fast-endpoint-query",
+					"definition": "http://hl7.org/fhir/us/ndh/OperationDefinition/Endpoint-fast-endpoint-query",
+				},
+			}
+		case "MedicinalProduct":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "epi-document",
+					"definition": "http://hl7.org/fhir/uv/emedicinal-product-info/OperationDefinition/MedicinalProduct-epi-document",
+				},
+			}
+		case "MedicinalProductAuthorization":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "evaluate-authorization",
+					"definition": "http://hl7.org/fhir/uv/emedicinal-product-info/OperationDefinition/MedicinalProductAuthorization-evaluate-authorization",
 				},
 			}
 		case "Schedule":
