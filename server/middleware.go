@@ -1113,7 +1113,7 @@ func isPlanApplyOp(parts []string) bool {
 		if parts[4] == "$convert" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Bundle") && (parts[4] == "$iti-65" || parts[4] == "$vrdr-submit" || parts[4] == "$bfdr-submit" || parts[4] == "$cdex-sign" || parts[4] == "$cdex-verify-signature") {
+		if strings.EqualFold(parts[3], "Bundle") && (parts[4] == "$iti-65" || parts[4] == "$vrdr-submit" || parts[4] == "$bfdr-submit" || parts[4] == "$cdex-sign" || parts[4] == "$cdex-verify-signature" || parts[4] == "$ecr-submit") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Immunization") && parts[4] == "$iis-submit" {
@@ -1131,7 +1131,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Coverage") && parts[4] == "$formulary-coverage" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Task") && (parts[4] == "$submit-attachment" || parts[4] == "$cdex-request" || parts[4] == "$cdex-poll" || parts[4] == "$cdex-questionnaire-request" || parts[4] == "$pct-gfe-coordination") {
+		if strings.EqualFold(parts[3], "Task") && (parts[4] == "$submit-attachment" || parts[4] == "$cdex-request" || parts[4] == "$cdex-poll" || parts[4] == "$cdex-questionnaire-request" || parts[4] == "$pct-gfe-coordination" || parts[4] == "$sdoh-fulfill") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Library") && parts[4] == "$evaluate" {
@@ -1143,7 +1143,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Encounter") && (parts[4] == "$admit" || parts[4] == "$ecr-report" || parts[4] == "$nhsn-hai-report" || parts[4] == "$pacio-timepoint" || parts[4] == "$pacio-timepoints") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[4] == "$pacio-assess" {
+		if strings.EqualFold(parts[3], "QuestionnaireResponse") && (parts[4] == "$pacio-assess" || parts[4] == "$sdoh-assess") {
 			return true
 		}
 		if (strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "ChargeItem")) && parts[4] == "$apply" {
@@ -1182,7 +1182,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Communication") && (parts[4] == "$rr-process" || parts[4] == "$cdex-submit-attachment") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Patient") && (parts[4] == "$merge" || parts[4] == "$health-cards-issue" || parts[4] == "$pcde" || parts[4] == "$immds-forecast" || parts[4] == "$gfe" || parts[4] == "$ihe-pix" || parts[4] == "$bulk-member-match" || parts[4] == "$sdoh-summary" || parts[4] == "$carin-bb" || parts[4] == "$decease" || parts[4] == "$mcode-summary" || parts[4] == "$find-subject-variants" || parts[4] == "$find-subject-tx-implications" || parts[4] == "$pacio-summary" || parts[4] == "$birth-report" || parts[4] == "$ihe-pdqm" || parts[4] == "$physical-activity-summary" || parts[4] == "$adi-record" || parts[4] == "$ra-coding-gaps" || parts[4] == "$pdex-WriteData" || parts[4] == "$record-occupation" || parts[4] == "$odh-summary" || parts[4] == "$cancer-registry-report" || parts[4] == "$pacio-cognitive-assess" || parts[4] == "$pacio-cognitive-summary" || parts[4] == "$idi-match" || parts[4] == "$pacio-pfe-record" || parts[4] == "$pacio-pfe-summary" || parts[4] == "$mcode-radiotherapy-summary" || parts[4] == "$iis-history" || parts[4] == "$mcode-genomics-summary" || parts[4] == "$nbs-summary") {
+		if strings.EqualFold(parts[3], "Patient") && (parts[4] == "$merge" || parts[4] == "$health-cards-issue" || parts[4] == "$pcde" || parts[4] == "$immds-forecast" || parts[4] == "$gfe" || parts[4] == "$ihe-pix" || parts[4] == "$bulk-member-match" || parts[4] == "$sdoh-summary" || parts[4] == "$carin-bb" || parts[4] == "$decease" || parts[4] == "$mcode-summary" || parts[4] == "$find-subject-variants" || parts[4] == "$find-subject-tx-implications" || parts[4] == "$pacio-summary" || parts[4] == "$birth-report" || parts[4] == "$ihe-pdqm" || parts[4] == "$physical-activity-summary" || parts[4] == "$adi-record" || parts[4] == "$ra-coding-gaps" || parts[4] == "$pdex-WriteData" || parts[4] == "$record-occupation" || parts[4] == "$odh-summary" || parts[4] == "$cancer-registry-report" || parts[4] == "$pacio-cognitive-assess" || parts[4] == "$pacio-cognitive-summary" || parts[4] == "$idi-match" || parts[4] == "$pacio-pfe-record" || parts[4] == "$pacio-pfe-summary" || parts[4] == "$mcode-radiotherapy-summary" || parts[4] == "$iis-history" || parts[4] == "$mcode-genomics-summary" || parts[4] == "$nbs-summary" || parts[4] == "$ecr-summary") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "ClaimResponse") && parts[4] == "$rtpbc-coverage" {
@@ -1206,10 +1206,10 @@ func isPlanApplyOp(parts []string) bool {
 		if (strings.EqualFold(parts[3], "PractitionerRole") && parts[4] == "$find-providers") || (strings.EqualFold(parts[3], "HealthcareService") && parts[4] == "$find-services") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "ResearchStudy") && (parts[4] == "$evaluate-eligibility" || parts[4] == "$rwd-cohort") {
+		if strings.EqualFold(parts[3], "ResearchStudy") && (parts[4] == "$evaluate-eligibility" || parts[4] == "$rwd-cohort" || parts[4] == "$vulcan-summary") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "ResearchSubject") && (parts[4] == "$enroll" || parts[4] == "$vulcan-soa-timeline") {
+		if strings.EqualFold(parts[3], "ResearchSubject") && (parts[4] == "$enroll" || parts[4] == "$vulcan-soa-timeline" || parts[4] == "$vulcan-esource-extract") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "AdverseEvent") && parts[4] == "$vulcan-icsr-report" {
@@ -1275,7 +1275,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Immunization") && parts[5] == "$iis-submit" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Bundle") && (parts[5] == "$cdex-sign" || parts[5] == "$cdex-verify-signature") {
+		if strings.EqualFold(parts[3], "Bundle") && (parts[5] == "$cdex-sign" || parts[5] == "$cdex-verify-signature" || parts[5] == "$ecr-submit") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Procedure") && parts[5] == "$mcode-radiotherapy-record" {
@@ -1296,13 +1296,13 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "GraphDefinition") && parts[5] == "$graph" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Task") && (parts[5] == "$submit-attachment" || parts[5] == "$cdex-request" || parts[5] == "$cdex-poll" || parts[5] == "$cdex-questionnaire-request" || parts[5] == "$pct-gfe-coordination") {
+		if strings.EqualFold(parts[3], "Task") && (parts[5] == "$submit-attachment" || parts[5] == "$cdex-request" || parts[5] == "$cdex-poll" || parts[5] == "$cdex-questionnaire-request" || parts[5] == "$pct-gfe-coordination" || parts[5] == "$sdoh-fulfill") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Library") && parts[5] == "$evaluate" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Patient") && (parts[5] == "$health-cards-issue" || parts[5] == "$pcde" || parts[5] == "$immds-forecast" || parts[5] == "$gfe" || parts[5] == "$ihe-pix" || parts[5] == "$sdoh-summary" || parts[5] == "$carin-bb" || parts[5] == "$decease" || parts[5] == "$mcode-summary" || parts[5] == "$find-subject-variants" || parts[5] == "$find-subject-tx-implications" || parts[5] == "$pacio-summary" || parts[5] == "$birth-report" || parts[5] == "$physical-activity-summary" || parts[5] == "$adi-record" || parts[5] == "$ra-coding-gaps" || parts[5] == "$pdex-WriteData" || parts[5] == "$record-occupation" || parts[5] == "$odh-summary" || parts[5] == "$cancer-registry-report" || parts[5] == "$pacio-cognitive-assess" || parts[5] == "$pacio-cognitive-summary" || parts[5] == "$pacio-pfe-record" || parts[5] == "$pacio-pfe-summary" || parts[5] == "$mcode-radiotherapy-summary" || parts[5] == "$iis-history" || parts[5] == "$mcode-genomics-summary" || parts[5] == "$nbs-summary") {
+		if strings.EqualFold(parts[3], "Patient") && (parts[5] == "$health-cards-issue" || parts[5] == "$pcde" || parts[5] == "$immds-forecast" || parts[5] == "$gfe" || parts[5] == "$ihe-pix" || parts[5] == "$sdoh-summary" || parts[5] == "$carin-bb" || parts[5] == "$decease" || parts[5] == "$mcode-summary" || parts[5] == "$find-subject-variants" || parts[5] == "$find-subject-tx-implications" || parts[5] == "$pacio-summary" || parts[5] == "$birth-report" || parts[5] == "$physical-activity-summary" || parts[5] == "$adi-record" || parts[5] == "$ra-coding-gaps" || parts[5] == "$pdex-WriteData" || parts[5] == "$record-occupation" || parts[5] == "$odh-summary" || parts[5] == "$cancer-registry-report" || parts[5] == "$pacio-cognitive-assess" || parts[5] == "$pacio-cognitive-summary" || parts[5] == "$pacio-pfe-record" || parts[5] == "$pacio-pfe-summary" || parts[5] == "$mcode-radiotherapy-summary" || parts[5] == "$iis-history" || parts[5] == "$mcode-genomics-summary" || parts[5] == "$nbs-summary" || parts[5] == "$ecr-summary") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "PlanDefinition") && parts[5] == "$medmorph-kar" {
@@ -1338,7 +1338,7 @@ func isPlanApplyOp(parts []string) bool {
 		if (strings.EqualFold(parts[3], "MedicinalProductAuthorization") || strings.EqualFold(parts[3], "RegulatedAuthorization")) && parts[5] == "$evaluate-authorization" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[5] == "$pacio-assess" {
+		if strings.EqualFold(parts[3], "QuestionnaireResponse") && (parts[5] == "$pacio-assess" || parts[5] == "$sdoh-assess") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Encounter") && (parts[5] == "$transfer" || parts[5] == "$discharge" || parts[5] == "$ecr-report" || parts[5] == "$nhsn-hai-report" || parts[5] == "$pacio-timepoint" || parts[5] == "$pacio-timepoints") {
@@ -1350,10 +1350,10 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Person") && parts[5] == "$verify-identity" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "ResearchStudy") && (parts[5] == "$evaluate-eligibility" || parts[5] == "$rwd-cohort") {
+		if strings.EqualFold(parts[3], "ResearchStudy") && (parts[5] == "$evaluate-eligibility" || parts[5] == "$rwd-cohort" || parts[5] == "$vulcan-summary") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "ResearchSubject") && (parts[5] == "$enroll" || parts[5] == "$vulcan-soa-timeline") {
+		if strings.EqualFold(parts[3], "ResearchSubject") && (parts[5] == "$enroll" || parts[5] == "$vulcan-soa-timeline" || parts[5] == "$vulcan-esource-extract") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "DocumentReference") && parts[5] == "$ihe-iti-68" {

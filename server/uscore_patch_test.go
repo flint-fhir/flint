@@ -7121,3 +7121,111 @@ func TestNBSPCTAEOBAndVulcanICSRWave44(t *testing.T) {
 		t.Fatalf("GET /ResearchSubject/subj-w44-1/$vulcan-soa-timeline expected vulcan-soa-study-visit-plan and vulcan-soa-encounter, got %d: %s", soaRec.Code, soaRec.Body.String())
 	}
 }
+
+func TestECRGravitySDOHAndVulcanESourceWave45(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("migrations failed: %v", err)
+	}
+
+	tenant := "wave45-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. Capabilities check for Wave 45 operations
+	capReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/metadata", nil)
+	capRec := httptest.NewRecorder()
+	pgH.ServeHTTP(capRec, capReq)
+	if capRec.Code != http.StatusOK ||
+		!strings.Contains(capRec.Body.String(), `"ecr-submit"`) ||
+		!strings.Contains(capRec.Body.String(), `"ecr-summary"`) ||
+		!strings.Contains(capRec.Body.String(), `"sdoh-assess"`) ||
+		!strings.Contains(capRec.Body.String(), `"sdoh-fulfill"`) ||
+		!strings.Contains(capRec.Body.String(), `"vulcan-esource-extract"`) ||
+		!strings.Contains(capRec.Body.String(), `"vulcan-summary"`) {
+		t.Fatalf("CapabilityStatement missing Wave 45 ops: %s", capRec.Body.String())
+	}
+
+	// 2. HL7 Public Health eCR v2.1.2: POST /Bundle/$ecr-submit & GET /Patient/pat-w45-1/$ecr-summary
+	ecrBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w45-1"}
+		]
+	}`
+	ecrReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Bundle/$ecr-submit", strings.NewReader(ecrBody))
+	ecrReq.Header.Set("Content-Type", "application/fhir+json")
+	ecrRec := httptest.NewRecorder()
+	pgH.ServeHTTP(ecrRec, ecrReq)
+	if ecrRec.Code != http.StatusOK ||
+		!strings.Contains(ecrRec.Body.String(), `"55751-2"`) ||
+		!strings.Contains(ecrRec.Body.String(), `"88085-6"`) ||
+		!strings.Contains(ecrRec.Body.String(), "rr-communication") {
+		t.Fatalf("POST /Bundle/$ecr-submit expected LOINC 55751-2, 88085-6, and rr-communication, got %d: %s", ecrRec.Code, ecrRec.Body.String())
+	}
+
+	ecrSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w45-1/$ecr-summary", nil)
+	ecrSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(ecrSumRec, ecrSumReq)
+	if ecrSumRec.Code != http.StatusOK ||
+		!strings.Contains(ecrSumRec.Body.String(), `"55751-2"`) ||
+		!strings.Contains(ecrSumRec.Body.String(), `"88085-6"`) {
+		t.Fatalf("GET /Patient/pat-w45-1/$ecr-summary expected LOINC 55751-2 and 88085-6, got %d: %s", ecrSumRec.Code, ecrSumRec.Body.String())
+	}
+
+	// 3. HL7 Gravity Project SDOH v2.2.0: POST /QuestionnaireResponse/$sdoh-assess & POST /Task/$sdoh-fulfill
+	sdohAssessBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w45-1"}
+		]
+	}`
+	sdohAssessReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/QuestionnaireResponse/$sdoh-assess", strings.NewReader(sdohAssessBody))
+	sdohAssessReq.Header.Set("Content-Type", "application/fhir+json")
+	sdohAssessRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sdohAssessRec, sdohAssessReq)
+	if sdohAssessRec.Code != http.StatusOK ||
+		!strings.Contains(sdohAssessRec.Body.String(), "SDOHCC-ObservationScreeningResponse") ||
+		!strings.Contains(sdohAssessRec.Body.String(), "SDOHCC-Condition") ||
+		!strings.Contains(sdohAssessRec.Body.String(), "SDOHCC-Goal") {
+		t.Fatalf("POST /QuestionnaireResponse/$sdoh-assess expected SDOHCC-ObservationScreeningResponse, SDOHCC-Condition, and SDOHCC-Goal, got %d: %s", sdohAssessRec.Code, sdohAssessRec.Body.String())
+	}
+
+	sdohFulfillReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Task/$sdoh-fulfill", strings.NewReader(sdohAssessBody))
+	sdohFulfillReq.Header.Set("Content-Type", "application/fhir+json")
+	sdohFulfillRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sdohFulfillRec, sdohFulfillReq)
+	if sdohFulfillRec.Code != http.StatusOK ||
+		!strings.Contains(sdohFulfillRec.Body.String(), "SDOHCC-TaskForReferralManagement") ||
+		!strings.Contains(sdohFulfillRec.Body.String(), "SDOHCC-Procedure") {
+		t.Fatalf("POST /Task/$sdoh-fulfill expected SDOHCC-TaskForReferralManagement and SDOHCC-Procedure, got %d: %s", sdohFulfillRec.Code, sdohFulfillRec.Body.String())
+	}
+
+	// 4. HL7 Vulcan eSource & RWD: POST /ResearchSubject/$vulcan-esource-extract & GET /ResearchStudy/vulcan-study-1/$vulcan-summary
+	esrcReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/ResearchSubject/subj-w45-1/$vulcan-esource-extract", strings.NewReader(sdohAssessBody))
+	esrcReq.Header.Set("Content-Type", "application/fhir+json")
+	esrcRec := httptest.NewRecorder()
+	pgH.ServeHTTP(esrcRec, esrcReq)
+	if esrcRec.Code != http.StatusOK ||
+		!strings.Contains(esrcRec.Body.String(), "vulcan-esource-crf-response") ||
+		!strings.Contains(esrcRec.Body.String(), `"Provenance"`) {
+		t.Fatalf("POST /ResearchSubject/subj-w45-1/$vulcan-esource-extract expected vulcan-esource-crf-response and Provenance, got %d: %s", esrcRec.Code, esrcRec.Body.String())
+	}
+
+	vSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/ResearchStudy/vulcan-study-1/$vulcan-summary", nil)
+	vSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(vSumRec, vSumReq)
+	if vSumRec.Code != http.StatusOK ||
+		!strings.Contains(vSumRec.Body.String(), "vulcan-study-1") ||
+		!strings.Contains(vSumRec.Body.String(), "vulcan-esource-crf-response") {
+		t.Fatalf("GET /ResearchStudy/vulcan-study-1/$vulcan-summary expected vulcan-study-1 and vulcan-esource-crf-response, got %d: %s", vSumRec.Code, vSumRec.Body.String())
+	}
+}
