@@ -1796,6 +1796,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /ExplanationOfBenefit/$pct-aeob-summary to return davinci-pct-aeob, got %d: %s", respAEOB.StatusCode, string(bAEOB))
 			}
 		}
+		if err == nil {
+			respECR, bECR, errECR := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$ecr-summary", "", nil, nil)
+			respVulcan, bVulcan, errVulcan := doReq(http.MethodGet, basePath+"/ResearchStudy/vulcan-study-1/$vulcan-summary", "", nil, nil)
+			if errECR != nil || respECR.StatusCode != http.StatusOK || !strings.Contains(string(bECR), `"55751-2"`) {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$ecr-summary to return LOINC 55751-2 eICR Composition, got %d: %s", respECR.StatusCode, string(bECR))
+			} else if errVulcan != nil || respVulcan.StatusCode != http.StatusOK || !strings.Contains(string(bVulcan), "vulcan-study-1") {
+				err = fmt.Errorf("expected GET /ResearchStudy/vulcan-study-1/$vulcan-summary to return vulcan-study-1, got %d: %s", respVulcan.StatusCode, string(bVulcan))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

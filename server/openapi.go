@@ -4690,6 +4690,94 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Bundle/$ecr-submit": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Bundle", "Composition", "Communication", "Parameters"},
+				"summary":     "Submit an HL7 Public Health Electronic Initial Case Report (eICR v2.1.2, LOINC 55751-2) Bundle and receive a Reportability Response (RR, LOINC 88085-6)",
+				"operationId": "bundleECRSubmitPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, eicrBundle, reportabilityResponse Composition, and rr-communication"},
+				},
+			},
+		},
+		"/Patient/{id}/$ecr-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Composition", "Communication", "Bundle"},
+				"summary":     "Assemble an HL7 Public Health Electronic Case Reporting (eCR v2.1.2) summary Bundle for Patient/{id}",
+				"operationId": "patientECRSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing eICR Composition, Reportability Response Composition, and Communication"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Composition", "Communication", "Bundle"},
+				"summary":     "Assemble an HL7 Public Health eCR summary Bundle (POST)",
+				"operationId": "patientECRSummaryPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing eICR Composition, Reportability Response Composition, and Communication"},
+				},
+			},
+		},
+		"/QuestionnaireResponse/$sdoh-assess": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"QuestionnaireResponse", "Observation", "Condition", "Goal", "Parameters"},
+				"summary":     "Evaluate an HL7 Gravity Project SDOH v2.2.0 screening QuestionnaireResponse and extract SDOHCC Observation, Condition, and Goal",
+				"operationId": "questionnaireResponseSDOHAssessPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, SDOHCC-ObservationScreeningResponse, SDOHCC-Condition, and SDOHCC-Goal"},
+				},
+			},
+		},
+		"/Task/$sdoh-fulfill": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Task", "Procedure", "Parameters"},
+				"summary":     "Fulfill an HL7 Gravity Project SDOH v2.2.0 CBO referral Task (SDOHCC-TaskForReferralManagement) and persist delivered SDOHCC-Procedure",
+				"operationId": "taskSDOHFulfillPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, completed Task, and SDOHCC-Procedure"},
+				},
+			},
+		},
+		"/ResearchSubject/$vulcan-esource-extract": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ResearchSubject", "QuestionnaireResponse", "Provenance", "Parameters"},
+				"summary":     "Extract EHR clinical data for a ResearchSubject into an HL7 Vulcan eSource Case Report Form (vulcan-esource-crf-response) with Provenance lineage",
+				"operationId": "researchSubjectVulcanESourceExtractPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, ResearchSubject, vulcan-esource-crf-response QuestionnaireResponse, and Provenance"},
+				},
+			},
+		},
+		"/ResearchStudy/{id}/$vulcan-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ResearchStudy", "ResearchSubject", "QuestionnaireResponse", "CarePlan", "AdverseEvent", "Bundle"},
+				"summary":     "Assemble an HL7 Vulcan Real-World Data (RWD) & eSource study summary Bundle for ResearchStudy/{id}",
+				"operationId": "researchStudyVulcanSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing ResearchStudy, enrolled ResearchSubjects, eSource CRFs, SOA CarePlans, and AdverseEvents"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ResearchStudy", "ResearchSubject", "QuestionnaireResponse", "CarePlan", "AdverseEvent", "Bundle"},
+				"summary":     "Assemble an HL7 Vulcan RWD & eSource study summary Bundle (POST)",
+				"operationId": "researchStudyVulcanSummaryPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing ResearchStudy, enrolled ResearchSubjects, eSource CRFs, SOA CarePlans, and AdverseEvents"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

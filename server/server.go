@@ -1145,6 +1145,36 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleVulcanICSRAndSOAWave44(w, r)
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && parts[4] == "$ecr-submit" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePublicHealthECRWave45(w, r, "ecr-submit")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$ecr-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePublicHealthECRWave45(w, r, "ecr-summary")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[4] == "$sdoh-assess" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleGravitySDOHWave45(w, r, "sdoh-assess")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[4] == "$sdoh-fulfill" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleGravitySDOHWave45(w, r, "sdoh-fulfill")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ResearchSubject") && parts[4] == "$vulcan-esource-extract" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleVulcanESourceWave45(w, r, "vulcan-esource-extract")
+					return
+				}
+				if strings.EqualFold(parts[3], "ResearchStudy") && parts[4] == "$vulcan-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleVulcanESourceWave45(w, r, "vulcan-summary")
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -1153,6 +1183,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && parts[5] == "$ecr-submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePublicHealthECRWave45(w, r, "ecr-submit")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$ecr-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePublicHealthECRWave45(w, r, "ecr-summary")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[5] == "$sdoh-assess" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleGravitySDOHWave45(w, r, "sdoh-assess")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[5] == "$sdoh-fulfill" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleGravitySDOHWave45(w, r, "sdoh-fulfill")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ResearchSubject") && parts[5] == "$vulcan-esource-extract" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleVulcanESourceWave45(w, r, "vulcan-esource-extract")
+					return
+				}
+				if strings.EqualFold(parts[3], "ResearchStudy") && parts[5] == "$vulcan-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleVulcanESourceWave45(w, r, "vulcan-summary")
+					return
+				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "DiagnosticReport") && parts[5] == "$nbs-submit" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4970,6 +5036,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "nbs-summary",
 					"definition": "http://hl7.org/fhir/us/newborn-screening/OperationDefinition/Patient-nbs-summary",
 				},
+				{
+					"name":       "ecr-summary",
+					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/Patient-ecr-summary",
+				},
 			}
 		case "Immunization":
 			entry["operation"] = []map[string]string{
@@ -5133,6 +5203,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "pacio-assess",
 					"definition": "http://hl7.org/fhir/us/pacio-fs/OperationDefinition/pacio-assess",
+				},
+				{
+					"name":       "sdoh-assess",
+					"definition": "http://hl7.org/fhir/us/sdoh-clinicalcare/OperationDefinition/QuestionnaireResponse-sdoh-assess",
 				},
 			}
 		case "ServiceRequest":
@@ -5459,6 +5533,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "pct-gfe-coordination",
 					"definition": "http://hl7.org/fhir/us/davinci-pct/OperationDefinition/Task-pct-gfe-coordination",
 				},
+				{
+					"name":       "sdoh-fulfill",
+					"definition": "http://hl7.org/fhir/us/sdoh-clinicalcare/OperationDefinition/Task-sdoh-fulfill",
+				},
 			}
 		case "ValueSet":
 			entry["operation"] = []map[string]string{
@@ -5638,6 +5716,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "rwd-cohort",
 					"definition": "http://hl7.org/fhir/uv/vulcan-rwd/OperationDefinition/ResearchStudy-rwd-cohort",
 				},
+				{
+					"name":       "vulcan-summary",
+					"definition": "http://hl7.org/fhir/uv/vulcan-rwd/OperationDefinition/ResearchStudy-vulcan-summary",
+				},
 			}
 		case "ResearchSubject":
 			entry["operation"] = []map[string]string{
@@ -5648,6 +5730,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "vulcan-soa-timeline",
 					"definition": "http://hl7.org/fhir/uv/vulcan-schedule/OperationDefinition/ResearchSubject-vulcan-soa-timeline",
+				},
+				{
+					"name":       "vulcan-esource-extract",
+					"definition": "http://hl7.org/fhir/uv/vulcan-esource/OperationDefinition/ResearchSubject-vulcan-esource-extract",
 				},
 			}
 		case "Endpoint":
@@ -5743,6 +5829,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "cdex-verify-signature",
 					"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/Bundle-cdex-verify-signature",
+				},
+				{
+					"name":       "ecr-submit",
+					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/Bundle-ecr-submit",
 				},
 			}
 		case "HealthcareService":

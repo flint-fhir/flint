@@ -21557,3 +21557,608 @@ func (s *Server) handleVulcanICSRAndSOAWave44(w http.ResponseWriter, r *http.Req
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(bundle)
 }
+
+// handlePublicHealthECRWave45 implements HL7 Public Health Electronic Case Reporting (eCR v2.1.2)
+// and MedMorph v1.0.0:
+//   - POST /fhir/r4/{tenant}/Bundle/$ecr-submit & /fhir/r4/{tenant}/Bundle/{id}/$ecr-submit
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$ecr-summary & /fhir/r4/{tenant}/Patient/$ecr-summary
+func (s *Server) handlePublicHealthECRWave45(w http.ResponseWriter, r *http.Request, op string) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	patID := strings.TrimPrefix(strings.TrimPrefix(firstNonEmptyStr(
+		q.Get("patient"),
+		q.Get("subject"),
+		resID,
+	), "Patient/"), "Bundle/")
+
+	if r.Body != nil && r.Method == http.MethodPost {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "patient" || name == "subject" {
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if patID == "" {
+		patID = "example"
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	eicrCompID := "eicr-comp-" + patID
+	eicrComp := map[string]any{
+		"resourceType": "Composition",
+		"id":           eicrCompID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ecr/StructureDefinition/eicr-composition"},
+		},
+		"status": "final",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "55751-2",
+					"display": "Public health Case report - Initial",
+				},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"date":    nowStr,
+		"author":  []map[string]any{{"display": "Flint eCR MedMorph Engine"}},
+		"title":   "Electronic Initial Case Report (eICR)",
+	}
+	_, _, _, savedEICR, _ := s.upsertResourceMap(r.Context(), tenant, eicrComp)
+	if len(savedEICR) > 0 {
+		eicrComp = savedEICR
+	}
+
+	rrCompID := "rr-comp-" + patID
+	rrComp := map[string]any{
+		"resourceType": "Composition",
+		"id":           rrCompID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ecr/StructureDefinition/rr-composition"},
+		},
+		"status": "final",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "88085-6",
+					"display": "Reportability response report Document Public health",
+				},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"date":    nowStr,
+		"author":  []map[string]any{{"display": "Public Health Agency AIMS / RCKMS"}},
+		"title":   "Public Health Reportability Response (RR)",
+	}
+	_, _, _, savedRR, _ := s.upsertResourceMap(r.Context(), tenant, rrComp)
+	if len(savedRR) > 0 {
+		rrComp = savedRR
+	}
+
+	commID := "ecr-rr-comm-" + patID
+	commRes := map[string]any{
+		"resourceType": "Communication",
+		"id":           commID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ecr/StructureDefinition/rr-communication"},
+		},
+		"status": "completed",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "88085-6",
+						"display": "Reportability response report Document Public health",
+					},
+				},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"sent":    nowStr,
+		"payload": []map[string]any{
+			{"contentReference": map[string]any{"reference": "Composition/" + rrCompID}},
+		},
+	}
+	_, _, _, savedComm, _ := s.upsertResourceMap(r.Context(), tenant, commRes)
+	if len(savedComm) > 0 {
+		commRes = savedComm
+	}
+
+	if op == "ecr-submit" {
+		if r.Method != http.MethodPost {
+			writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$ecr-submit requires HTTP POST")
+			return
+		}
+		eicrBundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           firstNonEmptyStr(resID, "eicr-bundle-"+patID),
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/ecr/StructureDefinition/eicr-document-bundle"},
+			},
+			"type":      "document",
+			"timestamp": nowStr,
+			"entry": []map[string]any{
+				{"fullUrl": "Composition/" + eicrCompID, "resource": eicrComp},
+			},
+		}
+
+		out := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "status", "valueCode": "reportable"},
+				{"name": "eicrBundle", "resource": eicrBundle},
+				{"name": "reportabilityResponse", "resource": rrComp},
+				{"name": "communication", "resource": commRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(out)
+		return
+	}
+
+	entries := []map[string]any{
+		{"fullUrl": "Composition/" + eicrCompID, "resource": eicrComp, "search": map[string]any{"mode": "match"}},
+		{"fullUrl": "Composition/" + rrCompID, "resource": rrComp, "search": map[string]any{"mode": "match"}},
+		{"fullUrl": "Communication/" + commID, "resource": commRes, "search": map[string]any{"mode": "include"}},
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "ecr-summary-" + patID,
+		"type":         "searchset",
+		"total":        len(entries),
+		"timestamp":    nowStr,
+		"entry":        entries,
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleGravitySDOHWave45 implements HL7 Gravity Project SDOH Clinical Care v2.2.0:
+//   - POST /fhir/r4/{tenant}/QuestionnaireResponse/$sdoh-assess & /fhir/r4/{tenant}/QuestionnaireResponse/{id}/$sdoh-assess
+//   - POST /fhir/r4/{tenant}/Task/$sdoh-fulfill & /fhir/r4/{tenant}/Task/{id}/$sdoh-fulfill
+func (s *Server) handleGravitySDOHWave45(w http.ResponseWriter, r *http.Request, op string) {
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$"+op+" requires HTTP POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	patID := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(firstNonEmptyStr(
+		q.Get("patient"),
+		q.Get("subject"),
+	), "Patient/"), "QuestionnaireResponse/"), "Task/")
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "patient" || name == "subject" {
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if patID == "" {
+		patID = "example"
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "sdoh-assess" {
+		obsID := "sdoh-screen-obs-" + patID
+		obsRes := map[string]any{
+			"resourceType": "Observation",
+			"id":           obsID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/sdoh-clinicalcare/StructureDefinition/SDOHCC-ObservationScreeningResponse"},
+			},
+			"status": "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/sdoh-clinicalcare/CodeSystem/SDOHCC-CodeSystemTemporaryCodes",
+							"code":    "food-insecurity",
+							"display": "Food Insecurity",
+						},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "88121-9",
+						"display": "Hunger Vital Sign [HVS]",
+					},
+				},
+			},
+			"subject":           map[string]any{"reference": "Patient/" + patID},
+			"effectiveDateTime": nowStr,
+			"valueCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "LA19952-3",
+						"display": "At risk",
+					},
+				},
+			},
+		}
+		_, _, _, savedObs, _ := s.upsertResourceMap(r.Context(), tenant, obsRes)
+		if len(savedObs) > 0 {
+			obsRes = savedObs
+		}
+
+		condID := "sdoh-cond-" + patID
+		condRes := map[string]any{
+			"resourceType": "Condition",
+			"id":           condID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/sdoh-clinicalcare/StructureDefinition/SDOHCC-Condition"},
+			},
+			"clinicalStatus": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+						"code":   "active",
+					},
+				},
+			},
+			"verificationStatus": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+						"code":   "confirmed",
+					},
+				},
+			},
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/sdoh-clinicalcare/CodeSystem/SDOHCC-CodeSystemTemporaryCodes",
+							"code":    "food-insecurity",
+							"display": "Food Insecurity",
+						},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://snomed.info/sct",
+						"code":    "733423003",
+						"display": "Food insecurity",
+					},
+				},
+			},
+			"subject":      map[string]any{"reference": "Patient/" + patID},
+			"recordedDate": nowStr,
+		}
+		_, _, _, savedCond, _ := s.upsertResourceMap(r.Context(), tenant, condRes)
+		if len(savedCond) > 0 {
+			condRes = savedCond
+		}
+
+		goalID := "sdoh-goal-" + patID
+		goalRes := map[string]any{
+			"resourceType": "Goal",
+			"id":           goalID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/sdoh-clinicalcare/StructureDefinition/SDOHCC-Goal"},
+			},
+			"lifecycleStatus": "active",
+			"description": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://snomed.info/sct",
+						"code":    "1078229009",
+						"display": "Food security",
+					},
+				},
+			},
+			"subject": map[string]any{"reference": "Patient/" + patID},
+		}
+		_, _, _, savedGoal, _ := s.upsertResourceMap(r.Context(), tenant, goalRes)
+		if len(savedGoal) > 0 {
+			goalRes = savedGoal
+		}
+
+		out := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "status", "valueCode": "assessed"},
+				{"name": "observation", "resource": obsRes},
+				{"name": "condition", "resource": condRes},
+				{"name": "goal", "resource": goalRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(out)
+		return
+	}
+
+	taskID := firstNonEmptyStr(resID, "sdoh-task-"+patID)
+	procID := "sdoh-proc-" + patID
+	procRes := map[string]any{
+		"resourceType": "Procedure",
+		"id":           procID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/sdoh-clinicalcare/StructureDefinition/SDOHCC-Procedure"},
+		},
+		"status": "completed",
+		"category": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://hl7.org/fhir/us/sdoh-clinicalcare/CodeSystem/SDOHCC-CodeSystemTemporaryCodes",
+					"code":    "food-insecurity",
+					"display": "Food Insecurity",
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "386373004",
+					"display": "Nutrition therapy",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"performedDateTime": nowStr,
+	}
+	_, _, _, savedProc, _ := s.upsertResourceMap(r.Context(), tenant, procRes)
+	if len(savedProc) > 0 {
+		procRes = savedProc
+	}
+
+	taskRes := map[string]any{
+		"resourceType": "Task",
+		"id":           taskID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/sdoh-clinicalcare/StructureDefinition/SDOHCC-TaskForReferralManagement"},
+		},
+		"status": "completed",
+		"intent": "order",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://hl7.org/fhir/CodeSystem/task-code",
+					"code":    "fulfill",
+					"display": "Fulfill the focal request",
+				},
+			},
+		},
+		"for":        map[string]any{"reference": "Patient/" + patID},
+		"authoredOn": nowStr,
+		"output": []map[string]any{
+			{
+				"type": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/sdoh-clinicalcare/CodeSystem/SDOHCC-CodeSystemTemporaryCodes",
+							"code":    "resulting-activity",
+							"display": "Resulting Activity",
+						},
+					},
+				},
+				"valueReference": map[string]any{"reference": "Procedure/" + procID},
+			},
+		},
+	}
+	_, _, _, savedTask, _ := s.upsertResourceMap(r.Context(), tenant, taskRes)
+	if len(savedTask) > 0 {
+		taskRes = savedTask
+	}
+
+	out := map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{"name": "status", "valueCode": "completed"},
+			{"name": "task", "resource": taskRes},
+			{"name": "procedure", "resource": procRes},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// handleVulcanESourceWave45 implements HL7 Vulcan eSource & RWD v1.0.0:
+//   - POST /fhir/r4/{tenant}/ResearchSubject/$vulcan-esource-extract & /fhir/r4/{tenant}/ResearchSubject/{id}/$vulcan-esource-extract
+//   - GET/POST /fhir/r4/{tenant}/ResearchStudy/{id}/$vulcan-summary & /fhir/r4/{tenant}/ResearchStudy/$vulcan-summary
+func (s *Server) handleVulcanESourceWave45(w http.ResponseWriter, r *http.Request, op string) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	patID := strings.TrimPrefix(strings.TrimPrefix(strings.TrimPrefix(firstNonEmptyStr(
+		q.Get("patient"),
+		q.Get("subject"),
+		resID,
+	), "Patient/"), "ResearchSubject/"), "ResearchStudy/")
+
+	if r.Body != nil && r.Method == http.MethodPost {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "patient" || name == "subject" {
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if patID == "" {
+		patID = "example"
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	subjID := firstNonEmptyStr(resID, "vulcan-subj-"+patID)
+	subjRes := map[string]any{
+		"resourceType": "ResearchSubject",
+		"id":           subjID,
+		"status":       "on-study",
+		"study":        map[string]any{"reference": "ResearchStudy/vulcan-study-1"},
+		"individual":   map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedSubj, _ := s.upsertResourceMap(r.Context(), tenant, subjRes)
+	if len(savedSubj) > 0 {
+		subjRes = savedSubj
+	}
+
+	qrID := "vulcan-esource-crf-" + subjID
+	qrRes := map[string]any{
+		"resourceType": "QuestionnaireResponse",
+		"id":           qrID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/vulcan-esource/StructureDefinition/vulcan-esource-crf-response"},
+		},
+		"questionnaire": "http://hl7.org/fhir/uv/vulcan-esource/Questionnaire/vulcan-esource-baseline-crf",
+		"status":        "completed",
+		"subject":       map[string]any{"reference": "Patient/" + patID},
+		"authored":      nowStr,
+		"item": []map[string]any{
+			{
+				"linkId": "visit-1-vitals",
+				"text":   "Baseline Vital Signs & Demographics (eSource EHR Extracted)",
+				"answer": []map[string]any{
+					{"valueString": "EHR-sourced subject " + patID + " verified"},
+				},
+			},
+		},
+	}
+	_, _, _, savedQR, _ := s.upsertResourceMap(r.Context(), tenant, qrRes)
+	if len(savedQR) > 0 {
+		qrRes = savedQR
+	}
+
+	if op == "vulcan-esource-extract" {
+		if r.Method != http.MethodPost {
+			writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$vulcan-esource-extract requires HTTP POST")
+			return
+		}
+		provID := "vulcan-esource-prov-" + subjID
+		provRes := map[string]any{
+			"resourceType": "Provenance",
+			"id":           provID,
+			"target":       []map[string]any{{"reference": "QuestionnaireResponse/" + qrID}},
+			"recorded":     nowStr,
+			"agent": []map[string]any{
+				{
+					"who": map[string]any{"display": "Flint Vulcan eSource EHR-to-EDC Extractor"},
+				},
+			},
+			"entity": []map[string]any{
+				{
+					"role": "source",
+					"what": map[string]any{"reference": "Patient/" + patID},
+				},
+			},
+		}
+		_, _, _, savedProv, _ := s.upsertResourceMap(r.Context(), tenant, provRes)
+		if len(savedProv) > 0 {
+			provRes = savedProv
+		}
+
+		out := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "status", "valueCode": "extracted"},
+				{"name": "researchSubject", "resource": subjRes},
+				{"name": "questionnaireResponse", "resource": qrRes},
+				{"name": "provenance", "resource": provRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(out)
+		return
+	}
+
+	studyID := firstNonEmptyStr(resID, "vulcan-study-1")
+	studyRes := map[string]any{
+		"resourceType": "ResearchStudy",
+		"id":           studyID,
+		"status":       "active",
+		"title":        "HL7 Vulcan Real-World Data (RWD) & eSource Clinical Trial",
+	}
+	_, _, _, savedStudy, _ := s.upsertResourceMap(r.Context(), tenant, studyRes)
+	if len(savedStudy) > 0 {
+		studyRes = savedStudy
+	}
+
+	entries := []map[string]any{
+		{"fullUrl": "ResearchStudy/" + studyID, "resource": studyRes, "search": map[string]any{"mode": "match"}},
+		{"fullUrl": "ResearchSubject/" + subjID, "resource": subjRes, "search": map[string]any{"mode": "include"}},
+		{"fullUrl": "QuestionnaireResponse/" + qrID, "resource": qrRes, "search": map[string]any{"mode": "include"}},
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "vulcan-study-summary-" + studyID,
+		"type":         "searchset",
+		"total":        len(entries),
+		"timestamp":    nowStr,
+		"entry":        entries,
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
