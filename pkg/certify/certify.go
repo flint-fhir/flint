@@ -1778,6 +1778,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-radiotherapy-summary to return mcode-radiotherapy-course-summary, got %d: %s", respRT.StatusCode, string(bRT))
 			}
 		}
+		if err == nil {
+			respIIS, bIIS, errIIS := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$iis-history", "", nil, nil)
+			respGen, bGen, errGen := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$mcode-genomics-summary", "", nil, nil)
+			if errIIS != nil || respIIS.StatusCode != http.StatusOK || !strings.Contains(string(bIIS), "immds-immunizationevaluation") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$iis-history to return immds-immunizationevaluation, got %d: %s", respIIS.StatusCode, string(bIIS))
+			} else if errGen != nil || respGen.StatusCode != http.StatusOK || !strings.Contains(string(bGen), "mcode-cancer-genomics-report") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-genomics-summary to return mcode-cancer-genomics-report, got %d: %s", respGen.StatusCode, string(bGen))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

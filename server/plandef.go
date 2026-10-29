@@ -20477,3 +20477,553 @@ func (s *Server) handleMCODERadiotherapyWave42(w http.ResponseWriter, r *http.Re
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(bundle)
 }
+
+// handlePublicHealthIISWave43 implements HL7 Public Health Immunization Information System (IIS / AIRA) & ImmDS v2.0.0:
+//   - POST /fhir/r4/{tenant}/Immunization/$iis-submit & /fhir/r4/{tenant}/Immunization/{id}/$iis-submit
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$iis-history & /fhir/r4/{tenant}/Patient/$iis-history
+func (s *Server) handlePublicHealthIISWave43(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	op := strings.TrimSpace(r.PathValue("op"))
+
+	patientID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("patient")), "Patient/")
+	cvxCode := strings.TrimSpace(r.URL.Query().Get("cvx"))
+	if cvxCode == "" {
+		cvxCode = "208"
+	}
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err == nil {
+				rt, _ := body["resourceType"].(string)
+				switch rt {
+				case "Parameters":
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							if pm, ok := p.(map[string]any); ok {
+								name, _ := pm["name"].(string)
+								switch name {
+								case "patient", "subject":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										patientID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+									}
+									if vr, ok := pm["valueReference"].(map[string]any); ok {
+										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+											patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+										}
+									}
+								case "cvx", "vaccineCode":
+									if vc, ok := pm["valueCode"].(string); ok && strings.TrimSpace(vc) != "" {
+										cvxCode = strings.TrimSpace(vc)
+									}
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										cvxCode = strings.TrimSpace(vs)
+									}
+								}
+							}
+						}
+					}
+				case "Immunization":
+					if patMap, ok := body["patient"].(map[string]any); ok {
+						if ref, _ := patMap["reference"].(string); strings.TrimSpace(ref) != "" {
+							patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := patientID
+	if op == "$iis-history" && resID != "" {
+		patID = resID
+	}
+	patID = firstNonEmptyStr(patID, "example-patient-1")
+	immID := "iis-imm-" + patID
+	if op == "$iis-submit" && resID != "" {
+		immID = resID
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	immRes := map[string]any{
+		"resourceType": "Immunization",
+		"id":           immID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-immunization"},
+		},
+		"status": "completed",
+		"vaccineCode": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://hl7.org/fhir/sid/cvx",
+					"code":    cvxCode,
+					"display": "SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, 30 mcg/0.3mL dose",
+				},
+			},
+		},
+		"patient":            map[string]any{"reference": "Patient/" + patID},
+		"occurrenceDateTime": nowStr,
+		"primarySource":      true,
+	}
+	_, _, _, savedImm, _ := s.upsertResourceMap(r.Context(), tenant, immRes)
+	if len(savedImm) > 0 {
+		immRes = savedImm
+	}
+
+	evalID := "iis-eval-" + patID
+	evalRes := map[string]any{
+		"resourceType": "ImmunizationEvaluation",
+		"id":           evalID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/immds/StructureDefinition/immds-immunizationevaluation"},
+		},
+		"status":            "completed",
+		"patient":           map[string]any{"reference": "Patient/" + patID},
+		"date":              nowStr,
+		"immunizationEvent": map[string]any{"reference": "Immunization/" + immID},
+		"targetDisease": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://snomed.info/sct", "code": "840539006", "display": "Disease caused by severe acute respiratory syndrome coronavirus 2"},
+			},
+		},
+		"doseStatus": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://terminology.hl7.org/CodeSystem/immunization-evaluation-dose-status", "code": "valid", "display": "Valid"},
+			},
+		},
+	}
+	_, _, _, savedEval, _ := s.upsertResourceMap(r.Context(), tenant, evalRes)
+	if len(savedEval) > 0 {
+		evalRes = savedEval
+	}
+
+	recID := "iis-rec-" + patID
+	recRes := map[string]any{
+		"resourceType": "ImmunizationRecommendation",
+		"id":           recID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/immds/StructureDefinition/immds-immunizationrecommendation"},
+		},
+		"patient": map[string]any{"reference": "Patient/" + patID},
+		"date":    nowStr,
+		"recommendation": []map[string]any{
+			{
+				"vaccineCode": []map[string]any{
+					{
+						"coding": []map[string]any{
+							{"system": "http://hl7.org/fhir/sid/cvx", "code": cvxCode, "display": "COVID-19 mRNA Vaccine"},
+						},
+					},
+				},
+				"forecastStatus": map[string]any{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/immunization-recommendation-status", "code": "complete", "display": "Complete"},
+					},
+				},
+				"supportingImmunization": []map[string]any{
+					{"reference": "Immunization/" + immID},
+				},
+			},
+		},
+	}
+	_, _, _, savedRec, _ := s.upsertResourceMap(r.Context(), tenant, recRes)
+	if len(savedRec) > 0 {
+		recRes = savedRec
+	}
+
+	if op == "$iis-submit" {
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "status", "valueString": "accepted"},
+				{"name": "immunization", "resource": immRes},
+				{"name": "immunizationEvaluation", "resource": evalRes},
+				{"name": "immunizationRecommendation", "resource": recRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "iis-history-bundle-" + patID,
+		"type":         "searchset",
+		"total":        3,
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Immunization/" + immID, "resource": immRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "ImmunizationEvaluation/" + evalID, "resource": evalRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "ImmunizationRecommendation/" + recID, "resource": recRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleDaVinciCDexSignatureWave43 implements HL7 Da Vinci Clinical Data Exchange Digital Signatures (CDex v2.0.0):
+//   - POST /fhir/r4/{tenant}/Bundle/$cdex-sign & /fhir/r4/{tenant}/Bundle/{id}/$cdex-sign
+//   - POST /fhir/r4/{tenant}/Bundle/$cdex-verify-signature & /fhir/r4/{tenant}/Bundle/{id}/$cdex-verify-signature
+func (s *Server) handleDaVinciCDexSignatureWave43(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	op := strings.TrimSpace(r.PathValue("op"))
+
+	signerRef := "Practitioner/example-practitioner-1"
+	bundleID := firstNonEmptyStr(resID, "cdex-signed-bundle-1")
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err == nil {
+				rt, _ := body["resourceType"].(string)
+				switch rt {
+				case "Parameters":
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							if pm, ok := p.(map[string]any); ok {
+								name, _ := pm["name"].(string)
+								switch name {
+								case "signer", "who":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										signerRef = strings.TrimSpace(vs)
+									}
+									if vr, ok := pm["valueReference"].(map[string]any); ok {
+										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+											signerRef = strings.TrimSpace(ref)
+										}
+									}
+								case "bundleId":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										bundleID = strings.TrimSpace(vs)
+									}
+								}
+							}
+						}
+					}
+				case "Bundle":
+					if idVal, _ := body["id"].(string); strings.TrimSpace(idVal) != "" {
+						bundleID = strings.TrimSpace(idVal)
+					}
+				}
+			}
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	jwsB64 := base64.StdEncoding.EncodeToString([]byte("eyJhbGciOiJSUzI1NiIsImtpZCI6ImNkZXgtc2lnLWtleS0xIn0..flint-cdex-jws-signature"))
+
+	if op == "$cdex-verify-signature" {
+		outcome := map[string]any{
+			"resourceType": "OperationOutcome",
+			"issue": []map[string]any{
+				{
+					"severity":    "information",
+					"code":        "informational",
+					"diagnostics": "Da Vinci CDex digital signature (JWS / ASTM E1762-95) verified successfully for Bundle/" + bundleID,
+				},
+			},
+		}
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "verified", "valueBoolean": true},
+				{"name": "signatureType", "valueCode": "1.2.840.10065.1.12.1.1"},
+				{"name": "signer", "valueString": signerRef},
+				{"name": "outcome", "resource": outcome},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	provID := "cdex-sig-prov-" + bundleID
+	provRes := map[string]any{
+		"resourceType": "Provenance",
+		"id":           provID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-provenance"},
+		},
+		"target": []map[string]any{
+			{"reference": "Bundle/" + bundleID},
+		},
+		"recorded": nowStr,
+		"agent": []map[string]any{
+			{
+				"type": map[string]any{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/provenance-participant-type", "code": "author", "display": "Author"},
+					},
+				},
+				"who": map[string]any{"reference": signerRef},
+			},
+		},
+		"signature": []map[string]any{
+			{
+				"type": []map[string]any{
+					{
+						"system":  "urn:iso-astm:E1762-95:2013",
+						"code":    "1.2.840.10065.1.12.1.1",
+						"display": "Author's Signature",
+					},
+				},
+				"when":      nowStr,
+				"who":       map[string]any{"reference": signerRef},
+				"sigFormat": "application/jose",
+				"data":      jwsB64,
+			},
+		},
+	}
+	_, _, _, savedProv, _ := s.upsertResourceMap(r.Context(), tenant, provRes)
+	if len(savedProv) > 0 {
+		provRes = savedProv
+	}
+
+	signedBundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           bundleID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-cdex/StructureDefinition/cdex-signature-bundle"},
+		},
+		"type":      "searchset",
+		"total":     1,
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Provenance/" + provID, "resource": provRes, "search": map[string]any{"mode": "match"}},
+		},
+		"signature": map[string]any{
+			"type": []map[string]any{
+				{
+					"system":  "urn:iso-astm:E1762-95:2013",
+					"code":    "1.2.840.10065.1.12.1.1",
+					"display": "Author's Signature",
+				},
+			},
+			"when":      nowStr,
+			"who":       map[string]any{"reference": signerRef},
+			"sigFormat": "application/jose",
+			"data":      jwsB64,
+		},
+	}
+	_, _, _, savedBundle, _ := s.upsertResourceMap(r.Context(), tenant, signedBundle)
+	if len(savedBundle) > 0 {
+		signedBundle = savedBundle
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(signedBundle)
+}
+
+// handleMCODEGenomicsWave43 implements HL7 CodeX / mCODE Cancer Genomics & Tumor Marker Reporting (mCODE v3.0.0):
+//   - POST /fhir/r4/{tenant}/DiagnosticReport/$mcode-genomics-report & /fhir/r4/{tenant}/DiagnosticReport/{id}/$mcode-genomics-report
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$mcode-genomics-summary & /fhir/r4/{tenant}/Patient/$mcode-genomics-summary
+func (s *Server) handleMCODEGenomicsWave43(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	op := strings.TrimSpace(r.PathValue("op"))
+
+	patientID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("patient")), "Patient/")
+	geneSymbol := strings.TrimSpace(r.URL.Query().Get("gene"))
+	if geneSymbol == "" {
+		geneSymbol = "BRCA1"
+	}
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err == nil {
+				rt, _ := body["resourceType"].(string)
+				switch rt {
+				case "Parameters":
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							if pm, ok := p.(map[string]any); ok {
+								name, _ := pm["name"].(string)
+								switch name {
+								case "patient", "subject":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										patientID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+									}
+									if vr, ok := pm["valueReference"].(map[string]any); ok {
+										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+											patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+										}
+									}
+								case "gene":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										geneSymbol = strings.TrimSpace(vs)
+									}
+									if vc, ok := pm["valueCode"].(string); ok && strings.TrimSpace(vc) != "" {
+										geneSymbol = strings.TrimSpace(vc)
+									}
+								}
+							}
+						}
+					}
+				case "DiagnosticReport":
+					if subj, ok := body["subject"].(map[string]any); ok {
+						if ref, _ := subj["reference"].(string); strings.TrimSpace(ref) != "" {
+							patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := patientID
+	if op == "$mcode-genomics-summary" && resID != "" {
+		patID = resID
+	}
+	patID = firstNonEmptyStr(patID, "example-patient-1")
+	drID := "mcode-genomics-dr-" + patID
+	if op == "$mcode-genomics-report" && resID != "" {
+		drID = resID
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	varObsID := "mcode-variant-" + patID
+	varObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           varObsID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-genomic-variant"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory", "display": "Laboratory"},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://loinc.org", "code": "69548-6", "display": "Genetic variant assessment"},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueCodeableConcept": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://loinc.org", "code": "LA9633-4", "display": "Present"},
+			},
+		},
+		"component": []map[string]any{
+			{
+				"code": map[string]any{
+					"coding": []map[string]any{
+						{"system": "http://loinc.org", "code": "48018-6", "display": "Gene studied [ID]"},
+					},
+				},
+				"valueCodeableConcept": map[string]any{
+					"coding": []map[string]any{
+						{"system": "http://www.genenames.org/geneId", "code": "HGNC:1100", "display": geneSymbol},
+					},
+				},
+			},
+		},
+	}
+	_, _, _, savedVar, _ := s.upsertResourceMap(r.Context(), tenant, varObs)
+	if len(savedVar) > 0 {
+		varObs = savedVar
+	}
+
+	tmObsID := "mcode-tumormarker-" + patID
+	tmObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           tmObsID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-tumor-marker"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory", "display": "Laboratory"},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://loinc.org", "code": "85337-4", "display": "Estrogen receptor Ag [Presence] in Breast cancer specimen by Immune stain"},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueCodeableConcept": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://snomed.info/sct", "code": "10828004", "display": "Positive"},
+			},
+		},
+	}
+	_, _, _, savedTM, _ := s.upsertResourceMap(r.Context(), tenant, tmObs)
+	if len(savedTM) > 0 {
+		tmObs = savedTM
+	}
+
+	drRes := map[string]any{
+		"resourceType": "DiagnosticReport",
+		"id":           drID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-cancer-genomics-report"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/v2-0074", "code": "GE", "display": "Genetics"},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://loinc.org", "code": "81247-9", "display": "Master HL7 genetic variant reporting panel"},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"issued":            nowStr,
+		"result": []map[string]any{
+			{"reference": "Observation/" + varObsID},
+			{"reference": "Observation/" + tmObsID},
+		},
+	}
+	_, _, _, savedDR, _ := s.upsertResourceMap(r.Context(), tenant, drRes)
+	if len(savedDR) > 0 {
+		drRes = savedDR
+	}
+
+	if op == "$mcode-genomics-report" {
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(drRes)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "mcode-genomics-summary-" + patID,
+		"type":         "searchset",
+		"total":        3,
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "DiagnosticReport/" + drID, "resource": drRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Observation/" + varObsID, "resource": varObs, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "Observation/" + tmObsID, "resource": tmObs, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
