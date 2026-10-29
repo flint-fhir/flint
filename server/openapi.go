@@ -4778,6 +4778,102 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Patient/{id}/$elr-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "DiagnosticReport", "Observation", "Specimen", "Bundle"},
+				"summary":     "Assemble an HL7 Public Health Electronic Laboratory Reporting (ELR v1.0.0) summary Bundle for Patient/{id}",
+				"operationId": "patientELRSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (us-ph-reportable-lab-bundle) containing reportable DiagnosticReport, Observation, and Specimen"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "DiagnosticReport", "Observation", "Specimen", "Bundle"},
+				"summary":     "Assemble an HL7 Public Health ELR summary Bundle (POST)",
+				"operationId": "patientELRSummaryPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (us-ph-reportable-lab-bundle) containing reportable DiagnosticReport, Observation, and Specimen"},
+				},
+			},
+		},
+		"/Bundle/$cancer-registry-submit": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Bundle", "Composition", "Condition", "Communication", "Parameters"},
+				"summary":     "Submit an HL7 Central Cancer Registry Reporting (CCRR v1.0.0, LOINC 72134-0) Bundle and persist ccrr-composition and mcode-primary-cancer-condition",
+				"operationId": "bundleCancerRegistrySubmitPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, ccrr-content-bundle, ccrr-composition, mcode-primary-cancer-condition, and Communication"},
+				},
+			},
+		},
+		"/ExplanationOfBenefit/$carin-bb-claims": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ExplanationOfBenefit", "Bundle"},
+				"summary":     "Assemble an HL7 CARIN Blue Button v2.0.0 Oral & Vision ExplanationOfBenefit claims Bundle",
+				"operationId": "explanationOfBenefitCARINBBClaimsGet",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing C4BB-ExplanationOfBenefit-Oral and C4BB-ExplanationOfBenefit-Vision"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ExplanationOfBenefit", "Bundle"},
+				"summary":     "Assemble an HL7 CARIN Blue Button v2.0.0 Oral & Vision ExplanationOfBenefit claims Bundle (POST)",
+				"operationId": "explanationOfBenefitCARINBBClaimsPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing C4BB-ExplanationOfBenefit-Oral and C4BB-ExplanationOfBenefit-Vision"},
+				},
+			},
+		},
+		"/Patient/{id}/$rtpbc-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Claim", "ClaimResponse", "Bundle"},
+				"summary":     "Assemble an HL7 CARIN Real-Time Pharmacy Benefit Check (RTPBC v1.0.0) summary Bundle for Patient/{id}",
+				"operationId": "patientRTPBCSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing rtpbc-claim-response and rtpbc-claim"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Claim", "ClaimResponse", "Bundle"},
+				"summary":     "Assemble an HL7 CARIN RTPBC summary Bundle (POST)",
+				"operationId": "patientRTPBCSummaryPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing rtpbc-claim-response and rtpbc-claim"},
+				},
+			},
+		},
+		"/Composition/$pacio-toc-bundle": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Composition", "Bundle"},
+				"summary":     "Generate and persist an HL7 PACIO Post-Acute Care Transitions of Care (TOC v1.0.0, LOINC 18842-5) discharge summary document Bundle",
+				"operationId": "compositionPACIOTOCBundlePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle (pacio-toc-bundle) containing pacio-toc-composition"},
+				},
+			},
+		},
+		"/Consent/$adi-verify": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Consent", "Provenance", "Parameters"},
+				"summary":     "Verify and attest an HL7 PACIO Advance Directives Interoperability (ADI v1.0.0, LOINC 42348-3) Consent with Provenance signature",
+				"operationId": "consentADIVerifyPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, verified, PADI-ParticipantConsent, and Provenance"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

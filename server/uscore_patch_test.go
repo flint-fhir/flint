@@ -7229,3 +7229,103 @@ func TestECRGravitySDOHAndVulcanESourceWave45(t *testing.T) {
 		t.Fatalf("GET /ResearchStudy/vulcan-study-1/$vulcan-summary expected vulcan-study-1 and vulcan-esource-crf-response, got %d: %s", vSumRec.Code, vSumRec.Body.String())
 	}
 }
+
+func TestELRCCRRCARINAndPACIOTOCWave46(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("migrations failed: %v", err)
+	}
+
+	tenant := "wave46-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. CapabilityStatement & OpenAPI check for Wave 46 operations
+	capReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/metadata", nil)
+	capRec := httptest.NewRecorder()
+	pgH.ServeHTTP(capRec, capReq)
+	if capRec.Code != http.StatusOK ||
+		!strings.Contains(capRec.Body.String(), `"elr-summary"`) ||
+		!strings.Contains(capRec.Body.String(), `"cancer-registry-submit"`) ||
+		!strings.Contains(capRec.Body.String(), `"carin-bb-claims"`) ||
+		!strings.Contains(capRec.Body.String(), `"rtpbc-summary"`) ||
+		!strings.Contains(capRec.Body.String(), `"pacio-toc-bundle"`) ||
+		!strings.Contains(capRec.Body.String(), `"adi-verify"`) {
+		t.Fatalf("CapabilityStatement missing Wave 46 ops: %s", capRec.Body.String())
+	}
+
+	// 2. HL7 Public Health ELR & CCRR: GET /Patient/pat-w46-1/$elr-summary & POST /Bundle/$cancer-registry-submit
+	elrReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w46-1/$elr-summary", nil)
+	elrRec := httptest.NewRecorder()
+	pgH.ServeHTTP(elrRec, elrReq)
+	if elrRec.Code != http.StatusOK ||
+		!strings.Contains(elrRec.Body.String(), `"94500-6"`) ||
+		!strings.Contains(elrRec.Body.String(), "us-ph-reportable-lab-bundle") {
+		t.Fatalf("GET /Patient/pat-w46-1/$elr-summary expected LOINC 94500-6 and us-ph-reportable-lab-bundle, got %d: %s", elrRec.Code, elrRec.Body.String())
+	}
+
+	ccrrBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w46-1"}
+		]
+	}`
+	ccrrReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Bundle/$cancer-registry-submit", strings.NewReader(ccrrBody))
+	ccrrReq.Header.Set("Content-Type", "application/fhir+json")
+	ccrrRec := httptest.NewRecorder()
+	pgH.ServeHTTP(ccrrRec, ccrrReq)
+	if ccrrRec.Code != http.StatusOK ||
+		!strings.Contains(ccrrRec.Body.String(), `"72134-0"`) ||
+		!strings.Contains(ccrrRec.Body.String(), "ccrr-content-bundle") ||
+		!strings.Contains(ccrrRec.Body.String(), "mcode-primary-cancer-condition") {
+		t.Fatalf("POST /Bundle/$cancer-registry-submit expected LOINC 72134-0, ccrr-content-bundle, and mcode-primary-cancer-condition, got %d: %s", ccrrRec.Code, ccrrRec.Body.String())
+	}
+
+	// 3. HL7 CARIN Blue Button Oral/Vision Claims & RTPBC Summary
+	c4bbReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/ExplanationOfBenefit/$carin-bb-claims?patient=Patient/pat-w46-1", nil)
+	c4bbRec := httptest.NewRecorder()
+	pgH.ServeHTTP(c4bbRec, c4bbReq)
+	if c4bbRec.Code != http.StatusOK ||
+		!strings.Contains(c4bbRec.Body.String(), "C4BB-ExplanationOfBenefit-Oral") ||
+		!strings.Contains(c4bbRec.Body.String(), "C4BB-ExplanationOfBenefit-Vision") {
+		t.Fatalf("GET /ExplanationOfBenefit/$carin-bb-claims expected Oral and Vision EOB profiles, got %d: %s", c4bbRec.Code, c4bbRec.Body.String())
+	}
+
+	rtpbcReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w46-1/$rtpbc-summary", nil)
+	rtpbcRec := httptest.NewRecorder()
+	pgH.ServeHTTP(rtpbcRec, rtpbcReq)
+	if rtpbcRec.Code != http.StatusOK ||
+		!strings.Contains(rtpbcRec.Body.String(), "rtpbc-claim-response") ||
+		!strings.Contains(rtpbcRec.Body.String(), "rtpbc-claim") {
+		t.Fatalf("GET /Patient/pat-w46-1/$rtpbc-summary expected rtpbc-claim-response and rtpbc-claim, got %d: %s", rtpbcRec.Code, rtpbcRec.Body.String())
+	}
+
+	// 4. HL7 PACIO TOC Bundle & ADI Verify
+	tocReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Composition/$pacio-toc-bundle", strings.NewReader(ccrrBody))
+	tocReq.Header.Set("Content-Type", "application/fhir+json")
+	tocRec := httptest.NewRecorder()
+	pgH.ServeHTTP(tocRec, tocReq)
+	if tocRec.Code != http.StatusOK ||
+		!strings.Contains(tocRec.Body.String(), "pacio-toc-bundle") ||
+		!strings.Contains(tocRec.Body.String(), `"18842-5"`) {
+		t.Fatalf("POST /Composition/$pacio-toc-bundle expected pacio-toc-bundle and LOINC 18842-5, got %d: %s", tocRec.Code, tocRec.Body.String())
+	}
+
+	adiReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Consent/$adi-verify", strings.NewReader(ccrrBody))
+	adiReq.Header.Set("Content-Type", "application/fhir+json")
+	adiRec := httptest.NewRecorder()
+	pgH.ServeHTTP(adiRec, adiReq)
+	if adiRec.Code != http.StatusOK ||
+		!strings.Contains(adiRec.Body.String(), "PADI-ParticipantConsent") ||
+		!strings.Contains(adiRec.Body.String(), `"42348-3"`) {
+		t.Fatalf("POST /Consent/$adi-verify expected PADI-ParticipantConsent and LOINC 42348-3, got %d: %s", adiRec.Code, adiRec.Body.String())
+	}
+}

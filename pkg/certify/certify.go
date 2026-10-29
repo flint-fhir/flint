@@ -1805,6 +1805,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /ResearchStudy/vulcan-study-1/$vulcan-summary to return vulcan-study-1, got %d: %s", respVulcan.StatusCode, string(bVulcan))
 			}
 		}
+		if err == nil {
+			respELR, bELR, errELR := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$elr-summary", "", nil, nil)
+			respC4BB, bC4BB, errC4BB := doReq(http.MethodGet, basePath+"/ExplanationOfBenefit/$carin-bb-claims?patient=Patient/cert-pat-1", "", nil, nil)
+			if errELR != nil || respELR.StatusCode != http.StatusOK || !strings.Contains(string(bELR), `"94500-6"`) {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$elr-summary to return LOINC 94500-6 reportable lab, got %d: %s", respELR.StatusCode, string(bELR))
+			} else if errC4BB != nil || respC4BB.StatusCode != http.StatusOK || !strings.Contains(string(bC4BB), "C4BB-ExplanationOfBenefit-Oral") {
+				err = fmt.Errorf("expected GET /ExplanationOfBenefit/$carin-bb-claims to return C4BB-ExplanationOfBenefit-Oral, got %d: %s", respC4BB.StatusCode, string(bC4BB))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
