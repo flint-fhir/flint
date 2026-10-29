@@ -1787,6 +1787,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-genomics-summary to return mcode-cancer-genomics-report, got %d: %s", respGen.StatusCode, string(bGen))
 			}
 		}
+		if err == nil {
+			respNBS, bNBS, errNBS := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$nbs-summary", "", nil, nil)
+			respAEOB, bAEOB, errAEOB := doReq(http.MethodGet, basePath+"/ExplanationOfBenefit/$pct-aeob-summary?patient=Patient/cert-pat-1", "", nil, nil)
+			if errNBS != nil || respNBS.StatusCode != http.StatusOK || !strings.Contains(string(bNBS), `"54089-8"`) {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$nbs-summary to return LOINC 54089-8 Newborn Screening panel, got %d: %s", respNBS.StatusCode, string(bNBS))
+			} else if errAEOB != nil || respAEOB.StatusCode != http.StatusOK || !strings.Contains(string(bAEOB), "davinci-pct-aeob") {
+				err = fmt.Errorf("expected GET /ExplanationOfBenefit/$pct-aeob-summary to return davinci-pct-aeob, got %d: %s", respAEOB.StatusCode, string(bAEOB))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
