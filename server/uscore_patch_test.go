@@ -6505,3 +6505,105 @@ func TestCCRRVBPRAndPACIOCSWave39(t *testing.T) {
 		t.Fatalf("GET /Patient/pat-w39-1/$pacio-cognitive-summary expected pacio-cs-Observation and pacio-cs-QuestionnaireResponse, got %d: %s", csSumRec.Code, csSumRec.Body.String())
 	}
 }
+
+func TestCarinRTPBCFASTIdentityAndPACIORTWave40(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave40-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	patBody := `{
+		"resourceType": "Patient",
+		"id": "pat-w40-1",
+		"active": true,
+		"gender": "female",
+		"birthDate": "1968-11-04",
+		"name": [{"family": "Banting", "given": ["Frederick"]}]
+	}`
+	putReq := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/Patient/pat-w40-1", strings.NewReader(patBody))
+	putReq.Header.Set("Content-Type", "application/fhir+json")
+	putRec := httptest.NewRecorder()
+	pgH.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK && putRec.Code != http.StatusCreated {
+		t.Fatalf("PUT /Patient/pat-w40-1 expected 200/201, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	// 1. HL7 CARIN RTPBC v2.0.0: POST /Claim/$rtpbc-submit & GET /ClaimResponse/$rtpbc-coverage
+	rtpbcBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w40-1"},
+			{"name": "medicationCode", "valueCode": "860975"},
+			{"name": "copay", "valueDecimal": 12.50}
+		]
+	}`
+	rtpbcReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Claim/$rtpbc-submit", strings.NewReader(rtpbcBody))
+	rtpbcReq.Header.Set("Content-Type", "application/fhir+json")
+	rtpbcRec := httptest.NewRecorder()
+	pgH.ServeHTTP(rtpbcRec, rtpbcReq)
+	if rtpbcRec.Code != http.StatusOK ||
+		!strings.Contains(rtpbcRec.Body.String(), "rtpbc-response-claimresponse") ||
+		!strings.Contains(rtpbcRec.Body.String(), `"patient-pay"`) ||
+		!strings.Contains(rtpbcRec.Body.String(), `"formularyAlternative"`) {
+		t.Fatalf("POST /Claim/$rtpbc-submit expected rtpbc-response-claimresponse, patient-pay, and formularyAlternative, got %d: %s", rtpbcRec.Code, rtpbcRec.Body.String())
+	}
+
+	covReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/ClaimResponse/$rtpbc-coverage?patient=Patient/pat-w40-1", nil)
+	covRec := httptest.NewRecorder()
+	pgH.ServeHTTP(covRec, covReq)
+	if covRec.Code != http.StatusOK ||
+		!strings.Contains(covRec.Body.String(), "rtpbc-response-claimresponse") {
+		t.Fatalf("GET /ClaimResponse/$rtpbc-coverage expected rtpbc-response-claimresponse Bundle, got %d: %s", covRec.Code, covRec.Body.String())
+	}
+
+	// 2. HL7 FAST Digital Identity v2.0.0: POST /Patient/$idi-match & POST /Person/person-w40-1/$verify-identity
+	idiReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/$idi-match", nil)
+	idiRec := httptest.NewRecorder()
+	pgH.ServeHTTP(idiRec, idiReq)
+	if idiRec.Code != http.StatusOK ||
+		!strings.Contains(idiRec.Body.String(), `"score":0.99`) ||
+		!strings.Contains(idiRec.Body.String(), "pat-w40-1") {
+		t.Fatalf("POST /Patient/$idi-match expected score 0.99 and pat-w40-1, got %d: %s", idiRec.Code, idiRec.Body.String())
+	}
+
+	verReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Person/person-w40-1/$verify-identity", nil)
+	verRec := httptest.NewRecorder()
+	pgH.ServeHTTP(verRec, verReq)
+	if verRec.Code != http.StatusOK ||
+		!strings.Contains(verRec.Body.String(), `"IAL2-AAL2"`) ||
+		!strings.Contains(verRec.Body.String(), `"level3"`) ||
+		!strings.Contains(verRec.Body.String(), `"VerificationResult"`) {
+		t.Fatalf("POST /Person/person-w40-1/$verify-identity expected IAL2-AAL2, level3, and VerificationResult, got %d: %s", verRec.Code, verRec.Body.String())
+	}
+
+	// 3. HL7 PACIO Re-Assessment Timepoints v1.0.0: POST /Encounter/enc-w40-1/$pacio-timepoint & GET /Encounter/enc-w40-1/$pacio-timepoints
+	tpReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Encounter/enc-w40-1/$pacio-timepoint", nil)
+	tpRec := httptest.NewRecorder()
+	pgH.ServeHTTP(tpRec, tpReq)
+	if tpRec.Code != http.StatusOK ||
+		!strings.Contains(tpRec.Body.String(), "pacio-rt-reassessment-timepoint-encounter") ||
+		!strings.Contains(tpRec.Body.String(), "pacio-rt-clinical-impression") {
+		t.Fatalf("POST /Encounter/enc-w40-1/$pacio-timepoint expected pacio-rt-reassessment-timepoint-encounter and pacio-rt-clinical-impression, got %d: %s", tpRec.Code, tpRec.Body.String())
+	}
+
+	tpsReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Encounter/enc-w40-1/$pacio-timepoints", nil)
+	tpsRec := httptest.NewRecorder()
+	pgH.ServeHTTP(tpsRec, tpsReq)
+	if tpsRec.Code != http.StatusOK ||
+		!strings.Contains(tpsRec.Body.String(), "pacio-rt-reassessment-timepoint-encounter") ||
+		!strings.Contains(tpsRec.Body.String(), "pacio-rt-clinical-impression") {
+		t.Fatalf("GET /Encounter/enc-w40-1/$pacio-timepoints expected pacio-rt-reassessment-timepoint-encounter and pacio-rt-clinical-impression, got %d: %s", tpsRec.Code, tpsRec.Body.String())
+	}
+}

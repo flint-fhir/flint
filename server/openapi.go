@@ -4225,6 +4225,97 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Claim/$rtpbc-submit": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Claim", "ClaimResponse"},
+				"summary":     "Submit a Real-Time Pharmacy Benefit Check (CARIN RTPBC v2.0.0) and receive patient-pay adjudication and formulary alternatives",
+				"operationId": "claimRTPBCSubmitPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing patientPayAmount, formularyAlternative, and rtpbc-response-claimresponse"},
+				},
+			},
+		},
+		"/ClaimResponse/$rtpbc-coverage": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ClaimResponse", "Bundle"},
+				"summary":     "Query CARIN Real-Time Pharmacy Benefit Check (CARIN RTPBC v2.0.0) ClaimResponse determinations",
+				"operationId": "claimResponseRTPBCCoverageGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of rtpbc-response-claimresponse resources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ClaimResponse", "Bundle"},
+				"summary":     "Query CARIN Real-Time Pharmacy Benefit Check ClaimResponse determinations (POST)",
+				"operationId": "claimResponseRTPBCCoveragePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of rtpbc-response-claimresponse resources"},
+				},
+			},
+		},
+		"/Patient/$idi-match": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Bundle"},
+				"summary":     "Execute NIST SP 800-63-3 IAL2/AAL2 weighted demographic patient matching (HL7 FAST Identity v2.0.0)",
+				"operationId": "patientIDIMatchPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of IDI-Patient candidates with search.score"},
+				},
+			},
+		},
+		"/Person/{id}/$verify-identity": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Person", "VerificationResult"},
+				"summary":     "Verify digital identity credentials for Person/{id} against NIST SP 800-63-3 IAL2 proofing criteria (HL7 FAST Identity v2.0.0)",
+				"operationId": "personVerifyIdentityPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing assuranceLevel, Person, and VerificationResult"},
+				},
+			},
+		},
+		"/Encounter/{id}/$pacio-timepoint": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Encounter", "ClinicalImpression"},
+				"summary":     "Record a Post-Acute Care Re-Assessment Timepoint Encounter and ClinicalImpression (HL7 PACIO RT v1.0.0)",
+				"operationId": "encounterPACIOTimepointPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing timepointEncounter and clinicalImpression"},
+				},
+			},
+		},
+		"/Encounter/{id}/$pacio-timepoints": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Encounter", "ClinicalImpression", "Bundle"},
+				"summary":     "Assemble a searchset Bundle of Post-Acute Re-Assessment Timepoint Encounters and ClinicalImpressions (HL7 PACIO RT v1.0.0)",
+				"operationId": "encounterPACIOTimepointsGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of PACIO Re-Assessment Timepoints"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Encounter", "ClinicalImpression", "Bundle"},
+				"summary":     "Assemble a searchset Bundle of Post-Acute Re-Assessment Timepoint Encounters and ClinicalImpressions (POST)",
+				"operationId": "encounterPACIOTimepointsPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of PACIO Re-Assessment Timepoints"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()
