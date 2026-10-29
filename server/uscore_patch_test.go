@@ -6994,3 +6994,130 @@ func TestIISCDexSignatureAndMCODEGenomicsWave43(t *testing.T) {
 		t.Fatalf("GET /Patient/pat-w43-1/$mcode-genomics-summary expected mcode-cancer-genomics-report, mcode-genomic-variant, and mcode-tumor-marker, got %d: %s", genSumRec.Code, genSumRec.Body.String())
 	}
 }
+
+func TestNBSPCTAEOBAndVulcanICSRWave44(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave44-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. Metadata & OpenAPI discovery
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK ||
+		!strings.Contains(metaRec.Body.String(), "nbs-submit") ||
+		!strings.Contains(metaRec.Body.String(), "nbs-summary") ||
+		!strings.Contains(metaRec.Body.String(), "pct-aeob-summary") ||
+		!strings.Contains(metaRec.Body.String(), "pct-gfe-coordination") ||
+		!strings.Contains(metaRec.Body.String(), "vulcan-icsr-report") ||
+		!strings.Contains(metaRec.Body.String(), "vulcan-soa-timeline") {
+		t.Fatalf("CapabilityStatement missing Wave 44 operations: %s", metaRec.Body.String())
+	}
+
+	oaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/openapi.json", nil)
+	oaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(oaRec, oaReq)
+	if oaRec.Code != http.StatusOK ||
+		!strings.Contains(oaRec.Body.String(), "/DiagnosticReport/$nbs-submit") ||
+		!strings.Contains(oaRec.Body.String(), "/Patient/{id}/$nbs-summary") ||
+		!strings.Contains(oaRec.Body.String(), "/ExplanationOfBenefit/$pct-aeob-summary") ||
+		!strings.Contains(oaRec.Body.String(), "/Task/$pct-gfe-coordination") ||
+		!strings.Contains(oaRec.Body.String(), "/AdverseEvent/$vulcan-icsr-report") ||
+		!strings.Contains(oaRec.Body.String(), "/ResearchSubject/{id}/$vulcan-soa-timeline") {
+		t.Fatalf("OpenAPI missing Wave 44 paths: %s", oaRec.Body.String())
+	}
+
+	// 1. HL7 Public Health NBS / EHDI v1.0.0: POST /DiagnosticReport/$nbs-submit & GET /Patient/pat-w44-1/$nbs-summary
+	nbsBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w44-1"},
+			{"name": "result", "valueString": "Pass bilateral OAE hearing screen and normal dried blood spot panel"}
+		]
+	}`
+	nbsReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/DiagnosticReport/$nbs-submit", strings.NewReader(nbsBody))
+	nbsReq.Header.Set("Content-Type", "application/fhir+json")
+	nbsRec := httptest.NewRecorder()
+	pgH.ServeHTTP(nbsRec, nbsReq)
+	if nbsRec.Code != http.StatusOK ||
+		!strings.Contains(nbsRec.Body.String(), `"54089-8"`) ||
+		!strings.Contains(nbsRec.Body.String(), `"440500007"`) {
+		t.Fatalf("POST /DiagnosticReport/$nbs-submit expected LOINC 54089-8 and SNOMED 440500007, got %d: %s", nbsRec.Code, nbsRec.Body.String())
+	}
+
+	nbsSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w44-1/$nbs-summary", nil)
+	nbsSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(nbsSumRec, nbsSumReq)
+	if nbsSumRec.Code != http.StatusOK ||
+		!strings.Contains(nbsSumRec.Body.String(), `"54089-8"`) ||
+		!strings.Contains(nbsSumRec.Body.String(), `"440500007"`) {
+		t.Fatalf("GET /Patient/pat-w44-1/$nbs-summary expected LOINC 54089-8 and SNOMED 440500007, got %d: %s", nbsSumRec.Code, nbsSumRec.Body.String())
+	}
+
+	// 2. HL7 Da Vinci PCT v2.0.0: GET /ExplanationOfBenefit/$pct-aeob-summary & POST /Task/$pct-gfe-coordination
+	aeobReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/ExplanationOfBenefit/$pct-aeob-summary?patient=Patient/pat-w44-1", nil)
+	aeobRec := httptest.NewRecorder()
+	pgH.ServeHTTP(aeobRec, aeobReq)
+	if aeobRec.Code != http.StatusOK ||
+		!strings.Contains(aeobRec.Body.String(), "davinci-pct-aeob-packet") ||
+		!strings.Contains(aeobRec.Body.String(), "davinci-pct-aeob") {
+		t.Fatalf("GET /ExplanationOfBenefit/$pct-aeob-summary expected davinci-pct-aeob-packet and davinci-pct-aeob, got %d: %s", aeobRec.Code, aeobRec.Body.String())
+	}
+
+	gfeCoordBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w44-1"}
+		]
+	}`
+	gfeCoordReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Task/$pct-gfe-coordination", strings.NewReader(gfeCoordBody))
+	gfeCoordReq.Header.Set("Content-Type", "application/fhir+json")
+	gfeCoordRec := httptest.NewRecorder()
+	pgH.ServeHTTP(gfeCoordRec, gfeCoordReq)
+	if gfeCoordRec.Code != http.StatusOK ||
+		!strings.Contains(gfeCoordRec.Body.String(), "davinci-pct-gfe-coordination-task") ||
+		!strings.Contains(gfeCoordRec.Body.String(), `"gfe-coordination-task"`) {
+		t.Fatalf("POST /Task/$pct-gfe-coordination expected davinci-pct-gfe-coordination-task and gfe-coordination-task, got %d: %s", gfeCoordRec.Code, gfeCoordRec.Body.String())
+	}
+
+	// 3. HL7 Vulcan ICSR & SOA: POST /AdverseEvent/$vulcan-icsr-report & GET /ResearchSubject/subj-w44-1/$vulcan-soa-timeline
+	icsrBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w44-1"},
+			{"name": "study", "valueString": "ResearchStudy/study-w44-1"}
+		]
+	}`
+	icsrReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/AdverseEvent/$vulcan-icsr-report", strings.NewReader(icsrBody))
+	icsrReq.Header.Set("Content-Type", "application/fhir+json")
+	icsrRec := httptest.NewRecorder()
+	pgH.ServeHTTP(icsrRec, icsrReq)
+	if icsrRec.Code != http.StatusOK ||
+		!strings.Contains(icsrRec.Body.String(), "icsr-bundle") ||
+		!strings.Contains(icsrRec.Body.String(), "vulcan-adverse-event-clinical-research") ||
+		!strings.Contains(icsrRec.Body.String(), `"85893-6"`) {
+		t.Fatalf("POST /AdverseEvent/$vulcan-icsr-report expected icsr-bundle, vulcan-adverse-event-clinical-research, and LOINC 85893-6, got %d: %s", icsrRec.Code, icsrRec.Body.String())
+	}
+
+	soaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/ResearchSubject/subj-w44-1/$vulcan-soa-timeline?patient=Patient/pat-w44-1", nil)
+	soaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(soaRec, soaReq)
+	if soaRec.Code != http.StatusOK ||
+		!strings.Contains(soaRec.Body.String(), "vulcan-soa-study-visit-plan") ||
+		!strings.Contains(soaRec.Body.String(), "vulcan-soa-encounter") {
+		t.Fatalf("GET /ResearchSubject/subj-w44-1/$vulcan-soa-timeline expected vulcan-soa-study-visit-plan and vulcan-soa-encounter, got %d: %s", soaRec.Code, soaRec.Body.String())
+	}
+}

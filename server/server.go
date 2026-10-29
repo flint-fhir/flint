@@ -1109,6 +1109,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleMCODEGenomicsWave43(w, r)
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "DiagnosticReport") && parts[4] == "$nbs-submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$nbs-submit")
+					s.handlePublicHealthNBSWave44(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$nbs-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$nbs-summary")
+					s.handlePublicHealthNBSWave44(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ExplanationOfBenefit") && parts[4] == "$pct-aeob-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$pct-aeob-summary")
+					s.handleDaVinciPCTWave44(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[4] == "$pct-gfe-coordination" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$pct-gfe-coordination")
+					s.handleDaVinciPCTWave44(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "AdverseEvent") && parts[4] == "$vulcan-icsr-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$vulcan-icsr-report")
+					s.handleVulcanICSRAndSOAWave44(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ResearchSubject") && parts[4] == "$vulcan-soa-timeline" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$vulcan-soa-timeline")
+					s.handleVulcanICSRAndSOAWave44(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -1117,6 +1153,48 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "DiagnosticReport") && parts[5] == "$nbs-submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$nbs-submit")
+					s.handlePublicHealthNBSWave44(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$nbs-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$nbs-summary")
+					s.handlePublicHealthNBSWave44(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ExplanationOfBenefit") && parts[5] == "$pct-aeob-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$pct-aeob-summary")
+					s.handleDaVinciPCTWave44(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[5] == "$pct-gfe-coordination" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$pct-gfe-coordination")
+					s.handleDaVinciPCTWave44(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "AdverseEvent") && parts[5] == "$vulcan-icsr-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$vulcan-icsr-report")
+					s.handleVulcanICSRAndSOAWave44(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ResearchSubject") && parts[5] == "$vulcan-soa-timeline" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$vulcan-soa-timeline")
+					s.handleVulcanICSRAndSOAWave44(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Immunization") && parts[5] == "$iis-submit" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4888,6 +4966,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "mcode-genomics-summary",
 					"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/Patient-mcode-genomics-summary",
 				},
+				{
+					"name":       "nbs-summary",
+					"definition": "http://hl7.org/fhir/us/newborn-screening/OperationDefinition/Patient-nbs-summary",
+				},
 			}
 		case "Immunization":
 			entry["operation"] = []map[string]string{
@@ -4944,6 +5026,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "mcode-genomics-report",
 					"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/DiagnosticReport-mcode-genomics-report",
+				},
+				{
+					"name":       "nbs-submit",
+					"definition": "http://hl7.org/fhir/us/newborn-screening/OperationDefinition/DiagnosticReport-nbs-submit",
 				},
 			}
 		case "Observation":
@@ -5369,6 +5455,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "cdex-questionnaire-request",
 					"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/Task-cdex-questionnaire-request",
 				},
+				{
+					"name":       "pct-gfe-coordination",
+					"definition": "http://hl7.org/fhir/us/davinci-pct/OperationDefinition/Task-pct-gfe-coordination",
+				},
 			}
 		case "ValueSet":
 			entry["operation"] = []map[string]string{
@@ -5555,6 +5645,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "enroll",
 					"definition": "http://hl7.org/fhir/uv/vulcan-schedule/OperationDefinition/ResearchSubject-enroll",
 				},
+				{
+					"name":       "vulcan-soa-timeline",
+					"definition": "http://hl7.org/fhir/uv/vulcan-schedule/OperationDefinition/ResearchSubject-vulcan-soa-timeline",
+				},
 			}
 		case "Endpoint":
 			entry["operation"] = []map[string]string{
@@ -5589,6 +5683,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "evaluate",
 					"definition": "http://flint.fhir.org/OperationDefinition/AdverseEvent-evaluate",
+				},
+				{
+					"name":       "vulcan-icsr-report",
+					"definition": "http://hl7.org/fhir/uv/vulcan-ae/OperationDefinition/AdverseEvent-vulcan-icsr-report",
 				},
 			}
 		case "RiskAssessment":
@@ -5666,6 +5764,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "carin-bb-summary",
 					"definition": "http://hl7.org/fhir/us/carin-bb/OperationDefinition/carin-bb-summary",
+				},
+				{
+					"name":       "pct-aeob-summary",
+					"definition": "http://hl7.org/fhir/us/davinci-pct/OperationDefinition/ExplanationOfBenefit-pct-aeob-summary",
 				},
 			}
 		}

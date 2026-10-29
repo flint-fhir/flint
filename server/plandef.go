@@ -21027,3 +21027,533 @@ func (s *Server) handleMCODEGenomicsWave43(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(bundle)
 }
+
+// handlePublicHealthNBSWave44 implements HL7 Public Health Newborn Screening & Early Hearing Detection (HL7 NBS / EHDI v1.0.0):
+//   - POST /fhir/r4/{tenant}/DiagnosticReport/$nbs-submit & /fhir/r4/{tenant}/DiagnosticReport/{id}/$nbs-submit
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$nbs-summary & /fhir/r4/{tenant}/Patient/$nbs-summary
+func (s *Server) handlePublicHealthNBSWave44(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	op := strings.TrimSpace(r.PathValue("op"))
+
+	patientID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("patient")), "Patient/")
+	screeningResult := strings.TrimSpace(r.URL.Query().Get("result"))
+	if screeningResult == "" {
+		screeningResult = "Normal newborn dried blood spot and hearing screening"
+	}
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err == nil {
+				rt, _ := body["resourceType"].(string)
+				switch rt {
+				case "Parameters":
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							if pm, ok := p.(map[string]any); ok {
+								name, _ := pm["name"].(string)
+								switch name {
+								case "patient", "subject":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										patientID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+									}
+									if vr, ok := pm["valueReference"].(map[string]any); ok {
+										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+											patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+										}
+									}
+								case "result":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										screeningResult = strings.TrimSpace(vs)
+									}
+								}
+							}
+						}
+					}
+				case "DiagnosticReport":
+					if subj, ok := body["subject"].(map[string]any); ok {
+						if ref, _ := subj["reference"].(string); strings.TrimSpace(ref) != "" {
+							patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := patientID
+	if op == "$nbs-summary" && resID != "" {
+		patID = resID
+	}
+	patID = firstNonEmptyStr(patID, "example-patient-1")
+	drID := "nbs-panel-" + patID
+	if op == "$nbs-submit" && resID != "" {
+		drID = resID
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	specID := "nbs-dbs-spec-" + patID
+	specRes := map[string]any{
+		"resourceType": "Specimen",
+		"id":           specID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-specimen"},
+		},
+		"status": "available",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://snomed.info/sct", "code": "440500007", "display": "Dried blood spot specimen"},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"collection": map[string]any{
+			"collectedDateTime": nowStr,
+		},
+	}
+	_, _, _, savedSpec, _ := s.upsertResourceMap(r.Context(), tenant, specRes)
+	if len(savedSpec) > 0 {
+		specRes = savedSpec
+	}
+
+	obsID := "nbs-obs-" + patID
+	obsRes := map[string]any{
+		"resourceType": "Observation",
+		"id":           obsID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory", "display": "Laboratory"},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://loinc.org", "code": "54108-6", "display": "Newborn screening comment-discussion"},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"specimen":          map[string]any{"reference": "Specimen/" + specID},
+		"effectiveDateTime": nowStr,
+		"valueString":       screeningResult,
+	}
+	_, _, _, savedObs, _ := s.upsertResourceMap(r.Context(), tenant, obsRes)
+	if len(savedObs) > 0 {
+		obsRes = savedObs
+	}
+
+	drRes := map[string]any{
+		"resourceType": "DiagnosticReport",
+		"id":           drID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-lab"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/v2-0074", "code": "LAB", "display": "Laboratory"},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://loinc.org", "code": "54089-8", "display": "Newborn screening panel American Health Information Community (AHIC)"},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"issued":            nowStr,
+		"specimen": []map[string]any{
+			{"reference": "Specimen/" + specID},
+		},
+		"result": []map[string]any{
+			{"reference": "Observation/" + obsID},
+		},
+	}
+	_, _, _, savedDR, _ := s.upsertResourceMap(r.Context(), tenant, drRes)
+	if len(savedDR) > 0 {
+		drRes = savedDR
+	}
+
+	if op == "$nbs-submit" {
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "status", "valueString": "accepted"},
+				{"name": "diagnosticReport", "resource": drRes},
+				{"name": "specimen", "resource": specRes},
+				{"name": "observation", "resource": obsRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "nbs-summary-" + patID,
+		"type":         "searchset",
+		"total":        3,
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "DiagnosticReport/" + drID, "resource": drRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Specimen/" + specID, "resource": specRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "Observation/" + obsID, "resource": obsRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleDaVinciPCTWave44 implements HL7 Da Vinci Patient Cost Transparency (PCT v2.0.0) AEOB Packet & GFE Coordination:
+//   - GET/POST /fhir/r4/{tenant}/ExplanationOfBenefit/$pct-aeob-summary & /fhir/r4/{tenant}/ExplanationOfBenefit/{id}/$pct-aeob-summary
+//   - POST /fhir/r4/{tenant}/Task/$pct-gfe-coordination & /fhir/r4/{tenant}/Task/{id}/$pct-gfe-coordination
+func (s *Server) handleDaVinciPCTWave44(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	op := strings.TrimSpace(r.PathValue("op"))
+
+	patientID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("patient")), "Patient/")
+	estimatedCharge := 1500.0
+	memberCostShare := 250.0
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err == nil {
+				rt, _ := body["resourceType"].(string)
+				switch rt {
+				case "Parameters":
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							if pm, ok := p.(map[string]any); ok {
+								name, _ := pm["name"].(string)
+								switch name {
+								case "patient", "subject":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										patientID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+									}
+									if vr, ok := pm["valueReference"].(map[string]any); ok {
+										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+											patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+										}
+									}
+								case "estimatedCharge":
+									if vf, ok := pm["valueDecimal"].(float64); ok && vf > 0 {
+										estimatedCharge = vf
+									}
+								case "memberCostShare":
+									if vf, ok := pm["valueDecimal"].(float64); ok && vf >= 0 {
+										memberCostShare = vf
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := firstNonEmptyStr(patientID, "example-patient-1")
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "$pct-gfe-coordination" {
+		taskID := firstNonEmptyStr(resID, "pct-gfe-coord-"+patID)
+		taskRes := map[string]any{
+			"resourceType": "Task",
+			"id":           taskID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-pct/StructureDefinition/davinci-pct-gfe-coordination-task"},
+			},
+			"status": "completed",
+			"intent": "order",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/davinci-pct/CodeSystem/PCTGFEonDemandTaskCSTemporaryTrialUse",
+						"code":    "gfe-coordination-task",
+						"display": "Good Faith Estimate (GFE) Coordination Task",
+					},
+				},
+			},
+			"for":        map[string]any{"reference": "Patient/" + patID},
+			"authoredOn": nowStr,
+		}
+		_, _, _, savedTask, _ := s.upsertResourceMap(r.Context(), tenant, taskRes)
+		if len(savedTask) > 0 {
+			taskRes = savedTask
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(taskRes)
+		return
+	}
+
+	eobID := firstNonEmptyStr(resID, "pct-aeob-"+patID)
+	eobRes := map[string]any{
+		"resourceType": "ExplanationOfBenefit",
+		"id":           eobID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pct/StructureDefinition/davinci-pct-aeob"},
+		},
+		"status": "active",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://terminology.hl7.org/CodeSystem/claim-type", "code": "institutional", "display": "Institutional"},
+			},
+		},
+		"use":     "predetermination",
+		"patient": map[string]any{"reference": "Patient/" + patID},
+		"created": nowStr,
+		"insurer": map[string]any{"reference": "Organization/example-payer-1"},
+		"provider": map[string]any{
+			"reference": "Organization/example-org-1",
+		},
+		"outcome": "complete",
+		"insurance": []map[string]any{
+			{
+				"focal":    true,
+				"coverage": map[string]any{"reference": "Coverage/example-coverage-1"},
+			},
+		},
+		"total": []map[string]any{
+			{
+				"category": map[string]any{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/adjudication", "code": "submitted", "display": "Submitted Amount"},
+					},
+				},
+				"amount": map[string]any{"value": estimatedCharge, "currency": "USD"},
+			},
+			{
+				"category": map[string]any{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/adjudication", "code": "copay", "display": "CoPay"},
+					},
+				},
+				"amount": map[string]any{"value": memberCostShare, "currency": "USD"},
+			},
+		},
+	}
+	_, _, _, savedEOB, _ := s.upsertResourceMap(r.Context(), tenant, eobRes)
+	if len(savedEOB) > 0 {
+		eobRes = savedEOB
+	}
+
+	packetBundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "pct-aeob-packet-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pct/StructureDefinition/davinci-pct-aeob-packet"},
+		},
+		"type":      "searchset",
+		"total":     1,
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "ExplanationOfBenefit/" + eobID, "resource": eobRes, "search": map[string]any{"mode": "match"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(packetBundle)
+}
+
+// handleVulcanICSRAndSOAWave44 implements HL7 Vulcan Clinical Research Adverse Event ICH E2B(R3) ICSR & Schedule of Activities (SOA):
+//   - POST /fhir/r4/{tenant}/AdverseEvent/$vulcan-icsr-report & /fhir/r4/{tenant}/AdverseEvent/{id}/$vulcan-icsr-report
+//   - GET/POST /fhir/r4/{tenant}/ResearchSubject/{id}/$vulcan-soa-timeline & /fhir/r4/{tenant}/ResearchSubject/$vulcan-soa-timeline
+func (s *Server) handleVulcanICSRAndSOAWave44(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	op := strings.TrimSpace(r.PathValue("op"))
+
+	patientID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("patient")), "Patient/")
+	studyID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("study")), "ResearchStudy/")
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if err := json.Unmarshal(raw, &body); err == nil {
+				rt, _ := body["resourceType"].(string)
+				switch rt {
+				case "Parameters":
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							if pm, ok := p.(map[string]any); ok {
+								name, _ := pm["name"].(string)
+								switch name {
+								case "patient", "subject":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										patientID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+									}
+									if vr, ok := pm["valueReference"].(map[string]any); ok {
+										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+											patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+										}
+									}
+								case "study":
+									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+										studyID = strings.TrimPrefix(strings.TrimSpace(vs), "ResearchStudy/")
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := firstNonEmptyStr(patientID, "example-patient-1")
+	stID := firstNonEmptyStr(studyID, "example-study-1")
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "$vulcan-icsr-report" {
+		aeID := firstNonEmptyStr(resID, "vulcan-ae-"+patID)
+		aeRes := map[string]any{
+			"resourceType": "AdverseEvent",
+			"id":           aeID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/uv/vulcan-ae/StructureDefinition/vulcan-adverse-event-clinical-research"},
+			},
+			"actuality": "actual",
+			"event": map[string]any{
+				"coding": []map[string]any{
+					{"system": "https://www.meddra.org", "code": "10019211", "display": "Headache"},
+				},
+			},
+			"subject": map[string]any{"reference": "Patient/" + patID},
+			"date":    nowStr,
+			"seriousness": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/adverse-event-seriousness", "code": "Non-serious", "display": "Non-serious"},
+				},
+			},
+			"study": []map[string]any{
+				{"reference": "ResearchStudy/" + stID},
+			},
+		}
+		_, _, _, savedAE, _ := s.upsertResourceMap(r.Context(), tenant, aeRes)
+		if len(savedAE) > 0 {
+			aeRes = savedAE
+		}
+
+		compID := "icsr-comp-" + aeID
+		compRes := map[string]any{
+			"resourceType": "Composition",
+			"id":           compID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/icsr-ae-reporting/StructureDefinition/icsr-composition"},
+			},
+			"status": "final",
+			"type": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://loinc.org", "code": "85893-6", "display": "Adverse event note"},
+				},
+			},
+			"subject": map[string]any{"reference": "Patient/" + patID},
+			"date":    nowStr,
+			"author":  []map[string]any{{"reference": "Practitioner/example-practitioner-1"}},
+			"title":   "ICH E2B(R3) Individual Case Safety Report (ICSR)",
+			"section": []map[string]any{
+				{
+					"title": "Reaction / Event Information",
+					"entry": []map[string]any{{"reference": "AdverseEvent/" + aeID}},
+				},
+			},
+		}
+		_, _, _, savedComp, _ := s.upsertResourceMap(r.Context(), tenant, compRes)
+		if len(savedComp) > 0 {
+			compRes = savedComp
+		}
+
+		icsrBundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           "icsr-bundle-" + aeID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/icsr-ae-reporting/StructureDefinition/icsr-bundle"},
+			},
+			"type":      "document",
+			"timestamp": nowStr,
+			"entry": []map[string]any{
+				{"fullUrl": "Composition/" + compID, "resource": compRes},
+				{"fullUrl": "AdverseEvent/" + aeID, "resource": aeRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(icsrBundle)
+		return
+	}
+
+	subjID := firstNonEmptyStr(resID, "vulcan-subj-"+patID)
+	encID := "vulcan-soa-enc-" + subjID
+	encRes := map[string]any{
+		"resourceType": "Encounter",
+		"id":           encID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/vulcan-schedule/StructureDefinition/vulcan-soa-encounter"},
+		},
+		"status": "planned",
+		"class": map[string]any{
+			"system":  "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+			"code":    "AMB",
+			"display": "ambulatory",
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedEnc, _ := s.upsertResourceMap(r.Context(), tenant, encRes)
+	if len(savedEnc) > 0 {
+		encRes = savedEnc
+	}
+
+	cpID := "vulcan-soa-cp-" + subjID
+	cpRes := map[string]any{
+		"resourceType": "CarePlan",
+		"id":           cpID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/vulcan-schedule/StructureDefinition/vulcan-soa-study-visit-plan"},
+		},
+		"status":  "active",
+		"intent":  "plan",
+		"title":   "Vulcan Schedule of Activities (SOA) Study Visit Timeline",
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"activity": []map[string]any{
+			{
+				"outcomeReference": []map[string]any{
+					{"reference": "Encounter/" + encID},
+				},
+			},
+		},
+	}
+	_, _, _, savedCP, _ := s.upsertResourceMap(r.Context(), tenant, cpRes)
+	if len(savedCP) > 0 {
+		cpRes = savedCP
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "vulcan-soa-timeline-" + subjID,
+		"type":         "searchset",
+		"total":        2,
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "CarePlan/" + cpID, "resource": cpRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Encounter/" + encID, "resource": encRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}

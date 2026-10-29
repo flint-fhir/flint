@@ -4591,6 +4591,105 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/DiagnosticReport/$nbs-submit": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"DiagnosticReport", "Specimen", "Observation"},
+				"summary":     "Submit an HL7 Public Health Newborn Screening (NBS / EHDI v1.0.0, LOINC 54089-8) panel with dried blood spot Specimen and screening Observation",
+				"operationId": "diagnosticReportNBSSubmitPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing accepted status, DiagnosticReport, Specimen, and Observation"},
+				},
+			},
+		},
+		"/Patient/{id}/$nbs-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "DiagnosticReport", "Specimen", "Observation", "Bundle"},
+				"summary":     "Assemble an HL7 Public Health Newborn Screening (NBS / EHDI v1.0.0) summary Bundle for Patient/{id}",
+				"operationId": "patientNBSSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of Newborn Screening DiagnosticReports, Specimens, and Observations"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "DiagnosticReport", "Specimen", "Observation", "Bundle"},
+				"summary":     "Assemble an HL7 Public Health Newborn Screening summary Bundle (POST)",
+				"operationId": "patientNBSSummaryPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of Newborn Screening DiagnosticReports, Specimens, and Observations"},
+				},
+			},
+		},
+		"/ExplanationOfBenefit/$pct-aeob-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ExplanationOfBenefit", "Bundle"},
+				"summary":     "Assemble a Da Vinci Patient Cost Transparency (PCT v2.0.0) Advanced Explanation of Benefits packet Bundle (davinci-pct-aeob-packet)",
+				"operationId": "eobPCTAEOBSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (davinci-pct-aeob-packet) containing davinci-pct-aeob"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ExplanationOfBenefit", "Bundle"},
+				"summary":     "Assemble a Da Vinci Patient Cost Transparency Advanced Explanation of Benefits packet Bundle (POST)",
+				"operationId": "eobPCTAEOBSummaryPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (davinci-pct-aeob-packet) containing davinci-pct-aeob"},
+				},
+			},
+		},
+		"/Task/$pct-gfe-coordination": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Task"},
+				"summary":     "Create and fulfill a Da Vinci Patient Cost Transparency (PCT v2.0.0) multi-provider Good Faith Estimate coordination Task (davinci-pct-gfe-coordination-task)",
+				"operationId": "taskPCTGFEoordinationPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Completed davinci-pct-gfe-coordination-task"},
+				},
+			},
+		},
+		"/AdverseEvent/$vulcan-icsr-report": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"AdverseEvent", "Composition", "Bundle"},
+				"summary":     "Generate an FDA / ICH E2B(R3) Individual Case Safety Report (ICSR, LOINC 85893-6) document Bundle from an HL7 Vulcan clinical research AdverseEvent",
+				"operationId": "adverseEventVulcanICSRReportPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle (icsr-bundle) containing icsr-composition and vulcan-adverse-event-clinical-research"},
+				},
+			},
+		},
+		"/ResearchSubject/{id}/$vulcan-soa-timeline": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ResearchSubject", "CarePlan", "Encounter", "Bundle"},
+				"summary":     "Assemble an HL7 Vulcan Schedule of Activities (SOA v1.0.0) study visit timeline Bundle for ResearchSubject/{id}",
+				"operationId": "researchSubjectVulcanSOATimelineGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing vulcan-soa-study-visit-plan CarePlan and vulcan-soa-encounter"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ResearchSubject", "CarePlan", "Encounter", "Bundle"},
+				"summary":     "Assemble an HL7 Vulcan Schedule of Activities study visit timeline Bundle (POST)",
+				"operationId": "researchSubjectVulcanSOATimelinePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing vulcan-soa-study-visit-plan CarePlan and vulcan-soa-encounter"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()
