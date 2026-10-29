@@ -6153,3 +6153,139 @@ func TestFASTNDHPhysicalActivityAndVulcanEPIWave36(t *testing.T) {
 		t.Fatalf("POST /MedicinalProductAuthorization/$evaluate-authorization expected RegulatedAuthorization-uv-epi and authorized=true, got %d: %s", epiAuthRec.Code, epiAuthRec.Body.String())
 	}
 }
+
+func TestELRPACIOADIAndDaVinciRAWave37(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave37-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	for _, item := range []struct {
+		path string
+		body string
+	}{
+		{"/Patient/pat-w37-1", `{
+			"resourceType": "Patient",
+			"id": "pat-w37-1",
+			"active": true,
+			"gender": "female",
+			"birthDate": "1962-11-03",
+			"name": [{"family": "Saunders", "given": ["Cicely"]}]
+		}`},
+		{"/Observation/obs-w37-lab-1", `{
+			"resourceType": "Observation",
+			"id": "obs-w37-lab-1",
+			"status": "final",
+			"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}]}],
+			"code": {"coding": [{"system": "http://loinc.org", "code": "94500-6", "display": "SARS-CoV-2 (COVID-19) RNA [Presence] in Respiratory specimen by NAA with probe detection"}]},
+			"subject": {"reference": "Patient/pat-w37-1"},
+			"effectiveDateTime": "2026-06-01T08:30:00Z",
+			"valueCodeableConcept": {"coding": [{"system": "http://snomed.info/sct", "code": "260373001", "display": "Detected"}]}
+		}`},
+		{"/DiagnosticReport/dr-w37-1", `{
+			"resourceType": "DiagnosticReport",
+			"id": "dr-w37-1",
+			"status": "final",
+			"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/v2-0074", "code": "LAB"}]}],
+			"code": {"coding": [{"system": "http://loinc.org", "code": "94500-6", "display": "SARS-CoV-2 (COVID-19) RNA panel"}]},
+			"subject": {"reference": "Patient/pat-w37-1"},
+			"effectiveDateTime": "2026-06-01T08:30:00Z",
+			"issued": "2026-06-01T09:00:00Z",
+			"result": [{"reference": "Observation/obs-w37-lab-1"}]
+		}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+item.path, strings.NewReader(item.body))
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusCreated {
+			t.Fatalf("PUT %s expected 200/201, got %d: %s", item.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 1. HL7 Public Health ELR v1.0.0: POST /DiagnosticReport/dr-w37-1/$elr-submit & GET /Observation/$reportable-labs
+	elrSubReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/DiagnosticReport/dr-w37-1/$elr-submit", nil)
+	elrSubRec := httptest.NewRecorder()
+	pgH.ServeHTTP(elrSubRec, elrSubReq)
+	if elrSubRec.Code != http.StatusOK ||
+		!strings.Contains(elrSubRec.Body.String(), "elr-MessageHeader") ||
+		!strings.Contains(elrSubRec.Body.String(), `"11502-2"`) {
+		t.Fatalf("POST /DiagnosticReport/dr-w37-1/$elr-submit expected elr-MessageHeader with LOINC 11502-2, got %d: %s", elrSubRec.Code, elrSubRec.Body.String())
+	}
+
+	repLabsReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Observation/$reportable-labs?patient=Patient/pat-w37-1", nil)
+	repLabsRec := httptest.NewRecorder()
+	pgH.ServeHTTP(repLabsRec, repLabsReq)
+	if repLabsRec.Code != http.StatusOK ||
+		!strings.Contains(repLabsRec.Body.String(), `"94500-6"`) ||
+		!strings.Contains(repLabsRec.Body.String(), `"260373001"`) {
+		t.Fatalf("GET /Observation/$reportable-labs expected SARS-CoV-2 LOINC 94500-6 and SNOMED 260373001, got %d: %s", repLabsRec.Code, repLabsRec.Body.String())
+	}
+
+	// 2. HL7 PACIO Advance Directives Interoperability (ADI v1.0.0): POST /Patient/pat-w37-1/$adi-record & GET /Composition/$adi-document
+	adiRecBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "preference", "valueString": "Comfort-focused care at home"}
+		]
+	}`
+	adiRecReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/pat-w37-1/$adi-record", strings.NewReader(adiRecBody))
+	adiRecReq.Header.Set("Content-Type", "application/fhir+json")
+	adiRecRec := httptest.NewRecorder()
+	pgH.ServeHTTP(adiRecRec, adiRecReq)
+	if adiRecRec.Code != http.StatusOK ||
+		!strings.Contains(adiRecRec.Body.String(), "PADI-Consent") ||
+		!strings.Contains(adiRecRec.Body.String(), `"75773-2"`) ||
+		!strings.Contains(adiRecRec.Body.String(), `"42348-3"`) {
+		t.Fatalf("POST /Patient/pat-w37-1/$adi-record expected PADI-Consent, LOINC 75773-2, and LOINC 42348-3, got %d: %s", adiRecRec.Code, adiRecRec.Body.String())
+	}
+
+	adiDocReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Composition/$adi-document?patient=Patient/pat-w37-1", nil)
+	adiDocRec := httptest.NewRecorder()
+	pgH.ServeHTTP(adiDocRec, adiDocReq)
+	if adiDocRec.Code != http.StatusOK ||
+		!strings.Contains(adiDocRec.Body.String(), "PADI-AdvanceDirectiveBundle") ||
+		!strings.Contains(adiDocRec.Body.String(), `"42348-3"`) {
+		t.Fatalf("GET /Composition/$adi-document expected PADI-AdvanceDirectiveBundle with LOINC 42348-3, got %d: %s", adiDocRec.Code, adiDocRec.Body.String())
+	}
+
+	// 3. HL7 Da Vinci Risk Adjustment v2.0.0: GET /Patient/pat-w37-1/$ra-coding-gaps & POST /MeasureReport/ra-mr-pat-w37-1/$ra-remediate
+	raGapsReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w37-1/$ra-coding-gaps", nil)
+	raGapsRec := httptest.NewRecorder()
+	pgH.ServeHTTP(raGapsRec, raGapsReq)
+	if raGapsRec.Code != http.StatusOK ||
+		!strings.Contains(raGapsRec.Body.String(), "ra-measurereport") ||
+		!strings.Contains(raGapsRec.Body.String(), "CMS-HCC 18") {
+		t.Fatalf("GET /Patient/pat-w37-1/$ra-coding-gaps expected ra-measurereport and CMS-HCC 18, got %d: %s", raGapsRec.Code, raGapsRec.Body.String())
+	}
+
+	raRemBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w37-1"},
+			{"name": "action", "valueCode": "confirm"},
+			{"name": "icd10Code", "valueCode": "E11.22"}
+		]
+	}`
+	raRemReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/MeasureReport/ra-mr-pat-w37-1/$ra-remediate", strings.NewReader(raRemBody))
+	raRemReq.Header.Set("Content-Type", "application/fhir+json")
+	raRemRec := httptest.NewRecorder()
+	pgH.ServeHTTP(raRemRec, raRemReq)
+	if raRemRec.Code != http.StatusOK ||
+		!strings.Contains(raRemRec.Body.String(), `"confirmedCondition"`) ||
+		!strings.Contains(raRemRec.Body.String(), `"E11.22"`) {
+		t.Fatalf("POST /MeasureReport/ra-mr-pat-w37-1/$ra-remediate expected confirmedCondition and ICD-10 E11.22, got %d: %s", raRemRec.Code, raRemRec.Body.String())
+	}
+}

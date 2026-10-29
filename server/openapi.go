@@ -3905,6 +3905,111 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/DiagnosticReport/{id}/$elr-submit": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"DiagnosticReport", "MessageHeader", "Bundle"},
+				"summary":     "Submit a reportable laboratory DiagnosticReport as an HL7 Public Health Electronic Laboratory Reporting (ELR v1.0.0) message Bundle",
+				"operationId": "diagnosticReportELRSubmitPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing reportable, elr-MessageHeader, and elr-message-bundle"},
+				},
+			},
+		},
+		"/Observation/$reportable-labs": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Observation"},
+				"summary":     "Query reportable laboratory Observations (HL7 Public Health ELR v1.0.0 / RCTC LOINC)",
+				"operationId": "observationReportableLabsGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of reportable US Core Laboratory Result Observations"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Observation"},
+				"summary":     "Query reportable laboratory Observations (POST Parameters)",
+				"operationId": "observationReportableLabsPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of reportable US Core Laboratory Result Observations"},
+				},
+			},
+		},
+		"/Patient/{id}/$adi-record": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Consent", "Observation", "Composition"},
+				"summary":     "Record a patient-authored Advance Directive (HL7 PACIO ADI v1.0.0 Consent, Care Experience Preference Observation, and Composition)",
+				"operationId": "patientADIRecordPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing PADI-Consent, Care Experience Preference Observation (LOINC 75773-2), and PADI-PACComposition (LOINC 42348-3)"},
+				},
+			},
+		},
+		"/Composition/$adi-document": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Composition", "Bundle"},
+				"summary":     "Assemble an HL7 PACIO Advance Directive Interoperability (ADI v1.0.0) document Bundle (LOINC 42348-3)",
+				"operationId": "compositionADIDocumentGet",
+				"parameters": []map[string]any{
+					{"name": "patient", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle (PADI-AdvanceDirectiveBundle)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Composition", "Bundle"},
+				"summary":     "Assemble an HL7 PACIO Advance Directive Interoperability (ADI v1.0.0) document Bundle (POST)",
+				"operationId": "compositionADIDocumentPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle (PADI-AdvanceDirectiveBundle)"},
+				},
+			},
+		},
+		"/Patient/{id}/$ra-coding-gaps": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "MeasureReport", "DetectedIssue"},
+				"summary":     "Evaluate CMS-HCC V28 suspect and historic coding gaps for Patient/{id} (HL7 Da Vinci Risk Adjustment v2.0.0)",
+				"operationId": "patientRACodingGapsGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle (ra-bundle) containing ra-measurereport and DetectedIssue"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "MeasureReport", "DetectedIssue"},
+				"summary":     "Evaluate CMS-HCC V28 suspect and historic coding gaps for Patient/{id} (POST)",
+				"operationId": "patientRACodingGapsPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle (ra-bundle) containing ra-measurereport and DetectedIssue"},
+				},
+			},
+		},
+		"/MeasureReport/{id}/$ra-remediate": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"MeasureReport", "Condition"},
+				"summary":     "Remediate (confirm or refute) a Da Vinci Risk Adjustment HCC coding gap on MeasureReport/{id}",
+				"operationId": "measureReportRARemediatePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing remediationStatus, confirmedCondition, and updated MeasureReport"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

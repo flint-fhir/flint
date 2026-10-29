@@ -1724,6 +1724,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /MedicinalProduct/$epi-document to return Bundle-uv-epi, got %d: %s", respEPI.StatusCode, string(bEPI))
 			}
 		}
+		if err == nil {
+			respELR, bELR, errELR := doReq(http.MethodGet, basePath+"/Observation/$reportable-labs?patient=Patient/cert-pat-1", "", nil, nil)
+			respRAGaps, bRAGaps, errRAGaps := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$ra-coding-gaps", "", nil, nil)
+			if errELR != nil || respELR.StatusCode != http.StatusOK || !strings.Contains(string(bELR), `"94500-6"`) {
+				err = fmt.Errorf("expected GET /Observation/$reportable-labs to return LOINC 94500-6 lab Bundle, got %d: %s", respELR.StatusCode, string(bELR))
+			} else if errRAGaps != nil || respRAGaps.StatusCode != http.StatusOK || !strings.Contains(string(bRAGaps), "ra-measurereport") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$ra-coding-gaps to return ra-measurereport Bundle, got %d: %s", respRAGaps.StatusCode, string(bRAGaps))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
