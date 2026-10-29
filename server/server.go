@@ -899,6 +899,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleDaVinciRiskAdjustmentWave37(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Composition") && parts[4] == "$eicr-document" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$eicr-document")
+					s.handlePublicHealthEICRAndRR(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Communication") && parts[4] == "$rr-process" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$rr-process")
+					s.handlePublicHealthEICRAndRR(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$pdex-WriteData" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$pdex-WriteData")
+					s.handleDaVinciPDexAndFormularyWave38(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "MedicationKnowledge") && parts[4] == "$formulary-alternatives" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$formulary-alternatives")
+					s.handleDaVinciPDexAndFormularyWave38(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$record-occupation" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$record-occupation")
+					s.handleODHOccupationalHealth(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$odh-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$odh-summary")
+					s.handleODHOccupationalHealth(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -907,6 +943,48 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Composition") && parts[5] == "$eicr-document" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$eicr-document")
+					s.handlePublicHealthEICRAndRR(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Communication") && parts[5] == "$rr-process" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$rr-process")
+					s.handlePublicHealthEICRAndRR(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[5] == "$pdex-WriteData" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$pdex-WriteData")
+					s.handleDaVinciPDexAndFormularyWave38(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "MedicationKnowledge") && parts[5] == "$formulary-alternatives" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$formulary-alternatives")
+					s.handleDaVinciPDexAndFormularyWave38(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[5] == "$record-occupation" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$record-occupation")
+					s.handleODHOccupationalHealth(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$odh-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$odh-summary")
+					s.handleODHOccupationalHealth(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "DiagnosticReport") && parts[5] == "$elr-submit" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4406,6 +4484,18 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "ra-coding-gaps",
 					"definition": "http://hl7.org/fhir/us/davinci-ra/OperationDefinition/Patient-coding-gaps",
 				},
+				{
+					"name":       "pdex-WriteData",
+					"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/Patient-pdex-WriteData",
+				},
+				{
+					"name":       "record-occupation",
+					"definition": "http://hl7.org/fhir/us/odh/OperationDefinition/Patient-record-occupation",
+				},
+				{
+					"name":       "odh-summary",
+					"definition": "http://hl7.org/fhir/us/odh/OperationDefinition/Patient-odh-summary",
+				},
 			}
 		case "Organization":
 			entry["operation"] = []map[string]string{
@@ -4501,6 +4591,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "adi-document",
 					"definition": "http://hl7.org/fhir/us/pacio-adi/OperationDefinition/Composition-adi-document",
+				},
+				{
+					"name":       "eicr-document",
+					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/Composition-eicr-document",
 				},
 			}
 		case "DocumentReference":
@@ -4697,6 +4791,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "adi-document",
 					"definition": "http://hl7.org/fhir/us/pacio-adi/OperationDefinition/Composition-adi-document",
+				},
+				{
+					"name":       "eicr-document",
+					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/Composition-eicr-document",
 				},
 			}
 		case "MeasureReport":
@@ -5025,6 +5123,17 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "formulary-lookup",
 					"definition": "http://hl7.org/fhir/us/davinci-drug-formulary/OperationDefinition/MedicationKnowledge-formulary-lookup",
+				},
+				{
+					"name":       "formulary-alternatives",
+					"definition": "http://hl7.org/fhir/us/davinci-drug-formulary/OperationDefinition/MedicationKnowledge-formulary-alternatives",
+				},
+			}
+		case "Communication":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "rr-process",
+					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/Communication-rr-process",
 				},
 			}
 		case "Bundle":

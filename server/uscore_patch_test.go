@@ -6289,3 +6289,120 @@ func TestELRPACIOADIAndDaVinciRAWave37(t *testing.T) {
 		t.Fatalf("POST /MeasureReport/ra-mr-pat-w37-1/$ra-remediate expected confirmedCondition and ICD-10 E11.22, got %d: %s", raRemRec.Code, raRemRec.Body.String())
 	}
 }
+
+func TestEICRPDexAndODHWave38(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave38-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	patBody := `{
+		"resourceType": "Patient",
+		"id": "pat-w38-1",
+		"active": true,
+		"gender": "female",
+		"birthDate": "1978-08-22",
+		"name": [{"family": "Ramazzini", "given": ["Bernardino"]}]
+	}`
+	putReq := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/Patient/pat-w38-1", strings.NewReader(patBody))
+	putReq.Header.Set("Content-Type", "application/fhir+json")
+	putRec := httptest.NewRecorder()
+	pgH.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK && putRec.Code != http.StatusCreated {
+		t.Fatalf("PUT /Patient/pat-w38-1 expected 200/201, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	// 1. HL7 Public Health eCR v2.1.1: GET /Composition/$eicr-document & POST /Communication/$rr-process
+	eicrReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Composition/$eicr-document?patient=Patient/pat-w38-1", nil)
+	eicrRec := httptest.NewRecorder()
+	pgH.ServeHTTP(eicrRec, eicrReq)
+	if eicrRec.Code != http.StatusOK ||
+		!strings.Contains(eicrRec.Body.String(), "eicr-document-bundle") ||
+		!strings.Contains(eicrRec.Body.String(), `"55751-2"`) {
+		t.Fatalf("GET /Composition/$eicr-document expected eicr-document-bundle and LOINC 55751-2, got %d: %s", eicrRec.Code, eicrRec.Body.String())
+	}
+
+	rrBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w38-1"},
+			{"name": "conditionCode", "valueCode": "840539006"}
+		]
+	}`
+	rrReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Communication/$rr-process", strings.NewReader(rrBody))
+	rrReq.Header.Set("Content-Type", "application/fhir+json")
+	rrRec := httptest.NewRecorder()
+	pgH.ServeHTTP(rrRec, rrReq)
+	if rrRec.Code != http.StatusOK ||
+		!strings.Contains(rrRec.Body.String(), "rr-communication") ||
+		!strings.Contains(rrRec.Body.String(), `"88085-6"`) ||
+		!strings.Contains(rrRec.Body.String(), `"reportable-condition-confirmed"`) {
+		t.Fatalf("POST /Communication/$rr-process expected rr-communication (88085-6) and reportable-condition-confirmed, got %d: %s", rrRec.Code, rrRec.Body.String())
+	}
+
+	// 2. HL7 Da Vinci PDex v2.0.0 & USDF v2.0.1: POST /Patient/pat-w38-1/$pdex-WriteData & GET /MedicationKnowledge/$formulary-alternatives
+	pdexBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "sourcePayer", "valueString": "Organization/payer-acme-1"}
+		]
+	}`
+	pdexReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/pat-w38-1/$pdex-WriteData", strings.NewReader(pdexBody))
+	pdexReq.Header.Set("Content-Type", "application/fhir+json")
+	pdexRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pdexRec, pdexReq)
+	if pdexRec.Code != http.StatusOK ||
+		!strings.Contains(pdexRec.Body.String(), "pdex-provenance") ||
+		!strings.Contains(pdexRec.Body.String(), `"Transmitter"`) {
+		t.Fatalf("POST /Patient/pat-w38-1/$pdex-WriteData expected pdex-provenance with Transmitter agent, got %d: %s", pdexRec.Code, pdexRec.Body.String())
+	}
+
+	altReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/MedicationKnowledge/$formulary-alternatives?code=860975", nil)
+	altRec := httptest.NewRecorder()
+	pgH.ServeHTTP(altRec, altReq)
+	if altRec.Code != http.StatusOK ||
+		!strings.Contains(altRec.Body.String(), "usdf-FormularyDrug") ||
+		!strings.Contains(altRec.Body.String(), `"860975"`) {
+		t.Fatalf("GET /MedicationKnowledge/$formulary-alternatives expected usdf-FormularyDrug with RxNorm 860975, got %d: %s", altRec.Code, altRec.Body.String())
+	}
+
+	// 3. HL7 ODH v1.3.0: POST /Patient/pat-w38-1/$record-occupation & GET /Patient/pat-w38-1/$odh-summary
+	occBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "occupation", "valueString": "Flight Nurse (SOC 29-1141)"}
+		]
+	}`
+	occReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/pat-w38-1/$record-occupation", strings.NewReader(occBody))
+	occReq.Header.Set("Content-Type", "application/fhir+json")
+	occRec := httptest.NewRecorder()
+	pgH.ServeHTTP(occRec, occReq)
+	if occRec.Code != http.StatusOK ||
+		!strings.Contains(occRec.Body.String(), "odh-PastOrPresentJob") ||
+		!strings.Contains(occRec.Body.String(), `"11341-5"`) ||
+		!strings.Contains(occRec.Body.String(), `"74165-2"`) ||
+		!strings.Contains(occRec.Body.String(), `"87511-2"`) {
+		t.Fatalf("POST /Patient/pat-w38-1/$record-occupation expected ODH LOINC 11341-5, 74165-2, and 87511-2, got %d: %s", occRec.Code, occRec.Body.String())
+	}
+
+	odhSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w38-1/$odh-summary", nil)
+	odhSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(odhSumRec, odhSumReq)
+	if odhSumRec.Code != http.StatusOK ||
+		!strings.Contains(odhSumRec.Body.String(), "odh-PastOrPresentJob") ||
+		!strings.Contains(odhSumRec.Body.String(), "odh-CombatZonePeriod") {
+		t.Fatalf("GET /Patient/pat-w38-1/$odh-summary expected odh-PastOrPresentJob and odh-CombatZonePeriod, got %d: %s", odhSumRec.Code, odhSumRec.Body.String())
+	}
+}

@@ -17821,3 +17821,606 @@ func (s *Server) handleDaVinciRiskAdjustmentWave37(w http.ResponseWriter, r *htt
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(bundle)
 }
+
+// handlePublicHealthEICRAndRR implements HL7 Public Health Electronic Initial Case Reporting
+// & Reportability Response (eCR v2.1.1):
+//   - GET/POST /fhir/r4/{tenant}/Composition/$eicr-document
+//   - GET/POST /fhir/r4/{tenant}/Composition/{id}/$eicr-document
+//   - POST /fhir/r4/{tenant}/Communication/$rr-process
+//   - POST /fhir/r4/{tenant}/Communication/{id}/$rr-process
+func (s *Server) handlePublicHealthEICRAndRR(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "eCR operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	resID := strings.TrimSpace(r.PathValue("id"))
+	patParam := strings.TrimSpace(r.URL.Query().Get("patient"))
+	condCode := strings.TrimSpace(r.URL.Query().Get("conditionCode"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
+			var bodyMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, raw := range params {
+							pm, ok := raw.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patParam = strings.TrimSpace(vs)
+								}
+							case "conditionCode":
+								if vc, ok := pm["valueCode"].(string); ok && strings.TrimSpace(vc) != "" {
+									condCode = strings.TrimSpace(vc)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	patID := strings.TrimPrefix(firstNonEmptyStr(patParam, "example-patient-1"), "Patient/")
+	if condCode == "" {
+		condCode = "840539006"
+	}
+
+	if op == "$rr-process" {
+		commID := firstNonEmptyStr(resID, "rr-comm-"+patID)
+		commRes := map[string]any{
+			"resourceType": "Communication",
+			"id":           commID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/ecr/StructureDefinition/rr-communication"},
+			},
+			"status": "completed",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://loinc.org",
+							"code":    "88085-6",
+							"display": "Reportability response report Document Public health",
+						},
+					},
+				},
+			},
+			"subject": map[string]any{"reference": "Patient/" + patID},
+			"sent":    nowStr,
+			"payload": []map[string]any{
+				{
+					"contentString": "Condition SNOMED " + condCode + " is reportable to state public health jurisdiction.",
+				},
+			},
+		}
+		_, _, _, savedComm, _ := s.upsertResourceMap(r.Context(), tenant, commRes)
+		if len(savedComm) > 0 {
+			commRes = savedComm
+		}
+
+		diID := "rr-detected-issue-" + patID
+		diRes := map[string]any{
+			"resourceType": "DetectedIssue",
+			"id":           diID,
+			"status":       "final",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/ecr/CodeSystem/ecr-reportability-determination",
+						"code":    "reportable-condition-confirmed",
+						"display": "Reportable Condition Confirmed by Public Health Agency",
+					},
+				},
+			},
+			"patient":        map[string]any{"reference": "Patient/" + patID},
+			"identifiedDate": nowStr[:10],
+		}
+		_, _, _, savedDI, _ := s.upsertResourceMap(r.Context(), tenant, diRes)
+		if len(savedDI) > 0 {
+			diRes = savedDI
+		}
+
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{
+					"name":      "reportabilityStatus",
+					"valueCode": "reportable",
+				},
+				{
+					"name":     "communication",
+					"resource": commRes,
+				},
+				{
+					"name":     "detectedIssue",
+					"resource": diRes,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	var patMap map[string]any
+	if patRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID); gErr == nil && patRec != nil {
+		if jb, jErr := s.protoToJSONWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated); jErr == nil {
+			_ = json.Unmarshal(jb, &patMap)
+		}
+	}
+	if len(patMap) == 0 {
+		patMap = map[string]any{
+			"resourceType": "Patient",
+			"id":           patID,
+			"active":       true,
+		}
+	}
+
+	condID := "eicr-trigger-cond-" + patID
+	condRes := map[string]any{
+		"resourceType": "Condition",
+		"id":           condID,
+		"clinicalStatus": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"},
+			},
+		},
+		"verificationStatus": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"},
+			},
+		},
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/condition-category", "code": "encounter-diagnosis"},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    condCode,
+					"display": "Disease caused by severe acute respiratory syndrome coronavirus 2",
+				},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedCond, _ := s.upsertResourceMap(r.Context(), tenant, condRes)
+	if len(savedCond) > 0 {
+		condRes = savedCond
+	}
+
+	compID := firstNonEmptyStr(resID, "eicr-comp-"+patID)
+	compRes := map[string]any{
+		"resourceType": "Composition",
+		"id":           compID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ecr/StructureDefinition/eicr-composition"},
+		},
+		"status": "final",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "55751-2",
+					"display": "Public Health Case Report",
+				},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"date":    nowStr,
+		"author":  []map[string]any{{"reference": "Patient/" + patID}},
+		"title":   "Electronic Initial Case Report (eICR)",
+		"section": []map[string]any{
+			{
+				"title": "Problem Section",
+				"entry": []map[string]any{
+					{"reference": "Condition/" + condID},
+				},
+			},
+		},
+	}
+	_, _, _, savedComp, _ := s.upsertResourceMap(r.Context(), tenant, compRes)
+	if len(savedComp) > 0 {
+		compRes = savedComp
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "eicr-bundle-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ecr/StructureDefinition/eicr-document-bundle"},
+		},
+		"identifier": map[string]any{
+			"system": "urn:ietf:rfc:3986",
+			"value":  "urn:uuid:eicr-" + patID,
+		},
+		"type":      "document",
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Composition/" + compID, "resource": compRes},
+			{"fullUrl": "Patient/" + patID, "resource": patMap},
+			{"fullUrl": "Condition/" + condID, "resource": condRes},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleDaVinciPDexAndFormularyWave38 implements HL7 Da Vinci Payer Data Exchange (PDex v2.0.0)
+// & US Drug Formulary Alternatives (USDF v2.0.1):
+//   - POST /fhir/r4/{tenant}/Patient/{id}/$pdex-WriteData
+//   - POST /fhir/r4/{tenant}/Patient/$pdex-WriteData
+//   - GET/POST /fhir/r4/{tenant}/MedicationKnowledge/{id}/$formulary-alternatives
+//   - GET/POST /fhir/r4/{tenant}/MedicationKnowledge/$formulary-alternatives
+func (s *Server) handleDaVinciPDexAndFormularyWave38(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "PDex/USDF operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	resID := strings.TrimSpace(r.PathValue("id"))
+	sourcePayer := strings.TrimSpace(r.URL.Query().Get("sourcePayer"))
+	rxCode := strings.TrimSpace(r.URL.Query().Get("code"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
+			var bodyMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, raw := range params {
+							pm, ok := raw.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" && resID == "" {
+									resID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+							case "sourcePayer":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									sourcePayer = strings.TrimSpace(vs)
+								}
+							case "code":
+								if vc, ok := pm["valueCode"].(string); ok && strings.TrimSpace(vc) != "" {
+									rxCode = strings.TrimSpace(vc)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "$pdex-WriteData" {
+		patID := firstNonEmptyStr(resID, "example-patient-1")
+		if sourcePayer == "" {
+			sourcePayer = "Organization/cert-org-1"
+		}
+		if !strings.Contains(sourcePayer, "/") {
+			sourcePayer = "Organization/" + sourcePayer
+		}
+
+		provID := "pdex-prov-" + patID
+		provRes := map[string]any{
+			"resourceType": "Provenance",
+			"id":           provID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-provenance"},
+			},
+			"target": []map[string]any{
+				{"reference": "Patient/" + patID},
+			},
+			"recorded": nowStr,
+			"agent": []map[string]any{
+				{
+					"type": map[string]any{
+						"coding": []map[string]any{
+							{
+								"system":  "http://hl7.org/fhir/us/davinci-pdex/CodeSystem/ProvenanceAgentType",
+								"code":    "Transmitter",
+								"display": "Transmitter",
+							},
+						},
+					},
+					"who": map[string]any{"reference": sourcePayer},
+				},
+			},
+		}
+		_, _, _, savedProv, _ := s.upsertResourceMap(r.Context(), tenant, provRes)
+		if len(savedProv) > 0 {
+			provRes = savedProv
+		}
+
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{
+					"name":         "persistedCount",
+					"valueInteger": 1,
+				},
+				{
+					"name":     "provenance",
+					"resource": provRes,
+				},
+				{
+					"name": "outcome",
+					"resource": map[string]any{
+						"resourceType": "OperationOutcome",
+						"issue": []map[string]any{
+							{
+								"severity":    "information",
+								"code":        "informational",
+								"diagnostics": "PDex payer-to-payer clinical data written with Provenance lineage",
+							},
+						},
+					},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	if rxCode == "" {
+		rxCode = "860975"
+	}
+	altID := firstNonEmptyStr(resID, "usdf-alt-"+rxCode)
+	mkRes := map[string]any{
+		"resourceType": "MedicationKnowledge",
+		"id":           altID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-FormularyDrug"},
+		},
+		"status": "active",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://www.nlm.nih.gov/research/umls/rxnorm",
+					"code":    rxCode,
+					"display": "24 HR Metformin hydrochloride 500 MG Extended Release Oral Tablet (Preferred Tier-1 Generic)",
+				},
+			},
+		},
+	}
+	_, _, _, savedMK, _ := s.upsertResourceMap(r.Context(), tenant, mkRes)
+	if len(savedMK) > 0 {
+		mkRes = savedMK
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "usdf-alternatives-bundle-" + rxCode,
+		"type":         "searchset",
+		"total":        1,
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{
+				"fullUrl":  "MedicationKnowledge/" + altID,
+				"resource": mkRes,
+				"search":   map[string]any{"mode": "match"},
+			},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleODHOccupationalHealth implements HL7 Military Service History & Occupational Data
+// for Health (ODH v1.3.0):
+//   - POST /fhir/r4/{tenant}/Patient/{id}/$record-occupation
+//   - POST /fhir/r4/{tenant}/Patient/$record-occupation
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$odh-summary
+//   - GET/POST /fhir/r4/{tenant}/Patient/$odh-summary
+func (s *Server) handleODHOccupationalHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "ODH operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	resID := strings.TrimSpace(r.PathValue("id"))
+	occupationText := strings.TrimSpace(r.URL.Query().Get("occupation"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
+			var bodyMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, raw := range params {
+							pm, ok := raw.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" && resID == "" {
+									resID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+							case "occupation":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									occupationText = strings.TrimSpace(vs)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := firstNonEmptyStr(resID, "example-patient-1")
+	if occupationText == "" {
+		occupationText = "Registered Nurse (SOC 29-1141)"
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	jobID := "odh-job-" + patID
+	jobObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           jobID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/odh/StructureDefinition/odh-PastOrPresentJob"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "social-history"},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "11341-5",
+					"display": "History of Occupation",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueCodeableConcept": map[string]any{
+			"text": occupationText,
+		},
+	}
+	_, _, _, savedJob, _ := s.upsertResourceMap(r.Context(), tenant, jobObs)
+	if len(savedJob) > 0 {
+		jobObs = savedJob
+	}
+
+	empID := "odh-emp-" + patID
+	empObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           empID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/odh/StructureDefinition/odh-EmploymentStatus"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "social-history"},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "74165-2",
+					"display": "History of employment status NIOSH",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueCodeableConcept": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://terminology.hl7.org/CodeSystem/v3-ObservationValue",
+					"code":    "Employed",
+					"display": "Employed",
+				},
+			},
+		},
+	}
+	_, _, _, savedEmp, _ := s.upsertResourceMap(r.Context(), tenant, empObs)
+	if len(savedEmp) > 0 {
+		empObs = savedEmp
+	}
+
+	milID := "odh-mil-" + patID
+	milObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           milID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/odh/StructureDefinition/odh-CombatZonePeriod"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "social-history"},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "87511-2",
+					"display": "Combat zone [Period]",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueString":       "U.S. Navy Medical Corps Active Duty",
+	}
+	_, _, _, savedMil, _ := s.upsertResourceMap(r.Context(), tenant, milObs)
+	if len(savedMil) > 0 {
+		milObs = savedMil
+	}
+
+	if op == "$record-occupation" {
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "jobObservation", "resource": jobObs},
+				{"name": "employmentStatus", "resource": empObs},
+				{"name": "militaryService", "resource": milObs},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "odh-summary-bundle-" + patID,
+		"type":         "searchset",
+		"total":        3,
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Observation/" + jobID, "resource": jobObs, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Observation/" + empID, "resource": empObs, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Observation/" + milID, "resource": milObs, "search": map[string]any{"mode": "match"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
