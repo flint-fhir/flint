@@ -1742,6 +1742,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$odh-summary to return LOINC 11341-5 ODH Bundle, got %d: %s", respODH.StatusCode, string(bODH))
 			}
 		}
+		if err == nil {
+			respCCRR, bCCRR, errCCRR := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$cancer-registry-report", "", nil, nil)
+			respVBPR, bVBPR, errVBPR := doReq(http.MethodGet, basePath+"/MeasureReport/$vbpr-performance", "", nil, nil)
+			if errCCRR != nil || respCCRR.StatusCode != http.StatusOK || !strings.Contains(string(bCCRR), "ccrr-content-bundle") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$cancer-registry-report to return ccrr-content-bundle, got %d: %s", respCCRR.StatusCode, string(bCCRR))
+			} else if errVBPR != nil || respVBPR.StatusCode != http.StatusOK || !strings.Contains(string(bVBPR), "vbp-measurereport") {
+				err = fmt.Errorf("expected GET /MeasureReport/$vbpr-performance to return vbp-measurereport, got %d: %s", respVBPR.StatusCode, string(bVBPR))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

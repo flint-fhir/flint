@@ -935,6 +935,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleODHOccupationalHealth(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$cancer-registry-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$cancer-registry-report")
+					s.handlePublicHealthCCRRAndMedMorph(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "PlanDefinition") && parts[4] == "$medmorph-kar" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$medmorph-kar")
+					s.handlePublicHealthCCRRAndMedMorph(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "MeasureReport") && parts[4] == "$vbpr-performance" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$vbpr-performance")
+					s.handleDaVinciVBPR(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "MeasureReport") && parts[4] == "$vbpr-attest" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$vbpr-attest")
+					s.handleDaVinciVBPR(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$pacio-cognitive-assess" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$pacio-cognitive-assess")
+					s.handlePACIOCognitiveStatus(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$pacio-cognitive-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$pacio-cognitive-summary")
+					s.handlePACIOCognitiveStatus(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -943,6 +979,48 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$cancer-registry-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$cancer-registry-report")
+					s.handlePublicHealthCCRRAndMedMorph(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "PlanDefinition") && parts[5] == "$medmorph-kar" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$medmorph-kar")
+					s.handlePublicHealthCCRRAndMedMorph(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "MeasureReport") && parts[5] == "$vbpr-performance" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$vbpr-performance")
+					s.handleDaVinciVBPR(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "MeasureReport") && parts[5] == "$vbpr-attest" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$vbpr-attest")
+					s.handleDaVinciVBPR(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[5] == "$pacio-cognitive-assess" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$pacio-cognitive-assess")
+					s.handlePACIOCognitiveStatus(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$pacio-cognitive-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$pacio-cognitive-summary")
+					s.handlePACIOCognitiveStatus(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Composition") && parts[5] == "$eicr-document" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4496,6 +4574,18 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "odh-summary",
 					"definition": "http://hl7.org/fhir/us/odh/OperationDefinition/Patient-odh-summary",
 				},
+				{
+					"name":       "cancer-registry-report",
+					"definition": "http://hl7.org/fhir/us/central-cancer-registry-reporting/OperationDefinition/Patient-cancer-registry-report",
+				},
+				{
+					"name":       "pacio-cognitive-assess",
+					"definition": "http://hl7.org/fhir/us/pacio-cs/OperationDefinition/Patient-pacio-cognitive-assess",
+				},
+				{
+					"name":       "pacio-cognitive-summary",
+					"definition": "http://hl7.org/fhir/us/pacio-cs/OperationDefinition/Patient-pacio-cognitive-summary",
+				},
 			}
 		case "Organization":
 			entry["operation"] = []map[string]string{
@@ -4803,6 +4893,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "ra-remediate",
 					"definition": "http://hl7.org/fhir/us/davinci-ra/OperationDefinition/MeasureReport-ra-remediate",
 				},
+				{
+					"name":       "vbpr-performance",
+					"definition": "http://hl7.org/fhir/us/davinci-vbpr/OperationDefinition/MeasureReport-vbpr-performance",
+				},
+				{
+					"name":       "vbpr-attest",
+					"definition": "http://hl7.org/fhir/us/davinci-vbpr/OperationDefinition/MeasureReport-vbpr-attest",
+				},
 			}
 		case "DocumentReference":
 			entry["operation"] = []map[string]string{
@@ -4955,6 +5053,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "ersd-lookup",
 					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/ersd-lookup",
+				},
+				{
+					"name":       "medmorph-kar",
+					"definition": "http://hl7.org/fhir/us/medmorph/OperationDefinition/PlanDefinition-medmorph-kar",
 				},
 			}
 		case "ActivityDefinition":
