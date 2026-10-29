@@ -18424,3 +18424,528 @@ func (s *Server) handleODHOccupationalHealth(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(bundle)
 }
+
+// handlePublicHealthCCRRAndMedMorph implements HL7 Public Health Central Cancer Registry
+// Reporting (CCRR v1.0.0) & MedMorph Knowledge Artifact Repository (MedMorph v1.0.0):
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$cancer-registry-report
+//   - GET/POST /fhir/r4/{tenant}/Patient/$cancer-registry-report
+//   - GET/POST /fhir/r4/{tenant}/PlanDefinition/$medmorph-kar
+//   - GET/POST /fhir/r4/{tenant}/PlanDefinition/{id}/$medmorph-kar
+func (s *Server) handlePublicHealthCCRRAndMedMorph(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "CCRR/MedMorph operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	resID := strings.TrimSpace(r.PathValue("id"))
+	patParam := strings.TrimSpace(r.URL.Query().Get("patient"))
+	icdCode := strings.TrimSpace(r.URL.Query().Get("icd10Code"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
+			var bodyMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, raw := range params {
+							pm, ok := raw.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patParam = strings.TrimSpace(vs)
+								}
+							case "icd10Code":
+								if vc, ok := pm["valueCode"].(string); ok && strings.TrimSpace(vc) != "" {
+									icdCode = strings.TrimSpace(vc)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "$medmorph-kar" {
+		planID := firstNonEmptyStr(resID, "medmorph-ccrr-plan-1")
+		planRes := map[string]any{
+			"resourceType": "PlanDefinition",
+			"id":           planID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/medmorph/StructureDefinition/us-ph-plandefinition"},
+			},
+			"url":     "http://hl7.org/fhir/us/central-cancer-registry-reporting/PlanDefinition/" + planID,
+			"version": "1.0.0",
+			"name":    "CCRRMedMorphPlanDefinition",
+			"title":   "Central Cancer Registry Reporting (CCRR) MedMorph Knowledge Artifact",
+			"status":  "active",
+			"date":    nowStr,
+			"action": []map[string]any{
+				{
+					"id":    "initiate-reporting-workflow",
+					"title": "Evaluate Cancer Trigger Codes against RCTC ValueSet",
+				},
+			},
+		}
+		_, _, _, savedPlan, _ := s.upsertResourceMap(r.Context(), tenant, planRes)
+		if len(savedPlan) > 0 {
+			planRes = savedPlan
+		}
+
+		vsID := "medmorph-cancer-triggers-vs-1"
+		vsRes := map[string]any{
+			"resourceType": "ValueSet",
+			"id":           vsID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/medmorph/StructureDefinition/us-ph-valueset"},
+			},
+			"url":    "http://hl7.org/fhir/us/central-cancer-registry-reporting/ValueSet/" + vsID,
+			"name":   "CancerTriggerCodesValueSet",
+			"title":  "Central Cancer Registry Trigger Codes",
+			"status": "active",
+		}
+		_, _, _, savedVS, _ := s.upsertResourceMap(r.Context(), tenant, vsRes)
+		if len(savedVS) > 0 {
+			vsRes = savedVS
+		}
+
+		bundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           "medmorph-kar-bundle-1",
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/medmorph/StructureDefinition/us-ph-specification-bundle"},
+			},
+			"type":      "collection",
+			"timestamp": nowStr,
+			"entry": []map[string]any{
+				{"fullUrl": "PlanDefinition/" + planID, "resource": planRes},
+				{"fullUrl": "ValueSet/" + vsID, "resource": vsRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(bundle)
+		return
+	}
+
+	patID := strings.TrimPrefix(firstNonEmptyStr(resID, patParam, "example-patient-1"), "Patient/")
+	if icdCode == "" {
+		icdCode = "C50.919"
+	}
+
+	var patMap map[string]any
+	if patRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID); gErr == nil && patRec != nil {
+		if jb, jErr := s.protoToJSONWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated); jErr == nil {
+			_ = json.Unmarshal(jb, &patMap)
+		}
+	}
+	if len(patMap) == 0 {
+		patMap = map[string]any{
+			"resourceType": "Patient",
+			"id":           patID,
+			"active":       true,
+		}
+	}
+
+	condID := "ccrr-primary-cancer-" + patID
+	condRes := map[string]any{
+		"resourceType": "Condition",
+		"id":           condID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/central-cancer-registry-reporting/StructureDefinition/ccrr-primary-cancer-condition"},
+		},
+		"clinicalStatus": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"},
+			},
+		},
+		"verificationStatus": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"},
+			},
+		},
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/condition-category", "code": "problem-list-item"},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://hl7.org/fhir/sid/icd-10-cm",
+					"code":    icdCode,
+					"display": "Malignant neoplasm of unspecified site of unspecified female breast",
+				},
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "254837009",
+					"display": "Malignant neoplasm of breast",
+				},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedCond, _ := s.upsertResourceMap(r.Context(), tenant, condRes)
+	if len(savedCond) > 0 {
+		condRes = savedCond
+	}
+
+	compID := "ccrr-comp-" + patID
+	compRes := map[string]any{
+		"resourceType": "Composition",
+		"id":           compID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/central-cancer-registry-reporting/StructureDefinition/ccrr-composition"},
+		},
+		"status": "final",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "72134-0",
+					"display": "Cancer event report",
+				},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"date":    nowStr,
+		"author":  []map[string]any{{"reference": "Patient/" + patID}},
+		"title":   "Central Cancer Registry Report (CCRR)",
+		"section": []map[string]any{
+			{
+				"title": "Primary Cancer Condition Section",
+				"entry": []map[string]any{
+					{"reference": "Condition/" + condID},
+				},
+			},
+		},
+	}
+	_, _, _, savedComp, _ := s.upsertResourceMap(r.Context(), tenant, compRes)
+	if len(savedComp) > 0 {
+		compRes = savedComp
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "ccrr-bundle-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/central-cancer-registry-reporting/StructureDefinition/ccrr-content-bundle"},
+		},
+		"identifier": map[string]any{
+			"system": "urn:ietf:rfc:3986",
+			"value":  "urn:uuid:ccrr-" + patID,
+		},
+		"type":      "document",
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Composition/" + compID, "resource": compRes},
+			{"fullUrl": "Patient/" + patID, "resource": patMap},
+			{"fullUrl": "Condition/" + condID, "resource": condRes},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleDaVinciVBPR implements HL7 Da Vinci Value-Based Performance Reporting (VBPR v1.0.0):
+//   - GET/POST /fhir/r4/{tenant}/MeasureReport/$vbpr-performance
+//   - GET/POST /fhir/r4/{tenant}/MeasureReport/{id}/$vbpr-performance
+//   - POST /fhir/r4/{tenant}/MeasureReport/{id}/$vbpr-attest
+//   - POST /fhir/r4/{tenant}/MeasureReport/$vbpr-attest
+func (s *Server) handleDaVinciVBPR(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Da Vinci VBPR operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	resID := strings.TrimSpace(r.PathValue("id"))
+	orgParam := strings.TrimSpace(r.URL.Query().Get("organization"))
+	attesterParam := strings.TrimSpace(r.URL.Query().Get("attester"))
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
+			var bodyMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, raw := range params {
+							pm, ok := raw.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch name {
+							case "organization", "reporter":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									orgParam = strings.TrimSpace(vs)
+								}
+							case "attester":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									attesterParam = strings.TrimSpace(vs)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+	if orgParam == "" {
+		orgParam = "Organization/cert-org-1"
+	}
+	if !strings.Contains(orgParam, "/") {
+		orgParam = "Organization/" + orgParam
+	}
+
+	mrID := firstNonEmptyStr(resID, "vbp-mr-2026-q1")
+	mrRes := map[string]any{
+		"resourceType": "MeasureReport",
+		"id":           mrID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-vbpr/StructureDefinition/vbp-measurereport"},
+		},
+		"status":   "complete",
+		"type":     "summary",
+		"measure":  "http://hl7.org/fhir/us/davinci-vbpr/Measure/vbp-quality-cost-contract-measure",
+		"date":     nowStr,
+		"reporter": map[string]any{"reference": orgParam},
+		"period": map[string]any{
+			"start": "2026-01-01",
+			"end":   "2026-12-31",
+		},
+		"group": []map[string]any{
+			{
+				"code": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/davinci-vbpr/CodeSystem/vbp-incentive",
+							"code":    "pay-for-performance",
+							"display": "Pay for Performance Composite Quality & Cost Score",
+						},
+					},
+				},
+				"measureScore": map[string]any{
+					"value": 92.5,
+					"unit":  "%",
+				},
+			},
+		},
+	}
+	_, _, _, savedMR, _ := s.upsertResourceMap(r.Context(), tenant, mrRes)
+	if len(savedMR) > 0 {
+		mrRes = savedMR
+	}
+
+	if op == "$vbpr-attest" {
+		if attesterParam == "" {
+			attesterParam = orgParam
+		}
+		if !strings.Contains(attesterParam, "/") {
+			attesterParam = "Organization/" + attesterParam
+		}
+		provID := "vbpr-attest-prov-" + mrID
+		provRes := map[string]any{
+			"resourceType": "Provenance",
+			"id":           provID,
+			"target": []map[string]any{
+				{"reference": "MeasureReport/" + mrID},
+			},
+			"recorded": nowStr,
+			"agent": []map[string]any{
+				{
+					"type": map[string]any{
+						"coding": []map[string]any{
+							{
+								"system":  "http://terminology.hl7.org/CodeSystem/provenance-participant-type",
+								"code":    "verifier",
+								"display": "Verifier",
+							},
+						},
+					},
+					"who": map[string]any{"reference": attesterParam},
+				},
+			},
+		}
+		_, _, _, savedProv, _ := s.upsertResourceMap(r.Context(), tenant, provRes)
+		if len(savedProv) > 0 {
+			provRes = savedProv
+		}
+
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{
+					"name":      "attestationStatus",
+					"valueCode": "attested",
+				},
+				{
+					"name":     "measureReport",
+					"resource": mrRes,
+				},
+				{
+					"name":     "provenance",
+					"resource": provRes,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(mrRes)
+}
+
+// handlePACIOCognitiveStatus implements HL7 PACIO Cognitive Status (PACIO CS v1.0.0):
+//   - POST /fhir/r4/{tenant}/Patient/{id}/$pacio-cognitive-assess
+//   - POST /fhir/r4/{tenant}/Patient/$pacio-cognitive-assess
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$pacio-cognitive-summary
+//   - GET/POST /fhir/r4/{tenant}/Patient/$pacio-cognitive-summary
+func (s *Server) handlePACIOCognitiveStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "PACIO Cognitive Status operation requires GET or POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	op := strings.TrimSpace(r.PathValue("op"))
+	resID := strings.TrimSpace(r.PathValue("id"))
+	bimsScore := 14
+
+	if r.Method == http.MethodPost && r.Body != nil {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
+			var bodyMap map[string]any
+			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, raw := range params {
+							pm, ok := raw.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" && resID == "" {
+									resID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+							case "bimsScore":
+								if vi, ok := pm["valueInteger"].(float64); ok && vi >= 0 {
+									bimsScore = int(vi)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	patID := firstNonEmptyStr(resID, "example-patient-1")
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	qrID := "pacio-cs-qr-" + patID
+	qrRes := map[string]any{
+		"resourceType": "QuestionnaireResponse",
+		"id":           qrID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/pacio-cs/StructureDefinition/pacio-cs-QuestionnaireResponse"},
+		},
+		"questionnaire": "http://hl7.org/fhir/us/pacio-cs/Questionnaire/MDS3.0-NC-1.17",
+		"status":        "completed",
+		"subject":       map[string]any{"reference": "Patient/" + patID},
+		"authored":      nowStr,
+	}
+	_, _, _, savedQR, _ := s.upsertResourceMap(r.Context(), tenant, qrRes)
+	if len(savedQR) > 0 {
+		qrRes = savedQR
+	}
+
+	obsID := "pacio-cs-bims-" + patID
+	obsRes := map[string]any{
+		"resourceType": "Observation",
+		"id":           obsID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/pacio-cs/StructureDefinition/pacio-cs-Observation"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "survey"},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "52491-8",
+					"display": "Brief interview for mental status [BIMS] total score - Reported",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueInteger":      bimsScore,
+		"derivedFrom": []map[string]any{
+			{"reference": "QuestionnaireResponse/" + qrID},
+		},
+	}
+	_, _, _, savedObs, _ := s.upsertResourceMap(r.Context(), tenant, obsRes)
+	if len(savedObs) > 0 {
+		obsRes = savedObs
+	}
+
+	if op == "$pacio-cognitive-assess" {
+		cogStatus := "cognitively-intact"
+		if bimsScore < 13 {
+			cogStatus = "moderate-impairment"
+		}
+		resp := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "cognitiveStatus", "valueCode": cogStatus},
+				{"name": "questionnaireResponse", "resource": qrRes},
+				{"name": "bimsObservation", "resource": obsRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "pacio-cs-summary-" + patID,
+		"type":         "searchset",
+		"total":        2,
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Observation/" + obsID, "resource": obsRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "QuestionnaireResponse/" + qrID, "resource": qrRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}

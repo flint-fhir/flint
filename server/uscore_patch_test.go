@@ -6406,3 +6406,102 @@ func TestEICRPDexAndODHWave38(t *testing.T) {
 		t.Fatalf("GET /Patient/pat-w38-1/$odh-summary expected odh-PastOrPresentJob and odh-CombatZonePeriod, got %d: %s", odhSumRec.Code, odhSumRec.Body.String())
 	}
 }
+
+func TestCCRRVBPRAndPACIOCSWave39(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	tenant := "wave39-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	patBody := `{
+		"resourceType": "Patient",
+		"id": "pat-w39-1",
+		"active": true,
+		"gender": "female",
+		"birthDate": "1955-03-19",
+		"name": [{"family": "Folstein", "given": ["Marshal"]}]
+	}`
+	putReq := httptest.NewRequest(http.MethodPut, "/fhir/r4/"+tenant+"/Patient/pat-w39-1", strings.NewReader(patBody))
+	putReq.Header.Set("Content-Type", "application/fhir+json")
+	putRec := httptest.NewRecorder()
+	pgH.ServeHTTP(putRec, putReq)
+	if putRec.Code != http.StatusOK && putRec.Code != http.StatusCreated {
+		t.Fatalf("PUT /Patient/pat-w39-1 expected 200/201, got %d: %s", putRec.Code, putRec.Body.String())
+	}
+
+	// 1. HL7 CCRR v1.0.0 & MedMorph KAR v1.0.0: GET /Patient/pat-w39-1/$cancer-registry-report & GET /PlanDefinition/$medmorph-kar
+	ccrrReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w39-1/$cancer-registry-report", nil)
+	ccrrRec := httptest.NewRecorder()
+	pgH.ServeHTTP(ccrrRec, ccrrReq)
+	if ccrrRec.Code != http.StatusOK ||
+		!strings.Contains(ccrrRec.Body.String(), "ccrr-content-bundle") ||
+		!strings.Contains(ccrrRec.Body.String(), `"72134-0"`) {
+		t.Fatalf("GET /Patient/pat-w39-1/$cancer-registry-report expected ccrr-content-bundle and LOINC 72134-0, got %d: %s", ccrrRec.Code, ccrrRec.Body.String())
+	}
+
+	karReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/PlanDefinition/$medmorph-kar", nil)
+	karRec := httptest.NewRecorder()
+	pgH.ServeHTTP(karRec, karReq)
+	if karRec.Code != http.StatusOK ||
+		!strings.Contains(karRec.Body.String(), "us-ph-specification-bundle") ||
+		!strings.Contains(karRec.Body.String(), "us-ph-plandefinition") {
+		t.Fatalf("GET /PlanDefinition/$medmorph-kar expected us-ph-specification-bundle and us-ph-plandefinition, got %d: %s", karRec.Code, karRec.Body.String())
+	}
+
+	// 2. HL7 Da Vinci VBPR v1.0.0: GET /MeasureReport/$vbpr-performance & POST /MeasureReport/vbp-mr-2026-q1/$vbpr-attest
+	vbprReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/MeasureReport/$vbpr-performance", nil)
+	vbprRec := httptest.NewRecorder()
+	pgH.ServeHTTP(vbprRec, vbprReq)
+	if vbprRec.Code != http.StatusOK ||
+		!strings.Contains(vbprRec.Body.String(), "vbp-measurereport") ||
+		!strings.Contains(vbprRec.Body.String(), `"pay-for-performance"`) {
+		t.Fatalf("GET /MeasureReport/$vbpr-performance expected vbp-measurereport with pay-for-performance, got %d: %s", vbprRec.Code, vbprRec.Body.String())
+	}
+
+	attReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/MeasureReport/vbp-mr-2026-q1/$vbpr-attest", nil)
+	attRec := httptest.NewRecorder()
+	pgH.ServeHTTP(attRec, attReq)
+	if attRec.Code != http.StatusOK ||
+		!strings.Contains(attRec.Body.String(), `"attested"`) ||
+		!strings.Contains(attRec.Body.String(), `"provenance"`) {
+		t.Fatalf("POST /MeasureReport/vbp-mr-2026-q1/$vbpr-attest expected attested status and provenance, got %d: %s", attRec.Code, attRec.Body.String())
+	}
+
+	// 3. HL7 PACIO Cognitive Status v1.0.0: POST /Patient/pat-w39-1/$pacio-cognitive-assess & GET /Patient/pat-w39-1/$pacio-cognitive-summary
+	csBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "bimsScore", "valueInteger": 14}
+		]
+	}`
+	csReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/pat-w39-1/$pacio-cognitive-assess", strings.NewReader(csBody))
+	csReq.Header.Set("Content-Type", "application/fhir+json")
+	csRec := httptest.NewRecorder()
+	pgH.ServeHTTP(csRec, csReq)
+	if csRec.Code != http.StatusOK ||
+		!strings.Contains(csRec.Body.String(), `"cognitively-intact"`) ||
+		!strings.Contains(csRec.Body.String(), `"52491-8"`) {
+		t.Fatalf("POST /Patient/pat-w39-1/$pacio-cognitive-assess expected cognitively-intact and BIMS LOINC 52491-8, got %d: %s", csRec.Code, csRec.Body.String())
+	}
+
+	csSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w39-1/$pacio-cognitive-summary", nil)
+	csSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(csSumRec, csSumReq)
+	if csSumRec.Code != http.StatusOK ||
+		!strings.Contains(csSumRec.Body.String(), "pacio-cs-Observation") ||
+		!strings.Contains(csSumRec.Body.String(), "pacio-cs-QuestionnaireResponse") {
+		t.Fatalf("GET /Patient/pat-w39-1/$pacio-cognitive-summary expected pacio-cs-Observation and pacio-cs-QuestionnaireResponse, got %d: %s", csSumRec.Code, csSumRec.Body.String())
+	}
+}

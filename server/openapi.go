@@ -4112,6 +4112,119 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Patient/{id}/$cancer-registry-report": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Composition", "Condition", "Bundle"},
+				"summary":     "Assemble an HL7 Central Cancer Registry Reporting (CCRR v1.0.0, LOINC 72134-0) document Bundle for Patient/{id}",
+				"operationId": "patientCancerRegistryReportGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle (ccrr-content-bundle)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Composition", "Condition", "Bundle"},
+				"summary":     "Assemble an HL7 Central Cancer Registry Reporting (CCRR v1.0.0) document Bundle (POST)",
+				"operationId": "patientCancerRegistryReportPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Document Bundle (ccrr-content-bundle)"},
+				},
+			},
+		},
+		"/PlanDefinition/$medmorph-kar": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"PlanDefinition", "ValueSet", "Bundle"},
+				"summary":     "Retrieve an HL7 MedMorph Knowledge Artifact Repository (KAR v1.0.0) specification Bundle",
+				"operationId": "planDefinitionMedMorphKARGet",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle (us-ph-specification-bundle) containing us-ph-plandefinition and trigger ValueSets"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"PlanDefinition", "ValueSet", "Bundle"},
+				"summary":     "Retrieve an HL7 MedMorph Knowledge Artifact Repository (KAR v1.0.0) specification Bundle (POST)",
+				"operationId": "planDefinitionMedMorphKARPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Collection Bundle (us-ph-specification-bundle)"},
+				},
+			},
+		},
+		"/MeasureReport/$vbpr-performance": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"MeasureReport"},
+				"summary":     "Generate a Da Vinci Value-Based Performance Report (VBPR v1.0.0 vbp-measurereport)",
+				"operationId": "measureReportVBPRPerformanceGet",
+				"parameters": []map[string]any{
+					{"name": "organization", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted Da Vinci VBPR MeasureReport (vbp-measurereport)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"MeasureReport"},
+				"summary":     "Generate a Da Vinci Value-Based Performance Report (POST)",
+				"operationId": "measureReportVBPRPerformancePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted Da Vinci VBPR MeasureReport (vbp-measurereport)"},
+				},
+			},
+		},
+		"/MeasureReport/{id}/$vbpr-attest": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"MeasureReport", "Provenance"},
+				"summary":     "Record a provider/payer contract attestation on Da Vinci VBPR MeasureReport/{id}",
+				"operationId": "measureReportVBPRAttestPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing attestationStatus, vbp-measurereport, and Provenance"},
+				},
+			},
+		},
+		"/Patient/{id}/$pacio-cognitive-assess": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient", "QuestionnaireResponse", "Observation"},
+				"summary":     "Record a standardized CMS BIMS Post-Acute Cognitive Status assessment (HL7 PACIO CS v1.0.0)",
+				"operationId": "patientPACIOCognitiveAssessPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing cognitiveStatus, pacio-cs-QuestionnaireResponse, and pacio-cs-Observation (LOINC 52491-8)"},
+				},
+			},
+		},
+		"/Patient/{id}/$pacio-cognitive-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Observation", "QuestionnaireResponse"},
+				"summary":     "Assemble a longitudinal HL7 PACIO Cognitive Status (PACIO CS v1.0.0) summary Bundle for Patient/{id}",
+				"operationId": "patientPACIOCognitiveSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of PACIO Cognitive Status Observations and QuestionnaireResponses"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Observation", "QuestionnaireResponse"},
+				"summary":     "Assemble a longitudinal HL7 PACIO Cognitive Status summary Bundle (POST)",
+				"operationId": "patientPACIOCognitiveSummaryPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of PACIO Cognitive Status Observations and QuestionnaireResponses"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()
