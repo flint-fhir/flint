@@ -1043,6 +1043,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handlePACIOPFE(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Composition") && parts[4] == "$bfdr-document" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$bfdr-document")
+					s.handlePublicHealthBFDRWave42(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && parts[4] == "$bfdr-submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$bfdr-submit")
+					s.handlePublicHealthBFDRWave42(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Communication") && parts[4] == "$cdex-submit-attachment" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$cdex-submit-attachment")
+					s.handleDaVinciCDexWave42(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[4] == "$cdex-questionnaire-request" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$cdex-questionnaire-request")
+					s.handleDaVinciCDexWave42(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Procedure") && parts[4] == "$mcode-radiotherapy-record" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$mcode-radiotherapy-record")
+					s.handleMCODERadiotherapyWave42(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$mcode-radiotherapy-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$mcode-radiotherapy-summary")
+					s.handleMCODERadiotherapyWave42(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -1051,6 +1087,41 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Composition") && parts[5] == "$bfdr-document" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$bfdr-document")
+					s.handlePublicHealthBFDRWave42(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Communication") && parts[5] == "$cdex-submit-attachment" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$cdex-submit-attachment")
+					s.handleDaVinciCDexWave42(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[5] == "$cdex-questionnaire-request" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$cdex-questionnaire-request")
+					s.handleDaVinciCDexWave42(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Procedure") && parts[5] == "$mcode-radiotherapy-record" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$mcode-radiotherapy-record")
+					s.handleMCODERadiotherapyWave42(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$mcode-radiotherapy-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$mcode-radiotherapy-summary")
+					s.handleMCODERadiotherapyWave42(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Composition") && parts[5] == "$vrdr-document" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4740,6 +4811,17 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "pacio-pfe-summary",
 					"definition": "http://hl7.org/fhir/us/pacio-pfe/OperationDefinition/Patient-pacio-pfe-summary",
 				},
+				{
+					"name":       "mcode-radiotherapy-summary",
+					"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/Patient-mcode-radiotherapy-summary",
+				},
+			}
+		case "Procedure":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "mcode-radiotherapy-record",
+					"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/Procedure-mcode-radiotherapy-record",
+				},
 			}
 		case "Organization":
 			entry["operation"] = []map[string]string{
@@ -4851,6 +4933,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "vrdr-document",
 					"definition": "http://hl7.org/fhir/us/vrdr/OperationDefinition/Composition-vrdr-document",
+				},
+				{
+					"name":       "bfdr-document",
+					"definition": "http://hl7.org/fhir/us/bfdr/OperationDefinition/Composition-bfdr-document",
 				},
 			}
 		case "DocumentReference":
@@ -5074,6 +5160,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "vrdr-document",
 					"definition": "http://hl7.org/fhir/us/vrdr/OperationDefinition/Composition-vrdr-document",
 				},
+				{
+					"name":       "bfdr-document",
+					"definition": "http://hl7.org/fhir/us/bfdr/OperationDefinition/Composition-bfdr-document",
+				},
 			}
 		case "MeasureReport":
 			entry["operation"] = []map[string]string{
@@ -5190,6 +5280,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "cdex-poll",
 					"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/Task-cdex-poll",
+				},
+				{
+					"name":       "cdex-questionnaire-request",
+					"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/Task-cdex-questionnaire-request",
 				},
 			}
 		case "ValueSet":
@@ -5441,6 +5535,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "rr-process",
 					"definition": "http://hl7.org/fhir/us/ecr/OperationDefinition/Communication-rr-process",
 				},
+				{
+					"name":       "cdex-submit-attachment",
+					"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/Communication-cdex-submit-attachment",
+				},
 			}
 		case "Bundle":
 			entry["operation"] = []map[string]string{
@@ -5451,6 +5549,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "vrdr-submit",
 					"definition": "http://hl7.org/fhir/us/vrdr/OperationDefinition/Bundle-vrdr-submit",
+				},
+				{
+					"name":       "bfdr-submit",
+					"definition": "http://hl7.org/fhir/us/bfdr/OperationDefinition/Bundle-bfdr-submit",
 				},
 			}
 		case "HealthcareService":
