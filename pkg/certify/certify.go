@@ -1751,6 +1751,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /MeasureReport/$vbpr-performance to return vbp-measurereport, got %d: %s", respVBPR.StatusCode, string(bVBPR))
 			}
 		}
+		if err == nil {
+			respRTPBC, bRTPBC, errRTPBC := doReq(http.MethodGet, basePath+"/ClaimResponse/$rtpbc-coverage?patient=Patient/cert-pat-1", "", nil, nil)
+			respPACIORT, bPACIORT, errPACIORT := doReq(http.MethodGet, basePath+"/Encounter/cert-enc-1/$pacio-timepoints", "", nil, nil)
+			if errRTPBC != nil || respRTPBC.StatusCode != http.StatusOK || !strings.Contains(string(bRTPBC), "rtpbc-response-claimresponse") {
+				err = fmt.Errorf("expected GET /ClaimResponse/$rtpbc-coverage to return rtpbc-response-claimresponse, got %d: %s", respRTPBC.StatusCode, string(bRTPBC))
+			} else if errPACIORT != nil || respPACIORT.StatusCode != http.StatusOK || !strings.Contains(string(bPACIORT), "pacio-rt-reassessment-timepoint-encounter") {
+				err = fmt.Errorf("expected GET /Encounter/cert-enc-1/$pacio-timepoints to return pacio-rt-reassessment-timepoint-encounter, got %d: %s", respPACIORT.StatusCode, string(bPACIORT))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

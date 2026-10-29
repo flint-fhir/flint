@@ -971,6 +971,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handlePACIOCognitiveStatus(w, r)
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Claim") && parts[4] == "$rtpbc-submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$rtpbc-submit")
+					s.handleCarinRTPBC(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ClaimResponse") && parts[4] == "$rtpbc-coverage" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$rtpbc-coverage")
+					s.handleCarinRTPBC(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$idi-match" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$idi-match")
+					s.handleFASTDigitalIdentity(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Person") && parts[4] == "$verify-identity" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$verify-identity")
+					s.handleFASTDigitalIdentity(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Encounter") && parts[4] == "$pacio-timepoint" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$pacio-timepoint")
+					s.handlePACIOReassessmentTimepoints(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Encounter") && parts[4] == "$pacio-timepoints" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("op", "$pacio-timepoints")
+					s.handlePACIOReassessmentTimepoints(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -979,6 +1015,41 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Claim") && parts[5] == "$rtpbc-submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$rtpbc-submit")
+					s.handleCarinRTPBC(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ClaimResponse") && parts[5] == "$rtpbc-coverage" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$rtpbc-coverage")
+					s.handleCarinRTPBC(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Person") && parts[5] == "$verify-identity" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$verify-identity")
+					s.handleFASTDigitalIdentity(w, r)
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Encounter") && parts[5] == "$pacio-timepoint" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$pacio-timepoint")
+					s.handlePACIOReassessmentTimepoints(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Encounter") && parts[5] == "$pacio-timepoints" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$pacio-timepoints")
+					s.handlePACIOReassessmentTimepoints(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$cancer-registry-report" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -4586,6 +4657,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "pacio-cognitive-summary",
 					"definition": "http://hl7.org/fhir/us/pacio-cs/OperationDefinition/Patient-pacio-cognitive-summary",
 				},
+				{
+					"name":       "idi-match",
+					"definition": "http://hl7.org/fhir/us/identity-matching/OperationDefinition/Patient-idi-match",
+				},
 			}
 		case "Organization":
 			entry["operation"] = []map[string]string{
@@ -4666,6 +4741,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "nhsn-hai-report",
 					"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Encounter-nhsn-hai-report",
+				},
+				{
+					"name":       "pacio-timepoint",
+					"definition": "http://hl7.org/fhir/us/pacio-rt/OperationDefinition/Encounter-pacio-timepoint",
+				},
+				{
+					"name":       "pacio-timepoints",
+					"definition": "http://hl7.org/fhir/us/pacio-rt/OperationDefinition/Encounter-pacio-timepoints",
 				},
 			}
 		case "Composition":
@@ -4867,6 +4950,24 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "gfe-submit",
 					"definition": "http://hl7.org/fhir/us/davinci-pct/OperationDefinition/gfe-submit",
 				},
+				{
+					"name":       "rtpbc-submit",
+					"definition": "http://hl7.org/fhir/us/carin-rtpbc/OperationDefinition/Claim-rtpbc-submit",
+				},
+			}
+		case "ClaimResponse":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "rtpbc-coverage",
+					"definition": "http://hl7.org/fhir/us/carin-rtpbc/OperationDefinition/ClaimResponse-rtpbc-coverage",
+				},
+			}
+		case "Person":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "verify-identity",
+					"definition": "http://hl7.org/fhir/us/identity-matching/OperationDefinition/Person-verify-identity",
+				},
 			}
 		case "Composition":
 			entry["operation"] = []map[string]string{
@@ -4979,6 +5080,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "everything",
 					"definition": "http://hl7.org/fhir/OperationDefinition/Encounter-everything",
+				},
+				{
+					"name":       "pacio-timepoint",
+					"definition": "http://hl7.org/fhir/us/pacio-rt/OperationDefinition/Encounter-pacio-timepoint",
+				},
+				{
+					"name":       "pacio-timepoints",
+					"definition": "http://hl7.org/fhir/us/pacio-rt/OperationDefinition/Encounter-pacio-timepoints",
 				},
 			}
 		case "Task":
