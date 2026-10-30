@@ -1260,6 +1260,36 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleNHSNDQMWave49(w, r, "nhsn-ach-summary")
 					return
 				}
+				if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$dtr-questionnaire-package" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDaVinciBurdenReductionWave50(w, r, "dtr-questionnaire-package")
+					return
+				}
+				if strings.EqualFold(parts[3], "Claim") && parts[4] == "$pas-inquire" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDaVinciBurdenReductionWave50(w, r, "pas-inquire")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$burden-reduction-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDaVinciBurdenReductionWave50(w, r, "burden-reduction-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$mcode-trial-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCodeXMCODEWave47(w, r, "mcode-trial-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "VerificationResult") && parts[4] == "$ndh-verify" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleFASTNDHVerifyAndDirectoryWave50(w, r, "ndh-verify")
+					return
+				}
+				if strings.EqualFold(parts[3], "Organization") && parts[4] == "$ndh-directory-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleFASTNDHVerifyAndDirectoryWave50(w, r, "ndh-directory-summary")
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -1268,6 +1298,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Questionnaire") && parts[5] == "$dtr-questionnaire-package" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDaVinciBurdenReductionWave50(w, r, "dtr-questionnaire-package")
+					return
+				}
+				if strings.EqualFold(parts[3], "Claim") && parts[5] == "$pas-inquire" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDaVinciBurdenReductionWave50(w, r, "pas-inquire")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$burden-reduction-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDaVinciBurdenReductionWave50(w, r, "burden-reduction-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$mcode-trial-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCodeXMCODEWave47(w, r, "mcode-trial-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "VerificationResult") && parts[5] == "$ndh-verify" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleFASTNDHVerifyAndDirectoryWave50(w, r, "ndh-verify")
+					return
+				}
+				if strings.EqualFold(parts[3], "Organization") && parts[5] == "$ndh-directory-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleFASTNDHVerifyAndDirectoryWave50(w, r, "ndh-directory-summary")
+					return
+				}
 				if strings.EqualFold(parts[3], "MeasureReport") && parts[5] == "$ra-evaluate-risk" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -5257,6 +5323,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "nhsn-ach-summary",
 					"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Patient-nhsn-ach-summary",
 				},
+				{
+					"name":       "burden-reduction-summary",
+					"definition": "http://hl7.org/fhir/us/davinci-crd/OperationDefinition/Patient-burden-reduction-summary",
+				},
+				{
+					"name":       "mcode-trial-summary",
+					"definition": "http://hl7.org/fhir/us/codex-clinical-trial-matching/OperationDefinition/Patient-mcode-trial-summary",
+				},
 			}
 		case "Immunization":
 			entry["operation"] = []map[string]string{
@@ -5277,6 +5351,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "fast-verify",
 					"definition": "http://hl7.org/fhir/us/ndh/OperationDefinition/Organization-fast-verify",
+				},
+				{
+					"name":       "ndh-directory-summary",
+					"definition": "http://hl7.org/fhir/us/ndh/OperationDefinition/Organization-ndh-directory-summary",
 				},
 			}
 		case "Condition":
@@ -5592,6 +5670,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "rtpbc-submit",
 					"definition": "http://hl7.org/fhir/us/carin-rtpbc/OperationDefinition/Claim-rtpbc-submit",
 				},
+				{
+					"name":       "pas-inquire",
+					"definition": "http://hl7.org/fhir/us/davinci-pas/OperationDefinition/Claim-pas-inquire",
+				},
 			}
 		case "ClaimResponse":
 			entry["operation"] = []map[string]string{
@@ -5685,6 +5767,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "package",
 					"definition": "http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/questionnaire-package",
+				},
+				{
+					"name":       "dtr-questionnaire-package",
+					"definition": "http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/Questionnaire-dtr-questionnaire-package",
 				},
 				{
 					"name":       "data-requirements",
@@ -6100,6 +6186,13 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "fast-network-query",
 					"definition": "http://hl7.org/fhir/us/ndh/OperationDefinition/OrganizationAffiliation-fast-network-query",
+				},
+			}
+		case "VerificationResult":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "ndh-verify",
+					"definition": "http://hl7.org/fhir/us/ndh/OperationDefinition/VerificationResult-ndh-verify",
 				},
 			}
 		case "Consent":
@@ -6599,6 +6692,30 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "nhsn-ach-summary",
 						"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Patient-nhsn-ach-summary",
+					},
+					{
+						"name":       "dtr-questionnaire-package",
+						"definition": "http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/Questionnaire-dtr-questionnaire-package",
+					},
+					{
+						"name":       "pas-inquire",
+						"definition": "http://hl7.org/fhir/us/davinci-pas/OperationDefinition/Claim-pas-inquire",
+					},
+					{
+						"name":       "burden-reduction-summary",
+						"definition": "http://hl7.org/fhir/us/davinci-crd/OperationDefinition/Patient-burden-reduction-summary",
+					},
+					{
+						"name":       "mcode-trial-summary",
+						"definition": "http://hl7.org/fhir/us/codex-clinical-trial-matching/OperationDefinition/Patient-mcode-trial-summary",
+					},
+					{
+						"name":       "ndh-verify",
+						"definition": "http://hl7.org/fhir/us/ndh/OperationDefinition/VerificationResult-ndh-verify",
+					},
+					{
+						"name":       "ndh-directory-summary",
+						"definition": "http://hl7.org/fhir/us/ndh/OperationDefinition/Organization-ndh-directory-summary",
 					},
 				},
 			},
