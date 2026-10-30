@@ -25467,3 +25467,645 @@ func (s *Server) handleVulcanRWDWave51(w http.ResponseWriter, r *http.Request, o
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(bundle)
 }
+
+// handlePublicHealthSANERWave52 implements HL7 Situational Awareness for Novel Epidemic Response (SANER v1.0.1):
+//   - POST /fhir/r4/{tenant}/MeasureReport/$saner-report-capacity & /fhir/r4/{tenant}/MeasureReport/{id}/$saner-report-capacity
+//   - GET/POST /fhir/r4/{tenant}/Location/$saner-capacity-summary & /fhir/r4/{tenant}/Location/{id}/$saner-capacity-summary
+func (s *Server) handlePublicHealthSANERWave52(w http.ResponseWriter, r *http.Request, op string) {
+	if op == "saner-report-capacity" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$saner-report-capacity requires HTTP POST")
+		return
+	}
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+			fmt.Sprintf("patient-scoped token (%s) cannot access facility-level SANER situational awareness operations", secCtx.GetPatientId()))
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	locID := strings.TrimPrefix(firstNonEmptyStr(q.Get("location"), q.Get("subject")), "Location/")
+	mrID := strings.TrimPrefix(q.Get("measureReport"), "MeasureReport/")
+	if op == "saner-capacity-summary" && locID == "" && resID != "" {
+		locID = strings.TrimPrefix(resID, "Location/")
+	}
+	if op == "saner-report-capacity" && mrID == "" && resID != "" {
+		mrID = strings.TrimPrefix(resID, "MeasureReport/")
+	}
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							switch name {
+							case "location", "subject":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									locID = strings.TrimPrefix(strings.TrimSpace(vs), "Location/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										locID = strings.TrimPrefix(strings.TrimSpace(ref), "Location/")
+									}
+								}
+							}
+						}
+					}
+				} else {
+					for _, k := range []string{"location", "subject"} {
+						if vs, ok := body[k].(string); ok && strings.TrimSpace(vs) != "" {
+							locID = strings.TrimPrefix(strings.TrimSpace(vs), "Location/")
+						} else if vr, ok := body[k].(map[string]any); ok {
+							if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+								locID = strings.TrimPrefix(strings.TrimSpace(ref), "Location/")
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if locID == "" {
+		locID = "saner-loc-1"
+	}
+	if mrID == "" {
+		mrID = "saner-mr-" + locID
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	locRes := map[string]any{
+		"resourceType": "Location",
+		"id":           locID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/saner/StructureDefinition/PublicHealthLocation"},
+		},
+		"status": "active",
+		"name":   "General Acute Care Hospital Facility",
+		"mode":   "instance",
+		"type": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/v3-RoleCode",
+						"code":    "HOSP",
+						"display": "Hospital",
+					},
+				},
+			},
+		},
+	}
+	_, _, _, savedLoc, _ := s.upsertResourceMap(r.Context(), tenant, locRes)
+	if len(savedLoc) > 0 {
+		locRes = savedLoc
+	}
+
+	measID := "saner-measure-" + locID
+	measRes := map[string]any{
+		"resourceType": "Measure",
+		"id":           measID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/saner/StructureDefinition/PublicHealthMeasure"},
+		},
+		"url":    "http://hl7.org/fhir/uv/saner/Measure/CDCHospitalCapacityAndUtilization",
+		"name":   "CDCHospitalCapacityAndUtilization",
+		"title":  "CDC Hospital Capacity and Utilization Situational Awareness Measure",
+		"status": "active",
+	}
+	_, _, _, savedMeas, _ := s.upsertResourceMap(r.Context(), tenant, measRes)
+	if len(savedMeas) > 0 {
+		measRes = savedMeas
+	}
+
+	mrRes := map[string]any{
+		"resourceType": "MeasureReport",
+		"id":           mrID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/saner/StructureDefinition/PublicHealthMeasureReport"},
+		},
+		"status":  "complete",
+		"type":    "summary",
+		"measure": "http://hl7.org/fhir/uv/saner/Measure/CDCHospitalCapacityAndUtilization",
+		"subject": map[string]any{"reference": "Location/" + locID},
+		"date":    nowStr,
+		"period": map[string]any{
+			"start": nowStr,
+			"end":   nowStr,
+		},
+		"group": []map[string]any{
+			{
+				"code": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/uv/saner/CodeSystem/MeasureGroupSystem",
+							"code":    "Beds",
+							"display": "Beds",
+						},
+					},
+				},
+				"population": []map[string]any{
+					{
+						"code": map[string]any{
+							"coding": []map[string]any{
+								{
+									"system":  "http://hl7.org/fhir/uv/saner/CodeSystem/MeasuredValues",
+									"code":    "numTotBeds",
+									"display": "All Hospital Beds",
+								},
+							},
+						},
+						"count": 250,
+					},
+					{
+						"code": map[string]any{
+							"coding": []map[string]any{
+								{
+									"system":  "http://hl7.org/fhir/uv/saner/CodeSystem/MeasuredValues",
+									"code":    "numTotBedsOcc",
+									"display": "Hospital Inpatient Bed Occupancy",
+								},
+							},
+						},
+						"count": 195,
+					},
+					{
+						"code": map[string]any{
+							"coding": []map[string]any{
+								{
+									"system":  "http://hl7.org/fhir/uv/saner/CodeSystem/MeasuredValues",
+									"code":    "numICUBeds",
+									"display": "ICU Beds",
+								},
+							},
+						},
+						"count": 40,
+					},
+					{
+						"code": map[string]any{
+							"coding": []map[string]any{
+								{
+									"system":  "http://hl7.org/fhir/uv/saner/CodeSystem/MeasuredValues",
+									"code":    "numVent",
+									"display": "Mechanical Ventilators",
+								},
+							},
+						},
+						"count": 28,
+					},
+				},
+			},
+		},
+	}
+	_, _, _, savedMR, _ := s.upsertResourceMap(r.Context(), tenant, mrRes)
+	if len(savedMR) > 0 {
+		mrRes = savedMR
+	}
+
+	if op == "saner-report-capacity" {
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(mrRes)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "saner-capacity-summary-" + locID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/saner/StructureDefinition/PublicHealthBundle"},
+		},
+		"type":      "searchset",
+		"total":     3,
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Location/" + locID, "resource": locRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Measure/" + measID, "resource": measRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "MeasureReport/" + mrID, "resource": mrRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleCodeXRTTDWave52 implements HL7 CodeX Radiation Therapy Treatment Data (CodeX RTTD v1.0.0):
+//   - POST /fhir/r4/{tenant}/ServiceRequest/$codex-rttd-plan & /fhir/r4/{tenant}/ServiceRequest/{id}/$codex-rttd-plan
+//   - GET/POST /fhir/r4/{tenant}/Patient/$codex-rttd-summary & /fhir/r4/{tenant}/Patient/{id}/$codex-rttd-summary
+func (s *Server) handleCodeXRTTDWave52(w http.ResponseWriter, r *http.Request, op string) {
+	if op == "codex-rttd-plan" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$codex-rttd-plan requires HTTP POST")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	patID := strings.TrimPrefix(firstNonEmptyStr(q.Get("patient"), q.Get("subject")), "Patient/")
+	srID := strings.TrimPrefix(q.Get("serviceRequest"), "ServiceRequest/")
+	if op == "codex-rttd-summary" && patID == "" && resID != "" {
+		patID = strings.TrimPrefix(resID, "Patient/")
+	}
+	if op == "codex-rttd-plan" && srID == "" && resID != "" {
+		srID = strings.TrimPrefix(resID, "ServiceRequest/")
+	}
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							}
+						}
+					}
+				} else {
+					for _, k := range []string{"patient", "subject"} {
+						if vs, ok := body[k].(string); ok && strings.TrimSpace(vs) != "" {
+							patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+						} else if vr, ok := body[k].(map[string]any); ok {
+							if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+								patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		if patID == "" || cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot access CodeX RTTD resources for Patient/%s", secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	if patID == "" {
+		patID = "pat-rttd-1"
+	}
+	if srID == "" {
+		srID = "rttd-plan-" + patID
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	volID := "rttd-vol-" + patID
+	volRes := map[string]any{
+		"resourceType": "BodyStructure",
+		"id":           volID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-radiotherapy-volume"},
+		},
+		"active": true,
+		"morphology": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "228793007",
+					"display": "Planning target volume (observable entity)",
+				},
+			},
+		},
+		"location": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "76752008",
+					"display": "Breast structure",
+				},
+			},
+		},
+		"patient": map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedVol, _ := s.upsertResourceMap(r.Context(), tenant, volRes)
+	if len(savedVol) > 0 {
+		volRes = savedVol
+	}
+
+	srRes := map[string]any{
+		"resourceType": "ServiceRequest",
+		"id":           srID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/codex-radiation-therapy/StructureDefinition/codexrt-radiotherapy-planned-course"},
+		},
+		"status": "active",
+		"intent": "filler-order",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "1217123003",
+					"display": "Radiotherapy course of treatment (regime/therapy)",
+				},
+			},
+		},
+		"subject":    map[string]any{"reference": "Patient/" + patID},
+		"authoredOn": nowStr,
+	}
+	_, _, _, savedSR, _ := s.upsertResourceMap(r.Context(), tenant, srRes)
+	if len(savedSR) > 0 {
+		srRes = savedSR
+	}
+
+	phaseID := "rttd-phase-" + patID
+	phaseRes := map[string]any{
+		"resourceType": "Procedure",
+		"id":           phaseID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/codex-radiation-therapy/StructureDefinition/codexrt-radiotherapy-treated-phase"},
+		},
+		"status": "completed",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "1222565005",
+					"display": "Radiotherapy treatment phase (regime/therapy)",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"performedDateTime": nowStr,
+		"basedOn": []map[string]any{
+			{"reference": "ServiceRequest/" + srID},
+		},
+	}
+	_, _, _, savedPhase, _ := s.upsertResourceMap(r.Context(), tenant, phaseRes)
+	if len(savedPhase) > 0 {
+		phaseRes = savedPhase
+	}
+
+	if op == "codex-rttd-plan" {
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(srRes)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "codex-rttd-summary-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/codex-radiation-therapy/StructureDefinition/codexrt-summary-bundle"},
+		},
+		"type":      "searchset",
+		"total":     3,
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "ServiceRequest/" + srID, "resource": srRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "BodyStructure/" + volID, "resource": volRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "Procedure/" + phaseID, "resource": phaseRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleGravitySDOHConsentAndCareWave52 implements HL7 Gravity SDOH Clinical Care (v2.2.0) Consent & Care Bundle:
+//   - POST /fhir/r4/{tenant}/Consent/$sdoh-consent-record & /fhir/r4/{tenant}/Consent/{id}/$sdoh-consent-record
+//   - GET/POST /fhir/r4/{tenant}/Patient/$sdoh-care-bundle & /fhir/r4/{tenant}/Patient/{id}/$sdoh-care-bundle
+func (s *Server) handleGravitySDOHConsentAndCareWave52(w http.ResponseWriter, r *http.Request, op string) {
+	if op == "sdoh-consent-record" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$sdoh-consent-record requires HTTP POST")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	patID := strings.TrimPrefix(firstNonEmptyStr(q.Get("patient"), q.Get("subject")), "Patient/")
+	consentID := strings.TrimPrefix(q.Get("consent"), "Consent/")
+	if op == "sdoh-care-bundle" && patID == "" && resID != "" {
+		patID = strings.TrimPrefix(resID, "Patient/")
+	}
+	if op == "sdoh-consent-record" && consentID == "" && resID != "" {
+		consentID = strings.TrimPrefix(resID, "Consent/")
+	}
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							}
+						}
+					}
+				} else {
+					for _, k := range []string{"patient", "subject"} {
+						if vs, ok := body[k].(string); ok && strings.TrimSpace(vs) != "" {
+							patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+						} else if vr, ok := body[k].(map[string]any); ok {
+							if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+								patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		if patID == "" || cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot access Gravity SDOH resources for Patient/%s", secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	if patID == "" {
+		patID = "pat-sdoh-1"
+	}
+	if consentID == "" {
+		consentID = "sdoh-consent-" + patID
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	consentRes := map[string]any{
+		"resourceType": "Consent",
+		"id":           consentID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/sdoh-clinicalcare/StructureDefinition/SDOHCC-Consent"},
+		},
+		"status": "active",
+		"scope": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://terminology.hl7.org/CodeSystem/consentscope",
+					"code":    "patient-privacy",
+					"display": "Privacy Consent",
+				},
+			},
+		},
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "59284-0",
+						"display": "Consent Document",
+					},
+				},
+			},
+		},
+		"patient":  map[string]any{"reference": "Patient/" + patID},
+		"dateTime": nowStr,
+		"policyRule": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+					"code":   "OPTIN",
+				},
+			},
+		},
+	}
+	_, _, _, savedConsent, _ := s.upsertResourceMap(r.Context(), tenant, consentRes)
+	if len(savedConsent) > 0 {
+		consentRes = savedConsent
+	}
+
+	condID := "sdoh-cond-" + patID
+	condRes := map[string]any{
+		"resourceType": "Condition",
+		"id":           condID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/sdoh-clinicalcare/StructureDefinition/SDOHCC-Condition"},
+		},
+		"clinicalStatus": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+					"code":   "active",
+				},
+			},
+		},
+		"verificationStatus": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+					"code":   "confirmed",
+				},
+			},
+		},
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/core/CodeSystem/condition-category",
+						"code":    "sdoh",
+						"display": "Social Determinants Of Health",
+					},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "733423003",
+					"display": "Food insecurity (finding)",
+				},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedCond, _ := s.upsertResourceMap(r.Context(), tenant, condRes)
+	if len(savedCond) > 0 {
+		condRes = savedCond
+	}
+
+	goalID := "sdoh-goal-" + patID
+	goalRes := map[string]any{
+		"resourceType": "Goal",
+		"id":           goalID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/sdoh-clinicalcare/StructureDefinition/SDOHCC-Goal"},
+		},
+		"lifecycleStatus": "active",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/sdoh-clinicalcare/CodeSystem/SDOHCC-CodeSystemTemporaryCodes",
+						"code":    "food-insecurity",
+						"display": "Food Insecurity",
+					},
+				},
+			},
+		},
+		"description": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "1078229009",
+					"display": "Food security",
+				},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedGoal, _ := s.upsertResourceMap(r.Context(), tenant, goalRes)
+	if len(savedGoal) > 0 {
+		goalRes = savedGoal
+	}
+
+	if op == "sdoh-consent-record" {
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(consentRes)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "sdoh-care-bundle-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/sdoh-clinicalcare/StructureDefinition/SDOHCC-Bundle"},
+		},
+		"type":      "searchset",
+		"total":     3,
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Consent/" + consentID, "resource": consentRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Condition/" + condID, "resource": condRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "Goal/" + goalID, "resource": goalRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}

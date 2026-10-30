@@ -1856,6 +1856,18 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$vulcan-rwd-summary to return vulcan-rwd-bundle, got %d: %s", respRWD51.StatusCode, string(bRWD51))
 			}
 		}
+		if err == nil {
+			respSANER52, bSANER52, errSANER52 := doReq(http.MethodGet, basePath+"/Location/cert-loc-1/$saner-capacity-summary", "", nil, nil)
+			respRTTD52, bRTTD52, errRTTD52 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$codex-rttd-summary", "", nil, nil)
+			respSDOH52, bSDOH52, errSDOH52 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$sdoh-care-bundle", "", nil, nil)
+			if errSANER52 != nil || respSANER52.StatusCode != http.StatusOK || !strings.Contains(string(bSANER52), "PublicHealthBundle") {
+				err = fmt.Errorf("expected GET /Location/cert-loc-1/$saner-capacity-summary to return PublicHealthBundle, got %d: %s", respSANER52.StatusCode, string(bSANER52))
+			} else if errRTTD52 != nil || respRTTD52.StatusCode != http.StatusOK || !strings.Contains(string(bRTTD52), "codexrt-summary-bundle") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$codex-rttd-summary to return codexrt-summary-bundle, got %d: %s", respRTTD52.StatusCode, string(bRTTD52))
+			} else if errSDOH52 != nil || respSDOH52.StatusCode != http.StatusOK || !strings.Contains(string(bSDOH52), "SDOHCC-Bundle") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$sdoh-care-bundle to return SDOHCC-Bundle, got %d: %s", respSDOH52.StatusCode, string(bSDOH52))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 

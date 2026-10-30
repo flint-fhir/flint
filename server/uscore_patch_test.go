@@ -8414,3 +8414,221 @@ func TestDaVinciATRPACIOSPLASCHAndVulcanRWDWave51(t *testing.T) {
 		}
 	})
 }
+
+func TestPublicHealthSANERCodeXRTTDAndGravitySDOHWave52(t *testing.T) {
+	tenant := "wave52-tenant"
+	pgSrv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. Verify CapabilityStatement operation advertisements for Wave 52
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK {
+		t.Fatalf("GET /metadata status = %d", metaRec.Code)
+	}
+	metaBody := metaRec.Body.String()
+	for _, opName := range []string{
+		`"saner-report-capacity"`,
+		`"saner-capacity-summary"`,
+		`"codex-rttd-plan"`,
+		`"codex-rttd-summary"`,
+		`"sdoh-consent-record"`,
+		`"sdoh-care-bundle"`,
+	} {
+		if !strings.Contains(metaBody, opName) {
+			t.Fatalf("expected CapabilityStatement to advertise %s", opName)
+		}
+	}
+
+	// 2. Verify 405 Method Not Allowed on GET for POST-only Wave 52 operations
+	for _, postOnlyPath := range []string{
+		"/fhir/r4/" + tenant + "/MeasureReport/$saner-report-capacity",
+		"/fhir/r4/" + tenant + "/MeasureReport/saner-mr-w52-1/$saner-report-capacity",
+		"/fhir/r4/" + tenant + "/ServiceRequest/$codex-rttd-plan",
+		"/fhir/r4/" + tenant + "/ServiceRequest/rttd-sr-w52-1/$codex-rttd-plan",
+		"/fhir/r4/" + tenant + "/Consent/$sdoh-consent-record",
+		"/fhir/r4/" + tenant + "/Consent/sdoh-con-w52-1/$sdoh-consent-record",
+	} {
+		req405 := httptest.NewRequest(http.MethodGet, postOnlyPath, nil)
+		rec405 := httptest.NewRecorder()
+		pgH.ServeHTTP(rec405, req405)
+		if rec405.Code != http.StatusMethodNotAllowed || !strings.Contains(rec405.Body.String(), `"not-supported"`) {
+			t.Fatalf("GET %s expected 405 Method Not Allowed with OperationOutcome not-supported, got %d: %s", postOnlyPath, rec405.Code, rec405.Body.String())
+		}
+	}
+
+	// 3. HL7 Public Health SANER: POST /MeasureReport/$saner-report-capacity & GET /Location/{id}/$saner-capacity-summary
+	sanerReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/MeasureReport/saner-mr-w52-1/$saner-report-capacity",
+		strings.NewReader(`{"location":"Location/saner-loc-w52-1"}`))
+	sanerReq.Header.Set("Content-Type", "application/fhir+json")
+	sanerRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sanerRec, sanerReq)
+	if sanerRec.Code != http.StatusOK ||
+		!strings.Contains(sanerRec.Body.String(), "PublicHealthMeasureReport") ||
+		!strings.Contains(sanerRec.Body.String(), `"numTotBeds"`) ||
+		!strings.Contains(sanerRec.Body.String(), `"numICUBeds"`) ||
+		!strings.Contains(sanerRec.Body.String(), `"numVent"`) {
+		t.Fatalf("POST /MeasureReport/saner-mr-w52-1/$saner-report-capacity failed: %d %s", sanerRec.Code, sanerRec.Body.String())
+	}
+
+	sanerSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Location/saner-loc-w52-1/$saner-capacity-summary", nil)
+	sanerSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sanerSumRec, sanerSumReq)
+	if sanerSumRec.Code != http.StatusOK ||
+		!strings.Contains(sanerSumRec.Body.String(), "PublicHealthBundle") ||
+		!strings.Contains(sanerSumRec.Body.String(), "PublicHealthLocation") ||
+		!strings.Contains(sanerSumRec.Body.String(), "PublicHealthMeasure") {
+		t.Fatalf("GET /Location/saner-loc-w52-1/$saner-capacity-summary failed: %d %s", sanerSumRec.Code, sanerSumRec.Body.String())
+	}
+
+	// 4. HL7 CodeX RTTD: POST /ServiceRequest/$codex-rttd-plan & GET /Patient/{id}/$codex-rttd-summary
+	rttdReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/ServiceRequest/rttd-sr-w52-1/$codex-rttd-plan",
+		strings.NewReader(`{"patient":"Patient/pat-w52-1"}`))
+	rttdReq.Header.Set("Content-Type", "application/fhir+json")
+	rttdRec := httptest.NewRecorder()
+	pgH.ServeHTTP(rttdRec, rttdReq)
+	if rttdRec.Code != http.StatusOK ||
+		!strings.Contains(rttdRec.Body.String(), "codexrt-radiotherapy-planned-course") ||
+		!strings.Contains(rttdRec.Body.String(), `"1217123003"`) {
+		t.Fatalf("POST /ServiceRequest/rttd-sr-w52-1/$codex-rttd-plan failed: %d %s", rttdRec.Code, rttdRec.Body.String())
+	}
+
+	rttdSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w52-1/$codex-rttd-summary", nil)
+	rttdSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(rttdSumRec, rttdSumReq)
+	if rttdSumRec.Code != http.StatusOK ||
+		!strings.Contains(rttdSumRec.Body.String(), "codexrt-summary-bundle") ||
+		!strings.Contains(rttdSumRec.Body.String(), "mcode-radiotherapy-volume") ||
+		!strings.Contains(rttdSumRec.Body.String(), "codexrt-radiotherapy-treated-phase") ||
+		!strings.Contains(rttdSumRec.Body.String(), `"228793007"`) {
+		t.Fatalf("GET /Patient/pat-w52-1/$codex-rttd-summary failed: %d %s", rttdSumRec.Code, rttdSumRec.Body.String())
+	}
+
+	// 5. HL7 Gravity SDOH: POST /Consent/$sdoh-consent-record & GET /Patient/{id}/$sdoh-care-bundle
+	sdohReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Consent/sdoh-con-w52-1/$sdoh-consent-record",
+		strings.NewReader(`{"patient":"Patient/pat-w52-1"}`))
+	sdohReq.Header.Set("Content-Type", "application/fhir+json")
+	sdohRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sdohRec, sdohReq)
+	if sdohRec.Code != http.StatusOK ||
+		!strings.Contains(sdohRec.Body.String(), "SDOHCC-Consent") ||
+		!strings.Contains(sdohRec.Body.String(), `"59284-0"`) {
+		t.Fatalf("POST /Consent/sdoh-con-w52-1/$sdoh-consent-record failed: %d %s", sdohRec.Code, sdohRec.Body.String())
+	}
+
+	sdohSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w52-1/$sdoh-care-bundle", nil)
+	sdohSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sdohSumRec, sdohSumReq)
+	if sdohSumRec.Code != http.StatusOK ||
+		!strings.Contains(sdohSumRec.Body.String(), "SDOHCC-Bundle") ||
+		!strings.Contains(sdohSumRec.Body.String(), "SDOHCC-Condition") ||
+		!strings.Contains(sdohSumRec.Body.String(), "SDOHCC-Goal") ||
+		!strings.Contains(sdohSumRec.Body.String(), `"733423003"`) {
+		t.Fatalf("GET /Patient/pat-w52-1/$sdoh-care-bundle failed: %d %s", sdohSumRec.Code, sdohSumRec.Body.String())
+	}
+
+	// 6. SMART v2 Patient Compartment Isolation (401 unauthenticated, 200 authorized, 403 cross-patient & facility-level)
+	mockAuth, err := auth.NewMockTokenValidator("https://auth.example.com", "flint-api")
+	if err != nil {
+		t.Fatalf("new mock validator: %v", err)
+	}
+	pgSrv.SetTokenValidator(mockAuth)
+	pat1Token := "token-pat-w52-1"
+	mockAuth.RegisterStatic(pat1Token, &authv1.SecurityContext{
+		Subject:   "Patient/pat-w52-1",
+		TenantId:  tenant,
+		PatientId: "pat-w52-1",
+		Scopes:    auth.ParseScopes("patient/Patient.rs patient/ServiceRequest.cruds patient/BodyStructure.rs patient/Procedure.rs patient/Consent.cruds patient/Condition.rs patient/Goal.rs patient/Location.rs patient/MeasureReport.cruds"),
+	})
+
+	unauthReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w52-1/$codex-rttd-summary", nil)
+	unauthRec := httptest.NewRecorder()
+	pgH.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated request expected 401, got %d", unauthRec.Code)
+	}
+
+	for _, okPath := range []string{
+		"/fhir/r4/" + tenant + "/Patient/pat-w52-1/$codex-rttd-summary",
+		"/fhir/r4/" + tenant + "/Patient/pat-w52-1/$sdoh-care-bundle",
+	} {
+		okAuthReq := httptest.NewRequest(http.MethodGet, okPath, nil)
+		okAuthReq.Header.Set("Authorization", "Bearer "+pat1Token)
+		okAuthRec := httptest.NewRecorder()
+		pgH.ServeHTTP(okAuthRec, okAuthReq)
+		if okAuthRec.Code != http.StatusOK {
+			t.Fatalf("authorized patient request GET %s expected 200, got %d: %s", okPath, okAuthRec.Code, okAuthRec.Body.String())
+		}
+	}
+
+	for _, crossPath := range []string{
+		"/fhir/r4/" + tenant + "/Patient/pat-w52-2/$codex-rttd-summary",
+		"/fhir/r4/" + tenant + "/Patient/pat-w52-2/$sdoh-care-bundle",
+		"/fhir/r4/" + tenant + "/Location/saner-loc-w52-1/$saner-capacity-summary",
+	} {
+		crossReq := httptest.NewRequest(http.MethodGet, crossPath, nil)
+		crossReq.Header.Set("Authorization", "Bearer "+pat1Token)
+		crossRec := httptest.NewRecorder()
+		pgH.ServeHTTP(crossRec, crossReq)
+		if crossRec.Code != http.StatusForbidden {
+			t.Fatalf("cross-patient/facility GET %s expected 403 Forbidden, got %d: %s", crossPath, crossRec.Code, crossRec.Body.String())
+		}
+	}
+
+	// 7. Postgres point-read round-trip when local Postgres is available
+	t.Run("PostgresPointReadRoundTrip", func(t *testing.T) {
+		db := openTestPostgres(t)
+		defer db.Close()
+		ctx := t.Context()
+		if err := postgres.RunMigrations(ctx, db); err != nil {
+			t.Fatalf("run migrations: %v", err)
+		}
+		cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+		cleanup()
+		defer cleanup()
+
+		dbStore := postgres.New(db)
+		dbSrv := server.New(dbStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		server.RegisterDefaultResourceTypes(dbSrv)
+		dbH := dbSrv.Handler()
+
+		for _, opReq := range []struct {
+			method string
+			path   string
+			body   string
+		}{
+			{http.MethodPost, "/fhir/r4/" + tenant + "/MeasureReport/saner-mr-w52-1/$saner-report-capacity", `{"location":"Location/saner-loc-w52-1"}`},
+			{http.MethodPost, "/fhir/r4/" + tenant + "/ServiceRequest/rttd-sr-w52-1/$codex-rttd-plan", `{"patient":"Patient/pat-w52-1"}`},
+			{http.MethodPost, "/fhir/r4/" + tenant + "/Consent/sdoh-con-w52-1/$sdoh-consent-record", `{"patient":"Patient/pat-w52-1"}`},
+		} {
+			req := httptest.NewRequest(opReq.method, opReq.path, strings.NewReader(opReq.body))
+			req.Header.Set("Content-Type", "application/fhir+json")
+			rec := httptest.NewRecorder()
+			dbH.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s %s status = %d: %s", opReq.method, opReq.path, rec.Code, rec.Body.String())
+			}
+		}
+
+		for _, resPath := range []string{
+			"/fhir/r4/" + tenant + "/Location/saner-loc-w52-1",
+			"/fhir/r4/" + tenant + "/Measure/saner-measure-saner-loc-w52-1",
+			"/fhir/r4/" + tenant + "/MeasureReport/saner-mr-w52-1",
+			"/fhir/r4/" + tenant + "/ServiceRequest/rttd-sr-w52-1",
+			"/fhir/r4/" + tenant + "/BodyStructure/rttd-vol-pat-w52-1",
+			"/fhir/r4/" + tenant + "/Procedure/rttd-phase-pat-w52-1",
+			"/fhir/r4/" + tenant + "/Consent/sdoh-con-w52-1",
+			"/fhir/r4/" + tenant + "/Condition/sdoh-cond-pat-w52-1",
+			"/fhir/r4/" + tenant + "/Goal/sdoh-goal-pat-w52-1",
+		} {
+			ptReq := httptest.NewRequest(http.MethodGet, resPath, nil)
+			ptRec := httptest.NewRecorder()
+			dbH.ServeHTTP(ptRec, ptReq)
+			if ptRec.Code != http.StatusOK {
+				t.Fatalf("point-read GET %s expected 200 OK from Postgres store, got %d: %s", resPath, ptRec.Code, ptRec.Body.String())
+			}
+		}
+	})
+}
