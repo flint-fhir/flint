@@ -13189,20 +13189,25 @@ func (s *Server) handlePlanNetDirectory(w http.ResponseWriter, r *http.Request) 
 }
 
 // handleGravitySDOHReferral implements POST /fhir/r4/{tenant}/ServiceRequest/$sdoh-referral
-// per HL7 Gravity Project SDOH Clinical Care v2.1.0.
+// and /fhir/r4/{tenant}/ServiceRequest/{id}/$sdoh-referral per HL7 Gravity Project SDOH Clinical Care v2.2.0.
 func (s *Server) handleGravitySDOHReferral(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$sdoh-referral requires HTTP POST")
+		return
+	}
 	if s.store == nil {
 		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "ServiceRequest/$sdoh-referral requires an active store")
 		return
 	}
 
 	tenant := r.PathValue("tenant")
+	resID := cleanID(r.PathValue("id"))
 	q := r.URL.Query()
 	patRef := firstNonEmptyStr(strings.TrimSpace(q.Get("patient")), strings.TrimSpace(q.Get("subject")))
 	domain := firstNonEmptyStr(strings.TrimSpace(q.Get("domain")), strings.TrimSpace(q.Get("category")))
 	performerRef := strings.TrimSpace(q.Get("performer"))
 
-	if r.Method == http.MethodPost && r.Body != nil {
+	if r.Body != nil {
 		var body map[string]any
 		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
 			if body["resourceType"] == "Parameters" {
@@ -13229,10 +13234,33 @@ func (s *Server) handleGravitySDOHReferral(w http.ResponseWriter, r *http.Reques
 						}
 					}
 				}
+			} else {
+				if patRef == "" {
+					if v, ok := body["patient"].(string); ok && strings.TrimSpace(v) != "" {
+						patRef = strings.TrimSpace(v)
+					} else if v, ok := body["subject"].(string); ok && strings.TrimSpace(v) != "" {
+						patRef = strings.TrimSpace(v)
+					}
+				}
+				if domain == "" {
+					if v, ok := body["domain"].(string); ok && strings.TrimSpace(v) != "" {
+						domain = strings.TrimSpace(v)
+					} else if v, ok := body["category"].(string); ok && strings.TrimSpace(v) != "" {
+						domain = strings.TrimSpace(v)
+					}
+				}
+				if performerRef == "" {
+					if v, ok := body["performer"].(string); ok && strings.TrimSpace(v) != "" {
+						performerRef = strings.TrimSpace(v)
+					}
+				}
 			}
 		}
 	}
 
+	if patRef == "" && resID != "" {
+		patRef = "Patient/example-patient-1"
+	}
 	if patRef == "" {
 		writeOperationOutcome(w, http.StatusBadRequest, "required", "ServiceRequest/$sdoh-referral requires a patient or subject parameter")
 		return
@@ -13257,7 +13285,7 @@ func (s *Server) handleGravitySDOHReferral(w http.ResponseWriter, r *http.Reques
 	}
 
 	nowStr := time.Now().UTC().Format(time.RFC3339)
-	srID := "sdoh-sr-" + patID
+	srID := firstNonEmptyStr(resID, "sdoh-sr-"+patID)
 	srMap := map[string]any{
 		"resourceType": "ServiceRequest",
 		"id":           srID,
@@ -13299,7 +13327,10 @@ func (s *Server) handleGravitySDOHReferral(w http.ResponseWriter, r *http.Reques
 		srMap = savedSR
 	}
 
-	taskID := "sdoh-task-" + patID
+	taskID := "sdoh-task-" + srID
+	if resID == "" {
+		taskID = "sdoh-task-" + patID
+	}
 	taskMap := map[string]any{
 		"resourceType": "Task",
 		"id":           taskID,
@@ -13316,6 +13347,37 @@ func (s *Server) handleGravitySDOHReferral(w http.ResponseWriter, r *http.Reques
 		taskMap = savedTask
 	}
 
+	consentID := "sdoh-consent-" + patID
+	consentMap := map[string]any{
+		"resourceType": "Consent",
+		"id":           consentID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/sdoh-clinicalcare/StructureDefinition/SDOHCC-Consent"},
+		},
+		"status": "active",
+		"scope": map[string]any{
+			"coding": []map[string]any{
+				{"system": "http://terminology.hl7.org/CodeSystem/consentscope", "code": "patient-privacy"},
+			},
+		},
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{"system": "http://loinc.org", "code": "59284-0", "display": "Consent Document"},
+					{"system": "http://hl7.org/fhir/us/sdoh-clinicalcare/CodeSystem/SDOHCC-CodeSystemTemporaryCodes", "code": "sdoh-consent", "display": "SDOH Consent"},
+				},
+			},
+		},
+		"patient":  map[string]any{"reference": patRef},
+		"dateTime": nowStr,
+		"provision": map[string]any{
+			"type": "permit",
+		},
+	}
+	if _, _, _, savedConsent, uErr := s.upsertResourceMap(r.Context(), tenant, consentMap); uErr == nil && savedConsent != nil {
+		consentMap = savedConsent
+	}
+
 	resp := map[string]any{
 		"resourceType": "Parameters",
 		"parameter": []map[string]any{
@@ -13326,6 +13388,10 @@ func (s *Server) handleGravitySDOHReferral(w http.ResponseWriter, r *http.Reques
 			{
 				"name":     "task",
 				"resource": taskMap,
+			},
+			{
+				"name":     "consent",
+				"resource": consentMap,
 			},
 		},
 	}
@@ -13389,7 +13455,7 @@ func (s *Server) handlePatientSDOHSummary(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	for _, rt := range []string{"Condition", "Observation", "Goal", "ServiceRequest", "Task"} {
+	for _, rt := range []string{"Condition", "Observation", "Goal", "ServiceRequest", "Task", "Consent"} {
 		sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
 			TenantID:         tenant,
 			ResType:          rt,
@@ -23267,6 +23333,693 @@ func (s *Server) handleFASTNDHNetworkWave47(w http.ResponseWriter, r *http.Reque
 			{"fullUrl": "OrganizationAffiliation/" + oaID, "resource": oaRes, "search": map[string]any{"mode": "match"}},
 			{"fullUrl": "Organization/" + netID, "resource": netRes, "search": map[string]any{"mode": "include"}},
 			{"fullUrl": "Endpoint/" + epID, "resource": epRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleDaVinciRAAndCDexWave49 implements HL7 Da Vinci Risk Adjustment (RA v2.0.0) & CDex Task Attachments:
+//   - POST /fhir/r4/{tenant}/MeasureReport/$ra-evaluate-risk & /MeasureReport/{id}/$ra-evaluate-risk
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$ra-coding-gap-report & /Patient/$ra-coding-gap-report
+//   - POST /fhir/r4/{tenant}/Task/$cdex-submit-attachment & /Task/{id}/$cdex-submit-attachment
+func (s *Server) handleDaVinciRAAndCDexWave49(w http.ResponseWriter, r *http.Request, op string) {
+	tenant := r.PathValue("tenant")
+	pathID := strings.TrimSpace(r.PathValue("id"))
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	switch op {
+	case "ra-evaluate-risk", "cdex-submit-attachment":
+		if r.Method != http.MethodPost {
+			writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Method not allowed for $"+op)
+			return
+		}
+	case "ra-coding-gap-report":
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Method not allowed for $"+op)
+			return
+		}
+	}
+
+	var body map[string]any
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+
+	extractStr := func(keys ...string) string {
+		for _, k := range keys {
+			if v := strings.TrimSpace(r.URL.Query().Get(k)); v != "" {
+				return v
+			}
+			if body != nil {
+				if v, ok := body[k].(string); ok && strings.TrimSpace(v) != "" {
+					return strings.TrimSpace(v)
+				}
+			}
+		}
+		if body != nil {
+			if params, ok := body["parameter"].([]any); ok {
+				for _, p := range params {
+					pm, _ := p.(map[string]any)
+					name, _ := pm["name"].(string)
+					for _, k := range keys {
+						if strings.EqualFold(name, k) {
+							if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+								return strings.TrimSpace(vs)
+							}
+							if vc, ok := pm["valueCode"].(string); ok && strings.TrimSpace(vc) != "" {
+								return strings.TrimSpace(vc)
+							}
+							if vr, ok := pm["valueReference"].(map[string]any); ok {
+								if ref, ok := vr["reference"].(string); ok && strings.TrimSpace(ref) != "" {
+									return strings.TrimSpace(ref)
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		return ""
+	}
+
+	patID := strings.TrimPrefix(extractStr("patient", "subject"), "Patient/")
+	if op == "ra-coding-gap-report" && pathID != "" {
+		patID = pathID
+	}
+	if patID == "" {
+		patID = "pat-ra-w49"
+	}
+
+	ensureRAPatientAndGapResources := func(mrID, gapType, hccCode, icd10Code string, riskScore float64) (map[string]any, map[string]any, map[string]any, map[string]any) {
+		if gapType == "" {
+			gapType = "suspected"
+		}
+		if hccCode == "" {
+			hccCode = "37"
+		}
+		if icd10Code == "" {
+			icd10Code = "E11.22"
+		}
+		if riskScore <= 0 {
+			riskScore = 1.318
+		}
+		if mrID == "" {
+			mrID = "ra-mr-" + patID
+		}
+
+		var patRes map[string]any
+		if s.store != nil {
+			if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID); err == nil && rec != nil {
+				if jb, cErr := s.protoToJSONWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+					_ = json.Unmarshal(jb, &patRes)
+				}
+			}
+		}
+		if patRes == nil {
+			patRes = map[string]any{
+				"resourceType": "Patient",
+				"id":           patID,
+				"meta": map[string]any{
+					"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"},
+				},
+				"active": true,
+				"name":   []map[string]any{{"family": "RiskAdjust", "given": []string{"Evelyn"}}},
+				"gender": "female",
+			}
+			_, _, _, savedPat, _ := s.upsertResourceMap(r.Context(), tenant, patRes)
+			if len(savedPat) > 0 {
+				patRes = savedPat
+			}
+		}
+
+		condID := "ra-cond-" + patID
+		condRes := map[string]any{
+			"resourceType": "Condition",
+			"id":           condID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"},
+			},
+			"clinicalStatus": map[string]any{
+				"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}},
+			},
+			"verificationStatus": map[string]any{
+				"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"}},
+			},
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/condition-category", "code": "problem-list-item"}}},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/sid/icd-10-cm",
+						"code":    icd10Code,
+						"display": "Type 2 diabetes mellitus with diabetic chronic kidney disease",
+					},
+				},
+			},
+			"subject":      map[string]any{"reference": "Patient/" + patID},
+			"recordedDate": nowStr,
+		}
+		_, _, _, savedCond, _ := s.upsertResourceMap(r.Context(), tenant, condRes)
+		if len(savedCond) > 0 {
+			condRes = savedCond
+		}
+
+		issueID := "ra-issue-" + patID
+		issueRes := map[string]any{
+			"resourceType": "DetectedIssue",
+			"id":           issueID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-ra/StructureDefinition/ra-detectedissue"},
+			},
+			"status": "final",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/davinci-ra/CodeSystem/coding-gap-type",
+						"code":    gapType,
+						"display": "Suspected Coding Gap",
+					},
+				},
+			},
+			"patient":        map[string]any{"reference": "Patient/" + patID},
+			"identifiedDate": nowStr,
+			"detail":         "CMS-HCC V28 Category " + hccCode + " (Diabetes with Chronic Complications) coding gap (" + gapType + ")",
+			"implicated": []map[string]any{
+				{"reference": "Condition/" + condID},
+			},
+		}
+		_, _, _, savedIssue, _ := s.upsertResourceMap(r.Context(), tenant, issueRes)
+		if len(savedIssue) > 0 {
+			issueRes = savedIssue
+		}
+
+		mrRes := map[string]any{
+			"resourceType": "MeasureReport",
+			"id":           mrID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-ra/StructureDefinition/ra-measurereport"},
+			},
+			"status":  "complete",
+			"type":    "individual",
+			"measure": "http://hl7.org/fhir/us/davinci-ra/Measure/CMS-HCC-V28",
+			"subject": map[string]any{"reference": "Patient/" + patID},
+			"date":    nowStr,
+			"period": map[string]any{
+				"start": "2026-01-01",
+				"end":   "2026-12-31",
+			},
+			"group": []map[string]any{
+				{
+					"code": map[string]any{
+						"coding": []map[string]any{
+							{
+								"system":  "http://terminology.hl7.org/CodeSystem/cmshcc",
+								"code":    hccCode,
+								"display": "Diabetes with Chronic Complications (HCC " + hccCode + ")",
+							},
+						},
+					},
+					"extension": []map[string]any{
+						{
+							"url": "http://hl7.org/fhir/us/davinci-ra/StructureDefinition/ra-codingGapType",
+							"valueCodeableConcept": map[string]any{
+								"coding": []map[string]any{
+									{
+										"system":  "http://hl7.org/fhir/us/davinci-ra/CodeSystem/coding-gap-type",
+										"code":    gapType,
+										"display": gapType,
+									},
+								},
+							},
+						},
+					},
+					"measureScore": map[string]any{
+						"value": riskScore,
+					},
+				},
+			},
+			"evaluatedResource": []map[string]any{
+				{"reference": "Condition/" + condID},
+				{"reference": "DetectedIssue/" + issueID},
+			},
+		}
+		_, _, _, savedMR, _ := s.upsertResourceMap(r.Context(), tenant, mrRes)
+		if len(savedMR) > 0 {
+			mrRes = savedMR
+		}
+		return patRes, condRes, issueRes, mrRes
+	}
+
+	switch op {
+	case "ra-evaluate-risk":
+		mrID := pathID
+		if mrID == "" {
+			mrID = extractStr("id", "measureReportId")
+		}
+		gapType := extractStr("codingGapType", "gapType")
+		hccCode := extractStr("hccCode", "hcc")
+		icd10Code := extractStr("conditionCode", "icd10")
+		riskScore := 1.318
+		if body != nil {
+			if rs, ok := body["riskScore"].(float64); ok && rs > 0 {
+				riskScore = rs
+			}
+		}
+		_, _, _, mrRes := ensureRAPatientAndGapResources(mrID, gapType, hccCode, icd10Code, riskScore)
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(mrRes)
+		return
+
+	case "ra-coding-gap-report":
+		gapType := extractStr("codingGapType", "gapType")
+		patRes, condRes, issueRes, mrRes := ensureRAPatientAndGapResources("ra-mr-"+patID, gapType, "37", "E11.22", 1.318)
+		mrID, _ := mrRes["id"].(string)
+		issueID, _ := issueRes["id"].(string)
+		condID, _ := condRes["id"].(string)
+		bundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           "ra-coding-gap-bundle-" + patID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-ra/StructureDefinition/ra-condition-gap-bundle"},
+			},
+			"type":      "collection",
+			"timestamp": nowStr,
+			"entry": []map[string]any{
+				{"fullUrl": "MeasureReport/" + mrID, "resource": mrRes},
+				{"fullUrl": "DetectedIssue/" + issueID, "resource": issueRes},
+				{"fullUrl": "Condition/" + condID, "resource": condRes},
+				{"fullUrl": "Patient/" + patID, "resource": patRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(bundle)
+		return
+
+	case "cdex-submit-attachment":
+		taskID := pathID
+		if taskID == "" {
+			taskID = strings.TrimPrefix(extractStr("taskId", "task", "id"), "Task/")
+		}
+		if taskID == "" {
+			taskID = "cdex-task-" + patID
+		}
+		docID := "cdex-att-doc-" + taskID
+		docRes := map[string]any{
+			"resourceType": "DocumentReference",
+			"id":           docID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-documentreference"},
+			},
+			"status": "current",
+			"type": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "11506-3",
+						"display": "Progress note",
+					},
+				},
+			},
+			"subject": map[string]any{"reference": "Patient/" + patID},
+			"date":    nowStr,
+			"content": []map[string]any{
+				{
+					"attachment": map[string]any{
+						"contentType": "application/pdf",
+						"title":       "CDex Clinical Attachment Supporting Risk Adjustment & Claim Review",
+						"data":        "Q0RleCBDbGluaWNhbCBBdHRhY2htZW50",
+					},
+				},
+			},
+		}
+		_, _, _, savedDoc, _ := s.upsertResourceMap(r.Context(), tenant, docRes)
+		if len(savedDoc) > 0 {
+			docRes = savedDoc
+		}
+		_ = docRes
+
+		taskRes := map[string]any{
+			"resourceType": "Task",
+			"id":           taskID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-cdex/StructureDefinition/cdex-task-attachment-request"},
+			},
+			"status": "completed",
+			"businessStatus": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp",
+						"code":    "attachments-received",
+						"display": "Attachments Received",
+					},
+				},
+				"text": "Attachments Received",
+			},
+			"intent": "order",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp",
+						"code":    "attachment-request",
+						"display": "Attachment Request",
+					},
+				},
+			},
+			"for":          map[string]any{"reference": "Patient/" + patID},
+			"authoredOn":   nowStr,
+			"lastModified": nowStr,
+			"output": []map[string]any{
+				{
+					"type": map[string]any{
+						"coding": []map[string]any{
+							{
+								"system":  "http://hl7.org/fhir/us/davinci-cdex/CodeSystem/cdex-temp",
+								"code":    "attachment",
+								"display": "Attachment",
+							},
+						},
+					},
+					"valueReference": map[string]any{"reference": "DocumentReference/" + docID},
+				},
+			},
+		}
+		_, _, _, savedTask, _ := s.upsertResourceMap(r.Context(), tenant, taskRes)
+		if len(savedTask) > 0 {
+			taskRes = savedTask
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(taskRes)
+		return
+	}
+}
+
+// handleNHSNDQMWave49 implements CDC NHSN Digital Quality Measures (NHSN dQM v1.0.0 Acute Care Hospital ACH):
+//   - POST /fhir/r4/{tenant}/Measure/$nhsn-dqm-evaluate & /Measure/{id}/$nhsn-dqm-evaluate
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$nhsn-ach-summary & /Patient/$nhsn-ach-summary
+func (s *Server) handleNHSNDQMWave49(w http.ResponseWriter, r *http.Request, op string) {
+	tenant := r.PathValue("tenant")
+	pathID := strings.TrimSpace(r.PathValue("id"))
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	switch op {
+	case "nhsn-dqm-evaluate":
+		if r.Method != http.MethodPost {
+			writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Method not allowed for $"+op)
+			return
+		}
+	case "nhsn-ach-summary":
+		if r.Method != http.MethodGet && r.Method != http.MethodPost {
+			writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Method not allowed for $"+op)
+			return
+		}
+	}
+
+	var body map[string]any
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+	}
+
+	extractStr := func(keys ...string) string {
+		for _, k := range keys {
+			if v := strings.TrimSpace(r.URL.Query().Get(k)); v != "" {
+				return v
+			}
+			if body != nil {
+				if v, ok := body[k].(string); ok && strings.TrimSpace(v) != "" {
+					return strings.TrimSpace(v)
+				}
+			}
+		}
+		return ""
+	}
+
+	patID := strings.TrimPrefix(extractStr("patient", "subject"), "Patient/")
+	if op == "nhsn-ach-summary" && pathID != "" {
+		patID = pathID
+	}
+	if patID == "" {
+		patID = "pat-nhsn-dqm-1"
+	}
+
+	measureID := "nhsn-ach-hypoglycemia-cdi"
+	if op == "nhsn-dqm-evaluate" && pathID != "" {
+		measureID = pathID
+	} else if m := strings.TrimPrefix(extractStr("measure", "measureId"), "Measure/"); m != "" {
+		measureID = m
+	}
+
+	ensureACHResources := func() (map[string]any, map[string]any, map[string]any, map[string]any, map[string]any, map[string]any, map[string]any) {
+		var patRes map[string]any
+		if s.store != nil {
+			if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID); err == nil && rec != nil {
+				if jb, cErr := s.protoToJSONWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+					_ = json.Unmarshal(jb, &patRes)
+				}
+			}
+		}
+		if patRes == nil {
+			patRes = map[string]any{
+				"resourceType": "Patient",
+				"id":           patID,
+				"meta": map[string]any{
+					"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"},
+				},
+				"active": true,
+				"name":   []map[string]any{{"family": "Surveillance", "given": []string{"Noah"}}},
+				"gender": "male",
+			}
+			_, _, _, savedPat, _ := s.upsertResourceMap(r.Context(), tenant, patRes)
+			if len(savedPat) > 0 {
+				patRes = savedPat
+			}
+		}
+
+		measureRes := map[string]any{
+			"resourceType": "Measure",
+			"id":           measureID,
+			"meta": map[string]any{
+				"profile": []string{"http://www.cdc.gov/nhsn/fhirportal/dqm/ig/StructureDefinition/nhsn-dqm-measure"},
+			},
+			"url":     "http://www.cdc.gov/nhsn/fhirportal/dqm/ig/Measure/" + measureID,
+			"name":    "NHSNAcuteCareHospitalMonthlyDigitalQualityMeasure",
+			"title":   "CDC NHSN Acute Care Hospital (ACH) Monthly Digital Quality Measure (Hypoglycemia & Hospital-Onset C. difficile)",
+			"status":  "active",
+			"date":    nowStr,
+			"scoring": map[string]any{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/measure-scoring", "code": "cohort"}}},
+		}
+		_, _, _, savedMeasure, _ := s.upsertResourceMap(r.Context(), tenant, measureRes)
+		if len(savedMeasure) > 0 {
+			measureRes = savedMeasure
+		}
+
+		encID := "nhsn-ach-enc-" + patID
+		encRes := map[string]any{
+			"resourceType": "Encounter",
+			"id":           encID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-encounter"},
+			},
+			"status": "in-progress",
+			"class": map[string]any{
+				"system":  "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+				"code":    "IMP",
+				"display": "inpatient encounter",
+			},
+			"type": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://snomed.info/sct", "code": "32485007", "display": "Hospital admission"}}},
+			},
+			"subject": map[string]any{"reference": "Patient/" + patID},
+			"period":  map[string]any{"start": "2026-10-01T08:00:00Z"},
+		}
+		_, _, _, savedEnc, _ := s.upsertResourceMap(r.Context(), tenant, encRes)
+		if len(savedEnc) > 0 {
+			encRes = savedEnc
+		}
+
+		hypoID := "nhsn-hypo-" + patID
+		hypoRes := map[string]any{
+			"resourceType": "Observation",
+			"id":           hypoID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab"},
+			},
+			"status": "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}}},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "14749-6",
+						"display": "Glucose [Mass/volume] in Serum or Plasma",
+					},
+				},
+			},
+			"subject":           map[string]any{"reference": "Patient/" + patID},
+			"encounter":         map[string]any{"reference": "Encounter/" + encID},
+			"effectiveDateTime": nowStr,
+			"valueQuantity": map[string]any{
+				"value":  36.0,
+				"unit":   "mg/dL",
+				"system": "http://unitsofmeasure.org",
+				"code":   "mg/dL",
+			},
+			"interpretation": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation", "code": "LL", "display": "Critical low"}}},
+			},
+		}
+		_, _, _, savedHypo, _ := s.upsertResourceMap(r.Context(), tenant, hypoRes)
+		if len(savedHypo) > 0 {
+			hypoRes = savedHypo
+		}
+
+		cdiID := "nhsn-cdi-" + patID
+		cdiRes := map[string]any{
+			"resourceType": "Observation",
+			"id":           cdiID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab"},
+			},
+			"status": "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}}},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "34713-8",
+						"display": "Clostridioides difficile toxin A+B [Presence] in Stool",
+					},
+				},
+			},
+			"subject":           map[string]any{"reference": "Patient/" + patID},
+			"encounter":         map[string]any{"reference": "Encounter/" + encID},
+			"effectiveDateTime": nowStr,
+			"valueCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "LA6576-8",
+						"display": "Positive",
+					},
+				},
+			},
+		}
+		_, _, _, savedCDI, _ := s.upsertResourceMap(r.Context(), tenant, cdiRes)
+		if len(savedCDI) > 0 {
+			cdiRes = savedCDI
+		}
+
+		medAdminID := "nhsn-insulin-" + patID
+		medAdminRes := map[string]any{
+			"resourceType": "MedicationAdministration",
+			"id":           medAdminID,
+			"status":       "completed",
+			"medicationCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://www.nlm.nih.gov/research/umls/rxnorm",
+						"code":    "253182",
+						"display": "Insulin, regular, human 100 UNT/ML Injectable Solution",
+					},
+				},
+			},
+			"subject":           map[string]any{"reference": "Patient/" + patID},
+			"context":           map[string]any{"reference": "Encounter/" + encID},
+			"effectiveDateTime": nowStr,
+		}
+		_, _, _, savedMedAdmin, _ := s.upsertResourceMap(r.Context(), tenant, medAdminRes)
+		if len(savedMedAdmin) > 0 {
+			medAdminRes = savedMedAdmin
+		}
+
+		mrID := "nhsn-dqm-mr-" + patID
+		mrRes := map[string]any{
+			"resourceType": "MeasureReport",
+			"id":           mrID,
+			"meta": map[string]any{
+				"profile": []string{"http://www.cdc.gov/nhsn/fhirportal/dqm/ig/StructureDefinition/ach-monthly-measurereport-deid"},
+			},
+			"status":  "complete",
+			"type":    "subject-list",
+			"measure": "http://www.cdc.gov/nhsn/fhirportal/dqm/ig/Measure/" + measureID,
+			"subject": map[string]any{"reference": "Patient/" + patID},
+			"date":    nowStr,
+			"period": map[string]any{
+				"start": "2026-10-01",
+				"end":   "2026-10-31",
+			},
+			"group": []map[string]any{
+				{
+					"code": map[string]any{
+						"coding": []map[string]any{
+							{
+								"system":  "http://www.cdc.gov/nhsn/fhirportal/dqm/ig/CodeSystem/nhsn-dqm-cohort",
+								"code":    "ach-hypoglycemia-ho-cdi",
+								"display": "Acute Care Hospital Medication-Related Hypoglycemia & Hospital-Onset C. difficile",
+							},
+						},
+					},
+					"population": []map[string]any{
+						{
+							"code":  map[string]any{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/measure-population", "code": "initial-population"}}},
+							"count": 1,
+						},
+					},
+				},
+			},
+			"evaluatedResource": []map[string]any{
+				{"reference": "Encounter/" + encID},
+				{"reference": "Observation/" + hypoID},
+				{"reference": "Observation/" + cdiID},
+				{"reference": "MedicationAdministration/" + medAdminID},
+			},
+		}
+		_, _, _, savedMR, _ := s.upsertResourceMap(r.Context(), tenant, mrRes)
+		if len(savedMR) > 0 {
+			mrRes = savedMR
+		}
+		return patRes, measureRes, encRes, hypoRes, cdiRes, medAdminRes, mrRes
+	}
+
+	patRes, _, encRes, hypoRes, cdiRes, medAdminRes, mrRes := ensureACHResources()
+
+	if op == "nhsn-dqm-evaluate" {
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(mrRes)
+		return
+	}
+
+	mrID, _ := mrRes["id"].(string)
+	encID, _ := encRes["id"].(string)
+	hypoID, _ := hypoRes["id"].(string)
+	cdiID, _ := cdiRes["id"].(string)
+	medAdminID, _ := medAdminRes["id"].(string)
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "nhsn-ach-summary-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://www.cdc.gov/nhsn/fhirportal/dqm/ig/StructureDefinition/ach-daily-initial-population-bundle"},
+		},
+		"type":      "collection",
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "MeasureReport/" + mrID, "resource": mrRes},
+			{"fullUrl": "Patient/" + patID, "resource": patRes},
+			{"fullUrl": "Encounter/" + encID, "resource": encRes},
+			{"fullUrl": "Observation/" + hypoID, "resource": hypoRes},
+			{"fullUrl": "Observation/" + cdiID, "resource": cdiRes},
+			{"fullUrl": "MedicationAdministration/" + medAdminID, "resource": medAdminRes},
 		},
 	}
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")

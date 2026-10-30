@@ -1823,6 +1823,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /OrganizationAffiliation/$fast-network-query to return ndh-OrganizationAffiliation, got %d: %s", respFASTNet.StatusCode, string(bFASTNet))
 			}
 		}
+		if err == nil {
+			respRA49, bRA49, errRA49 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$ra-coding-gap-report", "", nil, nil)
+			respACH49, bACH49, errACH49 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$nhsn-ach-summary", "", nil, nil)
+			if errRA49 != nil || respRA49.StatusCode != http.StatusOK || !strings.Contains(string(bRA49), "ra-condition-gap-bundle") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$ra-coding-gap-report to return ra-condition-gap-bundle, got %d: %s", respRA49.StatusCode, string(bRA49))
+			} else if errACH49 != nil || respACH49.StatusCode != http.StatusOK || !strings.Contains(string(bACH49), "ach-daily-initial-population-bundle") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$nhsn-ach-summary to return ach-daily-initial-population-bundle, got %d: %s", respACH49.StatusCode, string(bACH49))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
