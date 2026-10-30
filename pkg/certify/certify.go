@@ -1844,6 +1844,18 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /Organization/cert-org-1/$ndh-directory-summary to return ndh-ExchangeBundle, got %d: %s", respNDH50.StatusCode, string(bNDH50))
 			}
 		}
+		if err == nil {
+			respATR51, bATR51, errATR51 := doReq(http.MethodGet, basePath+"/Group/cert-grp-1/$atr-summary?patient=Patient/cert-pat-1", "", nil, nil)
+			respSPL51, bSPL51, errSPL51 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$pacio-splasch-summary", "", nil, nil)
+			respRWD51, bRWD51, errRWD51 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$vulcan-rwd-summary", "", nil, nil)
+			if errATR51 != nil || respATR51.StatusCode != http.StatusOK || !strings.Contains(string(bATR51), "atr-bundle") {
+				err = fmt.Errorf("expected GET /Group/cert-grp-1/$atr-summary to return atr-bundle, got %d: %s", respATR51.StatusCode, string(bATR51))
+			} else if errSPL51 != nil || respSPL51.StatusCode != http.StatusOK || !strings.Contains(string(bSPL51), "splasch-Bundle") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$pacio-splasch-summary to return splasch-Bundle, got %d: %s", respSPL51.StatusCode, string(bSPL51))
+			} else if errRWD51 != nil || respRWD51.StatusCode != http.StatusOK || !strings.Contains(string(bRWD51), "vulcan-rwd-bundle") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$vulcan-rwd-summary to return vulcan-rwd-bundle, got %d: %s", respRWD51.StatusCode, string(bRWD51))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
