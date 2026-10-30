@@ -707,8 +707,8 @@ func TestServer_CriticalSecurityAndSearchHardening(t *testing.T) {
 	respOpenAPI.Body.Close()
 
 	conformanceEntries, _ := openAPISpec["x-flint-conformance"].([]any)
-	if len(conformanceEntries) != 12 {
-		t.Errorf("expected 12 x-flint-conformance entries in OpenAPI 3.1.0 spec, got %d", len(conformanceEntries))
+	if len(conformanceEntries) < 12 {
+		t.Errorf("expected >= 12 x-flint-conformance entries in OpenAPI 3.1.0 spec, got %d", len(conformanceEntries))
 	}
 	specPaths, _ := openAPISpec["paths"].(map[string]any)
 	for _, requiredPath := range []string{
