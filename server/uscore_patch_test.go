@@ -7329,3 +7329,107 @@ func TestELRCCRRCARINAndPACIOTOCWave46(t *testing.T) {
 		t.Fatalf("POST /Consent/$adi-verify expected PADI-ParticipantConsent and LOINC 42348-3, got %d: %s", adiRec.Code, adiRec.Body.String())
 	}
 }
+
+func TestNHSNAURCodeXMCODEAndFASTNDHWave47(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("migrations failed: %v", err)
+	}
+
+	tenant := "wave47-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. CapabilityStatement check for Wave 47 operations
+	capReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/metadata", nil)
+	capRec := httptest.NewRecorder()
+	pgH.ServeHTTP(capRec, capReq)
+	if capRec.Code != http.StatusOK ||
+		!strings.Contains(capRec.Body.String(), `"nhsn-aur-submit"`) ||
+		!strings.Contains(capRec.Body.String(), `"nhsn-hai-summary"`) ||
+		!strings.Contains(capRec.Body.String(), `"mcode-trial-match"`) ||
+		!strings.Contains(capRec.Body.String(), `"mcode-disease-status"`) ||
+		!strings.Contains(capRec.Body.String(), `"fast-network-query"`) ||
+		!strings.Contains(capRec.Body.String(), `"fast-attest"`) {
+		t.Fatalf("CapabilityStatement missing Wave 47 ops: %s", capRec.Body.String())
+	}
+
+	// 2. CDC NHSN HAI / AUR: POST /MeasureReport/$nhsn-aur-submit & GET /Patient/pat-w47-1/$nhsn-hai-summary
+	aurBody := `{
+		"resourceType": "Parameters",
+		"parameter": [
+			{"name": "patient", "valueString": "Patient/pat-w47-1"}
+		]
+	}`
+	aurReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/MeasureReport/$nhsn-aur-submit", strings.NewReader(aurBody))
+	aurReq.Header.Set("Content-Type", "application/fhir+json")
+	aurRec := httptest.NewRecorder()
+	pgH.ServeHTTP(aurRec, aurReq)
+	if aurRec.Code != http.StatusOK ||
+		!strings.Contains(aurRec.Body.String(), "nhsn-aur-measure-report") ||
+		!strings.Contains(aurRec.Body.String(), "ach-daily-medicationadministration") ||
+		!strings.Contains(aurRec.Body.String(), `"1807512"`) {
+		t.Fatalf("POST /MeasureReport/$nhsn-aur-submit expected nhsn-aur-measure-report, ach-daily-medicationadministration, and RxNorm 1807512, got %d: %s", aurRec.Code, aurRec.Body.String())
+	}
+
+	haiReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w47-1/$nhsn-hai-summary", nil)
+	haiRec := httptest.NewRecorder()
+	pgH.ServeHTTP(haiRec, haiReq)
+	if haiRec.Code != http.StatusOK ||
+		!strings.Contains(haiRec.Body.String(), "nhsn-aur-measure-report") ||
+		!strings.Contains(haiRec.Body.String(), "ach-daily-encounter") ||
+		!strings.Contains(haiRec.Body.String(), "ach-daily-medicationadministration") {
+		t.Fatalf("GET /Patient/pat-w47-1/$nhsn-hai-summary expected nhsn-aur-measure-report, ach-daily-encounter, and ach-daily-medicationadministration, got %d: %s", haiRec.Code, haiRec.Body.String())
+	}
+
+	// 3. HL7 CodeX / mCODE Oncology: POST /Patient/$mcode-trial-match & POST /Observation/$mcode-disease-status
+	trialReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/pat-w47-1/$mcode-trial-match", strings.NewReader(aurBody))
+	trialReq.Header.Set("Content-Type", "application/fhir+json")
+	trialRec := httptest.NewRecorder()
+	pgH.ServeHTTP(trialRec, trialReq)
+	if trialRec.Code != http.StatusOK ||
+		!strings.Contains(trialRec.Body.String(), "codex-clinical-trial-match-bundle") ||
+		!strings.Contains(trialRec.Body.String(), "clinical-trial-research-study") {
+		t.Fatalf("POST /Patient/pat-w47-1/$mcode-trial-match expected codex-clinical-trial-match-bundle and clinical-trial-research-study, got %d: %s", trialRec.Code, trialRec.Body.String())
+	}
+
+	dsReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Observation/$mcode-disease-status", strings.NewReader(aurBody))
+	dsReq.Header.Set("Content-Type", "application/fhir+json")
+	dsRec := httptest.NewRecorder()
+	pgH.ServeHTTP(dsRec, dsReq)
+	if dsRec.Code != http.StatusOK ||
+		!strings.Contains(dsRec.Body.String(), "mcode-cancer-disease-status") ||
+		!strings.Contains(dsRec.Body.String(), `"97509-4"`) ||
+		!strings.Contains(dsRec.Body.String(), `"268910001"`) {
+		t.Fatalf("POST /Observation/$mcode-disease-status expected mcode-cancer-disease-status, LOINC 97509-4, and SNOMED 268910001, got %d: %s", dsRec.Code, dsRec.Body.String())
+	}
+
+	// 4. ONC FAST NDH & Da Vinci Plan-Net: GET /OrganizationAffiliation/$fast-network-query & POST /HealthcareService/$fast-attest
+	netReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/OrganizationAffiliation/$fast-network-query", nil)
+	netRec := httptest.NewRecorder()
+	pgH.ServeHTTP(netRec, netReq)
+	if netRec.Code != http.StatusOK ||
+		!strings.Contains(netRec.Body.String(), "ndh-OrganizationAffiliation") ||
+		!strings.Contains(netRec.Body.String(), "plannet-Network") ||
+		!strings.Contains(netRec.Body.String(), "ndh-Endpoint") {
+		t.Fatalf("GET /OrganizationAffiliation/$fast-network-query expected ndh-OrganizationAffiliation, plannet-Network, and ndh-Endpoint, got %d: %s", netRec.Code, netRec.Body.String())
+	}
+
+	attestReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/HealthcareService/$fast-attest", strings.NewReader(aurBody))
+	attestReq.Header.Set("Content-Type", "application/fhir+json")
+	attestRec := httptest.NewRecorder()
+	pgH.ServeHTTP(attestRec, attestReq)
+	if attestRec.Code != http.StatusOK ||
+		!strings.Contains(attestRec.Body.String(), "ndh-HealthcareService") ||
+		!strings.Contains(attestRec.Body.String(), "ndh-Verification") {
+		t.Fatalf("POST /HealthcareService/$fast-attest expected ndh-HealthcareService and ndh-Verification, got %d: %s", attestRec.Code, attestRec.Body.String())
+	}
+}

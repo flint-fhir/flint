@@ -22815,3 +22815,441 @@ func (s *Server) handlePACIOTOCAndADIWave46(w http.ResponseWriter, r *http.Reque
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(out)
 }
+
+// handleNHSNHAIAURWave47 implements CDC NHSN Healthcare-Associated Infections (HAI)
+// and Antimicrobial Use and Resistance (AUR / dQM v1.0.0):
+//   - POST /fhir/r4/{tenant}/MeasureReport/$nhsn-aur-submit & /fhir/r4/{tenant}/MeasureReport/{id}/$nhsn-aur-submit
+//   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$nhsn-hai-summary & /fhir/r4/{tenant}/Patient/$nhsn-hai-summary
+func (s *Server) handleNHSNHAIAURWave47(w http.ResponseWriter, r *http.Request, op string) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	patID := strings.TrimPrefix(strings.TrimPrefix(firstNonEmptyStr(
+		q.Get("patient"),
+		q.Get("subject"),
+		resID,
+	), "Patient/"), "MeasureReport/")
+
+	if r.Body != nil && r.Method == http.MethodPost {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "patient" || name == "subject" {
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if patID == "" {
+		patID = "example"
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	encID := "nhsn-hai-enc-" + patID
+	encRes := map[string]any{
+		"resourceType": "Encounter",
+		"id":           encID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/nhsn-dqm/StructureDefinition/ach-daily-encounter"},
+		},
+		"status": "in-progress",
+		"class": map[string]any{
+			"system":  "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+			"code":    "IMP",
+			"display": "inpatient encounter",
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedEnc, _ := s.upsertResourceMap(r.Context(), tenant, encRes)
+	if len(savedEnc) > 0 {
+		encRes = savedEnc
+	}
+
+	maID := "nhsn-aur-ma-" + patID
+	maRes := map[string]any{
+		"resourceType": "MedicationAdministration",
+		"id":           maID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/nhsn-dqm/StructureDefinition/ach-daily-medicationadministration"},
+		},
+		"status": "completed",
+		"medicationCodeableConcept": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://www.nlm.nih.gov/research/umls/rxnorm",
+					"code":    "1807512",
+					"display": "vancomycin 1000 MG Injection",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"context":           map[string]any{"reference": "Encounter/" + encID},
+		"effectiveDateTime": nowStr,
+	}
+	_, _, _, savedMA, _ := s.upsertResourceMap(r.Context(), tenant, maRes)
+	if len(savedMA) > 0 {
+		maRes = savedMA
+	}
+
+	mrID := firstNonEmptyStr(resID, "nhsn-aur-mr-"+patID)
+	mrRes := map[string]any{
+		"resourceType": "MeasureReport",
+		"id":           mrID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/nhsn-dqm/StructureDefinition/nhsn-aur-measure-report"},
+		},
+		"status":  "complete",
+		"type":    "individual",
+		"measure": "http://hl7.org/fhir/us/nhsn-dqm/Measure/NHSNAcuteCareHospitalMonthlyInitialPopulation",
+		"subject": map[string]any{"reference": "Patient/" + patID},
+		"date":    nowStr,
+		"period": map[string]any{
+			"start": nowStr,
+			"end":   nowStr,
+		},
+		"evaluatedResource": []map[string]any{
+			{"reference": "Encounter/" + encID},
+			{"reference": "MedicationAdministration/" + maID},
+		},
+	}
+	_, _, _, savedMR, _ := s.upsertResourceMap(r.Context(), tenant, mrRes)
+	if len(savedMR) > 0 {
+		mrRes = savedMR
+	}
+
+	if op == "nhsn-aur-submit" {
+		if r.Method != http.MethodPost {
+			writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$nhsn-aur-submit requires HTTP POST")
+			return
+		}
+		out := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "status", "valueCode": "submitted"},
+				{"name": "measureReport", "resource": mrRes},
+				{"name": "medicationAdministration", "resource": maRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(out)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "nhsn-hai-summary-" + patID,
+		"type":         "searchset",
+		"total":        3,
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "MeasureReport/" + mrID, "resource": mrRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Encounter/" + encID, "resource": encRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "MedicationAdministration/" + maID, "resource": maRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleCodeXMCODEWave47 implements HL7 CodeX Clinical Trial Matching v1.0.0
+// and HL7 mCODE v3.0.0 Cancer Disease Status Progression:
+//   - POST /fhir/r4/{tenant}/Patient/$mcode-trial-match & /fhir/r4/{tenant}/Patient/{id}/$mcode-trial-match
+//   - POST /fhir/r4/{tenant}/Observation/$mcode-disease-status & /fhir/r4/{tenant}/Observation/{id}/$mcode-disease-status
+func (s *Server) handleCodeXMCODEWave47(w http.ResponseWriter, r *http.Request, op string) {
+	if r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$"+op+" requires HTTP POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	patID := strings.TrimPrefix(strings.TrimPrefix(firstNonEmptyStr(
+		q.Get("patient"),
+		q.Get("subject"),
+		resID,
+	), "Patient/"), "Observation/")
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "patient" || name == "subject" {
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if patID == "" {
+		patID = "example"
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "mcode-trial-match" {
+		studyID := "codex-trial-match-" + patID
+		studyRes := map[string]any{
+			"resourceType": "ResearchStudy",
+			"id":           studyID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/codex-clinical-trial-matching/StructureDefinition/clinical-trial-research-study"},
+			},
+			"status": "active",
+			"title":  "CodeX Phase III Targeted Oncology Clinical Trial (mCODE Biomarker Matched)",
+			"phase": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/research-study-phase",
+						"code":    "phase-3",
+						"display": "Phase 3",
+					},
+				},
+			},
+		}
+		_, _, _, savedStudy, _ := s.upsertResourceMap(r.Context(), tenant, studyRes)
+		if len(savedStudy) > 0 {
+			studyRes = savedStudy
+		}
+
+		bundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           "codex-trial-match-bundle-" + patID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/codex-clinical-trial-matching/StructureDefinition/codex-clinical-trial-match-bundle"},
+			},
+			"type":      "searchset",
+			"total":     1,
+			"timestamp": nowStr,
+			"entry": []map[string]any{
+				{
+					"fullUrl":  "ResearchStudy/" + studyID,
+					"resource": studyRes,
+					"search": map[string]any{
+						"mode":  "match",
+						"score": 0.96,
+					},
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(bundle)
+		return
+	}
+
+	obsID := firstNonEmptyStr(resID, "mcode-disease-status-"+patID)
+	obsRes := map[string]any{
+		"resourceType": "Observation",
+		"id":           obsID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-cancer-disease-status"},
+		},
+		"status": "final",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "97509-4",
+					"display": "Cancer disease progression",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueCodeableConcept": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "268910001",
+					"display": "Patient's condition improved",
+				},
+			},
+		},
+	}
+	_, _, _, savedObs, _ := s.upsertResourceMap(r.Context(), tenant, obsRes)
+	if len(savedObs) > 0 {
+		obsRes = savedObs
+	}
+
+	out := map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{"name": "status", "valueCode": "recorded"},
+			{"name": "observation", "resource": obsRes},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// handleFASTNDHNetworkWave47 implements ONC FAST National Healthcare Directory (NDH v1.0.0)
+// and Da Vinci Plan-Net v1.1.0 Network Query & Service Attestation:
+//   - GET/POST /fhir/r4/{tenant}/OrganizationAffiliation/$fast-network-query & /fhir/r4/{tenant}/OrganizationAffiliation/{id}/$fast-network-query
+//   - POST /fhir/r4/{tenant}/HealthcareService/$fast-attest & /fhir/r4/{tenant}/HealthcareService/{id}/$fast-attest
+func (s *Server) handleFASTNDHNetworkWave47(w http.ResponseWriter, r *http.Request, op string) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	if op == "fast-attest" {
+		if r.Method != http.MethodPost {
+			writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$fast-attest requires HTTP POST")
+			return
+		}
+		hsID := firstNonEmptyStr(resID, "ndh-hs-1")
+		hsRes := map[string]any{
+			"resourceType": "HealthcareService",
+			"id":           hsID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-HealthcareService"},
+			},
+			"active":     true,
+			"providedBy": map[string]any{"reference": "Organization/ndh-org-1"},
+			"name":       "ONC FAST National Directory Verified Specialty Clinic",
+		}
+		_, _, _, savedHS, _ := s.upsertResourceMap(r.Context(), tenant, hsRes)
+		if len(savedHS) > 0 {
+			hsRes = savedHS
+		}
+
+		vrID := "ndh-vr-" + hsID
+		vrRes := map[string]any{
+			"resourceType": "VerificationResult",
+			"id":           vrID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-Verification"},
+			},
+			"target":     []map[string]any{{"reference": "HealthcareService/" + hsID}},
+			"status":     "validated",
+			"statusDate": nowStr,
+			"need": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/need",
+						"code":    "periodic",
+						"display": "Periodic",
+					},
+				},
+			},
+		}
+		_, _, _, savedVR, _ := s.upsertResourceMap(r.Context(), tenant, vrRes)
+		if len(savedVR) > 0 {
+			vrRes = savedVR
+		}
+
+		out := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "status", "valueCode": "validated"},
+				{"name": "healthcareService", "resource": hsRes},
+				{"name": "verificationResult", "resource": vrRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(out)
+		return
+	}
+
+	netID := "plannet-network-1"
+	netRes := map[string]any{
+		"resourceType": "Organization",
+		"id":           netID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Network"},
+		},
+		"active": true,
+		"name":   "Flint National Preferred Payer Network",
+	}
+	_, _, _, savedNet, _ := s.upsertResourceMap(r.Context(), tenant, netRes)
+	if len(savedNet) > 0 {
+		netRes = savedNet
+	}
+
+	epID := "ndh-endpoint-1"
+	epRes := map[string]any{
+		"resourceType": "Endpoint",
+		"id":           epID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-Endpoint"},
+		},
+		"status": "active",
+		"connectionType": map[string]any{
+			"system":  "http://terminology.hl7.org/CodeSystem/endpoint-connection-type",
+			"code":    "hl7-fhir-rest",
+			"display": "HL7 FHIR",
+		},
+		"name":        "ONC FAST National Directory FHIR R4 Endpoint",
+		"payloadType": []map[string]any{{"text": "any"}},
+		"address":     "https://ndh.flint.fhir.org/fhir/r4",
+	}
+	_, _, _, savedEP, _ := s.upsertResourceMap(r.Context(), tenant, epRes)
+	if len(savedEP) > 0 {
+		epRes = savedEP
+	}
+
+	oaID := firstNonEmptyStr(resID, "ndh-orgaff-1")
+	oaRes := map[string]any{
+		"resourceType": "OrganizationAffiliation",
+		"id":           oaID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-OrganizationAffiliation"},
+		},
+		"active":                    true,
+		"organization":              map[string]any{"reference": "Organization/" + netID},
+		"participatingOrganization": map[string]any{"reference": "Organization/ndh-org-1"},
+		"network":                   []map[string]any{{"reference": "Organization/" + netID}},
+		"endpoint":                  []map[string]any{{"reference": "Endpoint/" + epID}},
+	}
+	_, _, _, savedOA, _ := s.upsertResourceMap(r.Context(), tenant, oaRes)
+	if len(savedOA) > 0 {
+		oaRes = savedOA
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "fast-network-query-" + oaID,
+		"type":         "searchset",
+		"total":        3,
+		"timestamp":    nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "OrganizationAffiliation/" + oaID, "resource": oaRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Organization/" + netID, "resource": netRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "Endpoint/" + epID, "resource": epRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}

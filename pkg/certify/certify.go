@@ -1814,6 +1814,15 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /ExplanationOfBenefit/$carin-bb-claims to return C4BB-ExplanationOfBenefit-Oral, got %d: %s", respC4BB.StatusCode, string(bC4BB))
 			}
 		}
+		if err == nil {
+			respHAI, bHAI, errHAI := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$nhsn-hai-summary", "", nil, nil)
+			respFASTNet, bFASTNet, errFASTNet := doReq(http.MethodGet, basePath+"/OrganizationAffiliation/$fast-network-query", "", nil, nil)
+			if errHAI != nil || respHAI.StatusCode != http.StatusOK || !strings.Contains(string(bHAI), "nhsn-aur-measure-report") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$nhsn-hai-summary to return nhsn-aur-measure-report, got %d: %s", respHAI.StatusCode, string(bHAI))
+			} else if errFASTNet != nil || respFASTNet.StatusCode != http.StatusOK || !strings.Contains(string(bFASTNet), "ndh-OrganizationAffiliation") {
+				err = fmt.Errorf("expected GET /OrganizationAffiliation/$fast-network-query to return ndh-OrganizationAffiliation, got %d: %s", respFASTNet.StatusCode, string(bFASTNet))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
