@@ -290,14 +290,17 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		} else {
 			respOIDC, _, errOIDC := doReq(http.MethodGet, basePath+"/.well-known/openid-configuration", "", nil, nil)
 			respJWKS, bJWKS, errJWKS := doReq(http.MethodGet, basePath+"/.well-known/jwks.json", "", nil, nil)
+			respUDAP, bUDAP, errUDAP := doReq(http.MethodGet, basePath+"/.well-known/udap", "", nil, nil)
 			if errOIDC != nil || respOIDC.StatusCode != http.StatusOK {
 				err = fmt.Errorf("expected 200 OK on /.well-known/openid-configuration")
 			} else if errJWKS != nil || respJWKS.StatusCode != http.StatusOK || !strings.Contains(string(bJWKS), `"RS256"`) {
 				err = fmt.Errorf("expected 200 OK with RS256 key on /.well-known/jwks.json")
+			} else if errUDAP != nil || respUDAP.StatusCode != http.StatusOK || !strings.Contains(string(bUDAP), `"udap_dcr"`) {
+				err = fmt.Errorf("expected 200 OK with udap_dcr on /.well-known/udap")
 			}
 		}
 	}
-	record("DISC-02", suite1, "SMART v2 (.well-known/smart-configuration), OIDC & JWKS Discovery", t0, err, "SMART v2, OIDC & RS256 JWKS discovery verified")
+	record("DISC-02", suite1, "SMART v2 (.well-known/smart-configuration), OIDC, JWKS & UDAP Discovery", t0, err, "SMART v2, OIDC, RS256 JWKS & UDAP discovery verified")
 
 	t0 = time.Now()
 	resp, b, err = doReq(http.MethodGet, basePath+"/openapi.json", "", nil, nil)

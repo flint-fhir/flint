@@ -54,14 +54,14 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Patient Compartment, IPS, SDC & Da Vinci Operations",
-			Capability:    "Patient/$everything & Encounter/$everything (GET/POST + _type/_since/_typeFilter/_count/_offset pagination), Patient/{id}/$summary (HL7 IPS), DocumentReference/$docref (US Core / Argonaut Clinical Notes + On-Demand IPS), Composition/{id}/$document (2-hop closure + persist=true), Questionnaire/$populate, Questionnaire/$dtr-questionnaire-package & QuestionnaireResponse/$extract (HL7 SDC / Da Vinci DTR + Auto-Provenance), Measure/$evaluate-measure, Measure/$care-gaps (Da Vinci DEQM), MeasureReport/$ra-evaluate-risk & Patient/$ra-coding-gap-report (Da Vinci RA), Group/$confirm-attribution-list & Group/$atr-summary (Da Vinci ATR), Claim/$submit, Claim/$pas-inquire & Patient/$burden-reduction-summary (Da Vinci PAS/CRD/DTR), X-Provenance Header & /{resourceType}/{id}/$provenance, Patient/$match (MPI), Patient/$member-match (Da Vinci HRex), System/Type/Instance $meta / $meta-add / $meta-delete & RESTful Compartment Search",
-			Specification: "HL7 FHIR R4, US Core, IPS, SDC & Da Vinci HRex/PDex/PAS/CRD/DTR/ATR/RA/DEQM",
+			Capability:    "Patient/$everything & Encounter/$everything (GET/POST + _type/_since/_typeFilter/_count/_offset pagination), Patient/{id}/$summary (HL7 IPS), DocumentReference/$docref (US Core / Argonaut Clinical Notes + On-Demand IPS), Composition/{id}/$document (2-hop closure + persist=true), Questionnaire/$populate, Questionnaire/$dtr-questionnaire-package & QuestionnaireResponse/$extract (HL7 SDC / Da Vinci DTR + Auto-Provenance), Measure/$evaluate-measure, Measure/$care-gaps (Da Vinci DEQM), MeasureReport/$ra-evaluate-risk & Patient/$ra-coding-gap-report (Da Vinci RA), Group/$confirm-attribution-list & Group/$atr-summary (Da Vinci ATR), Group/$pdex-provider-member-match, Patient/$pdex-provider-everything, Patient/$pdex-payer-exchange & Patient/$pdex-payer-summary (CMS-0057-F / Da Vinci PDex v2.1.0), Claim/$submit, Claim/$pas-inquire & Patient/$burden-reduction-summary (Da Vinci PAS/CRD/DTR), X-Provenance Header & /{resourceType}/{id}/$provenance, Patient/$match (MPI), Patient/$member-match (Da Vinci HRex), System/Type/Instance $meta / $meta-add / $meta-delete & RESTful Compartment Search",
+			Specification: "HL7 FHIR R4, US Core, IPS, SDC, CMS-0057-F & Da Vinci HRex/PDex/PAS/CRD/DTR/ATR/RA/DEQM",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/DocumentReference/$docref",
 		},
 		{
-			Category:      "Specialty HL7 Implementation Guides (CodeX, Public Health, PACIO, Vulcan, Gravity SDOH & FAST NDH)",
-			Capability:    "CodeX mCODE, Genomics, Clinical Trial Matching & RTTD ($mcode-summary, $stage-cancer, $mcode-radiotherapy-record, $mcode-genomics-report, $mcode-trial-match, $mcode-trial-summary, $codex-rttd-plan, $codex-rttd-summary), Public Health eCR, ELR, IIS, NBS, VRDR, BFDR, CCRR, MedMorph, NHSN HAI/AUR/DQM & SANER ($ecr-submit, $elr-submit, $iis-submit, $nbs-submit, $vrdr-submit, $bfdr-submit, $cancer-registry-submit, $nhsn-dqm-evaluate, $nhsn-ach-summary, $saner-report-capacity, $saner-capacity-summary), PACIO Post-Acute, ADI, TOC, PFE, Cognitive & SPLASCH ($pacio-summary, $adi-record, $pacio-toc-bundle, $pacio-pfe-summary, $pacio-splasch-record, $pacio-splasch-summary), Vulcan Clinical Research & RWD ($vulcan-rwd-cohort, $vulcan-rwd-summary, $vulcan-esource-extract, $vulcan-soa-timeline, $vulcan-icsr-report, $epi-document), Gravity SDOH ($sdoh-assess, $sdoh-referral, $sdoh-fulfill, $sdoh-consent-record, $sdoh-care-bundle) & ONC FAST NDH ($fast-endpoint-query, $fast-network-query, $ndh-verify, $ndh-directory-summary)",
+			Category:      "Specialty HL7 Implementation Guides (CodeX, Public Health, PACIO, Vulcan, Gravity SDOH & FAST NDH/UDAP)",
+			Capability:    "CodeX mCODE, Genomics, Clinical Trial Matching & RTTD ($mcode-summary, $stage-cancer, $mcode-radiotherapy-record, $mcode-genomics-report, $mcode-trial-match, $mcode-trial-summary, $codex-rttd-plan, $codex-rttd-summary), Public Health eCR, ELR, IIS, NBS, VRDR, BFDR, CCRR, MedMorph, NHSN HAI/AUR/DQM & SANER ($ecr-submit, $elr-submit, $iis-submit, $nbs-submit, $vrdr-submit, $bfdr-submit, $cancer-registry-submit, $nhsn-dqm-evaluate, $nhsn-ach-summary, $saner-report-capacity, $saner-capacity-summary), PACIO Post-Acute, ADI, TOC, PFE, Cognitive & SPLASCH ($pacio-summary, $adi-record, $pacio-toc-bundle, $pacio-pfe-summary, $pacio-splasch-record, $pacio-splasch-summary), Vulcan Clinical Research & RWD ($vulcan-rwd-cohort, $vulcan-rwd-summary, $vulcan-esource-extract, $vulcan-soa-timeline, $vulcan-icsr-report, $epi-document), Gravity SDOH ($sdoh-assess, $sdoh-referral, $sdoh-fulfill, $sdoh-consent-record, $sdoh-care-bundle) & ONC FAST NDH / UDAP Security ($fast-endpoint-query, $fast-network-query, $ndh-verify, $ndh-directory-summary, $udap-register, $udap-trust-summary)",
 			Specification: "HL7 CodeX, Public Health, PACIO, Vulcan, Gravity SDOH & ONC FAST IGs",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/Location/{id}/$saner-capacity-summary",
@@ -5289,6 +5289,85 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "Searchset Bundle (SDOHCC-Bundle)"},
+				},
+			},
+		},
+		"/.well-known/udap": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Security", "UDAP"},
+				"summary":     "HL7 FAST Security / UDAP v1.0.0 Discovery Metadata (udap_dcr, udap_authn, udap_authz, udap_to, hl7-b2b)",
+				"operationId": "wellKnownUDAPGet",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "UDAP discovery metadata JSON"},
+				},
+			},
+		},
+		"/Organization/$udap-register": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Organization", "Endpoint", "Provenance", "Parameters"},
+				"summary":     "Register a trusted B2B client per HL7 FAST Security / UDAP Dynamic Client Registration (v1.0.0) and persist Organization, Endpoint, and Provenance",
+				"operationId": "organizationUDAPRegisterPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing clientId, udapProfile, organization, endpoint, and provenance"},
+				},
+			},
+		},
+		"/Organization/{id}/$udap-trust-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Organization", "Endpoint", "Provenance", "Bundle"},
+				"summary":     "Assemble an HL7 FAST Security / UDAP v1.0.0 trust community summary Bundle for Organization/{id}",
+				"operationId": "organizationUDAPTrustSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (udap-trust-bundle)"},
+				},
+			},
+		},
+		"/Group/$pdex-provider-member-match": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Group", "Patient", "Consent"},
+				"summary":     "Execute CMS-0057-F & HL7 Da Vinci PDex v2.1.0 Provider Access multi-member treatment relationship matching with opt-out Consent verification",
+				"operationId": "groupPDexProviderMemberMatchPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted pdex-member-match-group Group"},
+				},
+			},
+		},
+		"/Patient/{id}/$pdex-provider-everything": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Condition", "ExplanationOfBenefit", "ClaimResponse", "Provenance", "Bundle"},
+				"summary":     "Assemble a CMS-0057-F & HL7 Da Vinci PDex v2.1.0 Provider Access longitudinal clinical, claims, and prior authorization Bundle for Patient/{id}",
+				"operationId": "patientPDexProviderEverythingGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (pdex-provider-access-bundle)"},
+				},
+			},
+		},
+		"/Patient/$pdex-payer-exchange": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient", "Consent", "Coverage", "Condition", "ExplanationOfBenefit", "Provenance", "Parameters"},
+				"summary":     "Execute CMS-0057-F & HL7 Da Vinci PDex v2.1.0 Payer-to-Payer data exchange with member opt-in Consent verification",
+				"operationId": "patientPDexPayerExchangePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, consent, coverage, explanationOfBenefit, and provenance"},
+				},
+			},
+		},
+		"/Patient/{id}/$pdex-payer-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Consent", "Coverage", "Condition", "ExplanationOfBenefit", "Provenance", "Bundle"},
+				"summary":     "Assemble a CMS-0057-F & HL7 Da Vinci PDex v2.1.0 Payer-to-Payer longitudinal Bundle for Patient/{id}",
+				"operationId": "patientPDexPayerSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (pdex-payer-exchange-bundle)"},
 				},
 			},
 		},

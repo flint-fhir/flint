@@ -40,11 +40,11 @@ const igCatalog = [
     curl: "curl -i -H 'Prefer: respond-async' 'http://localhost:8080/fhir/r4/demo/$export?_type=Patient,Condition,Observation'"
   },
   {
-    title: "SMART on FHIR v2.0.0 & Backend Services (RFC 7523)",
+    title: "SMART on FHIR v2.0.0, Backend Services (RFC 7523) & HL7 FAST / UDAP Security",
     domain: "Core & ONC",
-    desc: "Built-in OAuth2 PKCE (S256), asymmetric ES384/RS384/RS256 private_key_jwt client assertions, granular ?category= scopes, and strict Patient compartment isolation.",
-    ops: ["GET /.well-known/smart-configuration", "POST /oauth2/token", "POST /oauth2/introspect", "POST /oauth2/revoke"],
-    curl: "curl -s 'http://localhost:8080/fhir/r4/demo/.well-known/smart-configuration' | jq ."
+    desc: "Built-in OAuth2 PKCE (S256), asymmetric ES384/RS384/RS256 private_key_jwt client assertions, HL7 FAST UDAP v1.0.0 Trusted Dynamic Client Registration ($udap-register, $udap-trust-summary, /.well-known/udap), and strict Patient compartment isolation.",
+    ops: ["GET /.well-known/smart-configuration", "GET /.well-known/udap", "Organization/$udap-register", "Organization/{id}/$udap-trust-summary", "POST /oauth2/token"],
+    curl: "curl -s 'http://localhost:8080/fhir/r4/demo/.well-known/udap' | jq ."
   },
   {
     title: "HL7 Da Vinci Burden Reduction (CRD, DTR & PAS v2.0.1)",
@@ -61,11 +61,11 @@ const igCatalog = [
     curl: "curl -s -X POST 'http://localhost:8080/fhir/r4/demo/Task/$cdex-submit-attachment' -H 'Content-Type: application/fhir+json' -d '{\"patient\":\"Patient/example-patient-1\"}' | jq ."
   },
   {
-    title: "HL7 Da Vinci Member Attribution (ATR v2.0.0) & PDex",
+    title: "CMS-0057-F Interoperability Final Rule: Da Vinci PDex v2.1.0 & Member Attribution (ATR)",
     domain: "Da Vinci Payer",
-    desc: "Payer-to-payer member matching ($member-match, $bulk-member-match), attribution roster management ($member-add, $confirm-attribution-list, $atr-summary), and $davinci-data-export.",
-    ops: ["Patient/$member-match", "Group/{id}/$confirm-attribution-list", "Group/{id}/$atr-summary", "Group/{id}/$davinci-data-export"],
-    curl: "curl -s 'http://localhost:8080/fhir/r4/demo/Group/atr-grp-1/$atr-summary?patient=Patient/example-patient-1' | jq ."
+    desc: "Provider Access API ($pdex-provider-member-match, $pdex-provider-everything), Payer-to-Payer Data Exchange ($pdex-payer-exchange, $pdex-payer-summary), member matching ($member-match, $bulk-member-match), and attribution rosters ($confirm-attribution-list, $atr-summary).",
+    ops: ["Group/$pdex-provider-member-match", "Patient/{id}/$pdex-provider-everything", "Patient/$pdex-payer-exchange", "Patient/{id}/$pdex-payer-summary", "Group/{id}/$confirm-attribution-list", "Group/{id}/$atr-summary"],
+    curl: "curl -s 'http://localhost:8080/fhir/r4/demo/Patient/example-patient-1/$pdex-provider-everything' | jq ."
   },
   {
     title: "HL7 Da Vinci Risk Adjustment (RA v2.0.0) & VBPR (v1.0.0)",
