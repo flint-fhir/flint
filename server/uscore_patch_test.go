@@ -8632,3 +8632,162 @@ func TestPublicHealthSANERCodeXRTTDAndGravitySDOHWave52(t *testing.T) {
 		}
 	})
 }
+
+func TestCapabilityStatementOpenAPIParityAndPublicWebsiteWave53(t *testing.T) {
+	srv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(srv)
+	h := srv.Handler()
+
+	// 1. Fetch CapabilityStatement (/fhir/r4/default/metadata)
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/default/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	h.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK {
+		t.Fatalf("GET /metadata status = %d: %s", metaRec.Code, metaRec.Body.String())
+	}
+
+	var capStmt struct {
+		Rest []struct {
+			Resource []struct {
+				Type      string `json:"type"`
+				Operation []struct {
+					Name       string `json:"name"`
+					Definition string `json:"definition"`
+				} `json:"operation"`
+			} `json:"resource"`
+			Operation []struct {
+				Name       string `json:"name"`
+				Definition string `json:"definition"`
+			} `json:"operation"`
+		} `json:"rest"`
+	}
+	if err := json.Unmarshal(metaRec.Body.Bytes(), &capStmt); err != nil {
+		t.Fatalf("unmarshal CapabilityStatement: %v", err)
+	}
+	if len(capStmt.Rest) == 0 {
+		t.Fatalf("CapabilityStatement missing rest[0]")
+	}
+
+	// 2. Fetch OpenAPI 3.1 spec (/fhir/r4/default/openapi.json)
+	oaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/default/openapi.json", nil)
+	oaRec := httptest.NewRecorder()
+	h.ServeHTTP(oaRec, oaReq)
+	if oaRec.Code != http.StatusOK {
+		t.Fatalf("GET /openapi.json status = %d: %s", oaRec.Code, oaRec.Body.String())
+	}
+
+	var oaSpec struct {
+		OpenAPI string                          `json:"openapi"`
+		Paths   map[string]map[string]any       `json:"paths"`
+		Matrix  []server.ConformanceMatrixEntry `json:"x-flint-conformance"`
+	}
+	if err := json.Unmarshal(oaRec.Body.Bytes(), &oaSpec); err != nil {
+		t.Fatalf("unmarshal OpenAPI spec: %v", err)
+	}
+	if oaSpec.OpenAPI != "3.1.0" {
+		t.Fatalf("expected openapi 3.1.0, got %q", oaSpec.OpenAPI)
+	}
+	if len(oaSpec.Matrix) < 13 {
+		t.Fatalf("expected >= 13 entries in x-flint-conformance, got %d", len(oaSpec.Matrix))
+	}
+	if len(oaSpec.Paths) < 350 {
+		t.Fatalf("expected >= 350 paths in OpenAPI 3.1 spec, got %d", len(oaSpec.Paths))
+	}
+
+	// 3. Verify every operation advertised in CapabilityStatement has a corresponding path in OpenAPI 3.1
+	for _, sysOp := range capStmt.Rest[0].Operation {
+		opSuffix := "/$" + sysOp.Name
+		found := false
+		for p := range oaSpec.Paths {
+			if p == opSuffix || strings.HasSuffix(p, opSuffix) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("operation $%s advertised in CapabilityStatement.rest[0].operation is missing from OpenAPI paths", sysOp.Name)
+		}
+	}
+
+	for _, res := range capStmt.Rest[0].Resource {
+		for _, op := range res.Operation {
+			typePath := "/" + res.Type + "/$" + op.Name
+			instPath := "/" + res.Type + "/{id}/$" + op.Name
+			_, hasType := oaSpec.Paths[typePath]
+			_, hasInst := oaSpec.Paths[instPath]
+			if !hasType && !hasInst {
+				t.Errorf("resource operation %s/$%s advertised in CapabilityStatement is missing from OpenAPI paths (checked %s and %s)", res.Type, op.Name, typePath, instPath)
+			}
+		}
+	}
+
+	// 4. Verify Public Website & README files exist and include up-to-date HL7 IGs & benchmarks
+	requiredFiles := []struct {
+		relPath  string
+		mustHave []string
+	}{
+		{
+			relPath: "../site/index.html",
+			mustHave: []string{
+				"Flint",
+				"1,410+ / sec",
+				"16× Smaller",
+				"HL7 Implementation Guide",
+				"--label-2:",
+			},
+		},
+		{
+			relPath: "../site/styles.css",
+			mustHave: []string{
+				"clamp(",
+				"contain: layout style",
+				"var(--label-2)",
+			},
+		},
+		{
+			relPath: "../site/app.js",
+			mustHave: []string{
+				"$saner-report-capacity",
+				"$codex-rttd-plan",
+				"$sdoh-consent-record",
+				"$vulcan-rwd-cohort",
+				"$pacio-splasch-record",
+				"$ndh-verify",
+				"$confirm-attribution-list",
+				"$dtr-questionnaire-package",
+				"$nhsn-dqm-evaluate",
+				"$ra-evaluate-risk",
+			},
+		},
+		{
+			relPath: "../.github/workflows/pages.yml",
+			mustHave: []string{
+				"deploy-pages",
+				"upload-pages-artifact",
+				"path: ./site",
+			},
+		},
+		{
+			relPath: "../README.md",
+			mustHave: []string{
+				"https://flint-fhir.github.io/flint/",
+				"$saner-report-capacity",
+				"$codex-rttd-plan",
+				"$sdoh-consent-record",
+			},
+		},
+	}
+
+	for _, rf := range requiredFiles {
+		data, err := os.ReadFile(rf.relPath)
+		if err != nil {
+			t.Fatalf("read %s: %v", rf.relPath, err)
+		}
+		content := string(data)
+		for _, needle := range rf.mustHave {
+			if !strings.Contains(content, needle) {
+				t.Errorf("%s is missing expected substring %q", rf.relPath, needle)
+			}
+		}
+	}
+}
