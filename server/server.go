@@ -1320,6 +1320,36 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleVulcanRWDWave51(w, r, "vulcan-rwd-summary")
 					return
 				}
+				if strings.EqualFold(parts[3], "MeasureReport") && parts[4] == "$saner-report-capacity" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePublicHealthSANERWave52(w, r, "saner-report-capacity")
+					return
+				}
+				if strings.EqualFold(parts[3], "Location") && parts[4] == "$saner-capacity-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePublicHealthSANERWave52(w, r, "saner-capacity-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "ServiceRequest") && parts[4] == "$codex-rttd-plan" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCodeXRTTDWave52(w, r, "codex-rttd-plan")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$codex-rttd-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCodeXRTTDWave52(w, r, "codex-rttd-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "Consent") && parts[4] == "$sdoh-consent-record" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleGravitySDOHConsentAndCareWave52(w, r, "sdoh-consent-record")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$sdoh-care-bundle" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleGravitySDOHConsentAndCareWave52(w, r, "sdoh-care-bundle")
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -1328,6 +1358,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "MeasureReport") && parts[5] == "$saner-report-capacity" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePublicHealthSANERWave52(w, r, "saner-report-capacity")
+					return
+				}
+				if strings.EqualFold(parts[3], "Location") && parts[5] == "$saner-capacity-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePublicHealthSANERWave52(w, r, "saner-capacity-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "ServiceRequest") && parts[5] == "$codex-rttd-plan" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCodeXRTTDWave52(w, r, "codex-rttd-plan")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$codex-rttd-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCodeXRTTDWave52(w, r, "codex-rttd-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "Consent") && parts[5] == "$sdoh-consent-record" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleGravitySDOHConsentAndCareWave52(w, r, "sdoh-consent-record")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$sdoh-care-bundle" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleGravitySDOHConsentAndCareWave52(w, r, "sdoh-care-bundle")
+					return
+				}
 				if strings.EqualFold(parts[3], "Group") && parts[5] == "$confirm-attribution-list" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -5406,6 +5472,21 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "vulcan-rwd-summary",
 					"definition": "http://hl7.org/fhir/uv/vulcan-rwd/OperationDefinition/Patient-vulcan-rwd-summary",
 				},
+				{
+					"name":       "codex-rttd-summary",
+					"definition": "http://hl7.org/fhir/us/codex-radiation-therapy/OperationDefinition/Patient-codex-rttd-summary",
+				},
+				{
+					"name":       "sdoh-care-bundle",
+					"definition": "http://hl7.org/fhir/us/sdoh-clinicalcare/OperationDefinition/Patient-sdoh-care-bundle",
+				},
+			}
+		case "Location":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "saner-capacity-summary",
+					"definition": "http://hl7.org/fhir/uv/saner/OperationDefinition/Location-saner-capacity-summary",
+				},
 			}
 		case "Immunization":
 			entry["operation"] = []map[string]string{
@@ -5608,6 +5689,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "physical-activity-referral",
 					"definition": "http://hl7.org/fhir/us/physical-activity/OperationDefinition/ServiceRequest-physical-activity-referral",
+				},
+				{
+					"name":       "codex-rttd-plan",
+					"definition": "http://hl7.org/fhir/us/codex-radiation-therapy/OperationDefinition/ServiceRequest-codex-rttd-plan",
 				},
 			}
 		case "MedicationRequest":
@@ -5824,6 +5909,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "ra-evaluate-risk",
 					"definition": "http://hl7.org/fhir/us/davinci-ra/OperationDefinition/MeasureReport-ra-evaluate-risk",
+				},
+				{
+					"name":       "saner-report-capacity",
+					"definition": "http://hl7.org/fhir/uv/saner/OperationDefinition/MeasureReport-saner-report-capacity",
 				},
 			}
 		case "DocumentReference":
@@ -6291,6 +6380,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "adi-verify",
 					"definition": "http://hl7.org/fhir/us/pacio-adi/OperationDefinition/Consent-adi-verify",
+				},
+				{
+					"name":       "sdoh-consent-record",
+					"definition": "http://hl7.org/fhir/us/sdoh-clinicalcare/OperationDefinition/Consent-sdoh-consent-record",
 				},
 			}
 		case "ExplanationOfBenefit":
