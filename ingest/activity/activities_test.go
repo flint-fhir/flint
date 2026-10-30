@@ -3,9 +3,11 @@ package activity_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log/slog"
 	"os"
 	"testing"
+	"time"
 
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
@@ -21,15 +23,29 @@ import (
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
+type failingPublisher struct{}
+
+func (failingPublisher) Publish(_ context.Context, _ []automq.Message) error {
+	return errors.New("simulated broker failure")
+}
+
 func TestWritePostgresBatch_WithExtractors(t *testing.T) {
 	dsn := os.Getenv("FLINT_TEST_POSTGRES_DSN")
 	if dsn == "" {
-		t.Skip("FLINT_TEST_POSTGRES_DSN not set")
+		dsn = "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
 	}
 
 	db, err := sql.Open("postgres", dsn)
-	require.NoError(t, err)
+	if err != nil {
+		t.Skipf("skipping Postgres activity test (open failed): %v", err)
+	}
 	defer db.Close()
+
+	pingCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := db.PingContext(pingCtx); err != nil {
+		t.Skipf("skipping Postgres activity test (ping failed): %v", err)
+	}
 
 	err = postgres.RunMigrations(t.Context(), db)
 	require.NoError(t, err)
@@ -102,6 +118,28 @@ func TestWritePostgresBatch_WithExtractors(t *testing.T) {
 	require.Len(t, condRes.Matches, 1)
 	assert.Equal(t, "act-cond-1", condRes.Matches[0].ResID)
 
+	// Verify custom IndexExtractors error fallback (warns and still writes resource)
+	customActivities := &activity.Activities{
+		Store: store,
+		// Omit Logger to exercise default slog.Default() fallback
+		IndexExtractors: map[string]activity.IndexExtractorFunc{
+			"Patient": func(_, _ string, _ []byte) (*postgres.SearchIndexes, error) {
+				return nil, errors.New("synthetic extractor failure")
+			},
+		},
+	}
+	err = customActivities.WritePostgresBatch(ctx, activity.WritePostgresBatchInput{
+		TenantID:       "test-act",
+		BundleID:       "bnd-act-2",
+		ResourceProtos: [][]byte{patBytes},
+		ResourceTypes:  []string{"Patient"},
+		ResourceIDs:    []string{"act-pat-fallback"},
+	})
+	require.NoError(t, err)
+	rawFallback, err := store.ReadResource(ctx, "test-act", "Patient", "act-pat-fallback")
+	require.NoError(t, err)
+	assert.NotEmpty(t, rawFallback)
+
 	// Cleanup
 	_ = postgres.PurgeTenant(ctx, db, "test-act")
 }
@@ -145,6 +183,17 @@ func TestPublishToAutoMQ_NilAndMemoryPublisher(t *testing.T) {
 		ResourceIDs:    []string{"pat-1"},
 	})
 	require.NoError(t, err)
+
+	activities.Producer = failingPublisher{}
+	err = activities.PublishToAutoMQ(context.Background(), activity.PublishToAutoMQInput{
+		TenantID:       "test-tenant",
+		ResourceProtos: [][]byte{{1, 2, 3}},
+		ResourceTypes:  []string{"Patient"},
+		ResourceIDs:    []string{"pat-1"},
+		Op:             "U",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "automq publish")
 }
 
 func TestActivities_SliceBoundsAndNilStoreValidation(t *testing.T) {

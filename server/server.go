@@ -1109,7 +1109,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleMCODEGenomicsWave43(w, r)
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "DiagnosticReport") && parts[4] == "$nbs-submit" {
+				if strings.EqualFold(parts[3], "DiagnosticReport") && parts[4] == "$nbs-submit" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("op", "$nbs-submit")
 					s.handlePublicHealthNBSWave44(w, r)
@@ -1127,13 +1127,13 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleDaVinciPCTWave44(w, r)
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[4] == "$pct-gfe-coordination" {
+				if strings.EqualFold(parts[3], "Task") && parts[4] == "$pct-gfe-coordination" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("op", "$pct-gfe-coordination")
 					s.handleDaVinciPCTWave44(w, r)
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "AdverseEvent") && parts[4] == "$vulcan-icsr-report" {
+				if strings.EqualFold(parts[3], "AdverseEvent") && parts[4] == "$vulcan-icsr-report" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("op", "$vulcan-icsr-report")
 					s.handleVulcanICSRAndSOAWave44(w, r)
@@ -1145,7 +1145,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleVulcanICSRAndSOAWave44(w, r)
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && parts[4] == "$ecr-submit" {
+				if strings.EqualFold(parts[3], "Bundle") && parts[4] == "$ecr-submit" {
 					r.SetPathValue("tenant", parts[2])
 					s.handlePublicHealthECRWave45(w, r, "ecr-submit")
 					return
@@ -1155,17 +1155,17 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handlePublicHealthECRWave45(w, r, "ecr-summary")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[4] == "$sdoh-assess" {
+				if strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[4] == "$sdoh-assess" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleGravitySDOHWave45(w, r, "sdoh-assess")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[4] == "$sdoh-fulfill" {
+				if strings.EqualFold(parts[3], "Task") && parts[4] == "$sdoh-fulfill" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleGravitySDOHWave45(w, r, "sdoh-fulfill")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ResearchSubject") && parts[4] == "$vulcan-esource-extract" {
+				if strings.EqualFold(parts[3], "ResearchSubject") && parts[4] == "$vulcan-esource-extract" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleVulcanESourceWave45(w, r, "vulcan-esource-extract")
 					return
@@ -1180,7 +1180,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handlePublicHealthELRAndCCRRWave46(w, r, "elr-summary")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && parts[4] == "$cancer-registry-submit" {
+				if strings.EqualFold(parts[3], "Bundle") && parts[4] == "$cancer-registry-submit" {
 					r.SetPathValue("tenant", parts[2])
 					s.handlePublicHealthELRAndCCRRWave46(w, r, "cancer-registry-submit")
 					return
@@ -1195,17 +1195,17 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleCARINBBAndRTPBCWave46(w, r, "rtpbc-summary")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Composition") && parts[4] == "$pacio-toc-bundle" {
+				if strings.EqualFold(parts[3], "Composition") && parts[4] == "$pacio-toc-bundle" {
 					r.SetPathValue("tenant", parts[2])
 					s.handlePACIOTOCAndADIWave46(w, r, "pacio-toc-bundle")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Consent") && parts[4] == "$adi-verify" {
+				if strings.EqualFold(parts[3], "Consent") && parts[4] == "$adi-verify" {
 					r.SetPathValue("tenant", parts[2])
 					s.handlePACIOTOCAndADIWave46(w, r, "adi-verify")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "MeasureReport") && parts[4] == "$nhsn-aur-submit" {
+				if strings.EqualFold(parts[3], "MeasureReport") && parts[4] == "$nhsn-aur-submit" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleNHSNHAIAURWave47(w, r, "nhsn-aur-submit")
 					return
@@ -1215,12 +1215,12 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleNHSNHAIAURWave47(w, r, "nhsn-hai-summary")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$mcode-trial-match" {
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$mcode-trial-match" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleCodeXMCODEWave47(w, r, "mcode-trial-match")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Observation") && parts[4] == "$mcode-disease-status" {
+				if strings.EqualFold(parts[3], "Observation") && parts[4] == "$mcode-disease-status" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleCodeXMCODEWave47(w, r, "mcode-disease-status")
 					return
@@ -1230,7 +1230,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleFASTNDHNetworkWave47(w, r, "fast-network-query")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "HealthcareService") && parts[4] == "$fast-attest" {
+				if strings.EqualFold(parts[3], "HealthcareService") && parts[4] == "$fast-attest" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleFASTNDHNetworkWave47(w, r, "fast-attest")
 					return
@@ -1243,7 +1243,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "MeasureReport") && parts[5] == "$nhsn-aur-submit" {
+				if strings.EqualFold(parts[3], "MeasureReport") && parts[5] == "$nhsn-aur-submit" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleNHSNHAIAURWave47(w, r, "nhsn-aur-submit")
@@ -1255,13 +1255,13 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleNHSNHAIAURWave47(w, r, "nhsn-hai-summary")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[5] == "$mcode-trial-match" {
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$mcode-trial-match" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleCodeXMCODEWave47(w, r, "mcode-trial-match")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Observation") && parts[5] == "$mcode-disease-status" {
+				if strings.EqualFold(parts[3], "Observation") && parts[5] == "$mcode-disease-status" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleCodeXMCODEWave47(w, r, "mcode-disease-status")
@@ -1273,7 +1273,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleFASTNDHNetworkWave47(w, r, "fast-network-query")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "HealthcareService") && parts[5] == "$fast-attest" {
+				if strings.EqualFold(parts[3], "HealthcareService") && parts[5] == "$fast-attest" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleFASTNDHNetworkWave47(w, r, "fast-attest")
@@ -1285,7 +1285,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handlePublicHealthELRAndCCRRWave46(w, r, "elr-summary")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && parts[5] == "$cancer-registry-submit" {
+				if strings.EqualFold(parts[3], "Bundle") && parts[5] == "$cancer-registry-submit" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handlePublicHealthELRAndCCRRWave46(w, r, "cancer-registry-submit")
@@ -1303,19 +1303,19 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleCARINBBAndRTPBCWave46(w, r, "rtpbc-summary")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Composition") && parts[5] == "$pacio-toc-bundle" {
+				if strings.EqualFold(parts[3], "Composition") && parts[5] == "$pacio-toc-bundle" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handlePACIOTOCAndADIWave46(w, r, "pacio-toc-bundle")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Consent") && parts[5] == "$adi-verify" {
+				if strings.EqualFold(parts[3], "Consent") && parts[5] == "$adi-verify" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handlePACIOTOCAndADIWave46(w, r, "adi-verify")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Bundle") && parts[5] == "$ecr-submit" {
+				if strings.EqualFold(parts[3], "Bundle") && parts[5] == "$ecr-submit" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handlePublicHealthECRWave45(w, r, "ecr-submit")
@@ -1327,19 +1327,19 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handlePublicHealthECRWave45(w, r, "ecr-summary")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[5] == "$sdoh-assess" {
+				if strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[5] == "$sdoh-assess" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleGravitySDOHWave45(w, r, "sdoh-assess")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[5] == "$sdoh-fulfill" {
+				if strings.EqualFold(parts[3], "Task") && parts[5] == "$sdoh-fulfill" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleGravitySDOHWave45(w, r, "sdoh-fulfill")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ResearchSubject") && parts[5] == "$vulcan-esource-extract" {
+				if strings.EqualFold(parts[3], "ResearchSubject") && parts[5] == "$vulcan-esource-extract" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleVulcanESourceWave45(w, r, "vulcan-esource-extract")
@@ -1351,7 +1351,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleVulcanESourceWave45(w, r, "vulcan-summary")
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "DiagnosticReport") && parts[5] == "$nbs-submit" {
+				if strings.EqualFold(parts[3], "DiagnosticReport") && parts[5] == "$nbs-submit" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					r.SetPathValue("op", "$nbs-submit")
@@ -1372,14 +1372,14 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleDaVinciPCTWave44(w, r)
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Task") && parts[5] == "$pct-gfe-coordination" {
+				if strings.EqualFold(parts[3], "Task") && parts[5] == "$pct-gfe-coordination" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					r.SetPathValue("op", "$pct-gfe-coordination")
 					s.handleDaVinciPCTWave44(w, r)
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "AdverseEvent") && parts[5] == "$vulcan-icsr-report" {
+				if strings.EqualFold(parts[3], "AdverseEvent") && parts[5] == "$vulcan-icsr-report" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					r.SetPathValue("op", "$vulcan-icsr-report")
