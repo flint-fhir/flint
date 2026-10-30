@@ -54,10 +54,17 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Patient Compartment, IPS, SDC & Da Vinci Operations",
-			Capability:    "Patient/$everything & Encounter/$everything (GET/POST + _type/_since/_typeFilter/_count/_offset pagination), Patient/{id}/$summary (HL7 IPS), DocumentReference/$docref (US Core / Argonaut Clinical Notes + On-Demand IPS), Composition/{id}/$document (2-hop closure + persist=true), Questionnaire/$populate & QuestionnaireResponse/$extract (HL7 SDC + Auto-Provenance), Measure/$evaluate-measure (individual, summary, subject-list) & Measure/$care-gaps (Da Vinci DEQM), X-Provenance Header & /{resourceType}/{id}/$provenance, Patient/$match (MPI), Patient/$member-match (Da Vinci HRex), Claim/$submit (Da Vinci PAS), System/Type/Instance $meta / $meta-add / $meta-delete & RESTful Compartment Search",
-			Specification: "HL7 FHIR R4, US Core, IPS, SDC & Da Vinci HRex/PDex/PAS/DEQM",
+			Capability:    "Patient/$everything & Encounter/$everything (GET/POST + _type/_since/_typeFilter/_count/_offset pagination), Patient/{id}/$summary (HL7 IPS), DocumentReference/$docref (US Core / Argonaut Clinical Notes + On-Demand IPS), Composition/{id}/$document (2-hop closure + persist=true), Questionnaire/$populate, Questionnaire/$dtr-questionnaire-package & QuestionnaireResponse/$extract (HL7 SDC / Da Vinci DTR + Auto-Provenance), Measure/$evaluate-measure, Measure/$care-gaps (Da Vinci DEQM), MeasureReport/$ra-evaluate-risk & Patient/$ra-coding-gap-report (Da Vinci RA), Group/$confirm-attribution-list & Group/$atr-summary (Da Vinci ATR), Claim/$submit, Claim/$pas-inquire & Patient/$burden-reduction-summary (Da Vinci PAS/CRD/DTR), X-Provenance Header & /{resourceType}/{id}/$provenance, Patient/$match (MPI), Patient/$member-match (Da Vinci HRex), System/Type/Instance $meta / $meta-add / $meta-delete & RESTful Compartment Search",
+			Specification: "HL7 FHIR R4, US Core, IPS, SDC & Da Vinci HRex/PDex/PAS/CRD/DTR/ATR/RA/DEQM",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/DocumentReference/$docref",
+		},
+		{
+			Category:      "Specialty HL7 Implementation Guides (CodeX, Public Health, PACIO, Vulcan, Gravity SDOH & FAST NDH)",
+			Capability:    "CodeX mCODE, Genomics, Clinical Trial Matching & RTTD ($mcode-summary, $stage-cancer, $mcode-radiotherapy-record, $mcode-genomics-report, $mcode-trial-match, $mcode-trial-summary, $codex-rttd-plan, $codex-rttd-summary), Public Health eCR, ELR, IIS, NBS, VRDR, BFDR, CCRR, MedMorph, NHSN HAI/AUR/DQM & SANER ($ecr-submit, $elr-submit, $iis-submit, $nbs-submit, $vrdr-submit, $bfdr-submit, $cancer-registry-submit, $nhsn-dqm-evaluate, $nhsn-ach-summary, $saner-report-capacity, $saner-capacity-summary), PACIO Post-Acute, ADI, TOC, PFE, Cognitive & SPLASCH ($pacio-summary, $adi-record, $pacio-toc-bundle, $pacio-pfe-summary, $pacio-splasch-record, $pacio-splasch-summary), Vulcan Clinical Research & RWD ($vulcan-rwd-cohort, $vulcan-rwd-summary, $vulcan-esource-extract, $vulcan-soa-timeline, $vulcan-icsr-report, $epi-document), Gravity SDOH ($sdoh-assess, $sdoh-referral, $sdoh-fulfill, $sdoh-consent-record, $sdoh-care-bundle) & ONC FAST NDH ($fast-endpoint-query, $fast-network-query, $ndh-verify, $ndh-directory-summary)",
+			Specification: "HL7 CodeX, Public Health, PACIO, Vulcan, Gravity SDOH & ONC FAST IGs",
+			Status:        "Verified",
+			Endpoint:      "/fhir/r4/{tenant}/Location/{id}/$saner-capacity-summary",
 		},
 		{
 			Category:      "Terminology Services",
@@ -2988,6 +2995,82 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/Library/$data-requirements": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Library"},
+				"summary":     "HL7 FHIR R4 Library/$data-requirements returning a module-definition Library of required clinical resources, ValueSets, and Libraries",
+				"operationId": "libraryDataRequirementsGet",
+				"parameters": []map[string]any{
+					{"name": "target", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "url", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 module-definition Library resource"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Library"},
+				"summary":     "HL7 FHIR R4 Library/$data-requirements (POST Parameters or Library)",
+				"operationId": "libraryDataRequirementsPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 module-definition Library resource"},
+				},
+			},
+		},
+		"/Measure/$data-requirements": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Measure"},
+				"summary":     "HL7 FHIR R4 Measure/$data-requirements returning a module-definition Library of required clinical resources, ValueSets, and Libraries",
+				"operationId": "measureDataRequirementsGet",
+				"parameters": []map[string]any{
+					{"name": "target", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "url", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 module-definition Library resource"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Measure"},
+				"summary":     "HL7 FHIR R4 Measure/$data-requirements (POST Parameters or Measure)",
+				"operationId": "measureDataRequirementsPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 module-definition Library resource"},
+				},
+			},
+		},
+		"/PlanDefinition/$data-requirements": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"PlanDefinition"},
+				"summary":     "HL7 FHIR R4 PlanDefinition/$data-requirements returning a module-definition Library of required clinical resources, ValueSets, and Libraries",
+				"operationId": "planDefinitionDataRequirementsGet",
+				"parameters": []map[string]any{
+					{"name": "target", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "url", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 module-definition Library resource"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"PlanDefinition"},
+				"summary":     "HL7 FHIR R4 PlanDefinition/$data-requirements (POST Parameters or PlanDefinition)",
+				"operationId": "planDefinitionDataRequirementsPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 module-definition Library resource"},
+				},
+			},
+		},
+		"/ConceptMap/$closure": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ConceptMap", "Terminology Services"},
+				"summary":     "HL7 FHIR R4 ConceptMap/$closure maintaining transitive subsumption closure tables across SNOMED CT / ICD-10-CM concepts",
+				"operationId": "conceptMapClosurePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 ConceptMap containing transitive subsumption equivalences"},
+				},
+			},
+		},
 		"/Questionnaire/$data-requirements": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Questionnaire"},
@@ -4953,6 +5036,259 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				"operationId": "healthcareServiceFASTAttestPost",
 				"responses": map[string]any{
 					"200": map[string]any{"description": "Parameters containing status, ndh-HealthcareService, and ndh-Verification VerificationResult"},
+				},
+			},
+		},
+		"/MeasureReport/$ra-evaluate-risk": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"MeasureReport", "DetectedIssue", "Condition", "Parameters"},
+				"summary":     "Evaluate CMS-HCC Risk Adjustment coding gaps per HL7 Da Vinci Risk Adjustment (RA v2.0.0) and persist ra-measurereport and DetectedIssue",
+				"operationId": "measureReportRAEvaluateRiskPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing measureReport, detectedIssue, and condition"},
+				},
+			},
+		},
+		"/Patient/{id}/$ra-coding-gap-report": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "MeasureReport", "DetectedIssue", "Condition", "Bundle"},
+				"summary":     "Assemble an HL7 Da Vinci Risk Adjustment (RA v2.0.0) coding gap report Bundle for Patient/{id}",
+				"operationId": "patientRACodingGapReportGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (ra-condition-gap-bundle) containing MeasureReport, DetectedIssue, and Condition"},
+				},
+			},
+		},
+		"/Task/$cdex-submit-attachment": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Task", "Communication", "DocumentReference", "Parameters"},
+				"summary":     "Fulfill a Da Vinci CDex v2.0.0 Task attachment request and persist cdex-task-attachment-request, Communication, and DocumentReference",
+				"operationId": "taskCDexSubmitAttachmentPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, task, communication, and documentReference"},
+				},
+			},
+		},
+		"/Measure/$nhsn-dqm-evaluate": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Measure", "MeasureReport", "Encounter", "MedicationAdministration"},
+				"summary":     "Evaluate a CDC NHSN Digital Quality Measure (dQM v1.0.0) Acute Care Hospital cohort and persist subject-list MeasureReport",
+				"operationId": "measureNHSNDQMEvaluatePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted subject-list MeasureReport"},
+				},
+			},
+		},
+		"/Patient/{id}/$nhsn-ach-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "MeasureReport", "Encounter", "MedicationAdministration", "Bundle"},
+				"summary":     "Assemble a CDC NHSN Acute Care Hospital (ACH dQM v1.0.0) daily initial population Bundle for Patient/{id}",
+				"operationId": "patientNHSNACHSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (ach-daily-initial-population-bundle)"},
+				},
+			},
+		},
+		"/Questionnaire/$dtr-questionnaire-package": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Questionnaire", "QuestionnaireResponse", "Library", "ValueSet", "Bundle"},
+				"summary":     "Assemble an HL7 Da Vinci Documentation Templates and Rules (DTR v2.0.1) Questionnaire Package Bundle",
+				"operationId": "questionnaireDTRPackagePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing packagebundle (DTR-QPackageBundle)"},
+				},
+			},
+		},
+		"/Claim/$pas-inquire": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Claim", "ClaimResponse", "Bundle"},
+				"summary":     "Inquire prior authorization status per HL7 Da Vinci Prior Authorization Support (PAS v2.0.1)",
+				"operationId": "claimPASInquirePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing responseBundle (profile-pas-inquiry-response-bundle)"},
+				},
+			},
+		},
+		"/Patient/{id}/$burden-reduction-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "QuestionnaireResponse", "Claim", "ClaimResponse", "Bundle"},
+				"summary":     "Assemble an HL7 Da Vinci Burden Reduction (CRD / DTR / PAS) summary Bundle for Patient/{id}",
+				"operationId": "patientBurdenReductionSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (burden-reduction-summary-bundle)"},
+				},
+			},
+		},
+		"/Patient/{id}/$mcode-trial-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "ResearchStudy", "ResearchSubject", "Condition", "Observation", "Bundle"},
+				"summary":     "Assemble an HL7 CodeX Clinical Trial Matching (v1.0.0) & mCODE v3.0.0 summary Bundle for Patient/{id}",
+				"operationId": "patientMCODETrialSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (codex-clinical-trial-match-bundle)"},
+				},
+			},
+		},
+		"/VerificationResult/$ndh-verify": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"VerificationResult", "Organization", "PractitionerRole", "Endpoint"},
+				"summary":     "Attest and verify provider/organization directory records per ONC FAST National Directory (NDH v1.0.0)",
+				"operationId": "verificationResultNDHVerifyPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted ndh-Verification VerificationResult"},
+				},
+			},
+		},
+		"/Organization/{id}/$ndh-directory-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Organization", "PractitionerRole", "Endpoint", "VerificationResult", "Bundle"},
+				"summary":     "Assemble an ONC FAST National Directory (NDH v1.0.0) exchange Bundle for Organization/{id}",
+				"operationId": "organizationNDHDirectorySummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (ndh-ExchangeBundle)"},
+				},
+			},
+		},
+		"/Group/{id}/$atr-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Group", "Patient", "Coverage", "Bundle"},
+				"summary":     "Assemble an HL7 Da Vinci Member Attribution (ATR v2.0.0) roster summary Bundle for Group/{id}",
+				"operationId": "groupATRSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (atr-bundle) containing atr-group, atr-patient, and atr-coverage"},
+				},
+			},
+		},
+		"/Observation/$pacio-splasch-record": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Observation", "DiagnosticReport"},
+				"summary":     "Record Speech, Language, Swallowing, Cognitive-Communication, and Hearing (HL7 PACIO SPLASCH v1.0.0) observations and DiagnosticReport",
+				"operationId": "observationPACIOSPLASCHRecordPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted splasch-DiagnosticReport"},
+				},
+			},
+		},
+		"/Patient/{id}/$pacio-splasch-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Observation", "DiagnosticReport", "Bundle"},
+				"summary":     "Assemble an HL7 PACIO SPLASCH (v1.0.0) speech, language, and swallowing summary Bundle for Patient/{id}",
+				"operationId": "patientPACIOSPLASCHSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (splasch-Bundle)"},
+				},
+			},
+		},
+		"/ResearchStudy/$vulcan-rwd-cohort": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ResearchStudy", "Group", "MedicationDispense", "MedicationAdministration", "Parameters"},
+				"summary":     "Evaluate an HL7 Vulcan Real World Data (RWD v1.0.0) pharmacoepidemiology study cohort and persist ResearchStudy, Group, MedicationDispense, and MedicationAdministration",
+				"operationId": "researchStudyVulcanRWDCohortPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing study, cohortGroup, medicationDispense, and eligibleCount"},
+				},
+			},
+		},
+		"/Patient/{id}/$vulcan-rwd-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "ResearchStudy", "Group", "MedicationDispense", "MedicationAdministration", "Bundle"},
+				"summary":     "Assemble an HL7 Vulcan Real World Data (RWD v1.0.0) pharmacoepidemiology summary Bundle for Patient/{id}",
+				"operationId": "patientVulcanRWDSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (vulcan-rwd-bundle)"},
+				},
+			},
+		},
+		"/MeasureReport/$saner-report-capacity": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"MeasureReport", "Measure", "Location"},
+				"summary":     "Report hospital bed, ICU, and ventilator capacity per HL7 Situational Awareness for Novel Epidemic Response (SANER v1.0.1)",
+				"operationId": "measureReportSANERReportCapacityPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted PublicHealthMeasureReport"},
+				},
+			},
+		},
+		"/Location/{id}/$saner-capacity-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Location", "Measure", "MeasureReport", "Bundle"},
+				"summary":     "Assemble an HL7 SANER v1.0.1 situational awareness hospital capacity Bundle for Location/{id}",
+				"operationId": "locationSANERCapacitySummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (PublicHealthBundle) containing PublicHealthLocation, PublicHealthMeasure, and PublicHealthMeasureReport"},
+				},
+			},
+		},
+		"/ServiceRequest/$codex-rttd-plan": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ServiceRequest", "BodyStructure", "Procedure"},
+				"summary":     "Record an HL7 CodeX Radiation Therapy Treatment Data (RTTD v1.0.0) planned course ServiceRequest, target BodyStructure, and treated phase Procedure",
+				"operationId": "serviceRequestCodeXRTTDPlanPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted codexrt-radiotherapy-planned-course ServiceRequest"},
+				},
+			},
+		},
+		"/Patient/{id}/$codex-rttd-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "ServiceRequest", "BodyStructure", "Procedure", "Bundle"},
+				"summary":     "Assemble an HL7 CodeX Radiation Therapy Treatment Data (RTTD v1.0.0) summary Bundle for Patient/{id}",
+				"operationId": "patientCodeXRTTDSummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (codexrt-summary-bundle)"},
+				},
+			},
+		},
+		"/Consent/$sdoh-consent-record": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Consent", "Condition", "Goal"},
+				"summary":     "Record an HL7 Gravity Project SDOH Clinical Care (v2.2.0) closed-loop Consent (LOINC 59284-0), Food Insecurity Condition, and Goal",
+				"operationId": "consentSDOHConsentRecordPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Persisted SDOHCC-Consent"},
+				},
+			},
+		},
+		"/Patient/{id}/$sdoh-care-bundle": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "Consent", "Condition", "Goal", "Bundle"},
+				"summary":     "Assemble an HL7 Gravity Project SDOH Clinical Care (v2.2.0) closed-loop Consent, Condition, and Goal Bundle for Patient/{id}",
+				"operationId": "patientSDOHCareBundleGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (SDOHCC-Bundle)"},
 				},
 			},
 		},

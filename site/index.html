@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flint — Proto-Native FHIR R4 Server &amp; Clinical Lakehouse in Go</title>
+  <meta name="description" content="Open-source, cloud-agnostic FHIR R4 server built in Go on PostgreSQL. Zero JSONB (google/fhir Protobuf BYTEA), sub-10ms covering-index search, SMART on FHIR v2, US Core v6.1.0 &amp; v7.0.0, ONC (g)(10), and 35+ HL7 Implementation Guides." />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="site-header">
+    <div class="nav-inner">
+      <a class="brand" href="#">
+        <span>🔥 Flint</span>
+        <span class="brand-pill">FHIR R4.0.1</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary Navigation">
+        <a href="#quickstart">Quickstart</a>
+        <a href="#benchmarks">Why Flint</a>
+        <a href="#ig-explorer">HL7 IG Catalog</a>
+        <a href="#conformance">Conformance Matrix</a>
+        <a href="#architecture">Architecture</a>
+        <a class="btn btn-primary" href="https://github.com/flint-fhir/flint" target="_blank" rel="noopener">GitHub Repository</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Hero Section -->
+    <section class="hero" style="border-block-start: none;">
+      <div class="hero-badges">
+        <span class="badge badge-accent">google/fhir Protobuf BYTEA (Zero JSONB)</span>
+        <span class="badge badge-green">50/50 Automated Conformance ($certify)</span>
+        <span class="badge">US Core v6.1.0 &amp; v7.0.0 + ONC (g)(10)</span>
+        <span class="badge">Apache 2.0 Open Source</span>
+      </div>
+      <h1>The Proto-Native FHIR R4 Server Built for Speed &amp; Interoperability</h1>
+      <p class="hero-lead">
+        <strong>Flint</strong> is a single-binary, cloud-agnostic HL7 FHIR R4 server written in Go on PostgreSQL.
+        By compiling all 146 FHIR R4 resources directly from <code>google/fhir</code> Protocol Buffers and indexing into
+        6 static covering tables per tenant, Flint delivers <strong>16× smaller storage</strong>, <strong>sub-10ms search</strong>,
+        and turnkey support for <strong>35+ HL7 Implementation Guides</strong>.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#quickstart">Run in 30 Seconds (Docker Compose)</a>
+        <a class="btn btn-secondary" href="#ig-explorer">Explore 130+ FHIR Operations</a>
+        <a class="btn btn-secondary" href="https://github.com/flint-fhir/flint" target="_blank" rel="noopener">Star on GitHub</a>
+      </div>
+
+      <div class="metrics-grid">
+        <div class="metric-card">
+          <div class="metric-value">16× Smaller</div>
+          <div class="metric-label">Proto3 Wire Persistence</div>
+          <div class="metric-sub">124B Protobuf BYTEA vs. ~2KB JSONB sprawl</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">1,410+ / sec</div>
+          <div class="metric-label">ACID Resource Ingestion</div>
+          <div class="metric-sub">1,024+ res/sec over HTTP REST Transaction Bundles</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">146 Types</div>
+          <div class="metric-label">100% FHIR R4 Coverage</div>
+          <div class="metric-sub">All 26 US Core v6.1.0 &amp; v7.0.0 (USCDI v3/v4) profiles</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-value">35+ HL7 IGs</div>
+          <div class="metric-label">130+ Clinical Operations</div>
+          <div class="metric-sub">Da Vinci, CARIN, CodeX, Public Health, PACIO, Vulcan, SDOH &amp; FAST</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 1-Command Quickstart -->
+    <section id="quickstart">
+      <div class="section-header">
+        <div class="section-eyebrow">Zero-Friction Deployment</div>
+        <h2 class="section-title">Start a Complete FHIR R4 Sandbox in One Command</h2>
+        <p class="section-desc">
+          <code>flintd</code> is a self-contained binary and multi-arch OCI container that embeds all SQL schema migrations and requires only PostgreSQL 15+.
+        </p>
+      </div>
+
+      <div class="quickstart-box">
+        <div class="tab-bar" role="tablist" aria-label="Deployment Options">
+          <button class="tab-btn" role="tab" data-tab="compose" aria-selected="true" onclick="selectQuickstartTab('compose')">1. Docker Compose (Fastest)</button>
+          <button class="tab-btn" role="tab" data-tab="container" aria-selected="false" onclick="selectQuickstartTab('container')">2. Prebuilt Container (GHCR)</button>
+          <button class="tab-btn" role="tab" data-tab="binary" aria-selected="false" onclick="selectQuickstartTab('binary')">3. Single Go Binary</button>
+        </div>
+        <div class="code-panel">
+          <button id="copyQuickstartBtn" class="btn btn-secondary copy-btn" onclick="copyQuickstart()">Copy</button>
+          <pre><code id="quickstartCode"></code></pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- Why Flint vs Traditional FHIR Servers (Responsive Table) -->
+    <section id="benchmarks">
+      <div class="section-header">
+        <div class="section-eyebrow">Architectural Advantage</div>
+        <h2 class="section-title">Why Flint vs. Traditional FHIR Servers?</h2>
+        <p class="section-desc">
+          Traditional JVM and JSONB FHIR servers suffer from garbage-collection pauses, GIN index bloat, and manual schema migrations.
+        </p>
+      </div>
+
+      <div tabindex="0" role="region" aria-labelledby="benchmark-table-caption" class="table-wrapper">
+        <table style="--label-2: 'Traditional FHIR Servers'; --label-3: 'Flint FHIR R4 Server';">
+          <caption id="benchmark-table-caption">Architectural Comparison: Traditional FHIR Servers vs. Flint</caption>
+          <thead>
+            <tr>
+              <th>Dimension</th>
+              <th>Traditional FHIR Servers</th>
+              <th>Flint FHIR R4 Server</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th>Storage Format</th>
+              <td>Heavy JSONB blobs or hundreds of relational tables</td>
+              <td>Compact <code>google/fhir</code> Protocol Buffers in <code>BYTEA</code> (<strong>16× wire reduction</strong>, zero JSONB)</td>
+            </tr>
+            <tr>
+              <th>Search Indexing</th>
+              <td>Deep relational joins or external Elasticsearch sync lag</td>
+              <td><strong>6 static covering <code>spidx_*</code> tables</strong> per tenant (string, token, date, reference, quantity, uri)</td>
+            </tr>
+            <tr>
+              <th>Schema Maintenance</th>
+              <td>Hand-written migrations across 146 resource types</td>
+              <td><strong>100% compiled</strong> via <code>proto2type</code> + runtime custom <code>SearchParameter</code> registration</td>
+            </tr>
+            <tr>
+              <th>Multi-Tenancy</th>
+              <td>Soft tenancy (shared tables with <code>tenant_id</code> filters)</td>
+              <td><strong>Schema-per-tenant physical PostgreSQL isolation</strong> for HIPAA &amp; payer-provider separation</td>
+            </tr>
+            <tr>
+              <th>Sustained Throughput</th>
+              <td>Bottlenecked by JVM heap / JSON parsing overhead</td>
+              <td><strong>1,410+ resources/sec</strong> direct store, <strong>1,024+ resources/sec</strong> HTTP transaction bundles ($p50 &lt; 250\text{ms}$)</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Interactive HL7 Implementation Guide & Operation Explorer -->
+    <section id="ig-explorer" class="catalog-section">
+      <div class="section-header">
+        <div class="section-eyebrow">Batteries-Included Healthcare Interoperability</div>
+        <h2 class="section-title">Interactive HL7 Implementation Guide &amp; Operation Explorer</h2>
+        <p class="section-desc">
+          Search and filter across 35+ HL7 Implementation Guides and 130+ operations built directly into <code>flintd</code>.
+        </p>
+      </div>
+
+      <div class="catalog-toolbar">
+        <input
+          type="search"
+          id="igSearchInput"
+          class="search-input"
+          placeholder="Filter by IG, operation (e.g. $saner-capacity-summary, $codex-rttd-plan, $sdoh-care-bundle, $pas-inquire)..."
+          aria-label="Filter HL7 Implementation Guides and Operations"
+        />
+        <div class="filter-pills" role="group" aria-label="Filter by Healthcare Domain">
+          <button class="pill-btn" data-domain="All" aria-pressed="true" onclick="setDomainFilter('All')">All Domains</button>
+          <button class="pill-btn" data-domain="Core & ONC" aria-pressed="false" onclick="setDomainFilter('Core & ONC')">Core &amp; ONC</button>
+          <button class="pill-btn" data-domain="Da Vinci Payer" aria-pressed="false" onclick="setDomainFilter('Da Vinci Payer')">Da Vinci &amp; CARIN</button>
+          <button class="pill-btn" data-domain="Oncology & Genomics" aria-pressed="false" onclick="setDomainFilter('Oncology & Genomics')">CodeX &amp; Genomics</button>
+          <button class="pill-btn" data-domain="Public Health" aria-pressed="false" onclick="setDomainFilter('Public Health')">Public Health &amp; NHSN</button>
+          <button class="pill-btn" data-domain="Post-Acute & SDOH" aria-pressed="false" onclick="setDomainFilter('Post-Acute & SDOH')">PACIO &amp; Gravity SDOH</button>
+          <button class="pill-btn" data-domain="Research & Directory" aria-pressed="false" onclick="setDomainFilter('Research & Directory')">Vulcan, FAST &amp; IHE</button>
+        </div>
+      </div>
+
+      <div id="igCount" style="font-size: 0.84rem; color: var(--muted); margin-block-end: 0.9rem;"></div>
+      <div id="igGrid" class="ig-grid"></div>
+    </section>
+
+    <!-- Full Conformance Matrix Table (Responsive Table) -->
+    <section id="conformance" class="catalog-section">
+      <div class="section-header">
+        <div class="section-eyebrow">Verified by 50 Automated Conformance Checks ($certify)</div>
+        <h2 class="section-title">FHIR R4, US Core &amp; National IG Conformance Matrix</h2>
+        <p class="section-desc">
+          Every Flint instance exposes <code>GET /fhir/r4/{tenant}/$certify</code> to execute a 50-check conformance harness in an isolated tenant sandbox and return an HL7 <code>TestReport</code>.
+        </p>
+      </div>
+
+      <div tabindex="0" role="region" aria-labelledby="conformance-table-caption" class="table-wrapper">
+        <table style="--label-2: 'Capabilities &amp; Operations'; --label-3: 'Specifications'; --label-4: 'Primary Endpoint'; --label-5: 'Status';">
+          <caption id="conformance-table-caption">Flint FHIR R4 Conformance Matrix (Waves 1–52)</caption>
+          <thead>
+            <tr>
+              <th>Category</th>
+              <th>Capabilities &amp; Operations</th>
+              <th>Specifications</th>
+              <th>Primary Endpoint</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th>Core Proto3 Storage</th>
+              <td>All 146 FHIR R4 Resource Types stored as <code>google/fhir</code> Protobuf <code>BYTEA</code> (zero JSONB) + 6 covering <code>spidx_*</code> index tables</td>
+              <td>HL7 FHIR R4.0.1 + Google FHIR Proto3</td>
+              <td><code>/fhir/r4/{tenant}/{resourceType}</code></td>
+              <td>✅ Verified</td>
+            </tr>
+            <tr>
+              <th>CRUD, Versioning &amp; Patch</th>
+              <td><code>read</code>, <code>vread</code>, <code>create</code>, <code>update</code>, <code>patch</code> (JSON Patch, Merge Patch, FHIRPath Patch), <code>delete</code>, <code>_history</code> (<code>_since</code>, <code>_at</code>, <code>_list</code>), <code>If-Match</code> CAS</td>
+              <td>HL7 FHIR R4 RESTful API, RFC 6902, RFC 7396</td>
+              <td><code>/fhir/r4/{tenant}/{resourceType}/{id}</code></td>
+              <td>✅ Verified</td>
+            </tr>
+            <tr>
+              <th>Advanced Search Engine</th>
+              <td><code>_filter</code> boolean grammar, <code>_content</code>/<code>_text</code>, UCUM unit normalization, composite search, <code>:of-type</code>, <code>:in</code>/<code>:not-in</code>/<code>:below</code>/<code>:above</code>, <code>:identifier</code>, multi-hop chained &amp; <code>_has</code> reverse chaining, wildcard <code>/*</code> compartments</td>
+              <td>HL7 FHIR R4 Search Specification</td>
+              <td><code>/fhir/r4/{tenant}/{resourceType}?_filter=...</code></td>
+              <td>✅ Verified</td>
+            </tr>
+            <tr>
+              <th>US Core, IPS, SDC &amp; Clinical Reasoning</th>
+              <td><code>Patient/$everything</code>, <code>Encounter/$everything</code>, <code>Group/$everything</code>, <code>Patient/$summary</code> (IPS), <code>DocumentReference/$docref</code>, <code>Questionnaire/$populate</code>, <code>QuestionnaireResponse/$extract</code>, <code>PlanDefinition/$apply</code>, <code>$fhirpath</code></td>
+              <td>US Core v6.1.0 &amp; v7.0.0, HL7 IPS, HL7 SDC, CPG</td>
+              <td><code>/fhir/r4/{tenant}/Patient/{id}/$summary</code></td>
+              <td>✅ Verified</td>
+            </tr>
+            <tr>
+              <th>Da Vinci &amp; CARIN Payer Suites</th>
+              <td>PAS (<code>$submit</code>, <code>$inquire</code>, <code>$pas-inquire</code>), CRD (<code>$crd</code>), DTR (<code>$dtr-questionnaire-package</code>), CDex (<code>$cdex-request</code>, <code>$cdex-poll</code>, <code>$cdex-sign</code>, <code>$cdex-submit-attachment</code>), ATR (<code>$confirm-attribution-list</code>, <code>$atr-summary</code>), RA (<code>$ra-evaluate-risk</code>, <code>$ra-coding-gap-report</code>), VBPR, PCT, DEQM, CARIN BB &amp; RTPBC</td>
+              <td>HL7 Da Vinci PAS, CRD, DTR, CDex, PDex, ATR, RA, VBPR, PCT, DEQM &amp; CARIN BB/RTPBC</td>
+              <td><code>/fhir/r4/{tenant}/Patient/{id}/$burden-reduction-summary</code></td>
+              <td>✅ Verified</td>
+            </tr>
+            <tr>
+              <th>CodeX Oncology &amp; Clinical Genomics</th>
+              <td>mCODE (<code>$mcode-summary</code>, <code>$stage-cancer</code>, <code>$mcode-disease-status</code>), Radiotherapy &amp; RTTD (<code>$mcode-radiotherapy-record</code>, <code>$codex-rttd-plan</code>, <code>$codex-rttd-summary</code>), Genomics (<code>$mcode-genomics-report</code>, <code>$find-subject-variants</code>, <code>$find-subject-tx-implications</code>), Trial Matching (<code>$mcode-trial-match</code>, <code>$mcode-trial-summary</code>)</td>
+              <td>HL7 CodeX mCODE v3.0.0, RTTD v1.0.0, Trial Matching &amp; Clinical Genomics v3.0.0</td>
+              <td><code>/fhir/r4/{tenant}/Patient/{id}/$codex-rttd-summary</code></td>
+              <td>✅ Verified</td>
+            </tr>
+            <tr>
+              <th>Public Health, Vital Records &amp; SANER</th>
+              <td>SANER (<code>$saner-report-capacity</code>, <code>$saner-capacity-summary</code>), CDC NHSN HAI/AUR/ACH (<code>$nhsn-dqm-evaluate</code>, <code>$nhsn-ach-summary</code>, <code>$nhsn-aur-submit</code>), eCR (<code>$ecr-submit</code>, <code>$ecr-summary</code>), ELR, IIS, NBS, VRDR, BFDR, CCRR &amp; MedMorph KAR</td>
+              <td>HL7 SANER v1.0.1, CDC NHSN dQM, eCR v2.1.2, ELR, ImmDS, NBS, VRDR, BFDR, CCRR</td>
+              <td><code>/fhir/r4/{tenant}/Location/{id}/$saner-capacity-summary</code></td>
+              <td>✅ Verified</td>
+            </tr>
+            <tr>
+              <th>PACIO Post-Acute &amp; Gravity SDOH</th>
+              <td>PACIO Functional/Cognitive Status, ADI (<code>$adi-record</code>, <code>$adi-verify</code>), PFE (<code>$pacio-pfe-summary</code>), TOC (<code>$pacio-toc-bundle</code>), Timepoints (<code>$pacio-timepoints</code>), SPLASCH (<code>$pacio-splasch-record</code>, <code>$pacio-splasch-summary</code>), Gravity SDOH (<code>$sdoh-assess</code>, <code>$sdoh-referral</code>, <code>$sdoh-fulfill</code>, <code>$sdoh-consent-record</code>, <code>$sdoh-care-bundle</code>)</td>
+              <td>HL7 PACIO FS, CS, ADI, PFE, TOC, RT, SPLASCH &amp; Gravity SDOH v2.2.0</td>
+              <td><code>/fhir/r4/{tenant}/Patient/{id}/$sdoh-care-bundle</code></td>
+              <td>✅ Verified</td>
+            </tr>
+            <tr>
+              <th>Vulcan Research, FAST NDH &amp; IHE</th>
+              <td>Vulcan RWD (<code>$vulcan-rwd-cohort</code>, <code>$vulcan-rwd-summary</code>), SOA (<code>$vulcan-soa-timeline</code>), eSource (<code>$vulcan-esource-extract</code>), ePI (<code>$epi-document</code>), ICSR (<code>$vulcan-icsr-report</code>), FAST NDH (<code>$ndh-verify</code>, <code>$ndh-directory-summary</code>, <code>$fast-network-query</code>), IHE PIXm/PDQm/MHD</td>
+              <td>HL7 Vulcan RWD/SOA/eSource/ePI/AE, ONC FAST NDH v1.0.0 &amp; IHE ITI</td>
+              <td><code>/fhir/r4/{tenant}/Patient/{id}/$vulcan-rwd-summary</code></td>
+              <td>✅ Verified</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Architecture & Clinical Lakehouse -->
+    <section id="architecture">
+      <div class="section-header">
+        <div class="section-eyebrow">Operational OLTP + Optional Analytical Lakehouse</div>
+        <h2 class="section-title">Designed for Both Sub-10ms EHR Point Reads &amp; Population Analytics</h2>
+        <p class="section-desc">
+          Run Flint purely as a zero-dependency PostgreSQL FHIR R4 server, or enable optional streaming CDC into Apache Iceberg and SQLMesh clinical marts.
+        </p>
+      </div>
+
+      <div class="arch-grid">
+        <div class="arch-card">
+          <h3>1. Protobuf-First FHIR R4 Engine</h3>
+          <p>
+            Incoming FHIR R4 JSON is validated against StructureDefinitions, ValueSets, and US Core profiles before being marshaled into compact <code>google/fhir</code> Protobuf wire bytes.
+          </p>
+        </div>
+        <div class="arch-card">
+          <h3>2. HAPI-Style Covering Index Tables</h3>
+          <p>
+            Search parameters are extracted via compiled <code>protoreflect</code> accessors into 6 static covering tables per tenant schema (<code>spidx_string</code>, <code>spidx_token</code>, <code>spidx_date</code>, <code>spidx_reference</code>, <code>spidx_quantity</code>, <code>spidx_uri</code>).
+          </p>
+        </div>
+        <div class="arch-card">
+          <h3>3. Built-In SMART v2 &amp; Audit Trail</h3>
+          <p>
+            Pluggable OIDC/Zitadel and built-in OAuth2 PKCE + Backend Services (<code>ES384</code>/<code>RS384</code>) enforce patient compartment boundaries and record immutable ASTM E2147 / ONC <code>AuditEvent</code> logs.
+          </p>
+        </div>
+        <div class="arch-card">
+          <h3>4. Optional Iceberg + SQLMesh Lakehouse</h3>
+          <p>
+            Enable <code>FLINT_AUTOMQ_BROKERS</code> to stream every FHIR upsert/delete into Apache Iceberg Table Topics and transform into Kimball Patient 360, CMS165, CMS122, and Claims marts via SQLMesh on DuckDB.
+          </p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div>
+        <strong>🔥 Flint FHIR R4 Server</strong> — Open-Source Proto-Native Healthcare Interoperability (Apache 2.0 License)
+      </div>
+      <div>
+        <a href="https://github.com/flint-fhir/flint" target="_blank" rel="noopener">GitHub</a> ·
+        <a href="https://github.com/flint-fhir/flint/blob/main/README.md" target="_blank" rel="noopener">Documentation</a> ·
+        <a href="https://github.com/flint-fhir/flint/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener">Contributing</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
