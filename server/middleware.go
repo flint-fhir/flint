@@ -139,7 +139,27 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							return
 						}
 					} else if isPlanApplyOp(parts) {
-						// Detailed SMART scope and patient compartment checks are enforced in handlePlanDefinitionApply / handleActivityDefinitionApply.
+						// Detailed SMART scope and patient compartment checks are enforced in handlePlanDefinitionApply / handleActivityDefinitionApply
+						// alongside baseline scope and Patient/{id} compartment isolation here.
+						if len(secCtx.GetScopes()) == 0 {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for operation")
+							return
+						}
+						if len(parts) == 6 && strings.EqualFold(resType, "Patient") {
+							id := parts[4]
+							if !auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) &&
+								!auth.Allows(secCtx, "Patient", auth.ActionCreate) && !auth.Allows(secCtx, "Patient", auth.ActionUpdate) {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("insufficient scope for Patient/%s", parts[5]))
+								return
+							}
+							if auth.IsPatientRestricted(secCtx) && cleanID(id) != cleanID(secCtx.GetPatientId()) {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("patient-scoped token (%s) cannot access %s for patient %s",
+										secCtx.GetPatientId(), parts[5], id))
+								return
+							}
+						}
 					} else if isQuestionnairePopulateOp(parts) {
 						hasQScope := auth.Allows(secCtx, "Questionnaire", auth.ActionRead) ||
 							auth.Allows(secCtx, "Questionnaire", auth.ActionSearch) ||
@@ -324,7 +344,27 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							return
 						}
 					} else if isPlanApplyOp(parts) {
-						// Detailed SMART scope and patient compartment checks are enforced in handlePlanDefinitionApply / handleActivityDefinitionApply.
+						// Detailed SMART scope and patient compartment checks are enforced in handlePlanDefinitionApply / handleActivityDefinitionApply
+						// alongside baseline scope and Patient/{id} compartment isolation here.
+						if len(secCtx.GetScopes()) == 0 {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for operation")
+							return
+						}
+						if len(parts) == 6 && strings.EqualFold(resType, "Patient") {
+							id := parts[4]
+							if !auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) &&
+								!auth.Allows(secCtx, "Patient", auth.ActionCreate) && !auth.Allows(secCtx, "Patient", auth.ActionUpdate) {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("insufficient scope for Patient/%s", parts[5]))
+								return
+							}
+							if auth.IsPatientRestricted(secCtx) && cleanID(id) != cleanID(secCtx.GetPatientId()) {
+								writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+									fmt.Sprintf("patient-scoped token (%s) cannot access %s for patient %s",
+										secCtx.GetPatientId(), parts[5], id))
+								return
+							}
+						}
 					} else if isQuestionnairePopulateOp(parts) {
 						hasQScope := auth.Allows(secCtx, "Questionnaire", auth.ActionRead) ||
 							auth.Allows(secCtx, "Questionnaire", auth.ActionSearch) ||

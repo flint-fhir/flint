@@ -1154,6 +1154,99 @@ func TestStore_Integration(t *testing.T) {
 	})
 
 	t.Run("OAuthRefreshRevokedTokensAndExportJobs", func(t *testing.T) {
+		acRec := postgres.OAuthAuthCodeRecord{
+			ClientID:            "smart-app-client",
+			RedirectURI:         "https://app.example.org/cb",
+			Scope:               "openid fhirUser patient/Patient.rs",
+			CodeChallenge:       "challenge-xyz",
+			CodeChallengeMethod: "S256",
+			PatientID:           "shared-id-99",
+			EncounterID:         "enc-1",
+			TenantID:            "test-tenant",
+			Nonce:               "nonce-1",
+			ExpiresAt:           time.Now().Add(10 * time.Minute),
+		}
+		if err := store.SaveAuthCode(ctx, "raw-auth-code-1", acRec); err != nil {
+			t.Fatalf("SaveAuthCode: %v", err)
+		}
+		consumedAC, foundAC, err := store.ConsumeAuthCode(ctx, "raw-auth-code-1")
+		if err != nil || !foundAC || consumedAC.ClientID != "smart-app-client" || consumedAC.PatientID != "shared-id-99" {
+			t.Fatalf("ConsumeAuthCode failed: got %+v found=%v err=%v", consumedAC, foundAC, err)
+		}
+		if _, foundReplay, err := store.ConsumeAuthCode(ctx, "raw-auth-code-1"); err != nil || foundReplay {
+			t.Errorf("expected found=false on replay of consumed auth code, got found=%v err=%v", foundReplay, err)
+		}
+
+		// AuditEvent store write, read, and filtered query
+		auditID := "aud-store-test-1"
+		if err := store.WriteAuditEvent(ctx, postgres.AuditRecord{
+			TenantID:      "test-tenant",
+			AuditID:       auditID,
+			Action:        "R",
+			SubtypeCode:   "read",
+			Outcome:       "0",
+			OutcomeDesc:   "HTTP 200 OK",
+			HTTPMethod:    "GET",
+			HTTPStatus:    200,
+			RequestURI:    "/fhir/r4/test-tenant/Patient/shared-id-99",
+			AgentSubject:  "dr-house",
+			AgentPatient:  "shared-id-99",
+			ClientIP:      "127.0.0.1",
+			EntityType:    "Patient",
+			EntityID:      "shared-id-99",
+			EntityVersion: "1",
+		}); err != nil {
+			t.Fatalf("WriteAuditEvent: %v", err)
+		}
+		readAud, err := store.ReadAuditEvent(ctx, "test-tenant", auditID)
+		if err != nil || readAud.AgentSubject != "dr-house" || readAud.EntityID != "shared-id-99" {
+			t.Fatalf("ReadAuditEvent failed: got %+v err=%v", readAud, err)
+		}
+		queriedAud, totalAud, err := store.QueryAuditEvents(ctx, postgres.AuditQueryParams{
+			TenantID:     "test-tenant",
+			Action:       "R",
+			SubtypeCode:  "read",
+			Outcome:      "0",
+			AgentSubject: "dr-house",
+			AgentPatient: "shared-id-99",
+			EntityType:   "Patient",
+			EntityID:     "shared-id-99",
+			Count:        10,
+		})
+		if err != nil || totalAud != 1 || len(queriedAud) != 1 {
+			t.Fatalf("QueryAuditEvents failed: total=%d len=%d err=%v", totalAud, len(queriedAud), err)
+		}
+
+		// Direct ExportResources & StreamExportResources tests (EmptyCohort, single PatientID, PatientIDs cohort, PatientCompartment)
+		_ = store.WriteResource(ctx, postgres.ResourceInput{
+			TenantID:      "test-tenant",
+			ResType:       "Patient",
+			ResID:         "shared-id-99",
+			ResourceProto: []byte{0x0a, 0x0c, 0x73, 0x68, 0x61, 0x72, 0x65, 0x64, 0x2d, 0x69, 0x64, 0x2d, 0x39, 0x39},
+		})
+		emptyExport, err := store.ExportResources(ctx, postgres.ExportParams{
+			TenantID:    "test-tenant",
+			EmptyCohort: true,
+		})
+		if err != nil || len(emptyExport) != 0 {
+			t.Fatalf("expected 0 resources for EmptyCohort, got %d (err=%v)", len(emptyExport), err)
+		}
+		cohortExport, err := store.ExportResources(ctx, postgres.ExportParams{
+			TenantID:      "test-tenant",
+			PatientIDs:    []string{"Patient/shared-id-99"},
+			ResourceTypes: []string{"Patient", "Observation"},
+		})
+		if err != nil || len(cohortExport) == 0 {
+			t.Fatalf("expected cohort export resources for shared-id-99, got %d (err=%v)", len(cohortExport), err)
+		}
+		singlePatExport, err := store.ExportResources(ctx, postgres.ExportParams{
+			TenantID:  "test-tenant",
+			PatientID: "shared-id-99",
+		})
+		if err != nil || len(singlePatExport) == 0 {
+			t.Fatalf("expected single-patient compartment export resources for shared-id-99, got %d (err=%v)", len(singlePatExport), err)
+		}
+
 		rtRec := postgres.OAuthRefreshTokenRecord{
 			Subject:     "inferno-client",
 			PatientID:   "shared-id-99",

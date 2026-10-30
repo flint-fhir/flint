@@ -21035,6 +21035,10 @@ func (s *Server) handlePublicHealthNBSWave44(w http.ResponseWriter, r *http.Requ
 	tenant := r.PathValue("tenant")
 	resID := strings.TrimSpace(r.PathValue("id"))
 	op := strings.TrimSpace(r.PathValue("op"))
+	if op == "$nbs-submit" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$nbs-submit requires HTTP POST")
+		return
+	}
 
 	patientID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("patient")), "Patient/")
 	screeningResult := strings.TrimSpace(r.URL.Query().Get("result"))
@@ -21221,6 +21225,10 @@ func (s *Server) handleDaVinciPCTWave44(w http.ResponseWriter, r *http.Request) 
 	tenant := r.PathValue("tenant")
 	resID := strings.TrimSpace(r.PathValue("id"))
 	op := strings.TrimSpace(r.PathValue("op"))
+	if op == "$pct-gfe-coordination" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$pct-gfe-coordination requires HTTP POST")
+		return
+	}
 
 	patientID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("patient")), "Patient/")
 	estimatedCharge := 1500.0
@@ -21376,6 +21384,10 @@ func (s *Server) handleVulcanICSRAndSOAWave44(w http.ResponseWriter, r *http.Req
 	tenant := r.PathValue("tenant")
 	resID := strings.TrimSpace(r.PathValue("id"))
 	op := strings.TrimSpace(r.PathValue("op"))
+	if op == "$vulcan-icsr-report" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$vulcan-icsr-report requires HTTP POST")
+		return
+	}
 
 	patientID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("patient")), "Patient/")
 	studyID := strings.TrimPrefix(strings.TrimSpace(r.URL.Query().Get("study")), "ResearchStudy/")
@@ -21563,6 +21575,10 @@ func (s *Server) handleVulcanICSRAndSOAWave44(w http.ResponseWriter, r *http.Req
 //   - POST /fhir/r4/{tenant}/Bundle/$ecr-submit & /fhir/r4/{tenant}/Bundle/{id}/$ecr-submit
 //   - GET/POST /fhir/r4/{tenant}/Patient/{id}/$ecr-summary & /fhir/r4/{tenant}/Patient/$ecr-summary
 func (s *Server) handlePublicHealthECRWave45(w http.ResponseWriter, r *http.Request, op string) {
+	if op == "ecr-submit" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$ecr-submit requires HTTP POST")
+		return
+	}
 	tenant := r.PathValue("tenant")
 	resID := strings.TrimSpace(r.PathValue("id"))
 	q := r.URL.Query()
@@ -22011,6 +22027,10 @@ func (s *Server) handleGravitySDOHWave45(w http.ResponseWriter, r *http.Request,
 //   - POST /fhir/r4/{tenant}/ResearchSubject/$vulcan-esource-extract & /fhir/r4/{tenant}/ResearchSubject/{id}/$vulcan-esource-extract
 //   - GET/POST /fhir/r4/{tenant}/ResearchStudy/{id}/$vulcan-summary & /fhir/r4/{tenant}/ResearchStudy/$vulcan-summary
 func (s *Server) handleVulcanESourceWave45(w http.ResponseWriter, r *http.Request, op string) {
+	if op == "vulcan-esource-extract" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$vulcan-esource-extract requires HTTP POST")
+		return
+	}
 	tenant := r.PathValue("tenant")
 	resID := strings.TrimSpace(r.PathValue("id"))
 	q := r.URL.Query()

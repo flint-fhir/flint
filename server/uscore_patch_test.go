@@ -7433,3 +7433,302 @@ func TestNHSNAURCodeXMCODEAndFASTNDHWave47(t *testing.T) {
 		t.Fatalf("POST /HealthcareService/$fast-attest expected ndh-HealthcareService and ndh-Verification, got %d: %s", attestRec.Code, attestRec.Body.String())
 	}
 }
+
+func TestWave48_IGOperationMethodEnforcementInstanceRoutingAndPersistence(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("migrations failed: %v", err)
+	}
+
+	tenant := "wave48-hardening"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. Table-driven 405 Method Not Allowed enforcement across POST-only IG operations
+	postOnlyOps := []string{
+		"/DiagnosticReport/$nbs-submit",
+		"/DiagnosticReport/dr-custom-1/$nbs-submit",
+		"/Task/$pct-gfe-coordination",
+		"/Task/task-custom-1/$pct-gfe-coordination",
+		"/AdverseEvent/$vulcan-icsr-report",
+		"/AdverseEvent/ae-custom-1/$vulcan-icsr-report",
+		"/Bundle/$ecr-submit",
+		"/Bundle/bnd-custom-1/$ecr-submit",
+		"/QuestionnaireResponse/$sdoh-assess",
+		"/QuestionnaireResponse/qr-custom-1/$sdoh-assess",
+		"/Task/$sdoh-fulfill",
+		"/Task/task-custom-2/$sdoh-fulfill",
+		"/ResearchSubject/$vulcan-esource-extract",
+		"/ResearchSubject/subj-custom-1/$vulcan-esource-extract",
+		"/Bundle/$cancer-registry-submit",
+		"/Bundle/bnd-custom-2/$cancer-registry-submit",
+		"/Composition/$pacio-toc-bundle",
+		"/Composition/comp-custom-1/$pacio-toc-bundle",
+		"/Consent/$adi-verify",
+		"/Consent/cons-custom-1/$adi-verify",
+		"/MeasureReport/$nhsn-aur-submit",
+		"/MeasureReport/mr-custom-1/$nhsn-aur-submit",
+		"/Patient/$mcode-trial-match",
+		"/Patient/pat-custom-1/$mcode-trial-match",
+		"/Observation/$mcode-disease-status",
+		"/Observation/obs-custom-1/$mcode-disease-status",
+		"/HealthcareService/$fast-attest",
+		"/HealthcareService/hs-custom-1/$fast-attest",
+	}
+	for _, opPath := range postOnlyOps {
+		req := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+opPath, nil)
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("GET %s expected 405 Method Not Allowed, got %d: %s", opPath, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"OperationOutcome"`) || !strings.Contains(rec.Body.String(), `"not-supported"`) {
+			t.Fatalf("GET %s expected OperationOutcome with code not-supported, got: %s", opPath, rec.Body.String())
+		}
+	}
+
+	// 2. Instance-level routing (/Resource/{id}/$op) + PostgreSQL round-trip persistence verification
+	type persistenceCase struct {
+		name           string
+		method         string
+		invokePath     string
+		body           string
+		verifyReadPath string
+		expectedSubstr string
+	}
+	cases := []persistenceCase{
+		{
+			name:           "NBS Submit persists DiagnosticReport/nbs-dr-inst-99",
+			method:         http.MethodPost,
+			invokePath:     "/DiagnosticReport/nbs-dr-inst-99/$nbs-submit",
+			body:           `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"Patient/pat-w48-1"}]}`,
+			verifyReadPath: "/DiagnosticReport/nbs-dr-inst-99",
+			expectedSubstr: `"54089-8"`,
+		},
+		{
+			name:           "Da Vinci PCT GFE Coordination persists Task/pct-coord-inst-99",
+			method:         http.MethodPost,
+			invokePath:     "/Task/pct-coord-inst-99/$pct-gfe-coordination",
+			body:           `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"Patient/pat-w48-1"}]}`,
+			verifyReadPath: "/Task/pct-coord-inst-99",
+			expectedSubstr: "davinci-pct-gfe-coordination-task",
+		},
+		{
+			name:           "Vulcan ICSR Report persists AdverseEvent/ae-inst-99",
+			method:         http.MethodPost,
+			invokePath:     "/AdverseEvent/ae-inst-99/$vulcan-icsr-report",
+			body:           `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"Patient/pat-w48-1"}]}`,
+			verifyReadPath: "/AdverseEvent/ae-inst-99",
+			expectedSubstr: "vulcan-adverse-event-clinical-research",
+		},
+		{
+			name:           "Gravity SDOH Assess persists Observation/sdoh-screen-obs-pat-w48-1",
+			method:         http.MethodPost,
+			invokePath:     "/QuestionnaireResponse/qr-inst-99/$sdoh-assess",
+			body:           `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"Patient/pat-w48-1"}]}`,
+			verifyReadPath: "/Observation/sdoh-screen-obs-pat-w48-1",
+			expectedSubstr: "SDOHCC-ObservationScreeningResponse",
+		},
+		{
+			name:           "Gravity SDOH Fulfill persists Task/sdoh-task-inst-99 and Procedure/sdoh-proc-pat-w48-1",
+			method:         http.MethodPost,
+			invokePath:     "/Task/sdoh-task-inst-99/$sdoh-fulfill",
+			body:           `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"Patient/pat-w48-1"}]}`,
+			verifyReadPath: "/Procedure/sdoh-proc-pat-w48-1",
+			expectedSubstr: "SDOHCC-Procedure",
+		},
+		{
+			name:           "Vulcan eSource Extract persists QuestionnaireResponse/vulcan-esource-crf-subj-inst-99",
+			method:         http.MethodPost,
+			invokePath:     "/ResearchSubject/subj-inst-99/$vulcan-esource-extract",
+			body:           `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"Patient/pat-w48-1"}]}`,
+			verifyReadPath: "/QuestionnaireResponse/vulcan-esource-crf-subj-inst-99",
+			expectedSubstr: "vulcan-esource-crf-response",
+		},
+		{
+			name:           "PACIO TOC Bundle persists Composition/pacio-toc-comp-inst-99",
+			method:         http.MethodPost,
+			invokePath:     "/Composition/pacio-toc-comp-inst-99/$pacio-toc-bundle",
+			body:           `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"Patient/pat-w48-1"}]}`,
+			verifyReadPath: "/Composition/pacio-toc-comp-inst-99",
+			expectedSubstr: `"18842-5"`,
+		},
+		{
+			name:           "PACIO ADI Verify persists Consent/adi-consent-inst-99 and Provenance/adi-prov-adi-consent-inst-99",
+			method:         http.MethodPost,
+			invokePath:     "/Consent/adi-consent-inst-99/$adi-verify",
+			body:           `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"Patient/pat-w48-1"}]}`,
+			verifyReadPath: "/Consent/adi-consent-inst-99",
+			expectedSubstr: "PADI-ParticipantConsent",
+		},
+		{
+			name:           "CDC NHSN AUR Submit persists MeasureReport/nhsn-aur-mr-inst-99 and MedicationAdministration/nhsn-aur-ma-nhsn-aur-mr-inst-99",
+			method:         http.MethodPost,
+			invokePath:     "/MeasureReport/nhsn-aur-mr-inst-99/$nhsn-aur-submit",
+			body:           `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"Patient/pat-w48-1"}]}`,
+			verifyReadPath: "/MeasureReport/nhsn-aur-mr-inst-99",
+			expectedSubstr: "nhsn-aur-measure-report",
+		},
+		{
+			name:           "HL7 mCODE Disease Status persists Observation/mcode-ds-inst-99",
+			method:         http.MethodPost,
+			invokePath:     "/Observation/mcode-ds-inst-99/$mcode-disease-status",
+			body:           `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"Patient/pat-w48-1"}]}`,
+			verifyReadPath: "/Observation/mcode-ds-inst-99",
+			expectedSubstr: `"97509-4"`,
+		},
+		{
+			name:           "ONC FAST Attest persists HealthcareService/ndh-hs-inst-99 and VerificationResult/ndh-vr-ndh-hs-inst-99",
+			method:         http.MethodPost,
+			invokePath:     "/HealthcareService/ndh-hs-inst-99/$fast-attest",
+			body:           `{}`,
+			verifyReadPath: "/VerificationResult/ndh-vr-ndh-hs-inst-99",
+			expectedSubstr: "ndh-Verification",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "/fhir/r4/"+tenant+tc.invokePath, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/fhir+json")
+			rec := httptest.NewRecorder()
+			pgH.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("invoke %s %s failed with %d: %s", tc.method, tc.invokePath, rec.Code, rec.Body.String())
+			}
+
+			// Verify persisted resource via standard FHIR point read GET /fhir/r4/{tenant}/{Type}/{id}
+			readReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+tc.verifyReadPath, nil)
+			readRec := httptest.NewRecorder()
+			pgH.ServeHTTP(readRec, readReq)
+			if readRec.Code != http.StatusOK {
+				t.Fatalf("point read GET %s after %s expected 200 OK, got %d: %s", tc.verifyReadPath, tc.invokePath, readRec.Code, readRec.Body.String())
+			}
+			if !strings.Contains(readRec.Body.String(), tc.expectedSubstr) {
+				t.Fatalf("point read GET %s missing %s in body: %s", tc.verifyReadPath, tc.expectedSubstr, readRec.Body.String())
+			}
+		})
+	}
+}
+
+func TestWave48_IGOperationSMARTCompartmentAndScopeIsolation(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("migrations failed: %v", err)
+	}
+
+	tenant := "wave48-smart-rbac"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+
+	mockAuth, err := auth.NewMockTokenValidator("https://auth.example.com", "flint-api")
+	if err != nil {
+		t.Fatalf("new mock validator: %v", err)
+	}
+	pgSrv.SetTokenValidator(mockAuth)
+
+	// Token 1: Patient-scoped token for pat-alice with patient/Patient.rs
+	aliceToken := "token-pat-alice"
+	mockAuth.RegisterStatic(aliceToken, &authv1.SecurityContext{
+		Subject:   "Patient/pat-alice",
+		TenantId:  tenant,
+		PatientId: "pat-alice",
+		Scopes:    auth.ParseScopes("patient/Patient.rs"),
+	})
+
+	// Token 2: Empty-scope token
+	emptyScopeToken := "token-no-scopes"
+	mockAuth.RegisterStatic(emptyScopeToken, &authv1.SecurityContext{
+		Subject:  "user-no-scopes",
+		TenantId: tenant,
+		Scopes:   nil,
+	})
+
+	// Token 3: Non-Patient scope token (only Practitioner read)
+	pracOnlyToken := "token-prac-only"
+	mockAuth.RegisterStatic(pracOnlyToken, &authv1.SecurityContext{
+		Subject:  "prac-user",
+		TenantId: tenant,
+		Scopes:   auth.ParseScopes("user/Practitioner.rs"),
+	})
+
+	pgH := pgSrv.Handler()
+
+	patientOpsGET := []string{
+		"/Patient/pat-alice/$nbs-summary",
+		"/Patient/pat-alice/$ecr-summary",
+		"/Patient/pat-alice/$elr-summary",
+		"/Patient/pat-alice/$rtpbc-summary",
+		"/Patient/pat-alice/$nhsn-hai-summary",
+	}
+
+	// 1. Unauthenticated requests must return 401 Unauthorized
+	for _, p := range patientOpsGET {
+		req := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+p, nil)
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated GET %s expected 401, got %d: %s", p, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 2. Patient-scoped token for pat-alice succeeds on pat-alice's own summary operations (200 OK)
+	for _, p := range patientOpsGET {
+		req := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+p, nil)
+		req.Header.Set("Authorization", "Bearer "+aliceToken)
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("aliceToken GET %s expected 200 OK, got %d: %s", p, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 3. Cross-patient compartment access: aliceToken attempting to access pat-bob's operations MUST return 403 Forbidden
+	crossPatientOps := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/Patient/pat-bob/$nbs-summary"},
+		{http.MethodGet, "/Patient/pat-bob/$ecr-summary"},
+		{http.MethodGet, "/Patient/pat-bob/$elr-summary"},
+		{http.MethodGet, "/Patient/pat-bob/$rtpbc-summary"},
+		{http.MethodGet, "/Patient/pat-bob/$nhsn-hai-summary"},
+		{http.MethodPost, "/Patient/pat-bob/$mcode-trial-match"},
+	}
+	for _, cp := range crossPatientOps {
+		req := httptest.NewRequest(cp.method, "/fhir/r4/"+tenant+cp.path, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+aliceToken)
+		req.Header.Set("Content-Type", "application/fhir+json")
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("cross-patient %s %s with aliceToken expected 403 Forbidden, got %d: %s", cp.method, cp.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 4. Token without Patient scope (user/Practitioner.rs) or with 0 scopes MUST return 403 Forbidden on Patient/{id}/$op
+	for _, tok := range []string{emptyScopeToken, pracOnlyToken} {
+		req := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-alice/$nhsn-hai-summary", nil)
+		req.Header.Set("Authorization", "Bearer "+tok)
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("GET /Patient/pat-alice/$nhsn-hai-summary with token %s expected 403 Forbidden, got %d: %s", tok, rec.Code, rec.Body.String())
+		}
+	}
+}
