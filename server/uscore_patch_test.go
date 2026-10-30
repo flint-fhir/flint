@@ -8197,3 +8197,220 @@ func TestDaVinciBurdenReductionCodeXCTMAndFASTNDHWave50(t *testing.T) {
 		}
 	})
 }
+
+func TestDaVinciATRPACIOSPLASCHAndVulcanRWDWave51(t *testing.T) {
+	tenant := "wave51-tenant"
+	pgSrv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. Verify CapabilityStatement operation advertisements for Wave 51
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK {
+		t.Fatalf("GET /metadata status = %d", metaRec.Code)
+	}
+	metaBody := metaRec.Body.String()
+	for _, opName := range []string{
+		`"confirm-attribution-list"`,
+		`"atr-summary"`,
+		`"pacio-splasch-record"`,
+		`"pacio-splasch-summary"`,
+		`"vulcan-rwd-cohort"`,
+		`"vulcan-rwd-summary"`,
+	} {
+		if !strings.Contains(metaBody, opName) {
+			t.Fatalf("CapabilityStatement missing Wave 51 operation %s", opName)
+		}
+	}
+
+	// 2. Verify 405 Method Not Allowed on GET for POST-only operations
+	for _, getPath := range []string{
+		"/fhir/r4/" + tenant + "/Group/$confirm-attribution-list",
+		"/fhir/r4/" + tenant + "/Group/atr-grp-w51-1/$confirm-attribution-list",
+		"/fhir/r4/" + tenant + "/Observation/$pacio-splasch-record",
+		"/fhir/r4/" + tenant + "/Observation/splasch-obs-w51-1/$pacio-splasch-record",
+		"/fhir/r4/" + tenant + "/ResearchStudy/$vulcan-rwd-cohort",
+		"/fhir/r4/" + tenant + "/ResearchStudy/rwd-study-w51-1/$vulcan-rwd-cohort",
+	} {
+		req := httptest.NewRequest(http.MethodGet, getPath, nil)
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed || !strings.Contains(rec.Body.String(), `"not-supported"`) {
+			t.Fatalf("GET %s expected 405 Method Not Allowed with not-supported OperationOutcome, got %d: %s", getPath, rec.Code, rec.Body.String())
+		}
+	}
+
+	// 3. Da Vinci ATR: POST /Group/$confirm-attribution-list & GET /Group/{id}/$atr-summary
+	atrReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Group/atr-grp-w51-1/$confirm-attribution-list",
+		strings.NewReader(`{"resourceType":"Parameters","parameter":[{"name":"patient","valueReference":{"reference":"Patient/pat-w51-1"}},{"name":"coverage","valueReference":{"reference":"Coverage/cov-w51-1"}}]}`))
+	atrReq.Header.Set("Content-Type", "application/fhir+json")
+	atrRec := httptest.NewRecorder()
+	pgH.ServeHTTP(atrRec, atrReq)
+	if atrRec.Code != http.StatusOK ||
+		!strings.Contains(atrRec.Body.String(), `"valueCode":"confirmed"`) ||
+		!strings.Contains(atrRec.Body.String(), "atr-group") ||
+		!strings.Contains(atrRec.Body.String(), "ext-changeType") ||
+		!strings.Contains(atrRec.Body.String(), "ext-coverageReference") {
+		t.Fatalf("POST /Group/atr-grp-w51-1/$confirm-attribution-list failed: %d %s", atrRec.Code, atrRec.Body.String())
+	}
+
+	atrSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Group/atr-grp-w51-1/$atr-summary?patient=Patient/pat-w51-1", nil)
+	atrSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(atrSumRec, atrSumReq)
+	if atrSumRec.Code != http.StatusOK ||
+		!strings.Contains(atrSumRec.Body.String(), "atr-bundle") ||
+		!strings.Contains(atrSumRec.Body.String(), "atr-coverage") ||
+		!strings.Contains(atrSumRec.Body.String(), "atr-patient") {
+		t.Fatalf("GET /Group/atr-grp-w51-1/$atr-summary failed: %d %s", atrSumRec.Code, atrSumRec.Body.String())
+	}
+
+	// 4. PACIO SPLASCH: POST /Observation/$pacio-splasch-record & GET /Patient/{id}/$pacio-splasch-summary
+	splReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Observation/splasch-obs-w51-1/$pacio-splasch-record",
+		strings.NewReader(`{"patient":"Patient/pat-w51-1"}`))
+	splReq.Header.Set("Content-Type", "application/fhir+json")
+	splRec := httptest.NewRecorder()
+	pgH.ServeHTTP(splRec, splReq)
+	if splRec.Code != http.StatusOK ||
+		!strings.Contains(splRec.Body.String(), "splasch-DiagnosticReport") {
+		t.Fatalf("POST /Observation/splasch-obs-w51-1/$pacio-splasch-record failed: %d %s", splRec.Code, splRec.Body.String())
+	}
+
+	splSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w51-1/$pacio-splasch-summary", nil)
+	splSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(splSumRec, splSumReq)
+	if splSumRec.Code != http.StatusOK ||
+		!strings.Contains(splSumRec.Body.String(), "splasch-Bundle") ||
+		!strings.Contains(splSumRec.Body.String(), "splasch-SpokenLanguageComprehensionObservation") ||
+		!strings.Contains(splSumRec.Body.String(), "splasch-SwallowingObservation") ||
+		!strings.Contains(splSumRec.Body.String(), `"99829-4"`) {
+		t.Fatalf("GET /Patient/pat-w51-1/$pacio-splasch-summary failed: %d %s", splSumRec.Code, splSumRec.Body.String())
+	}
+
+	// 5. Vulcan RWD: POST /ResearchStudy/$vulcan-rwd-cohort & GET /Patient/{id}/$vulcan-rwd-summary
+	rwdReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/ResearchStudy/rwd-study-w51-1/$vulcan-rwd-cohort",
+		strings.NewReader(`{"patient":"Patient/pat-w51-1"}`))
+	rwdReq.Header.Set("Content-Type", "application/fhir+json")
+	rwdRec := httptest.NewRecorder()
+	pgH.ServeHTTP(rwdRec, rwdReq)
+	if rwdRec.Code != http.StatusOK ||
+		!strings.Contains(rwdRec.Body.String(), "ResearchStudyVulcanRWD") ||
+		!strings.Contains(rwdRec.Body.String(), "MedicationDispenseVulcanRWD") ||
+		!strings.Contains(rwdRec.Body.String(), `"valueInteger":1`) {
+		t.Fatalf("POST /ResearchStudy/rwd-study-w51-1/$vulcan-rwd-cohort failed: %d %s", rwdRec.Code, rwdRec.Body.String())
+	}
+
+	rwdSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w51-1/$vulcan-rwd-summary", nil)
+	rwdSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(rwdSumRec, rwdSumReq)
+	if rwdSumRec.Code != http.StatusOK ||
+		!strings.Contains(rwdSumRec.Body.String(), "vulcan-rwd-bundle") ||
+		!strings.Contains(rwdSumRec.Body.String(), "MedicationAdministrationVulcanRWD") ||
+		!strings.Contains(rwdSumRec.Body.String(), `"860975"`) {
+		t.Fatalf("GET /Patient/pat-w51-1/$vulcan-rwd-summary failed: %d %s", rwdSumRec.Code, rwdSumRec.Body.String())
+	}
+
+	// 6. SMART v2 Patient Compartment Isolation (401 unauthenticated, 200 authorized, 403 cross-patient)
+	mockAuth, err := auth.NewMockTokenValidator("https://auth.example.com", "flint-api")
+	if err != nil {
+		t.Fatalf("new mock validator: %v", err)
+	}
+	pgSrv.SetTokenValidator(mockAuth)
+	pat1Token := "token-pat-w51-1"
+	mockAuth.RegisterStatic(pat1Token, &authv1.SecurityContext{
+		Subject:   "Patient/pat-w51-1",
+		TenantId:  tenant,
+		PatientId: "pat-w51-1",
+		Scopes:    auth.ParseScopes("patient/Patient.rs patient/Observation.cruds patient/DiagnosticReport.rs patient/Group.cruds patient/ResearchStudy.cruds patient/MedicationDispense.rs patient/MedicationAdministration.rs"),
+	})
+
+	unauthReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w51-1/$pacio-splasch-summary", nil)
+	unauthRec := httptest.NewRecorder()
+	pgH.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated request expected 401, got %d", unauthRec.Code)
+	}
+
+	okAuthReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w51-1/$pacio-splasch-summary", nil)
+	okAuthReq.Header.Set("Authorization", "Bearer "+pat1Token)
+	okAuthRec := httptest.NewRecorder()
+	pgH.ServeHTTP(okAuthRec, okAuthReq)
+	if okAuthRec.Code != http.StatusOK {
+		t.Fatalf("authorized patient request expected 200, got %d: %s", okAuthRec.Code, okAuthRec.Body.String())
+	}
+
+	for _, crossPath := range []string{
+		"/fhir/r4/" + tenant + "/Patient/pat-w51-2/$pacio-splasch-summary",
+		"/fhir/r4/" + tenant + "/Patient/pat-w51-2/$vulcan-rwd-summary",
+		"/fhir/r4/" + tenant + "/Group/atr-grp-w51-1/$confirm-attribution-list",
+	} {
+		method := http.MethodGet
+		if strings.HasSuffix(crossPath, "$confirm-attribution-list") {
+			method = http.MethodPost
+		}
+		crossReq := httptest.NewRequest(method, crossPath, nil)
+		crossReq.Header.Set("Authorization", "Bearer "+pat1Token)
+		crossRec := httptest.NewRecorder()
+		pgH.ServeHTTP(crossRec, crossReq)
+		if crossRec.Code != http.StatusForbidden {
+			t.Fatalf("cross-patient/admin %s %s expected 403 Forbidden, got %d: %s", method, crossPath, crossRec.Code, crossRec.Body.String())
+		}
+	}
+
+	// 7. Postgres point-read round-trip when local Postgres is available
+	t.Run("PostgresPointReadRoundTrip", func(t *testing.T) {
+		db := openTestPostgres(t)
+		defer db.Close()
+		ctx := t.Context()
+		if err := postgres.RunMigrations(ctx, db); err != nil {
+			t.Fatalf("run migrations: %v", err)
+		}
+		cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+		cleanup()
+		defer cleanup()
+
+		dbStore := postgres.New(db)
+		dbSrv := server.New(dbStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		server.RegisterDefaultResourceTypes(dbSrv)
+		dbH := dbSrv.Handler()
+
+		for _, opReq := range []struct {
+			method string
+			path   string
+			body   string
+		}{
+			{http.MethodPost, "/fhir/r4/" + tenant + "/Group/atr-grp-w51-1/$confirm-attribution-list", `{"patient":"Patient/pat-w51-1"}`},
+			{http.MethodPost, "/fhir/r4/" + tenant + "/Observation/splasch-obs-w51-1/$pacio-splasch-record", `{"patient":"Patient/pat-w51-1"}`},
+			{http.MethodPost, "/fhir/r4/" + tenant + "/ResearchStudy/rwd-study-w51-1/$vulcan-rwd-cohort", `{"patient":"Patient/pat-w51-1"}`},
+		} {
+			req := httptest.NewRequest(opReq.method, opReq.path, strings.NewReader(opReq.body))
+			req.Header.Set("Content-Type", "application/fhir+json")
+			rec := httptest.NewRecorder()
+			dbH.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s %s status = %d: %s", opReq.method, opReq.path, rec.Code, rec.Body.String())
+			}
+		}
+
+		for _, resPath := range []string{
+			"/fhir/r4/" + tenant + "/Group/atr-grp-w51-1",
+			"/fhir/r4/" + tenant + "/Patient/pat-w51-1",
+			"/fhir/r4/" + tenant + "/Coverage/atr-cov-pat-w51-1",
+			"/fhir/r4/" + tenant + "/Observation/splasch-obs-w51-1",
+			"/fhir/r4/" + tenant + "/Observation/splasch-swallow-pat-w51-1",
+			"/fhir/r4/" + tenant + "/DiagnosticReport/splasch-dr-pat-w51-1",
+			"/fhir/r4/" + tenant + "/ResearchStudy/rwd-study-w51-1",
+			"/fhir/r4/" + tenant + "/Group/rwd-cohort-rwd-study-w51-1",
+			"/fhir/r4/" + tenant + "/MedicationDispense/rwd-md-pat-w51-1",
+			"/fhir/r4/" + tenant + "/MedicationAdministration/rwd-ma-pat-w51-1",
+		} {
+			ptReq := httptest.NewRequest(http.MethodGet, resPath, nil)
+			ptRec := httptest.NewRecorder()
+			dbH.ServeHTTP(ptRec, ptReq)
+			if ptRec.Code != http.StatusOK {
+				t.Fatalf("point-read GET %s expected 200 OK from Postgres store, got %d: %s", resPath, ptRec.Code, ptRec.Body.String())
+			}
+		}
+	})
+}

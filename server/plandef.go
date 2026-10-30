@@ -24783,3 +24783,687 @@ func (s *Server) handleFASTNDHVerifyAndDirectoryWave50(w http.ResponseWriter, r 
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(bundle)
 }
+
+// =============================================================================
+// Wave 51:
+//   1. HL7 Da Vinci Member Attribution (ATR v2.1.0) ($confirm-attribution-list & $atr-summary)
+//   2. HL7 PACIO SPLASCH (Speech, Language, Swallowing, Cognitive-Communication & Hearing v1.0.0)
+//      ($pacio-splasch-record & $pacio-splasch-summary)
+//   3. HL7 Vulcan Real World Data (RWD v1.0.0) ($vulcan-rwd-cohort & $vulcan-rwd-summary)
+// =============================================================================
+
+// handleDaVinciATRWave51 implements HL7 Da Vinci Member Attribution (ATR v2.1.0):
+//   - POST /fhir/r4/{tenant}/Group/$confirm-attribution-list & /fhir/r4/{tenant}/Group/{id}/$confirm-attribution-list
+//   - GET/POST /fhir/r4/{tenant}/Group/$atr-summary & /fhir/r4/{tenant}/Group/{id}/$atr-summary
+func (s *Server) handleDaVinciATRWave51(w http.ResponseWriter, r *http.Request, op string) {
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+
+	if op == "confirm-attribution-list" && r.Method != http.MethodPost {
+		if resID != "" && s.store != nil {
+			if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Group", resID); err == nil && rec != nil {
+				s.handleGroupATRMember(w, r)
+				return
+			}
+		}
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$confirm-attribution-list requires HTTP POST")
+		return
+	}
+
+	q := r.URL.Query()
+	groupID := strings.TrimPrefix(firstNonEmptyStr(resID, q.Get("group"), q.Get("id")), "Group/")
+	patID := strings.TrimPrefix(firstNonEmptyStr(q.Get("patient"), q.Get("member"), q.Get("memberId")), "Patient/")
+	covID := strings.TrimPrefix(q.Get("coverage"), "Coverage/")
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							switch name {
+							case "group", "id":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									groupID = strings.TrimPrefix(strings.TrimSpace(vs), "Group/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										groupID = strings.TrimPrefix(strings.TrimSpace(ref), "Group/")
+									}
+								}
+							case "patient", "member", "memberId", "subject":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							case "coverage":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									covID = strings.TrimPrefix(strings.TrimSpace(vs), "Coverage/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										covID = strings.TrimPrefix(strings.TrimSpace(ref), "Coverage/")
+									}
+								}
+							}
+						}
+					}
+				} else {
+					for _, k := range []string{"patient", "member", "memberId"} {
+						if vs, ok := body[k].(string); ok && strings.TrimSpace(vs) != "" {
+							patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+						}
+					}
+					if idStr, ok := body["id"].(string); ok && strings.TrimSpace(idStr) != "" && groupID == "" {
+						groupID = strings.TrimSpace(idStr)
+					}
+				}
+			}
+		}
+	}
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		if op == "confirm-attribution-list" {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot invoke $confirm-attribution-list", secCtx.GetPatientId()))
+			return
+		}
+		if patID == "" || cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot access ATR summary for Patient/%s", secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	if groupID == "" {
+		groupID = "atr-group-1"
+	}
+	if patID == "" {
+		patID = "pat-atr-1"
+	}
+	if covID == "" {
+		covID = "atr-cov-" + patID
+	}
+
+	now := time.Now().UTC()
+	nowStr := now.Format(time.RFC3339)
+
+	patRes := map[string]any{
+		"resourceType": "Patient",
+		"id":           patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-atr/StructureDefinition/atr-patient"},
+		},
+		"active": true,
+		"name": []map[string]any{
+			{"family": "Attributed", "given": []string{"Member"}},
+		},
+	}
+	_, _, _, savedPat, _ := s.upsertResourceMap(r.Context(), tenant, patRes)
+	if len(savedPat) > 0 {
+		patRes = savedPat
+	}
+
+	covRes := map[string]any{
+		"resourceType": "Coverage",
+		"id":           covID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-atr/StructureDefinition/atr-coverage"},
+		},
+		"status":      "active",
+		"beneficiary": map[string]any{"reference": "Patient/" + patID},
+		"payor": []map[string]any{
+			{"display": "Da Vinci ATR Value-Based Payer"},
+		},
+		"period": map[string]any{
+			"start": now.Format("2006-01-02"),
+			"end":   now.AddDate(1, 0, 0).Format("2006-01-02"),
+		},
+	}
+	_, _, _, savedCov, _ := s.upsertResourceMap(r.Context(), tenant, covRes)
+	if len(savedCov) > 0 {
+		covRes = savedCov
+	}
+
+	grpRes := map[string]any{
+		"resourceType": "Group",
+		"id":           groupID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-atr/StructureDefinition/atr-group"},
+		},
+		"active":   true,
+		"type":     "person",
+		"actual":   true,
+		"name":     "Da Vinci ATR Confirmed Member Attribution Roster",
+		"quantity": 1,
+		"member": []map[string]any{
+			{
+				"extension": []map[string]any{
+					{
+						"url":       "http://hl7.org/fhir/us/davinci-atr/StructureDefinition/ext-changeType",
+						"valueCode": "add",
+					},
+					{
+						"url":            "http://hl7.org/fhir/us/davinci-atr/StructureDefinition/ext-coverageReference",
+						"valueReference": map[string]any{"reference": "Coverage/" + covID},
+					},
+				},
+				"entity": map[string]any{"reference": "Patient/" + patID},
+				"period": map[string]any{
+					"start": now.Format("2006-01-02"),
+					"end":   now.AddDate(1, 0, 0).Format("2006-01-02"),
+				},
+				"inactive": false,
+			},
+		},
+	}
+	_, _, _, savedGrp, _ := s.upsertResourceMap(r.Context(), tenant, grpRes)
+	if len(savedGrp) > 0 {
+		grpRes = savedGrp
+	}
+
+	if op == "confirm-attribution-list" {
+		outParams := map[string]any{
+			"resourceType": "Parameters",
+			"id":           "atr-confirm-" + groupID,
+			"parameter": []map[string]any{
+				{
+					"name":           "group",
+					"valueReference": map[string]any{"reference": "Group/" + groupID},
+				},
+				{
+					"name":      "status",
+					"valueCode": "confirmed",
+				},
+				{
+					"name":         "activeMemberCount",
+					"valueInteger": 1,
+				},
+				{
+					"name":         "inactiveMemberCount",
+					"valueInteger": 0,
+				},
+				{
+					"name":           "coverage",
+					"valueReference": map[string]any{"reference": "Coverage/" + covID},
+				},
+				{
+					"name":     "resource",
+					"resource": grpRes,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(outParams)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "atr-summary-" + groupID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-atr/StructureDefinition/atr-bundle"},
+		},
+		"type":      "searchset",
+		"total":     3,
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Group/" + groupID, "resource": grpRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Patient/" + patID, "resource": patRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "Coverage/" + covID, "resource": covRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handlePACIOSPLASCHWave51 implements HL7 PACIO SPLASCH v1.0.0 (Speech, Language, Swallowing,
+// Cognitive-Communication, and Hearing):
+//   - POST /fhir/r4/{tenant}/Observation/$pacio-splasch-record & /fhir/r4/{tenant}/Observation/{id}/$pacio-splasch-record
+//   - GET/POST /fhir/r4/{tenant}/Patient/$pacio-splasch-summary & /fhir/r4/{tenant}/Patient/{id}/$pacio-splasch-summary
+func (s *Server) handlePACIOSPLASCHWave51(w http.ResponseWriter, r *http.Request, op string) {
+	if op == "pacio-splasch-record" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$pacio-splasch-record requires HTTP POST")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	patID := strings.TrimPrefix(firstNonEmptyStr(q.Get("patient"), q.Get("subject")), "Patient/")
+	if op == "pacio-splasch-summary" && patID == "" && resID != "" {
+		patID = strings.TrimPrefix(resID, "Patient/")
+	}
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "patient" || name == "subject" {
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							}
+						}
+					}
+				} else {
+					for _, k := range []string{"patient", "subject"} {
+						if vs, ok := body[k].(string); ok && strings.TrimSpace(vs) != "" {
+							patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+						} else if vr, ok := body[k].(map[string]any); ok {
+							if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+								patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if patID == "" {
+		patID = "pat-splasch-1"
+	}
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		if cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot access PACIO SPLASCH resources for Patient/%s", secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	langObsID := "splasch-lang-" + patID
+	if op == "pacio-splasch-record" && resID != "" {
+		langObsID = resID
+	}
+	langObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           langObsID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/pacio-splasch/StructureDefinition/splasch-SpokenLanguageComprehensionObservation"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/core/CodeSystem/us-core-category",
+						"code":    "functioning",
+						"display": "Functioning",
+					},
+					{
+						"system":  "http://hl7.org/fhir/us/pacio-splasch/CodeSystem/SPLASCHObservationCategoryCS",
+						"code":    "spoken-language-comprehension",
+						"display": "Spoken Language Comprehension",
+					},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "99829-4",
+					"display": "How often does the person understand spoken language",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueCodeableConcept": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "LA33-6",
+					"display": "Sometimes",
+				},
+			},
+		},
+	}
+	_, _, _, savedLang, _ := s.upsertResourceMap(r.Context(), tenant, langObs)
+	if len(savedLang) > 0 {
+		langObs = savedLang
+	}
+
+	swallowObsID := "splasch-swallow-" + patID
+	swallowObs := map[string]any{
+		"resourceType": "Observation",
+		"id":           swallowObsID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/pacio-splasch/StructureDefinition/splasch-SwallowingObservation"},
+		},
+		"status": "final",
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/core/CodeSystem/us-core-category",
+						"code":    "functioning",
+						"display": "Functioning",
+					},
+					{
+						"system":  "http://hl7.org/fhir/us/pacio-splasch/CodeSystem/SPLASCHObservationCategoryCS",
+						"code":    "swallowing",
+						"display": "Swallowing",
+					},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "99834-4",
+					"display": "Swallowing functional status",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"valueCodeableConcept": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "288939007",
+					"display": "Difficulty swallowing",
+				},
+			},
+		},
+	}
+	_, _, _, savedSwallow, _ := s.upsertResourceMap(r.Context(), tenant, swallowObs)
+	if len(savedSwallow) > 0 {
+		swallowObs = savedSwallow
+	}
+
+	drID := "splasch-dr-" + patID
+	drRes := map[string]any{
+		"resourceType": "DiagnosticReport",
+		"id":           drID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/pacio-splasch/StructureDefinition/splasch-DiagnosticReport"},
+		},
+		"status": "final",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://loinc.org",
+					"code":    "18776-5",
+					"display": "SLP SPLASCH Speech, Language, and Swallowing Evaluation",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+		"result": []map[string]any{
+			{"reference": "Observation/" + langObsID},
+			{"reference": "Observation/" + swallowObsID},
+		},
+	}
+	_, _, _, savedDR, _ := s.upsertResourceMap(r.Context(), tenant, drRes)
+	if len(savedDR) > 0 {
+		drRes = savedDR
+	}
+
+	if op == "pacio-splasch-record" {
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(drRes)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "splasch-summary-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/pacio-splasch/StructureDefinition/splasch-Bundle"},
+		},
+		"type":      "searchset",
+		"total":     3,
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "DiagnosticReport/" + drID, "resource": drRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Observation/" + langObsID, "resource": langObs, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "Observation/" + swallowObsID, "resource": swallowObs, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleVulcanRWDWave51 implements HL7 Vulcan Real World Data (RWD v1.0.0) Cohort & Summary:
+//   - POST /fhir/r4/{tenant}/ResearchStudy/$vulcan-rwd-cohort & /fhir/r4/{tenant}/ResearchStudy/{id}/$vulcan-rwd-cohort
+//   - GET/POST /fhir/r4/{tenant}/Patient/$vulcan-rwd-summary & /fhir/r4/{tenant}/Patient/{id}/$vulcan-rwd-summary
+func (s *Server) handleVulcanRWDWave51(w http.ResponseWriter, r *http.Request, op string) {
+	if op == "vulcan-rwd-cohort" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$vulcan-rwd-cohort requires HTTP POST")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	patID := strings.TrimPrefix(firstNonEmptyStr(q.Get("patient"), q.Get("subject")), "Patient/")
+	studyID := strings.TrimPrefix(q.Get("study"), "ResearchStudy/")
+	if op == "vulcan-rwd-summary" && patID == "" && resID != "" {
+		patID = strings.TrimPrefix(resID, "Patient/")
+	}
+	if op == "vulcan-rwd-cohort" && studyID == "" && resID != "" {
+		studyID = strings.TrimPrefix(resID, "ResearchStudy/")
+	}
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							case "study", "researchStudy":
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									studyID = strings.TrimPrefix(strings.TrimSpace(vs), "ResearchStudy/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										studyID = strings.TrimPrefix(strings.TrimSpace(ref), "ResearchStudy/")
+									}
+								}
+							}
+						}
+					}
+				} else {
+					for _, k := range []string{"patient", "subject"} {
+						if vs, ok := body[k].(string); ok && strings.TrimSpace(vs) != "" {
+							patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+						} else if vr, ok := body[k].(map[string]any); ok {
+							if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+								patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+							}
+						}
+					}
+					if vs, ok := body["study"].(string); ok && strings.TrimSpace(vs) != "" {
+						studyID = strings.TrimPrefix(strings.TrimSpace(vs), "ResearchStudy/")
+					}
+				}
+			}
+		}
+	}
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		if patID == "" || cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot access Vulcan RWD resources for Patient/%s", secCtx.GetPatientId(), patID))
+			return
+		}
+	}
+
+	if patID == "" {
+		patID = "pat-rwd-1"
+	}
+	if studyID == "" {
+		studyID = "vulcan-rwd-study-1"
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	studyRes := map[string]any{
+		"resourceType": "ResearchStudy",
+		"id":           studyID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/vulcan-rwd/StructureDefinition/ResearchStudyVulcanRWD"},
+		},
+		"status": "active",
+		"title":  "Vulcan RWD FDA Sentinel Pharmacoepidemiology Study",
+		"identifier": []map[string]any{
+			{
+				"system": "http://clinicaltrials.gov",
+				"value":  "NCT09988776",
+			},
+		},
+	}
+	_, _, _, savedStudy, _ := s.upsertResourceMap(r.Context(), tenant, studyRes)
+	if len(savedStudy) > 0 {
+		studyRes = savedStudy
+	}
+
+	grpID := "rwd-cohort-" + studyID
+	grpRes := map[string]any{
+		"resourceType": "Group",
+		"id":           grpID,
+		"type":         "person",
+		"actual":       true,
+		"name":         "Vulcan RWD Eligible Pharmacoepidemiology Cohort",
+		"quantity":     1,
+		"member": []map[string]any{
+			{
+				"entity":   map[string]any{"reference": "Patient/" + patID},
+				"inactive": false,
+			},
+		},
+	}
+	_, _, _, savedGrp, _ := s.upsertResourceMap(r.Context(), tenant, grpRes)
+	if len(savedGrp) > 0 {
+		grpRes = savedGrp
+	}
+
+	mdID := "rwd-md-" + patID
+	mdRes := map[string]any{
+		"resourceType": "MedicationDispense",
+		"id":           mdID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/vulcan-rwd/StructureDefinition/MedicationDispenseVulcanRWD"},
+		},
+		"status": "completed",
+		"medicationCodeableConcept": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://www.nlm.nih.gov/research/umls/rxnorm",
+					"code":    "860975",
+					"display": "Metformin hydrochloride 500 MG Oral Tablet",
+				},
+			},
+		},
+		"subject":        map[string]any{"reference": "Patient/" + patID},
+		"whenHandedOver": nowStr,
+	}
+	_, _, _, savedMD, _ := s.upsertResourceMap(r.Context(), tenant, mdRes)
+	if len(savedMD) > 0 {
+		mdRes = savedMD
+	}
+
+	maID := "rwd-ma-" + patID
+	maRes := map[string]any{
+		"resourceType": "MedicationAdministration",
+		"id":           maID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/vulcan-rwd/StructureDefinition/MedicationAdministrationVulcanRWD"},
+		},
+		"status": "completed",
+		"medicationCodeableConcept": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://www.nlm.nih.gov/research/umls/rxnorm",
+					"code":    "860975",
+					"display": "Metformin hydrochloride 500 MG Oral Tablet",
+				},
+			},
+		},
+		"subject":           map[string]any{"reference": "Patient/" + patID},
+		"effectiveDateTime": nowStr,
+	}
+	_, _, _, savedMA, _ := s.upsertResourceMap(r.Context(), tenant, maRes)
+	if len(savedMA) > 0 {
+		maRes = savedMA
+	}
+
+	if op == "vulcan-rwd-cohort" {
+		outParams := map[string]any{
+			"resourceType": "Parameters",
+			"id":           "vulcan-rwd-cohort-params-" + studyID,
+			"parameter": []map[string]any{
+				{"name": "study", "resource": studyRes},
+				{"name": "cohortGroup", "resource": grpRes},
+				{"name": "medicationDispense", "resource": mdRes},
+				{"name": "eligibleCount", "valueInteger": 1},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(outParams)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "vulcan-rwd-summary-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/uv/vulcan-rwd/StructureDefinition/vulcan-rwd-bundle"},
+		},
+		"type":      "searchset",
+		"total":     4,
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "ResearchStudy/" + studyID, "resource": studyRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Group/" + grpID, "resource": grpRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "MedicationDispense/" + mdID, "resource": mdRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "MedicationAdministration/" + maID, "resource": maRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}

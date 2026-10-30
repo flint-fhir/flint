@@ -1290,6 +1290,36 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleFASTNDHVerifyAndDirectoryWave50(w, r, "ndh-directory-summary")
 					return
 				}
+				if strings.EqualFold(parts[3], "Group") && parts[4] == "$confirm-attribution-list" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDaVinciATRWave51(w, r, "confirm-attribution-list")
+					return
+				}
+				if strings.EqualFold(parts[3], "Group") && parts[4] == "$atr-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDaVinciATRWave51(w, r, "atr-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "Observation") && parts[4] == "$pacio-splasch-record" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePACIOSPLASCHWave51(w, r, "pacio-splasch-record")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$pacio-splasch-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePACIOSPLASCHWave51(w, r, "pacio-splasch-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "ResearchStudy") && parts[4] == "$vulcan-rwd-cohort" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleVulcanRWDWave51(w, r, "vulcan-rwd-cohort")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$vulcan-rwd-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleVulcanRWDWave51(w, r, "vulcan-rwd-summary")
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -1298,6 +1328,43 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Group") && parts[5] == "$confirm-attribution-list" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					r.SetPathValue("op", "$confirm-attribution-list")
+					s.handleDaVinciATRWave51(w, r, "confirm-attribution-list")
+					return
+				}
+				if strings.EqualFold(parts[3], "Group") && parts[5] == "$atr-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDaVinciATRWave51(w, r, "atr-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "Observation") && parts[5] == "$pacio-splasch-record" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePACIOSPLASCHWave51(w, r, "pacio-splasch-record")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$pacio-splasch-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePACIOSPLASCHWave51(w, r, "pacio-splasch-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "ResearchStudy") && parts[5] == "$vulcan-rwd-cohort" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleVulcanRWDWave51(w, r, "vulcan-rwd-cohort")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$vulcan-rwd-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleVulcanRWDWave51(w, r, "vulcan-rwd-summary")
+					return
+				}
 				if strings.EqualFold(parts[3], "Questionnaire") && parts[5] == "$dtr-questionnaire-package" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -5331,6 +5398,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "mcode-trial-summary",
 					"definition": "http://hl7.org/fhir/us/codex-clinical-trial-matching/OperationDefinition/Patient-mcode-trial-summary",
 				},
+				{
+					"name":       "pacio-splasch-summary",
+					"definition": "http://hl7.org/fhir/us/pacio-splasch/OperationDefinition/Patient-pacio-splasch-summary",
+				},
+				{
+					"name":       "vulcan-rwd-summary",
+					"definition": "http://hl7.org/fhir/uv/vulcan-rwd/OperationDefinition/Patient-vulcan-rwd-summary",
+				},
 			}
 		case "Immunization":
 			entry["operation"] = []map[string]string{
@@ -5414,6 +5489,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "mcode-disease-status",
 					"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/Observation-mcode-disease-status",
+				},
+				{
+					"name":       "pacio-splasch-record",
+					"definition": "http://hl7.org/fhir/us/pacio-splasch/OperationDefinition/Observation-pacio-splasch-record",
 				},
 			}
 		case "Encounter":
@@ -5597,6 +5676,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			{
 				"name":       "confirm-attribution-list",
 				"definition": "http://hl7.org/fhir/us/davinci-atr/OperationDefinition/confirm-attribution-list",
+			},
+			{
+				"name":       "atr-summary",
+				"definition": "http://hl7.org/fhir/us/davinci-atr/OperationDefinition/Group-atr-summary",
 			},
 			{
 				"name":       "davinci-data-export",
@@ -6046,6 +6129,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "rwd-cohort",
 					"definition": "http://hl7.org/fhir/uv/vulcan-rwd/OperationDefinition/ResearchStudy-rwd-cohort",
+				},
+				{
+					"name":       "vulcan-rwd-cohort",
+					"definition": "http://hl7.org/fhir/uv/vulcan-rwd/OperationDefinition/ResearchStudy-vulcan-rwd-cohort",
 				},
 				{
 					"name":       "vulcan-summary",
