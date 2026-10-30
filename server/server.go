@@ -1205,6 +1205,36 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handlePACIOTOCAndADIWave46(w, r, "adi-verify")
 					return
 				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "MeasureReport") && parts[4] == "$nhsn-aur-submit" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleNHSNHAIAURWave47(w, r, "nhsn-aur-submit")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$nhsn-hai-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleNHSNHAIAURWave47(w, r, "nhsn-hai-summary")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$mcode-trial-match" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCodeXMCODEWave47(w, r, "mcode-trial-match")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Observation") && parts[4] == "$mcode-disease-status" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleCodeXMCODEWave47(w, r, "mcode-disease-status")
+					return
+				}
+				if strings.EqualFold(parts[3], "OrganizationAffiliation") && parts[4] == "$fast-network-query" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleFASTNDHNetworkWave47(w, r, "fast-network-query")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "HealthcareService") && parts[4] == "$fast-attest" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleFASTNDHNetworkWave47(w, r, "fast-attest")
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -1213,6 +1243,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "MeasureReport") && parts[5] == "$nhsn-aur-submit" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleNHSNHAIAURWave47(w, r, "nhsn-aur-submit")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$nhsn-hai-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleNHSNHAIAURWave47(w, r, "nhsn-hai-summary")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[5] == "$mcode-trial-match" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCodeXMCODEWave47(w, r, "mcode-trial-match")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Observation") && parts[5] == "$mcode-disease-status" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleCodeXMCODEWave47(w, r, "mcode-disease-status")
+					return
+				}
+				if strings.EqualFold(parts[3], "OrganizationAffiliation") && parts[5] == "$fast-network-query" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleFASTNDHNetworkWave47(w, r, "fast-network-query")
+					return
+				}
+				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "HealthcareService") && parts[5] == "$fast-attest" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleFASTNDHNetworkWave47(w, r, "fast-attest")
+					return
+				}
 				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$elr-summary" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -5114,6 +5180,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "rtpbc-summary",
 					"definition": "http://hl7.org/fhir/us/carin-rtpbc/OperationDefinition/Patient-rtpbc-summary",
 				},
+				{
+					"name":       "nhsn-hai-summary",
+					"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Patient-nhsn-hai-summary",
+				},
+				{
+					"name":       "mcode-trial-match",
+					"definition": "http://hl7.org/fhir/us/codex-clinical-trial-matching/OperationDefinition/Patient-mcode-trial-match",
+				},
 			}
 		case "Immunization":
 			entry["operation"] = []map[string]string{
@@ -5189,6 +5263,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "reportable-labs",
 					"definition": "http://hl7.org/fhir/us/elr/OperationDefinition/Observation-reportable-labs",
+				},
+				{
+					"name":       "mcode-disease-status",
+					"definition": "http://hl7.org/fhir/us/mcode/OperationDefinition/Observation-mcode-disease-status",
 				},
 			}
 		case "Encounter":
@@ -5504,6 +5582,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "vbpr-attest",
 					"definition": "http://hl7.org/fhir/us/davinci-vbpr/OperationDefinition/MeasureReport-vbpr-attest",
+				},
+				{
+					"name":       "nhsn-aur-submit",
+					"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/MeasureReport-nhsn-aur-submit",
 				},
 			}
 		case "DocumentReference":
@@ -5926,6 +6008,17 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "find-services",
 					"definition": "http://hl7.org/fhir/us/davinci-pdex-plan-net/OperationDefinition/find-services",
+				},
+				{
+					"name":       "fast-attest",
+					"definition": "http://hl7.org/fhir/us/ndh/OperationDefinition/HealthcareService-fast-attest",
+				},
+			}
+		case "OrganizationAffiliation":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "fast-network-query",
+					"definition": "http://hl7.org/fhir/us/ndh/OperationDefinition/OrganizationAffiliation-fast-network-query",
 				},
 			}
 		case "Consent":

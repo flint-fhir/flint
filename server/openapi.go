@@ -4874,6 +4874,88 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/MeasureReport/$nhsn-aur-submit": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"MeasureReport", "MedicationAdministration", "Parameters"},
+				"summary":     "Submit a CDC NHSN Antimicrobial Use and Resistance (AUR / ACH v1.0.0) digital quality MeasureReport and persist antimicrobial MedicationAdministration",
+				"operationId": "measureReportNHSNAURSubmitPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, nhsn-aur-measure-report, and ach-daily-medicationadministration"},
+				},
+			},
+		},
+		"/Patient/{id}/$nhsn-hai-summary": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Patient", "MeasureReport", "Encounter", "MedicationAdministration", "Bundle"},
+				"summary":     "Assemble a CDC NHSN HAI & AUR acute care surveillance Bundle for Patient/{id}",
+				"operationId": "patientNHSNHAISummaryGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing nhsn-aur-measure-report, ach-daily-encounter, and ach-daily-medicationadministration"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Patient", "MeasureReport", "Encounter", "MedicationAdministration", "Bundle"},
+				"summary":     "Assemble a CDC NHSN HAI & AUR acute care surveillance Bundle (POST)",
+				"operationId": "patientNHSNHAISummaryPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle containing nhsn-aur-measure-report, ach-daily-encounter, and ach-daily-medicationadministration"},
+				},
+			},
+		},
+		"/Patient/$mcode-trial-match": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Patient", "ResearchStudy", "Bundle"},
+				"summary":     "Match an HL7 mCODE oncology Patient against clinical trials (CodeX Clinical Trial Matching v1.0.0)",
+				"operationId": "patientMCODETrialMatchPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle (codex-clinical-trial-match-bundle) of matched ResearchStudy resources"},
+				},
+			},
+		},
+		"/Observation/$mcode-disease-status": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Observation", "Parameters"},
+				"summary":     "Record and persist an HL7 mCODE v3.0.0 Cancer Disease Status Observation (LOINC 97509-4)",
+				"operationId": "observationMCODEDiseaseStatusPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status and mcode-cancer-disease-status Observation"},
+				},
+			},
+		},
+		"/OrganizationAffiliation/$fast-network-query": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"OrganizationAffiliation", "Organization", "Endpoint", "Bundle"},
+				"summary":     "Query ONC FAST National Directory (NDH v1.0.0) & Da Vinci Plan-Net v1.1.0 OrganizationAffiliation and payer network directory",
+				"operationId": "organizationAffiliationFASTNetworkQueryGet",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of ndh-OrganizationAffiliation, plannet-Network Organization, and ndh-Endpoint"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"OrganizationAffiliation", "Organization", "Endpoint", "Bundle"},
+				"summary":     "Query ONC FAST NDH & Da Vinci Plan-Net OrganizationAffiliation and payer network directory (POST)",
+				"operationId": "organizationAffiliationFASTNetworkQueryPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Searchset Bundle of ndh-OrganizationAffiliation, plannet-Network Organization, and ndh-Endpoint"},
+				},
+			},
+		},
+		"/HealthcareService/$fast-attest": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"HealthcareService", "VerificationResult", "Parameters"},
+				"summary":     "Attest and verify an ONC FAST National Directory (NDH v1.0.0) HealthcareService and persist VerificationResult",
+				"operationId": "healthcareServiceFASTAttestPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, ndh-HealthcareService, and ndh-Verification VerificationResult"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()
