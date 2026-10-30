@@ -681,7 +681,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handlePlanNetDirectory(w, r)
 					return
 				}
-				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ServiceRequest") && parts[4] == "$sdoh-referral" {
+				if strings.EqualFold(parts[3], "ServiceRequest") && parts[4] == "$sdoh-referral" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleGravitySDOHReferral(w, r)
 					return
@@ -1235,6 +1235,31 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleFASTNDHNetworkWave47(w, r, "fast-attest")
 					return
 				}
+				if strings.EqualFold(parts[3], "MeasureReport") && parts[4] == "$ra-evaluate-risk" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDaVinciRAAndCDexWave49(w, r, "ra-evaluate-risk")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$ra-coding-gap-report" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDaVinciRAAndCDexWave49(w, r, "ra-coding-gap-report")
+					return
+				}
+				if strings.EqualFold(parts[3], "Task") && parts[4] == "$cdex-submit-attachment" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDaVinciRAAndCDexWave49(w, r, "cdex-submit-attachment")
+					return
+				}
+				if strings.EqualFold(parts[3], "Measure") && parts[4] == "$nhsn-dqm-evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleNHSNDQMWave49(w, r, "nhsn-dqm-evaluate")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$nhsn-ach-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleNHSNDQMWave49(w, r, "nhsn-ach-summary")
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -1243,6 +1268,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "MeasureReport") && parts[5] == "$ra-evaluate-risk" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDaVinciRAAndCDexWave49(w, r, "ra-evaluate-risk")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$ra-coding-gap-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDaVinciRAAndCDexWave49(w, r, "ra-coding-gap-report")
+					return
+				}
+				if strings.EqualFold(parts[3], "Task") && parts[5] == "$cdex-submit-attachment" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDaVinciRAAndCDexWave49(w, r, "cdex-submit-attachment")
+					return
+				}
+				if strings.EqualFold(parts[3], "Measure") && parts[5] == "$nhsn-dqm-evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleNHSNDQMWave49(w, r, "nhsn-dqm-evaluate")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$nhsn-ach-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleNHSNDQMWave49(w, r, "nhsn-ach-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "ServiceRequest") && parts[5] == "$sdoh-referral" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleGravitySDOHReferral(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "MeasureReport") && parts[5] == "$nhsn-aur-submit" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -5188,6 +5249,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "mcode-trial-match",
 					"definition": "http://hl7.org/fhir/us/codex-clinical-trial-matching/OperationDefinition/Patient-mcode-trial-match",
 				},
+				{
+					"name":       "ra-coding-gap-report",
+					"definition": "http://hl7.org/fhir/us/davinci-ra/OperationDefinition/Patient-ra-coding-gap-report",
+				},
+				{
+					"name":       "nhsn-ach-summary",
+					"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Patient-nhsn-ach-summary",
+				},
 			}
 		case "Immunization":
 			entry["operation"] = []map[string]string{
@@ -5587,6 +5656,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "nhsn-aur-submit",
 					"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/MeasureReport-nhsn-aur-submit",
 				},
+				{
+					"name":       "ra-evaluate-risk",
+					"definition": "http://hl7.org/fhir/us/davinci-ra/OperationDefinition/MeasureReport-ra-evaluate-risk",
+				},
 			}
 		case "DocumentReference":
 			entry["operation"] = []map[string]string{
@@ -5648,6 +5721,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "nhsn-acute-care",
 					"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Measure-nhsn-acute-care",
 				},
+				{
+					"name":       "nhsn-dqm-evaluate",
+					"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Measure-nhsn-dqm-evaluate",
+				},
 			}
 		case "Library":
 			entry["operation"] = []map[string]string{
@@ -5700,6 +5777,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "sdoh-fulfill",
 					"definition": "http://hl7.org/fhir/us/sdoh-clinicalcare/OperationDefinition/Task-sdoh-fulfill",
+				},
+				{
+					"name":       "cdex-submit-attachment",
+					"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/Task-cdex-submit-attachment",
 				},
 			}
 		case "ValueSet":
@@ -6498,6 +6579,26 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "nhsn-acute-care",
 						"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Measure-nhsn-acute-care",
+					},
+					{
+						"name":       "ra-evaluate-risk",
+						"definition": "http://hl7.org/fhir/us/davinci-ra/OperationDefinition/MeasureReport-ra-evaluate-risk",
+					},
+					{
+						"name":       "ra-coding-gap-report",
+						"definition": "http://hl7.org/fhir/us/davinci-ra/OperationDefinition/Patient-ra-coding-gap-report",
+					},
+					{
+						"name":       "cdex-submit-attachment",
+						"definition": "http://hl7.org/fhir/us/davinci-cdex/OperationDefinition/Task-cdex-submit-attachment",
+					},
+					{
+						"name":       "nhsn-dqm-evaluate",
+						"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Measure-nhsn-dqm-evaluate",
+					},
+					{
+						"name":       "nhsn-ach-summary",
+						"definition": "http://hl7.org/fhir/us/nhsn-dqm/OperationDefinition/Patient-nhsn-ach-summary",
 					},
 				},
 			},

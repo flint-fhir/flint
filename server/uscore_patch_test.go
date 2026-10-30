@@ -7732,3 +7732,243 @@ func TestWave48_IGOperationSMARTCompartmentAndScopeIsolation(t *testing.T) {
 		}
 	}
 }
+
+func TestDaVinciRANHSNDQMAndSDOHReferralWave49(t *testing.T) {
+	db := openTestPostgres(t)
+	defer db.Close()
+	ctx := t.Context()
+	if err := postgres.RunMigrations(ctx, db); err != nil {
+		t.Fatalf("migrations failed: %v", err)
+	}
+
+	tenant := "wave49-test"
+	cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+	cleanup()
+	defer cleanup()
+
+	pgStore := postgres.New(db)
+	pgSrv := server.New(pgStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. CapabilityStatement advertisement for Wave 49 operations
+	capReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/metadata", nil)
+	capRec := httptest.NewRecorder()
+	pgH.ServeHTTP(capRec, capReq)
+	if capRec.Code != http.StatusOK ||
+		!strings.Contains(capRec.Body.String(), `"ra-evaluate-risk"`) ||
+		!strings.Contains(capRec.Body.String(), `"ra-coding-gap-report"`) ||
+		!strings.Contains(capRec.Body.String(), `"cdex-submit-attachment"`) ||
+		!strings.Contains(capRec.Body.String(), `"nhsn-dqm-evaluate"`) ||
+		!strings.Contains(capRec.Body.String(), `"nhsn-ach-summary"`) ||
+		!strings.Contains(capRec.Body.String(), `"sdoh-referral"`) {
+		t.Fatalf("CapabilityStatement missing Wave 49 ops: %s", capRec.Body.String())
+	}
+
+	// 2. 405 Method Not Allowed enforcement on GET for POST-only Wave 49 operations
+	postOnlyPaths := []string{
+		"/MeasureReport/$ra-evaluate-risk",
+		"/MeasureReport/ra-mr-inst-49/$ra-evaluate-risk",
+		"/Task/$cdex-submit-attachment",
+		"/Task/cdex-task-inst-49/$cdex-submit-attachment",
+		"/Measure/$nhsn-dqm-evaluate",
+		"/Measure/nhsn-measure-inst-49/$nhsn-dqm-evaluate",
+		"/ServiceRequest/$sdoh-referral",
+		"/ServiceRequest/sdoh-sr-inst-49/$sdoh-referral",
+	}
+	for _, opPath := range postOnlyPaths {
+		req := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+opPath, nil)
+		rec := httptest.NewRecorder()
+		pgH.ServeHTTP(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("GET %s expected 405 Method Not Allowed, got %d: %s", opPath, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), `"OperationOutcome"`) || !strings.Contains(rec.Body.String(), `"not-supported"`) {
+			t.Fatalf("GET %s expected OperationOutcome with not-supported, got: %s", opPath, rec.Body.String())
+		}
+	}
+
+	// 3. HL7 Da Vinci Risk Adjustment (RA v2.0.0) & CDex Task Attachments:
+	//    POST /MeasureReport/ra-mr-inst-49/$ra-evaluate-risk + GET /Patient/pat-w49-1/$ra-coding-gap-report + POST /Task/cdex-task-inst-49/$cdex-submit-attachment
+	raBody := `{"patient":"Patient/pat-w49-1","codingGapType":"suspected","hccCode":"37","conditionCode":"E11.22","riskScore":1.425}`
+	raEvalReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/MeasureReport/ra-mr-inst-49/$ra-evaluate-risk", strings.NewReader(raBody))
+	raEvalReq.Header.Set("Content-Type", "application/fhir+json")
+	raEvalRec := httptest.NewRecorder()
+	pgH.ServeHTTP(raEvalRec, raEvalReq)
+	if raEvalRec.Code != http.StatusOK ||
+		!strings.Contains(raEvalRec.Body.String(), "ra-measurereport") ||
+		!strings.Contains(raEvalRec.Body.String(), `"ra-mr-inst-49"`) ||
+		!strings.Contains(raEvalRec.Body.String(), `"suspected"`) {
+		t.Fatalf("POST /MeasureReport/ra-mr-inst-49/$ra-evaluate-risk failed (%d): %s", raEvalRec.Code, raEvalRec.Body.String())
+	}
+
+	// Verify PostgreSQL round-trip persistence via standard point reads
+	for _, check := range []struct {
+		path   string
+		substr string
+	}{
+		{"/MeasureReport/ra-mr-inst-49", "ra-measurereport"},
+		{"/Condition/ra-cond-pat-w49-1", `"E11.22"`},
+		{"/DetectedIssue/ra-issue-pat-w49-1", "ra-detectedissue"},
+	} {
+		rReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+check.path, nil)
+		rRec := httptest.NewRecorder()
+		pgH.ServeHTTP(rRec, rReq)
+		if rRec.Code != http.StatusOK || !strings.Contains(rRec.Body.String(), check.substr) {
+			t.Fatalf("point read GET %s expected 200 OK with %s, got %d: %s", check.path, check.substr, rRec.Code, rRec.Body.String())
+		}
+	}
+
+	raGapReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w49-1/$ra-coding-gap-report", nil)
+	raGapRec := httptest.NewRecorder()
+	pgH.ServeHTTP(raGapRec, raGapReq)
+	if raGapRec.Code != http.StatusOK ||
+		!strings.Contains(raGapRec.Body.String(), "ra-condition-gap-bundle") ||
+		!strings.Contains(raGapRec.Body.String(), "ra-detectedissue") ||
+		!strings.Contains(raGapRec.Body.String(), `"E11.22"`) {
+		t.Fatalf("GET /Patient/pat-w49-1/$ra-coding-gap-report failed (%d): %s", raGapRec.Code, raGapRec.Body.String())
+	}
+
+	cdexAttReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Task/cdex-task-inst-49/$cdex-submit-attachment", strings.NewReader(`{"patient":"Patient/pat-w49-1"}`))
+	cdexAttReq.Header.Set("Content-Type", "application/fhir+json")
+	cdexAttRec := httptest.NewRecorder()
+	pgH.ServeHTTP(cdexAttRec, cdexAttReq)
+	if cdexAttRec.Code != http.StatusOK ||
+		!strings.Contains(cdexAttRec.Body.String(), "cdex-task-attachment-request") ||
+		!strings.Contains(cdexAttRec.Body.String(), `"attachments-received"`) ||
+		!strings.Contains(cdexAttRec.Body.String(), `"DocumentReference/cdex-att-doc-cdex-task-inst-49"`) {
+		t.Fatalf("POST /Task/cdex-task-inst-49/$cdex-submit-attachment failed (%d): %s", cdexAttRec.Code, cdexAttRec.Body.String())
+	}
+
+	for _, check := range []struct {
+		path   string
+		substr string
+	}{
+		{"/Task/cdex-task-inst-49", "cdex-task-attachment-request"},
+		{"/DocumentReference/cdex-att-doc-cdex-task-inst-49", `"11506-3"`},
+	} {
+		rReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+check.path, nil)
+		rRec := httptest.NewRecorder()
+		pgH.ServeHTTP(rRec, rReq)
+		if rRec.Code != http.StatusOK || !strings.Contains(rRec.Body.String(), check.substr) {
+			t.Fatalf("point read GET %s expected 200 OK with %s, got %d: %s", check.path, check.substr, rRec.Code, rRec.Body.String())
+		}
+	}
+
+	// 4. CDC NHSN Digital Quality Measures (NHSN dQM v1.0.0 ACH Monthly Surveillance):
+	//    POST /Measure/nhsn-measure-inst-49/$nhsn-dqm-evaluate + GET /Patient/pat-w49-1/$nhsn-ach-summary
+	dqmEvalReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Measure/nhsn-measure-inst-49/$nhsn-dqm-evaluate", strings.NewReader(`{"patient":"Patient/pat-w49-1"}`))
+	dqmEvalReq.Header.Set("Content-Type", "application/fhir+json")
+	dqmEvalRec := httptest.NewRecorder()
+	pgH.ServeHTTP(dqmEvalRec, dqmEvalReq)
+	if dqmEvalRec.Code != http.StatusOK ||
+		!strings.Contains(dqmEvalRec.Body.String(), "ach-monthly-measurereport-deid") ||
+		!strings.Contains(dqmEvalRec.Body.String(), `"subject-list"`) {
+		t.Fatalf("POST /Measure/nhsn-measure-inst-49/$nhsn-dqm-evaluate failed (%d): %s", dqmEvalRec.Code, dqmEvalRec.Body.String())
+	}
+
+	for _, check := range []struct {
+		path   string
+		substr string
+	}{
+		{"/Measure/nhsn-measure-inst-49", "nhsn-dqm-measure"},
+		{"/MeasureReport/nhsn-dqm-mr-pat-w49-1", "ach-monthly-measurereport-deid"},
+		{"/Observation/nhsn-hypo-pat-w49-1", `"14749-6"`},
+		{"/Observation/nhsn-cdi-pat-w49-1", `"34713-8"`},
+	} {
+		rReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+check.path, nil)
+		rRec := httptest.NewRecorder()
+		pgH.ServeHTTP(rRec, rReq)
+		if rRec.Code != http.StatusOK || !strings.Contains(rRec.Body.String(), check.substr) {
+			t.Fatalf("point read GET %s expected 200 OK with %s, got %d: %s", check.path, check.substr, rRec.Code, rRec.Body.String())
+		}
+	}
+
+	achSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w49-1/$nhsn-ach-summary", nil)
+	achSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(achSumRec, achSumReq)
+	if achSumRec.Code != http.StatusOK ||
+		!strings.Contains(achSumRec.Body.String(), "ach-daily-initial-population-bundle") ||
+		!strings.Contains(achSumRec.Body.String(), `"14749-6"`) ||
+		!strings.Contains(achSumRec.Body.String(), `"34713-8"`) {
+		t.Fatalf("GET /Patient/pat-w49-1/$nhsn-ach-summary failed (%d): %s", achSumRec.Code, achSumRec.Body.String())
+	}
+
+	// 5. HL7 Gravity Project SDOH Closed-Loop Referral & SDOHCC-Consent:
+	//    POST /ServiceRequest/sdoh-sr-inst-49/$sdoh-referral + GET /Patient/pat-w49-1/$sdoh-summary
+	sdohRefReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/ServiceRequest/sdoh-sr-inst-49/$sdoh-referral", strings.NewReader(`{"patient":"Patient/pat-w49-1"}`))
+	sdohRefReq.Header.Set("Content-Type", "application/fhir+json")
+	sdohRefRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sdohRefRec, sdohRefReq)
+	if sdohRefRec.Code != http.StatusOK ||
+		!strings.Contains(sdohRefRec.Body.String(), `"sdoh-sr-inst-49"`) ||
+		!strings.Contains(sdohRefRec.Body.String(), "SDOHCC-Consent") {
+		t.Fatalf("POST /ServiceRequest/sdoh-sr-inst-49/$sdoh-referral failed (%d): %s", sdohRefRec.Code, sdohRefRec.Body.String())
+	}
+
+	for _, check := range []struct {
+		path   string
+		substr string
+	}{
+		{"/ServiceRequest/sdoh-sr-inst-49", "SDOHCC-ServiceRequest"},
+		{"/Consent/sdoh-consent-pat-w49-1", "SDOHCC-Consent"},
+	} {
+		rReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+check.path, nil)
+		rRec := httptest.NewRecorder()
+		pgH.ServeHTTP(rRec, rReq)
+		if rRec.Code != http.StatusOK || !strings.Contains(rRec.Body.String(), check.substr) {
+			t.Fatalf("point read GET %s expected 200 OK with %s, got %d: %s", check.path, check.substr, rRec.Code, rRec.Body.String())
+		}
+	}
+
+	sdohSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w49-1/$sdoh-summary", nil)
+	sdohSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(sdohSumRec, sdohSumReq)
+	if sdohSumRec.Code != http.StatusOK ||
+		!strings.Contains(sdohSumRec.Body.String(), "SDOHCC-Bundle") ||
+		!strings.Contains(sdohSumRec.Body.String(), "SDOHCC-Consent") {
+		t.Fatalf("GET /Patient/pat-w49-1/$sdoh-summary expected SDOHCC-Bundle and SDOHCC-Consent, got %d: %s", sdohSumRec.Code, sdohSumRec.Body.String())
+	}
+
+	// 6. SMART v2 Patient Compartment Isolation on Wave 49 Patient operations
+	mockAuth, err := auth.NewMockTokenValidator("https://auth.example.com", "flint-api")
+	if err != nil {
+		t.Fatalf("new mock validator: %v", err)
+	}
+	pgSrv.SetTokenValidator(mockAuth)
+	w49Token := "token-pat-w49-1"
+	mockAuth.RegisterStatic(w49Token, &authv1.SecurityContext{
+		Subject:   "Patient/pat-w49-1",
+		TenantId:  tenant,
+		PatientId: "pat-w49-1",
+		Scopes:    auth.ParseScopes("patient/Patient.rs"),
+	})
+
+	for _, op := range []string{"/$ra-coding-gap-report", "/$nhsn-ach-summary"} {
+		// Unauthenticated -> 401
+		unauthReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w49-1"+op, nil)
+		unauthRec := httptest.NewRecorder()
+		pgH.ServeHTTP(unauthRec, unauthReq)
+		if unauthRec.Code != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated GET /Patient/pat-w49-1%s expected 401, got %d", op, unauthRec.Code)
+		}
+
+		// Own patient -> 200 OK
+		ownReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w49-1"+op, nil)
+		ownReq.Header.Set("Authorization", "Bearer "+w49Token)
+		ownRec := httptest.NewRecorder()
+		pgH.ServeHTTP(ownRec, ownReq)
+		if ownRec.Code != http.StatusOK {
+			t.Fatalf("own patient GET /Patient/pat-w49-1%s expected 200 OK, got %d: %s", op, ownRec.Code, ownRec.Body.String())
+		}
+
+		// Cross-patient -> 403 Forbidden
+		crossReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-other-999"+op, nil)
+		crossReq.Header.Set("Authorization", "Bearer "+w49Token)
+		crossRec := httptest.NewRecorder()
+		pgH.ServeHTTP(crossRec, crossReq)
+		if crossRec.Code != http.StatusForbidden {
+			t.Fatalf("cross-patient GET /Patient/pat-other-999%s expected 403 Forbidden, got %d: %s", op, crossRec.Code, crossRec.Body.String())
+		}
+	}
+}
