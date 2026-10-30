@@ -7972,3 +7972,228 @@ func TestDaVinciRANHSNDQMAndSDOHReferralWave49(t *testing.T) {
 		}
 	}
 }
+
+func TestDaVinciBurdenReductionCodeXCTMAndFASTNDHWave50(t *testing.T) {
+	tenant := "wave50-tenant"
+	pgSrv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. Verify CapabilityStatement advertises Wave 50 operations
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK {
+		t.Fatalf("GET /metadata status = %d, want 200", metaRec.Code)
+	}
+	metaBody := metaRec.Body.String()
+	for _, opName := range []string{
+		`"dtr-questionnaire-package"`,
+		`"pas-inquire"`,
+		`"burden-reduction-summary"`,
+		`"mcode-trial-summary"`,
+		`"ndh-verify"`,
+		`"ndh-directory-summary"`,
+	} {
+		if !strings.Contains(metaBody, opName) {
+			t.Fatalf("CapabilityStatement missing Wave 50 operation %s", opName)
+		}
+	}
+
+	// 2. Verify 405 Method Not Allowed on GET for POST-only Wave 50 operations
+	for _, path := range []string{
+		"/fhir/r4/" + tenant + "/Questionnaire/$dtr-questionnaire-package",
+		"/fhir/r4/" + tenant + "/Questionnaire/dtr-q-w50-1/$dtr-questionnaire-package",
+		"/fhir/r4/" + tenant + "/Claim/$pas-inquire",
+		"/fhir/r4/" + tenant + "/Claim/pas-claim-w50-1/$pas-inquire",
+		"/fhir/r4/" + tenant + "/Patient/$mcode-trial-match",
+		"/fhir/r4/" + tenant + "/Patient/pat-w50-1/$mcode-trial-match",
+		"/fhir/r4/" + tenant + "/VerificationResult/$ndh-verify",
+		"/fhir/r4/" + tenant + "/VerificationResult/ndh-vr-w50-1/$ndh-verify",
+	} {
+		getReq := httptest.NewRequest(http.MethodGet, path, nil)
+		getRec := httptest.NewRecorder()
+		pgH.ServeHTTP(getRec, getReq)
+		if getRec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("GET %s status = %d, want 405 Method Not Allowed: %s", path, getRec.Code, getRec.Body.String())
+		}
+		if !strings.Contains(getRec.Body.String(), `"not-supported"`) {
+			t.Fatalf("GET %s expected OperationOutcome code not-supported, got: %s", path, getRec.Body.String())
+		}
+	}
+
+	// 3. Da Vinci Burden Reduction Suite ($dtr-questionnaire-package, $pas-inquire, $burden-reduction-summary)
+	dtrReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Questionnaire/dtr-q-w50-1/$dtr-questionnaire-package",
+		strings.NewReader(`{"patient":"Patient/pat-w50-1"}`))
+	dtrReq.Header.Set("Content-Type", "application/fhir+json")
+	dtrRec := httptest.NewRecorder()
+	pgH.ServeHTTP(dtrRec, dtrReq)
+	if dtrRec.Code != http.StatusOK {
+		t.Fatalf("POST /Questionnaire/dtr-q-w50-1/$dtr-questionnaire-package status = %d: %s", dtrRec.Code, dtrRec.Body.String())
+	}
+	if !strings.Contains(dtrRec.Body.String(), "dtr-qpackage-bundle") || !strings.Contains(dtrRec.Body.String(), "dtr-std-questionnaire") {
+		t.Fatalf("POST $dtr-questionnaire-package missing DTR profiles: %s", dtrRec.Body.String())
+	}
+
+	pasReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Claim/pas-claim-w50-1/$pas-inquire",
+		strings.NewReader(`{"patient":"Patient/pat-w50-1"}`))
+	pasReq.Header.Set("Content-Type", "application/fhir+json")
+	pasRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pasRec, pasReq)
+	if pasRec.Code != http.StatusOK {
+		t.Fatalf("POST /Claim/pas-claim-w50-1/$pas-inquire status = %d: %s", pasRec.Code, pasRec.Body.String())
+	}
+	if !strings.Contains(pasRec.Body.String(), "profile-pas-inquiry-response-bundle") || !strings.Contains(pasRec.Body.String(), "Certified in total") {
+		t.Fatalf("POST $pas-inquire missing PAS inquiry response profile or X12 A1 disposition: %s", pasRec.Body.String())
+	}
+
+	brSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w50-1/$burden-reduction-summary", nil)
+	brSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(brSumRec, brSumReq)
+	if brSumRec.Code != http.StatusOK || !strings.Contains(brSumRec.Body.String(), "burden-reduction-summary-bundle") || !strings.Contains(brSumRec.Body.String(), "ext-coverage-information") {
+		t.Fatalf("GET /Patient/pat-w50-1/$burden-reduction-summary status = %d: %s", brSumRec.Code, brSumRec.Body.String())
+	}
+
+	// 4. HL7 CodeX / mCODE Oncology Clinical Trial Matching ($mcode-trial-match & $mcode-trial-summary)
+	ctmMatchReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/pat-w50-1/$mcode-trial-match", nil)
+	ctmMatchRec := httptest.NewRecorder()
+	pgH.ServeHTTP(ctmMatchRec, ctmMatchReq)
+	if ctmMatchRec.Code != http.StatusOK || !strings.Contains(ctmMatchRec.Body.String(), "codex-clinical-trial-match-bundle") {
+		t.Fatalf("POST /Patient/pat-w50-1/$mcode-trial-match status = %d: %s", ctmMatchRec.Code, ctmMatchRec.Body.String())
+	}
+
+	ctmSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w50-1/$mcode-trial-summary", nil)
+	ctmSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(ctmSumRec, ctmSumReq)
+	if ctmSumRec.Code != http.StatusOK || !strings.Contains(ctmSumRec.Body.String(), "mcode-primary-cancer-condition") || !strings.Contains(ctmSumRec.Body.String(), "89247-1") {
+		t.Fatalf("GET /Patient/pat-w50-1/$mcode-trial-summary status = %d: %s", ctmSumRec.Code, ctmSumRec.Body.String())
+	}
+
+	// 5. HL7 FAST National Healthcare Directory Primary Source Verification ($ndh-verify & $ndh-directory-summary)
+	ndhVerReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/VerificationResult/ndh-vr-w50-1/$ndh-verify",
+		strings.NewReader(`{"organization":"Organization/ndh-org-w50-1"}`))
+	ndhVerReq.Header.Set("Content-Type", "application/fhir+json")
+	ndhVerRec := httptest.NewRecorder()
+	pgH.ServeHTTP(ndhVerRec, ndhVerReq)
+	if ndhVerRec.Code != http.StatusOK || !strings.Contains(ndhVerRec.Body.String(), `"status":"attested"`) || !strings.Contains(ndhVerRec.Body.String(), "ndh-Verification") {
+		t.Fatalf("POST /VerificationResult/ndh-vr-w50-1/$ndh-verify status = %d: %s", ndhVerRec.Code, ndhVerRec.Body.String())
+	}
+
+	ndhSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Organization/ndh-org-w50-1/$ndh-directory-summary", nil)
+	ndhSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(ndhSumRec, ndhSumReq)
+	if ndhSumRec.Code != http.StatusOK || !strings.Contains(ndhSumRec.Body.String(), "ndh-ExchangeBundle") {
+		t.Fatalf("GET /Organization/ndh-org-w50-1/$ndh-directory-summary status = %d: %s", ndhSumRec.Code, ndhSumRec.Body.String())
+	}
+
+	// 6. SMART v2 Patient Compartment Isolation on Wave 50 operations
+	mockAuth, err := auth.NewMockTokenValidator("https://auth.example.com", "flint-api")
+	if err != nil {
+		t.Fatalf("new mock validator: %v", err)
+	}
+	pgSrv.SetTokenValidator(mockAuth)
+	w50Token := "token-pat-w50-1"
+	mockAuth.RegisterStatic(w50Token, &authv1.SecurityContext{
+		Subject:   "Patient/pat-w50-1",
+		TenantId:  tenant,
+		PatientId: "pat-w50-1",
+		Scopes:    auth.ParseScopes("patient/Patient.rs patient/VerificationResult.cruds"),
+	})
+
+	for _, op := range []string{"/$burden-reduction-summary", "/$mcode-trial-summary"} {
+		unauthReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w50-1"+op, nil)
+		unauthRec := httptest.NewRecorder()
+		pgH.ServeHTTP(unauthRec, unauthReq)
+		if unauthRec.Code != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated GET /Patient/pat-w50-1%s expected 401, got %d", op, unauthRec.Code)
+		}
+
+		ownReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w50-1"+op, nil)
+		ownReq.Header.Set("Authorization", "Bearer "+w50Token)
+		ownRec := httptest.NewRecorder()
+		pgH.ServeHTTP(ownRec, ownReq)
+		if ownRec.Code != http.StatusOK {
+			t.Fatalf("own patient GET /Patient/pat-w50-1%s expected 200 OK, got %d: %s", op, ownRec.Code, ownRec.Body.String())
+		}
+
+		crossReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-other-999"+op, nil)
+		crossReq.Header.Set("Authorization", "Bearer "+w50Token)
+		crossRec := httptest.NewRecorder()
+		pgH.ServeHTTP(crossRec, crossReq)
+		if crossRec.Code != http.StatusForbidden {
+			t.Fatalf("cross-patient GET /Patient/pat-other-999%s expected 403 Forbidden, got %d: %s", op, crossRec.Code, crossRec.Body.String())
+		}
+	}
+
+	// Patient-scoped token cannot invoke administrative $ndh-verify -> 403 Forbidden
+	ndhForbReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/VerificationResult/ndh-vr-w50-1/$ndh-verify", nil)
+	ndhForbReq.Header.Set("Authorization", "Bearer "+w50Token)
+	ndhForbRec := httptest.NewRecorder()
+	pgH.ServeHTTP(ndhForbRec, ndhForbReq)
+	if ndhForbRec.Code != http.StatusForbidden {
+		t.Fatalf("patient-scoped POST $ndh-verify expected 403 Forbidden, got %d: %s", ndhForbRec.Code, ndhForbRec.Body.String())
+	}
+
+	// 7. PostgreSQL point-read round-trip persistence verification when Postgres is available
+	t.Run("PostgresPointReadRoundTrip", func(t *testing.T) {
+		db := openTestPostgres(t)
+		defer db.Close()
+		ctx := t.Context()
+		if err := postgres.RunMigrations(ctx, db); err != nil {
+			t.Fatalf("migrations failed: %v", err)
+		}
+		cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+		cleanup()
+		defer cleanup()
+
+		dbStore := postgres.New(db)
+		dbSrv := server.New(dbStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		server.RegisterDefaultResourceTypes(dbSrv)
+		dbH := dbSrv.Handler()
+
+		for _, opReq := range []struct {
+			method string
+			path   string
+			body   string
+		}{
+			{http.MethodPost, "/fhir/r4/" + tenant + "/Questionnaire/dtr-q-w50-1/$dtr-questionnaire-package", `{"patient":"Patient/pat-w50-1"}`},
+			{http.MethodPost, "/fhir/r4/" + tenant + "/Claim/pas-claim-w50-1/$pas-inquire", `{"patient":"Patient/pat-w50-1"}`},
+			{http.MethodGet, "/fhir/r4/" + tenant + "/Patient/pat-w50-1/$burden-reduction-summary", ""},
+			{http.MethodPost, "/fhir/r4/" + tenant + "/Patient/pat-w50-1/$mcode-trial-match", ""},
+			{http.MethodPost, "/fhir/r4/" + tenant + "/VerificationResult/ndh-vr-w50-1/$ndh-verify", `{"organization":"Organization/ndh-org-w50-1"}`},
+			{http.MethodGet, "/fhir/r4/" + tenant + "/Organization/ndh-org-w50-1/$ndh-directory-summary", ""},
+		} {
+			req := httptest.NewRequest(opReq.method, opReq.path, strings.NewReader(opReq.body))
+			req.Header.Set("Content-Type", "application/fhir+json")
+			rec := httptest.NewRecorder()
+			dbH.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s %s status = %d: %s", opReq.method, opReq.path, rec.Code, rec.Body.String())
+			}
+		}
+
+		for _, resPath := range []string{
+			"/fhir/r4/" + tenant + "/Questionnaire/dtr-q-w50-1",
+			"/fhir/r4/" + tenant + "/Library/dtr-lib-pat-w50-1",
+			"/fhir/r4/" + tenant + "/QuestionnaireResponse/dtr-qr-pat-w50-1",
+			"/fhir/r4/" + tenant + "/Claim/pas-claim-w50-1",
+			"/fhir/r4/" + tenant + "/ClaimResponse/pas-inq-resp-pas-claim-w50-1",
+			"/fhir/r4/" + tenant + "/ServiceRequest/crd-sr-pat-w50-1",
+			"/fhir/r4/" + tenant + "/Condition/mcode-primary-cancer-pat-w50-1",
+			"/fhir/r4/" + tenant + "/Observation/mcode-ecog-pat-w50-1",
+			"/fhir/r4/" + tenant + "/ResearchStudy/codex-trial-match-pat-w50-1",
+			"/fhir/r4/" + tenant + "/ResearchSubject/codex-trial-subj-pat-w50-1",
+			"/fhir/r4/" + tenant + "/VerificationResult/ndh-vr-w50-1",
+			"/fhir/r4/" + tenant + "/Organization/ndh-org-w50-1",
+			"/fhir/r4/" + tenant + "/Endpoint/ndh-ep-ndh-org-w50-1",
+			"/fhir/r4/" + tenant + "/OrganizationAffiliation/ndh-oa-ndh-org-w50-1",
+		} {
+			ptReq := httptest.NewRequest(http.MethodGet, resPath, nil)
+			ptRec := httptest.NewRecorder()
+			dbH.ServeHTTP(ptRec, ptReq)
+			if ptRec.Code != http.StatusOK {
+				t.Fatalf("point-read GET %s expected 200 OK from Postgres store, got %d: %s", resPath, ptRec.Code, ptRec.Body.String())
+			}
+		}
+	})
+}

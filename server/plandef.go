@@ -2784,6 +2784,9 @@ func (s *Server) upsertResourceMap(ctx context.Context, tenant string, rm map[st
 	if extractor, hasExt := s.extractors[rt]; hasExt {
 		idx, _ = extractor(tenant, rid, protoBytes)
 	}
+	if s.store == nil {
+		return rt, rid, 1, rm, nil
+	}
 	rec, err := s.store.WriteResourceWithMeta(ctx, postgres.ResourceInput{
 		TenantID:      tenant,
 		ResType:       rt,
@@ -23055,11 +23058,12 @@ func (s *Server) handleNHSNHAIAURWave47(w http.ResponseWriter, r *http.Request, 
 }
 
 // handleCodeXMCODEWave47 implements HL7 CodeX Clinical Trial Matching v1.0.0
-// and HL7 mCODE v3.0.0 Cancer Disease Status Progression:
+// and HL7 mCODE v3.0.0 Cancer Disease Status Progression & Trial Summary (Waves 47 & 50):
 //   - POST /fhir/r4/{tenant}/Patient/$mcode-trial-match & /fhir/r4/{tenant}/Patient/{id}/$mcode-trial-match
+//   - GET/POST /fhir/r4/{tenant}/Patient/$mcode-trial-summary & /fhir/r4/{tenant}/Patient/{id}/$mcode-trial-summary
 //   - POST /fhir/r4/{tenant}/Observation/$mcode-disease-status & /fhir/r4/{tenant}/Observation/{id}/$mcode-disease-status
 func (s *Server) handleCodeXMCODEWave47(w http.ResponseWriter, r *http.Request, op string) {
-	if r.Method != http.MethodPost {
+	if op != "mcode-trial-summary" && r.Method != http.MethodPost {
 		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$"+op+" requires HTTP POST")
 		return
 	}
@@ -23093,6 +23097,16 @@ func (s *Server) handleCodeXMCODEWave47(w http.ResponseWriter, r *http.Request, 
 							}
 						}
 					}
+				} else {
+					for _, k := range []string{"patient", "subject"} {
+						if vs, ok := body[k].(string); ok && strings.TrimSpace(vs) != "" {
+							patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+						} else if vr, ok := body[k].(map[string]any); ok {
+							if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+								patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+							}
+						}
+					}
 				}
 			}
 		}
@@ -23100,9 +23114,114 @@ func (s *Server) handleCodeXMCODEWave47(w http.ResponseWriter, r *http.Request, 
 	if patID == "" {
 		patID = "example"
 	}
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		if cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot invoke $%s for Patient/%s", secCtx.GetPatientId(), op, patID))
+			return
+		}
+	}
 	nowStr := time.Now().UTC().Format(time.RFC3339)
 
-	if op == "mcode-trial-match" {
+	if op == "mcode-trial-match" || op == "mcode-trial-summary" {
+		condID := "mcode-primary-cancer-" + patID
+		condRes := map[string]any{
+			"resourceType": "Condition",
+			"id":           condID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-primary-cancer-condition"},
+			},
+			"clinicalStatus": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/condition-clinical",
+						"code":    "active",
+						"display": "Active",
+					},
+				},
+			},
+			"verificationStatus": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+						"code":    "confirmed",
+						"display": "Confirmed",
+					},
+				},
+			},
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://terminology.hl7.org/CodeSystem/condition-category",
+							"code":    "problem-list-item",
+							"display": "Problem List Item",
+						},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://snomed.info/sct",
+						"code":    "254837009",
+						"display": "Malignant neoplasm of breast (disorder)",
+					},
+				},
+			},
+			"subject":      map[string]any{"reference": "Patient/" + patID},
+			"recordedDate": nowStr,
+		}
+		_, _, _, savedCond, _ := s.upsertResourceMap(r.Context(), tenant, condRes)
+		if len(savedCond) > 0 {
+			condRes = savedCond
+		}
+
+		ecogID := "mcode-ecog-" + patID
+		ecogRes := map[string]any{
+			"resourceType": "Observation",
+			"id":           ecogID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-ecog-performance-status"},
+			},
+			"status": "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://terminology.hl7.org/CodeSystem/observation-category",
+							"code":    "survey",
+							"display": "Survey",
+						},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "89247-1",
+						"display": "ECOG Performance Status score",
+					},
+				},
+			},
+			"subject":           map[string]any{"reference": "Patient/" + patID},
+			"effectiveDateTime": nowStr,
+			"valueCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "LA9622-7",
+						"display": "Fully active, able to carry on all pre-disease performance without restriction",
+					},
+				},
+			},
+		}
+		_, _, _, savedEcog, _ := s.upsertResourceMap(r.Context(), tenant, ecogRes)
+		if len(savedEcog) > 0 {
+			ecogRes = savedEcog
+		}
+
 		studyID := "codex-trial-match-" + patID
 		studyRes := map[string]any{
 			"resourceType": "ResearchStudy",
@@ -23127,6 +23246,41 @@ func (s *Server) handleCodeXMCODEWave47(w http.ResponseWriter, r *http.Request, 
 			studyRes = savedStudy
 		}
 
+		subjID := "codex-trial-subj-" + patID
+		subjRes := map[string]any{
+			"resourceType": "ResearchSubject",
+			"id":           subjID,
+			"status":       "candidate",
+			"study":        map[string]any{"reference": "ResearchStudy/" + studyID},
+			"individual":   map[string]any{"reference": "Patient/" + patID},
+		}
+		_, _, _, savedSubj, _ := s.upsertResourceMap(r.Context(), tenant, subjRes)
+		if len(savedSubj) > 0 {
+			subjRes = savedSubj
+		}
+
+		if op == "mcode-trial-summary" {
+			summaryBundle := map[string]any{
+				"resourceType": "Bundle",
+				"id":           "codex-trial-summary-" + patID,
+				"meta": map[string]any{
+					"profile": []string{"http://hl7.org/fhir/us/codex-clinical-trial-matching/StructureDefinition/codex-clinical-trial-match-bundle"},
+				},
+				"type":      "collection",
+				"timestamp": nowStr,
+				"entry": []map[string]any{
+					{"fullUrl": "Condition/" + condID, "resource": condRes},
+					{"fullUrl": "Observation/" + ecogID, "resource": ecogRes},
+					{"fullUrl": "ResearchStudy/" + studyID, "resource": studyRes},
+					{"fullUrl": "ResearchSubject/" + subjID, "resource": subjRes},
+				},
+			}
+			w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(summaryBundle)
+			return
+		}
+
 		bundle := map[string]any{
 			"resourceType": "Bundle",
 			"id":           "codex-trial-match-bundle-" + patID,
@@ -23143,6 +23297,13 @@ func (s *Server) handleCodeXMCODEWave47(w http.ResponseWriter, r *http.Request, 
 					"search": map[string]any{
 						"mode":  "match",
 						"score": 0.96,
+					},
+				},
+				{
+					"fullUrl":  "ResearchSubject/" + subjID,
+					"resource": subjRes,
+					"search": map[string]any{
+						"mode": "include",
 					},
 				},
 			},
@@ -24020,6 +24181,602 @@ func (s *Server) handleNHSNDQMWave49(w http.ResponseWriter, r *http.Request, op 
 			{"fullUrl": "Observation/" + hypoID, "resource": hypoRes},
 			{"fullUrl": "Observation/" + cdiID, "resource": cdiRes},
 			{"fullUrl": "MedicationAdministration/" + medAdminID, "resource": medAdminRes},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleDaVinciBurdenReductionWave50 implements HL7 Da Vinci Burden Reduction Suite
+// (DTR v2.0.1 $dtr-questionnaire-package, PAS v2.0.1 $pas-inquire, and $burden-reduction-summary):
+//   - POST /fhir/r4/{tenant}/Questionnaire/$dtr-questionnaire-package & /fhir/r4/{tenant}/Questionnaire/{id}/$dtr-questionnaire-package
+//   - POST /fhir/r4/{tenant}/Claim/$pas-inquire & /fhir/r4/{tenant}/Claim/{id}/$pas-inquire
+//   - GET/POST /fhir/r4/{tenant}/Patient/$burden-reduction-summary & /fhir/r4/{tenant}/Patient/{id}/$burden-reduction-summary
+func (s *Server) handleDaVinciBurdenReductionWave50(w http.ResponseWriter, r *http.Request, op string) {
+	if (op == "dtr-questionnaire-package" || op == "pas-inquire") && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$"+op+" requires HTTP POST")
+		return
+	}
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	patID := strings.TrimPrefix(firstNonEmptyStr(q.Get("patient"), q.Get("subject")), "Patient/")
+	if op == "burden-reduction-summary" && patID == "" && resID != "" {
+		patID = strings.TrimPrefix(resID, "Patient/")
+	}
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "patient" || name == "subject" || name == "coverage" {
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" && (name == "patient" || name == "subject") {
+									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" && (name == "patient" || name == "subject") {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							}
+							if resMap, ok := pm["resource"].(map[string]any); ok {
+								if rt, _ := resMap["resourceType"].(string); rt == "Patient" {
+									if idStr, _ := resMap["id"].(string); strings.TrimSpace(idStr) != "" {
+										patID = strings.TrimSpace(idStr)
+									}
+								} else if subj, ok := resMap["patient"].(map[string]any); ok {
+									if ref, _ := subj["reference"].(string); strings.TrimSpace(ref) != "" {
+										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+									}
+								}
+							}
+						}
+					}
+				} else {
+					for _, k := range []string{"patient", "subject"} {
+						if vs, ok := body[k].(string); ok && strings.TrimSpace(vs) != "" {
+							patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+						} else if vr, ok := body[k].(map[string]any); ok {
+							if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+								patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if patID == "" {
+		patID = "example-patient-1"
+	}
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
+		if cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("patient-scoped token (%s) cannot invoke $%s for Patient/%s", secCtx.GetPatientId(), op, patID))
+			return
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	qID := "dtr-q-" + patID
+	if op == "dtr-questionnaire-package" && resID != "" {
+		qID = resID
+	}
+	qRes := map[string]any{
+		"resourceType": "Questionnaire",
+		"id":           qID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-std-questionnaire"},
+		},
+		"url":         "http://hl7.org/fhir/us/davinci-dtr/Questionnaire/home-oxygen-therapy",
+		"version":     "2.0.1",
+		"name":        "HomeOxygenTherapyDTRQuestionnaire",
+		"title":       "Da Vinci DTR v2.0.1 Home Oxygen Therapy Prior Authorization Questionnaire",
+		"status":      "active",
+		"subjectType": []string{"Patient"},
+		"date":        nowStr,
+		"item": []map[string]any{
+			{
+				"linkId":   "1",
+				"text":     "Arterial Oxygen Saturation (SpO2) on Room Air (%)",
+				"type":     "decimal",
+				"required": true,
+			},
+			{
+				"linkId":   "2",
+				"text":     "Primary Diagnosis ICD-10-CM Code",
+				"type":     "choice",
+				"required": true,
+			},
+		},
+	}
+	_, _, _, savedQ, _ := s.upsertResourceMap(r.Context(), tenant, qRes)
+	if len(savedQ) > 0 {
+		qRes = savedQ
+	}
+
+	libID := "dtr-lib-" + patID
+	libRes := map[string]any{
+		"resourceType": "Library",
+		"id":           libID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/computable-library-cqfm"},
+		},
+		"url":     "http://hl7.org/fhir/us/davinci-dtr/Library/HomeOxygenTherapyPrepopulation",
+		"version": "2.0.1",
+		"name":    "HomeOxygenTherapyPrepopulation",
+		"title":   "Da Vinci DTR CQL Pre-population Library",
+		"status":  "active",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://terminology.hl7.org/CodeSystem/library-type",
+					"code":    "logic-library",
+					"display": "Logic Library",
+				},
+			},
+		},
+	}
+	_, _, _, savedLib, _ := s.upsertResourceMap(r.Context(), tenant, libRes)
+	if len(savedLib) > 0 {
+		libRes = savedLib
+	}
+
+	qrID := "dtr-qr-" + patID
+	qrRes := map[string]any{
+		"resourceType": "QuestionnaireResponse",
+		"id":           qrID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-questionnaireresponse"},
+		},
+		"questionnaire": "http://hl7.org/fhir/us/davinci-dtr/Questionnaire/home-oxygen-therapy",
+		"status":        "in-progress",
+		"subject":       map[string]any{"reference": "Patient/" + patID},
+		"authored":      nowStr,
+		"item": []map[string]any{
+			{
+				"linkId": "1",
+				"text":   "Arterial Oxygen Saturation (SpO2) on Room Air (%)",
+				"answer": []map[string]any{
+					{"valueDecimal": 87.0},
+				},
+			},
+		},
+	}
+	_, _, _, savedQR, _ := s.upsertResourceMap(r.Context(), tenant, qrRes)
+	if len(savedQR) > 0 {
+		qrRes = savedQR
+	}
+
+	if op == "dtr-questionnaire-package" {
+		pkgBundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           "dtr-qpackage-bundle-" + qID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-qpackage-bundle"},
+			},
+			"type":      "collection",
+			"timestamp": nowStr,
+			"entry": []map[string]any{
+				{"fullUrl": "Questionnaire/" + qID, "resource": qRes},
+				{"fullUrl": "Library/" + libID, "resource": libRes},
+				{"fullUrl": "QuestionnaireResponse/" + qrID, "resource": qrRes},
+			},
+		}
+		out := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{
+					"name":     "PackageBundle",
+					"resource": pkgBundle,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(out)
+		return
+	}
+
+	claimID := "pas-inq-claim-" + patID
+	if op == "pas-inquire" && resID != "" {
+		claimID = resID
+	}
+	claimRes := map[string]any{
+		"resourceType": "Claim",
+		"id":           claimID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim-inquiry"},
+		},
+		"status": "active",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://terminology.hl7.org/CodeSystem/claim-type",
+					"code":    "professional",
+					"display": "Professional",
+				},
+			},
+		},
+		"use":      "preauthorization",
+		"patient":  map[string]any{"reference": "Patient/" + patID},
+		"created":  nowStr,
+		"insurer":  map[string]any{"reference": "Organization/cert-org-1"},
+		"provider": map[string]any{"reference": "Practitioner/cert-prac-1"},
+		"priority": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/processpriority",
+					"code":   "normal",
+				},
+			},
+		},
+		"insurance": []map[string]any{
+			{
+				"sequence": 1,
+				"focal":    true,
+				"coverage": map[string]any{"reference": "Coverage/cert-cov-1"},
+			},
+		},
+	}
+	_, _, _, savedClaim, _ := s.upsertResourceMap(r.Context(), tenant, claimRes)
+	if len(savedClaim) > 0 {
+		claimRes = savedClaim
+	}
+
+	crID := "pas-inq-resp-" + claimID
+	crRes := map[string]any{
+		"resourceType": "ClaimResponse",
+		"id":           crID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claiminquiryresponse"},
+		},
+		"status": "active",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://terminology.hl7.org/CodeSystem/claim-type",
+					"code":    "professional",
+					"display": "Professional",
+				},
+			},
+		},
+		"use":         "preauthorization",
+		"patient":     map[string]any{"reference": "Patient/" + patID},
+		"created":     nowStr,
+		"insurer":     map[string]any{"reference": "Organization/cert-org-1"},
+		"request":     map[string]any{"reference": "Claim/" + claimID},
+		"outcome":     "complete",
+		"disposition": "Certified in total (X12 278 HCR01=A1)",
+		"preAuthRef":  "AUTH-PAS-" + strings.ToUpper(patID),
+		"item": []map[string]any{
+			{
+				"itemSequence": 1,
+				"extension": []map[string]any{
+					{
+						"url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewAction",
+						"extension": []map[string]any{
+							{
+								"url": "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-reviewActionCode",
+								"valueCodeableConcept": map[string]any{
+									"coding": []map[string]any{
+										{
+											"system":  "https://codesystem.x12.org/005010/306",
+											"code":    "A1",
+											"display": "Certified in total",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				"adjudication": []map[string]any{
+					{
+						"category": map[string]any{
+							"coding": []map[string]any{
+								{
+									"system": "http://terminology.hl7.org/CodeSystem/adjudication",
+									"code":   "submitted",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_, _, _, savedCR, _ := s.upsertResourceMap(r.Context(), tenant, crRes)
+	if len(savedCR) > 0 {
+		crRes = savedCR
+	}
+
+	if op == "pas-inquire" {
+		inqBundle := map[string]any{
+			"resourceType": "Bundle",
+			"id":           "pas-inquiry-response-bundle-" + claimID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-inquiry-response-bundle"},
+			},
+			"type":      "collection",
+			"timestamp": nowStr,
+			"entry": []map[string]any{
+				{"fullUrl": "ClaimResponse/" + crID, "resource": crRes},
+				{"fullUrl": "Claim/" + claimID, "resource": claimRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(inqBundle)
+		return
+	}
+
+	srID := "crd-sr-" + patID
+	srRes := map[string]any{
+		"resourceType": "ServiceRequest",
+		"id":           srID,
+		"status":       "active",
+		"intent":       "order",
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets",
+					"code":    "E1390",
+					"display": "Oxygen concentrator, single delivery port",
+				},
+			},
+		},
+		"subject":    map[string]any{"reference": "Patient/" + patID},
+		"authoredOn": nowStr,
+		"extension": []map[string]any{
+			{
+				"url": "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/ext-coverage-information",
+				"extension": []map[string]any{
+					{"url": "coverage", "valueReference": map[string]any{"reference": "Coverage/cert-cov-1"}},
+					{"url": "covered", "valueCode": "conditional"},
+					{"url": "pa-needed", "valueCode": "auth-needed"},
+					{"url": "doc-needed", "valueCode": "clinical"},
+					{"url": "questionnaire", "valueCanonical": "http://hl7.org/fhir/us/davinci-dtr/Questionnaire/home-oxygen-therapy"},
+				},
+			},
+		},
+	}
+	_, _, _, savedSR, _ := s.upsertResourceMap(r.Context(), tenant, srRes)
+	if len(savedSR) > 0 {
+		srRes = savedSR
+	}
+
+	summaryBundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "burden-reduction-summary-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/burden-reduction-summary-bundle"},
+		},
+		"type":      "collection",
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "ServiceRequest/" + srID, "resource": srRes},
+			{"fullUrl": "Questionnaire/" + qID, "resource": qRes},
+			{"fullUrl": "QuestionnaireResponse/" + qrID, "resource": qrRes},
+			{"fullUrl": "Claim/" + claimID, "resource": claimRes},
+			{"fullUrl": "ClaimResponse/" + crID, "resource": crRes},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(summaryBundle)
+}
+
+// handleFASTNDHVerifyAndDirectoryWave50 implements HL7 FAST National Healthcare Directory
+// (NDH v1.0.0) Primary Source Verification ($ndh-verify) and Directory Summary ($ndh-directory-summary):
+//   - POST /fhir/r4/{tenant}/VerificationResult/$ndh-verify & /fhir/r4/{tenant}/VerificationResult/{id}/$ndh-verify
+//   - GET/POST /fhir/r4/{tenant}/Organization/$ndh-directory-summary & /fhir/r4/{tenant}/Organization/{id}/$ndh-directory-summary
+func (s *Server) handleFASTNDHVerifyAndDirectoryWave50(w http.ResponseWriter, r *http.Request, op string) {
+	if op == "ndh-verify" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$ndh-verify requires HTTP POST")
+		return
+	}
+	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) && op == "ndh-verify" {
+		writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+			fmt.Sprintf("patient-scoped token (%s) cannot invoke administrative $ndh-verify", secCtx.GetPatientId()))
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	resID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+	orgID := strings.TrimPrefix(firstNonEmptyStr(q.Get("organization"), q.Get("target")), "Organization/")
+	if op == "ndh-directory-summary" && orgID == "" && resID != "" {
+		orgID = strings.TrimPrefix(resID, "Organization/")
+	}
+
+	if r.Body != nil {
+		raw, _ := io.ReadAll(r.Body)
+		if len(bytes.TrimSpace(raw)) > 0 {
+			var body map[string]any
+			if json.Unmarshal(raw, &body) == nil {
+				if params, ok := body["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							if name == "organization" || name == "target" {
+								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
+									orgID = strings.TrimPrefix(strings.TrimSpace(vs), "Organization/")
+								}
+								if vr, ok := pm["valueReference"].(map[string]any); ok {
+									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+										orgID = strings.TrimPrefix(strings.TrimSpace(ref), "Organization/")
+									}
+								}
+							}
+						}
+					}
+				} else {
+					for _, k := range []string{"organization", "target"} {
+						if vs, ok := body[k].(string); ok && strings.TrimSpace(vs) != "" {
+							orgID = strings.TrimPrefix(strings.TrimSpace(vs), "Organization/")
+						} else if vr, ok := body[k].(map[string]any); ok {
+							if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
+								orgID = strings.TrimPrefix(strings.TrimSpace(ref), "Organization/")
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if orgID == "" {
+		orgID = "ndh-org-1"
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	orgRes := map[string]any{
+		"resourceType": "Organization",
+		"id":           orgID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-Organization"},
+		},
+		"active": true,
+		"name":   "ONC FAST National Directory Verified Health System",
+		"identifier": []map[string]any{
+			{
+				"system": "http://hl7.org/fhir/sid/us-npi",
+				"value":  "1992837465",
+			},
+		},
+	}
+	_, _, _, savedOrg, _ := s.upsertResourceMap(r.Context(), tenant, orgRes)
+	if len(savedOrg) > 0 {
+		orgRes = savedOrg
+	}
+
+	epID := "ndh-ep-" + orgID
+	epRes := map[string]any{
+		"resourceType": "Endpoint",
+		"id":           epID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-Endpoint"},
+		},
+		"status": "active",
+		"connectionType": map[string]any{
+			"system":  "http://terminology.hl7.org/CodeSystem/endpoint-connection-type",
+			"code":    "hl7-fhir-rest",
+			"display": "HL7 FHIR",
+		},
+		"name":        "FAST NDH Primary Source Verified FHIR R4 Endpoint",
+		"payloadType": []map[string]any{{"text": "any"}},
+		"address":     "https://ndh.flint.fhir.org/fhir/r4/" + orgID,
+	}
+	_, _, _, savedEP, _ := s.upsertResourceMap(r.Context(), tenant, epRes)
+	if len(savedEP) > 0 {
+		epRes = savedEP
+	}
+
+	oaID := "ndh-oa-" + orgID
+	oaRes := map[string]any{
+		"resourceType": "OrganizationAffiliation",
+		"id":           oaID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-OrganizationAffiliation"},
+		},
+		"active":                    true,
+		"organization":              map[string]any{"reference": "Organization/" + orgID},
+		"participatingOrganization": map[string]any{"reference": "Organization/" + orgID},
+		"endpoint":                  []map[string]any{{"reference": "Endpoint/" + epID}},
+	}
+	_, _, _, savedOA, _ := s.upsertResourceMap(r.Context(), tenant, oaRes)
+	if len(savedOA) > 0 {
+		oaRes = savedOA
+	}
+
+	vrID := "ndh-vr-" + orgID
+	if op == "ndh-verify" && resID != "" {
+		vrID = resID
+	}
+	vrRes := map[string]any{
+		"resourceType": "VerificationResult",
+		"id":           vrID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-Verification"},
+		},
+		"target": []map[string]any{
+			{"reference": "Organization/" + orgID},
+			{"reference": "Endpoint/" + epID},
+		},
+		"status":     "attested",
+		"statusDate": nowStr,
+		"validationType": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://terminology.hl7.org/CodeSystem/verificationresult-validation-type",
+					"code":    "primary",
+					"display": "Primary Source",
+				},
+			},
+		},
+		"need": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://terminology.hl7.org/CodeSystem/need",
+					"code":    "periodic",
+					"display": "Periodic",
+				},
+			},
+		},
+		"primarySource": []map[string]any{
+			{
+				"who": map[string]any{
+					"display": "CMS NPPES & State Medical Licensure Board",
+				},
+				"type": []map[string]any{
+					{
+						"coding": []map[string]any{
+							{
+								"system":  "http://terminology.hl7.org/CodeSystem/verificationresult-primary-source-type",
+								"code":    "lic-board",
+								"display": "License Board",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	_, _, _, savedVR, _ := s.upsertResourceMap(r.Context(), tenant, vrRes)
+	if len(savedVR) > 0 {
+		vrRes = savedVR
+	}
+
+	if op == "ndh-verify" {
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(vrRes)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "ndh-directory-summary-" + orgID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-ExchangeBundle"},
+		},
+		"type":      "searchset",
+		"total":     4,
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Organization/" + orgID, "resource": orgRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Endpoint/" + epID, "resource": epRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "OrganizationAffiliation/" + oaID, "resource": oaRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "VerificationResult/" + vrID, "resource": vrRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")

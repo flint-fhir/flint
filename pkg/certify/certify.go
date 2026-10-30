@@ -1832,6 +1832,18 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$nhsn-ach-summary to return ach-daily-initial-population-bundle, got %d: %s", respACH49.StatusCode, string(bACH49))
 			}
 		}
+		if err == nil {
+			respBR50, bBR50, errBR50 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$burden-reduction-summary", "", nil, nil)
+			respCTM50, bCTM50, errCTM50 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$mcode-trial-summary", "", nil, nil)
+			respNDH50, bNDH50, errNDH50 := doReq(http.MethodGet, basePath+"/Organization/cert-org-1/$ndh-directory-summary", "", nil, nil)
+			if errBR50 != nil || respBR50.StatusCode != http.StatusOK || !strings.Contains(string(bBR50), "burden-reduction-summary-bundle") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$burden-reduction-summary to return burden-reduction-summary-bundle, got %d: %s", respBR50.StatusCode, string(bBR50))
+			} else if errCTM50 != nil || respCTM50.StatusCode != http.StatusOK || !strings.Contains(string(bCTM50), "codex-clinical-trial-match-bundle") {
+				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-trial-summary to return codex-clinical-trial-match-bundle, got %d: %s", respCTM50.StatusCode, string(bCTM50))
+			} else if errNDH50 != nil || respNDH50.StatusCode != http.StatusOK || !strings.Contains(string(bNDH50), "ndh-ExchangeBundle") {
+				err = fmt.Errorf("expected GET /Organization/cert-org-1/$ndh-directory-summary to return ndh-ExchangeBundle, got %d: %s", respNDH50.StatusCode, string(bNDH50))
+			}
+		}
 	}
 	record("DOC-01", suite5, "US Core $docref (Clinical Notes + On-Demand IPS), Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance / $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything", t0, err, "Verified DocumentReference/$docref, Observation/$lastn & $stats, CapabilityStatement/$implements & $subset, StructureDefinition/$snapshot, NamingSystem/$preferred-id, X-Provenance + $provenance, PlanDefinition/$apply, $data-requirements, $fhirpath, $reindex & $everything start/end")
 
