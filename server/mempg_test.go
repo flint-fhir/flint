@@ -136,13 +136,68 @@ type memPGConn struct {
 
 func (c *memPGConn) Prepare(_ string) (driver.Stmt, error) { return nil, errors.New("unsupported") }
 func (c *memPGConn) Close() error                          { return nil }
-func (c *memPGConn) Begin() (driver.Tx, error)             { return &memPGTx{}, nil }
+func (c *memPGConn) Begin() (driver.Tx, error)             { return c.store.beginTx(), nil }
 func (c *memPGConn) Ping(_ context.Context) error          { return nil }
 
-type memPGTx struct{}
+type memPGTx struct {
+	store     *memPGStore
+	resources map[string]*memResRecord
+	history   []memResRecord
+	strings   []postgres.SpidxString
+	tokens    []postgres.SpidxToken
+	dates     []postgres.SpidxDate
+	refs      []postgres.SpidxReference
+	quants    []postgres.SpidxQuantity
+	uris      []postgres.SpidxURI
+	done      bool
+}
 
-func (t *memPGTx) Commit() error   { return nil }
-func (t *memPGTx) Rollback() error { return nil }
+func (s *memPGStore) beginTx() *memPGTx {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	resSnap := make(map[string]*memResRecord, len(s.resources))
+	for k, v := range s.resources {
+		if v != nil {
+			cp := *v
+			resSnap[k] = &cp
+		}
+	}
+	return &memPGTx{
+		store:     s,
+		resources: resSnap,
+		history:   append([]memResRecord(nil), s.history...),
+		strings:   append([]postgres.SpidxString(nil), s.strings...),
+		tokens:    append([]postgres.SpidxToken(nil), s.tokens...),
+		dates:     append([]postgres.SpidxDate(nil), s.dates...),
+		refs:      append([]postgres.SpidxReference(nil), s.refs...),
+		quants:    append([]postgres.SpidxQuantity(nil), s.quants...),
+		uris:      append([]postgres.SpidxURI(nil), s.uris...),
+	}
+}
+
+func (t *memPGTx) Commit() error {
+	t.done = true
+	return nil
+}
+
+func (t *memPGTx) Rollback() error {
+	if t.done || t.store == nil {
+		return nil
+	}
+	t.done = true
+	s := t.store
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resources = t.resources
+	s.history = t.history
+	s.strings = t.strings
+	s.tokens = t.tokens
+	s.dates = t.dates
+	s.refs = t.refs
+	s.quants = t.quants
+	s.uris = t.uris
+	return nil
+}
 
 type memPGRows struct {
 	cols []string
