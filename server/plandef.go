@@ -26109,3 +26109,911 @@ func (s *Server) handleGravitySDOHConsentAndCareWave52(w http.ResponseWriter, r 
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(bundle)
 }
+
+// =============================================================================
+// Wave 54: CMS-0057-F Interoperability Final Rule (HL7 Da Vinci PDex v2.1.0
+// Provider Access & Payer-to-Payer APIs) & HL7 FAST / UDAP Security (v1.0.0)
+// =============================================================================
+
+// handleUDAPDiscoveryWave54 serves the HL7 FAST Security / UDAP v1.0.0 discovery metadata
+// at GET /.well-known/udap and GET /fhir/r4/{tenant}/.well-known/udap.
+func (s *Server) handleUDAPDiscoveryWave54(w http.ResponseWriter, r *http.Request) {
+	baseURL := requestBaseURL(r)
+	if baseURL == "" {
+		baseURL = "http://localhost:8080"
+	}
+	tenant := strings.TrimSpace(r.PathValue("tenant"))
+	if tenant == "" {
+		tenant = "default"
+	}
+
+	udapMeta := map[string]any{
+		"udap_versions_supported":                 []string{"1"},
+		"udap_profiles_supported":                 []string{"udap_dcr", "udap_authn", "udap_authz", "udap_to"},
+		"udap_authorization_extensions_supported": []string{"hl7-b2b", "hl7-b2b-user"},
+		"udap_authorization_extensions_required":  []string{"hl7-b2b"},
+		"udap_certifications_supported": []string{
+			"http://hl7.org/fhir/us/udap-security/ImplementationGuide/hl7.fhir.us.udap-security",
+		},
+		"udap_certifications_required": []string{
+			"http://hl7.org/fhir/us/udap-security/ImplementationGuide/hl7.fhir.us.udap-security",
+		},
+		"grant_types_supported": []string{"authorization_code", "refresh_token", "client_credentials"},
+		"scopes_supported": []string{
+			"openid", "fhirUser", "udap", "launch", "launch/patient",
+			"patient/*.rs", "user/*.cruds", "system/*.rs", "system/*.cruds",
+		},
+		"authorization_endpoint": baseURL + "/oauth2/authorize",
+		"token_endpoint":         baseURL + "/oauth2/token",
+		"token_endpoint_auth_methods_supported": []string{
+			"private_key_jwt",
+		},
+		"token_endpoint_auth_signing_alg_values_supported": []string{
+			"RS256", "RS384", "ES256", "ES384",
+		},
+		"registration_endpoint": baseURL + "/fhir/r4/" + tenant + "/Organization/$udap-register",
+		"registration_endpoint_jwt_signing_alg_values_supported": []string{
+			"RS256", "RS384", "ES256", "ES384",
+		},
+		"signed_metadata": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.flint-udap-signed-metadata",
+		"x5c":             []string{"MIIFlintUDAPTrustCommunityRootCA=="},
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r.Method != http.MethodHead {
+		_ = json.NewEncoder(w).Encode(udapMeta)
+	}
+}
+
+// handleUDAPSecurityWave54 implements HL7 FAST Security / UDAP v1.0.0:
+//   - POST /Organization/$udap-register & /Organization/{id}/$udap-register
+//   - GET|POST /Organization/$udap-trust-summary & /Organization/{id}/$udap-trust-summary
+func (s *Server) handleUDAPSecurityWave54(w http.ResponseWriter, r *http.Request, op string) {
+	if op == "udap-register" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Organization/$udap-register requires HTTP POST")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	if tenant == "" {
+		tenant = "default"
+	}
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && secCtx != nil {
+		if auth.IsPatientRestricted(secCtx) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token cannot invoke Organization/$"+op)
+			return
+		}
+		if op == "udap-register" {
+			if !auth.Allows(secCtx, "Organization", auth.ActionCreate) && !auth.Allows(secCtx, "Organization", auth.ActionUpdate) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Organization/$udap-register")
+				return
+			}
+		} else {
+			if !auth.Allows(secCtx, "Organization", auth.ActionRead) && !auth.Allows(secCtx, "Organization", auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Organization/$udap-trust-summary")
+				return
+			}
+		}
+	}
+
+	orgID := cleanID(r.PathValue("id"))
+	q := r.URL.Query()
+	for _, k := range []string{"organization", "organizationId", "id"} {
+		if v := cleanID(q.Get(k)); v != "" && orgID == "" {
+			orgID = v
+		}
+	}
+	clientName := strings.TrimSpace(q.Get("client_name"))
+	purposeOfUse := strings.TrimSpace(q.Get("purpose_of_use"))
+	sanURI := strings.TrimSpace(q.Get("san"))
+
+	if r.Body != nil && r.Method == http.MethodPost {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			for _, k := range []string{"organization", "organizationId", "id"} {
+				if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && orgID == "" {
+					orgID = cleanID(v)
+				}
+			}
+			if v, ok := bodyMap["client_name"].(string); ok && strings.TrimSpace(v) != "" && clientName == "" {
+				clientName = strings.TrimSpace(v)
+			}
+			if v, ok := bodyMap["purpose_of_use"].(string); ok && strings.TrimSpace(v) != "" && purposeOfUse == "" {
+				purposeOfUse = strings.TrimSpace(v)
+			}
+			if v, ok := bodyMap["san"].(string); ok && strings.TrimSpace(v) != "" && sanURI == "" {
+				sanURI = strings.TrimSpace(v)
+			}
+		}
+	}
+
+	if orgID == "" {
+		orgID = "udap-org-1"
+	}
+	if clientName == "" {
+		clientName = "Flint UDAP Trusted B2B Client"
+	}
+	if purposeOfUse == "" {
+		purposeOfUse = "TREAT"
+	}
+	if sanURI == "" {
+		sanURI = "https://client.example.org/fhir"
+	}
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	orgRes := map[string]any{
+		"resourceType": "Organization",
+		"id":           orgID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-Organization"},
+		},
+		"active": true,
+		"name":   clientName,
+		"identifier": []map[string]any{
+			{
+				"system": "urn:ietf:rfc:3986",
+				"value":  sanURI,
+			},
+		},
+		"type": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/organization-type",
+						"code":    "prov",
+						"display": "Healthcare Provider",
+					},
+				},
+			},
+		},
+	}
+	_, _, _, savedOrg, _ := s.upsertResourceMap(r.Context(), tenant, orgRes)
+	if len(savedOrg) > 0 {
+		orgRes = savedOrg
+	}
+
+	epID := "udap-ep-" + orgID
+	epRes := map[string]any{
+		"resourceType": "Endpoint",
+		"id":           epID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/ndh/StructureDefinition/ndh-Endpoint"},
+		},
+		"status": "active",
+		"connectionType": map[string]any{
+			"system":  "http://terminology.hl7.org/CodeSystem/endpoint-connection-type",
+			"code":    "hl7-fhir-rest",
+			"display": "HL7 FHIR",
+		},
+		"name":                 clientName + " UDAP FHIR Endpoint",
+		"managingOrganization": map[string]any{"reference": "Organization/" + orgID},
+		"payloadType": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/endpoint-payload-type",
+						"code":    "any",
+						"display": "Any",
+					},
+				},
+			},
+		},
+		"address": sanURI,
+	}
+	_, _, _, savedEp, _ := s.upsertResourceMap(r.Context(), tenant, epRes)
+	if len(savedEp) > 0 {
+		epRes = savedEp
+	}
+
+	provID := "udap-prov-" + orgID
+	provRes := map[string]any{
+		"resourceType": "Provenance",
+		"id":           provID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-provenance"},
+		},
+		"target": []map[string]any{
+			{"reference": "Organization/" + orgID},
+			{"reference": "Endpoint/" + epID},
+		},
+		"recorded": nowStr,
+		"reason": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/v3-ActReason",
+						"code":    purposeOfUse,
+						"display": "treatment",
+					},
+				},
+			},
+		},
+		"agent": []map[string]any{
+			{
+				"type": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system": "http://terminology.hl7.org/CodeSystem/provenance-participant-type",
+							"code":   "author",
+						},
+					},
+				},
+				"who": map[string]any{"reference": "Organization/" + orgID},
+			},
+		},
+	}
+	_, _, _, savedProv, _ := s.upsertResourceMap(r.Context(), tenant, provRes)
+	if len(savedProv) > 0 {
+		provRes = savedProv
+	}
+
+	if op == "udap-register" {
+		paramsOut := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "clientId", "valueString": "udap-client-" + orgID},
+				{"name": "udapProfile", "valueUri": "http://hl7.org/fhir/us/udap-security/ImplementationGuide/hl7.fhir.us.udap-security"},
+				{"name": "purposeOfUse", "valueCode": purposeOfUse},
+				{"name": "organization", "resource": orgRes},
+				{"name": "endpoint", "resource": epRes},
+				{"name": "provenance", "resource": provRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(paramsOut)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "udap-trust-bundle-" + orgID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/udap-security/StructureDefinition/udap-trust-bundle"},
+		},
+		"type":      "searchset",
+		"total":     3,
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Organization/" + orgID, "resource": orgRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Endpoint/" + epID, "resource": epRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "Provenance/" + provID, "resource": provRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleDaVinciPDexProviderAccessWave54 implements CMS-0057-F & HL7 Da Vinci PDex v2.1.0 Provider Access API:
+//   - POST /Group/$pdex-provider-member-match & /Group/{id}/$pdex-provider-member-match
+//   - GET|POST /Patient/$pdex-provider-everything & /Patient/{id}/$pdex-provider-everything
+func (s *Server) handleDaVinciPDexProviderAccessWave54(w http.ResponseWriter, r *http.Request, op string) {
+	if op == "pdex-provider-member-match" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Group/$pdex-provider-member-match requires HTTP POST")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	if tenant == "" {
+		tenant = "default"
+	}
+
+	q := r.URL.Query()
+	var groupID, patID string
+	if op == "pdex-provider-member-match" {
+		groupID = cleanID(r.PathValue("id"))
+		for _, k := range []string{"group", "groupId", "id"} {
+			if v := cleanID(q.Get(k)); v != "" && groupID == "" {
+				groupID = v
+			}
+		}
+		for _, k := range []string{"patient", "member", "subject"} {
+			if v := cleanID(q.Get(k)); v != "" && patID == "" {
+				patID = v
+			}
+		}
+	} else {
+		patID = cleanID(r.PathValue("id"))
+		for _, k := range []string{"patient", "subject", "id"} {
+			if v := cleanID(q.Get(k)); v != "" && patID == "" {
+				patID = v
+			}
+		}
+	}
+
+	if r.Body != nil && r.Method == http.MethodPost {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			for _, k := range []string{"group", "groupId"} {
+				if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && groupID == "" {
+					groupID = cleanID(v)
+				}
+			}
+			for _, k := range []string{"patient", "member", "subject"} {
+				if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && patID == "" {
+					patID = cleanID(v)
+				}
+			}
+		}
+	}
+
+	if groupID == "" {
+		groupID = "pdex-prov-grp-1"
+	}
+	if patID == "" {
+		patID = "pat-pdex-1"
+	}
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && secCtx != nil {
+		if op == "pdex-provider-member-match" {
+			if auth.IsPatientRestricted(secCtx) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token cannot invoke multi-member Group/$pdex-provider-member-match")
+				return
+			}
+			if !auth.Allows(secCtx, "Group", auth.ActionCreate) && !auth.Allows(secCtx, "Group", auth.ActionUpdate) &&
+				!auth.Allows(secCtx, "Group", auth.ActionRead) && !auth.Allows(secCtx, "Group", auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Group/$pdex-provider-member-match")
+				return
+			}
+		} else {
+			if !auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Patient/$pdex-provider-everything")
+				return
+			}
+			if auth.IsPatientRestricted(secCtx) && cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", "cross-patient access denied for Patient/$pdex-provider-everything")
+				return
+			}
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	patRes := map[string]any{
+		"resourceType": "Patient",
+		"id":           patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"},
+		},
+		"active": true,
+		"name": []map[string]any{
+			{"family": "Member", "given": []string{"PDex"}},
+		},
+		"gender":    "female",
+		"birthDate": "1982-06-15",
+	}
+	_, _, _, savedPat, _ := s.upsertResourceMap(r.Context(), tenant, patRes)
+	if len(savedPat) > 0 {
+		patRes = savedPat
+	}
+
+	if op == "pdex-provider-member-match" {
+		consentID := "pdex-prov-consent-" + patID
+		consentRes := map[string]any{
+			"resourceType": "Consent",
+			"id":           consentID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-consent"},
+			},
+			"status": "active",
+			"scope": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system": "http://terminology.hl7.org/CodeSystem/consentscope",
+						"code":   "patient-privacy",
+					},
+				},
+			},
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://loinc.org",
+							"code":    "64292-6",
+							"display": "Release of information consent",
+						},
+					},
+				},
+			},
+			"patient":  map[string]any{"reference": "Patient/" + patID},
+			"dateTime": nowStr,
+			"policyRule": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+						"code":   "OPTIN",
+					},
+				},
+			},
+			"provision": map[string]any{
+				"type": "permit",
+			},
+		}
+		_, _, _, _, _ = s.upsertResourceMap(r.Context(), tenant, consentRes)
+
+		grpRes := map[string]any{
+			"resourceType": "Group",
+			"id":           groupID,
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-member-match-group"},
+			},
+			"active": true,
+			"type":   "person",
+			"actual": true,
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://hl7.org/fhir/us/davinci-pdex/CodeSystem/PDexMultiMemberMatchResultCS",
+						"code":    "match",
+						"display": "Matched Members",
+					},
+				},
+			},
+			"name":     "CMS-0057-F Provider Access Attributed Member Roster",
+			"quantity": 1,
+			"member": []map[string]any{
+				{
+					"entity":   map[string]any{"reference": "Patient/" + patID},
+					"inactive": false,
+				},
+			},
+		}
+		_, _, _, savedGrp, _ := s.upsertResourceMap(r.Context(), tenant, grpRes)
+		if len(savedGrp) > 0 {
+			grpRes = savedGrp
+		}
+
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(grpRes)
+		return
+	}
+
+	condID := "pdex-cond-" + patID
+	condRes := map[string]any{
+		"resourceType": "Condition",
+		"id":           condID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"},
+		},
+		"clinicalStatus": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+					"code":   "active",
+				},
+			},
+		},
+		"verificationStatus": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+					"code":   "confirmed",
+				},
+			},
+		},
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system": "http://terminology.hl7.org/CodeSystem/condition-category",
+						"code":   "problem-list-item",
+					},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "44054006",
+					"display": "Type 2 diabetes mellitus",
+				},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedCond, _ := s.upsertResourceMap(r.Context(), tenant, condRes)
+	if len(savedCond) > 0 {
+		condRes = savedCond
+	}
+
+	eobID := "pdex-eob-" + patID
+	eobRes := map[string]any{
+		"resourceType": "ExplanationOfBenefit",
+		"id":           eobID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-ExplanationOfBenefit-Inpatient-Institutional"},
+		},
+		"status": "active",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/claim-type",
+					"code":   "institutional",
+				},
+			},
+		},
+		"use":      "claim",
+		"patient":  map[string]any{"reference": "Patient/" + patID},
+		"created":  nowStr,
+		"insurer":  map[string]any{"display": "Flint Health Plan"},
+		"provider": map[string]any{"display": "Flint Medical Center"},
+		"outcome":  "complete",
+	}
+	_, _, _, savedEob, _ := s.upsertResourceMap(r.Context(), tenant, eobRes)
+	if len(savedEob) > 0 {
+		eobRes = savedEob
+	}
+
+	paID := "pdex-pa-" + patID
+	paRes := map[string]any{
+		"resourceType": "ClaimResponse",
+		"id":           paID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse"},
+		},
+		"status": "active",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/claim-type",
+					"code":   "professional",
+				},
+			},
+		},
+		"use":        "preauthorization",
+		"patient":    map[string]any{"reference": "Patient/" + patID},
+		"created":    nowStr,
+		"insurer":    map[string]any{"display": "Flint Health Plan"},
+		"outcome":    "complete",
+		"preAuthRef": "PA-CMS0057-" + patID,
+	}
+	_, _, _, savedPA, _ := s.upsertResourceMap(r.Context(), tenant, paRes)
+	if len(savedPA) > 0 {
+		paRes = savedPA
+	}
+
+	provID := "pdex-prov-" + patID
+	provRes := map[string]any{
+		"resourceType": "Provenance",
+		"id":           provID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-provenance"},
+		},
+		"target": []map[string]any{
+			{"reference": "Patient/" + patID},
+			{"reference": "ExplanationOfBenefit/" + eobID},
+			{"reference": "ClaimResponse/" + paID},
+		},
+		"recorded": nowStr,
+		"agent": []map[string]any{
+			{
+				"type": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-provenance-participant-type",
+							"code":   "transmitter",
+						},
+					},
+				},
+				"who": map[string]any{"display": "Flint Health Plan Payer Server"},
+			},
+		},
+	}
+	_, _, _, savedProv, _ := s.upsertResourceMap(r.Context(), tenant, provRes)
+	if len(savedProv) > 0 {
+		provRes = savedProv
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "pdex-provider-everything-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-provider-access-bundle"},
+		},
+		"type":      "searchset",
+		"total":     5,
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Patient/" + patID, "resource": patRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Condition/" + condID, "resource": condRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "ExplanationOfBenefit/" + eobID, "resource": eobRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "ClaimResponse/" + paID, "resource": paRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "Provenance/" + provID, "resource": provRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}
+
+// handleDaVinciPDexPayerExchangeWave54 implements CMS-0057-F & HL7 Da Vinci PDex v2.1.0 Payer-to-Payer Exchange:
+//   - POST /Patient/$pdex-payer-exchange & /Patient/{id}/$pdex-payer-exchange
+//   - GET|POST /Patient/$pdex-payer-summary & /Patient/{id}/$pdex-payer-summary
+func (s *Server) handleDaVinciPDexPayerExchangeWave54(w http.ResponseWriter, r *http.Request, op string) {
+	if op == "pdex-payer-exchange" && r.Method != http.MethodPost {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "Patient/$pdex-payer-exchange requires HTTP POST")
+		return
+	}
+
+	tenant := r.PathValue("tenant")
+	if tenant == "" {
+		tenant = "default"
+	}
+
+	patID := cleanID(r.PathValue("id"))
+	q := r.URL.Query()
+	for _, k := range []string{"patient", "subject", "id"} {
+		if v := cleanID(q.Get(k)); v != "" && patID == "" {
+			patID = v
+		}
+	}
+	if r.Body != nil && r.Method == http.MethodPost {
+		var bodyMap map[string]any
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
+			for _, k := range []string{"patient", "subject", "id"} {
+				if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && patID == "" {
+					patID = cleanID(v)
+				}
+			}
+		}
+	}
+	if patID == "" {
+		patID = "pat-pdex-1"
+	}
+
+	if secCtx, ok := auth.FromContext(r.Context()); ok && secCtx != nil {
+		if op == "pdex-payer-exchange" {
+			if !auth.Allows(secCtx, "Patient", auth.ActionCreate) && !auth.Allows(secCtx, "Patient", auth.ActionUpdate) &&
+				!auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Patient/$pdex-payer-exchange")
+				return
+			}
+		} else {
+			if !auth.Allows(secCtx, "Patient", auth.ActionRead) && !auth.Allows(secCtx, "Patient", auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for Patient/$pdex-payer-summary")
+				return
+			}
+		}
+		if auth.IsPatientRestricted(secCtx) && cleanID(secCtx.GetPatientId()) != cleanID(patID) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "cross-patient access denied for Patient/$"+op)
+			return
+		}
+	}
+
+	nowStr := time.Now().UTC().Format(time.RFC3339)
+
+	patRes := map[string]any{
+		"resourceType": "Patient",
+		"id":           patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"},
+		},
+		"active": true,
+		"name": []map[string]any{
+			{"family": "Member", "given": []string{"PDex"}},
+		},
+		"gender":    "female",
+		"birthDate": "1982-06-15",
+	}
+	_, _, _, savedPat, _ := s.upsertResourceMap(r.Context(), tenant, patRes)
+	if len(savedPat) > 0 {
+		patRes = savedPat
+	}
+
+	consentID := "pdex-payer-consent-" + patID
+	consentRes := map[string]any{
+		"resourceType": "Consent",
+		"id":           consentID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-consent"},
+		},
+		"status": "active",
+		"scope": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/consentscope",
+					"code":   "patient-privacy",
+				},
+			},
+		},
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://loinc.org",
+						"code":    "64292-6",
+						"display": "Release of information consent",
+					},
+				},
+			},
+		},
+		"patient":  map[string]any{"reference": "Patient/" + patID},
+		"dateTime": nowStr,
+		"policyRule": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+					"code":   "OPTIN",
+				},
+			},
+		},
+		"provision": map[string]any{
+			"type": "permit",
+		},
+	}
+	_, _, _, savedConsent, _ := s.upsertResourceMap(r.Context(), tenant, consentRes)
+	if len(savedConsent) > 0 {
+		consentRes = savedConsent
+	}
+
+	covID := "pdex-cov-" + patID
+	covRes := map[string]any{
+		"resourceType": "Coverage",
+		"id":           covID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-coverage"},
+		},
+		"status":      "active",
+		"beneficiary": map[string]any{"reference": "Patient/" + patID},
+		"payor": []map[string]any{
+			{"display": "Prior Health Plan"},
+		},
+	}
+	_, _, _, savedCov, _ := s.upsertResourceMap(r.Context(), tenant, covRes)
+	if len(savedCov) > 0 {
+		covRes = savedCov
+	}
+
+	condID := "pdex-payer-cond-" + patID
+	condRes := map[string]any{
+		"resourceType": "Condition",
+		"id":           condID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns"},
+		},
+		"clinicalStatus": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
+					"code":   "active",
+				},
+			},
+		},
+		"verificationStatus": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status",
+					"code":   "confirmed",
+				},
+			},
+		},
+		"category": []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system": "http://terminology.hl7.org/CodeSystem/condition-category",
+						"code":   "problem-list-item",
+					},
+				},
+			},
+		},
+		"code": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system":  "http://snomed.info/sct",
+					"code":    "38341003",
+					"display": "Hypertensive disorder",
+				},
+			},
+		},
+		"subject": map[string]any{"reference": "Patient/" + patID},
+	}
+	_, _, _, savedCond, _ := s.upsertResourceMap(r.Context(), tenant, condRes)
+	if len(savedCond) > 0 {
+		condRes = savedCond
+	}
+
+	eobID := "pdex-payer-eob-" + patID
+	eobRes := map[string]any{
+		"resourceType": "ExplanationOfBenefit",
+		"id":           eobID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-ExplanationOfBenefit-Professional-NonClinician"},
+		},
+		"status": "active",
+		"type": map[string]any{
+			"coding": []map[string]any{
+				{
+					"system": "http://terminology.hl7.org/CodeSystem/claim-type",
+					"code":   "professional",
+				},
+			},
+		},
+		"use":      "claim",
+		"patient":  map[string]any{"reference": "Patient/" + patID},
+		"created":  nowStr,
+		"insurer":  map[string]any{"display": "Prior Health Plan"},
+		"provider": map[string]any{"display": "Community Clinic"},
+		"outcome":  "complete",
+	}
+	_, _, _, savedEob, _ := s.upsertResourceMap(r.Context(), tenant, eobRes)
+	if len(savedEob) > 0 {
+		eobRes = savedEob
+	}
+
+	provID := "pdex-payer-prov-" + patID
+	provRes := map[string]any{
+		"resourceType": "Provenance",
+		"id":           provID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-provenance"},
+		},
+		"target": []map[string]any{
+			{"reference": "Coverage/" + covID},
+			{"reference": "Condition/" + condID},
+			{"reference": "ExplanationOfBenefit/" + eobID},
+		},
+		"recorded": nowStr,
+		"agent": []map[string]any{
+			{
+				"type": map[string]any{
+					"coding": []map[string]any{
+						{
+							"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-provenance-participant-type",
+							"code":   "transmitter",
+						},
+					},
+				},
+				"who": map[string]any{"display": "Prior Health Plan"},
+			},
+		},
+	}
+	_, _, _, savedProv, _ := s.upsertResourceMap(r.Context(), tenant, provRes)
+	if len(savedProv) > 0 {
+		provRes = savedProv
+	}
+
+	if op == "pdex-payer-exchange" {
+		paramsOut := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "status", "valueCode": "exchanged"},
+				{"name": "consent", "resource": consentRes},
+				{"name": "coverage", "resource": covRes},
+				{"name": "explanationOfBenefit", "resource": eobRes},
+				{"name": "provenance", "resource": provRes},
+			},
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(paramsOut)
+		return
+	}
+
+	bundle := map[string]any{
+		"resourceType": "Bundle",
+		"id":           "pdex-payer-summary-" + patID,
+		"meta": map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-payer-exchange-bundle"},
+		},
+		"type":      "searchset",
+		"total":     6,
+		"timestamp": nowStr,
+		"entry": []map[string]any{
+			{"fullUrl": "Patient/" + patID, "resource": patRes, "search": map[string]any{"mode": "match"}},
+			{"fullUrl": "Consent/" + consentID, "resource": consentRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "Coverage/" + covID, "resource": covRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "Condition/" + condID, "resource": condRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "ExplanationOfBenefit/" + eobID, "resource": eobRes, "search": map[string]any{"mode": "include"}},
+			{"fullUrl": "Provenance/" + provID, "resource": provRes, "search": map[string]any{"mode": "include"}},
+		},
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(bundle)
+}

@@ -230,6 +230,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /oauth2/revoke", s.handleOAuthRevoke)
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCConfig)
+	mux.HandleFunc("GET /.well-known/udap", s.handleUDAPDiscoveryWave54)
 
 	// Discovery & OpenAPI 3.1 / Interactive Explorer / CDS Hooks v2.0 endpoints
 	mux.HandleFunc("GET /fhir/r4/openapi.json", s.handleOpenAPI)
@@ -306,6 +307,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/smart-configuration", s.handleSMARTConfig)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/openid-configuration", s.handleOIDCConfig)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/jwks.json", s.handleJWKS)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/udap", s.handleUDAPDiscoveryWave54)
 
 	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		isGetOrHead := r.Method == http.MethodGet || r.Method == http.MethodHead
@@ -1350,6 +1352,36 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleGravitySDOHConsentAndCareWave52(w, r, "sdoh-care-bundle")
 					return
 				}
+				if strings.EqualFold(parts[3], "Organization") && parts[4] == "$udap-register" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleUDAPSecurityWave54(w, r, "udap-register")
+					return
+				}
+				if strings.EqualFold(parts[3], "Organization") && parts[4] == "$udap-trust-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleUDAPSecurityWave54(w, r, "udap-trust-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "Group") && parts[4] == "$pdex-provider-member-match" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDaVinciPDexProviderAccessWave54(w, r, "pdex-provider-member-match")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$pdex-provider-everything" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDaVinciPDexProviderAccessWave54(w, r, "pdex-provider-everything")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$pdex-payer-exchange" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDaVinciPDexPayerExchangeWave54(w, r, "pdex-payer-exchange")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$pdex-payer-summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDaVinciPDexPayerExchangeWave54(w, r, "pdex-payer-summary")
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -1358,6 +1390,42 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "Organization") && parts[5] == "$udap-register" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleUDAPSecurityWave54(w, r, "udap-register")
+					return
+				}
+				if strings.EqualFold(parts[3], "Organization") && parts[5] == "$udap-trust-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleUDAPSecurityWave54(w, r, "udap-trust-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "Group") && parts[5] == "$pdex-provider-member-match" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDaVinciPDexProviderAccessWave54(w, r, "pdex-provider-member-match")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$pdex-provider-everything" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDaVinciPDexProviderAccessWave54(w, r, "pdex-provider-everything")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$pdex-payer-exchange" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDaVinciPDexPayerExchangeWave54(w, r, "pdex-payer-exchange")
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$pdex-payer-summary" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDaVinciPDexPayerExchangeWave54(w, r, "pdex-payer-summary")
+					return
+				}
 				if strings.EqualFold(parts[3], "MeasureReport") && parts[5] == "$saner-report-capacity" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
@@ -5480,6 +5548,18 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "sdoh-care-bundle",
 					"definition": "http://hl7.org/fhir/us/sdoh-clinicalcare/OperationDefinition/Patient-sdoh-care-bundle",
 				},
+				{
+					"name":       "pdex-provider-everything",
+					"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/Patient-pdex-provider-everything",
+				},
+				{
+					"name":       "pdex-payer-exchange",
+					"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/Patient-pdex-payer-exchange",
+				},
+				{
+					"name":       "pdex-payer-summary",
+					"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/Patient-pdex-payer-summary",
+				},
 			}
 		case "Location":
 			entry["operation"] = []map[string]string{
@@ -5511,6 +5591,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				{
 					"name":       "ndh-directory-summary",
 					"definition": "http://hl7.org/fhir/us/ndh/OperationDefinition/Organization-ndh-directory-summary",
+				},
+				{
+					"name":       "udap-register",
+					"definition": "http://hl7.org/fhir/us/udap-security/OperationDefinition/Organization-udap-register",
+				},
+				{
+					"name":       "udap-trust-summary",
+					"definition": "http://hl7.org/fhir/us/udap-security/OperationDefinition/Organization-udap-trust-summary",
 				},
 			}
 		case "Condition":
@@ -5769,6 +5857,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			{
 				"name":       "davinci-data-export",
 				"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/DavinciDataExport",
+			},
+			{
+				"name":       "pdex-provider-member-match",
+				"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/Group-pdex-provider-member-match",
 			},
 		},
 	})
@@ -6896,6 +6988,30 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "ndh-directory-summary",
 						"definition": "http://hl7.org/fhir/us/ndh/OperationDefinition/Organization-ndh-directory-summary",
+					},
+					{
+						"name":       "udap-register",
+						"definition": "http://hl7.org/fhir/us/udap-security/OperationDefinition/Organization-udap-register",
+					},
+					{
+						"name":       "udap-trust-summary",
+						"definition": "http://hl7.org/fhir/us/udap-security/OperationDefinition/Organization-udap-trust-summary",
+					},
+					{
+						"name":       "pdex-provider-member-match",
+						"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/Group-pdex-provider-member-match",
+					},
+					{
+						"name":       "pdex-provider-everything",
+						"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/Patient-pdex-provider-everything",
+					},
+					{
+						"name":       "pdex-payer-exchange",
+						"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/Patient-pdex-payer-exchange",
+					},
+					{
+						"name":       "pdex-payer-summary",
+						"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/Patient-pdex-payer-summary",
 					},
 				},
 			},

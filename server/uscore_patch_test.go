@@ -8791,3 +8791,251 @@ func TestCapabilityStatementOpenAPIParityAndPublicWebsiteWave53(t *testing.T) {
 		}
 	}
 }
+
+func TestCMS0057PDexAndUDAPSecurityWave54(t *testing.T) {
+	tenant := "wave54-tenant"
+	pgSrv := server.New(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.RegisterDefaultResourceTypes(pgSrv)
+	pgH := pgSrv.Handler()
+
+	// 1. Verify CapabilityStatement operation advertisements for Wave 54
+	metaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/metadata", nil)
+	metaRec := httptest.NewRecorder()
+	pgH.ServeHTTP(metaRec, metaReq)
+	if metaRec.Code != http.StatusOK {
+		t.Fatalf("GET /metadata status = %d", metaRec.Code)
+	}
+	metaBody := metaRec.Body.String()
+	for _, opName := range []string{
+		`"udap-register"`,
+		`"udap-trust-summary"`,
+		`"pdex-provider-member-match"`,
+		`"pdex-provider-everything"`,
+		`"pdex-payer-exchange"`,
+		`"pdex-payer-summary"`,
+	} {
+		if !strings.Contains(metaBody, opName) {
+			t.Fatalf("expected CapabilityStatement to advertise %s", opName)
+		}
+	}
+
+	// 2. Verify HL7 FAST Security / UDAP v1.0.0 Discovery (/.well-known/udap)
+	for _, discPath := range []string{
+		"/.well-known/udap",
+		"/fhir/r4/" + tenant + "/.well-known/udap",
+	} {
+		discReq := httptest.NewRequest(http.MethodGet, discPath, nil)
+		discRec := httptest.NewRecorder()
+		pgH.ServeHTTP(discRec, discReq)
+		if discRec.Code != http.StatusOK ||
+			!strings.Contains(discRec.Body.String(), `"udap_dcr"`) ||
+			!strings.Contains(discRec.Body.String(), `"hl7-b2b"`) ||
+			!strings.Contains(discRec.Body.String(), `"registration_endpoint"`) {
+			t.Fatalf("GET %s failed: %d %s", discPath, discRec.Code, discRec.Body.String())
+		}
+	}
+
+	// 3. Verify 405 Method Not Allowed on GET for POST-only Wave 54 operations
+	for _, postOnlyPath := range []string{
+		"/fhir/r4/" + tenant + "/Organization/$udap-register",
+		"/fhir/r4/" + tenant + "/Organization/udap-org-w54-1/$udap-register",
+		"/fhir/r4/" + tenant + "/Group/$pdex-provider-member-match",
+		"/fhir/r4/" + tenant + "/Group/pdex-grp-w54-1/$pdex-provider-member-match",
+		"/fhir/r4/" + tenant + "/Patient/$pdex-payer-exchange",
+		"/fhir/r4/" + tenant + "/Patient/pat-w54-1/$pdex-payer-exchange",
+	} {
+		req405 := httptest.NewRequest(http.MethodGet, postOnlyPath, nil)
+		rec405 := httptest.NewRecorder()
+		pgH.ServeHTTP(rec405, req405)
+		if rec405.Code != http.StatusMethodNotAllowed || !strings.Contains(rec405.Body.String(), `"not-supported"`) {
+			t.Fatalf("GET %s expected 405 Method Not Allowed with OperationOutcome not-supported, got %d: %s", postOnlyPath, rec405.Code, rec405.Body.String())
+		}
+	}
+
+	// 4. HL7 FAST Security / UDAP: POST /Organization/{id}/$udap-register & GET /Organization/{id}/$udap-trust-summary
+	udapRegReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Organization/udap-org-w54-1/$udap-register",
+		strings.NewReader(`{"client_name":"Flint Trusted Health Network","purpose_of_use":"TREAT","san":"https://trust.flint.org/fhir"}`))
+	udapRegReq.Header.Set("Content-Type", "application/fhir+json")
+	udapRegRec := httptest.NewRecorder()
+	pgH.ServeHTTP(udapRegRec, udapRegReq)
+	if udapRegRec.Code != http.StatusOK ||
+		!strings.Contains(udapRegRec.Body.String(), `"udap-client-udap-org-w54-1"`) ||
+		!strings.Contains(udapRegRec.Body.String(), "ndh-Organization") ||
+		!strings.Contains(udapRegRec.Body.String(), "ndh-Endpoint") {
+		t.Fatalf("POST /Organization/udap-org-w54-1/$udap-register failed: %d %s", udapRegRec.Code, udapRegRec.Body.String())
+	}
+
+	udapSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Organization/udap-org-w54-1/$udap-trust-summary", nil)
+	udapSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(udapSumRec, udapSumReq)
+	if udapSumRec.Code != http.StatusOK ||
+		!strings.Contains(udapSumRec.Body.String(), "udap-trust-bundle") ||
+		!strings.Contains(udapSumRec.Body.String(), "us-core-provenance") {
+		t.Fatalf("GET /Organization/udap-org-w54-1/$udap-trust-summary failed: %d %s", udapSumRec.Code, udapSumRec.Body.String())
+	}
+
+	// 5. CMS-0057-F Provider Access API: POST /Group/{id}/$pdex-provider-member-match & GET /Patient/{id}/$pdex-provider-everything
+	provMatchReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Group/pdex-grp-w54-1/$pdex-provider-member-match",
+		strings.NewReader(`{"patient":"Patient/pat-w54-1"}`))
+	provMatchReq.Header.Set("Content-Type", "application/fhir+json")
+	provMatchRec := httptest.NewRecorder()
+	pgH.ServeHTTP(provMatchRec, provMatchReq)
+	if provMatchRec.Code != http.StatusOK ||
+		!strings.Contains(provMatchRec.Body.String(), "pdex-member-match-group") ||
+		!strings.Contains(provMatchRec.Body.String(), "PDexMultiMemberMatchResultCS") {
+		t.Fatalf("POST /Group/pdex-grp-w54-1/$pdex-provider-member-match failed: %d %s", provMatchRec.Code, provMatchRec.Body.String())
+	}
+
+	provEvReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w54-1/$pdex-provider-everything", nil)
+	provEvRec := httptest.NewRecorder()
+	pgH.ServeHTTP(provEvRec, provEvReq)
+	if provEvRec.Code != http.StatusOK ||
+		!strings.Contains(provEvRec.Body.String(), "pdex-provider-access-bundle") ||
+		!strings.Contains(provEvRec.Body.String(), "C4BB-ExplanationOfBenefit-Inpatient-Institutional") ||
+		!strings.Contains(provEvRec.Body.String(), "profile-claimresponse") ||
+		!strings.Contains(provEvRec.Body.String(), `"PA-CMS0057-pat-w54-1"`) {
+		t.Fatalf("GET /Patient/pat-w54-1/$pdex-provider-everything failed: %d %s", provEvRec.Code, provEvRec.Body.String())
+	}
+
+	// 6. CMS-0057-F Payer-to-Payer Exchange: POST /Patient/{id}/$pdex-payer-exchange & GET /Patient/{id}/$pdex-payer-summary
+	payerExReq := httptest.NewRequest(http.MethodPost, "/fhir/r4/"+tenant+"/Patient/pat-w54-1/$pdex-payer-exchange",
+		strings.NewReader(`{"patient":"Patient/pat-w54-1"}`))
+	payerExReq.Header.Set("Content-Type", "application/fhir+json")
+	payerExRec := httptest.NewRecorder()
+	pgH.ServeHTTP(payerExRec, payerExReq)
+	if payerExRec.Code != http.StatusOK ||
+		!strings.Contains(payerExRec.Body.String(), `"exchanged"`) ||
+		!strings.Contains(payerExRec.Body.String(), "pdex-consent") ||
+		!strings.Contains(payerExRec.Body.String(), "pdex-provenance") {
+		t.Fatalf("POST /Patient/pat-w54-1/$pdex-payer-exchange failed: %d %s", payerExRec.Code, payerExRec.Body.String())
+	}
+
+	payerSumReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w54-1/$pdex-payer-summary", nil)
+	payerSumRec := httptest.NewRecorder()
+	pgH.ServeHTTP(payerSumRec, payerSumReq)
+	if payerSumRec.Code != http.StatusOK ||
+		!strings.Contains(payerSumRec.Body.String(), "pdex-payer-exchange-bundle") ||
+		!strings.Contains(payerSumRec.Body.String(), "C4BB-ExplanationOfBenefit-Professional-NonClinician") ||
+		!strings.Contains(payerSumRec.Body.String(), `"64292-6"`) {
+		t.Fatalf("GET /Patient/pat-w54-1/$pdex-payer-summary failed: %d %s", payerSumRec.Code, payerSumRec.Body.String())
+	}
+
+	// 7. SMART v2 Patient Compartment Isolation (public .well-known/udap, 401 unauthenticated, 200 authorized, 403 cross-patient & org/group)
+	mockAuth, err := auth.NewMockTokenValidator("https://auth.example.com", "flint-api")
+	if err != nil {
+		t.Fatalf("new mock validator: %v", err)
+	}
+	pgSrv.SetTokenValidator(mockAuth)
+	pat1Token := "token-pat-w54-1"
+	mockAuth.RegisterStatic(pat1Token, &authv1.SecurityContext{
+		Subject:   "Patient/pat-w54-1",
+		TenantId:  tenant,
+		PatientId: "pat-w54-1",
+		Scopes:    auth.ParseScopes("patient/Patient.cruds patient/Consent.rs patient/Coverage.rs patient/Condition.rs patient/ExplanationOfBenefit.rs patient/ClaimResponse.rs patient/Provenance.rs patient/Group.rs patient/Organization.rs"),
+	})
+
+	pubUDAPReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/.well-known/udap", nil)
+	pubUDAPRec := httptest.NewRecorder()
+	pgH.ServeHTTP(pubUDAPRec, pubUDAPReq)
+	if pubUDAPRec.Code != http.StatusOK {
+		t.Fatalf("public GET /.well-known/udap expected 200 without token, got %d", pubUDAPRec.Code)
+	}
+
+	unauthReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/"+tenant+"/Patient/pat-w54-1/$pdex-provider-everything", nil)
+	unauthRec := httptest.NewRecorder()
+	pgH.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated request expected 401, got %d", unauthRec.Code)
+	}
+
+	for _, okPath := range []string{
+		"/fhir/r4/" + tenant + "/Patient/pat-w54-1/$pdex-provider-everything",
+		"/fhir/r4/" + tenant + "/Patient/pat-w54-1/$pdex-payer-summary",
+	} {
+		okAuthReq := httptest.NewRequest(http.MethodGet, okPath, nil)
+		okAuthReq.Header.Set("Authorization", "Bearer "+pat1Token)
+		okAuthRec := httptest.NewRecorder()
+		pgH.ServeHTTP(okAuthRec, okAuthReq)
+		if okAuthRec.Code != http.StatusOK {
+			t.Fatalf("authorized patient request GET %s expected 200, got %d: %s", okPath, okAuthRec.Code, okAuthRec.Body.String())
+		}
+	}
+
+	for _, crossPath := range []string{
+		"/fhir/r4/" + tenant + "/Patient/pat-w54-2/$pdex-provider-everything",
+		"/fhir/r4/" + tenant + "/Patient/pat-w54-2/$pdex-payer-summary",
+		"/fhir/r4/" + tenant + "/Organization/udap-org-w54-1/$udap-trust-summary",
+	} {
+		crossReq := httptest.NewRequest(http.MethodGet, crossPath, nil)
+		crossReq.Header.Set("Authorization", "Bearer "+pat1Token)
+		crossRec := httptest.NewRecorder()
+		pgH.ServeHTTP(crossRec, crossReq)
+		if crossRec.Code != http.StatusForbidden {
+			t.Fatalf("cross-patient/organization GET %s expected 403 Forbidden, got %d: %s", crossPath, crossRec.Code, crossRec.Body.String())
+		}
+	}
+
+	// 8. Postgres point-read round-trip when local Postgres is available
+	t.Run("PostgresPointReadRoundTrip", func(t *testing.T) {
+		db := openTestPostgres(t)
+		defer db.Close()
+		ctx := t.Context()
+		if err := postgres.RunMigrations(ctx, db); err != nil {
+			t.Fatalf("run migrations: %v", err)
+		}
+		cleanup := func() { _ = postgres.PurgeTenant(ctx, db, tenant) }
+		cleanup()
+		defer cleanup()
+
+		dbStore := postgres.New(db)
+		dbSrv := server.New(dbStore, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		server.RegisterDefaultResourceTypes(dbSrv)
+		dbH := dbSrv.Handler()
+
+		for _, opReq := range []struct {
+			method string
+			path   string
+			body   string
+		}{
+			{http.MethodPost, "/fhir/r4/" + tenant + "/Organization/udap-org-w54-1/$udap-register", `{"client_name":"Flint Trusted Health Network","purpose_of_use":"TREAT"}`},
+			{http.MethodPost, "/fhir/r4/" + tenant + "/Group/pdex-grp-w54-1/$pdex-provider-member-match", `{"patient":"Patient/pat-w54-1"}`},
+			{http.MethodGet, "/fhir/r4/" + tenant + "/Patient/pat-w54-1/$pdex-provider-everything", ""},
+			{http.MethodPost, "/fhir/r4/" + tenant + "/Patient/pat-w54-1/$pdex-payer-exchange", `{"patient":"Patient/pat-w54-1"}`},
+		} {
+			req := httptest.NewRequest(opReq.method, opReq.path, strings.NewReader(opReq.body))
+			if opReq.method == http.MethodPost {
+				req.Header.Set("Content-Type", "application/fhir+json")
+			}
+			rec := httptest.NewRecorder()
+			dbH.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("%s %s status = %d: %s", opReq.method, opReq.path, rec.Code, rec.Body.String())
+			}
+		}
+
+		for _, resPath := range []string{
+			"/fhir/r4/" + tenant + "/Organization/udap-org-w54-1",
+			"/fhir/r4/" + tenant + "/Endpoint/udap-ep-udap-org-w54-1",
+			"/fhir/r4/" + tenant + "/Provenance/udap-prov-udap-org-w54-1",
+			"/fhir/r4/" + tenant + "/Group/pdex-grp-w54-1",
+			"/fhir/r4/" + tenant + "/Patient/pat-w54-1",
+			"/fhir/r4/" + tenant + "/Consent/pdex-prov-consent-pat-w54-1",
+			"/fhir/r4/" + tenant + "/Condition/pdex-cond-pat-w54-1",
+			"/fhir/r4/" + tenant + "/ExplanationOfBenefit/pdex-eob-pat-w54-1",
+			"/fhir/r4/" + tenant + "/ClaimResponse/pdex-pa-pat-w54-1",
+			"/fhir/r4/" + tenant + "/Provenance/pdex-prov-pat-w54-1",
+			"/fhir/r4/" + tenant + "/Consent/pdex-payer-consent-pat-w54-1",
+			"/fhir/r4/" + tenant + "/Coverage/pdex-cov-pat-w54-1",
+			"/fhir/r4/" + tenant + "/Condition/pdex-payer-cond-pat-w54-1",
+			"/fhir/r4/" + tenant + "/ExplanationOfBenefit/pdex-payer-eob-pat-w54-1",
+			"/fhir/r4/" + tenant + "/Provenance/pdex-payer-prov-pat-w54-1",
+		} {
+			ptReq := httptest.NewRequest(http.MethodGet, resPath, nil)
+			ptRec := httptest.NewRecorder()
+			dbH.ServeHTTP(ptRec, ptReq)
+			if ptRec.Code != http.StatusOK {
+				t.Fatalf("point-read GET %s expected 200 OK from Postgres store, got %d: %s", resPath, ptRec.Code, ptRec.Body.String())
+			}
+		}
+	})
+}
