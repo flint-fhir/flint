@@ -220,6 +220,9 @@ func extractSingleFieldValue(
 	case "google.fhir.r4.core.HumanName":
 		extractHumanNameStrings(idx, tenantID, resType, resID, subMsg)
 
+	case "google.fhir.r4.core.ContactPoint":
+		extractContactPointTokens(idx, tenantID, resType, resID, subMsg)
+
 	case "google.fhir.r4.core.Address":
 		extractAddressStrings(idx, tenantID, resType, resID, subMsg)
 
@@ -628,6 +631,8 @@ func appendTokenTextFromMessage(idx *SearchIndexes, tenantID, resType, resID str
 			case "google.fhir.r4.core.Coding":
 				spNames := mapCodeableConceptSpNames(resType, fieldName, parentField)
 				extractCodingTextStrings(idx, tenantID, resType, resID, subMsg, spNames)
+			case "google.fhir.r4.core.ContactPoint":
+				extractContactPointTokens(idx, tenantID, resType, resID, subMsg)
 			default:
 				nextParent := fieldName
 				if parentField != "" {
@@ -764,6 +769,41 @@ func extractHumanNameStrings(idx *SearchIndexes, tenantID, resType, resID string
 				SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: "name", SpValue: txt},
 			)
 		}
+	}
+}
+
+func extractContactPointTokens(idx *SearchIndexes, tenantID, resType, resID string, cpMsg protoreflect.Message) {
+	if idx == nil || !cpMsg.IsValid() {
+		return
+	}
+	var sys, val, use string
+	if sysFD := cpMsg.Descriptor().Fields().ByName("system"); sysFD != nil && cpMsg.Has(sysFD) && sysFD.Kind() == protoreflect.MessageKind {
+		sys, _ = extractEnumWrapper(cpMsg.Get(sysFD).Message())
+	}
+	if valFD := cpMsg.Descriptor().Fields().ByName("value"); valFD != nil && cpMsg.Has(valFD) && valFD.Kind() == protoreflect.MessageKind {
+		val = strings.TrimSpace(extractWrappedString(cpMsg.Get(valFD).Message()))
+	}
+	if useFD := cpMsg.Descriptor().Fields().ByName("use"); useFD != nil && cpMsg.Has(useFD) && useFD.Kind() == protoreflect.MessageKind {
+		use, _ = extractEnumWrapper(cpMsg.Get(useFD).Message())
+	}
+	if val != "" {
+		idx.Tokens = append(idx.Tokens, SpidxToken{
+			TenantID: tenantID,
+			ResType:  resType,
+			ResID:    resID,
+			SpName:   "telecom",
+			SpSystem: sys,
+			SpValue:  val,
+		})
+	}
+	if use != "" {
+		idx.Tokens = append(idx.Tokens, SpidxToken{
+			TenantID: tenantID,
+			ResType:  resType,
+			ResID:    resID,
+			SpName:   "telecom-use",
+			SpValue:  use,
+		})
 	}
 }
 

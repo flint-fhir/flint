@@ -1,6 +1,6 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, and 35+ National HL7 Implementation Guide
-// conformance & certification runner. It executes 7 structured test suites (75 checks) against
+// conformance & certification runner. It executes 8 structured test suites (78 checks) against
 // a target Flint server and produces both a standard FHIR R4 TestReport resource
 // and a human-readable scorecard.
 package certify
@@ -2010,6 +2010,210 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("NATIG-13", suite7, "ONC FAST National Directory (NDH v1.0.0 $ndh-directory-summary, $fast-endpoint-query, $fast-network-query), Plan-Net & IHE PIXm/PDQm", t0, err, "FAST NDH directory exchange, Plan-Net provider lookup & IHE PIXm/PDQm verified")
+
+	// =========================================================================
+	// Suite 8: HL7 TestScript ($evaluate) & FHIRPath R4 (N1) Conformance
+	// =========================================================================
+	suite8 := "8. HL7 TestScript ($evaluate) & FHIRPath R4 Conformance"
+
+	t0 = time.Now()
+	{
+		tsInline := []byte(`{
+			"resourceType": "TestScript",
+			"id": "cert-ts-inline-1",
+			"name": "CertifyTouchstonePatientLifecycle",
+			"status": "active",
+			"fixture": [
+				{
+					"id": "fix-pat",
+					"autocreate": false,
+					"autodelete": false,
+					"resource": {
+						"reference": "Patient/cert-ts-pat-1"
+					}
+				}
+			],
+			"contained": [
+				{
+					"resourceType": "Patient",
+					"id": "cert-ts-pat-1",
+					"active": true,
+					"gender": "female",
+					"birthDate": "1991-06-15",
+					"name": [{"use": "official", "family": "TouchstoneCert", "given": ["Elena", "Marie"]}]
+				}
+			],
+			"variable": [
+				{
+					"name": "CreatedPatId",
+					"expression": "Patient.id",
+					"sourceId": "create-resp"
+				}
+			],
+			"setup": {
+				"action": [
+					{
+						"operation": {
+							"type": {"system": "http://terminology.hl7.org/CodeSystem/testscript-operation-codes", "code": "create"},
+							"resource": "Patient",
+							"sourceId": "fix-pat",
+							"responseId": "create-resp"
+						}
+					},
+					{
+						"assert": {
+							"responseCode": "201",
+							"resource": "Patient",
+							"minimumId": "fix-pat",
+							"warningOnly": false
+						}
+					}
+				]
+			},
+			"test": [
+				{
+					"id": "read-and-search",
+					"name": "ReadAndSearchPatient",
+					"action": [
+						{
+							"operation": {
+								"type": {"code": "read"},
+								"resource": "Patient",
+								"params": "/${CreatedPatId}",
+								"responseId": "read-resp"
+							}
+						},
+						{
+							"assert": {
+								"response": "okay",
+								"expression": "Patient.name.where(use = 'official').family = 'TouchstoneCert' and Patient.name.first().given.count() = 2",
+								"warningOnly": false
+							}
+						},
+						{
+							"operation": {
+								"type": {"code": "search"},
+								"resource": "Patient",
+								"params": "?_id=${CreatedPatId}"
+							}
+						},
+						{
+							"assert": {
+								"responseCode": "200",
+								"resource": "Bundle",
+								"expression": "Bundle.total >= 1 and Bundle.entry.resource.ofType(Patient).exists(id = 'cert-ts-pat-1')",
+								"warningOnly": false
+							}
+						}
+					]
+				}
+			],
+			"teardown": {
+				"action": [
+					{
+						"operation": {
+							"type": {"code": "delete"},
+							"resource": "Patient",
+							"params": "/${CreatedPatId}"
+						}
+					}
+				]
+			}
+		}`)
+		respTS, bTS, errTS := doReq(http.MethodPost, basePath+"/TestScript/$evaluate", "application/fhir+json", tsInline, nil)
+		if errTS != nil || respTS.StatusCode != http.StatusOK || !strings.Contains(string(bTS), `"resourceType":"TestReport"`) || !strings.Contains(string(bTS), `"result":"pass"`) {
+			err = fmt.Errorf("expected POST /TestScript/$evaluate to return passing TestReport, got %d: %s", respTS.StatusCode, string(bTS))
+		} else {
+			err = nil
+		}
+	}
+	record("TS-01", suite8, "HL7 FHIR R4 / AEGIS Touchstone TestScript ($evaluate) Setup, Variable Extraction, Test & Teardown", t0, err, "Touchstone TestScript setup -> read/search -> teardown returned TestReport (result=pass, score=100%)")
+
+	t0 = time.Now()
+	{
+		storedTS := []byte(`{
+			"resourceType": "TestScript",
+			"id": "cert-stored-ts-1",
+			"url": "http://flint.fhir.org/TestScript/cert-stored-ts-1",
+			"name": "CertifyStoredTestScript",
+			"status": "active",
+			"test": [
+				{
+					"id": "verify-patient",
+					"name": "VerifyCertifyPatient",
+					"action": [
+						{
+							"operation": {
+								"type": {"code": "read"},
+								"resource": "Patient",
+								"targetId": "Patient/cert-pat-1"
+							}
+						},
+						{
+							"assert": {
+								"responseCode": "200",
+								"resource": "Patient",
+								"validateProfileId": "us-core-patient",
+								"expression": "Patient.id = 'cert-pat-1' and Patient.active = true",
+								"warningOnly": false
+							}
+						}
+					]
+				}
+			]
+		}`)
+		respPutTS, bPutTS, errPutTS := doReq(http.MethodPut, basePath+"/TestScript/cert-stored-ts-1", "application/fhir+json", storedTS, nil)
+		if errPutTS != nil || (respPutTS.StatusCode != http.StatusOK && respPutTS.StatusCode != http.StatusCreated) {
+			err = fmt.Errorf("expected PUT /TestScript/cert-stored-ts-1 to succeed, got %d: %s", respPutTS.StatusCode, string(bPutTS))
+		} else {
+			respEvalTS, bEvalTS, errEvalTS := doReq(http.MethodGet, basePath+"/TestScript/cert-stored-ts-1/$evaluate", "", nil, nil)
+			if errEvalTS != nil || respEvalTS.StatusCode != http.StatusOK || !strings.Contains(string(bEvalTS), `"result":"pass"`) {
+				err = fmt.Errorf("expected GET /TestScript/cert-stored-ts-1/$evaluate to return passing TestReport, got %d: %s", respEvalTS.StatusCode, string(bEvalTS))
+			} else {
+				err = nil
+			}
+		}
+	}
+	record("TS-02", suite8, "Stored TestScript Instance Execution (GET /TestScript/{id}/$evaluate & US Core Profile Assertion)", t0, err, "Stored TestScript instance evaluated against Patient/cert-pat-1 with US Core profile assertion")
+
+	t0 = time.Now()
+	{
+		fpTS := []byte(`{
+			"resourceType": "TestScript",
+			"id": "cert-fhirpath-ts-1",
+			"name": "CertifyFHIRPathR4SpecificationVectors",
+			"status": "active",
+			"test": [
+				{
+					"id": "fhirpath-n1-vectors",
+					"name": "FHIRPathN1SpecificationVectors",
+					"action": [
+						{
+							"operation": {
+								"type": {"code": "read"},
+								"resource": "Observation",
+								"targetId": "Observation/cert-obs-avg-bp"
+							}
+						},
+						{
+							"assert": {
+								"responseCode": "200",
+								"expression": "Observation.component.count() = 2 and Observation.component.where(code.coding.code = '96608-5').value.value = 128 and Observation.component.select(value.value).sum() = 208 and iif(Observation.status = 'final', 'verified', 'pending').upper() = 'VERIFIED'",
+								"warningOnly": false
+							}
+						}
+					]
+				}
+			]
+		}`)
+		respFP, bFP, errFP := doReq(http.MethodPost, basePath+"/TestScript/$evaluate", "application/fhir+json", fpTS, nil)
+		if errFP != nil || respFP.StatusCode != http.StatusOK || !strings.Contains(string(bFP), `"result":"pass"`) {
+			err = fmt.Errorf("expected POST /TestScript/$evaluate with FHIRPath R4 specification vectors to pass, got %d: %s", respFP.StatusCode, string(bFP))
+		} else {
+			err = nil
+		}
+	}
+	record("TS-03", suite8, "HL7 FHIRPath R4 (http://hl7.org/fhirpath/N1/) Polymorphic Choice, Projection, Math & Conditional Logic", t0, err, "FHIRPath R4 where(), select(), sum(), count(), polymorphic value[x], iif() & upper() verified")
 
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)

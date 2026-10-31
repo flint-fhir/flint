@@ -1654,6 +1654,52 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/TestScript/$evaluate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"TestScript"},
+				"summary":     "Execute a stored HL7 FHIR R4 TestScript by id or url ($evaluate) and return a TestReport",
+				"operationId": "testScriptEvaluateGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "url", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "HL7 FHIR R4 TestReport detailing setup, test, and teardown results"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"TestScript"},
+				"summary":     "Execute an inline HL7 FHIR R4 TestScript or Parameters payload ($evaluate) and return a TestReport",
+				"operationId": "testScriptEvaluatePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "HL7 FHIR R4 TestReport detailing setup, test, and teardown results"},
+				},
+			},
+		},
+		"/TestScript/{id}/$evaluate": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"TestScript"},
+				"summary":     "Execute stored TestScript/{id} ($evaluate) and return an HL7 FHIR R4 TestReport",
+				"operationId": "testScriptEvaluateByIdGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "HL7 FHIR R4 TestReport detailing setup, test, and teardown results"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"TestScript"},
+				"summary":     "Execute stored TestScript/{id} ($evaluate, POST) and return an HL7 FHIR R4 TestReport",
+				"operationId": "testScriptEvaluateByIdPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "HL7 FHIR R4 TestReport detailing setup, test, and teardown results"},
+				},
+			},
+		},
 		"/Patient/$match": map[string]any{
 			"post": map[string]any{
 				"tags":        []string{"Patient"},
