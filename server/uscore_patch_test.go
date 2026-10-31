@@ -251,10 +251,16 @@ func openTestPostgres(t *testing.T) *sql.DB {
 	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
+		if canUseMemPGFallback(t.Name()) {
+			return openMemPostgres(t)
+		}
 		t.Skipf("skipping postgres integration test: %v", err)
 	}
 	if err := db.PingContext(t.Context()); err != nil {
 		db.Close()
+		if canUseMemPGFallback(t.Name()) {
+			return openMemPostgres(t)
+		}
 		t.Skipf("skipping postgres integration test (postgres unreachable): %v", err)
 	}
 	return db
