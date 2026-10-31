@@ -6504,6 +6504,13 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"definition": "http://hl7.org/fhir/us/carin-bb/OperationDefinition/ExplanationOfBenefit-carin-bb-claims",
 				},
 			}
+		case "TestScript":
+			entry["operation"] = []map[string]string{
+				{
+					"name":       "evaluate",
+					"definition": "http://hl7.org/fhir/OperationDefinition/TestScript-evaluate",
+				},
+			}
 		}
 		resEntries = append(resEntries, entry)
 	}

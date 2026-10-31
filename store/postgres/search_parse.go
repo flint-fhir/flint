@@ -475,6 +475,9 @@ func ParseSortSpecs(raw string) ([]SortSpec, error) {
 		if s == "" {
 			return nil, fmt.Errorf("invalid empty _sort field in %q", raw)
 		}
+		if strings.EqualFold(s, "birthdate") {
+			s = "birthdate"
+		}
 		out = append(out, SortSpec{Param: s, Desc: desc})
 	}
 	return out, nil
@@ -605,7 +608,7 @@ var (
 	}
 	knownTokenSearchParams = map[string]bool{
 		"identifier": true, "gender": true, "active": true,
-		"email": true, "phone": true, "language": true,
+		"email": true, "phone": true, "telecom": true, "language": true,
 		"deceased": true, "status": true, "code": true,
 		"component-code": true, "combo-code": true,
 		"category": true, "type": true, "class": true,
