@@ -32,28 +32,40 @@ type Config struct {
 	Out         io.Writer
 }
 
-func main() {
-	defaultURL := os.Getenv("FLINT_URL")
+func parseSeedConfig(args []string, getenv func(string) string) (Config, error) {
+	defaultURL := getenv("FLINT_URL")
 	if defaultURL == "" {
 		defaultURL = "http://localhost:8080"
 	}
-	defaultTenant := os.Getenv("FLINT_TENANT")
+	defaultTenant := getenv("FLINT_TENANT")
 	if defaultTenant == "" {
 		defaultTenant = "demo"
 	}
-	defaultToken := os.Getenv("FLINT_TOKEN")
+	defaultToken := getenv("FLINT_TOKEN")
 
-	urlFlag := flag.String("url", defaultURL, "Flint server base URL")
-	tenantFlag := flag.String("tenant", defaultTenant, "Target FHIR tenant ID")
-	tokenFlag := flag.String("token", defaultToken, "Optional SMART on FHIR Bearer token")
-	flag.Parse()
+	fs := flag.NewFlagSet("seed", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	urlFlag := fs.String("url", defaultURL, "Flint server base URL")
+	tenantFlag := fs.String("tenant", defaultTenant, "Target FHIR tenant ID")
+	tokenFlag := fs.String("token", defaultToken, "Optional SMART on FHIR Bearer token")
+	if err := fs.Parse(args); err != nil {
+		return Config{}, err
+	}
 
-	cfg := Config{
+	return Config{
 		BaseURL:     *urlFlag,
 		Tenant:      *tenantFlag,
 		BearerToken: *tokenFlag,
 		HTTPClient:  &http.Client{Timeout: 30 * time.Second},
 		Out:         os.Stdout,
+	}, nil
+}
+
+func main() {
+	cfg, err := parseSeedConfig(os.Args[1:], os.Getenv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "seed flags: %v\n", err)
+		os.Exit(2)
 	}
 
 	if err := Run(context.Background(), cfg); err != nil {

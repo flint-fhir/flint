@@ -32,16 +32,17 @@ import (
 )
 
 type Config struct {
-	Target       string        // "http", "store", "temporal"
-	URL          string        // e.g. "http://localhost:8080/fhir/r4/loadtest"
-	Rate         int           // target bundles/sec (0 = unthrottled benchmark)
-	Duration     time.Duration // test duration
-	Workers      int           // number of concurrent workers
-	BundleSize   int           // number of entries per bundle (1-5)
-	Tenant       string        // tenant ID
-	PGDSN        string        // Postgres DSN (for store target)
-	DBDriver     string        // SQL driver name (defaults to "postgres")
-	TemporalAddr string        // Temporal host:port (for temporal target)
+	Target         string        // "http", "store", "temporal"
+	URL            string        // e.g. "http://localhost:8080/fhir/r4/loadtest"
+	Rate           int           // target bundles/sec (0 = unthrottled benchmark)
+	Duration       time.Duration // test duration
+	Workers        int           // number of concurrent workers
+	BundleSize     int           // number of entries per bundle (1-5)
+	Tenant         string        // tenant ID
+	PGDSN          string        // Postgres DSN (for store target)
+	DBDriver       string        // SQL driver name (defaults to "postgres")
+	TemporalAddr   string        // Temporal host:port (for temporal target)
+	WorkflowRunner func(ctx context.Context, bundleID string, input workflow.IngestInput) error
 }
 
 type Metrics struct {
@@ -388,12 +389,25 @@ func runStoreLoad(ctx context.Context, cfg Config, m *Metrics) {
 }
 
 func runTemporalLoad(ctx context.Context, cfg Config, m *Metrics) {
-	c, err := client.Dial(client.Options{HostPort: cfg.TemporalAddr})
-	if err != nil {
-		fmt.Printf("Failed to connect to Temporal: %v\n", err)
-		return
+	runner := cfg.WorkflowRunner
+	if runner == nil {
+		c, err := client.Dial(client.Options{HostPort: cfg.TemporalAddr})
+		if err != nil {
+			fmt.Printf("Failed to connect to Temporal: %v\n", err)
+			return
+		}
+		defer c.Close()
+		runner = func(wCtx context.Context, bundleID string, input workflow.IngestInput) error {
+			we, err := c.ExecuteWorkflow(wCtx, client.StartWorkflowOptions{
+				ID:        bundleID,
+				TaskQueue: workflow.TaskQueue,
+			}, workflow.IngestFHIRBundle, input)
+			if err != nil {
+				return err
+			}
+			return we.Get(wCtx, nil)
+		}
 	}
-	defer c.Close()
 
 	jobs := make(chan int64, cfg.Workers*4)
 	var wg sync.WaitGroup
@@ -415,16 +429,7 @@ func runTemporalLoad(ctx context.Context, cfg Config, m *Metrics) {
 				}
 
 				t0 := time.Now()
-				we, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-					ID:        bundleID,
-					TaskQueue: workflow.TaskQueue,
-				}, workflow.IngestFHIRBundle, input)
-				if err != nil {
-					m.totalErrors.Add(1)
-					continue
-				}
-
-				err = we.Get(ctx, nil)
+				err := runner(ctx, bundleID, input)
 				lat := time.Since(t0)
 				m.recordLatency(lat)
 				m.totalBundles.Add(1)

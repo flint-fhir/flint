@@ -4,10 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
-
-	"go.temporal.io/sdk/client"
 
 	"github.com/flint-fhir/flint/ingest/workflow"
 )
@@ -32,28 +29,13 @@ func buildUpdateIngestInput(bundleID string) workflow.IngestInput {
 	}
 }
 
-func runUpdate() {
-	ctx := context.Background()
-
-	c, err := client.Dial(client.Options{HostPort: envOrDefault("TEMPORAL_ADDRESS", "localhost:7233")})
-	if err != nil {
-		log.Fatalf("temporal: %v", err)
-	}
-	defer c.Close()
-
+func runUpdateWithDeps(ctx context.Context, deps e2eDeps) error {
 	input := buildUpdateIngestInput(fmt.Sprintf("e2e-update-%d", time.Now().Unix()))
 
 	fmt.Println("🚀 Sending update for Patient e2e-wf-001 (Family -> Wonderland)...")
-	we, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
-		ID:        input.BundleID,
-		TaskQueue: workflow.TaskQueue,
-	}, workflow.IngestFHIRBundle, input)
-	if err != nil {
-		log.Fatalf("execute: %v", err)
-	}
-
-	if err := we.Get(ctx, nil); err != nil {
-		log.Fatalf("workflow failed: %v", err)
+	if _, _, err := deps.execWorkflow(ctx, input); err != nil {
+		return err
 	}
 	fmt.Println("✅ Update workflow completed successfully!")
+	return nil
 }
