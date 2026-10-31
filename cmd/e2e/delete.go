@@ -8,6 +8,16 @@ import (
 	"github.com/flint-fhir/flint/automq"
 )
 
+func buildDeleteCDCMessage() automq.Message {
+	return automq.Message{
+		TenantID:  "e2e-test",
+		ResType:   "Patient",
+		ResID:     "e2e-wf-003",
+		ProtoData: []byte{}, // tombstone payload
+		Op:        "D",      // Delete CDC operation
+	}
+}
+
 func runDelete() {
 	ctx := context.Background()
 	brokers := []string{envOrDefault("AUTOMQ_BROKERS", "localhost:9092")}
@@ -21,14 +31,7 @@ func runDelete() {
 	}
 	defer p.Close()
 
-	// Publish delete event for Charlie (e2e-wf-003)
-	msg := automq.Message{
-		TenantID:  "e2e-test",
-		ResType:   "Patient",
-		ResID:     "e2e-wf-003",
-		ProtoData: []byte{}, // tombstone payload
-		Op:        "D",      // Delete CDC operation
-	}
+	msg := buildDeleteCDCMessage()
 
 	fmt.Println("🚀 Publishing delete CDC event (op=D) for Patient e2e-wf-003...")
 	if err := p.Publish(ctx, []automq.Message{msg}); err != nil {

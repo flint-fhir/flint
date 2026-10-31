@@ -13,6 +13,25 @@ import (
 	"github.com/flint-fhir/flint/automq"
 )
 
+func buildRecoveryMessage(id, family, given string) automq.Message {
+	payload, _ := json.Marshal(map[string]any{
+		"resourceType": "Patient",
+		"id":           map[string]string{"value": id},
+		"name": []map[string]any{{
+			"family": map[string]string{"value": family},
+			"given":  []map[string]string{{"value": given}},
+		}},
+		"gender": map[string]string{"value": "male"},
+	})
+	return automq.Message{
+		TenantID:  "e2e-test",
+		ResType:   "Patient",
+		ResID:     id,
+		ProtoData: payload,
+		Op:        "C",
+	}
+}
+
 func runRecovery() {
 	ctx := context.Background()
 	brokers := []string{envOrDefault("AUTOMQ_BROKERS", "localhost:9092")}
@@ -35,23 +54,7 @@ func runRecovery() {
 	}
 
 	preID := "e2e-recovery-pre"
-	prePayload, _ := json.Marshal(map[string]any{
-		"resourceType": "Patient",
-		"id":           map[string]string{"value": preID},
-		"name": []map[string]any{{
-			"family": map[string]string{"value": "PreRestart"},
-			"given":  []map[string]string{{"value": "Arthur"}},
-		}},
-		"gender": map[string]string{"value": "male"},
-	})
-
-	if err := p1.Publish(ctx, []automq.Message{{
-		TenantID:  "e2e-test",
-		ResType:   "Patient",
-		ResID:     preID,
-		ProtoData: prePayload,
-		Op:        "C",
-	}}); err != nil {
+	if err := p1.Publish(ctx, []automq.Message{buildRecoveryMessage(preID, "PreRestart", "Arthur")}); err != nil {
 		log.Fatalf("publish pre-restart message: %v", err)
 	}
 	p1.Close()
@@ -94,23 +97,7 @@ func runRecovery() {
 	}
 
 	postID := "e2e-recovery-post"
-	postPayload, _ := json.Marshal(map[string]any{
-		"resourceType": "Patient",
-		"id":           map[string]string{"value": postID},
-		"name": []map[string]any{{
-			"family": map[string]string{"value": "PostRestart"},
-			"given":  []map[string]string{{"value": "Ford"}},
-		}},
-		"gender": map[string]string{"value": "male"},
-	})
-
-	if err := p2.Publish(ctx, []automq.Message{{
-		TenantID:  "e2e-test",
-		ResType:   "Patient",
-		ResID:     postID,
-		ProtoData: postPayload,
-		Op:        "C",
-	}}); err != nil {
+	if err := p2.Publish(ctx, []automq.Message{buildRecoveryMessage(postID, "PostRestart", "Ford")}); err != nil {
 		log.Fatalf("publish post-restart message: %v", err)
 	}
 	p2.Close()

@@ -20,35 +20,17 @@ import (
 	"github.com/flint-fhir/flint/ingest/workflow"
 )
 
-func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "delete":
-			runDelete()
-			return
-		case "update":
-			runUpdate()
-			return
-		case "recovery":
-			runRecovery()
-			return
+func selectE2EMode(args []string) string {
+	if len(args) > 1 {
+		switch args[1] {
+		case "delete", "update", "recovery":
+			return args[1]
 		}
 	}
-	runPipeline()
+	return "pipeline"
 }
 
-func runPipeline() {
-	ctx := context.Background()
-
-	// Connect to Temporal
-	c, err := client.Dial(client.Options{HostPort: envOrDefault("TEMPORAL_ADDRESS", "localhost:7233")})
-	if err != nil {
-		log.Fatalf("temporal: %v", err)
-	}
-	defer c.Close()
-
-	// Build workflow input with pre-encoded resources
-	// (In production, the API server parses FHIR JSON → proto, then sends to Temporal)
+func buildPipelineIngestInput(bundleID string) workflow.IngestInput {
 	patients := []struct {
 		ID     string
 		Family string
@@ -60,8 +42,6 @@ func runPipeline() {
 		{"e2e-wf-003", "Workflow", "Charlie", "other"},
 	}
 
-	// For E2E, we send raw JSON bytes as "protos" — the WritePostgresBatch activity
-	// handles the actual proto decoding. Here we test the workflow orchestration.
 	var resProtos [][]byte
 	var resTypes []string
 	var resIDs []string
@@ -78,13 +58,39 @@ func runPipeline() {
 		resIDs = append(resIDs, p.ID)
 	}
 
-	input := workflow.IngestInput{
+	return workflow.IngestInput{
 		TenantID:       "e2e-test",
-		BundleID:       fmt.Sprintf("e2e-bundle-%d", time.Now().Unix()),
+		BundleID:       bundleID,
 		ResourceProtos: resProtos,
 		ResourceTypes:  resTypes,
 		ResourceIDs:    resIDs,
 	}
+}
+
+func main() {
+	switch selectE2EMode(os.Args) {
+	case "delete":
+		runDelete()
+	case "update":
+		runUpdate()
+	case "recovery":
+		runRecovery()
+	default:
+		runPipeline()
+	}
+}
+
+func runPipeline() {
+	ctx := context.Background()
+
+	// Connect to Temporal
+	c, err := client.Dial(client.Options{HostPort: envOrDefault("TEMPORAL_ADDRESS", "localhost:7233")})
+	if err != nil {
+		log.Fatalf("temporal: %v", err)
+	}
+	defer c.Close()
+
+	input := buildPipelineIngestInput(fmt.Sprintf("e2e-bundle-%d", time.Now().Unix()))
 
 	// Start the workflow
 	fmt.Println("🚀 Starting IngestFHIRBundle workflow...")

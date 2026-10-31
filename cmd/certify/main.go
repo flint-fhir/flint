@@ -30,44 +30,91 @@ import (
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
+type cliOptions struct {
+	URL        string
+	DSN        string
+	Tenant     string
+	Token      string
+	OutPath    string
+	HTTPClient *http.Client
+}
+
 func main() {
-	defaultURL := os.Getenv("FLINT_URL")
-	defaultDSN := os.Getenv("FLINT_POSTGRES_DSN")
+	opts, err := parseCLIOptions(os.Args[1:], os.Getenv)
+	if err != nil {
+		os.Exit(2)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	code := runCertifyCLI(
+		ctx,
+		opts,
+		func(dsn string) (*sql.DB, error) { return sql.Open("postgres", dsn) },
+		os.Stdout,
+		os.Stderr,
+	)
+	if code != 0 {
+		os.Exit(code)
+	}
+}
+
+func parseCLIOptions(args []string, getenv func(string) string) (cliOptions, error) {
+	defaultURL := getenv("FLINT_URL")
+	defaultDSN := getenv("FLINT_POSTGRES_DSN")
 	if defaultDSN == "" {
 		defaultDSN = "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
 	}
-	defaultTenant := os.Getenv("FLINT_TENANT")
+	defaultTenant := getenv("FLINT_TENANT")
 	if defaultTenant == "" {
 		defaultTenant = "certify"
 	}
 
-	urlFlag := flag.String("url", defaultURL, "Target Flint server URL (if empty, boots an ephemeral server over -dsn)")
-	dsnFlag := flag.String("dsn", defaultDSN, "Postgres DSN for ephemeral server mode")
-	tenantFlag := flag.String("tenant", defaultTenant, "Target FHIR tenant ID")
-	tokenFlag := flag.String("token", os.Getenv("FLINT_TOKEN"), "Optional SMART on FHIR Bearer token")
-	outFlag := flag.String("out", "", "Optional file path to write FHIR R4 TestReport JSON")
-	flag.Parse()
+	fs := flag.NewFlagSet("certify", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	urlFlag := fs.String("url", defaultURL, "Target Flint server URL (if empty, boots an ephemeral server over -dsn)")
+	dsnFlag := fs.String("dsn", defaultDSN, "Postgres DSN for ephemeral server mode")
+	tenantFlag := fs.String("tenant", defaultTenant, "Target FHIR tenant ID")
+	tokenFlag := fs.String("token", getenv("FLINT_TOKEN"), "Optional SMART on FHIR Bearer token")
+	outFlag := fs.String("out", "", "Optional file path to write FHIR R4 TestReport JSON")
+	if err := fs.Parse(args); err != nil {
+		return cliOptions{}, err
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	return cliOptions{
+		URL:        strings.TrimSpace(*urlFlag),
+		DSN:        *dsnFlag,
+		Tenant:     *tenantFlag,
+		Token:      *tokenFlag,
+		OutPath:    strings.TrimSpace(*outFlag),
+		HTTPClient: &http.Client{Timeout: 30 * time.Second},
+	}, nil
+}
 
-	targetURL := strings.TrimSpace(*urlFlag)
+func runCertifyCLI(
+	ctx context.Context,
+	opts cliOptions,
+	openDB func(dsn string) (*sql.DB, error),
+	stdout, stderr io.Writer,
+) int {
+	targetURL := strings.TrimSpace(opts.URL)
 	var cleanup func()
 
 	if targetURL == "" {
-		db, err := sql.Open("postgres", *dsnFlag)
+		db, err := openDB(opts.DSN)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "certify failed: open postgres: %v\n", err)
-			os.Exit(1)
+			_, _ = fmt.Fprintf(stderr, "certify failed: open postgres: %v\n", err)
+			return 1
 		}
 		if err := db.PingContext(ctx); err != nil {
 			db.Close()
-			fmt.Fprintf(os.Stderr, "certify failed: ping postgres (%s): %v\n", *dsnFlag, err)
-			os.Exit(1)
+			_, _ = fmt.Fprintf(stderr, "certify failed: ping postgres (%s): %v\n", opts.DSN, err)
+			return 1
 		}
 		if err := postgres.RunMigrations(ctx, db); err != nil {
 			db.Close()
-			fmt.Fprintf(os.Stderr, "certify failed: run migrations: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "certify failed: run migrations: %v\n", err)
+			return 1
 		}
 		st := postgres.New(db)
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -79,7 +126,7 @@ func main() {
 		targetURL = ts.URL
 		cleanup = func() {
 			ts.Close()
-			_ = postgres.PurgeTenant(context.Background(), db, *tenantFlag)
+			_ = postgres.PurgeTenant(context.Background(), db, opts.Tenant)
 			db.Close()
 		}
 	}
@@ -87,33 +134,39 @@ func main() {
 		defer cleanup()
 	}
 
-	rep, err := certify.Run(ctx, certify.Config{
-		BaseURL:     targetURL,
-		Tenant:      *tenantFlag,
-		BearerToken: *tokenFlag,
-		HTTPClient:  &http.Client{Timeout: 30 * time.Second},
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "certify failed: %v\n", err)
-		os.Exit(1)
+	client := opts.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
 	}
 
-	fmt.Print(rep.FormatScorecard())
+	rep, err := certify.Run(ctx, certify.Config{
+		BaseURL:     targetURL,
+		Tenant:      opts.Tenant,
+		BearerToken: opts.Token,
+		HTTPClient:  client,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "certify failed: %v\n", err)
+		return 1
+	}
 
-	if outPath := strings.TrimSpace(*outFlag); outPath != "" {
+	_, _ = fmt.Fprint(stdout, rep.FormatScorecard())
+
+	if outPath := strings.TrimSpace(opts.OutPath); outPath != "" {
 		raw, err := json.MarshalIndent(rep.ToFHIRTestReport(), "", "  ")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "marshal TestReport: %v\n", err)
-			os.Exit(1)
+			_, _ = fmt.Fprintf(stderr, "marshal TestReport: %v\n", err)
+			return 1
 		}
 		if err := os.WriteFile(outPath, raw, 0o600); err != nil {
-			fmt.Fprintf(os.Stderr, "write TestReport to %s: %v\n", outPath, err)
-			os.Exit(1)
+			_, _ = fmt.Fprintf(stderr, "write TestReport to %s: %v\n", outPath, err)
+			return 1
 		}
-		fmt.Printf("\n📄 Wrote FHIR R4 TestReport JSON to %s\n", outPath)
+		_, _ = fmt.Fprintf(stdout, "\n📄 Wrote FHIR R4 TestReport JSON to %s\n", outPath)
 	}
 
 	if rep.Result != "pass" {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }

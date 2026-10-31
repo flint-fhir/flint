@@ -40,6 +40,7 @@ type Config struct {
 	BundleSize   int           // number of entries per bundle (1-5)
 	Tenant       string        // tenant ID
 	PGDSN        string        // Postgres DSN (for store target)
+	DBDriver     string        // SQL driver name (defaults to "postgres")
 	TemporalAddr string        // Temporal host:port (for temporal target)
 }
 
@@ -63,19 +64,26 @@ func (m *Metrics) recordLatency(d time.Duration) {
 	m.mu.Unlock()
 }
 
-func main() {
+func parseLoadConfig(args []string) (Config, error) {
 	cfg := Config{}
-	flag.StringVar(&cfg.Target, "target", "http", "Target mode: http, store, temporal")
-	flag.StringVar(&cfg.URL, "url", "http://localhost:8082/fhir/r4/loadtest", "Flint HTTP server bundle URL")
-	flag.IntVar(&cfg.Rate, "rate", 1000, "Target bundles/second (0 for maximum uncapped throughput)")
-	flag.DurationVar(&cfg.Duration, "duration", 30*time.Second, "Test run duration (e.g. 30s, 5m, 1h)")
-	flag.IntVar(&cfg.Workers, "workers", 50, "Number of concurrent workers")
-	flag.IntVar(&cfg.BundleSize, "bundle-size", 5, "Number of Big 5 resources per Bundle (1-5)")
-	flag.StringVar(&cfg.Tenant, "tenant", "loadtest", "Tenant ID")
-	flag.StringVar(&cfg.PGDSN, "pg-dsn", "postgres://flint:flint@localhost:5432/flint?sslmode=disable", "Postgres DSN")
-	flag.StringVar(&cfg.TemporalAddr, "temporal-addr", "localhost:7233", "Temporal service address")
-	flag.Parse()
+	fs := flag.NewFlagSet("loadtest", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&cfg.Target, "target", "http", "Target mode: http, store, temporal")
+	fs.StringVar(&cfg.URL, "url", "http://localhost:8082/fhir/r4/loadtest", "Flint HTTP server bundle URL")
+	fs.IntVar(&cfg.Rate, "rate", 1000, "Target bundles/second (0 for maximum uncapped throughput)")
+	fs.DurationVar(&cfg.Duration, "duration", 30*time.Second, "Test run duration (e.g. 30s, 5m, 1h)")
+	fs.IntVar(&cfg.Workers, "workers", 50, "Number of concurrent workers")
+	fs.IntVar(&cfg.BundleSize, "bundle-size", 5, "Number of Big 5 resources per Bundle (1-5)")
+	fs.StringVar(&cfg.Tenant, "tenant", "loadtest", "Tenant ID")
+	fs.StringVar(&cfg.PGDSN, "pg-dsn", "postgres://flint:flint@localhost:5432/flint?sslmode=disable", "Postgres DSN")
+	fs.StringVar(&cfg.TemporalAddr, "temporal-addr", "localhost:7233", "Temporal service address")
+	if err := fs.Parse(args); err != nil {
+		return Config{}, err
+	}
+	return cfg, nil
+}
 
+func executeLoadTest(ctx context.Context, cfg Config) (*Metrics, time.Duration, error) {
 	fmt.Println("==================================================")
 	fmt.Println("⚡ Flint High-Throughput Load Testing Harness")
 	fmt.Printf("   Target:      %s\n", cfg.Target)
@@ -87,9 +95,6 @@ func main() {
 	fmt.Printf("   Workers:     %d\n", cfg.Workers)
 	fmt.Printf("   Bundle Size: %d resources/bundle\n", cfg.BundleSize)
 	fmt.Println("==================================================")
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	ctx, runCancel := context.WithTimeout(ctx, cfg.Duration)
 	defer runCancel()
@@ -108,12 +113,27 @@ func main() {
 	case "temporal":
 		runTemporalLoad(ctx, cfg, metrics)
 	default:
-		fmt.Printf("Unknown target mode: %s\n", cfg.Target)
-		os.Exit(1)
+		return nil, 0, fmt.Errorf("unknown target mode: %s", cfg.Target)
 	}
 
 	elapsed := time.Since(start)
 	printReport(cfg, metrics, elapsed)
+	return metrics, elapsed, nil
+}
+
+func main() {
+	cfg, err := parseLoadConfig(os.Args[1:])
+	if err != nil {
+		os.Exit(2)
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	if _, _, err := executeLoadTest(ctx, cfg); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 }
 
 func runHTTPLoad(ctx context.Context, cfg Config, m *Metrics) {
@@ -241,7 +261,11 @@ func runHTTPLoad(ctx context.Context, cfg Config, m *Metrics) {
 }
 
 func runStoreLoad(ctx context.Context, cfg Config, m *Metrics) {
-	db, err := sql.Open("postgres", cfg.PGDSN)
+	drv := cfg.DBDriver
+	if drv == "" {
+		drv = "postgres"
+	}
+	db, err := sql.Open(drv, cfg.PGDSN)
 	if err != nil {
 		fmt.Printf("Failed to open Postgres: %v\n", err)
 		return
