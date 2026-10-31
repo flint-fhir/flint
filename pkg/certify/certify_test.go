@@ -806,6 +806,15 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			_, _ = w.Write([]byte(`{"resourceType":"Bundle","profile":"SDOHCC-Bundle"}`))
 			return
 		}
+		if strings.HasSuffix(path, "/TestScript/$evaluate") || strings.HasSuffix(path, "/TestScript/cert-stored-ts-1/$evaluate") {
+			_, _ = w.Write([]byte(`{"resourceType":"TestReport","status":"completed","result":"pass","score":100}`))
+			return
+		}
+		if r.Method == http.MethodPut && strings.HasSuffix(path, "/TestScript/cert-stored-ts-1") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"resourceType":"TestScript","id":"cert-stored-ts-1"}`))
+			return
+		}
 
 		// Search & Graph & MPI endpoints
 		if strings.HasSuffix(path, "/$graph") {
@@ -858,13 +867,13 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 75 {
-		t.Fatalf("expected all 75 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 78 {
+		t.Fatalf("expected all 78 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()
 	trTests, ok := tr["test"].([]map[string]any)
-	if !ok || len(trTests) != 7 {
-		t.Fatalf("expected 7 suites in TestReport.test, got %d", len(trTests))
+	if !ok || len(trTests) != 8 {
+		t.Fatalf("expected 8 suites in TestReport.test, got %d", len(trTests))
 	}
 }

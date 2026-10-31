@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"regexp"
 	"sort"
 	"strconv"
@@ -772,6 +773,17 @@ func (c *memPGConn) QueryContext(_ context.Context, query string, args []driver.
 			rows: [][]driver.Value{{int64(len(matches))}},
 		}, nil
 
+	case !strings.Contains(q, "FROM fhir_resource r") && strings.Contains(q, "FROM spidx_reference rf") && strings.Contains(q, "r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto"):
+		matches := s.resolveIncludeQuery(q, args)
+		rows := make([][]driver.Value, 0, len(matches))
+		for _, m := range matches {
+			rows = append(rows, []driver.Value{m.resType, m.resID, int64(m.version), m.lastUpdated, m.protoBytes})
+		}
+		return &memPGRows{
+			cols: []string{"res_type", "res_id", "res_version", "last_updated", "resource_proto"},
+			rows: rows,
+		}, nil
+
 	case strings.Contains(q, "r.res_type, r.res_id, r.res_version, r.last_updated, r.resource_proto"):
 		matches := s.filterResources(q, args, true)
 		rows := make([][]driver.Value, 0, len(matches))
@@ -1092,12 +1104,7 @@ func (s *memPGStore) filterResources(q string, args []driver.NamedValue, applyPa
 		candidates = append(candidates, r)
 	}
 
-	sort.Slice(candidates, func(i, j int) bool {
-		if candidates[i].resType != candidates[j].resType {
-			return candidates[i].resType < candidates[j].resType
-		}
-		return candidates[i].resID < candidates[j].resID
-	})
+	s.sortCandidates(candidates, q, args)
 
 	if applyPagination && strings.Contains(q, "OFFSET $") && len(args) >= 2 {
 		limit := nvInt(args, len(args)-2)
@@ -1111,6 +1118,164 @@ func (s *memPGStore) filterResources(q string, args []driver.NamedValue, applyPa
 		}
 	}
 	return candidates
+}
+
+var (
+	reSortDateSub   = regexp.MustCompile(`\(SELECT (MIN|MAX)\(sd\.(sp_low|sp_high)\) FROM spidx_date sd WHERE [^)]+ sd\.sp_name = \$(\d+)\) (ASC|DESC)`)
+	reSortStringSub = regexp.MustCompile(`\(SELECT (MIN|MAX)\(ss\.sp_value\) FROM spidx_string ss WHERE [^)]+ ss\.sp_name = \$(\d+)\) (ASC|DESC)`)
+	reRfResTypeEq   = regexp.MustCompile(`AND rf\.res_type = \$(\d+)`)
+	reRfSpNameEq    = regexp.MustCompile(`AND rf\.sp_name = \$(\d+)`)
+	reRfSpNameAny   = regexp.MustCompile(`AND rf\.sp_name = ANY\(\$(\d+)\)`)
+	reRfTargetType  = regexp.MustCompile(`AND \(?rf\.target_type = \$(\d+)`)
+)
+
+func (s *memPGStore) resolveIncludeQuery(q string, args []driver.NamedValue) []*memResRecord {
+	tenant := nvStr(args, 0)
+	idList := parsePGStringArray(nvStr(args, 1))
+	if strings.Contains(q, "rf.res_id = ANY($3)") {
+		idList = parsePGStringArray(nvStr(args, 2))
+	}
+	isRevInclude := strings.Contains(q, "rf.target_id = ANY($2)")
+
+	wantResType := ""
+	if m := reRfResTypeEq.FindStringSubmatch(q); len(m) == 2 {
+		idx, _ := strconv.Atoi(m[1])
+		wantResType = nvStr(args, idx-1)
+	}
+	wantSpName := ""
+	if m := reRfSpNameEq.FindStringSubmatch(q); len(m) == 2 {
+		idx, _ := strconv.Atoi(m[1])
+		wantSpName = nvStr(args, idx-1)
+	}
+	var wantSpNames []string
+	if m := reRfSpNameAny.FindStringSubmatch(q); len(m) == 2 {
+		idx, _ := strconv.Atoi(m[1])
+		wantSpNames = parsePGStringArray(nvStr(args, idx-1))
+	}
+	wantTargetType := ""
+	if m := reRfTargetType.FindStringSubmatch(q); len(m) == 2 {
+		idx, _ := strconv.Atoi(m[1])
+		wantTargetType = nvStr(args, idx-1)
+	}
+
+	seen := make(map[string]bool)
+	var out []*memResRecord
+	for _, rf := range s.refs {
+		if rf.TenantID != tenant {
+			continue
+		}
+		if wantResType != "" && rf.ResType != wantResType {
+			continue
+		}
+		if wantSpName != "" && rf.SpName != wantSpName {
+			continue
+		}
+		if len(wantSpNames) > 0 && !slicesContains(wantSpNames, rf.SpName) {
+			continue
+		}
+		if wantTargetType != "" && rf.TargetType != "" && rf.TargetType != wantTargetType {
+			continue
+		}
+		if isRevInclude {
+			if !slicesContains(idList, rf.TargetID) {
+				continue
+			}
+			key := memResKey(tenant, rf.ResType, rf.ResID)
+			if rec := s.resources[key]; rec != nil && !rec.isDeleted && !seen[key] {
+				seen[key] = true
+				out = append(out, rec)
+			}
+		} else {
+			if !slicesContains(idList, rf.ResID) {
+				continue
+			}
+			key := memResKey(tenant, rf.TargetType, rf.TargetID)
+			if rec := s.resources[key]; rec != nil && !rec.isDeleted && !seen[key] {
+				seen[key] = true
+				out = append(out, rec)
+			}
+		}
+	}
+	return out
+}
+
+func (s *memPGStore) sortCandidates(candidates []*memResRecord, q string, args []driver.NamedValue) {
+	if m := reSortDateSub.FindStringSubmatch(q); len(m) == 5 {
+		spIdx, _ := strconv.Atoi(m[3])
+		spName := nvStr(args, spIdx-1)
+		desc := m[4] == "DESC"
+		getDate := func(r *memResRecord) (time.Time, bool) {
+			var best time.Time
+			found := false
+			for _, d := range s.dates {
+				if d.TenantID == r.tenantID && d.ResType == r.resType && d.ResID == r.resID && d.SpName == spName {
+					t := d.SpLow
+					if desc {
+						t = d.SpHigh
+					}
+					if !found || (!desc && t.Before(best)) || (desc && t.After(best)) {
+						best = t
+						found = true
+					}
+				}
+			}
+			return best, found
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			ti, okI := getDate(candidates[i])
+			tj, okJ := getDate(candidates[j])
+			if okI != okJ {
+				return okI
+			}
+			if okI && !ti.Equal(tj) {
+				if desc {
+					return ti.After(tj)
+				}
+				return ti.Before(tj)
+			}
+			return candidates[i].resID < candidates[j].resID
+		})
+		return
+	}
+	if m := reSortStringSub.FindStringSubmatch(q); len(m) == 4 {
+		spIdx, _ := strconv.Atoi(m[2])
+		spName := nvStr(args, spIdx-1)
+		desc := m[3] == "DESC"
+		getStr := func(r *memResRecord) (string, bool) {
+			var best string
+			found := false
+			for _, st := range s.strings {
+				if st.TenantID == r.tenantID && st.ResType == r.resType && st.ResID == r.resID && st.SpName == spName {
+					if !found || (!desc && st.SpValue < best) || (desc && st.SpValue > best) {
+						best = st.SpValue
+						found = true
+					}
+				}
+			}
+			return best, found
+		}
+		sort.Slice(candidates, func(i, j int) bool {
+			si, okI := getStr(candidates[i])
+			sj, okJ := getStr(candidates[j])
+			if okI != okJ {
+				return okI
+			}
+			if okI && si != sj {
+				if desc {
+					return si > sj
+				}
+				return si < sj
+			}
+			return candidates[i].resID < candidates[j].resID
+		})
+		return
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].resType != candidates[j].resType {
+			return candidates[i].resType < candidates[j].resType
+		}
+		return candidates[i].resID < candidates[j].resID
+	})
 }
 
 func (s *memPGStore) inCompartment(tenant, focalType, focalID string, r *memResRecord) bool {
@@ -1169,28 +1334,131 @@ func slicesContains(ss []string, target string) bool {
 	return false
 }
 
+var (
+	reCrfAlias        = regexp.MustCompile(`^JOIN spidx_reference (crf\d+) `)
+	reCtgLinkCrf      = regexp.MustCompile(`\.res_id = (crf\d+)\.target_id`)
+	reTargetTypeArg   = regexp.MustCompile(`\.target_type = \$(\d+)`)
+	reTokenSysVal     = regexp.MustCompile(`sp_system = \$(\d+) AND [a-z0-9_]+\.sp_value = \$(\d+)`)
+	reTokenEmptySys   = regexp.MustCompile(`sp_system = '' AND [a-z0-9_]+\.sp_value = \$(\d+)`)
+	reTokenSysOnly    = regexp.MustCompile(`sp_system = \$(\d+)`)
+	reDateCmp         = regexp.MustCompile(`sp_(low|high)\s*(<=|>=|<|>)\s*\$(\d+)`)
+	reQuantBranchCode = regexp.MustCompile(`\(([^()]+)\) AND [a-z0-9_]+\.sp_code = \$(\d+)`)
+	reQuantValCmp     = regexp.MustCompile(`sp_value\s*(<=|>=|!=|<|>|=)\s*\$(\d+)`)
+	reQuantCodeOnly   = regexp.MustCompile(`sp_code = \$(\d+)`)
+	reQuantSysOnly    = regexp.MustCompile(`sp_system = \$(\d+)`)
+	reNotExistsToken  = regexp.MustCompile(`NOT EXISTS \(SELECT 1 FROM spidx_token (t\d+) WHERE [^)]+\)`)
+	reMissingNot      = regexp.MustCompile(`AND NOT \(EXISTS \(SELECT 1 FROM spidx_[a-z]+ m WHERE m\.tenant_id = r\.tenant_id AND m\.res_type = r\.res_type AND m\.res_id = r\.res_id AND m\.sp_name = \$(\d+)\)`)
+	reMissingPresent  = regexp.MustCompile(`AND \(EXISTS \(SELECT 1 FROM spidx_[a-z]+ m WHERE m\.tenant_id = r\.tenant_id AND m\.res_type = r\.res_type AND m\.res_id = r\.res_id AND m\.sp_name = \$(\d+)\)`)
+	reHasExists       = regexp.MustCompile(`EXISTS \(SELECT 1 FROM spidx_reference hrf0 JOIN fhir_resource hr0 .+ hsp0\.sp_name = \$(\d+) AND \((.+)\) WHERE hrf0\.tenant_id = r\.tenant_id AND hrf0\.res_type = \$(\d+) AND hrf0\.sp_name = \$(\d+)`)
+	reCompQuantOnly   = regexp.MustCompile(`EXISTS \(SELECT 1 FROM spidx_quantity cq WHERE cq\.tenant_id = r\.tenant_id AND cq\.res_type = r\.res_type AND cq\.res_id = r\.res_id AND cq\.sp_name = \$(\d+) AND ([^)]+)\)`)
+	reCompTokQuant    = regexp.MustCompile(`EXISTS \(SELECT 1 FROM spidx_token ct JOIN spidx_quantity cq ON [^W]+ WHERE ct\.tenant_id = r\.tenant_id AND ct\.res_type = r\.res_type AND ct\.res_id = r\.res_id AND ct\.sp_name = 'code' AND \(([^)]+)\) AND cq\.sp_name = 'value-quantity' AND ([^)]+)\)`)
+	reFilterStrSub    = regexp.MustCompile(`EXISTS \(SELECT 1 FROM spidx_string fs WHERE fs\.tenant_id = r\.tenant_id AND fs\.res_type = r\.res_type AND fs\.res_id = r\.res_id AND fs\.sp_name = \$(\d+) AND fs\.sp_value (?:LIKE|=) \$(\d+)`)
+	reFilterTokSub    = regexp.MustCompile(`EXISTS \(SELECT 1 FROM spidx_token ft WHERE ft\.tenant_id = r\.tenant_id AND ft\.res_type = r\.res_type AND ft\.res_id = r\.res_id AND ft\.sp_name = \$(\d+) AND \((.+?)\)\)`)
+)
+
 func (s *memPGStore) matchesJoinsAndWhere(r *memResRecord, q string, args []driver.NamedValue) bool {
 	joinSection := q
+	whereSection := ""
 	if idx := strings.Index(joinSection, "FROM fhir_resource r"); idx != -1 {
 		joinSection = joinSection[idx+len("FROM fhir_resource r"):]
 	}
 	if idx := strings.Index(joinSection, "WHERE r.tenant_id = $1"); idx != -1 {
+		whereSection = joinSection[idx+len("WHERE r.tenant_id = $1"):]
 		joinSection = joinSection[:idx]
 	}
+
+	chainedRefs := make(map[string][]postgres.SpidxReference)
+
 	parts := strings.Split(joinSection, "JOIN ")
 	for _, part := range parts {
-		line := "JOIN " + strings.TrimSpace(part)
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue
+		}
+		line := "JOIN " + trimmed
 		switch {
+		case strings.HasPrefix(line, "JOIN spidx_reference "):
+			if m := reCrfAlias.FindStringSubmatch(line); len(m) == 2 {
+				crfAlias := m[1]
+				spName, _ := extractSpNameAndValues(line, args)
+				wantTargetType := ""
+				if tm := reTargetTypeArg.FindStringSubmatch(line); len(tm) == 2 {
+					tIdx, _ := strconv.Atoi(tm[1])
+					wantTargetType = nvStr(args, tIdx-1)
+				}
+				var matchedRefs []postgres.SpidxReference
+				if pm := reCtgLinkCrf.FindStringSubmatch(line); len(pm) == 2 {
+					parentRefs := chainedRefs[pm[1]]
+					for _, prf := range parentRefs {
+						for _, rf := range s.refs {
+							if rf.TenantID != r.tenantID || rf.ResID != prf.TargetID || rf.SpName != spName {
+								continue
+							}
+							if prf.TargetType != "" && rf.ResType != prf.TargetType {
+								continue
+							}
+							if wantTargetType != "" && rf.TargetType != "" && rf.TargetType != wantTargetType {
+								continue
+							}
+							matchedRefs = append(matchedRefs, rf)
+						}
+					}
+				} else {
+					for _, rf := range s.refs {
+						if rf.TenantID != r.tenantID || rf.ResType != r.resType || rf.ResID != r.resID || rf.SpName != spName {
+							continue
+						}
+						if wantTargetType != "" && rf.TargetType != "" && rf.TargetType != wantTargetType {
+							continue
+						}
+						matchedRefs = append(matchedRefs, rf)
+					}
+				}
+				if len(matchedRefs) == 0 {
+					return false
+				}
+				chainedRefs[crfAlias] = matchedRefs
+				continue
+			}
+			if !s.matchSpidxRefJoin(r, line, args) {
+				return false
+			}
 		case strings.HasPrefix(line, "JOIN spidx_string "):
+			if m := reCtgLinkCrf.FindStringSubmatch(line); len(m) == 2 {
+				refs := chainedRefs[m[1]]
+				matchedAny := false
+				for _, rf := range refs {
+					targetRec := &memResRecord{tenantID: r.tenantID, resType: rf.TargetType, resID: rf.TargetID}
+					if s.matchSpidxStringForTarget(targetRec, line, args) {
+						matchedAny = true
+						break
+					}
+				}
+				if !matchedAny {
+					return false
+				}
+				continue
+			}
 			if !s.matchSpidxStringJoin(r, line, args) {
 				return false
 			}
 		case strings.HasPrefix(line, "JOIN spidx_token "):
-			if !s.matchSpidxTokenJoin(r, line, args) {
-				return false
+			if m := reCtgLinkCrf.FindStringSubmatch(line); len(m) == 2 {
+				refs := chainedRefs[m[1]]
+				matchedAny := false
+				for _, rf := range refs {
+					targetRec := &memResRecord{tenantID: r.tenantID, resType: rf.TargetType, resID: rf.TargetID}
+					if s.matchSpidxTokenForTarget(targetRec, line, args) {
+						matchedAny = true
+						break
+					}
+				}
+				if !matchedAny {
+					return false
+				}
+				continue
 			}
-		case strings.HasPrefix(line, "JOIN spidx_reference "):
-			if !s.matchSpidxRefJoin(r, line, args) {
+			if !s.matchSpidxTokenJoin(r, line, args) {
 				return false
 			}
 		case strings.HasPrefix(line, "JOIN spidx_quantity "):
@@ -1201,6 +1469,157 @@ func (s *memPGStore) matchesJoinsAndWhere(r *memResRecord, q string, args []driv
 			if !s.matchSpidxDateJoin(r, line, args) {
 				return false
 			}
+		}
+	}
+
+	if whereSection != "" && !s.matchesWhereClauses(r, whereSection, args) {
+		return false
+	}
+
+	return true
+}
+
+func (s *memPGStore) hasAnyIndexForParam(r *memResRecord, spName string) bool {
+	for _, row := range s.strings {
+		if row.TenantID == r.tenantID && row.ResType == r.resType && row.ResID == r.resID && row.SpName == spName {
+			return true
+		}
+	}
+	for _, row := range s.tokens {
+		if row.TenantID == r.tenantID && row.ResType == r.resType && row.ResID == r.resID && row.SpName == spName {
+			return true
+		}
+	}
+	for _, row := range s.dates {
+		if row.TenantID == r.tenantID && row.ResType == r.resType && row.ResID == r.resID && row.SpName == spName {
+			return true
+		}
+	}
+	for _, row := range s.refs {
+		if row.TenantID == r.tenantID && row.ResType == r.resType && row.ResID == r.resID && row.SpName == spName {
+			return true
+		}
+	}
+	for _, row := range s.quants {
+		if row.TenantID == r.tenantID && row.ResType == r.resType && row.ResID == r.resID && row.SpName == spName {
+			return true
+		}
+	}
+	for _, row := range s.uris {
+		if row.TenantID == r.tenantID && row.ResType == r.resType && row.ResID == r.resID && row.SpName == spName {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *memPGStore) matchesWhereClauses(r *memResRecord, whereSection string, args []driver.NamedValue) bool {
+	// 1. :not modifier on token
+	for _, m := range reNotExistsToken.FindAllStringSubmatch(whereSection, -1) {
+		if s.matchSpidxTokenForTarget(r, m[0], args) {
+			return false
+		}
+	}
+	// 2. :missing=true
+	for _, m := range reMissingNot.FindAllStringSubmatch(whereSection, -1) {
+		idx, _ := strconv.Atoi(m[1])
+		spName := nvStr(args, idx-1)
+		if s.hasAnyIndexForParam(r, spName) {
+			return false
+		}
+	}
+	// 3. :missing=false
+	for _, m := range reMissingPresent.FindAllStringSubmatch(whereSection, -1) {
+		idx, _ := strconv.Atoi(m[1])
+		spName := nvStr(args, idx-1)
+		if !s.hasAnyIndexForParam(r, spName) {
+			return false
+		}
+	}
+	// 4. _has reverse chaining
+	for _, m := range reHasExists.FindAllStringSubmatch(whereSection, -1) {
+		spIdx, _ := strconv.Atoi(m[1])
+		tokCond := m[2]
+		srcIdx, _ := strconv.Atoi(m[3])
+		refIdx, _ := strconv.Atoi(m[4])
+		spName := nvStr(args, spIdx-1)
+		srcType := nvStr(args, srcIdx-1)
+		refName := nvStr(args, refIdx-1)
+
+		matchedHas := false
+		for _, rf := range s.refs {
+			if rf.TenantID != r.tenantID || rf.ResType != srcType || rf.SpName != refName || rf.TargetID != r.resID {
+				continue
+			}
+			srcRec := s.resources[memResKey(r.tenantID, rf.ResType, rf.ResID)]
+			if srcRec == nil || srcRec.isDeleted {
+				continue
+			}
+			if s.matchTokenCondOnRec(srcRec, spName, tokCond, args) {
+				matchedHas = true
+				break
+			}
+		}
+		if !matchedHas {
+			return false
+		}
+	}
+	// 5. Composite component-code-value-quantity
+	for _, m := range reCompQuantOnly.FindAllStringSubmatch(whereSection, -1) {
+		spIdx, _ := strconv.Atoi(m[1])
+		spName := nvStr(args, spIdx-1)
+		qCond := m[2]
+		if !s.matchQuantCondOnRec(r, spName, qCond, args) {
+			return false
+		}
+	}
+	// 6. Composite code-value-quantity
+	for _, m := range reCompTokQuant.FindAllStringSubmatch(whereSection, -1) {
+		tokCond := m[1]
+		qCond := m[2]
+		if !s.matchTokenCondOnRec(r, "code", tokCond, args) || !s.matchQuantCondOnRec(r, "value-quantity", qCond, args) {
+			return false
+		}
+	}
+	// 7. _filter string & token leaf conditions
+	if strMatches := reFilterStrSub.FindAllStringSubmatch(whereSection, -1); len(strMatches) > 0 {
+		isOrGroup := strings.Contains(whereSection, " OR EXISTS (SELECT 1 FROM spidx_string fs")
+		anyMatched := false
+		for _, m := range strMatches {
+			spIdx, _ := strconv.Atoi(m[1])
+			patIdx, _ := strconv.Atoi(m[2])
+			spName := nvStr(args, spIdx-1)
+			pat := nvStr(args, patIdx-1)
+			matched := false
+			for _, row := range s.strings {
+				if row.TenantID == r.tenantID && row.ResType == r.resType && row.ResID == r.resID && row.SpName == spName {
+					if matchStringPattern(row.SpValue, pat, true) {
+						matched = true
+						break
+					}
+				}
+			}
+			if matched {
+				anyMatched = true
+			} else if !isOrGroup {
+				return false
+			}
+		}
+		if isOrGroup && !anyMatched {
+			return false
+		}
+	}
+	for _, loc := range reFilterTokSub.FindAllStringSubmatchIndex(whereSection, -1) {
+		spIdx, _ := strconv.Atoi(whereSection[loc[2]:loc[3]])
+		spName := nvStr(args, spIdx-1)
+		tokCond := whereSection[loc[4]:loc[5]]
+		negated := loc[0] >= 5 && strings.HasSuffix(whereSection[:loc[0]], "NOT (")
+		matched := s.matchTokenCondOnRec(r, spName, tokCond, args)
+		if negated && matched {
+			return false
+		}
+		if !negated && !matched {
+			return false
 		}
 	}
 	return true
@@ -1232,25 +1651,45 @@ func extractSpNameAndValues(line string, args []driver.NamedValue) (string, []st
 	return lArgs[0], lArgs[1:]
 }
 
+func matchStringPattern(spVal, pat string, isLike bool) bool {
+	valLower := strings.ToLower(spVal)
+	patLower := strings.ToLower(pat)
+	if !isLike {
+		return valLower == patLower
+	}
+	if strings.HasPrefix(patLower, "%") && strings.HasSuffix(patLower, "%") {
+		sub := strings.Trim(patLower, "%")
+		return sub != "" && strings.Contains(valLower, sub)
+	}
+	if strings.HasSuffix(patLower, "%") {
+		pref := strings.TrimSuffix(patLower, "%")
+		return pref != "" && strings.HasPrefix(valLower, pref)
+	}
+	return valLower == patLower
+}
+
 func (s *memPGStore) matchSpidxStringJoin(r *memResRecord, line string, args []driver.NamedValue) bool {
+	return s.matchSpidxStringForTarget(r, line, args)
+}
+
+func (s *memPGStore) matchSpidxStringForTarget(r *memResRecord, line string, args []driver.NamedValue) bool {
 	spName, patterns := extractSpNameAndValues(line, args)
 	if spName == "" || len(patterns) == 0 {
 		return true
 	}
-	isChainedTarget := strings.Contains(line, "ctg")
+	isLike := strings.Contains(line, "LIKE")
 	for _, row := range s.strings {
-		if row.TenantID != r.tenantID {
+		if row.TenantID != r.tenantID || row.ResID != r.resID {
 			continue
 		}
-		if !isChainedTarget && (row.ResType != r.resType || row.ResID != r.resID) {
+		if r.resType != "" && row.ResType != r.resType {
 			continue
 		}
 		if row.SpName != spName && row.SpName != spName+":text" && (!strings.HasSuffix(spName, ":text") || row.SpName != strings.TrimSuffix(spName, ":text")) {
 			continue
 		}
 		for _, pat := range patterns {
-			cleanPat := strings.Trim(pat, "%")
-			if cleanPat != "" && strings.Contains(strings.ToLower(row.SpValue), strings.ToLower(cleanPat)) {
+			if matchStringPattern(row.SpValue, pat, isLike) {
 				return true
 			}
 		}
@@ -1259,19 +1698,62 @@ func (s *memPGStore) matchSpidxStringJoin(r *memResRecord, line string, args []d
 }
 
 func (s *memPGStore) matchSpidxTokenJoin(r *memResRecord, line string, args []driver.NamedValue) bool {
-	spName, vals := extractSpNameAndValues(line, args)
-	if spName == "" || len(vals) == 0 {
+	return s.matchSpidxTokenForTarget(r, line, args)
+}
+
+func (s *memPGStore) matchSpidxTokenForTarget(r *memResRecord, line string, args []driver.NamedValue) bool {
+	locs := reSpNameArg.FindAllStringSubmatchIndex(line, -1)
+	if len(locs) == 0 {
 		return true
 	}
-	isChainedTarget := strings.Contains(line, "ctg")
+	last := locs[len(locs)-1]
+	idx, _ := strconv.Atoi(line[last[2]:last[3]])
+	spName := nvStr(args, idx-1)
+	condPart := line[last[1]:]
+	return s.matchTokenCondOnRec(r, spName, condPart, args)
+}
+
+func (s *memPGStore) matchTokenCondOnRec(r *memResRecord, spName, condPart string, args []driver.NamedValue) bool {
+	sysValPairs := reTokenSysVal.FindAllStringSubmatch(condPart, -1)
+	emptySysMatches := reTokenEmptySys.FindAllStringSubmatch(condPart, -1)
+	sysOnlyMatches := reTokenSysOnly.FindAllStringSubmatch(condPart, -1)
+
 	for _, row := range s.tokens {
-		if row.TenantID != r.tenantID || row.SpName != spName {
+		if row.TenantID != r.tenantID || row.ResID != r.resID || row.SpName != spName {
 			continue
 		}
-		if !isChainedTarget && (row.ResType != r.resType || row.ResID != r.resID) {
+		if r.resType != "" && row.ResType != r.resType {
 			continue
 		}
-		for _, v := range vals {
+		if len(sysValPairs) > 0 {
+			for _, m := range sysValPairs {
+				sIdx, _ := strconv.Atoi(m[1])
+				vIdx, _ := strconv.Atoi(m[2])
+				if row.SpSystem == nvStr(args, sIdx-1) && strings.EqualFold(row.SpValue, nvStr(args, vIdx-1)) {
+					return true
+				}
+			}
+			continue
+		}
+		if len(emptySysMatches) > 0 {
+			for _, m := range emptySysMatches {
+				vIdx, _ := strconv.Atoi(m[1])
+				if row.SpSystem == "" && strings.EqualFold(row.SpValue, nvStr(args, vIdx-1)) {
+					return true
+				}
+			}
+			continue
+		}
+		if len(sysOnlyMatches) > 0 && !strings.Contains(condPart, "sp_value") {
+			for _, m := range sysOnlyMatches {
+				sIdx, _ := strconv.Atoi(m[1])
+				if row.SpSystem == nvStr(args, sIdx-1) {
+					return true
+				}
+			}
+			continue
+		}
+		for _, v := range extractLineArgs(condPart, args) {
 			if v != "" && strings.EqualFold(row.SpValue, v) {
 				return true
 			}
@@ -1304,13 +1786,93 @@ func (s *memPGStore) matchSpidxRefJoin(r *memResRecord, line string, args []driv
 	return false
 }
 
+func evalSingleQuantCmp(val float64, op string, target float64) bool {
+	switch op {
+	case "<":
+		return val < target
+	case "<=":
+		return val <= target
+	case ">":
+		return val > target
+	case ">=":
+		return val >= target
+	case "!=":
+		return math.Abs(val-target) > 1e-9
+	default:
+		return math.Abs(val-target) <= 1e-9
+	}
+}
+
 func (s *memPGStore) matchSpidxQuantJoin(r *memResRecord, line string, args []driver.NamedValue) bool {
-	spName, _ := extractSpNameAndValues(line, args)
-	if spName == "" {
+	locs := reSpNameArg.FindAllStringSubmatchIndex(line, -1)
+	if len(locs) == 0 {
 		return true
 	}
+	last := locs[len(locs)-1]
+	idx, _ := strconv.Atoi(line[last[2]:last[3]])
+	spName := nvStr(args, idx-1)
+	condPart := line[last[1]:]
+	return s.matchQuantCondOnRec(r, spName, condPart, args)
+}
+
+func (s *memPGStore) matchQuantCondOnRec(r *memResRecord, spName, condPart string, args []driver.NamedValue) bool {
+	branches := reQuantBranchCode.FindAllStringSubmatch(condPart, -1)
+	valCmps := reQuantValCmp.FindAllStringSubmatch(condPart, -1)
+	codeMatches := reQuantCodeOnly.FindAllStringSubmatch(condPart, -1)
+	sysMatches := reQuantSysOnly.FindAllStringSubmatch(condPart, -1)
+
 	for _, row := range s.quants {
-		if row.TenantID == r.tenantID && row.ResType == r.resType && row.ResID == r.resID && row.SpName == spName {
+		if row.TenantID != r.tenantID || row.ResType != r.resType || row.ResID != r.resID || row.SpName != spName {
+			continue
+		}
+		if len(sysMatches) > 0 {
+			sIdx, _ := strconv.Atoi(sysMatches[len(sysMatches)-1][1])
+			wantSys := nvStr(args, sIdx-1)
+			if row.SpSystem != wantSys && (!strings.Contains(condPart, "sp_system = ''") || row.SpSystem != "") {
+				continue
+			}
+		}
+		if len(branches) > 0 {
+			matchedBranch := false
+			for _, b := range branches {
+				cIdx, _ := strconv.Atoi(b[2])
+				if row.SpCode != nvStr(args, cIdx-1) {
+					continue
+				}
+				bCmps := reQuantValCmp.FindAllStringSubmatch(b[1], -1)
+				allOk := true
+				for _, cm := range bCmps {
+					vIdx, _ := strconv.Atoi(cm[2])
+					if !evalSingleQuantCmp(row.SpValue, cm[1], nvFloat(args, vIdx-1)) {
+						allOk = false
+						break
+					}
+				}
+				if allOk {
+					matchedBranch = true
+					break
+				}
+			}
+			if matchedBranch {
+				return true
+			}
+			continue
+		}
+		if len(codeMatches) > 0 {
+			cIdx, _ := strconv.Atoi(codeMatches[0][1])
+			if row.SpCode != nvStr(args, cIdx-1) {
+				continue
+			}
+		}
+		allOk := true
+		for _, cm := range valCmps {
+			vIdx, _ := strconv.Atoi(cm[2])
+			if !evalSingleQuantCmp(row.SpValue, cm[1], nvFloat(args, vIdx-1)) {
+				allOk = false
+				break
+			}
+		}
+		if allOk {
 			return true
 		}
 	}
@@ -1318,12 +1880,47 @@ func (s *memPGStore) matchSpidxQuantJoin(r *memResRecord, line string, args []dr
 }
 
 func (s *memPGStore) matchSpidxDateJoin(r *memResRecord, line string, args []driver.NamedValue) bool {
-	spName, _ := extractSpNameAndValues(line, args)
-	if spName == "" {
+	locs := reSpNameArg.FindAllStringSubmatchIndex(line, -1)
+	if len(locs) == 0 {
 		return true
 	}
+	last := locs[len(locs)-1]
+	idx, _ := strconv.Atoi(line[last[2]:last[3]])
+	spName := nvStr(args, idx-1)
+	condPart := line[last[1]:]
+	cmps := reDateCmp.FindAllStringSubmatch(condPart, -1)
+
 	for _, row := range s.dates {
-		if row.TenantID == r.tenantID && row.ResType == r.resType && row.ResID == r.resID && row.SpName == spName {
+		if row.TenantID != r.tenantID || row.ResType != r.resType || row.ResID != r.resID || row.SpName != spName {
+			continue
+		}
+		allOk := true
+		for _, cm := range cmps {
+			col := cm[1]
+			op := cm[2]
+			tIdx, _ := strconv.Atoi(cm[3])
+			target := nvTime(args, tIdx-1)
+			val := row.SpLow
+			if col == "high" {
+				val = row.SpHigh
+			}
+			var ok bool
+			switch op {
+			case "<":
+				ok = val.Before(target)
+			case "<=":
+				ok = !val.After(target)
+			case ">":
+				ok = val.After(target)
+			case ">=":
+				ok = !val.Before(target)
+			}
+			if !ok {
+				allOk = false
+				break
+			}
+		}
+		if allOk {
 			return true
 		}
 	}
