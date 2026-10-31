@@ -1276,7 +1276,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "ServiceRequest") && (parts[4] == "$collect-specimen" || parts[4] == "$sdoh-referral" || parts[4] == "$physical-activity-referral" || parts[4] == "$codex-rttd-plan") {
 			return true
 		}
-		if (strings.EqualFold(parts[3], "AdverseEvent") || strings.EqualFold(parts[3], "CarePlan") || strings.EqualFold(parts[3], "RiskAssessment") || strings.EqualFold(parts[3], "DiagnosticReport") || strings.EqualFold(parts[3], "Consent")) && parts[4] == "$evaluate" {
+		if (strings.EqualFold(parts[3], "AdverseEvent") || strings.EqualFold(parts[3], "CarePlan") || strings.EqualFold(parts[3], "RiskAssessment") || strings.EqualFold(parts[3], "DiagnosticReport") || strings.EqualFold(parts[3], "Consent") || strings.EqualFold(parts[3], "TestScript")) && parts[4] == "$evaluate" {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Consent") && (parts[4] == "$adi-verify" || parts[4] == "$sdoh-consent-record") {
@@ -1444,7 +1444,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "ServiceRequest") && (parts[5] == "$collect-specimen" || parts[5] == "$sdoh-referral" || parts[5] == "$codex-rttd-plan") {
 			return true
 		}
-		if (strings.EqualFold(parts[3], "AdverseEvent") || strings.EqualFold(parts[3], "CarePlan") || strings.EqualFold(parts[3], "RiskAssessment") || strings.EqualFold(parts[3], "DiagnosticReport") || strings.EqualFold(parts[3], "Consent")) && parts[5] == "$evaluate" {
+		if (strings.EqualFold(parts[3], "AdverseEvent") || strings.EqualFold(parts[3], "CarePlan") || strings.EqualFold(parts[3], "RiskAssessment") || strings.EqualFold(parts[3], "DiagnosticReport") || strings.EqualFold(parts[3], "Consent") || strings.EqualFold(parts[3], "TestScript")) && parts[5] == "$evaluate" {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Group") && (parts[5] == "$add" || parts[5] == "$remove" || parts[5] == "$member-add" || parts[5] == "$member-remove" || parts[5] == "$confirm-attribution-list" || parts[5] == "$davinci-data-export" || parts[5] == "$atr-summary" || parts[5] == "$pdex-provider-member-match") {

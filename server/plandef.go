@@ -2080,51 +2080,23 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 }
 
 func evaluateFHIRPathOnResource(root map[string]any, expr string) []any {
-	expr = strings.TrimSpace(expr)
-	if expr == "" || root == nil {
-		return nil
-	}
-	// Check for top-level comparison outside parentheses (e.g., "Observation.component.where(...).valueQuantity.value >= 140")
-	if lhs, op, rhs, ok := splitTopLevelComparison(expr); ok {
-		lhsVals := evaluateFHIRPathTokens([]any{root}, root, lhs)
-		return []any{compareFHIRPathValues(lhsVals, op, rhs)}
-	}
-	return evaluateFHIRPathTokens([]any{root}, root, expr)
+	return evalFHIRPath(root, expr)
 }
 
-func splitTopLevelComparison(expr string) (string, string, string, bool) {
-	depth := 0
-	inQuote := byte(0)
-	for i := 0; i < len(expr); i++ {
-		ch := expr[i]
-		if inQuote != 0 {
-			if ch == inQuote {
-				inQuote = 0
-			}
-			continue
-		}
-		if ch == '\'' || ch == '"' {
-			inQuote = ch
-			continue
-		}
-		switch ch {
-		case '(':
-			depth++
-		case ')':
-			if depth > 0 {
-				depth--
-			}
-		default:
-			if depth == 0 {
-				for _, op := range []string{"!=", ">=", "<=", "=", ">", "<"} {
-					if strings.HasPrefix(expr[i:], op) {
-						return strings.TrimSpace(expr[:i]), op, strings.TrimSpace(expr[i+len(op):]), true
-					}
-				}
-			}
+func isAllDigits(s string) bool {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "-") || strings.HasPrefix(s, "+") {
+		s = s[1:]
+	}
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
 		}
 	}
-	return "", "", "", false
+	return true
 }
 
 func splitFHIRPathSegments(expr string) []string {
@@ -2136,7 +2108,7 @@ func splitFHIRPathSegments(expr string) []string {
 		ch := expr[i]
 		if inQuote != 0 {
 			cur.WriteByte(ch)
-			if ch == inQuote {
+			if ch == inQuote && (i == 0 || expr[i-1] != '\\') {
 				inQuote = 0
 			}
 			continue
@@ -2147,16 +2119,20 @@ func splitFHIRPathSegments(expr string) []string {
 			continue
 		}
 		switch ch {
-		case '(':
+		case '(', '[', '{':
 			depth++
 			cur.WriteByte(ch)
-		case ')':
+		case ')', ']', '}':
 			if depth > 0 {
 				depth--
 			}
 			cur.WriteByte(ch)
 		case '.':
 			if depth == 0 {
+				if i+1 < len(expr) && expr[i+1] >= '0' && expr[i+1] <= '9' && isAllDigits(cur.String()) {
+					cur.WriteByte(ch)
+					continue
+				}
 				if s := strings.TrimSpace(cur.String()); s != "" {
 					segs = append(segs, s)
 				}
@@ -2172,223 +2148,6 @@ func splitFHIRPathSegments(expr string) []string {
 		segs = append(segs, s)
 	}
 	return segs
-}
-
-func evaluateFHIRPathTokens(items []any, root map[string]any, expr string) []any {
-	segs := splitFHIRPathSegments(expr)
-	if len(segs) == 0 {
-		return items
-	}
-	if rt, _ := root["resourceType"].(string); rt != "" && strings.EqualFold(segs[0], rt) {
-		segs = segs[1:]
-	}
-	current := items
-	for _, seg := range segs {
-		lowerSeg := strings.ToLower(seg)
-		switch {
-		case lowerSeg == "exists()":
-			return []any{len(current) > 0}
-		case lowerSeg == "empty()":
-			return []any{len(current) == 0}
-		case lowerSeg == "count()":
-			return []any{len(current)}
-		case lowerSeg == "first()":
-			if len(current) > 0 {
-				current = []any{current[0]}
-			} else {
-				current = nil
-			}
-		case lowerSeg == "last()":
-			if len(current) > 0 {
-				current = []any{current[len(current)-1]}
-			} else {
-				current = nil
-			}
-		case strings.HasPrefix(lowerSeg, "where(") && strings.HasSuffix(seg, ")"):
-			cond := strings.TrimSpace(seg[len("where(") : len(seg)-1])
-			var filtered []any
-			for _, it := range current {
-				if evaluateFHIRPathWhereItem(it, root, cond) {
-					filtered = append(filtered, it)
-				}
-			}
-			current = filtered
-		case strings.HasPrefix(lowerSeg, "extension(") && strings.HasSuffix(seg, ")"):
-			extURL := strings.Trim(strings.TrimSpace(seg[len("extension("):len(seg)-1]), "'\"")
-			var matched []any
-			for _, it := range current {
-				if m, ok := it.(map[string]any); ok {
-					if exts, ok := m["extension"].([]any); ok {
-						for _, e := range exts {
-							if em, ok := e.(map[string]any); ok {
-								if u, _ := em["url"].(string); u == extURL {
-									matched = append(matched, em)
-								}
-							}
-						}
-					}
-				}
-			}
-			current = matched
-		default:
-			var next []any
-			for _, it := range current {
-				m, ok := it.(map[string]any)
-				if !ok {
-					continue
-				}
-				if v, exists := m[seg]; exists {
-					if arr, isArr := v.([]any); isArr {
-						next = append(next, arr...)
-					} else if v != nil {
-						next = append(next, v)
-					}
-					continue
-				}
-				// Support polymorphic value[x] shorthand (e.g. "value" matching valueQuantity, valueString, valueCodeableConcept)
-				if seg == "value" {
-					for k, v := range m {
-						if strings.HasPrefix(k, "value") && len(k) > len("value") && v != nil {
-							next = append(next, v)
-						}
-					}
-				}
-			}
-			current = next
-		}
-	}
-	return current
-}
-
-func evaluateFHIRPathWhereItem(item any, root map[string]any, cond string) bool {
-	if lhs, op, rhs, ok := splitTopLevelComparison(cond); ok {
-		lhsVals := evaluateFHIRPathTokens([]any{item}, root, lhs)
-		return compareFHIRPathValues(lhsVals, op, rhs)
-	}
-	vals := evaluateFHIRPathTokens([]any{item}, root, cond)
-	if len(vals) == 0 {
-		return false
-	}
-	if b, ok := vals[0].(bool); ok {
-		return b
-	}
-	return true
-}
-
-func compareFHIRPathValues(lhsVals []any, op, rhsRaw string) bool {
-	rhs := strings.Trim(strings.TrimSpace(rhsRaw), "'\"")
-	rhsNum, numErr := strconv.ParseFloat(rhs, 64)
-	rhsIsNum := numErr == nil
-	rhsBool, boolErr := strconv.ParseBool(rhs)
-	rhsIsBool := boolErr == nil
-
-	for _, lv := range lhsVals {
-		switch v := lv.(type) {
-		case string:
-			switch op {
-			case "=":
-				if v == rhs {
-					return true
-				}
-			case "!=":
-				if v != rhs {
-					return true
-				}
-			case ">":
-				if v > rhs {
-					return true
-				}
-			case ">=":
-				if v >= rhs {
-					return true
-				}
-			case "<":
-				if v < rhs {
-					return true
-				}
-			case "<=":
-				if v <= rhs {
-					return true
-				}
-			}
-		case float64:
-			if !rhsIsNum {
-				continue
-			}
-			switch op {
-			case "=":
-				if v == rhsNum {
-					return true
-				}
-			case "!=":
-				if v != rhsNum {
-					return true
-				}
-			case ">":
-				if v > rhsNum {
-					return true
-				}
-			case ">=":
-				if v >= rhsNum {
-					return true
-				}
-			case "<":
-				if v < rhsNum {
-					return true
-				}
-			case "<=":
-				if v <= rhsNum {
-					return true
-				}
-			}
-		case int:
-			if !rhsIsNum {
-				continue
-			}
-			fv := float64(v)
-			switch op {
-			case "=":
-				if fv == rhsNum {
-					return true
-				}
-			case "!=":
-				if fv != rhsNum {
-					return true
-				}
-			case ">":
-				if fv > rhsNum {
-					return true
-				}
-			case ">=":
-				if fv >= rhsNum {
-					return true
-				}
-			case "<":
-				if fv < rhsNum {
-					return true
-				}
-			case "<=":
-				if fv <= rhsNum {
-					return true
-				}
-			}
-		case bool:
-			if !rhsIsBool {
-				continue
-			}
-			switch op {
-			case "=":
-				if v == rhsBool {
-					return true
-				}
-			case "!=":
-				if v != rhsBool {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 // handleMeasureCollectData handles GET/POST /fhir/r4/{tenant}/Measure/$collect-data

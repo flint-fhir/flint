@@ -1382,6 +1382,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleDaVinciPDexPayerExchangeWave54(w, r, "pdex-payer-summary")
 					return
 				}
+				if strings.EqualFold(parts[3], "TestScript") && parts[4] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleTestScriptEvaluate(w, r)
+					return
+				}
 				if r.Method == http.MethodPost && parts[4] == "$convert" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -1390,6 +1395,12 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 6 && parts[0] == "fhir" && parts[1] == "r4" {
+				if strings.EqualFold(parts[3], "TestScript") && parts[5] == "$evaluate" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleTestScriptEvaluate(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Organization") && parts[5] == "$udap-register" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
