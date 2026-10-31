@@ -3,7 +3,7 @@ const quickstartSnippets = {
 curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/docker-compose.yml -o docker-compose.yml
 docker compose --profile seed up -d
 
-# Explore the live FHIR R4 API & 50-Check Conformance Suite:
+# Explore the live FHIR R4 API & 75-Check Conformance Suite:
 open http://localhost:8080/fhir/r4/demo/$docs
 curl -s http://localhost:8080/fhir/r4/demo/$certify | jq .result`,
 
@@ -12,7 +12,7 @@ docker run --rm -p 8080:8080 \\
   -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \\
   ghcr.io/flint-fhir/flint:latest
 
-# Seed the US Core cohort & execute the 50-check conformance certification CLI
+# Seed the US Core cohort & execute the 75-check conformance certification CLI
 docker run --rm --entrypoint /usr/local/bin/seed ghcr.io/flint-fhir/flint:latest -url http://host.docker.internal:8080 -tenant demo
 docker run --rm --entrypoint /usr/local/bin/certify ghcr.io/flint-fhir/flint:latest -url http://host.docker.internal:8080 -tenant demo`,
 

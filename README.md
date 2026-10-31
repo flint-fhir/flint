@@ -94,7 +94,7 @@ Flint implements full search index extraction, transactional persistence, SMART 
 | **`AuditEvent`** | ASTM E2147 / ONC `§170.315(d)(2)` Auditable Events | `read`, `search-type` | `_id`, `date`, `entity`, `patient`, `agent`, `action`, `subtype`, `outcome` | `user/AuditEvent.rs`, `system/AuditEvent.rs` | ✅ Production Ready |
 | **`Bundle`** | HL7 FHIR R4 Batch & ACID Transaction | `batch`, `transaction` (`POST`, `PUT`, `PATCH`, `DELETE`, `GET`, `HEAD`, `urn:uuid:` resolution, `ifNoneExist`, `ifMatch`, `ifNoneMatch`, `ifModifiedSince`, conditional `?searchParams` URLs) | N/A | Per-entry SMART scope & compartment validation | ✅ Production Ready |
 | **`$export`, `$import` & `Group` (`$everything`, `$add`, `$remove`, `$member-add`, `$member-remove`, `$confirm-attribution-list`, `$atr-summary`, `$pdex-provider-member-match`, `$davinci-data-export`)** | HL7 FHIR Bulk Data Access v2.0.0 / ONC `§170.315(g)(10)`, Da Vinci Member Attribution (ATR), CMS-0057-F / Da Vinci PDex v2.1.0 Provider Access & Payer-to-Payer Data Exchange & Cohort Management | `GET/POST` System (`/$export`), All-Patients (`/Patient/$export`), Active Group Member Cohort (`/Group/{id}/$export`, `/Group/{id}/$everything`, `/Group/{id}/$davinci-data-export`, `POST /Group/{id}/$add`, `POST /Group/{id}/$remove`, `POST /Group/{id}/$member-add`, `POST /Group/{id}/$member-remove`, `POST /Group/{id}/$confirm-attribution-list`, `GET/POST /Group/{id}/$atr-summary`, `POST /Group/$pdex-provider-member-match`), Single-Patient (`/Patient/{id}/$export`), Bulk NDJSON Import (`POST /$import`, `/$import-poll/{jobId}`), Postgres-persisted Async Poll (`/$export-poll/{jobId}`), NDJSON Download (`/$export-file/{jobId}/{file}`) | `_type`, `_since`, `_until`, `_elements`, `_typeFilter`, `patient`, `_outputFormat`, `inputFormat`, `input` (`application/fhir+ndjson`), `member`, `memberId`, `attributionPeriod` | `system/*.rs` (Export), `system/*.cruds` (Import), `patient/*.rs` (Single-Patient) | ✅ Production Ready |
-| **`$certify` (Conformance)** | HL7 FHIR R4 `TestReport` / US Core `v6.1.0` & `v7.0.0` / ONC `(g)(10)` & HTI-1 | `GET/POST /fhir/r4/{tenant}/$certify` & CLI (`task certify`) | 50-check automated conformance harness across 5 suites | Public / Admin | ✅ Production Ready |
+| **`$certify` (Conformance)** | HL7 FHIR R4 `TestReport` / US Core `v6.1.0` & `v7.0.0` / ONC `(g)(10)` & 35+ National HL7 IGs | `GET/POST /fhir/r4/{tenant}/$certify` & CLI (`task certify`) | 75-check automated conformance harness across 7 suites | Public / Admin | ✅ Production Ready |
 
 ---
 
@@ -115,7 +115,7 @@ docker compose --profile seed up -d
 
 Once running, open:
 * **Interactive SMART v2 Sandbox & Clinical Recipe Runner (`$docs`)**: [http://localhost:8080/fhir/r4/demo/$docs](http://localhost:8080/fhir/r4/demo/$docs)
-* **Live 50-Check Conformance `TestReport` (`$certify`)**: [http://localhost:8080/fhir/r4/demo/$certify](http://localhost:8080/fhir/r4/demo/$certify)
+* **Live 75-Check Conformance `TestReport` (`$certify`)**: [http://localhost:8080/fhir/r4/demo/$certify](http://localhost:8080/fhir/r4/demo/$certify)
 * **Proto-Compiled OpenAPI 3.1.0 Spec**: [http://localhost:8080/fhir/r4/demo/openapi.json](http://localhost:8080/fhir/r4/demo/openapi.json)
 
 ### Option 2: Container Image (`ghcr.io/flint-fhir/flint`)
@@ -128,14 +128,14 @@ docker run --rm -p 8080:8080 \
   ghcr.io/flint-fhir/flint:latest
 ```
 
-Seed the US Core `"demo"` cohort or run the 50-check certification CLI using the same container image:
+Seed the US Core `"demo"` cohort or run the 75-check certification CLI using the same container image:
 
 ```bash
 # Seed the 25-resource US Core v6.1.0 & v7.0.0 cohort into tenant "demo"
 docker run --rm --entrypoint /usr/local/bin/seed \
   ghcr.io/flint-fhir/flint:latest -url http://host.docker.internal:8080 -tenant demo
 
-# Run the 50-check conformance certification suite
+# Run the 75-check conformance certification suite
 docker run --rm --entrypoint /usr/local/bin/certify \
   ghcr.io/flint-fhir/flint:latest -url http://host.docker.internal:8080 -tenant demo
 ```
@@ -332,7 +332,7 @@ Content-Type: application/fhir+json
   * Single-Patient Compartment: `GET /fhir/r4/{tenant}/Patient/{id}/$export`
   * Async Job Status Poll & Cancel (Postgres-persisted): `GET /fhir/r4/{tenant}/$export-poll/{jobId}` & `DELETE /fhir/r4/{tenant}/$export-poll/{jobId}`
   * NDJSON File Download: `GET /fhir/r4/{tenant}/$export-file/{jobId}/{ResourceType}.ndjson`
-* **Automated Conformance & Certification (`$certify`)**: `GET /fhir/r4/{tenant}/$certify` and `POST /fhir/r4/{tenant}/$certify` (executes 49 end-to-end conformance checks across FHIR R4, US Core v6.1.0 & v7.0.0, SMART v2, Terminology, Subscriptions, SDC, and ONC `(g)(10)` in an isolated sandbox and returns an HL7 FHIR R4 `TestReport` resource)
+* **Automated Conformance & Certification (`$certify`)**: `GET /fhir/r4/{tenant}/$certify` and `POST /fhir/r4/{tenant}/$certify` (executes 75 end-to-end conformance checks across 7 suites covering FHIR R4, US Core v6.1.0 & v7.0.0, SMART v2, Terminology, Subscriptions, SDC, ONC `(g)(10)`, Da Vinci, CARIN, CodeX, Genomics, SANER/NHSN, PACIO, Gravity SDOH, Vulcan, and FAST in an isolated sandbox and returns an HL7 FHIR R4 `TestReport` resource)
 * **Validate**: `POST /fhir/r4/{tenant}/{resourceType}/$validate` and `POST /fhir/r4/{tenant}/$validate`
 * **Search**: `GET /fhir/r4/{tenant}/{resourceType}?{searchParams}&_count=20&_offset=0` and `POST /fhir/r4/{tenant}/{resourceType}/_search` (includes `Bundle.link` `self`/`next`/`previous` pagination)
 * **Security Audit Log (`AuditEvent`)**: `GET /fhir/r4/{tenant}/AuditEvent?entity=Patient/123&outcome=0&agent=Practitioner/dr-smith` and `GET /fhir/r4/{tenant}/AuditEvent/{id}`
@@ -483,7 +483,7 @@ flint/
 ├── cmd/
 │   ├── flintd/           # Core FHIR REST HTTP server entrypoint
 │   ├── seed/             # Deterministic US Core v6.1.0 & v7.0.0 cohort seeder (task seed)
-│   ├── certify/          # Automated 50-check US Core v6.1.0 & v7.0.0 / ONC (g)(10) certification CLI (task certify)
+│   ├── certify/          # Automated 75-check US Core v6.1.0 & v7.0.0 / ONC (g)(10) / National IG certification CLI (task certify)
 │   ├── loadtest/         # High-throughput HTTP & Postgres store load testing harness
 │   ├── worker/           # [Add-On] Temporal ingestion worker entrypoint (task build-worker)
 │   └── e2e/              # [Add-On] Lakehouse E2E & restart recovery verification
@@ -499,7 +499,7 @@ flint/
 │   ├── audit/            # HIPAA/ONC FHIR R4 AuditEvent classification, serialization & recorders
 │   ├── auth/             # TokenValidator, OIDC/Zitadel, and Hegel property tests
 │   ├── cdc/              # Generic, zero-dependency CDC Publisher interface & in-memory sink
-│   ├── certify/          # 50-check FHIR R4 / US Core v6.1.0 & v7.0.0 / ONC (g)(10) conformance engine & TestReport builder
+│   ├── certify/          # 75-check FHIR R4 / US Core v6.1.0 & v7.0.0 / ONC (g)(10) / National IG conformance engine & TestReport builder
 │   ├── fhirutil/         # Bidirectional flat FHIR R4 JSON <-> google/fhir protojson codec & helpers
 │   └── validation/       # FHIR StructureDefinition, ValueSet, and cardinality validator
 ├── proto/
