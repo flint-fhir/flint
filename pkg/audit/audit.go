@@ -39,13 +39,21 @@ type Recorder interface {
 	Query(ctx context.Context, params postgres.AuditQueryParams) ([]postgres.AuditRecord, int, error)
 }
 
-// StoreRecorder backs Recorder with the Postgres operational store.
-type StoreRecorder struct {
-	store *postgres.Store
+// AuditStore is the persistence interface required by StoreRecorder.
+// Both *postgres.Store and *doris.Store implement AuditStore.
+type AuditStore interface {
+	WriteAuditEvent(ctx context.Context, rec postgres.AuditRecord) error
+	ReadAuditEvent(ctx context.Context, tenantID, auditID string) (*postgres.AuditRecord, error)
+	QueryAuditEvents(ctx context.Context, params postgres.AuditQueryParams) ([]postgres.AuditRecord, int, error)
 }
 
-// NewStoreRecorder creates a Postgres-backed audit recorder.
-func NewStoreRecorder(store *postgres.Store) *StoreRecorder {
+// StoreRecorder backs Recorder with an operational store (PostgreSQL or Apache Doris).
+type StoreRecorder struct {
+	store AuditStore
+}
+
+// NewStoreRecorder creates a store-backed audit recorder.
+func NewStoreRecorder(store AuditStore) *StoreRecorder {
 	return &StoreRecorder{store: store}
 }
 
