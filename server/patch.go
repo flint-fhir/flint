@@ -79,181 +79,193 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	existingRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeOperationOutcome(w, http.StatusNotFound, "not-found",
-			fmt.Sprintf("%s/%s not found", resType, resID))
-		return
-	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
-		if existingRec != nil && existingRec.ResVersion > 0 {
-			w.Header().Set("ETag", postgres.FormatETag(existingRec.ResVersion))
+	var (
+		existingRec *postgres.ResourceRecord
+		rec         *postgres.ResourceRecord
+		patchedJSON []byte
+		protoBytes  []byte
+		idx         *postgres.SearchIndexes
+	)
+	for attempt := 0; ; attempt++ {
+		existingRec, err = s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found",
+				fmt.Sprintf("%s/%s not found", resType, resID))
+			return
 		}
-		writeOperationOutcome(w, http.StatusGone, "deleted",
-			fmt.Sprintf("%s/%s has been deleted", resType, resID))
-		return
-	}
-	if err != nil {
-		s.logger.Error("read resource for patch", "error", err, "type", resType, "id", resID)
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read resource for patch")
-		return
-	}
-
-	if expectedVersion > 0 && existingRec.ResVersion != expectedVersion {
-		writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict",
-			fmt.Sprintf("%v: expected version %d, current version %d", postgres.ErrVersionConflict, expectedVersion, existingRec.ResVersion))
-		return
-	}
-
-	currentJSON, err := s.protoToJSONWithMeta(resType, existingRec.ResourceProto, 0, time.Time{})
-	if err != nil {
-		s.logger.Error("denormalize resource for patch", "error", err, "type", resType, "id", resID)
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize resource for patch")
-		return
-	}
-
-	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
-	var patchedJSON []byte
-	if strings.Contains(contentType, "json-patch+json") || trimmedBody[0] == '[' {
-		var status int
-		patchedJSON, status, err = ApplyJSONPatch(currentJSON, trimmedBody)
-		if err != nil {
-			code := "invalid"
-			if status == http.StatusUnprocessableEntity {
-				code = "invariant"
+		if errors.Is(err, postgres.ErrResourceDeleted) {
+			if existingRec != nil && existingRec.ResVersion > 0 {
+				w.Header().Set("ETag", postgres.FormatETag(existingRec.ResVersion))
 			}
-			writeOperationOutcome(w, status, code, err.Error())
+			writeOperationOutcome(w, http.StatusGone, "deleted",
+				fmt.Sprintf("%s/%s has been deleted", resType, resID))
 			return
 		}
-	} else if isFHIRParametersPatch(trimmedBody) {
-		var status int
-		patchedJSON, status, err = ApplyFHIRPatch(currentJSON, trimmedBody)
 		if err != nil {
-			code := "invalid"
-			if status == http.StatusUnprocessableEntity {
-				code = "invariant"
-			}
-			writeOperationOutcome(w, status, code, err.Error())
+			s.logger.Error("read resource for patch", "error", err, "type", resType, "id", resID)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read resource for patch")
 			return
 		}
-	} else {
-		patchedJSON, err = ApplyMergePatch(currentJSON, trimmedBody)
-		if err != nil {
-			writeOperationOutcome(w, http.StatusBadRequest, "structure", err.Error())
-			return
-		}
-	}
 
-	var patchedMap map[string]any
-	if err := json.Unmarshal(patchedJSON, &patchedMap); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid patched JSON: %v", err))
-		return
-	}
-	if rt, ok := patchedMap["resourceType"].(string); !ok || rt != resType {
-		writeOperationOutcome(w, http.StatusBadRequest, "invariant",
-			fmt.Sprintf("PATCH cannot change resourceType from %q to %v", resType, patchedMap["resourceType"]))
-		return
-	}
-	if rawID, hasID := patchedMap["id"]; hasID && rawID != nil {
-		idStr, ok := rawID.(string)
-		if !ok || (idStr != "" && idStr != resID) {
+		if expectedVersion > 0 && existingRec.ResVersion != expectedVersion {
+			writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict",
+				fmt.Sprintf("%v: expected version %d, current version %d", postgres.ErrVersionConflict, expectedVersion, existingRec.ResVersion))
+			return
+		}
+
+		currentJSON, err := s.protoToJSONWithMeta(resType, existingRec.ResourceProto, 0, time.Time{})
+		if err != nil {
+			s.logger.Error("denormalize resource for patch", "error", err, "type", resType, "id", resID)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize resource for patch")
+			return
+		}
+
+		contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+		if strings.Contains(contentType, "json-patch+json") || trimmedBody[0] == '[' {
+			var status int
+			patchedJSON, status, err = ApplyJSONPatch(currentJSON, trimmedBody)
+			if err != nil {
+				code := "invalid"
+				if status == http.StatusUnprocessableEntity {
+					code = "invariant"
+				}
+				writeOperationOutcome(w, status, code, err.Error())
+				return
+			}
+		} else if isFHIRParametersPatch(trimmedBody) {
+			var status int
+			patchedJSON, status, err = ApplyFHIRPatch(currentJSON, trimmedBody)
+			if err != nil {
+				code := "invalid"
+				if status == http.StatusUnprocessableEntity {
+					code = "invariant"
+				}
+				writeOperationOutcome(w, status, code, err.Error())
+				return
+			}
+		} else {
+			patchedJSON, err = ApplyMergePatch(currentJSON, trimmedBody)
+			if err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "structure", err.Error())
+				return
+			}
+		}
+
+		var patchedMap map[string]any
+		if err := json.Unmarshal(patchedJSON, &patchedMap); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid patched JSON: %v", err))
+			return
+		}
+		if rt, ok := patchedMap["resourceType"].(string); !ok || rt != resType {
 			writeOperationOutcome(w, http.StatusBadRequest, "invariant",
-				fmt.Sprintf("PATCH cannot change resource id from %q to %v", resID, rawID))
+				fmt.Sprintf("PATCH cannot change resourceType from %q to %v", resType, patchedMap["resourceType"]))
 			return
 		}
-	}
-	patchedMap["id"] = resID
-	patchedJSON, err = json.Marshal(patchedMap)
-	if err != nil {
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to marshal patched resource")
-		return
-	}
-
-	resolvedPatch, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, patchedJSON, nil)
-	if refErr != nil {
-		writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
-		return
-	}
-	patchedJSON = resolvedPatch
-
-	if s.validator != nil {
-		outcome := s.validator.ValidateJSON(resType, patchedJSON)
-		if !outcome.IsValid() {
-			outcome.WriteHTTP(w, http.StatusBadRequest)
+		if rawID, hasID := patchedMap["id"]; hasID && rawID != nil {
+			idStr, ok := rawID.(string)
+			if !ok || (idStr != "" && idStr != resID) {
+				writeOperationOutcome(w, http.StatusBadRequest, "invariant",
+					fmt.Sprintf("PATCH cannot change resource id from %q to %v", resID, rawID))
+				return
+			}
+		}
+		patchedMap["id"] = resID
+		patchedJSON, err = json.Marshal(patchedMap)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to marshal patched resource")
 			return
 		}
-	}
 
-	patchedJSON = normalizeSubscriptionOnWrite(resType, patchedJSON)
+		resolvedPatch, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, patchedJSON, nil)
+		if refErr != nil {
+			writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
+			return
+		}
+		patchedJSON = resolvedPatch
 
-	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, patchedJSON)
-	if err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure",
-			fmt.Sprintf("invalid patched FHIR JSON: %v", err))
-		return
-	}
+		if s.validator != nil {
+			outcome := s.validator.ValidateJSON(resType, patchedJSON)
+			if !outcome.IsValid() {
+				outcome.WriteHTTP(w, http.StatusBadRequest)
+				return
+			}
+		}
 
-	msg := dynamicpb.NewMessage(md)
-	unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
-	if err := unmarshaler.Unmarshal(normalizedBody, msg); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure",
-			fmt.Sprintf("invalid patched FHIR JSON: %v", err))
-		return
-	}
-	setProtoResourceID(msg, resID)
+		patchedJSON = normalizeSubscriptionOnWrite(resType, patchedJSON)
 
-	protoBytes, err := proto.Marshal(msg)
-	if err != nil {
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to encode patched resource")
-		return
-	}
+		normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, patchedJSON)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure",
+				fmt.Sprintf("invalid patched FHIR JSON: %v", err))
+			return
+		}
 
-	s.syncSearchParameterOnWrite(resType, resID, patchedJSON)
+		msg := dynamicpb.NewMessage(md)
+		unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+		if err := unmarshaler.Unmarshal(normalizedBody, msg); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure",
+				fmt.Sprintf("invalid patched FHIR JSON: %v", err))
+			return
+		}
+		setProtoResourceID(msg, resID)
 
-	var idx *postgres.SearchIndexes
-	if extractor, ok := s.extractors[resType]; ok {
-		idx, _ = extractor(tenant, resID, protoBytes)
-	}
-	s.enrichProvenancePatientIndex(r.Context(), tenant, resType, idx)
-	setAuditPatientID(r.Context(), extractPatientIDFromIndexes(resType, resID, idx))
+		protoBytes, err = proto.Marshal(msg)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to encode patched resource")
+			return
+		}
 
-	if secCtx, ok := auth.FromContext(r.Context()); ok {
-		if auth.IsPatientRestricted(secCtx) {
-			if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
-				if !postgres.IndexesBelongToPatientCompartment(resType, resID, idx, cleanID(secCtx.GetPatientId())) {
+		s.syncSearchParameterOnWrite(resType, resID, patchedJSON)
+
+		idx = nil
+		if extractor, ok := s.extractors[resType]; ok {
+			idx, _ = extractor(tenant, resID, protoBytes)
+		}
+		s.enrichProvenancePatientIndex(r.Context(), tenant, resType, idx)
+		setAuditPatientID(r.Context(), extractPatientIDFromIndexes(resType, resID, idx))
+
+		if secCtx, ok := auth.FromContext(r.Context()); ok {
+			if auth.IsPatientRestricted(secCtx) {
+				if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
+					if !postgres.IndexesBelongToPatientCompartment(resType, resID, idx, cleanID(secCtx.GetPatientId())) {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							fmt.Sprintf("patient-scoped token (%s) cannot patch %s/%s outside patient compartment",
+								secCtx.GetPatientId(), resType, resID))
+						return
+					}
+				}
+			}
+			if constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionUpdate); constrained {
+				if !s.resourceSatisfiesScopeConstraints(tenant, resType, resID, existingRec.ResourceProto, constraints) ||
+					!s.resourceSatisfiesScopeConstraints(tenant, resType, resID, protoBytes, constraints) {
 					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-						fmt.Sprintf("patient-scoped token (%s) cannot patch %s/%s outside patient compartment",
-							secCtx.GetPatientId(), resType, resID))
+						fmt.Sprintf("insufficient granular SMART v2 scope to patch %s/%s", resType, resID))
 					return
 				}
 			}
 		}
-		if constraints, constrained := auth.ScopeQueryConstraints(secCtx, resType, auth.ActionUpdate); constrained {
-			if !s.resourceSatisfiesScopeConstraints(tenant, resType, resID, existingRec.ResourceProto, constraints) ||
-				!s.resourceSatisfiesScopeConstraints(tenant, resType, resID, protoBytes, constraints) {
-				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-					fmt.Sprintf("insufficient granular SMART v2 scope to patch %s/%s", resType, resID))
-				return
-			}
-		}
-	}
 
-	rec, err := s.store.WriteResourceWithMeta(r.Context(), postgres.ResourceInput{
-		TenantID:        tenant,
-		ResType:         resType,
-		ResID:           resID,
-		ResourceProto:   protoBytes,
-		SearchIndexes:   idx,
-		ExpectedVersion: existingRec.ResVersion,
-	})
-	if errors.Is(err, postgres.ErrVersionConflict) {
-		writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", err.Error())
-		return
-	}
-	if err != nil {
-		s.logger.Error("write patched resource", "error", err, "type", resType, "id", resID)
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to store patched resource")
-		return
+		rec, err = s.store.WriteResourceWithMeta(r.Context(), postgres.ResourceInput{
+			TenantID:        tenant,
+			ResType:         resType,
+			ResID:           resID,
+			ResourceProto:   protoBytes,
+			SearchIndexes:   idx,
+			ExpectedVersion: existingRec.ResVersion,
+		})
+		if errors.Is(err, postgres.ErrVersionConflict) {
+			if expectedVersion == 0 && attempt < 16 {
+				continue
+			}
+			writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", err.Error())
+			return
+		}
+		if err != nil {
+			s.logger.Error("write patched resource", "error", err, "type", resType, "id", resID)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to store patched resource")
+			return
+		}
+		break
 	}
 
 	s.publishCDC(r.Context(), automq.Message{

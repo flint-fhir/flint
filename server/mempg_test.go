@@ -92,6 +92,7 @@ type memAuditRec struct {
 }
 
 type memPGStore struct {
+	txMu          sync.Mutex
 	mu            sync.RWMutex
 	resources     map[string]*memResRecord
 	history       []memResRecord
@@ -153,6 +154,7 @@ type memPGTx struct {
 }
 
 func (s *memPGStore) beginTx() *memPGTx {
+	s.txMu.Lock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	resSnap := make(map[string]*memResRecord, len(s.resources))
@@ -176,7 +178,11 @@ func (s *memPGStore) beginTx() *memPGTx {
 }
 
 func (t *memPGTx) Commit() error {
+	if t.done || t.store == nil {
+		return nil
+	}
 	t.done = true
+	t.store.txMu.Unlock()
 	return nil
 }
 
@@ -187,7 +193,6 @@ func (t *memPGTx) Rollback() error {
 	t.done = true
 	s := t.store
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.resources = t.resources
 	s.history = t.history
 	s.strings = t.strings
@@ -196,6 +201,8 @@ func (t *memPGTx) Rollback() error {
 	s.refs = t.refs
 	s.quants = t.quants
 	s.uris = t.uris
+	s.mu.Unlock()
+	s.txMu.Unlock()
 	return nil
 }
 

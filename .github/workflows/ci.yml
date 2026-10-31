@@ -58,6 +58,14 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Go Native Fuzzing Gate (Search, _filter, FHIRPath, Patch & Validator)
+        run: |
+          go test ./store/postgres -run '^$' -fuzz=FuzzParseFilterExpr -fuzztime=2s
+          go test ./store/postgres -run '^$' -fuzz=FuzzSearchQueryAndIfNoneExist -fuzztime=2s
+          go test ./server -run '^$' -fuzz=FuzzFHIRPathR4Engine -fuzztime=2s
+          go test ./server -run '^$' -fuzz=FuzzPatchEngines -fuzztime=2s
+          go test ./server -run '^$' -fuzz=FuzzValidationAndDynamicExtraction -fuzztime=2s
+
       - name: Live Server Binary, US Core Seeder & 78-Check $certify E2E Gate
         env:
           FLINT_POSTGRES_DSN: "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
