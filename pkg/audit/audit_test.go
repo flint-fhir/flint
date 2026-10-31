@@ -199,3 +199,89 @@ func TestMemoryRecorderAndToFHIRResource(t *testing.T) {
 	assert.Equal(t, "R", fhirMap["action"])
 	assert.Equal(t, "0", fhirMap["outcome"])
 }
+
+func TestClassifyAllInteractionsOutcomesAndMemoryQueryWave55(t *testing.T) {
+	cases := []struct {
+		method      string
+		parts       []string
+		status      int
+		wantAction  string
+		wantSubtype string
+		wantType    string
+		wantID      string
+	}{
+		{http.MethodGet, []string{"fhir", "r4", "t1"}, 200, audit.ActionExecute, "search-system", "System", ""},
+		{http.MethodGet, []string{"fhir", "r4"}, 200, audit.ActionExecute, "operation", "", ""},
+		{http.MethodPost, []string{"fhir", "r4", "t1", "_search"}, 200, audit.ActionExecute, "search-system", "System", ""},
+		{http.MethodPost, []string{"fhir", "r4", "t1", "$validate"}, 200, audit.ActionExecute, "validate", "Resource", ""},
+		{http.MethodGet, []string{"fhir", "r4", "t1", "$export"}, 202, audit.ActionExecute, "export", "System", ""},
+		{http.MethodGet, []string{"fhir", "r4", "t1", "$export-poll", "job-1"}, 200, audit.ActionRead, "export-poll", "ExportJob", "job-1"},
+		{http.MethodDelete, []string{"fhir", "r4", "t1", "$export-poll", "job-1"}, 202, audit.ActionDelete, "export-cancel", "ExportJob", "job-1"},
+		{http.MethodGet, []string{"fhir", "r4", "t1", "$export-file", "job-1", "Patient.ndjson"}, 200, audit.ActionRead, "export-file", "Patient", "job-1"},
+		{http.MethodGet, []string{"fhir", "r4", "t1", "metadata"}, 200, audit.ActionRead, "capabilities", "CapabilityStatement", ""},
+		{http.MethodGet, []string{"fhir", "r4", "t1", "Patient", "$match"}, 200, audit.ActionExecute, "match", "Patient", ""},
+		{http.MethodPost, []string{"fhir", "r4", "t1", "Patient", "pat-1", "$purge"}, 200, audit.ActionExecute, "purge", "Patient", "pat-1"},
+		{http.MethodPatch, []string{"fhir", "r4", "t1", "Patient", "pat-1"}, 200, audit.ActionUpdate, "patch", "Patient", "pat-1"},
+		{http.MethodOptions, []string{"fhir", "r4", "t1", "Patient"}, 200, audit.ActionExecute, "operation", "Patient", ""},
+	}
+	for _, tc := range cases {
+		act, sub, eType, eID, _ := audit.ClassifyHTTPInteraction(tc.method, tc.parts, tc.status)
+		assert.Equal(t, tc.wantAction, act)
+		assert.Equal(t, tc.wantSubtype, sub)
+		assert.Equal(t, tc.wantType, eType)
+		assert.Equal(t, tc.wantID, eID)
+	}
+
+	out0, desc0 := audit.ClassifyHTTPOutcome(0)
+	assert.Equal(t, audit.OutcomeSuccess, out0)
+	assert.Equal(t, "200 OK", desc0)
+
+	out4, _ := audit.ClassifyHTTPOutcome(http.StatusNotFound)
+	assert.Equal(t, audit.OutcomeMinorFailure, out4)
+
+	out8, desc8 := audit.ClassifyHTTPOutcome(599)
+	assert.Equal(t, audit.OutcomeSeriousFailure, out8)
+	assert.Equal(t, "HTTP 599", desc8)
+
+	// MemoryRecorder defaults, not-found, and filter branches
+	mem := audit.NewMemoryRecorder()
+	require.NoError(t, mem.Record(t.Context(), postgres.AuditRecord{
+		TenantID:     "t1",
+		AuditID:      "a1",
+		Action:       audit.ActionCreate,
+		SubtypeCode:  "create",
+		Outcome:      audit.OutcomeSuccess,
+		AgentSubject: "", // defaults to anonymous
+		AgentPatient: "pat-1",
+		EntityType:   "Observation",
+		EntityID:     "obs-1",
+	}))
+	_, err := mem.Read(t.Context(), "t1", "missing")
+	require.Error(t, err)
+
+	recs, total, err := mem.Query(t.Context(), postgres.AuditQueryParams{
+		TenantID:     "t1",
+		Action:       audit.ActionCreate,
+		SubtypeCode:  "create",
+		Outcome:      audit.OutcomeSuccess,
+		AgentSubject: "anonymous",
+		AgentPatient: "pat-1",
+		EntityType:   "Observation",
+		EntityID:     "obs-1",
+		Count:        10,
+		Offset:       0,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, recs, 1)
+
+	// Offset beyond total
+	emptyRecs, total, err := mem.Query(t.Context(), postgres.AuditQueryParams{TenantID: "t1", Offset: 5})
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	assert.Empty(t, emptyRecs)
+
+	// StoreRecorder constructor check
+	sr := audit.NewStoreRecorder(nil)
+	require.NotNil(t, sr)
+}

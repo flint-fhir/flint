@@ -12,16 +12,7 @@ import (
 	"github.com/flint-fhir/flint/ingest/workflow"
 )
 
-func runUpdate() {
-	ctx := context.Background()
-
-	c, err := client.Dial(client.Options{HostPort: envOrDefault("TEMPORAL_ADDRESS", "localhost:7233")})
-	if err != nil {
-		log.Fatalf("temporal: %v", err)
-	}
-	defer c.Close()
-
-	// Update Alice (e2e-wf-001) with family name "Wonderland"
+func buildUpdateIngestInput(bundleID string) workflow.IngestInput {
 	blob, _ := json.Marshal(map[string]any{
 		"resourceType": "Patient",
 		"id":           map[string]string{"value": "e2e-wf-001"},
@@ -32,13 +23,25 @@ func runUpdate() {
 		"gender": map[string]string{"value": "female"},
 	})
 
-	input := workflow.IngestInput{
+	return workflow.IngestInput{
 		TenantID:       "e2e-test",
-		BundleID:       fmt.Sprintf("e2e-update-%d", time.Now().Unix()),
+		BundleID:       bundleID,
 		ResourceProtos: [][]byte{blob},
 		ResourceTypes:  []string{"Patient"},
 		ResourceIDs:    []string{"e2e-wf-001"},
 	}
+}
+
+func runUpdate() {
+	ctx := context.Background()
+
+	c, err := client.Dial(client.Options{HostPort: envOrDefault("TEMPORAL_ADDRESS", "localhost:7233")})
+	if err != nil {
+		log.Fatalf("temporal: %v", err)
+	}
+	defer c.Close()
+
+	input := buildUpdateIngestInput(fmt.Sprintf("e2e-update-%d", time.Now().Unix()))
 
 	fmt.Println("🚀 Sending update for Patient e2e-wf-001 (Family -> Wonderland)...")
 	we, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{

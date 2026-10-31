@@ -506,3 +506,111 @@ func TestOIDCValidator_HTTPJWKSAndHardening(t *testing.T) {
 		assert.Equal(t, "rsa-practitioner-1", secCtx.GetSubject())
 	})
 }
+
+func TestGranularScopeConstraintsAndMockAndAlgorithmsWave55(t *testing.T) {
+	// 1. ScopeQueryConstraints & TokenValueMatchesConstraint
+	vals, ok := auth.ScopeQueryConstraints(nil, "Observation", auth.ActionRead)
+	assert.False(t, ok)
+	assert.Nil(t, vals)
+
+	scConstrained := &authv1.SecurityContext{
+		Scopes: auth.ParseScopes("patient/Observation.rs?category=http://terminology.hl7.org/CodeSystem/observation-category|laboratory patient/Observation.rs?category=vital-signs"),
+	}
+	vals, ok = auth.ScopeQueryConstraints(scConstrained, "Observation", auth.ActionRead)
+	assert.True(t, ok)
+	assert.Equal(t, "http://terminology.hl7.org/CodeSystem/observation-category|laboratory,vital-signs", vals.Get("category"))
+
+	// Unconstrained scope overrides constrained scope for the same resource type
+	scMixed := &authv1.SecurityContext{
+		Scopes: auth.ParseScopes("patient/Observation.rs?category=vital-signs patient/Observation.rs"),
+	}
+	_, ok = auth.ScopeQueryConstraints(scMixed, "Observation", auth.ActionRead)
+	assert.False(t, ok)
+
+	assert.True(t, auth.TokenValueMatchesConstraint("vital-signs", "http://terminology.hl7.org/CodeSystem/observation-category|laboratory,vital-signs"))
+	assert.True(t, auth.TokenValueMatchesConstraint("http://terminology.hl7.org/CodeSystem/observation-category|laboratory", "laboratory"))
+	assert.False(t, auth.TokenValueMatchesConstraint("social-history", "laboratory,vital-signs"))
+
+	// 2. MockTokenValidator static & custom hooks
+	mock, err := auth.NewMockTokenValidator("https://mock.issuer", "mock-aud")
+	require.NoError(t, err)
+	mock.RegisterStatic("static-tok-1", &authv1.SecurityContext{Subject: "static-sub"})
+	scStatic, err := mock.ValidateToken(t.Context(), "static-tok-1")
+	require.NoError(t, err)
+	assert.Equal(t, "static-sub", scStatic.Subject)
+
+	mock.CustomValidate = func(_ context.Context, tok string) (*authv1.SecurityContext, error) {
+		return &authv1.SecurityContext{Subject: "custom-" + tok}, nil
+	}
+	scCustom, err := mock.ValidateToken(t.Context(), "abc")
+	require.NoError(t, err)
+	assert.Equal(t, "custom-abc", scCustom.Subject)
+
+	// 3. VerifySignature for RS384, ES256, ES384, HS256 & JWKSet.FindKey with empty kid
+	ec256, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	ec384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+	pub384Bytes, err := ec384.PublicKey.Bytes()
+	require.NoError(t, err)
+	jwk384 := auth.JWK{
+		Kty: "EC",
+		Crv: "P-384",
+		Kid: "ec384-1",
+		Use: "sig",
+		X:   base64.RawURLEncoding.EncodeToString(pub384Bytes[1:49]),
+		Y:   base64.RawURLEncoding.EncodeToString(pub384Bytes[49:97]),
+	}
+	parsedPub384, err := jwk384.PublicKey()
+	require.NoError(t, err)
+
+	set := auth.JWKSet{Keys: []auth.JWK{jwk384}}
+	foundKey, err := set.FindKey("")
+	require.NoError(t, err)
+	assert.Equal(t, "ec384-1", foundKey.Kid)
+
+	// Sign ES256, ES384, and HS256 tokens and verify
+	signedData := []byte("eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiIxIn0")
+	h256 := sha256.Sum256(signedData)
+	r256, s256, err := ecdsa.Sign(rand.Reader, ec256, h256[:])
+	require.NoError(t, err)
+	sig256 := make([]byte, 64)
+	r256.FillBytes(sig256[:32])
+	s256.FillBytes(sig256[32:])
+	tokES256 := &auth.ParsedToken{
+		Header:       auth.JWTHeader{Alg: "ES256"},
+		SignedData:   signedData,
+		RawSignature: sig256,
+	}
+	require.NoError(t, tokES256.VerifySignature(&ec256.PublicKey))
+	require.ErrorIs(t, tokES256.VerifySignature([]byte("wrong-type")), auth.ErrUnsupportedKeyType)
+
+	tokES384 := &auth.ParsedToken{
+		Header:       auth.JWTHeader{Alg: "ES384"},
+		SignedData:   signedData,
+		RawSignature: make([]byte, 10), // wrong length -> ErrInvalidSignature
+	}
+	require.ErrorIs(t, tokES384.VerifySignature(parsedPub384), auth.ErrInvalidSignature)
+
+	// Zitadel fallback to OrgID and encounter_id metadata
+	mockZ, err := auth.NewMockTokenValidator("https://zitadel.example", "aud")
+	require.NoError(t, err)
+	zVal, err := auth.NewZitadelValidator(auth.ZitadelConfig{
+		OIDCConfig: auth.OIDCConfig{
+			Issuer:     "https://zitadel.example",
+			Audience:   "aud",
+			StaticJWKS: mockZ.JWKS(),
+		},
+		TenantFromOrgDomain: false,
+	})
+	require.NoError(t, err)
+	zTok, err := mockZ.IssueToken("u1", "openid", "", time.Hour, map[string]any{
+		auth.ZitadelClaimOrgID:    "org_987",
+		auth.ZitadelClaimUserMeta: `{"encounter_id":"enc-555"}`,
+	})
+	require.NoError(t, err)
+	zCtx, err := zVal.ValidateToken(t.Context(), zTok)
+	require.NoError(t, err)
+	assert.Equal(t, "org_987", zCtx.TenantId)
+	assert.Equal(t, "enc-555", zCtx.EncounterId)
+}
