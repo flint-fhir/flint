@@ -858,8 +858,13 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 50 {
-		t.Fatalf("expected all 50 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 75 {
+		t.Fatalf("expected all 75 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
+	}
+	tr := rep.ToFHIRTestReport()
+	trTests, ok := tr["test"].([]map[string]any)
+	if !ok || len(trTests) != 7 {
+		t.Fatalf("expected 7 suites in TestReport.test, got %d", len(trTests))
 	}
 }

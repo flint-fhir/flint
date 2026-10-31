@@ -1,6 +1,6 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
-// (USCDI v3 & v4), and ONC §170.315(g)(10) / HTI-1 Standardized API conformance
-// & certification runner. It executes 5 structured test suites (50 checks) against
+// (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, and 35+ National HL7 Implementation Guide
+// conformance & certification runner. It executes 7 structured test suites (75 checks) against
 // a target Flint server and produces both a standard FHIR R4 TestReport resource
 // and a human-readable scorecard.
 package certify
@@ -1581,294 +1581,19 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		if err == nil {
 			respADReq, bADReq, errADReq := doReq(http.MethodGet, basePath+"/ActivityDefinition/activitydef-bp-home-monitoring/$data-requirements", "", nil, nil)
 			respGD, bGD, errGD := doReq(http.MethodGet, basePath+"/GraphDefinition/us-core-patient-care-graph/$graph?start=Patient/cert-pat-1", "", nil, nil)
-			cerPayload := []byte(`{"resourceType":"CoverageEligibilityRequest","id":"cert-cer-1","status":"active","purpose":["benefits","validation"],"patient":{"reference":"Patient/cert-pat-1"},"insurer":{"reference":"Organization/cert-org-1"},"insurance":[{"coverage":{"reference":"Coverage/cert-cov-1"}}]}`)
-			respCER, bCER, errCER := doReq(http.MethodPost, basePath+"/CoverageEligibilityRequest/$submit", "application/fhir+json", cerPayload, nil)
+			respLibEval, bLibEval, errLibEval := doReq(http.MethodGet, basePath+"/Library/CMS165-Logic/$evaluate?subject=Patient/cert-pat-1", "", nil, nil)
+			respEncEv, bEncEv, errEncEv := doReq(http.MethodGet, basePath+"/Encounter/$everything?id=cert-enc-1", "", nil, nil)
+			respTypeDoc, bTypeDoc, errTypeDoc := doReq(http.MethodGet, basePath+"/Composition/$document?id=cert-comp-1", "", nil, nil)
 			if errADReq != nil || respADReq.StatusCode != http.StatusOK || !strings.Contains(string(bADReq), `"module-definition"`) {
 				err = fmt.Errorf("expected ActivityDefinition/$data-requirements to return module-definition Library, got %d: %s", respADReq.StatusCode, string(bADReq))
 			} else if errGD != nil || respGD.StatusCode != http.StatusOK || !strings.Contains(string(bGD), `"cert-pat-1"`) {
 				err = fmt.Errorf("expected GraphDefinition/$graph?start=Patient/cert-pat-1 to return collection Bundle with cert-pat-1, got %d: %s", respGD.StatusCode, string(bGD))
-			} else if errCER != nil || respCER.StatusCode != http.StatusOK || !strings.Contains(string(bCER), `"CoverageEligibilityResponse"`) || !strings.Contains(string(bCER), `"inforce":true`) {
-				err = fmt.Errorf("expected CoverageEligibilityRequest/$submit to return CoverageEligibilityResponse with inforce:true, got %d: %s", respCER.StatusCode, string(bCER))
-			}
-		}
-		if err == nil {
-			respLibEval, bLibEval, errLibEval := doReq(http.MethodGet, basePath+"/Library/CMS165-Logic/$evaluate?subject=Patient/cert-pat-1", "", nil, nil)
-			respEncEv, bEncEv, errEncEv := doReq(http.MethodGet, basePath+"/Encounter/$everything?id=cert-enc-1", "", nil, nil)
-			cdexPayload := []byte(`{"resourceType":"Parameters","parameter":[{"name":"TrackingId","valueString":"cert-task-1"},{"name":"MemberId","valueString":"cert-pat-1"},{"name":"Attachment","part":[{"name":"LineItem","valueString":"1"},{"name":"Code","valueCodeableConcept":{"coding":[{"system":"http://loinc.org","code":"11506-3","display":"Progress note"}]}},{"name":"Content","resource":{"resourceType":"DocumentReference","id":"cert-cdex-doc-1","status":"current","content":[{"attachment":{"contentType":"text/plain","url":"https://flint.example.org/cdex/note.txt"}}]}}]}]}`)
-			respCDex, bCDex, errCDex := doReq(http.MethodPost, basePath+"/$submit-attachment", "application/fhir+json", cdexPayload, nil)
-			if errLibEval != nil || respLibEval.StatusCode != http.StatusOK || !strings.Contains(string(bLibEval), `"InInitialPopulation"`) {
+			} else if errLibEval != nil || respLibEval.StatusCode != http.StatusOK || !strings.Contains(string(bLibEval), `"InInitialPopulation"`) {
 				err = fmt.Errorf("expected Library/CMS165-Logic/$evaluate?subject=Patient/cert-pat-1 to return Parameters with InInitialPopulation, got %d: %s", respLibEval.StatusCode, string(bLibEval))
 			} else if errEncEv != nil || respEncEv.StatusCode != http.StatusOK || !strings.Contains(string(bEncEv), `"cert-enc-1"`) {
 				err = fmt.Errorf("expected Encounter/$everything?id=cert-enc-1 to return Bundle with cert-enc-1, got %d: %s", respEncEv.StatusCode, string(bEncEv))
-			} else if errCDex != nil || respCDex.StatusCode != http.StatusOK || !strings.Contains(string(bCDex), `"DocumentReference/cert-cdex-doc-1"`) {
-				err = fmt.Errorf("expected POST /$submit-attachment to return OperationOutcome with DocumentReference/cert-cdex-doc-1, got %d: %s", respCDex.StatusCode, string(bCDex))
-			}
-		}
-		if err == nil {
-			shcPayload := []byte(`{"resourceType":"Parameters","parameter":[{"name":"credentialType","valueUri":"https://smarthealth.cards#immunization"}]}`)
-			respSHC, bSHC, errSHC := doReq(http.MethodPost, basePath+"/Patient/cert-pat-1/$health-cards-issue", "application/fhir+json", shcPayload, nil)
-			respPCDE, bPCDE, errPCDE := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$pcde", "", nil, nil)
-			if errSHC != nil || respSHC.StatusCode != http.StatusOK || !strings.Contains(string(bSHC), `"verifiableCredential"`) || !strings.Contains(string(bSHC), `"resource:0"`) {
-				err = fmt.Errorf("expected POST /Patient/cert-pat-1/$health-cards-issue to return Parameters with verifiableCredential and resource:0, got %d: %s", respSHC.StatusCode, string(bSHC))
-			} else if errPCDE != nil || respPCDE.StatusCode != http.StatusOK || !strings.Contains(string(bPCDE), `"11503-0"`) || !strings.Contains(string(bPCDE), `"cert-cp-1"`) {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$pcde to return PCDE document Bundle with LOINC 11503-0 and cert-cp-1, got %d: %s", respPCDE.StatusCode, string(bPCDE))
-			}
-		}
-		if err == nil {
-			predetPayload := []byte(`{"resourceType":"Claim","id":"cert-claim-predet-1","status":"active","use":"predetermination","patient":{"reference":"Patient/cert-pat-1"},"insurer":{"reference":"Organization/cert-org-1"},"provider":{"reference":"Practitioner/cert-prac-1"},"item":[{"sequence":1,"productOrService":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"99214"}]},"net":{"value":250.0,"currency":"USD"}}]}`)
-			respPredet, bPredet, errPredet := doReq(http.MethodPost, basePath+"/Claim/$predetermine", "application/fhir+json", predetPayload, nil)
-			respRA, bRA, errRA := doReq(http.MethodGet, basePath+"/Measure/$evaluate-risk-condition-category?subject=Patient/cert-pat-1", "", nil, nil)
-			if errPredet != nil || respPredet.StatusCode != http.StatusOK || !strings.Contains(string(bPredet), `"use":"predetermination"`) || !strings.Contains(string(bPredet), `"PREDET-CERT-CLAIM-PREDET-1"`) {
-				err = fmt.Errorf("expected POST /Claim/$predetermine to return predetermination ClaimResponse with PREDET-CERT-CLAIM-PREDET-1, got %d: %s", respPredet.StatusCode, string(bPredet))
-			} else if errRA != nil || respRA.StatusCode != http.StatusOK || !strings.Contains(string(bRA), "ra-measurereport") || !strings.Contains(string(bRA), "CMS-HCC 85") {
-				err = fmt.Errorf("expected GET /Measure/$evaluate-risk-condition-category to return Risk Adjustment Bundle with CMS-HCC 85, got %d: %s", respRA.StatusCode, string(bRA))
-			}
-		}
-		if err == nil {
-			respCRD, bCRD, errCRD := doReq(http.MethodGet, basePath+"/ServiceRequest/cert-sr-1/$crd", "", nil, nil)
-			respCPEval, bCPEval, errCPEval := doReq(http.MethodGet, basePath+"/CarePlan/cert-cp-1/$evaluate", "", nil, nil)
-			if errCRD != nil || respCRD.StatusCode != http.StatusOK || !strings.Contains(string(bCRD), "ext-coverage-information") {
-				err = fmt.Errorf("expected GET /ServiceRequest/cert-sr-1/$crd to return Parameters with ext-coverage-information, got %d: %s", respCRD.StatusCode, string(bCRD))
-			} else if errCPEval != nil || respCPEval.StatusCode != http.StatusOK || !strings.Contains(string(bCPEval), `"achievementStatus"`) || !strings.Contains(string(bCPEval), `"achieved"`) {
-				err = fmt.Errorf("expected GET /CarePlan/cert-cp-1/$evaluate to return Parameters with achievementStatus=achieved, got %d: %s", respCPEval.StatusCode, string(bCPEval))
-			}
-		}
-		if err == nil {
-			respImmDS, bImmDS, errImmDS := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$immds-forecast", "", nil, nil)
-			respRisk, bRisk, errRisk := doReq(http.MethodGet, basePath+"/RiskAssessment/$evaluate?subject=Patient/cert-pat-1", "", nil, nil)
-			if errImmDS != nil || respImmDS.StatusCode != http.StatusOK || !strings.Contains(string(bImmDS), "ImmunizationRecommendation") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$immds-forecast to return Parameters with ImmunizationRecommendation, got %d: %s", respImmDS.StatusCode, string(bImmDS))
-			} else if errRisk != nil || respRisk.StatusCode != http.StatusOK || !strings.Contains(string(bRisk), `"probabilityDecimal"`) {
-				err = fmt.Errorf("expected GET /RiskAssessment/$evaluate?subject=Patient/cert-pat-1 to return RiskAssessment with probabilityDecimal, got %d: %s", respRisk.StatusCode, string(bRisk))
-			}
-		}
-		if err == nil {
-			respTypeDoc, bTypeDoc, errTypeDoc := doReq(http.MethodGet, basePath+"/Composition/$document?id=cert-comp-1", "", nil, nil)
-			respMK, bMK, errMK := doReq(http.MethodGet, basePath+"/MedicationKnowledge/$lookup?code=723", "", nil, nil)
-			respInt, bInt, errInt := doReq(http.MethodGet, basePath+"/MedicationRequest/$check-interactions?patient=Patient/cert-pat-1&code=723", "", nil, nil)
-			if errTypeDoc != nil || respTypeDoc.StatusCode != http.StatusOK || !strings.Contains(string(bTypeDoc), `"type":"document"`) {
+			} else if errTypeDoc != nil || respTypeDoc.StatusCode != http.StatusOK || !strings.Contains(string(bTypeDoc), `"type":"document"`) {
 				err = fmt.Errorf("expected GET /Composition/$document?id=cert-comp-1 to return document Bundle, got %d: %s", respTypeDoc.StatusCode, string(bTypeDoc))
-			} else if errMK != nil || respMK.StatusCode != http.StatusOK || !strings.Contains(string(bMK), "usdf-FormularyDrug") {
-				err = fmt.Errorf("expected GET /MedicationKnowledge/$lookup?code=723 to return usdf-FormularyDrug MedicationKnowledge, got %d: %s", respMK.StatusCode, string(bMK))
-			} else if errInt != nil || respInt.StatusCode != http.StatusOK || !strings.Contains(string(bInt), `"interactionCount"`) {
-				err = fmt.Errorf("expected GET /MedicationRequest/$check-interactions to return Parameters with interactionCount, got %d: %s", respInt.StatusCode, string(bInt))
-			}
-		}
-		if err == nil {
-			respPix, bPix, errPix := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$ihe-pix", "", nil, nil)
-			respSpec, bSpec, errSpec := doReq(http.MethodPost, basePath+"/ServiceRequest/cert-sr-1/$collect-specimen", "application/fhir+json", nil, nil)
-			if errPix != nil || respPix.StatusCode != http.StatusOK || !strings.Contains(string(bPix), `"targetId"`) {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$ihe-pix to return Parameters with targetId, got %d: %s", respPix.StatusCode, string(bPix))
-			} else if errSpec != nil || respSpec.StatusCode != http.StatusOK || !strings.Contains(string(bSpec), `"ACC-CERT-SR-1"`) {
-				err = fmt.Errorf("expected POST /ServiceRequest/cert-sr-1/$collect-specimen to return Specimen with ACC-CERT-SR-1, got %d: %s", respSpec.StatusCode, string(bSpec))
-			}
-		}
-		if err == nil {
-			bmmPayload := []byte(`{"resourceType":"Parameters","parameter":[{"name":"MemberBundle","part":[{"name":"MemberPatient","resource":{"resourceType":"Patient","name":[{"family":"Certify","given":["Alice"]}],"birthDate":"1985-04-12","gender":"female"}}]}]}`)
-			respBMM, bBMM, errBMM := doReq(http.MethodPost, basePath+"/Patient/$bulk-member-match", "application/fhir+json", bmmPayload, nil)
-			respDisp, bDisp, errDisp := doReq(http.MethodPost, basePath+"/MedicationRequest/cert-medreq-1/$dispense", "application/fhir+json", nil, nil)
-			if errBMM != nil || respBMM.StatusCode != http.StatusOK || !strings.Contains(string(bBMM), `"MatchedMembers"`) {
-				err = fmt.Errorf("expected POST /Patient/$bulk-member-match to return Parameters with MatchedMembers, got %d: %s", respBMM.StatusCode, string(bBMM))
-			} else if errDisp != nil || respDisp.StatusCode != http.StatusOK || !strings.Contains(string(bDisp), `"resourceType":"MedicationDispense"`) {
-				err = fmt.Errorf("expected POST /MedicationRequest/cert-medreq-1/$dispense to return MedicationDispense, got %d: %s", respDisp.StatusCode, string(bDisp))
-			}
-		}
-		if err == nil {
-			respPN, bPN, errPN := doReq(http.MethodGet, basePath+"/PractitionerRole/$find-providers?specialty=207RC0000X", "", nil, nil)
-			respCon, bCon, errCon := doReq(http.MethodGet, basePath+"/Consent/$evaluate?patient=Patient/cert-pat-1", "", nil, nil)
-			if errPN != nil || respPN.StatusCode != http.StatusOK || !strings.Contains(string(bPN), "plannet-PractitionerRole") {
-				err = fmt.Errorf("expected GET /PractitionerRole/$find-providers to return Plan-Net Bundle, got %d: %s", respPN.StatusCode, string(bPN))
-			} else if errCon != nil || respCon.StatusCode != http.StatusOK || !strings.Contains(string(bCon), `"valueCode":"permit"`) {
-				err = fmt.Errorf("expected GET /Consent/$evaluate to return decision=permit Parameters, got %d: %s", respCon.StatusCode, string(bCon))
-			}
-		}
-		if err == nil {
-			respCBB, bCBB, errCBB := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$carin-bb", "", nil, nil)
-			respERSD, bERSD, errERSD := doReq(http.MethodGet, basePath+"/PlanDefinition/$ersd-lookup", "", nil, nil)
-			if errCBB != nil || respCBB.StatusCode != http.StatusOK || !strings.Contains(string(bCBB), "C4BB-Bundle") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$carin-bb to return C4BB-Bundle, got %d: %s", respCBB.StatusCode, string(bCBB))
-			} else if errERSD != nil || respERSD.StatusCode != http.StatusOK || !strings.Contains(string(bERSD), "ersd-rctc-plan-1") {
-				err = fmt.Errorf("expected GET /PlanDefinition/$ersd-lookup to return ersd-rctc-plan-1, got %d: %s", respERSD.StatusCode, string(bERSD))
-			}
-		}
-		if err == nil {
-			respMC, bMC, errMC := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$mcode-summary", "", nil, nil)
-			respFL, bFL, errFL := doReq(http.MethodGet, basePath+"/MedicationKnowledge/$formulary-lookup?code=860975", "", nil, nil)
-			if errMC != nil || respMC.StatusCode != http.StatusOK || !strings.Contains(string(bMC), "mcode-patient-bundle") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-summary to return mcode-patient-bundle, got %d: %s", respMC.StatusCode, string(bMC))
-			} else if errFL != nil || respFL.StatusCode != http.StatusOK || !strings.Contains(string(bFL), "usdf-FormularyDrug") {
-				err = fmt.Errorf("expected GET /MedicationKnowledge/$formulary-lookup to return usdf-FormularyDrug, got %d: %s", respFL.StatusCode, string(bFL))
-			}
-		}
-		if err == nil {
-			respCG, bCG, errCG := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$find-subject-variants?genes=BRCA1", "", nil, nil)
-			respNHSN, bNHSN, errNHSN := doReq(http.MethodGet, basePath+"/Measure/$nhsn-acute-care", "", nil, nil)
-			if errCG != nil || respCG.StatusCode != http.StatusOK || !strings.Contains(string(bCG), `"69548-6"`) {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$find-subject-variants to return variant 69548-6, got %d: %s", respCG.StatusCode, string(bCG))
-			} else if errNHSN != nil || respNHSN.StatusCode != http.StatusOK || !strings.Contains(string(bNHSN), "nhsn-hai-aur-measure") {
-				err = fmt.Errorf("expected GET /Measure/$nhsn-acute-care to return nhsn-hai-aur-measure, got %d: %s", respNHSN.StatusCode, string(bNHSN))
-			}
-		}
-		if err == nil {
-			respPDQm, bPDQm, errPDQm := doReq(http.MethodGet, basePath+"/Patient/$ihe-pdqm?family=Certify", "", nil, nil)
-			respVulc, bVulc, errVulc := doReq(http.MethodGet, basePath+"/ResearchStudy/vulcan-study-1/$rwd-cohort", "", nil, nil)
-			if errPDQm != nil || respPDQm.StatusCode != http.StatusOK || !strings.Contains(string(bPDQm), "IHE.PDQm.QueryPatientResourceResponseMessage") {
-				err = fmt.Errorf("expected GET /Patient/$ihe-pdqm to return IHE.PDQm.QueryPatientResourceResponseMessage, got %d: %s", respPDQm.StatusCode, string(bPDQm))
-			} else if errVulc != nil || respVulc.StatusCode != http.StatusOK || !strings.Contains(string(bVulc), `"cohortGroup"`) {
-				err = fmt.Errorf("expected GET /ResearchStudy/vulcan-study-1/$rwd-cohort to return cohortGroup, got %d: %s", respVulc.StatusCode, string(bVulc))
-			}
-		}
-		if err == nil {
-			respNDH, bNDH, errNDH := doReq(http.MethodGet, basePath+"/Endpoint/$fast-endpoint-query", "", nil, nil)
-			respEPI, bEPI, errEPI := doReq(http.MethodGet, basePath+"/MedicinalProduct/$epi-document", "", nil, nil)
-			if errNDH != nil || respNDH.StatusCode != http.StatusOK || !strings.Contains(string(bNDH), "ndh-Endpoint") {
-				err = fmt.Errorf("expected GET /Endpoint/$fast-endpoint-query to return ndh-Endpoint Bundle, got %d: %s", respNDH.StatusCode, string(bNDH))
-			} else if errEPI != nil || respEPI.StatusCode != http.StatusOK || !strings.Contains(string(bEPI), "Bundle-uv-epi") {
-				err = fmt.Errorf("expected GET /MedicinalProduct/$epi-document to return Bundle-uv-epi, got %d: %s", respEPI.StatusCode, string(bEPI))
-			}
-		}
-		if err == nil {
-			respELR, bELR, errELR := doReq(http.MethodGet, basePath+"/Observation/$reportable-labs?patient=Patient/cert-pat-1", "", nil, nil)
-			respRAGaps, bRAGaps, errRAGaps := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$ra-coding-gaps", "", nil, nil)
-			if errELR != nil || respELR.StatusCode != http.StatusOK || !strings.Contains(string(bELR), `"94500-6"`) {
-				err = fmt.Errorf("expected GET /Observation/$reportable-labs to return LOINC 94500-6 lab Bundle, got %d: %s", respELR.StatusCode, string(bELR))
-			} else if errRAGaps != nil || respRAGaps.StatusCode != http.StatusOK || !strings.Contains(string(bRAGaps), "ra-measurereport") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$ra-coding-gaps to return ra-measurereport Bundle, got %d: %s", respRAGaps.StatusCode, string(bRAGaps))
-			}
-		}
-		if err == nil {
-			respEICR, bEICR, errEICR := doReq(http.MethodGet, basePath+"/Composition/$eicr-document?patient=Patient/cert-pat-1", "", nil, nil)
-			respODH, bODH, errODH := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$odh-summary", "", nil, nil)
-			if errEICR != nil || respEICR.StatusCode != http.StatusOK || !strings.Contains(string(bEICR), "eicr-document-bundle") {
-				err = fmt.Errorf("expected GET /Composition/$eicr-document to return eicr-document-bundle, got %d: %s", respEICR.StatusCode, string(bEICR))
-			} else if errODH != nil || respODH.StatusCode != http.StatusOK || !strings.Contains(string(bODH), `"11341-5"`) {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$odh-summary to return LOINC 11341-5 ODH Bundle, got %d: %s", respODH.StatusCode, string(bODH))
-			}
-		}
-		if err == nil {
-			respCCRR, bCCRR, errCCRR := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$cancer-registry-report", "", nil, nil)
-			respVBPR, bVBPR, errVBPR := doReq(http.MethodGet, basePath+"/MeasureReport/$vbpr-performance", "", nil, nil)
-			if errCCRR != nil || respCCRR.StatusCode != http.StatusOK || !strings.Contains(string(bCCRR), "ccrr-content-bundle") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$cancer-registry-report to return ccrr-content-bundle, got %d: %s", respCCRR.StatusCode, string(bCCRR))
-			} else if errVBPR != nil || respVBPR.StatusCode != http.StatusOK || !strings.Contains(string(bVBPR), "vbp-measurereport") {
-				err = fmt.Errorf("expected GET /MeasureReport/$vbpr-performance to return vbp-measurereport, got %d: %s", respVBPR.StatusCode, string(bVBPR))
-			}
-		}
-		if err == nil {
-			respRTPBC, bRTPBC, errRTPBC := doReq(http.MethodGet, basePath+"/ClaimResponse/$rtpbc-coverage?patient=Patient/cert-pat-1", "", nil, nil)
-			respPACIORT, bPACIORT, errPACIORT := doReq(http.MethodGet, basePath+"/Encounter/cert-enc-1/$pacio-timepoints", "", nil, nil)
-			if errRTPBC != nil || respRTPBC.StatusCode != http.StatusOK || !strings.Contains(string(bRTPBC), "rtpbc-response-claimresponse") {
-				err = fmt.Errorf("expected GET /ClaimResponse/$rtpbc-coverage to return rtpbc-response-claimresponse, got %d: %s", respRTPBC.StatusCode, string(bRTPBC))
-			} else if errPACIORT != nil || respPACIORT.StatusCode != http.StatusOK || !strings.Contains(string(bPACIORT), "pacio-rt-reassessment-timepoint-encounter") {
-				err = fmt.Errorf("expected GET /Encounter/cert-enc-1/$pacio-timepoints to return pacio-rt-reassessment-timepoint-encounter, got %d: %s", respPACIORT.StatusCode, string(bPACIORT))
-			}
-		}
-		if err == nil {
-			respVRDR, bVRDR, errVRDR := doReq(http.MethodGet, basePath+"/Composition/$vrdr-document?patient=Patient/cert-pat-1", "", nil, nil)
-			respPFE, bPFE, errPFE := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$pacio-pfe-summary", "", nil, nil)
-			if errVRDR != nil || respVRDR.StatusCode != http.StatusOK || !strings.Contains(string(bVRDR), "vrdr-death-certificate-document") {
-				err = fmt.Errorf("expected GET /Composition/$vrdr-document to return vrdr-death-certificate-document, got %d: %s", respVRDR.StatusCode, string(bVRDR))
-			} else if errPFE != nil || respPFE.StatusCode != http.StatusOK || !strings.Contains(string(bPFE), "pacio-pfe-observation-single") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$pacio-pfe-summary to return pacio-pfe-observation-single, got %d: %s", respPFE.StatusCode, string(bPFE))
-			}
-		}
-		if err == nil {
-			respBFDR, bBFDR, errBFDR := doReq(http.MethodGet, basePath+"/Composition/$bfdr-document?patient=Patient/cert-pat-1", "", nil, nil)
-			respRT, bRT, errRT := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$mcode-radiotherapy-summary", "", nil, nil)
-			if errBFDR != nil || respBFDR.StatusCode != http.StatusOK || !strings.Contains(string(bBFDR), "Bundle-document-live-birth-report") {
-				err = fmt.Errorf("expected GET /Composition/$bfdr-document to return Bundle-document-live-birth-report, got %d: %s", respBFDR.StatusCode, string(bBFDR))
-			} else if errRT != nil || respRT.StatusCode != http.StatusOK || !strings.Contains(string(bRT), "mcode-radiotherapy-course-summary") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-radiotherapy-summary to return mcode-radiotherapy-course-summary, got %d: %s", respRT.StatusCode, string(bRT))
-			}
-		}
-		if err == nil {
-			respIIS, bIIS, errIIS := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$iis-history", "", nil, nil)
-			respGen, bGen, errGen := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$mcode-genomics-summary", "", nil, nil)
-			if errIIS != nil || respIIS.StatusCode != http.StatusOK || !strings.Contains(string(bIIS), "immds-immunizationevaluation") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$iis-history to return immds-immunizationevaluation, got %d: %s", respIIS.StatusCode, string(bIIS))
-			} else if errGen != nil || respGen.StatusCode != http.StatusOK || !strings.Contains(string(bGen), "mcode-cancer-genomics-report") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-genomics-summary to return mcode-cancer-genomics-report, got %d: %s", respGen.StatusCode, string(bGen))
-			}
-		}
-		if err == nil {
-			respNBS, bNBS, errNBS := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$nbs-summary", "", nil, nil)
-			respAEOB, bAEOB, errAEOB := doReq(http.MethodGet, basePath+"/ExplanationOfBenefit/$pct-aeob-summary?patient=Patient/cert-pat-1", "", nil, nil)
-			if errNBS != nil || respNBS.StatusCode != http.StatusOK || !strings.Contains(string(bNBS), `"54089-8"`) {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$nbs-summary to return LOINC 54089-8 Newborn Screening panel, got %d: %s", respNBS.StatusCode, string(bNBS))
-			} else if errAEOB != nil || respAEOB.StatusCode != http.StatusOK || !strings.Contains(string(bAEOB), "davinci-pct-aeob") {
-				err = fmt.Errorf("expected GET /ExplanationOfBenefit/$pct-aeob-summary to return davinci-pct-aeob, got %d: %s", respAEOB.StatusCode, string(bAEOB))
-			}
-		}
-		if err == nil {
-			respECR, bECR, errECR := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$ecr-summary", "", nil, nil)
-			respVulcan, bVulcan, errVulcan := doReq(http.MethodGet, basePath+"/ResearchStudy/vulcan-study-1/$vulcan-summary", "", nil, nil)
-			if errECR != nil || respECR.StatusCode != http.StatusOK || !strings.Contains(string(bECR), `"55751-2"`) {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$ecr-summary to return LOINC 55751-2 eICR Composition, got %d: %s", respECR.StatusCode, string(bECR))
-			} else if errVulcan != nil || respVulcan.StatusCode != http.StatusOK || !strings.Contains(string(bVulcan), "vulcan-study-1") {
-				err = fmt.Errorf("expected GET /ResearchStudy/vulcan-study-1/$vulcan-summary to return vulcan-study-1, got %d: %s", respVulcan.StatusCode, string(bVulcan))
-			}
-		}
-		if err == nil {
-			respELR, bELR, errELR := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$elr-summary", "", nil, nil)
-			respC4BB, bC4BB, errC4BB := doReq(http.MethodGet, basePath+"/ExplanationOfBenefit/$carin-bb-claims?patient=Patient/cert-pat-1", "", nil, nil)
-			if errELR != nil || respELR.StatusCode != http.StatusOK || !strings.Contains(string(bELR), `"94500-6"`) {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$elr-summary to return LOINC 94500-6 reportable lab, got %d: %s", respELR.StatusCode, string(bELR))
-			} else if errC4BB != nil || respC4BB.StatusCode != http.StatusOK || !strings.Contains(string(bC4BB), "C4BB-ExplanationOfBenefit-Oral") {
-				err = fmt.Errorf("expected GET /ExplanationOfBenefit/$carin-bb-claims to return C4BB-ExplanationOfBenefit-Oral, got %d: %s", respC4BB.StatusCode, string(bC4BB))
-			}
-		}
-		if err == nil {
-			respHAI, bHAI, errHAI := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$nhsn-hai-summary", "", nil, nil)
-			respFASTNet, bFASTNet, errFASTNet := doReq(http.MethodGet, basePath+"/OrganizationAffiliation/$fast-network-query", "", nil, nil)
-			if errHAI != nil || respHAI.StatusCode != http.StatusOK || !strings.Contains(string(bHAI), "nhsn-aur-measure-report") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$nhsn-hai-summary to return nhsn-aur-measure-report, got %d: %s", respHAI.StatusCode, string(bHAI))
-			} else if errFASTNet != nil || respFASTNet.StatusCode != http.StatusOK || !strings.Contains(string(bFASTNet), "ndh-OrganizationAffiliation") {
-				err = fmt.Errorf("expected GET /OrganizationAffiliation/$fast-network-query to return ndh-OrganizationAffiliation, got %d: %s", respFASTNet.StatusCode, string(bFASTNet))
-			}
-		}
-		if err == nil {
-			respRA49, bRA49, errRA49 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$ra-coding-gap-report", "", nil, nil)
-			respACH49, bACH49, errACH49 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$nhsn-ach-summary", "", nil, nil)
-			if errRA49 != nil || respRA49.StatusCode != http.StatusOK || !strings.Contains(string(bRA49), "ra-condition-gap-bundle") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$ra-coding-gap-report to return ra-condition-gap-bundle, got %d: %s", respRA49.StatusCode, string(bRA49))
-			} else if errACH49 != nil || respACH49.StatusCode != http.StatusOK || !strings.Contains(string(bACH49), "ach-daily-initial-population-bundle") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$nhsn-ach-summary to return ach-daily-initial-population-bundle, got %d: %s", respACH49.StatusCode, string(bACH49))
-			}
-		}
-		if err == nil {
-			respBR50, bBR50, errBR50 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$burden-reduction-summary", "", nil, nil)
-			respCTM50, bCTM50, errCTM50 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$mcode-trial-summary", "", nil, nil)
-			respNDH50, bNDH50, errNDH50 := doReq(http.MethodGet, basePath+"/Organization/cert-org-1/$ndh-directory-summary", "", nil, nil)
-			if errBR50 != nil || respBR50.StatusCode != http.StatusOK || !strings.Contains(string(bBR50), "burden-reduction-summary-bundle") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$burden-reduction-summary to return burden-reduction-summary-bundle, got %d: %s", respBR50.StatusCode, string(bBR50))
-			} else if errCTM50 != nil || respCTM50.StatusCode != http.StatusOK || !strings.Contains(string(bCTM50), "codex-clinical-trial-match-bundle") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-trial-summary to return codex-clinical-trial-match-bundle, got %d: %s", respCTM50.StatusCode, string(bCTM50))
-			} else if errNDH50 != nil || respNDH50.StatusCode != http.StatusOK || !strings.Contains(string(bNDH50), "ndh-ExchangeBundle") {
-				err = fmt.Errorf("expected GET /Organization/cert-org-1/$ndh-directory-summary to return ndh-ExchangeBundle, got %d: %s", respNDH50.StatusCode, string(bNDH50))
-			}
-		}
-		if err == nil {
-			respATR51, bATR51, errATR51 := doReq(http.MethodGet, basePath+"/Group/cert-grp-1/$atr-summary?patient=Patient/cert-pat-1", "", nil, nil)
-			respSPL51, bSPL51, errSPL51 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$pacio-splasch-summary", "", nil, nil)
-			respRWD51, bRWD51, errRWD51 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$vulcan-rwd-summary", "", nil, nil)
-			if errATR51 != nil || respATR51.StatusCode != http.StatusOK || !strings.Contains(string(bATR51), "atr-bundle") {
-				err = fmt.Errorf("expected GET /Group/cert-grp-1/$atr-summary to return atr-bundle, got %d: %s", respATR51.StatusCode, string(bATR51))
-			} else if errSPL51 != nil || respSPL51.StatusCode != http.StatusOK || !strings.Contains(string(bSPL51), "splasch-Bundle") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$pacio-splasch-summary to return splasch-Bundle, got %d: %s", respSPL51.StatusCode, string(bSPL51))
-			} else if errRWD51 != nil || respRWD51.StatusCode != http.StatusOK || !strings.Contains(string(bRWD51), "vulcan-rwd-bundle") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$vulcan-rwd-summary to return vulcan-rwd-bundle, got %d: %s", respRWD51.StatusCode, string(bRWD51))
-			}
-		}
-		if err == nil {
-			respSANER52, bSANER52, errSANER52 := doReq(http.MethodGet, basePath+"/Location/cert-loc-1/$saner-capacity-summary", "", nil, nil)
-			respRTTD52, bRTTD52, errRTTD52 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$codex-rttd-summary", "", nil, nil)
-			respSDOH52, bSDOH52, errSDOH52 := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$sdoh-care-bundle", "", nil, nil)
-			if errSANER52 != nil || respSANER52.StatusCode != http.StatusOK || !strings.Contains(string(bSANER52), "PublicHealthBundle") {
-				err = fmt.Errorf("expected GET /Location/cert-loc-1/$saner-capacity-summary to return PublicHealthBundle, got %d: %s", respSANER52.StatusCode, string(bSANER52))
-			} else if errRTTD52 != nil || respRTTD52.StatusCode != http.StatusOK || !strings.Contains(string(bRTTD52), "codexrt-summary-bundle") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$codex-rttd-summary to return codexrt-summary-bundle, got %d: %s", respRTTD52.StatusCode, string(bRTTD52))
-			} else if errSDOH52 != nil || respSDOH52.StatusCode != http.StatusOK || !strings.Contains(string(bSDOH52), "SDOHCC-Bundle") {
-				err = fmt.Errorf("expected GET /Patient/cert-pat-1/$sdoh-care-bundle to return SDOHCC-Bundle, got %d: %s", respSDOH52.StatusCode, string(bSDOH52))
 			}
 		}
 	}
@@ -1887,6 +1612,404 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("AUD-01", suite5, "ASTM E2147 / ONC (d)(2) AuditEvent Trail Verification", t0, err, "Clinical access & mutation AuditEvents verified")
+
+	// =========================================================================
+	// Suite 6: HL7 Da Vinci Payer, CMS-0057-F, CARIN Blue Button & RTPBC
+	// =========================================================================
+	suite6 := "Suite 6: HL7 Da Vinci Payer, CMS-0057-F, CARIN Blue Button & RTPBC"
+
+	t0 = time.Now()
+	{
+		shcPayload := []byte(`{"resourceType":"Parameters","parameter":[{"name":"credentialType","valueUri":"https://smarthealth.cards#immunization"}]}`)
+		respSHC, bSHC, errSHC := doReq(http.MethodPost, basePath+"/Patient/cert-pat-1/$health-cards-issue", "application/fhir+json", shcPayload, nil)
+		respPCDE, bPCDE, errPCDE := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$pcde", "", nil, nil)
+		if errSHC != nil || respSHC.StatusCode != http.StatusOK || !strings.Contains(string(bSHC), `"verifiableCredential"`) || !strings.Contains(string(bSHC), `"resource:0"`) {
+			err = fmt.Errorf("expected POST /Patient/cert-pat-1/$health-cards-issue to return Parameters with verifiableCredential and resource:0, got %d: %s", respSHC.StatusCode, string(bSHC))
+		} else if errPCDE != nil || respPCDE.StatusCode != http.StatusOK || !strings.Contains(string(bPCDE), `"11503-0"`) || !strings.Contains(string(bPCDE), `"cert-cp-1"`) {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$pcde to return PCDE document Bundle with LOINC 11503-0 and cert-cp-1, got %d: %s", respPCDE.StatusCode, string(bPCDE))
+		} else {
+			err = nil
+		}
+	}
+	record("PAYER-01", suite6, "SMART Health Cards ($health-cards-issue) & Da Vinci PCDE ($pcde)", t0, err, "Verifiable Credential JWS & PCDE LOINC 11503-0 Continuity Bundle verified")
+
+	t0 = time.Now()
+	{
+		cerPayload := []byte(`{"resourceType":"CoverageEligibilityRequest","id":"cert-cer-1","status":"active","purpose":["benefits","validation"],"patient":{"reference":"Patient/cert-pat-1"},"insurer":{"reference":"Organization/cert-org-1"},"insurance":[{"coverage":{"reference":"Coverage/cert-cov-1"}}]}`)
+		respCER, bCER, errCER := doReq(http.MethodPost, basePath+"/CoverageEligibilityRequest/$submit", "application/fhir+json", cerPayload, nil)
+		predetPayload := []byte(`{"resourceType":"Claim","id":"cert-claim-predet-1","status":"active","use":"predetermination","patient":{"reference":"Patient/cert-pat-1"},"insurer":{"reference":"Organization/cert-org-1"},"provider":{"reference":"Practitioner/cert-prac-1"},"item":[{"sequence":1,"productOrService":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"99214"}]},"net":{"value":250.0,"currency":"USD"}}]}`)
+		respPredet, bPredet, errPredet := doReq(http.MethodPost, basePath+"/Claim/$predetermine", "application/fhir+json", predetPayload, nil)
+		if errCER != nil || respCER.StatusCode != http.StatusOK || !strings.Contains(string(bCER), `"CoverageEligibilityResponse"`) || !strings.Contains(string(bCER), `"inforce":true`) {
+			err = fmt.Errorf("expected CoverageEligibilityRequest/$submit to return CoverageEligibilityResponse with inforce:true, got %d: %s", respCER.StatusCode, string(bCER))
+		} else if errPredet != nil || respPredet.StatusCode != http.StatusOK || !strings.Contains(string(bPredet), `"use":"predetermination"`) || !strings.Contains(string(bPredet), `"PREDET-CERT-CLAIM-PREDET-1"`) {
+			err = fmt.Errorf("expected POST /Claim/$predetermine to return predetermination ClaimResponse with PREDET-CERT-CLAIM-PREDET-1, got %d: %s", respPredet.StatusCode, string(bPredet))
+		} else {
+			err = nil
+		}
+	}
+	record("PAYER-02", suite6, "Da Vinci PAS Pre-Determination (Claim/$predetermine) & Eligibility (CoverageEligibilityRequest/$submit)", t0, err, "Adjudicated CoverageEligibilityResponse & predetermination ClaimResponse verified")
+
+	t0 = time.Now()
+	{
+		respCRD, bCRD, errCRD := doReq(http.MethodGet, basePath+"/ServiceRequest/cert-sr-1/$crd", "", nil, nil)
+		respCPEval, bCPEval, errCPEval := doReq(http.MethodGet, basePath+"/CarePlan/cert-cp-1/$evaluate", "", nil, nil)
+		if errCRD != nil || respCRD.StatusCode != http.StatusOK || !strings.Contains(string(bCRD), "ext-coverage-information") {
+			err = fmt.Errorf("expected GET /ServiceRequest/cert-sr-1/$crd to return Parameters with ext-coverage-information, got %d: %s", respCRD.StatusCode, string(bCRD))
+		} else if errCPEval != nil || respCPEval.StatusCode != http.StatusOK || !strings.Contains(string(bCPEval), `"achievementStatus"`) || !strings.Contains(string(bCPEval), `"achieved"`) {
+			err = fmt.Errorf("expected GET /CarePlan/cert-cp-1/$evaluate to return Parameters with achievementStatus=achieved, got %d: %s", respCPEval.StatusCode, string(bCPEval))
+		} else {
+			err = nil
+		}
+	}
+	record("PAYER-03", suite6, "Da Vinci Coverage Requirements Discovery (ServiceRequest/$crd) & CarePlan/$evaluate", t0, err, "CRD ext-coverage-information & CarePlan goal achievement verified")
+
+	t0 = time.Now()
+	{
+		cdexPayload := []byte(`{"resourceType":"Parameters","parameter":[{"name":"TrackingId","valueString":"cert-task-1"},{"name":"MemberId","valueString":"cert-pat-1"},{"name":"Attachment","part":[{"name":"LineItem","valueString":"1"},{"name":"Code","valueCodeableConcept":{"coding":[{"system":"http://loinc.org","code":"11506-3","display":"Progress note"}]}},{"name":"Content","resource":{"resourceType":"DocumentReference","id":"cert-cdex-doc-1","status":"current","content":[{"attachment":{"contentType":"text/plain","url":"https://flint.example.org/cdex/note.txt"}}]}}]}]}`)
+		respCDex, bCDex, errCDex := doReq(http.MethodPost, basePath+"/$submit-attachment", "application/fhir+json", cdexPayload, nil)
+		if errCDex != nil || respCDex.StatusCode != http.StatusOK || !strings.Contains(string(bCDex), `"DocumentReference/cert-cdex-doc-1"`) {
+			err = fmt.Errorf("expected POST /$submit-attachment to return OperationOutcome with DocumentReference/cert-cdex-doc-1, got %d: %s", respCDex.StatusCode, string(bCDex))
+		} else {
+			err = nil
+		}
+	}
+	record("PAYER-04", suite6, "Da Vinci Clinical Data Exchange (CDex /$submit-attachment)", t0, err, "CDex clinical attachment linked to Task & DocumentReference verified")
+
+	t0 = time.Now()
+	{
+		bmmPayload := []byte(`{"resourceType":"Parameters","parameter":[{"name":"MemberBundle","part":[{"name":"MemberPatient","resource":{"resourceType":"Patient","name":[{"family":"Certify","given":["Alice"]}],"birthDate":"1985-04-12","gender":"female"}}]}]}`)
+		respBMM, bBMM, errBMM := doReq(http.MethodPost, basePath+"/Patient/$bulk-member-match", "application/fhir+json", bmmPayload, nil)
+		if errBMM != nil || respBMM.StatusCode != http.StatusOK || !strings.Contains(string(bBMM), `"MatchedMembers"`) {
+			err = fmt.Errorf("expected POST /Patient/$bulk-member-match to return Parameters with MatchedMembers, got %d: %s", respBMM.StatusCode, string(bBMM))
+		} else {
+			err = nil
+		}
+	}
+	record("PAYER-05", suite6, "CMS-0057-F / Da Vinci PDex Bulk Member Match (Patient/$bulk-member-match)", t0, err, "Multi-member PDex cohort matching verified")
+
+	t0 = time.Now()
+	{
+		respATR, bATR, errATR := doReq(http.MethodGet, basePath+"/Group/cert-grp-1/$atr-summary?patient=Patient/cert-pat-1", "", nil, nil)
+		if errATR != nil || respATR.StatusCode != http.StatusOK || !strings.Contains(string(bATR), "atr-bundle") {
+			err = fmt.Errorf("expected GET /Group/cert-grp-1/$atr-summary to return atr-bundle, got %d: %s", respATR.StatusCode, string(bATR))
+		} else {
+			err = nil
+		}
+	}
+	record("PAYER-06", suite6, "Da Vinci Member Attribution (ATR v2.0.0 Group/$atr-summary)", t0, err, "Member attribution roster Bundle verified")
+
+	t0 = time.Now()
+	{
+		respBR, bBR, errBR := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$burden-reduction-summary", "", nil, nil)
+		if errBR != nil || respBR.StatusCode != http.StatusOK || !strings.Contains(string(bBR), "burden-reduction-summary-bundle") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$burden-reduction-summary to return burden-reduction-summary-bundle, got %d: %s", respBR.StatusCode, string(bBR))
+		} else {
+			err = nil
+		}
+	}
+	record("PAYER-07", suite6, "Da Vinci Burden Reduction Summary (CRD + DTR + PAS $burden-reduction-summary)", t0, err, "Unified CRD/DTR/PAS Burden Reduction Bundle verified")
+
+	t0 = time.Now()
+	{
+		respRA, bRA, errRA := doReq(http.MethodGet, basePath+"/Measure/$evaluate-risk-condition-category?subject=Patient/cert-pat-1", "", nil, nil)
+		respRAGaps, bRAGaps, errRAGaps := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$ra-coding-gaps", "", nil, nil)
+		respRARep, bRARep, errRARep := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$ra-coding-gap-report", "", nil, nil)
+		if errRA != nil || respRA.StatusCode != http.StatusOK || !strings.Contains(string(bRA), "ra-measurereport") || !strings.Contains(string(bRA), "CMS-HCC 85") {
+			err = fmt.Errorf("expected GET /Measure/$evaluate-risk-condition-category to return Risk Adjustment Bundle with CMS-HCC 85, got %d: %s", respRA.StatusCode, string(bRA))
+		} else if errRAGaps != nil || respRAGaps.StatusCode != http.StatusOK || !strings.Contains(string(bRAGaps), "ra-measurereport") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$ra-coding-gaps to return ra-measurereport Bundle, got %d: %s", respRAGaps.StatusCode, string(bRAGaps))
+		} else if errRARep != nil || respRARep.StatusCode != http.StatusOK || !strings.Contains(string(bRARep), "ra-condition-gap-bundle") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$ra-coding-gap-report to return ra-condition-gap-bundle, got %d: %s", respRARep.StatusCode, string(bRARep))
+		} else {
+			err = nil
+		}
+	}
+	record("PAYER-08", suite6, "Da Vinci Risk Adjustment v2.0.0 ($evaluate-risk-condition-category, $ra-coding-gaps & $ra-coding-gap-report)", t0, err, "CMS-HCC risk adjustment MeasureReport & coding gap Bundle verified")
+
+	t0 = time.Now()
+	{
+		respVBPR, bVBPR, errVBPR := doReq(http.MethodGet, basePath+"/MeasureReport/$vbpr-performance", "", nil, nil)
+		if errVBPR != nil || respVBPR.StatusCode != http.StatusOK || !strings.Contains(string(bVBPR), "vbp-measurereport") {
+			err = fmt.Errorf("expected GET /MeasureReport/$vbpr-performance to return vbp-measurereport, got %d: %s", respVBPR.StatusCode, string(bVBPR))
+		} else {
+			err = nil
+		}
+	}
+	record("PAYER-09", suite6, "Da Vinci Value-Based Performance Reporting (MeasureReport/$vbpr-performance)", t0, err, "VBPR value-based contract MeasureReport verified")
+
+	t0 = time.Now()
+	{
+		respAEOB, bAEOB, errAEOB := doReq(http.MethodGet, basePath+"/ExplanationOfBenefit/$pct-aeob-summary?patient=Patient/cert-pat-1", "", nil, nil)
+		if errAEOB != nil || respAEOB.StatusCode != http.StatusOK || !strings.Contains(string(bAEOB), "davinci-pct-aeob") {
+			err = fmt.Errorf("expected GET /ExplanationOfBenefit/$pct-aeob-summary to return davinci-pct-aeob, got %d: %s", respAEOB.StatusCode, string(bAEOB))
+		} else {
+			err = nil
+		}
+	}
+	record("PAYER-10", suite6, "Da Vinci Patient Cost Transparency (ExplanationOfBenefit/$pct-aeob-summary)", t0, err, "No Surprises Act Advanced EOB (AEOB) Bundle verified")
+
+	t0 = time.Now()
+	{
+		respMK, bMK, errMK := doReq(http.MethodGet, basePath+"/MedicationKnowledge/$lookup?code=723", "", nil, nil)
+		respFL, bFL, errFL := doReq(http.MethodGet, basePath+"/MedicationKnowledge/$formulary-lookup?code=860975", "", nil, nil)
+		respInt, bInt, errInt := doReq(http.MethodGet, basePath+"/MedicationRequest/$check-interactions?patient=Patient/cert-pat-1&code=723", "", nil, nil)
+		respDisp, bDisp, errDisp := doReq(http.MethodPost, basePath+"/MedicationRequest/cert-medreq-1/$dispense", "application/fhir+json", nil, nil)
+		if errMK != nil || respMK.StatusCode != http.StatusOK || !strings.Contains(string(bMK), "usdf-FormularyDrug") {
+			err = fmt.Errorf("expected GET /MedicationKnowledge/$lookup?code=723 to return usdf-FormularyDrug MedicationKnowledge, got %d: %s", respMK.StatusCode, string(bMK))
+		} else if errFL != nil || respFL.StatusCode != http.StatusOK || !strings.Contains(string(bFL), "usdf-FormularyDrug") {
+			err = fmt.Errorf("expected GET /MedicationKnowledge/$formulary-lookup to return usdf-FormularyDrug, got %d: %s", respFL.StatusCode, string(bFL))
+		} else if errInt != nil || respInt.StatusCode != http.StatusOK || !strings.Contains(string(bInt), `"interactionCount"`) {
+			err = fmt.Errorf("expected GET /MedicationRequest/$check-interactions to return Parameters with interactionCount, got %d: %s", respInt.StatusCode, string(bInt))
+		} else if errDisp != nil || respDisp.StatusCode != http.StatusOK || !strings.Contains(string(bDisp), `"resourceType":"MedicationDispense"`) {
+			err = fmt.Errorf("expected POST /MedicationRequest/cert-medreq-1/$dispense to return MedicationDispense, got %d: %s", respDisp.StatusCode, string(bDisp))
+		} else {
+			err = nil
+		}
+	}
+	record("PAYER-11", suite6, "Da Vinci US Drug Formulary ($lookup, $formulary-lookup), Drug-Allergy Check & Pharmacy $dispense", t0, err, "USDF FormularyDrug, drug-allergy check & MedicationDispense verified")
+
+	t0 = time.Now()
+	{
+		respCBB, bCBB, errCBB := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$carin-bb", "", nil, nil)
+		respC4BB, bC4BB, errC4BB := doReq(http.MethodGet, basePath+"/ExplanationOfBenefit/$carin-bb-claims?patient=Patient/cert-pat-1", "", nil, nil)
+		respRTPBC, bRTPBC, errRTPBC := doReq(http.MethodGet, basePath+"/ClaimResponse/$rtpbc-coverage?patient=Patient/cert-pat-1", "", nil, nil)
+		if errCBB != nil || respCBB.StatusCode != http.StatusOK || !strings.Contains(string(bCBB), "C4BB-Bundle") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$carin-bb to return C4BB-Bundle, got %d: %s", respCBB.StatusCode, string(bCBB))
+		} else if errC4BB != nil || respC4BB.StatusCode != http.StatusOK || !strings.Contains(string(bC4BB), "C4BB-ExplanationOfBenefit-Oral") {
+			err = fmt.Errorf("expected GET /ExplanationOfBenefit/$carin-bb-claims to return C4BB-ExplanationOfBenefit-Oral, got %d: %s", respC4BB.StatusCode, string(bC4BB))
+		} else if errRTPBC != nil || respRTPBC.StatusCode != http.StatusOK || !strings.Contains(string(bRTPBC), "rtpbc-response-claimresponse") {
+			err = fmt.Errorf("expected GET /ClaimResponse/$rtpbc-coverage to return rtpbc-response-claimresponse, got %d: %s", respRTPBC.StatusCode, string(bRTPBC))
+		} else {
+			err = nil
+		}
+	}
+	record("PAYER-12", suite6, "CARIN Blue Button v2.0.0 ($carin-bb, $carin-bb-claims) & Real-Time Pharmacy Benefit Check ($rtpbc-coverage)", t0, err, "C4BB EOBs & CARIN RTPBC patient-pay coverage verified")
+
+	// =========================================================================
+	// Suite 7: HL7 CodeX Oncology, Genomics, Public Health, PACIO, SDOH, Vulcan & FAST
+	// =========================================================================
+	suite7 := "Suite 7: HL7 CodeX Oncology, Genomics, Public Health, PACIO, Gravity SDOH, Vulcan & FAST"
+
+	t0 = time.Now()
+	{
+		respMC, bMC, errMC := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$mcode-summary", "", nil, nil)
+		respRT, bRT, errRT := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$mcode-radiotherapy-summary", "", nil, nil)
+		if errMC != nil || respMC.StatusCode != http.StatusOK || !strings.Contains(string(bMC), "mcode-patient-bundle") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-summary to return mcode-patient-bundle, got %d: %s", respMC.StatusCode, string(bMC))
+		} else if errRT != nil || respRT.StatusCode != http.StatusOK || !strings.Contains(string(bRT), "mcode-radiotherapy-course-summary") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-radiotherapy-summary to return mcode-radiotherapy-course-summary, got %d: %s", respRT.StatusCode, string(bRT))
+		} else {
+			err = nil
+		}
+	}
+	record("NATIG-01", suite7, "HL7 CodeX / mCODE v3.0.0 Oncology ($mcode-summary & $mcode-radiotherapy-summary)", t0, err, "mCODE oncology longitudinal & radiotherapy course summaries verified")
+
+	t0 = time.Now()
+	{
+		respRTTD, bRTTD, errRTTD := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$codex-rttd-summary", "", nil, nil)
+		respCTM, bCTM, errCTM := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$mcode-trial-summary", "", nil, nil)
+		if errRTTD != nil || respRTTD.StatusCode != http.StatusOK || !strings.Contains(string(bRTTD), "codexrt-summary-bundle") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$codex-rttd-summary to return codexrt-summary-bundle, got %d: %s", respRTTD.StatusCode, string(bRTTD))
+		} else if errCTM != nil || respCTM.StatusCode != http.StatusOK || !strings.Contains(string(bCTM), "codex-clinical-trial-match-bundle") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-trial-summary to return codex-clinical-trial-match-bundle, got %d: %s", respCTM.StatusCode, string(bCTM))
+		} else {
+			err = nil
+		}
+	}
+	record("NATIG-02", suite7, "HL7 CodeX RTTD v1.0.0 ($codex-rttd-summary) & Clinical Trial Matching ($mcode-trial-summary)", t0, err, "CodeX Radiation Therapy Treatment Data & Clinical Trial Matching verified")
+
+	t0 = time.Now()
+	{
+		respCG, bCG, errCG := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$find-subject-variants?genes=BRCA1", "", nil, nil)
+		respGen, bGen, errGen := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$mcode-genomics-summary", "", nil, nil)
+		if errCG != nil || respCG.StatusCode != http.StatusOK || !strings.Contains(string(bCG), `"69548-6"`) {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$find-subject-variants to return variant 69548-6, got %d: %s", respCG.StatusCode, string(bCG))
+		} else if errGen != nil || respGen.StatusCode != http.StatusOK || !strings.Contains(string(bGen), "mcode-cancer-genomics-report") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$mcode-genomics-summary to return mcode-cancer-genomics-report, got %d: %s", respGen.StatusCode, string(bGen))
+		} else {
+			err = nil
+		}
+	}
+	record("NATIG-03", suite7, "HL7 Clinical Genomics v3.0.0 ($find-subject-variants & $mcode-genomics-summary)", t0, err, "LOINC 69548-6 genomic variant discovery & mCODE genomics report verified")
+
+	t0 = time.Now()
+	{
+		respSANER, bSANER, errSANER := doReq(http.MethodGet, basePath+"/Location/cert-loc-1/$saner-capacity-summary", "", nil, nil)
+		respNHSN, bNHSN, errNHSN := doReq(http.MethodGet, basePath+"/Measure/$nhsn-acute-care", "", nil, nil)
+		respHAI, bHAI, errHAI := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$nhsn-hai-summary", "", nil, nil)
+		respACH, bACH, errACH := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$nhsn-ach-summary", "", nil, nil)
+		if errSANER != nil || respSANER.StatusCode != http.StatusOK || !strings.Contains(string(bSANER), "PublicHealthBundle") {
+			err = fmt.Errorf("expected GET /Location/cert-loc-1/$saner-capacity-summary to return PublicHealthBundle, got %d: %s", respSANER.StatusCode, string(bSANER))
+		} else if errNHSN != nil || respNHSN.StatusCode != http.StatusOK || !strings.Contains(string(bNHSN), "nhsn-hai-aur-measure") {
+			err = fmt.Errorf("expected GET /Measure/$nhsn-acute-care to return nhsn-hai-aur-measure, got %d: %s", respNHSN.StatusCode, string(bNHSN))
+		} else if errHAI != nil || respHAI.StatusCode != http.StatusOK || !strings.Contains(string(bHAI), "nhsn-aur-measure-report") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$nhsn-hai-summary to return nhsn-aur-measure-report, got %d: %s", respHAI.StatusCode, string(bHAI))
+		} else if errACH != nil || respACH.StatusCode != http.StatusOK || !strings.Contains(string(bACH), "ach-daily-initial-population-bundle") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$nhsn-ach-summary to return ach-daily-initial-population-bundle, got %d: %s", respACH.StatusCode, string(bACH))
+		} else {
+			err = nil
+		}
+	}
+	record("NATIG-04", suite7, "HL7 SANER v1.0.1 ($saner-capacity-summary) & CDC NHSN HAI/AUR/ACH ($nhsn-acute-care, $nhsn-hai-summary, $nhsn-ach-summary)", t0, err, "Hospital bed/ICU/ventilator capacity & CDC NHSN HAI/AUR/ACH bundles verified")
+
+	t0 = time.Now()
+	{
+		respERSD, bERSD, errERSD := doReq(http.MethodGet, basePath+"/PlanDefinition/$ersd-lookup", "", nil, nil)
+		respEICR, bEICR, errEICR := doReq(http.MethodGet, basePath+"/Composition/$eicr-document?patient=Patient/cert-pat-1", "", nil, nil)
+		respECR, bECR, errECR := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$ecr-summary", "", nil, nil)
+		if errERSD != nil || respERSD.StatusCode != http.StatusOK || !strings.Contains(string(bERSD), "ersd-rctc-plan-1") {
+			err = fmt.Errorf("expected GET /PlanDefinition/$ersd-lookup to return ersd-rctc-plan-1, got %d: %s", respERSD.StatusCode, string(bERSD))
+		} else if errEICR != nil || respEICR.StatusCode != http.StatusOK || !strings.Contains(string(bEICR), "eicr-document-bundle") {
+			err = fmt.Errorf("expected GET /Composition/$eicr-document to return eicr-document-bundle, got %d: %s", respEICR.StatusCode, string(bEICR))
+		} else if errECR != nil || respECR.StatusCode != http.StatusOK || !strings.Contains(string(bECR), `"55751-2"`) {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$ecr-summary to return LOINC 55751-2 eICR Composition, got %d: %s", respECR.StatusCode, string(bECR))
+		} else {
+			err = nil
+		}
+	}
+	record("NATIG-05", suite7, "HL7 Public Health Electronic Initial Case Reporting (eCR v2.1.2 $ersd-lookup, $eicr-document & $ecr-summary)", t0, err, "RCTC trigger lookup & LOINC 55751-2 eICR document bundle verified")
+
+	t0 = time.Now()
+	{
+		respELR, bELR, errELR := doReq(http.MethodGet, basePath+"/Observation/$reportable-labs?patient=Patient/cert-pat-1", "", nil, nil)
+		respELRSum, bELRSum, errELRSum := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$elr-summary", "", nil, nil)
+		respSpec, bSpec, errSpec := doReq(http.MethodPost, basePath+"/ServiceRequest/cert-sr-1/$collect-specimen", "application/fhir+json", nil, nil)
+		if errELR != nil || respELR.StatusCode != http.StatusOK || !strings.Contains(string(bELR), `"94500-6"`) {
+			err = fmt.Errorf("expected GET /Observation/$reportable-labs to return LOINC 94500-6 lab Bundle, got %d: %s", respELR.StatusCode, string(bELR))
+		} else if errELRSum != nil || respELRSum.StatusCode != http.StatusOK || !strings.Contains(string(bELRSum), `"94500-6"`) {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$elr-summary to return LOINC 94500-6 reportable lab, got %d: %s", respELRSum.StatusCode, string(bELRSum))
+		} else if errSpec != nil || respSpec.StatusCode != http.StatusOK || !strings.Contains(string(bSpec), `"ACC-CERT-SR-1"`) {
+			err = fmt.Errorf("expected POST /ServiceRequest/cert-sr-1/$collect-specimen to return Specimen with ACC-CERT-SR-1, got %d: %s", respSpec.StatusCode, string(bSpec))
+		} else {
+			err = nil
+		}
+	}
+	record("NATIG-06", suite7, "HL7 Electronic Laboratory Reporting (ELR $reportable-labs, $elr-summary) & Specimen Accessioning ($collect-specimen)", t0, err, "Reportable lab surveillance & automated Specimen accessioning verified")
+
+	t0 = time.Now()
+	{
+		respImmDS, bImmDS, errImmDS := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$immds-forecast", "", nil, nil)
+		respIIS, bIIS, errIIS := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$iis-history", "", nil, nil)
+		respNBS, bNBS, errNBS := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$nbs-summary", "", nil, nil)
+		if errImmDS != nil || respImmDS.StatusCode != http.StatusOK || !strings.Contains(string(bImmDS), "ImmunizationRecommendation") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$immds-forecast to return Parameters with ImmunizationRecommendation, got %d: %s", respImmDS.StatusCode, string(bImmDS))
+		} else if errIIS != nil || respIIS.StatusCode != http.StatusOK || !strings.Contains(string(bIIS), "immds-immunizationevaluation") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$iis-history to return immds-immunizationevaluation, got %d: %s", respIIS.StatusCode, string(bIIS))
+		} else if errNBS != nil || respNBS.StatusCode != http.StatusOK || !strings.Contains(string(bNBS), `"54089-8"`) {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$nbs-summary to return LOINC 54089-8 Newborn Screening panel, got %d: %s", respNBS.StatusCode, string(bNBS))
+		} else {
+			err = nil
+		}
+	}
+	record("NATIG-07", suite7, "HL7 Immunization Decision Support (ImmDS $immds-forecast, IIS $iis-history) & Newborn Screening ($nbs-summary)", t0, err, "ACIP vaccine forecasting, IIS evaluation & LOINC 54089-8 NBS panel verified")
+
+	t0 = time.Now()
+	{
+		respVRDR, bVRDR, errVRDR := doReq(http.MethodGet, basePath+"/Composition/$vrdr-document?patient=Patient/cert-pat-1", "", nil, nil)
+		respBFDR, bBFDR, errBFDR := doReq(http.MethodGet, basePath+"/Composition/$bfdr-document?patient=Patient/cert-pat-1", "", nil, nil)
+		respCCRR, bCCRR, errCCRR := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$cancer-registry-report", "", nil, nil)
+		if errVRDR != nil || respVRDR.StatusCode != http.StatusOK || !strings.Contains(string(bVRDR), "vrdr-death-certificate-document") {
+			err = fmt.Errorf("expected GET /Composition/$vrdr-document to return vrdr-death-certificate-document, got %d: %s", respVRDR.StatusCode, string(bVRDR))
+		} else if errBFDR != nil || respBFDR.StatusCode != http.StatusOK || !strings.Contains(string(bBFDR), "Bundle-document-live-birth-report") {
+			err = fmt.Errorf("expected GET /Composition/$bfdr-document to return Bundle-document-live-birth-report, got %d: %s", respBFDR.StatusCode, string(bBFDR))
+		} else if errCCRR != nil || respCCRR.StatusCode != http.StatusOK || !strings.Contains(string(bCCRR), "ccrr-content-bundle") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$cancer-registry-report to return ccrr-content-bundle, got %d: %s", respCCRR.StatusCode, string(bCCRR))
+		} else {
+			err = nil
+		}
+	}
+	record("NATIG-08", suite7, "HL7 Vital Records Death & Birth Reporting (VRDR $vrdr-document, BFDR $bfdr-document) & Cancer Registry ($cancer-registry-report)", t0, err, "VRDR death certificate, BFDR birth report & CCRR cancer registry bundles verified")
+
+	t0 = time.Now()
+	{
+		respODH, bODH, errODH := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$odh-summary", "", nil, nil)
+		respRisk, bRisk, errRisk := doReq(http.MethodGet, basePath+"/RiskAssessment/$evaluate?subject=Patient/cert-pat-1", "", nil, nil)
+		respCon, bCon, errCon := doReq(http.MethodGet, basePath+"/Consent/$evaluate?patient=Patient/cert-pat-1", "", nil, nil)
+		if errODH != nil || respODH.StatusCode != http.StatusOK || !strings.Contains(string(bODH), `"11341-5"`) {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$odh-summary to return LOINC 11341-5 ODH Bundle, got %d: %s", respODH.StatusCode, string(bODH))
+		} else if errRisk != nil || respRisk.StatusCode != http.StatusOK || !strings.Contains(string(bRisk), `"probabilityDecimal"`) {
+			err = fmt.Errorf("expected GET /RiskAssessment/$evaluate?subject=Patient/cert-pat-1 to return RiskAssessment with probabilityDecimal, got %d: %s", respRisk.StatusCode, string(bRisk))
+		} else if errCon != nil || respCon.StatusCode != http.StatusOK || !strings.Contains(string(bCon), `"valueCode":"permit"`) {
+			err = fmt.Errorf("expected GET /Consent/$evaluate to return decision=permit Parameters, got %d: %s", respCon.StatusCode, string(bCon))
+		} else {
+			err = nil
+		}
+	}
+	record("NATIG-09", suite7, "HL7 Occupational Data for Health ($odh-summary), Clinical Risk ($evaluate) & Privacy Consent ($evaluate)", t0, err, "LOINC 11341-5 ODH history, RiskAssessment & Consent permit decision verified")
+
+	t0 = time.Now()
+	{
+		respPFE, bPFE, errPFE := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$pacio-pfe-summary", "", nil, nil)
+		respPACIORT, bPACIORT, errPACIORT := doReq(http.MethodGet, basePath+"/Encounter/cert-enc-1/$pacio-timepoints", "", nil, nil)
+		respSPL, bSPL, errSPL := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$pacio-splasch-summary", "", nil, nil)
+		if errPFE != nil || respPFE.StatusCode != http.StatusOK || !strings.Contains(string(bPFE), "pacio-pfe-observation-single") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$pacio-pfe-summary to return pacio-pfe-observation-single, got %d: %s", respPFE.StatusCode, string(bPFE))
+		} else if errPACIORT != nil || respPACIORT.StatusCode != http.StatusOK || !strings.Contains(string(bPACIORT), "pacio-rt-reassessment-timepoint-encounter") {
+			err = fmt.Errorf("expected GET /Encounter/cert-enc-1/$pacio-timepoints to return pacio-rt-reassessment-timepoint-encounter, got %d: %s", respPACIORT.StatusCode, string(bPACIORT))
+		} else if errSPL != nil || respSPL.StatusCode != http.StatusOK || !strings.Contains(string(bSPL), "splasch-Bundle") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$pacio-splasch-summary to return splasch-Bundle, got %d: %s", respSPL.StatusCode, string(bSPL))
+		} else {
+			err = nil
+		}
+	}
+	record("NATIG-10", suite7, "HL7 PACIO Post-Acute Care ($pacio-pfe-summary, $pacio-timepoints & $pacio-splasch-summary)", t0, err, "PACIO Personal Functioning, Re-Assessment Timepoints & SPLASCH verified")
+
+	t0 = time.Now()
+	{
+		respSDOH, bSDOH, errSDOH := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$sdoh-care-bundle", "", nil, nil)
+		if errSDOH != nil || respSDOH.StatusCode != http.StatusOK || !strings.Contains(string(bSDOH), "SDOHCC-Bundle") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$sdoh-care-bundle to return SDOHCC-Bundle, got %d: %s", respSDOH.StatusCode, string(bSDOH))
+		} else {
+			err = nil
+		}
+	}
+	record("NATIG-11", suite7, "HL7 Gravity Project Social Determinants of Health (SDOH v2.2.0 $sdoh-care-bundle)", t0, err, "Closed-loop SDOH screening, referral, Task & Consent Care Bundle verified")
+
+	t0 = time.Now()
+	{
+		respVulc, bVulc, errVulc := doReq(http.MethodGet, basePath+"/ResearchStudy/vulcan-study-1/$rwd-cohort", "", nil, nil)
+		respVulcanSum, bVulcanSum, errVulcanSum := doReq(http.MethodGet, basePath+"/ResearchStudy/vulcan-study-1/$vulcan-summary", "", nil, nil)
+		respRWD, bRWD, errRWD := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$vulcan-rwd-summary", "", nil, nil)
+		respEPI, bEPI, errEPI := doReq(http.MethodGet, basePath+"/MedicinalProduct/$epi-document", "", nil, nil)
+		if errVulc != nil || respVulc.StatusCode != http.StatusOK || !strings.Contains(string(bVulc), `"cohortGroup"`) {
+			err = fmt.Errorf("expected GET /ResearchStudy/vulcan-study-1/$rwd-cohort to return cohortGroup, got %d: %s", respVulc.StatusCode, string(bVulc))
+		} else if errVulcanSum != nil || respVulcanSum.StatusCode != http.StatusOK || !strings.Contains(string(bVulcanSum), "vulcan-study-1") {
+			err = fmt.Errorf("expected GET /ResearchStudy/vulcan-study-1/$vulcan-summary to return vulcan-study-1, got %d: %s", respVulcanSum.StatusCode, string(bVulcanSum))
+		} else if errRWD != nil || respRWD.StatusCode != http.StatusOK || !strings.Contains(string(bRWD), "vulcan-rwd-bundle") {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$vulcan-rwd-summary to return vulcan-rwd-bundle, got %d: %s", respRWD.StatusCode, string(bRWD))
+		} else if errEPI != nil || respEPI.StatusCode != http.StatusOK || !strings.Contains(string(bEPI), "Bundle-uv-epi") {
+			err = fmt.Errorf("expected GET /MedicinalProduct/$epi-document to return Bundle-uv-epi, got %d: %s", respEPI.StatusCode, string(bEPI))
+		} else {
+			err = nil
+		}
+	}
+	record("NATIG-12", suite7, "HL7 Vulcan Clinical Research (RWD $rwd-cohort, $vulcan-summary, $vulcan-rwd-summary & ePI $epi-document)", t0, err, "Vulcan RWD cohort, ResearchStudy summary & ePI regulatory bundle verified")
+
+	t0 = time.Now()
+	{
+		respPN, bPN, errPN := doReq(http.MethodGet, basePath+"/PractitionerRole/$find-providers?specialty=207RC0000X", "", nil, nil)
+		respNDH, bNDH, errNDH := doReq(http.MethodGet, basePath+"/Endpoint/$fast-endpoint-query", "", nil, nil)
+		respFASTNet, bFASTNet, errFASTNet := doReq(http.MethodGet, basePath+"/OrganizationAffiliation/$fast-network-query", "", nil, nil)
+		respNDHSum, bNDHSum, errNDHSum := doReq(http.MethodGet, basePath+"/Organization/cert-org-1/$ndh-directory-summary", "", nil, nil)
+		respPix, bPix, errPix := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$ihe-pix", "", nil, nil)
+		respPDQm, bPDQm, errPDQm := doReq(http.MethodGet, basePath+"/Patient/$ihe-pdqm?family=Certify", "", nil, nil)
+		if errPN != nil || respPN.StatusCode != http.StatusOK || !strings.Contains(string(bPN), "plannet-PractitionerRole") {
+			err = fmt.Errorf("expected GET /PractitionerRole/$find-providers to return Plan-Net Bundle, got %d: %s", respPN.StatusCode, string(bPN))
+		} else if errNDH != nil || respNDH.StatusCode != http.StatusOK || !strings.Contains(string(bNDH), "ndh-Endpoint") {
+			err = fmt.Errorf("expected GET /Endpoint/$fast-endpoint-query to return ndh-Endpoint Bundle, got %d: %s", respNDH.StatusCode, string(bNDH))
+		} else if errFASTNet != nil || respFASTNet.StatusCode != http.StatusOK || !strings.Contains(string(bFASTNet), "ndh-OrganizationAffiliation") {
+			err = fmt.Errorf("expected GET /OrganizationAffiliation/$fast-network-query to return ndh-OrganizationAffiliation, got %d: %s", respFASTNet.StatusCode, string(bFASTNet))
+		} else if errNDHSum != nil || respNDHSum.StatusCode != http.StatusOK || !strings.Contains(string(bNDHSum), "ndh-ExchangeBundle") {
+			err = fmt.Errorf("expected GET /Organization/cert-org-1/$ndh-directory-summary to return ndh-ExchangeBundle, got %d: %s", respNDHSum.StatusCode, string(bNDHSum))
+		} else if errPix != nil || respPix.StatusCode != http.StatusOK || !strings.Contains(string(bPix), `"targetId"`) {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$ihe-pix to return Parameters with targetId, got %d: %s", respPix.StatusCode, string(bPix))
+		} else if errPDQm != nil || respPDQm.StatusCode != http.StatusOK || !strings.Contains(string(bPDQm), "IHE.PDQm.QueryPatientResourceResponseMessage") {
+			err = fmt.Errorf("expected GET /Patient/$ihe-pdqm to return IHE.PDQm.QueryPatientResourceResponseMessage, got %d: %s", respPDQm.StatusCode, string(bPDQm))
+		} else {
+			err = nil
+		}
+	}
+	record("NATIG-13", suite7, "ONC FAST National Directory (NDH v1.0.0 $ndh-directory-summary, $fast-endpoint-query, $fast-network-query), Plan-Net & IHE PIXm/PDQm", t0, err, "FAST NDH directory exchange, Plan-Net provider lookup & IHE PIXm/PDQm verified")
 
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)

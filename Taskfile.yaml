@@ -18,7 +18,7 @@ tasks:
       - docker compose --profile seed up -d --build
       - echo "🔥 Flint FHIR R4 Server running on http://localhost:8080"
       - echo "  Interactive SMART v2 Sandbox ($docs) → http://localhost:8080/fhir/r4/demo/$docs"
-      - echo "  50-Check Conformance ($certify)      → http://localhost:8080/fhir/r4/demo/$certify"
+      - echo "  75-Check Conformance ($certify)      → http://localhost:8080/fhir/r4/demo/$certify"
 
   compose-down:
     desc: Stop standalone Docker Compose stack
@@ -78,7 +78,7 @@ tasks:
       - go run ./cmd/seed {{.CLI_ARGS}}
 
   certify:
-    desc: Run automated 50-check FHIR R4, US Core v6.1.0 & v7.0.0, and ONC (g)(10) conformance certification suite
+    desc: Run automated 75-check FHIR R4, US Core v6.1.0 & v7.0.0, ONC (g)(10), and National IG conformance certification suite
     cmds:
       - go run ./cmd/certify {{.CLI_ARGS}}
 
@@ -109,7 +109,7 @@ tasks:
       - task: deploy-flintd
       - echo "🔥 Flint FHIR R4 k3d Cluster Ready!"
       - echo "  Interactive SMART v2 Sandbox ($docs) → http://localhost:8080/fhir/r4/demo/$docs"
-      - echo "  50-Check Conformance ($certify)      → http://localhost:8080/fhir/r4/demo/$certify"
+      - echo "  75-Check Conformance ($certify)      → http://localhost:8080/fhir/r4/demo/$certify"
       - echo "  Patient IPS Summary ($summary)       → http://localhost:8080/fhir/r4/demo/Patient/example-patient-1/$summary"
       - echo "  US Core Clinical Notes ($docref)     → http://localhost:8080/fhir/r4/demo/DocumentReference/$docref?patient=example-patient-1"
 
