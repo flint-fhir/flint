@@ -26,6 +26,7 @@ type AuditRecord struct {
 	EntityType    string
 	EntityID      string
 	EntityVersion string
+	PurposeOfUse  string
 }
 
 // AuditQueryParams specifies search filters for querying FHIR AuditEvent records.
@@ -50,6 +51,10 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec AuditRecord) error {
 	if rec.AgentSubject == "" {
 		rec.AgentSubject = "anonymous"
 	}
+	outcomeDesc := rec.OutcomeDesc
+	if rec.PurposeOfUse != "" && !strings.Contains(outcomeDesc, "[purposeOfUse=") {
+		outcomeDesc = fmt.Sprintf("%s [purposeOfUse=%s]", outcomeDesc, rec.PurposeOfUse)
+	}
 
 	return s.withTenantTx(ctx, rec.TenantID, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
@@ -64,7 +69,7 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec AuditRecord) error {
 			)
 			ON CONFLICT (tenant_id, audit_id) DO NOTHING
 		`,
-			rec.TenantID, rec.AuditID, rec.Recorded, rec.Action, rec.SubtypeCode, rec.Outcome, rec.OutcomeDesc,
+			rec.TenantID, rec.AuditID, rec.Recorded, rec.Action, rec.SubtypeCode, rec.Outcome, outcomeDesc,
 			rec.HTTPMethod, rec.HTTPStatus, rec.RequestURI, rec.AgentSubject, rec.AgentPatient,
 			rec.ClientIP, rec.EntityType, rec.EntityID, rec.EntityVersion,
 		)
@@ -95,7 +100,22 @@ func (s *Store) ReadAuditEvent(ctx context.Context, tenantID, auditID string) (*
 	if err != nil {
 		return nil, err
 	}
+	hydratePurposeOfUse(&rec)
 	return &rec, nil
+}
+
+func hydratePurposeOfUse(rec *AuditRecord) {
+	if rec == nil || rec.PurposeOfUse != "" {
+		return
+	}
+	const tag = " [purposeOfUse="
+	if idx := strings.Index(rec.OutcomeDesc, tag); idx != -1 {
+		rest := rec.OutcomeDesc[idx+len(tag):]
+		if endIdx := strings.IndexByte(rest, ']'); endIdx != -1 {
+			rec.PurposeOfUse = rest[:endIdx]
+			rec.OutcomeDesc = strings.TrimSpace(rec.OutcomeDesc[:idx])
+		}
+	}
 }
 
 // QueryAuditEvents searches fhir_audit_event ordered by recorded descending.
@@ -170,6 +190,7 @@ func (s *Store) QueryAuditEvents(ctx context.Context, params AuditQueryParams) (
 			); err != nil {
 				return fmt.Errorf("scan audit event: %w", err)
 			}
+			hydratePurposeOfUse(&rec)
 			records = append(records, rec)
 		}
 		return rows.Err()

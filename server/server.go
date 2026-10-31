@@ -96,6 +96,8 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 		auditRec = audit.NewMemoryRecorder()
 	}
 	devAuth, _ := auth.NewMockTokenValidator("", "")
+	valEngine := validation.NewEngine(validation.DefaultOptions())
+	valEngine.SetFHIRPathEvaluator(evalFHIRPath)
 	return &Server{
 		store:         store,
 		logger:        logger,
@@ -106,7 +108,7 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 		refreshTokens: make(map[string]refreshTokenEntry),
 		revokedTokens: make(map[string]time.Time),
 		clientJWKs:    make(map[string]auth.JWK),
-		validator:     validation.NewEngine(validation.DefaultOptions()),
+		validator:     valEngine,
 		auditRecorder: auditRec,
 		exportJobs:    make(map[string]*exportJob),
 		subSem:        make(chan struct{}, 32),
@@ -176,6 +178,9 @@ func (s *Server) AuditRecorder() audit.Recorder {
 // SetValidator configures the FHIR StructureDefinition and ValueSet validator.
 // Passing nil disables validation.
 func (s *Server) SetValidator(v validation.Validator) {
+	if eng, ok := v.(*validation.Engine); ok && eng != nil {
+		eng.SetFHIRPathEvaluator(evalFHIRPath)
+	}
 	s.validator = v
 }
 
@@ -239,6 +244,9 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$docs", s.handleDocsUI)
 	mux.HandleFunc("GET /cds-services", s.handleCDSServicesDiscovery)
 	mux.HandleFunc("POST /cds-services/{serviceId}", s.handleCDSServiceInvoke)
+	mux.HandleFunc("GET /cds-services/{serviceId}/$dsi-attributes", s.handleCDSServiceDSIAttributes)
+	mux.HandleFunc("POST /cds-services/{serviceId}/$dsi-attributes", s.handleCDSServiceDSIAttributes)
+	mux.HandleFunc("POST /cds-services/{serviceId}/feedback", s.handleCDSServiceFeedback)
 	mux.HandleFunc("GET /fhir/r4/cds-services", s.handleCDSServicesDiscovery)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/cds-services", s.handleCDSServicesDiscovery)
 
@@ -341,6 +349,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("serviceId", parts[4])
 					s.handleCDSServiceInvoke(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "AuditEvent") && parts[4] == "$verify-integrity" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleAuditVerifyIntegrity(w, r)
 					return
 				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$member-match" {
@@ -2517,6 +2530,20 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleExportFile(w, r)
 					return
 				}
+				if parts[3] == "cds-services" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("serviceId", parts[4])
+					switch parts[5] {
+					case "$dsi-attributes":
+						s.handleCDSServiceDSIAttributes(w, r)
+						return
+					case "feedback":
+						if r.Method == http.MethodPost {
+							s.handleCDSServiceFeedback(w, r)
+							return
+						}
+					}
+				}
 				if isGetOrHead && postgres.IsCompartmentType(parts[3]) && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("compartmentType", postgres.CanonicalCompartmentType(parts[3]))
@@ -3857,6 +3884,69 @@ func (s *Server) handleSearchAuditEvents(w http.ResponseWriter, r *http.Request)
 	if r == nil || r.Method != http.MethodHead {
 		json.NewEncoder(w).Encode(bundle)
 	}
+}
+
+// handleAuditVerifyIntegrity handles GET/POST /fhir/r4/{tenant}/AuditEvent/$verify-integrity
+// per HIPAA 45 CFR §164.312(b) and ONC §170.315(d)(2)/(d)(3) tamper-evident audit log verification.
+func (s *Server) handleAuditVerifyIntegrity(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	var records []postgres.AuditRecord
+	var total int
+	if s.auditRecorder != nil {
+		var err error
+		records, total, err = s.auditRecorder.Query(r.Context(), postgres.AuditQueryParams{
+			TenantID: tenant,
+			Count:    1000,
+		})
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to query AuditEvents for integrity verification")
+			return
+		}
+	}
+
+	chainHead, verifiedCount, chainEntries, valid := audit.VerifyAuditChain(records)
+	params := []map[string]any{
+		{
+			"name":         "verified",
+			"valueBoolean": valid,
+		},
+		{
+			"name":        "algorithm",
+			"valueString": "SHA-256-HASH-CHAIN",
+		},
+		{
+			"name":        "regulatoryStandard",
+			"valueString": "HIPAA 45 CFR §164.312(b) / ONC 45 CFR §170.315(d)(2)-(d)(3)",
+		},
+		{
+			"name":         "totalRecords",
+			"valueInteger": total,
+		},
+		{
+			"name":         "verifiedCount",
+			"valueInteger": verifiedCount,
+		},
+		{
+			"name":        "chainHeadDigest",
+			"valueString": chainHead,
+		},
+	}
+	if len(chainEntries) > 0 {
+		latest := chainEntries[len(chainEntries)-1]
+		if latestID, ok := latest["auditId"].(string); ok && latestID != "" {
+			params = append(params, map[string]any{
+				"name":        "latestAuditId",
+				"valueString": latestID,
+			})
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    params,
+	})
 }
 
 // handlePatientEverything handles GET/POST /{tenant}/{resourceType}/{id}/$everything — assemble full Patient, Encounter, or Group compartment Bundle.
@@ -5889,6 +5979,12 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			{"name": "entity", "type": "reference"},
 			{"name": "entity-type", "type": "token"},
 			{"name": "entity-id", "type": "token"},
+		},
+		"operation": []map[string]string{
+			{
+				"name":       "verify-integrity",
+				"definition": "http://flint.fhir.org/OperationDefinition/AuditEvent-verify-integrity",
+			},
 		},
 	})
 

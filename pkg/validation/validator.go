@@ -42,16 +42,58 @@ func DefaultOptions() Options {
 
 // Engine implements the Validator interface.
 type Engine struct {
-	schemas map[string]ResourceSchema
-	opts    Options
+	schemas        map[string]ResourceSchema
+	opts           Options
+	customMu       sync.RWMutex
+	customProfiles map[string]map[string]any
+	fhirPathEval   func(root map[string]any, expr string) []any
 }
 
 // NewEngine creates a new validation engine with default Big 5 schemas.
 func NewEngine(opts Options) *Engine {
 	return &Engine{
-		schemas: DefaultSchemas(),
-		opts:    opts,
+		schemas:        DefaultSchemas(),
+		opts:           opts,
+		customProfiles: make(map[string]map[string]any),
 	}
+}
+
+// SetFHIRPathEvaluator configures an optional HL7 FHIRPath R4 evaluator used to
+// evaluate StructureDefinition constraint.expression invariants during validation.
+func (e *Engine) SetFHIRPathEvaluator(fn func(root map[string]any, expr string) []any) {
+	e.customMu.Lock()
+	defer e.customMu.Unlock()
+	e.fhirPathEval = fn
+}
+
+// RegisterStructureDefinition registers a custom HL7 FHIR R4 StructureDefinition
+// resource map (by canonical url and/or id) for runtime profile validation.
+func (e *Engine) RegisterStructureDefinition(sdMap map[string]any) {
+	if e == nil || sdMap == nil {
+		return
+	}
+	e.customMu.Lock()
+	defer e.customMu.Unlock()
+	if e.customProfiles == nil {
+		e.customProfiles = make(map[string]map[string]any)
+	}
+	if u := strings.TrimSpace(extractStringOrWrapped(sdMap["url"])); u != "" {
+		e.customProfiles[u] = sdMap
+	}
+	if id := strings.TrimSpace(extractStringOrWrapped(sdMap["id"])); id != "" {
+		e.customProfiles["StructureDefinition/"+id] = sdMap
+		e.customProfiles[id] = sdMap
+	}
+}
+
+func (e *Engine) lookupCustomStructureDefinition(profile string) (map[string]any, bool) {
+	e.customMu.RLock()
+	defer e.customMu.RUnlock()
+	if e.customProfiles == nil {
+		return nil, false
+	}
+	sd, ok := e.customProfiles[strings.TrimSpace(profile)]
+	return sd, ok
 }
 
 // RegisterSchema registers or overrides a ResourceSchema in the engine.
@@ -165,6 +207,28 @@ func (e *Engine) ValidateResource(expectedResType string, resMap map[string]any)
 
 	// 7. Recursive BackboneElement, complex datatype, and embedded ContainedResource validation
 	e.validateNestedChildren(resTypeStr, schema.ChildDescriptors, resMap, outcome, 0)
+
+	// 8. Core HL7 FHIR R4 cross-element invariants (obs-6, obs-7, pat-1, dom-3, bdl-3)
+	e.validateR4CoreInvariants(resTypeStr, resMap, outcome)
+
+	// 9. Enforce any custom StructureDefinition profiles declared in meta.profile
+	if metaMap, ok := resMap["meta"].(map[string]any); ok {
+		if profArr, ok := metaMap["profile"].([]any); ok {
+			for _, item := range profArr {
+				rawProf := strings.TrimSpace(extractStringOrWrapped(item))
+				if rawProf == "" {
+					continue
+				}
+				baseProf := rawProf
+				if pipeIdx := strings.IndexByte(rawProf, '|'); pipeIdx != -1 {
+					baseProf = strings.TrimSpace(rawProf[:pipeIdx])
+				}
+				if sdMap, ok := e.lookupCustomStructureDefinition(baseProf); ok {
+					e.validateAgainstCustomStructureDefinition(rawProf, sdMap, resTypeStr, resMap, outcome)
+				}
+			}
+		}
+	}
 
 	return outcome
 }
@@ -545,6 +609,7 @@ func (e *Engine) ValidateResourceWithProfiles(expectedResType string, resMap map
 
 	var allProfiles []string
 	seen := make(map[string]bool)
+	metaProfileSeen := make(map[string]bool)
 	addProf := func(p string) {
 		p = strings.TrimSpace(p)
 		if p != "" && !seen[p] {
@@ -560,7 +625,15 @@ func (e *Engine) ValidateResourceWithProfiles(expectedResType string, resMap map
 	if metaMap, ok := resMap["meta"].(map[string]any); ok {
 		if profArr, ok := metaMap["profile"].([]any); ok {
 			for _, item := range profArr {
-				addProf(extractStringOrWrapped(item))
+				rawMetaProf := strings.TrimSpace(extractStringOrWrapped(item))
+				if rawMetaProf != "" {
+					baseMetaProf := rawMetaProf
+					if pipeIdx := strings.IndexByte(rawMetaProf, '|'); pipeIdx != -1 {
+						baseMetaProf = strings.TrimSpace(rawMetaProf[:pipeIdx])
+					}
+					metaProfileSeen[baseMetaProf] = true
+					addProf(rawMetaProf)
+				}
 			}
 		}
 	}
@@ -582,6 +655,12 @@ func (e *Engine) ValidateResourceWithProfiles(expectedResType string, resMap map
 
 		spec, known := usCoreProfileSpecs[baseProf]
 		if !known {
+			if sdMap, ok := e.lookupCustomStructureDefinition(baseProf); ok {
+				if !metaProfileSeen[baseProf] {
+					e.validateAgainstCustomStructureDefinition(rawProf, sdMap, resTypeStr, resMap, outcome)
+				}
+				continue
+			}
 			outcome.AddWarning(CodeNotSupported,
 				fmt.Sprintf("Profile %q is not registered in the US Core StructureDefinition registry; validated against base %s schema", rawProf, resTypeStr),
 				resTypeStr+".meta.profile")
@@ -1019,4 +1098,420 @@ func conditionProfileSpec(slug string) usCoreProfileSpec {
 			}
 		},
 	}
+}
+
+// validateR4CoreInvariants enforces high-value HL7 FHIR R4 cross-element invariants:
+//   - obs-6: dataAbsentReason SHALL only be present if Observation.value[x] is not present
+//   - obs-7: If Observation.code is the same as an Observation.component.code then Observation.value[x] SHALL NOT be present
+//   - pat-1: Patient.contact SHALL at least contain a contact's details (name, telecom, address) or a reference to an organization
+//   - dom-3: Contained resources SHALL be referenced from elsewhere in the resource or refer to the containing resource (#)
+//   - bdl-3: Bundle.entry.request is prohibited for document, message, searchset, and collection bundles
+func (e *Engine) validateR4CoreInvariants(resTypeStr string, resMap map[string]any, outcome *Outcome) {
+	// dom-3 applies to any DomainResource with contained[]
+	if containedArr, ok := resMap["contained"].([]any); ok && len(containedArr) > 0 {
+		for i, item := range containedArr {
+			cm, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			cid := strings.TrimSpace(extractStringOrWrapped(cm["id"]))
+			if cid == "" {
+				continue
+			}
+			targetRef := "#" + cid
+			referencedInOuter := containsReferenceStringOutsideContainedID(resMap, targetRef, i)
+			refersToContainer := containsReferenceString(cm, "#")
+			if !referencedInOuter && !refersToContainer {
+				outcome.AddError(CodeInvariant,
+					fmt.Sprintf("%s violated invariant dom-3: contained resource %s is neither referenced from elsewhere in the resource nor refers to the containing resource", resTypeStr, targetRef),
+					fmt.Sprintf("%s.contained[%d]", resTypeStr, i))
+			}
+		}
+	}
+
+	switch resTypeStr {
+	case "Observation":
+		hasRootValue := hasAnyValueX(resMap)
+		if resMap["dataAbsentReason"] != nil && hasRootValue {
+			outcome.AddError(CodeInvariant,
+				"Observation violated invariant obs-6: dataAbsentReason SHALL only be present if Observation.value[x] is not present",
+				"Observation")
+		}
+		rootCodings := extractCodingPairsFromElement(resMap["code"])
+		if comps, ok := resMap["component"].([]any); ok {
+			obs7Triggered := false
+			for i, compItem := range comps {
+				compMap, ok := compItem.(map[string]any)
+				if !ok {
+					continue
+				}
+				if compMap["dataAbsentReason"] != nil && hasAnyValueX(compMap) {
+					outcome.AddError(CodeInvariant,
+						"Observation.component violated invariant obs-6: dataAbsentReason SHALL only be present if Observation.component.value[x] is not present",
+						fmt.Sprintf("Observation.component[%d]", i))
+				}
+				if hasRootValue && !obs7Triggered && len(rootCodings) > 0 {
+					compCodings := extractCodingPairsFromElement(compMap["code"])
+					if codingPairsOverlap(rootCodings, compCodings) {
+						obs7Triggered = true
+						outcome.AddError(CodeInvariant,
+							"Observation violated invariant obs-7: If Observation.code is the same as an Observation.component.code then Observation.value[x] SHALL NOT be present",
+							"Observation")
+					}
+				}
+			}
+		}
+
+	case "Patient":
+		if contacts, ok := resMap["contact"].([]any); ok {
+			for i, item := range contacts {
+				cMap, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				hasDetails := hasUSCoreRequiredElement(cMap, "name") ||
+					hasUSCoreRequiredElement(cMap, "telecom") ||
+					hasUSCoreRequiredElement(cMap, "address") ||
+					hasUSCoreRequiredElement(cMap, "organization")
+				if !hasDetails {
+					outcome.AddError(CodeInvariant,
+						"Patient.contact violated invariant pat-1: SHALL at least contain a contact's details (name, telecom, or address) or a reference to an organization",
+						fmt.Sprintf("Patient.contact[%d]", i))
+				}
+			}
+		}
+
+	case "Bundle":
+		bType := strings.TrimSpace(extractStringOrWrapped(resMap["type"]))
+		switch bType {
+		case "document", "message", "searchset", "collection":
+			if entries, ok := resMap["entry"].([]any); ok {
+				for i, item := range entries {
+					eMap, ok := item.(map[string]any)
+					if !ok {
+						continue
+					}
+					if eMap["request"] != nil {
+						outcome.AddError(CodeInvariant,
+							fmt.Sprintf("Bundle violated invariant bdl-3: entry.request is prohibited when Bundle.type is %q", bType),
+							fmt.Sprintf("Bundle.entry[%d].request", i))
+					}
+				}
+			}
+		}
+	}
+}
+
+func hasAnyValueX(m map[string]any) bool {
+	for k, v := range m {
+		if strings.HasPrefix(k, "value") && len(k) > len("value") && v != nil {
+			return true
+		}
+	}
+	return false
+}
+
+type codingPair struct {
+	system string
+	code   string
+}
+
+func extractCodingPairsFromElement(val any) []codingPair {
+	m, ok := val.(map[string]any)
+	if !ok {
+		return nil
+	}
+	codings, ok := m["coding"].([]any)
+	if !ok {
+		return nil
+	}
+	var out []codingPair
+	for _, item := range codings {
+		cm, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		code := strings.TrimSpace(extractStringOrWrapped(cm["code"]))
+		if code == "" {
+			continue
+		}
+		sys := strings.TrimSpace(extractStringOrWrapped(cm["system"]))
+		out = append(out, codingPair{system: sys, code: code})
+	}
+	return out
+}
+
+func codingPairsOverlap(a, b []codingPair) bool {
+	for _, pa := range a {
+		for _, pb := range b {
+			if pa.code == pb.code && (pa.system == pb.system || pa.system == "" || pb.system == "") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containsReferenceStringOutsideContainedID(root map[string]any, targetRef string, containedIdx int) bool {
+	for k, v := range root {
+		if k == "contained" {
+			if arr, ok := v.([]any); ok {
+				for idx, item := range arr {
+					if idx == containedIdx {
+						continue
+					}
+					if containsReferenceString(item, targetRef) {
+						return true
+					}
+				}
+			}
+			continue
+		}
+		if containsReferenceString(v, targetRef) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsReferenceString(v any, targetRef string) bool {
+	switch val := v.(type) {
+	case string:
+		return strings.TrimSpace(val) == targetRef || strings.Contains(val, targetRef)
+	case map[string]any:
+		for k, child := range val {
+			if k == "reference" || k == "url" || k == "valueUri" || k == "valueCanonical" {
+				if s := strings.TrimSpace(extractStringOrWrapped(child)); s == targetRef {
+					return true
+				}
+			}
+			if containsReferenceString(child, targetRef) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range val {
+			if containsReferenceString(item, targetRef) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var ignoredBaseConstraintKeys = map[string]bool{
+	"ele-1": true,
+	"ext-1": true,
+	"dom-1": true,
+	"dom-2": true,
+	"dom-3": true,
+	"dom-4": true,
+	"dom-5": true,
+	"dom-6": true,
+	"rng-2": true,
+}
+
+// validateAgainstCustomStructureDefinition validates a resource against a dynamically
+// registered FHIR R4 StructureDefinition (snapshot/differential elements & FHIRPath constraints).
+func (e *Engine) validateAgainstCustomStructureDefinition(rawProf string, sdMap map[string]any, resTypeStr string, resMap map[string]any, outcome *Outcome) {
+	sdType := strings.TrimSpace(extractStringOrWrapped(sdMap["type"]))
+	if sdType != "" && sdType != "Resource" && sdType != "DomainResource" && sdType != resTypeStr {
+		outcome.AddError(CodeInvariant,
+			fmt.Sprintf("Resource of type %q does not conform to profile %q (expected resourceType %q)", resTypeStr, rawProf, sdType),
+			resTypeStr+".resourceType")
+		return
+	}
+
+	var elements []map[string]any
+	appendElements := func(containerKey string) {
+		if container, ok := sdMap[containerKey].(map[string]any); ok {
+			if arr, ok := container["element"].([]any); ok {
+				for _, item := range arr {
+					if em, ok := item.(map[string]any); ok {
+						elements = append(elements, em)
+					}
+				}
+			}
+		}
+	}
+	// Prefer differential elements if present; also include snapshot elements if differential is absent.
+	appendElements("differential")
+	if len(elements) == 0 {
+		appendElements("snapshot")
+	}
+
+	seenConstraints := make(map[string]bool)
+	for _, elemMap := range elements {
+		elemPath := strings.TrimSpace(extractStringOrWrapped(elemMap["path"]))
+		if elemPath == "" {
+			elemPath = resTypeStr
+		}
+		sliceName := strings.TrimSpace(extractStringOrWrapped(elemMap["sliceName"]))
+
+		// 1. Evaluate custom FHIRPath constraints declared on this element
+		if constraints, ok := elemMap["constraint"].([]any); ok && e.fhirPathEval != nil {
+			for _, cItem := range constraints {
+				cMap, ok := cItem.(map[string]any)
+				if !ok {
+					continue
+				}
+				key := strings.TrimSpace(extractStringOrWrapped(cMap["key"]))
+				if ignoredBaseConstraintKeys[key] {
+					continue
+				}
+				expr := strings.TrimSpace(extractStringOrWrapped(cMap["expression"]))
+				if expr == "" {
+					continue
+				}
+				dedupKey := elemPath + "|" + key + "|" + expr
+				if seenConstraints[dedupKey] {
+					continue
+				}
+				seenConstraints[dedupKey] = true
+
+				human := strings.TrimSpace(extractStringOrWrapped(cMap["human"]))
+				if human == "" {
+					human = fmt.Sprintf("FHIRPath constraint %q (%s) failed", key, expr)
+				}
+				severity := strings.ToLower(strings.TrimSpace(extractStringOrWrapped(cMap["severity"])))
+
+				evalExpr := expr
+				if after, ok := strings.CutPrefix(elemPath, resTypeStr+"."); ok && after != "" {
+					// If expression isn't already rooted at resourceType or child path, scope or check existence
+					if !hasUSCoreRequiredElement(resMap, after) {
+						continue
+					}
+				}
+				results := e.fhirPathEval(resMap, evalExpr)
+				if !fhirPathResultTruthy(results) {
+					msg := fmt.Sprintf("Profile %s constraint %s failed: %s (expression: %s)", rawProf, key, human, expr)
+					if severity == "warning" {
+						outcome.AddWarning(CodeInvariant, msg, elemPath)
+					} else {
+						outcome.AddError(CodeInvariant, msg, elemPath)
+					}
+				}
+			}
+		}
+
+		// 2. Enforce direct child cardinality (min >= 1, max == "0") and fixed[x] values
+		relPath, isChild := strings.CutPrefix(elemPath, resTypeStr+".")
+		if !isChild || relPath == "" {
+			continue
+		}
+
+		minCard := extractMinCardinality(elemMap["min"])
+		maxCard := strings.TrimSpace(extractStringOrWrapped(elemMap["max"]))
+
+		// Handle extension slice requirements (e.g., Patient.extension:mySlice with fixedUri or type.profile)
+		if relPath == "extension" && sliceName != "" {
+			reqExtURL := extractExtensionSliceURL(elemMap)
+			if minCard >= 1 && reqExtURL != "" {
+				if !resourceHasExtensionURL(resMap, reqExtURL) {
+					outcome.AddError(CodeRequired,
+						fmt.Sprintf("Profile %q requires extension slice %q (%s) on %s", rawProf, sliceName, reqExtURL, resTypeStr),
+						elemPath)
+				}
+			}
+			continue
+		}
+
+		if sliceName != "" || strings.Contains(relPath, ".") {
+			continue
+		}
+
+		if minCard >= 1 && !hasUSCoreRequiredElement(resMap, relPath) {
+			exprField := strings.TrimSuffix(relPath, "[x]")
+			outcome.AddError(CodeRequired,
+				fmt.Sprintf("Profile %q requires element %q (min=%d) on %s", rawProf, relPath, minCard, resTypeStr),
+				resTypeStr+"."+exprField)
+		}
+
+		if maxCard == "0" && hasUSCoreRequiredElement(resMap, relPath) {
+			exprField := strings.TrimSuffix(relPath, "[x]")
+			outcome.AddError(CodeStructure,
+				fmt.Sprintf("Profile %q prohibits element %q (max=0) on %s", rawProf, relPath, resTypeStr),
+				resTypeStr+"."+exprField)
+		}
+
+		for _, fixedKey := range []string{"fixedCode", "fixedString", "fixedUri", "fixedCanonical"} {
+			if expectedFixed := strings.TrimSpace(extractStringOrWrapped(elemMap[fixedKey])); expectedFixed != "" {
+				if actualVal, exists := resMap[relPath]; exists && actualVal != nil {
+					actualStr := strings.TrimSpace(extractStringOrWrapped(actualVal))
+					if actualStr != expectedFixed {
+						outcome.AddError(CodeValue,
+							fmt.Sprintf("Profile %q requires %s=%q (got %q)", rawProf, elemPath, expectedFixed, actualStr),
+							elemPath)
+					}
+				}
+			}
+		}
+	}
+}
+
+func extractMinCardinality(v any) int {
+	switch val := v.(type) {
+	case float64:
+		return int(val)
+	case int:
+		return val
+	case int64:
+		return int(val)
+	case json.Number:
+		if n, err := val.Int64(); err == nil {
+			return int(n)
+		}
+	}
+	return 0
+}
+
+func fhirPathResultTruthy(results []any) bool {
+	if len(results) == 0 {
+		return false
+	}
+	if len(results) == 1 {
+		if b, ok := results[0].(bool); ok {
+			return b
+		}
+	}
+	return true
+}
+
+func extractExtensionSliceURL(elemMap map[string]any) string {
+	if u := strings.TrimSpace(extractStringOrWrapped(elemMap["fixedUri"])); u != "" {
+		return u
+	}
+	if types, ok := elemMap["type"].([]any); ok {
+		for _, tItem := range types {
+			tm, ok := tItem.(map[string]any)
+			if !ok {
+				continue
+			}
+			if profs, ok := tm["profile"].([]any); ok {
+				for _, p := range profs {
+					if u := strings.TrimSpace(extractStringOrWrapped(p)); u != "" {
+						return u
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func resourceHasExtensionURL(resMap map[string]any, targetURL string) bool {
+	exts, ok := resMap["extension"].([]any)
+	if !ok {
+		return false
+	}
+	for _, item := range exts {
+		em, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(extractStringOrWrapped(em["url"])) == targetURL {
+			return true
+		}
+	}
+	return false
 }

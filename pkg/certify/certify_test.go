@@ -175,6 +175,9 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 		path := r.URL.Path
 		q := r.URL.Query()
 		w.Header().Set("Content-Type", "application/fhir+json")
+		if pou := r.Header.Get("X-Purpose-Of-Use"); pou != "" {
+			w.Header().Set("X-TEFCA-Exchange-Purpose", pou)
+		}
 
 		// OAuth2 endpoints
 		switch path {
@@ -408,6 +411,28 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 
 		// Suite 5: Validation, Terminology, Subscriptions, CQM, CDS, IPS, Da Vinci, SDC, Public Health, AuditEvent
 		if strings.HasSuffix(path, "/$validate") {
+			if strings.HasSuffix(path, "/Observation/$validate") {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"invariant","diagnostics":"Observation violated invariant obs-6"}]}`))
+				return
+			}
+			if strings.HasSuffix(path, "/Patient/$validate") && r.Method == http.MethodPost {
+				bodyBytes, _ := io.ReadAll(r.Body)
+				bodyStr := string(bodyBytes)
+				if q.Get("profile") == "http://flint.fhir.org/StructureDefinition/cert-custom-patient-profile" {
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"invariant","diagnostics":"Profile constraint cp-1 failed and birthDate min=1"}]}`))
+					return
+				}
+				if strings.Contains(bodyStr, `"contact"`) {
+					w.WriteHeader(http.StatusOK)
+					_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"invariant","diagnostics":"Patient.contact violated invariant pat-1"}]}`))
+					return
+				}
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome"}`))
+				return
+			}
 			if r.Method == http.MethodPost {
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome"}`))
@@ -481,6 +506,14 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 		}
 		if strings.HasSuffix(path, "/cds-services") {
 			_, _ = w.Write([]byte(`{"services":[{"id":"s1"},{"id":"s2"},{"id":"s3"}]}`))
+			return
+		}
+		if strings.HasSuffix(path, "/$dsi-attributes") {
+			_, _ = w.Write([]byte(`{"serviceId":"flint-hypertension-care-gap","regulatoryCriterion":"45 CFR §170.315(b)(11)","validationSummary":{"sensitivity":0.988}}`))
+			return
+		}
+		if strings.HasSuffix(path, "/feedback") {
+			_, _ = w.Write([]byte(`{"status":"recorded","recordedCount":1}`))
 			return
 		}
 		if strings.Contains(path, "/cds-services/") {
@@ -815,6 +848,34 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			_, _ = w.Write([]byte(`{"resourceType":"TestScript","id":"cert-stored-ts-1"}`))
 			return
 		}
+		if r.Method == http.MethodPut && strings.HasSuffix(path, "/StructureDefinition/cert-custom-patient-profile") {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"resourceType":"StructureDefinition","id":"cert-custom-patient-profile"}`))
+			return
+		}
+		if strings.HasSuffix(path, "/Observation/$validate") {
+			_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"invariant","diagnostics":"Observation violated invariant obs-6"}]}`))
+			return
+		}
+		if strings.HasSuffix(path, "/Patient/$validate") && q.Get("profile") == "http://flint.fhir.org/StructureDefinition/cert-custom-patient-profile" {
+			_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"invariant","diagnostics":"Profile constraint cp-1 failed and birthDate min=1"}]}`))
+			return
+		}
+		if strings.HasSuffix(path, "/cds-services/flint-hypertension-care-gap/$dsi-attributes") {
+			_, _ = w.Write([]byte(`{"serviceId":"flint-hypertension-care-gap","regulatoryCriterion":"45 CFR §170.315(b)(11)","validationSummary":{"sensitivity":0.988}}`))
+			return
+		}
+		if strings.HasSuffix(path, "/cds-services/flint-hypertension-care-gap/feedback") {
+			_, _ = w.Write([]byte(`{"status":"recorded","recordedCount":1}`))
+			return
+		}
+		if strings.HasSuffix(path, "/AuditEvent/$verify-integrity") {
+			_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"verified","valueBoolean":true},{"name":"algorithm","valueString":"SHA-256-HASH-CHAIN"}]}`))
+			return
+		}
+		if pou := r.Header.Get("X-Purpose-Of-Use"); pou != "" {
+			w.Header().Set("X-TEFCA-Exchange-Purpose", pou)
+		}
 
 		// Search & Graph & MPI endpoints
 		if strings.HasSuffix(path, "/$graph") {
@@ -867,13 +928,13 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 78 {
-		t.Fatalf("expected all 78 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 82 {
+		t.Fatalf("expected all 82 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()
 	trTests, ok := tr["test"].([]map[string]any)
-	if !ok || len(trTests) != 8 {
-		t.Fatalf("expected 8 suites in TestReport.test, got %d", len(trTests))
+	if !ok || len(trTests) != 9 {
+		t.Fatalf("expected 9 suites in TestReport.test, got %d", len(trTests))
 	}
 }

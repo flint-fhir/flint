@@ -29,17 +29,29 @@ import (
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
-// syncSearchParameterOnWrite inspects a written SearchParameter resource and registers
-// (or unregisters when status=="retired") its custom search parameter definition at runtime.
+// syncSearchParameterOnWrite inspects a written SearchParameter or StructureDefinition resource
+// and registers (or unregisters when status=="retired") its definition at runtime.
 func (s *Server) syncSearchParameterOnWrite(resType, resID string, rawJSON []byte) {
-	if !strings.EqualFold(resType, "SearchParameter") || len(rawJSON) == 0 {
+	if len(rawJSON) == 0 {
 		return
 	}
-	var m map[string]any
-	if err := json.Unmarshal(rawJSON, &m); err != nil {
+	if strings.EqualFold(resType, "SearchParameter") {
+		var m map[string]any
+		if err := json.Unmarshal(rawJSON, &m); err != nil {
+			return
+		}
+		registerSearchParameterMap(resID, m)
 		return
 	}
-	registerSearchParameterMap(resID, m)
+	if strings.EqualFold(resType, "StructureDefinition") {
+		if eng, ok := s.validator.(*validation.Engine); ok && eng != nil {
+			var m map[string]any
+			if err := json.Unmarshal(rawJSON, &m); err != nil {
+				return
+			}
+			eng.RegisterStructureDefinition(m)
+		}
+	}
 }
 
 func (s *Server) syncSearchParameterOnDelete(resType, resID string) {

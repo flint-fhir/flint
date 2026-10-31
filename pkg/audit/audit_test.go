@@ -284,4 +284,43 @@ func TestClassifyAllInteractionsOutcomesAndMemoryQueryWave55(t *testing.T) {
 	// StoreRecorder constructor check
 	sr := audit.NewStoreRecorder(nil)
 	require.NotNil(t, sr)
+
+	// TEFCA PurposeOfUse validation and SHA-256 tamper-evident hash chain verification
+	for _, raw := range []string{"TREAT", "treatment", "PAYMT", "OPERATIONS", "IAS", "PUBHLTH", "HRESCH", "ETREAT", "COC", "COVERAGE", "GOV", "http://terminology.hl7.org/CodeSystem/v3-ActReason|TREAT"} {
+		code, disp, ok := audit.ValidatePurposeOfUse(raw)
+		assert.True(t, ok, "expected valid PurposeOfUse for %s", raw)
+		assert.NotEmpty(t, code)
+		assert.NotEmpty(t, disp)
+	}
+	_, _, badOK := audit.ValidatePurposeOfUse("INVALID-PURPOSE")
+	assert.False(t, badOK)
+
+	recWithPOU := postgres.AuditRecord{
+		TenantID:     "t1",
+		AuditID:      "a-pou-1",
+		Action:       audit.ActionRead,
+		SubtypeCode:  "read",
+		Outcome:      audit.OutcomeSuccess,
+		HTTPMethod:   http.MethodGet,
+		HTTPStatus:   http.StatusOK,
+		RequestURI:   "/fhir/r4/t1/Patient/p1",
+		AgentSubject: "practitioner-1",
+		EntityType:   "Patient",
+		EntityID:     "p1",
+		PurposeOfUse: "TREAT",
+	}
+	fhirMap := audit.ToFHIRResource(recWithPOU)
+	assert.NotNil(t, fhirMap["purposeOfEvent"])
+
+	emptyHead, emptyCount, emptyEntries, emptyValid := audit.VerifyAuditChain(nil)
+	assert.True(t, emptyValid)
+	assert.Equal(t, 0, emptyCount)
+	assert.Empty(t, emptyEntries)
+	assert.Len(t, emptyHead, 64)
+
+	chainHead, verifiedCount, chainEntries, valid := audit.VerifyAuditChain([]postgres.AuditRecord{recWithPOU, recs[0]})
+	assert.True(t, valid)
+	assert.Equal(t, 2, verifiedCount)
+	assert.Len(t, chainEntries, 2)
+	assert.Len(t, chainHead, 64)
 }

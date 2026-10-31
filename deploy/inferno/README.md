@@ -4,10 +4,10 @@ This directory provides a pre-configured Docker Compose stack for running the of
 
 ## 1. Quick Automated Certification (No Docker Required)
 
-Run Flint's built-in 26-check FHIR R4 / US Core v6.1.0 / SMART v2 / ONC `(g)(10)` Conformance & Certification Runner (`cmd/certify`):
+Run Flint's built-in 82-check FHIR R4 / US Core v6.1.0 & v7.0.0 / SMART v2 / ONC `(g)(10)` & HTI-1 `(b)(11)` Conformance & Certification Runner (`cmd/certify`):
 
 ```bash
-# Prints the full 26/26 Certification Scorecard and writes a FHIR R4 TestReport JSON
+# Prints the full 82/82 Certification Scorecard across 9 suites and writes a FHIR R4 TestReport JSON
 task certify
 ```
 

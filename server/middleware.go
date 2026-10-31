@@ -26,6 +26,7 @@ var auditActorKey = auditActorKeyType{}
 type auditActorHolder struct {
 	actorSubject string
 	patientID    string
+	purposeOfUse string
 }
 
 // authMiddleware enforces SMART on FHIR bearer token authentication,
@@ -932,9 +933,25 @@ func (w *auditResponseWriter) Write(b []byte) (int, error) {
 }
 
 // auditMiddleware records an immutable HL7 FHIR R4 / US Core AuditEvent for every
-// clinical interaction and security rejection (401/403).
+// clinical interaction and security rejection (401/403), and enforces TEFCA PurposeOfUse headers.
 func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawPurpose := strings.TrimSpace(r.Header.Get("X-Purpose-Of-Use"))
+		if rawPurpose == "" {
+			rawPurpose = strings.TrimSpace(r.Header.Get("X-TEFCA-Exchange-Purpose"))
+		}
+		var normalizedPurpose string
+		if rawPurpose != "" {
+			code, _, ok := audit.ValidatePurposeOfUse(rawPurpose)
+			if !ok {
+				writeOperationOutcome(w, http.StatusBadRequest, "code-invalid",
+					fmt.Sprintf("invalid TEFCA / HL7 PurposeOfUse header %q; expected one of TREAT, PAYMT, OPERATIONS, IAS, PUBHLTH, HRESCH, ETREAT, COC, COVERAGE, GOV", rawPurpose))
+				return
+			}
+			normalizedPurpose = code
+			w.Header().Set("X-TEFCA-Exchange-Purpose", normalizedPurpose)
+		}
+
 		if s.auditRecorder == nil {
 			next.ServeHTTP(w, r)
 			return
@@ -949,7 +966,7 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		holder := &auditActorHolder{}
+		holder := &auditActorHolder{purposeOfUse: normalizedPurpose}
 		ctx := context.WithValue(r.Context(), auditActorKey, holder)
 		arw := &auditResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 
@@ -962,9 +979,10 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 			arw.statusCode,
 		)
 
-		// Skip recording successful GET/HEAD reads/searches on AuditEvent itself to prevent
+		// Skip recording successful GET/HEAD/POST reads/searches/$verify-integrity on AuditEvent itself to prevent
 		// self-referential audit log inflation while still auditing 401/403 attempts.
-		if entityType == "AuditEvent" && (r.Method == http.MethodGet || r.Method == http.MethodHead) && arw.statusCode < 400 {
+		if entityType == "AuditEvent" && arw.statusCode < 400 &&
+			(r.Method == http.MethodGet || r.Method == http.MethodHead || subtypeCode == "verify-integrity") {
 			return
 		}
 
@@ -1027,6 +1045,7 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 			EntityType:    entityType,
 			EntityID:      entityID,
 			EntityVersion: entityVersion,
+			PurposeOfUse:  holder.purposeOfUse,
 		}
 
 		if err := s.auditRecorder.Record(r.Context(), rec); err != nil {
@@ -1291,6 +1310,12 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "StructureDefinition") && parts[4] == "$snapshot" {
 			return true
 		}
+		if strings.EqualFold(parts[3], "AuditEvent") && parts[4] == "$verify-integrity" {
+			return true
+		}
+		if parts[3] == "cds-services" {
+			return true
+		}
 		if strings.EqualFold(parts[3], "MessageHeader") && (parts[4] == "$process-message" || parts[4] == "$process-notification") {
 			return true
 		}
@@ -1460,6 +1485,9 @@ func isPlanApplyOp(parts []string) bool {
 			return true
 		}
 		if strings.EqualFold(parts[3], "StructureDefinition") && parts[5] == "$snapshot" {
+			return true
+		}
+		if parts[3] == "cds-services" {
 			return true
 		}
 		if strings.EqualFold(parts[3], "StructureMap") && parts[5] == "$transform" {
