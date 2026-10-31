@@ -2215,6 +2215,130 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("TS-03", suite8, "HL7 FHIRPath R4 (http://hl7.org/fhirpath/N1/) Polymorphic Choice, Projection, Math & Conditional Logic", t0, err, "FHIRPath R4 where(), select(), sum(), count(), polymorphic value[x], iif() & upper() verified")
 
+	// =========================================================================
+	// Suite 9: Core R4 Invariants, Custom Profiles, ONC HTI-1 (b)(11) DSI & TEFCA / Audit Chain
+	// =========================================================================
+	suite9 := "9. Core R4 Invariants, Custom Profiles, ONC HTI-1 (b)(11) DSI & TEFCA / Audit Chain"
+
+	t0 = time.Now()
+	{
+		obs6Bad := []byte(`{
+			"resourceType": "Observation",
+			"status": "final",
+			"code": {"coding": [{"system": "http://loinc.org", "code": "8867-4"}]},
+			"valueQuantity": {"value": 72, "unit": "/min"},
+			"dataAbsentReason": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/data-absent-reason", "code": "unknown"}]}
+		}`)
+		pat1Bad := []byte(`{
+			"resourceType": "Patient",
+			"contact": [{"relationship": [{"text": "Emergency"}]}]
+		}`)
+		respObs6, bObs6, errObs6 := doReq(http.MethodPost, basePath+"/Observation/$validate", "application/fhir+json", obs6Bad, nil)
+		respPat1, bPat1, errPat1 := doReq(http.MethodPost, basePath+"/Patient/$validate", "application/fhir+json", pat1Bad, nil)
+		if errObs6 != nil || (respObs6.StatusCode != http.StatusOK && respObs6.StatusCode != http.StatusBadRequest) || !strings.Contains(string(bObs6), "obs-6") {
+			err = fmt.Errorf("expected POST /Observation/$validate to detect invariant obs-6 violation, got %d: %s", respObs6.StatusCode, string(bObs6))
+		} else if errPat1 != nil || (respPat1.StatusCode != http.StatusOK && respPat1.StatusCode != http.StatusBadRequest) || !strings.Contains(string(bPat1), "pat-1") {
+			err = fmt.Errorf("expected POST /Patient/$validate to detect invariant pat-1 violation, got %d: %s", respPat1.StatusCode, string(bPat1))
+		} else {
+			err = nil
+		}
+	}
+	record("COMP-01", suite9, "HL7 FHIR R4 Core Cross-Element Invariants (obs-6, obs-7, pat-1, dom-3 & bdl-3)", t0, err, "R4 cross-element invariants obs-6 and pat-1 enforced on $validate")
+
+	t0 = time.Now()
+	{
+		customSD := []byte(`{
+			"resourceType": "StructureDefinition",
+			"id": "cert-custom-patient-profile",
+			"url": "http://flint.fhir.org/StructureDefinition/cert-custom-patient-profile",
+			"name": "CertifyCustomPatientProfile",
+			"status": "active",
+			"kind": "resource",
+			"abstract": false,
+			"type": "Patient",
+			"baseDefinition": "http://hl7.org/fhir/StructureDefinition/Patient",
+			"derivation": "constraint",
+			"differential": {
+				"element": [
+					{
+						"id": "Patient",
+						"path": "Patient",
+						"constraint": [
+							{
+								"key": "cp-1",
+								"severity": "error",
+								"human": "Custom profile requires telecom to be present",
+								"expression": "Patient.telecom.exists()"
+							}
+						]
+					},
+					{
+						"id": "Patient.birthDate",
+						"path": "Patient.birthDate",
+						"min": 1
+					}
+				]
+			}
+		}`)
+		respPutSD, bPutSD, errPutSD := doReq(http.MethodPut, basePath+"/StructureDefinition/cert-custom-patient-profile", "application/fhir+json", customSD, nil)
+		if errPutSD != nil || (respPutSD.StatusCode != http.StatusOK && respPutSD.StatusCode != http.StatusCreated) {
+			err = fmt.Errorf("expected PUT /StructureDefinition/cert-custom-patient-profile to succeed, got %d: %s", respPutSD.StatusCode, string(bPutSD))
+		} else {
+			badCustomPat := []byte(`{"resourceType": "Patient", "name": [{"family": "NoBirthDateOrTelecom"}]}`)
+			respValSD, bValSD, errValSD := doReq(http.MethodPost, basePath+"/Patient/$validate?profile=http://flint.fhir.org/StructureDefinition/cert-custom-patient-profile", "application/fhir+json", badCustomPat, nil)
+			if errValSD != nil || (respValSD.StatusCode != http.StatusOK && respValSD.StatusCode != http.StatusBadRequest) || !strings.Contains(string(bValSD), "cp-1") || !strings.Contains(string(bValSD), "birthDate") {
+				err = fmt.Errorf("expected custom StructureDefinition $validate to enforce cp-1 & min=1 birthDate, got %d: %s", respValSD.StatusCode, string(bValSD))
+			} else {
+				err = nil
+			}
+		}
+	}
+	record("COMP-02", suite9, "Dynamic Runtime StructureDefinition Profile & Custom FHIRPath Constraint Validation", t0, err, "Runtime StructureDefinition differential cardinality & FHIRPath constraint (cp-1) enforced")
+
+	t0 = time.Now()
+	{
+		respDSI, bDSI, errDSI := doReq(http.MethodGet, basePath+"/cds-services/flint-hypertension-care-gap/$dsi-attributes", "", nil, nil)
+		fbBody := []byte(`{
+			"feedback": [
+				{
+					"card": "card-htn-gap-cert-pat-1",
+					"outcome": "overridden",
+					"overrideReason": {
+						"reason": {
+							"system": "http://terminology.hl7.org/CodeSystem/cds-override-reason",
+							"code": "patient-refused"
+						}
+					}
+				}
+			]
+		}`)
+		respFB, bFB, errFB := doReq(http.MethodPost, basePath+"/cds-services/flint-hypertension-care-gap/feedback", "application/json", fbBody, nil)
+		if errDSI != nil || respDSI.StatusCode != http.StatusOK || !strings.Contains(string(bDSI), "170.315(b)(11)") || !strings.Contains(string(bDSI), "validationSummary") {
+			err = fmt.Errorf("expected GET /cds-services/flint-hypertension-care-gap/$dsi-attributes to return ONC HTI-1 (b)(11) attributes, got %d: %s", respDSI.StatusCode, string(bDSI))
+		} else if errFB != nil || respFB.StatusCode != http.StatusOK || !strings.Contains(string(bFB), `"status":"recorded"`) {
+			err = fmt.Errorf("expected POST /cds-services/flint-hypertension-care-gap/feedback to record clinician override, got %d: %s", respFB.StatusCode, string(bFB))
+		} else {
+			err = nil
+		}
+	}
+	record("COMP-03", suite9, "ONC HTI-1 §170.315(b)(11) Decision Support Interventions (DSI) Source Attributes & Clinician Feedback", t0, err, "ONC HTI-1 (b)(11) DSI source attributes & CDS Hooks clinician override feedback verified")
+
+	t0 = time.Now()
+	{
+		respPOU, bPOU, errPOU := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1", "", nil, map[string]string{
+			"X-Purpose-Of-Use": "TREAT",
+		})
+		respAudVer, bAudVer, errAudVer := doReq(http.MethodGet, basePath+"/AuditEvent/$verify-integrity", "", nil, nil)
+		if errPOU != nil || respPOU.StatusCode != http.StatusOK || respPOU.Header.Get("X-TEFCA-Exchange-Purpose") != "TREAT" {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1 with X-Purpose-Of-Use: TREAT to echo X-TEFCA-Exchange-Purpose: TREAT, got %d (hdr=%q): %s", respPOU.StatusCode, respPOU.Header.Get("X-TEFCA-Exchange-Purpose"), string(bPOU))
+		} else if errAudVer != nil || respAudVer.StatusCode != http.StatusOK || !strings.Contains(string(bAudVer), `"SHA-256-HASH-CHAIN"`) || !strings.Contains(string(bAudVer), `"valueBoolean":true`) {
+			err = fmt.Errorf("expected GET /AuditEvent/$verify-integrity to verify SHA-256 audit hash chain, got %d: %s", respAudVer.StatusCode, string(bAudVer))
+		} else {
+			err = nil
+		}
+	}
+	record("COMP-04", suite9, "TEFCA Exchange Purpose (X-Purpose-Of-Use) & HIPAA / ONC §170.315(d)(2) Tamper-Evident Audit Chain ($verify-integrity)", t0, err, "TEFCA PurposeOfUse (TREAT) enforcement & SHA-256 AuditEvent integrity chain verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

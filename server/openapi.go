@@ -1654,6 +1654,50 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/AuditEvent/$verify-integrity": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"AuditEvent"},
+				"summary":     "Verify HIPAA 45 CFR §164.312(b) / ONC §170.315(d)(2) SHA-256 tamper-evident AuditEvent hash chain ($verify-integrity)",
+				"operationId": "auditEventVerifyIntegrityGet",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters containing SHA-256 hash chain verification status and head digest"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"AuditEvent"},
+				"summary":     "Verify HIPAA 45 CFR §164.312(b) / ONC §170.315(d)(2) SHA-256 tamper-evident AuditEvent hash chain ($verify-integrity, POST)",
+				"operationId": "auditEventVerifyIntegrityPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters containing SHA-256 hash chain verification status and head digest"},
+				},
+			},
+		},
+		"/cds-services/{serviceId}/$dsi-attributes": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"CDS Hooks"},
+				"summary":     "Retrieve ONC HTI-1 45 CFR §170.315(b)(11) Decision Support Intervention (DSI) source attributes",
+				"operationId": "cdsServiceDSIAttributesGet",
+				"parameters": []map[string]any{
+					{"name": "serviceId", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "ONC HTI-1 (b)(11) DSI source attribute metadata"},
+				},
+			},
+		},
+		"/cds-services/{serviceId}/feedback": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"CDS Hooks"},
+				"summary":     "Record HL7 CDS Hooks v2.0 & ONC HTI-1 §170.315(b)(11) clinician acceptance or override reason feedback",
+				"operationId": "cdsServiceFeedbackPost",
+				"parameters": []map[string]any{
+					{"name": "serviceId", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Feedback recorded confirmation"},
+				},
+			},
+		},
 		"/TestScript/$evaluate": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"TestScript"},

@@ -3,6 +3,7 @@ package validation_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/flint-fhir/flint/pkg/validation"
@@ -443,6 +444,154 @@ func TestValidationEngine_StrictUnknownAndTypes(t *testing.T) {
 		)
 		if mismatch.IsValid() || len(mismatch.Issues) < 2 {
 			t.Fatalf("expected profile resourceType mismatch and mode=update missing id to fail, got %+v", mismatch.Issues)
+		}
+	})
+
+	t.Run("R4 Core Invariants and Custom StructureDefinition Profile Validation", func(t *testing.T) {
+		strictEngine.SetFHIRPathEvaluator(func(root map[string]any, expr string) []any {
+			if strings.Contains(expr, "warn") {
+				return []any{false}
+			}
+			if _, ok := root["telecom"]; ok {
+				return []any{true}
+			}
+			return nil
+		})
+
+		strictEngine.RegisterStructureDefinition(map[string]any{
+			"resourceType": "StructureDefinition",
+			"id":           "custom-pat-sd",
+			"url":          "http://example.org/fhir/StructureDefinition/custom-pat-sd",
+			"version":      "1.0.0",
+			"type":         "Patient",
+			"snapshot": map[string]any{
+				"element": []any{
+					map[string]any{
+						"path": "Patient",
+						"constraint": []any{
+							map[string]any{
+								"key":        "ele-1",
+								"severity":   "error",
+								"expression": "hasValue()",
+							},
+							map[string]any{
+								"key":        "cp-err",
+								"severity":   "error",
+								"human":      "telecom required",
+								"expression": "Patient.telecom.exists()",
+							},
+							map[string]any{
+								"key":        "cp-warn",
+								"severity":   "warning",
+								"expression": "warn",
+							},
+						},
+					},
+					map[string]any{
+						"path": "Patient.birthDate",
+						"min":  float64(1),
+						"constraint": []any{
+							map[string]any{
+								"key":        "bd-1",
+								"severity":   "error",
+								"expression": "Patient.telecom.exists()",
+							},
+						},
+					},
+					map[string]any{
+						"path": "Patient.photo",
+						"max":  "0",
+					},
+					map[string]any{
+						"path":      "Patient.gender",
+						"fixedCode": "female",
+					},
+					map[string]any{
+						"path":      "Patient.extension",
+						"sliceName": "reqExt",
+						"min":       1,
+						"type": []any{
+							map[string]any{
+								"code":    "Extension",
+								"profile": []any{"http://example.org/fhir/StructureDefinition/req-ext"},
+							},
+						},
+					},
+				},
+			},
+		})
+
+		// Wrong resourceType against custom SD
+		wrongType := strictEngine.ValidateJSONWithProfiles(
+			"Observation",
+			[]byte(`{"resourceType":"Observation","status":"final","code":{"coding":[{"code":"8867-4"}]}}`),
+			[]string{"http://example.org/fhir/StructureDefinition/custom-pat-sd"},
+			"",
+		)
+		if wrongType.IsValid() {
+			t.Fatal("expected wrong resourceType against custom Patient SD to fail")
+		}
+
+		// Failing custom Patient SD (missing birthDate, prohibited photo, wrong gender, missing extension slice, failing cp-err)
+		badCustomPat := strictEngine.ValidateJSONWithProfiles(
+			"Patient",
+			[]byte(`{
+				"resourceType": "Patient",
+				"meta": {"profile": ["http://example.org/fhir/StructureDefinition/custom-pat-sd|1.0.0"]},
+				"gender": "male",
+				"photo": [{"contentType": "image/png"}],
+				"contact": [{"relationship": [{"text": "Emergency"}]}],
+				"contained": [{"resourceType": "Organization", "id": "unreferenced-org"}]
+			}`),
+			[]string{"http://example.org/fhir/StructureDefinition/custom-pat-sd"},
+			"",
+		)
+		if badCustomPat.IsValid() || len(badCustomPat.Issues) < 5 {
+			t.Fatalf("expected badCustomPat to fail multiple checks, got %+v", badCustomPat.Issues)
+		}
+
+		// Passing custom Patient SD
+		goodCustomPat := strictEngine.ValidateJSON(
+			"Patient",
+			[]byte(`{
+				"resourceType": "Patient",
+				"meta": {"profile": ["http://example.org/fhir/StructureDefinition/custom-pat-sd"]},
+				"extension": [{"url": "http://example.org/fhir/StructureDefinition/req-ext", "valueBoolean": true}],
+				"gender": "female",
+				"birthDate": "1990-01-01",
+				"telecom": [{"system": "phone", "value": "555-0100"}],
+				"managingOrganization": {"reference": "#ref-org"},
+				"contained": [{"resourceType": "Organization", "id": "ref-org", "name": "Org"}]
+			}`),
+		)
+		if !goodCustomPat.IsValid() {
+			t.Fatalf("expected goodCustomPat to be valid (warnings allowed), got %+v", goodCustomPat.Issues)
+		}
+
+		// obs-6, obs-7, and bdl-3 invariants
+		badObs := strictEngine.ValidateJSON("Observation", []byte(`{
+			"resourceType": "Observation",
+			"status": "final",
+			"code": {"coding": [{"system": "http://loinc.org", "code": "8480-6"}]},
+			"valueQuantity": {"value": 120},
+			"dataAbsentReason": {"coding": [{"code": "unknown"}]},
+			"component": [{
+				"code": {"coding": [{"system": "http://loinc.org", "code": "8480-6"}]},
+				"valueQuantity": {"value": 120},
+				"dataAbsentReason": {"coding": [{"code": "unknown"}]}
+			}]
+		}`))
+		if badObs.IsValid() || len(badObs.Issues) < 3 {
+			t.Fatalf("expected obs-6 and obs-7 violations on badObs, got %+v", badObs.Issues)
+		}
+
+		badBundle := strictEngine.ValidateJSON("Bundle", []byte(`{
+			"resourceType": "Bundle",
+			"type": "collection",
+			"entry": [{"request": {"method": "POST", "url": "Patient"}}]
+		}`))
+		if badBundle.IsValid() {
+			t.Fatal("expected bdl-3 violation on collection Bundle with entry.request")
 		}
 	})
 }

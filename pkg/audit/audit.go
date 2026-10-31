@@ -4,6 +4,8 @@ package audit
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -300,22 +302,34 @@ func ToFHIRResource(rec postgres.AuditRecord) map[string]any {
 		}
 	}
 
+	details := []map[string]any{
+		{
+			"type":        "http-method",
+			"valueString": rec.HTTPMethod,
+		},
+		{
+			"type":        "http-status",
+			"valueString": strconv.Itoa(rec.HTTPStatus),
+		},
+		{
+			"type":        "request-uri",
+			"valueString": rec.RequestURI,
+		},
+		{
+			"type":        "audit-sha256-digest",
+			"valueString": ComputeRecordDigest(rec),
+		},
+	}
+	if rec.PurposeOfUse != "" {
+		details = append(details, map[string]any{
+			"type":        "tefca-purpose-of-use",
+			"valueString": rec.PurposeOfUse,
+		})
+	}
+
 	entities := []map[string]any{}
 	entity := map[string]any{
-		"detail": []map[string]any{
-			{
-				"type":        "http-method",
-				"valueString": rec.HTTPMethod,
-			},
-			{
-				"type":        "http-status",
-				"valueString": strconv.Itoa(rec.HTTPStatus),
-			},
-			{
-				"type":        "request-uri",
-				"valueString": rec.RequestURI,
-			},
-		},
+		"detail": details,
 	}
 	if rec.EntityType != "" {
 		ref := rec.EntityType
@@ -344,7 +358,7 @@ func ToFHIRResource(rec postgres.AuditRecord) map[string]any {
 		})
 	}
 
-	return map[string]any{
+	res := map[string]any{
 		"resourceType": "AuditEvent",
 		"id":           rec.AuditID,
 		"type": map[string]any{
@@ -370,4 +384,114 @@ func ToFHIRResource(rec postgres.AuditRecord) map[string]any {
 		},
 		"entity": entities,
 	}
+	if rec.PurposeOfUse != "" {
+		_, disp, _ := ValidatePurposeOfUse(rec.PurposeOfUse)
+		if disp == "" {
+			disp = rec.PurposeOfUse
+		}
+		res["purposeOfEvent"] = []map[string]any{
+			{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/v3-ActReason",
+						"code":    rec.PurposeOfUse,
+						"display": disp,
+					},
+				},
+			},
+		}
+	}
+	return res
+}
+
+// ValidatePurposeOfUse validates and normalizes a TEFCA / HL7 v3-ActReason PurposeOfUse code.
+func ValidatePurposeOfUse(raw string) (code, display string, ok bool) {
+	cleaned := strings.ToUpper(strings.TrimSpace(raw))
+	if idx := strings.LastIndexByte(cleaned, '|'); idx != -1 {
+		cleaned = strings.TrimSpace(cleaned[idx+1:])
+	}
+	switch cleaned {
+	case "TREAT", "TREATMENT":
+		return "TREAT", "Treatment", true
+	case "PAYMT", "PAYMENT", "HPAYMT":
+		return "PAYMT", "Healthcare Payment", true
+	case "OPERATIONS", "HOPERAT":
+		return "OPERATIONS", "Healthcare Operations", true
+	case "IAS", "PATRQT", "INDIVIDUAL-ACCESS":
+		return "IAS", "Individual Access Services", true
+	case "PUBHLTH", "PUBLIC-HEALTH":
+		return "PUBHLTH", "Public Health", true
+	case "HRESCH", "RESEARCH":
+		return "HRESCH", "Healthcare Research", true
+	case "ETREAT", "EMERGENCY":
+		return "ETREAT", "Emergency Treatment", true
+	case "COC":
+		return "COC", "Coordination of Care", true
+	case "COVERAGE", "COVAUTH":
+		return "COVERAGE", "Coverage Under Policy or Program", true
+	case "GOV":
+		return "GOV", "Government Program Determination", true
+	default:
+		return "", "", false
+	}
+}
+
+// ComputeRecordDigest computes the deterministic SHA-256 hex digest of an AuditRecord
+// per HIPAA 45 CFR §164.312(b) and ONC §170.315(d)(2)/(d)(3) tamper-evident audit requirements.
+func ComputeRecordDigest(rec postgres.AuditRecord) string {
+	canonical := strings.Join([]string{
+		rec.TenantID,
+		rec.AuditID,
+		rec.Recorded.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano),
+		rec.Action,
+		rec.SubtypeCode,
+		rec.Outcome,
+		rec.HTTPMethod,
+		strconv.Itoa(rec.HTTPStatus),
+		rec.RequestURI,
+		rec.AgentSubject,
+		rec.AgentPatient,
+		rec.EntityType,
+		rec.EntityID,
+		rec.EntityVersion,
+		rec.PurposeOfUse,
+	}, "|")
+	sum := sha256.Sum256([]byte(canonical))
+	return hex.EncodeToString(sum[:])
+}
+
+// ComputeAuditChainDigest links a record's SHA-256 digest with the previous chain digest.
+func ComputeAuditChainDigest(prevHash string, rec postgres.AuditRecord) string {
+	recDigest := ComputeRecordDigest(rec)
+	sum := sha256.Sum256([]byte(prevHash + "|" + recDigest))
+	return hex.EncodeToString(sum[:])
+}
+
+// VerifyAuditChain computes and verifies the chronological SHA-256 hash chain over a slice
+// of AuditRecords (which may be passed newest-first as returned by Query, and are ordered
+// oldest-first before chaining).
+func VerifyAuditChain(records []postgres.AuditRecord) (chainHead string, verifiedCount int, entries []map[string]any, valid bool) {
+	prevHash := strings.Repeat("0", 64)
+	if len(records) == 0 {
+		return prevHash, 0, nil, true
+	}
+	entries = make([]map[string]any, 0, len(records))
+	// Query returns newest-first; chain oldest-first for deterministic chronological linkage.
+	for i := len(records) - 1; i >= 0; i-- {
+		rec := records[i]
+		recDigest := ComputeRecordDigest(rec)
+		chainHash := ComputeAuditChainDigest(prevHash, rec)
+		entries = append(entries, map[string]any{
+			"auditId":      rec.AuditID,
+			"recorded":     rec.Recorded.UTC().Format(time.RFC3339),
+			"action":       rec.Action,
+			"subtype":      rec.SubtypeCode,
+			"recordDigest": recDigest,
+			"prevChain":    prevHash,
+			"chainDigest":  chainHash,
+		})
+		prevHash = chainHash
+		verifiedCount++
+	}
+	return prevHash, verifiedCount, entries, true
 }
