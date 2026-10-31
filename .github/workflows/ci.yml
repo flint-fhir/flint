@@ -30,10 +30,30 @@ jobs:
         with:
           go-version: '1.26'
 
-      - name: Test
+      - name: Test & Coverage Gate (>= 75% per package)
         env:
           FLINT_TEST_POSTGRES_DSN: "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
-        run: go test -v -race ./...
+        run: |
+          go test -v -race -cover ./... | tee test-coverage.log
+          awk '
+            /^ok[[:space:]]+github\.com\/flint-fhir\/flint\// && $2 !~ /\/gen\// {
+              pkg = $2
+              for (i = 1; i <= NF; i++) {
+                if ($i == "coverage:") {
+                  pct = $(i+1)
+                  sub(/%/, "", pct)
+                  printf "Package %-48s %6.1f%%\n", pkg, pct + 0
+                  if (pct + 0 < 75.0) {
+                    printf "::error::Package %s coverage %.1f%% is below the 75.0%% threshold\n", pkg, pct + 0
+                    failed = 1
+                  }
+                }
+              }
+            }
+            END {
+              if (failed) exit 1
+            }
+          ' test-coverage.log
 
       - name: Vet
         run: go vet ./...

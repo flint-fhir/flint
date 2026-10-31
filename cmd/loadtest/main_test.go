@@ -17,6 +17,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/flint-fhir/flint/ingest/workflow"
 )
 
 type loadStubDriver struct{}
@@ -179,4 +181,58 @@ func TestExecuteLoadTest_HTTPStoreAndUnknownTarget(t *testing.T) {
 		Duration: 10 * time.Millisecond,
 	})
 	require.ErrorContains(t, err, "unknown target mode")
+
+	// 5. Store target with unknown driver & unthrottled Rate == 0
+	_, _, err = executeLoadTest(t.Context(), Config{
+		Target:   "store",
+		DBDriver: "nonexistent_sql_driver",
+		Duration: 10 * time.Millisecond,
+	})
+	require.NoError(t, err)
+
+	m4, _, err := executeLoadTest(t.Context(), Config{
+		Target:     "store",
+		DBDriver:   "loadtest_stub_ok",
+		PGDSN:      "stub",
+		Rate:       0,
+		Duration:   30 * time.Millisecond,
+		Workers:    2,
+		BundleSize: 2,
+		Tenant:     "loadtest",
+	})
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, m4.totalBundles.Load(), int64(1))
+
+	// 6. Temporal target with mock WorkflowRunner (success + error, throttled + unthrottled)
+	var wfCall atomic.Int64
+	m5, _, err := executeLoadTest(t.Context(), Config{
+		Target:     "temporal",
+		Rate:       100,
+		Duration:   60 * time.Millisecond,
+		Workers:    2,
+		BundleSize: 1,
+		Tenant:     "loadtest",
+		WorkflowRunner: func(_ context.Context, _ string, _ workflow.IngestInput) error {
+			if wfCall.Add(1)%3 == 0 {
+				return errors.New("simulated workflow error")
+			}
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, m5.totalBundles.Load(), int64(1))
+
+	m6, _, err := executeLoadTest(t.Context(), Config{
+		Target:     "temporal",
+		Rate:       0,
+		Duration:   30 * time.Millisecond,
+		Workers:    2,
+		BundleSize: 1,
+		Tenant:     "loadtest",
+		WorkflowRunner: func(_ context.Context, _ string, _ workflow.IngestInput) error {
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, m6.totalBundles.Load(), int64(1))
 }

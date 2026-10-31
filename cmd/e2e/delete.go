@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 
 	"github.com/flint-fhir/flint/automq"
 )
@@ -18,24 +17,14 @@ func buildDeleteCDCMessage() automq.Message {
 	}
 }
 
-func runDelete() {
-	ctx := context.Background()
+func runDeleteWithDeps(ctx context.Context, deps e2eDeps) error {
 	brokers := []string{envOrDefault("AUTOMQ_BROKERS", "localhost:9092")}
-
-	p, err := automq.NewProducer(automq.Config{
-		Brokers:     brokers,
-		TopicPrefix: "fhir.",
-	})
-	if err != nil {
-		log.Fatalf("producer: %v", err)
-	}
-	defer p.Close()
-
 	msg := buildDeleteCDCMessage()
 
 	fmt.Println("🚀 Publishing delete CDC event (op=D) for Patient e2e-wf-003...")
-	if err := p.Publish(ctx, []automq.Message{msg}); err != nil {
-		log.Fatalf("publish: %v", err)
+	if err := deps.publishCDC(ctx, brokers, "", []automq.Message{msg}); err != nil {
+		return fmt.Errorf("publish: %w", err)
 	}
 	fmt.Println("✅ Delete CDC event published successfully!")
+	return nil
 }

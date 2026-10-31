@@ -105,6 +105,49 @@ func TestSeedRun_UnitHTTP(t *testing.T) {
 	assert.Contains(t, buf.String(), "Patient/pat-alice-001/$everything")
 }
 
+func TestParseSeedConfigAndErrorBranches(t *testing.T) {
+	cfg, err := parseSeedConfig(nil, func(string) string { return "" })
+	require.NoError(t, err)
+	assert.Equal(t, "http://localhost:8080", cfg.BaseURL)
+	assert.Equal(t, "demo", cfg.Tenant)
+
+	cfgEnv, err := parseSeedConfig([]string{"-url", "http://example.org", "-tenant", "t1", "-token", "tok1"}, func(k string) string {
+		if k == "FLINT_URL" {
+			return "http://env.example.org"
+		}
+		return "env-val"
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "http://example.org", cfgEnv.BaseURL)
+	assert.Equal(t, "t1", cfgEnv.Tenant)
+	assert.Equal(t, "tok1", cfgEnv.BearerToken)
+
+	_, err = parseSeedConfig([]string{"-unknown-flag"}, func(string) string { return "" })
+	require.Error(t, err)
+
+	// Non-200 HTTP response
+	ts500 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal failure"))
+	}))
+	defer ts500.Close()
+	err = Run(t.Context(), Config{BaseURL: ts500.URL})
+	require.ErrorContains(t, err, "returned HTTP 500")
+
+	// Invalid JSON in 200 response
+	tsBadJSON := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{not-json"))
+	}))
+	defer tsBadJSON.Close()
+	err = Run(t.Context(), Config{BaseURL: tsBadJSON.URL})
+	require.ErrorContains(t, err, "decode transaction-response")
+
+	// Invalid URL & unreachable endpoint
+	err = Run(t.Context(), Config{BaseURL: "://bad-url"})
+	require.Error(t, err)
+}
+
 func TestSeedRun_EndToEndIntegration(t *testing.T) {
 	dsn := os.Getenv("FLINT_TEST_POSTGRES_DSN")
 	if dsn == "" {

@@ -17,8 +17,92 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 	"go.temporal.io/sdk/client"
 
+	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/ingest/workflow"
 )
+
+type e2eDeps struct {
+	execWorkflow func(ctx context.Context, input workflow.IngestInput) (string, string, error)
+	pollMessages func(ctx context.Context, brokers, topic string, maxRecords int) ([]*kgo.Record, error)
+	publishCDC   func(ctx context.Context, brokers []string, schemaRegURL string, msgs []automq.Message) error
+	findMessage  func(ctx context.Context, brokers []string, topic, key string) (int32, int64, error)
+	runCmd       func(name string, args ...string) ([]byte, error)
+	sleep        func(d time.Duration)
+}
+
+func defaultE2EDeps() e2eDeps {
+	return e2eDeps{
+		execWorkflow: func(ctx context.Context, input workflow.IngestInput) (string, string, error) {
+			c, err := client.Dial(client.Options{HostPort: envOrDefault("TEMPORAL_ADDRESS", "localhost:7233")})
+			if err != nil {
+				return "", "", fmt.Errorf("temporal: %w", err)
+			}
+			defer c.Close()
+			we, err := c.ExecuteWorkflow(ctx, client.StartWorkflowOptions{
+				ID:        input.BundleID,
+				TaskQueue: workflow.TaskQueue,
+			}, workflow.IngestFHIRBundle, input)
+			if err != nil {
+				return "", "", fmt.Errorf("start workflow: %w", err)
+			}
+			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			if err := we.Get(waitCtx, nil); err != nil {
+				return we.GetID(), we.GetRunID(), fmt.Errorf("workflow failed: %w", err)
+			}
+			return we.GetID(), we.GetRunID(), nil
+		},
+		pollMessages: func(ctx context.Context, brokers, topic string, maxRecords int) ([]*kgo.Record, error) {
+			cl, err := kgo.NewClient(
+				kgo.SeedBrokers(brokers),
+				kgo.ConsumeTopics(topic),
+				kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
+			)
+			if err != nil {
+				return nil, fmt.Errorf("kafka: %w", err)
+			}
+			defer cl.Close()
+			fetchCtx, fetchCancel := context.WithTimeout(ctx, 10*time.Second)
+			defer fetchCancel()
+			var out []*kgo.Record
+			for {
+				fetches := cl.PollFetches(fetchCtx)
+				if fetchCtx.Err() != nil {
+					break
+				}
+				fetches.EachRecord(func(r *kgo.Record) {
+					out = append(out, r)
+				})
+				if len(out) >= maxRecords {
+					break
+				}
+			}
+			return out, nil
+		},
+		publishCDC: func(ctx context.Context, brokers []string, schemaRegURL string, msgs []automq.Message) error {
+			cfg := automq.Config{
+				Brokers:           brokers,
+				TopicPrefix:       "fhir.",
+				SchemaRegistryURL: schemaRegURL,
+			}
+			if schemaRegURL != "" {
+				cfg.DefaultSchemaID = 1
+			}
+			p, err := automq.NewProducer(cfg)
+			if err != nil {
+				return fmt.Errorf("producer: %w", err)
+			}
+			defer p.Close()
+			return p.Publish(ctx, msgs)
+		},
+		findMessage: func(ctx context.Context, brokers []string, topic, key string) (int32, int64, error) {
+			p, off := findMessageInTopic(ctx, brokers, topic, key)
+			return p, off, nil
+		},
+		runCmd: execCombinedOutput,
+		sleep:  time.Sleep,
+	}
+}
 
 func selectE2EMode(args []string) string {
 	if len(args) > 1 {
@@ -67,83 +151,48 @@ func buildPipelineIngestInput(bundleID string) workflow.IngestInput {
 	}
 }
 
-func main() {
-	switch selectE2EMode(os.Args) {
+func runE2EMode(ctx context.Context, args []string, deps e2eDeps) error {
+	switch selectE2EMode(args) {
 	case "delete":
-		runDelete()
+		return runDeleteWithDeps(ctx, deps)
 	case "update":
-		runUpdate()
+		return runUpdateWithDeps(ctx, deps)
 	case "recovery":
-		runRecovery()
+		return runRecoveryWithDeps(ctx, deps)
 	default:
-		runPipeline()
+		return runPipelineWithDeps(ctx, deps)
 	}
 }
 
-func runPipeline() {
-	ctx := context.Background()
-
-	// Connect to Temporal
-	c, err := client.Dial(client.Options{HostPort: envOrDefault("TEMPORAL_ADDRESS", "localhost:7233")})
-	if err != nil {
-		log.Fatalf("temporal: %v", err)
+func main() {
+	if err := runE2EMode(context.Background(), os.Args, defaultE2EDeps()); err != nil {
+		log.Fatalf("%v", err)
 	}
-	defer c.Close()
+}
 
+func runPipelineWithDeps(ctx context.Context, deps e2eDeps) error {
 	input := buildPipelineIngestInput(fmt.Sprintf("e2e-bundle-%d", time.Now().Unix()))
 
-	// Start the workflow
 	fmt.Println("🚀 Starting IngestFHIRBundle workflow...")
-	workflowOpts := client.StartWorkflowOptions{
-		ID:        input.BundleID,
-		TaskQueue: workflow.TaskQueue,
-	}
-
-	we, err := c.ExecuteWorkflow(ctx, workflowOpts, workflow.IngestFHIRBundle, input)
+	wfID, runID, err := deps.execWorkflow(ctx, input)
 	if err != nil {
-		log.Fatalf("start workflow: %v", err)
+		return err
 	}
-	fmt.Printf("   Workflow ID: %s\n   Run ID:      %s\n", we.GetID(), we.GetRunID())
-
-	// Wait for completion (timeout 30s)
-	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	err = we.Get(waitCtx, nil)
-	if err != nil {
-		log.Fatalf("❌ Workflow failed: %v", err)
-	}
+	fmt.Printf("   Workflow ID: %s\n   Run ID:      %s\n", wfID, runID)
 	fmt.Println("✅ Workflow completed successfully")
 
 	// Verify AutoMQ received messages
 	fmt.Println("\n📡 Checking AutoMQ (fhir.Patient topic)...")
 	brokers := envOrDefault("AUTOMQ_BROKERS", "localhost:9092")
-	cl, err := kgo.NewClient(
-		kgo.SeedBrokers(brokers),
-		kgo.ConsumeTopics("fhir.Patient"),
-		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
-	)
+	records, err := deps.pollMessages(ctx, brokers, "fhir.Patient", 3)
 	if err != nil {
-		log.Fatalf("kafka: %v", err)
+		return err
 	}
-	defer cl.Close()
 
-	fetchCtx, fetchCancel := context.WithTimeout(ctx, 10*time.Second)
-	defer fetchCancel()
-
-	var msgCount int
-	for {
-		fetches := cl.PollFetches(fetchCtx)
-		if fetchCtx.Err() != nil {
-			break
-		}
-		fetches.EachRecord(func(r *kgo.Record) {
-			msgCount++
-			fmt.Printf("   [%d] key=%s partition=%d offset=%d headers=%v\n",
-				msgCount, string(r.Key), r.Partition, r.Offset, headerMap(r.Headers))
-		})
-		if msgCount >= 3 {
-			break
-		}
+	msgCount := len(records)
+	for i, r := range records {
+		fmt.Printf("   [%d] key=%s partition=%d offset=%d headers=%v\n",
+			i+1, string(r.Key), r.Partition, r.Offset, headerMap(r.Headers))
 	}
 
 	if msgCount >= 3 {
@@ -155,6 +204,7 @@ func runPipeline() {
 	}
 
 	fmt.Println("\n🎉 E2E pipeline test complete!")
+	return nil
 }
 
 func headerMap(headers []kgo.RecordHeader) map[string]string {
