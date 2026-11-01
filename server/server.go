@@ -338,8 +338,12 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$certify", s.handleCertify)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$sync-analytics", s.handleSyncAnalytics)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$sync-analytics", s.handleSyncAnalytics)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$run", s.handleViewDefinitionRun)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$run", s.handleViewDefinitionRun)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$sql", s.handleViewDefinitionSQL)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$sql", s.handleViewDefinitionSQL)
 
-	// HL7 SQL-on-FHIR v2 ViewDefinition CRUD, $run, and $export endpoints
+	// HL7 SQL-on-FHIR v2 ViewDefinition CRUD, $run, $export, and Zero-JSON $sql endpoints
 	mux.HandleFunc("GET /fhir/r4/{tenant}/ViewDefinition/$run", s.handleViewDefinitionRun)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/ViewDefinition/$run", s.handleViewDefinitionRun)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/ViewDefinition/{id}/$run", s.handleViewDefinitionRun)
@@ -348,6 +352,10 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}/ViewDefinition/$export", s.handleViewDefinitionExport)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/ViewDefinition/{id}/$export", s.handleViewDefinitionExport)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/ViewDefinition/{id}/$export", s.handleViewDefinitionExport)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/ViewDefinition/$sql", s.handleViewDefinitionSQL)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/ViewDefinition/$sql", s.handleViewDefinitionSQL)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/ViewDefinition/{id}/$sql", s.handleViewDefinitionSQL)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/ViewDefinition/{id}/$sql", s.handleViewDefinitionSQL)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/ViewDefinition/{id}", s.handleViewDefinitionCRUD)
 	mux.HandleFunc("PUT /fhir/r4/{tenant}/ViewDefinition/{id}", s.handleViewDefinitionCRUD)
 	mux.HandleFunc("DELETE /fhir/r4/{tenant}/ViewDefinition/{id}", s.handleViewDefinitionCRUD)
@@ -455,6 +463,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				if strings.EqualFold(parts[3], "ViewDefinition") && parts[4] == "$export" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleViewDefinitionExport(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ViewDefinition") && parts[4] == "$sql" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleViewDefinitionSQL(w, r)
 					return
 				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Claim") && parts[4] == "$submit" {
@@ -1632,6 +1645,12 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleViewDefinitionExport(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ViewDefinition") && parts[5] == "$sql" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleViewDefinitionSQL(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$mcode-trial-summary" {
@@ -6729,6 +6748,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				"name":       "export",
 				"definition": "http://hl7.org/fhir/uv/sql-on-fhir/OperationDefinition/ViewDefinition-export",
 			},
+			{
+				"name":       "sql",
+				"definition": "http://flint.fhir.org/OperationDefinition/ViewDefinition-sql",
+			},
 		},
 	})
 
@@ -7253,6 +7276,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 						"definition": "http://hl7.org/fhir/uv/sql-on-fhir/OperationDefinition/ViewDefinition-run",
 					},
 					{
+						"name":       "sql",
+						"definition": "http://flint.fhir.org/OperationDefinition/ViewDefinition-sql",
+					},
+					{
 						"name":       "sync-analytics",
 						"definition": "http://flint.fhir.org/OperationDefinition/System-sync-analytics",
 					},
@@ -7262,6 +7289,13 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 	}
 
 	return cap
+}
+
+// protoToFHIRMapWithMeta decodes binary wire Protobuf bytes directly into an in-memory
+// FHIR R4 map[string]any using protoreflect without any intermediate JSON serialization.
+func (s *Server) protoToFHIRMapWithMeta(resType string, protoBytes []byte, version int, lastUpdated time.Time) (map[string]any, error) {
+	md := s.protoRegistry[resType]
+	return fhirutil.ProtoBytesToFHIRMap(md, resType, protoBytes, version, lastUpdated)
 }
 
 // protoToJSONWithMeta converts proto bytes to standard flat HL7 FHIR R4 JSON using the registered message type.

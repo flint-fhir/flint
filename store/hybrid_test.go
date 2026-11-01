@@ -302,6 +302,8 @@ func TestHybridStore_ReplicationAndAnalyticalPushdown(t *testing.T) {
 	syncedCount, err := backfillHyb.SyncTenant(ctx, "t-backfill")
 	require.NoError(t, err)
 	assert.Equal(t, 1, syncedCount)
+	assert.Equal(t, uint64(1), backfillHyb.SyncedResources())
+	assert.False(t, backfillHyb.LastSyncTime().IsZero())
 
 	bfSearch, err := freshReplica.Search(ctx, store.SearchParams{
 		TenantID: "t-backfill",

@@ -33,11 +33,16 @@ func (s *Server) attachStorageTopology(payload map[string]any) {
 		payload["analyticalBackend"] = s.analyticalStore.BackendName()
 	}
 	if hyb, ok := s.store.(*store.HybridStore); ok && hyb != nil {
-		payload["hybridReplication"] = map[string]any{
-			"replicatedWrites":  hyb.ReplicatedWrites(),
-			"replicatedDeletes": hyb.ReplicatedDeletes(),
-			"replicationErrors": hyb.ReplicationErrors(),
+		repMap := map[string]any{
+			"replicatedWrites":     hyb.ReplicatedWrites(),
+			"replicatedDeletes":    hyb.ReplicatedDeletes(),
+			"replicationErrors":    hyb.ReplicationErrors(),
+			"totalSyncedResources": hyb.SyncedResources(),
 		}
+		if lastSync := hyb.LastSyncTime(); !lastSync.IsZero() {
+			repMap["lastSyncTime"] = lastSync.Format(time.RFC3339)
+		}
+		payload["hybridReplication"] = repMap
 	}
 }
 
@@ -50,6 +55,7 @@ type serverMetrics struct {
 	cdcPublishErrorsTotal           atomic.Uint64
 	subscriptionsDeliveredTotal     atomic.Uint64
 	subscriptionDeliveryErrorsTotal atomic.Uint64
+	sqlOnFHIRRunsTotal              atomic.Uint64
 }
 
 func newServerMetrics() *serverMetrics {
@@ -201,12 +207,25 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString("# TYPE flint_subscription_delivery_errors_total counter\n")
 	fmt.Fprintf(&b, "flint_subscription_delivery_errors_total %d\n", subDeliveryErr)
 
-	var hybWrites, hybDeletes, hybErrors uint64
+	var hybWrites, hybDeletes, hybErrors, hybSynced uint64
 	if hyb, ok := s.store.(*store.HybridStore); ok && hyb != nil {
 		hybWrites = hyb.ReplicatedWrites()
 		hybDeletes = hyb.ReplicatedDeletes()
 		hybErrors = hyb.ReplicationErrors()
+		hybSynced = hyb.SyncedResources()
 	}
+	var sqlRuns uint64
+	if s.metrics != nil {
+		sqlRuns = s.metrics.sqlOnFHIRRunsTotal.Load()
+	}
+	analyticalLabel := "none"
+	if s.analyticalStore != nil && !store.IsNil(s.analyticalStore) {
+		analyticalLabel = s.analyticalStore.BackendName()
+	}
+	b.WriteString("# HELP flint_storage_backend_info Configured Flint storage and analytical backend topology.\n")
+	b.WriteString("# TYPE flint_storage_backend_info gauge\n")
+	fmt.Fprintf(&b, "flint_storage_backend_info{backend=%q,analytical_backend=%q} 1\n", s.storageBackendLabel(), analyticalLabel)
+
 	b.WriteString("# HELP flint_hybrid_replicated_writes_total Total number of FHIR resource writes replicated to the analytical store in hybrid mode.\n")
 	b.WriteString("# TYPE flint_hybrid_replicated_writes_total counter\n")
 	fmt.Fprintf(&b, "flint_hybrid_replicated_writes_total %d\n", hybWrites)
@@ -218,6 +237,14 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString("# HELP flint_hybrid_replication_errors_total Total number of hybrid OLTP-to-OLAP replication errors.\n")
 	b.WriteString("# TYPE flint_hybrid_replication_errors_total counter\n")
 	fmt.Fprintf(&b, "flint_hybrid_replication_errors_total %d\n", hybErrors)
+
+	b.WriteString("# HELP flint_hybrid_synced_resources_total Total number of FHIR resources backfilled via $sync-analytics.\n")
+	b.WriteString("# TYPE flint_hybrid_synced_resources_total counter\n")
+	fmt.Fprintf(&b, "flint_hybrid_synced_resources_total %d\n", hybSynced)
+
+	b.WriteString("# HELP flint_sqlonfhir_runs_total Total number of HL7 SQL-on-FHIR v2 ViewDefinition executions.\n")
+	b.WriteString("# TYPE flint_sqlonfhir_runs_total counter\n")
+	fmt.Fprintf(&b, "flint_sqlonfhir_runs_total %d\n", sqlRuns)
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

@@ -263,4 +263,62 @@ func TestSQLOnFHIRv2_ViewDefinitionCRUD_Run_Export_And_SyncAnalytics(t *testing.
 	require.NoError(t, err)
 	respDelVD.Body.Close()
 	assert.Equal(t, http.StatusNoContent, respDelVD.StatusCode)
+
+	// 9. Verify Zero-JSON headers on ViewDefinition/$run and test ViewDefinition/$sql transpiler across Doris, Postgres, and SQLite dialects
+	assert.Equal(t, "zero-json-proto3", respDem.Header.Get("X-Flint-Storage-Model"))
+	assert.Contains(t, respDem.Header.Get("X-Flint-Generated-SQL"), "fhir_patient")
+
+	// 9a. Doris dialect (Parameters JSON) for observation-vitals -> queries zero-blob fhir_observation
+	respSQLDoris, err := client.Get(ts.URL + "/fhir/r4/sof/ViewDefinition/observation-vitals/$sql?dialect=doris&_limit=25")
+	require.NoError(t, err)
+	sqlDorisBytes, _ := io.ReadAll(respSQLDoris.Body)
+	respSQLDoris.Body.Close()
+	assert.Equal(t, http.StatusOK, respSQLDoris.StatusCode)
+	assert.Contains(t, string(sqlDorisBytes), "fhir_observation")
+	assert.Contains(t, string(sqlDorisBytes), "zero-json-proto3-doris-mow")
+	assert.NotContains(t, string(sqlDorisBytes), "json_extract")
+	assert.NotContains(t, string(sqlDorisBytes), "jsonb")
+
+	// 9b. PostgreSQL & SQLite dialects (raw application/sql output) -> queries fhir_resource + spidx_* covering indexes
+	for _, dialect := range []string{"postgres", "sqlite"} {
+		respSQL, err := client.Get(ts.URL + "/fhir/r4/sof/ViewDefinition/patient-demographics/$sql?dialect=" + dialect + "&_format=application/sql")
+		require.NoError(t, err)
+		rawSQL, _ := io.ReadAll(respSQL.Body)
+		respSQL.Body.Close()
+		assert.Equal(t, http.StatusOK, respSQL.StatusCode)
+		assert.Contains(t, respSQL.Header.Get("Content-Type"), "application/sql")
+		assert.Contains(t, string(rawSQL), "FROM fhir_resource r")
+		assert.Contains(t, string(rawSQL), "spidx_string")
+		assert.Contains(t, string(rawSQL), "spidx_token")
+		assert.Contains(t, string(rawSQL), "spidx_date")
+		assert.NotContains(t, string(rawSQL), "jsonb")
+		assert.NotContains(t, string(rawSQL), "json_extract")
+	}
+
+	// 9c. POST /ViewDefinition/$sql with inline ViewDefinition and where clause
+	inlineSQLVD := `{
+		"resourceType": "ViewDefinition",
+		"resource": "Observation",
+		"where": [
+			{"path": "code.coding.exists(code = '8867-4')"},
+			{"path": "status = 'final'"}
+		],
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "getResourceKey()"},
+					{"name": "patient_id", "path": "subject.getReferenceKey(Patient)"},
+					{"name": "value_quantity", "path": "valueQuantity.value", "type": "decimal"}
+				]
+			}
+		]
+	}`
+	for _, dialect := range []string{"doris", "postgres"} {
+		respInlineSQL, err := client.Post(ts.URL+"/fhir/r4/sof/ViewDefinition/$sql?dialect="+dialect+"&_format=sql", "application/fhir+json", bytes.NewBufferString(inlineSQLVD))
+		require.NoError(t, err)
+		inlineSQLBytes, _ := io.ReadAll(respInlineSQL.Body)
+		respInlineSQL.Body.Close()
+		assert.Equal(t, http.StatusOK, respInlineSQL.StatusCode)
+		assert.Contains(t, string(inlineSQLBytes), "8867-4")
+	}
 }

@@ -950,4 +950,16 @@ func TestDorisStore_LoadFromDB_And_CompensatingRollback(t *testing.T) {
 	assert.Equal(t, 1, afterRollback.ResVersion)
 	_, err = restarted.ReadResourceWithMeta(ctx, "t-hyd", "Patient", "p-temp")
 	require.ErrorIs(t, err, sql.ErrNoRows)
+
+	// Multi-row batched WriteBatch verification: writing 3 resources without preconditions emits single multi-row INSERT statements
+	batchDS := doris.New(nil)
+	require.NoError(t, batchDS.WriteBatch(ctx, []store.ResourceInput{
+		{TenantID: "t-batch", ResType: "Patient", ResID: "bp-1", ResourceProto: patProto},
+		{TenantID: "t-batch", ResType: "Patient", ResID: "bp-2", ResourceProto: patProto},
+		{TenantID: "t-batch", ResType: "Patient", ResID: "bp-3", ResourceProto: patProto},
+	}))
+	stmts := batchDS.ExecutedStatements()
+	require.Len(t, stmts, 3, "expected 3 multi-row INSERT statements (fhir_resource, fhir_resource_history, fhir_patient)")
+	assert.Contains(t, stmts[0], "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+	assert.Contains(t, stmts[2], "INSERT INTO fhir_patient")
 }

@@ -264,22 +264,122 @@ func (s *Store) writeUnlocked(ctx context.Context, input store.ResourceInput) (*
 	return &rec, nil
 }
 
-// WriteBatch writes multiple FHIR resources using Doris Group Commit batching.
+// WriteBatch writes multiple FHIR resources using multi-row Doris Group Commit batching.
 func (s *Store) WriteBatch(ctx context.Context, inputs []store.ResourceInput) error {
 	if len(inputs) == 0 {
 		return nil
 	}
-	tenantID := inputs[0].TenantID
+	tenantID := strings.TrimSpace(inputs[0].TenantID)
+	if tenantID == "" {
+		return store.ErrNoTenant
+	}
+	hasPrecond := false
 	for _, in := range inputs {
-		if in.TenantID != tenantID {
+		if in.TenantID != inputs[0].TenantID {
 			return store.ErrCrossTenantBatch
 		}
-	}
-	for _, in := range inputs {
-		if _, err := s.WriteResourceWithMeta(ctx, in); err != nil {
-			return err
+		if in.CreateOnly || in.ExpectedVersion > 0 {
+			hasPrecond = true
 		}
 	}
+	if len(inputs) == 1 || hasPrecond {
+		for _, in := range inputs {
+			if _, err := s.WriteResourceWithMeta(ctx, in); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	now := time.Now().UTC()
+	rows := make([]DorisResourceRow, 0, len(inputs))
+
+	s.mu.Lock()
+	for _, input := range inputs {
+		key := resKey(input.TenantID, input.ResType, input.ResID)
+		existing, exists := s.resources[key]
+		curVersion := 0
+		if exists {
+			curVersion = existing.row.ResVersion
+		}
+		created := !exists || existing.row.IsDeleted
+		newVersion := curVersion + 1
+		row := ExtractRow(input, newVersion, now, false)
+		rec := store.ResourceRecord{
+			TenantID:      input.TenantID,
+			ResType:       input.ResType,
+			ResID:         input.ResID,
+			ResVersion:    newVersion,
+			LastUpdated:   now,
+			ResourceProto: append([]byte(nil), input.ResourceProto...),
+			IsDeleted:     false,
+			Created:       created,
+		}
+		s.resources[key] = storedEntry{
+			row:     row,
+			indexes: cloneSearchIndexes(input.SearchIndexes),
+		}
+		s.history[key] = append(s.history[key], rec)
+		rows = append(rows, row)
+	}
+	s.mu.Unlock()
+
+	var (
+		resTuples  = make([]string, 0, len(rows))
+		resArgs    = make([]any, 0, len(rows)*17)
+		histTuples = make([]string, 0, len(rows))
+		histArgs   = make([]any, 0, len(rows)*7)
+		coreByTbl  = make(map[string][]DorisResourceRow)
+		coreOrder  []string
+	)
+	for _, row := range rows {
+		resTuples = append(resTuples, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		resArgs = append(resArgs,
+			row.TenantID, row.ResType, row.ResID, row.ResVersion, row.IsDeleted, row.LastUpdated,
+			row.IdempotencyKey, row.PatientID, row.EncounterID, row.PrimaryCodeSys, row.PrimaryCode,
+			row.PrimaryDateLow, row.PrimaryDateHigh, row.PrimaryQuantity, row.PrimaryUnitSys, row.PrimaryUnitCode,
+			row.ResourceProtoHex,
+		)
+		histTuples = append(histTuples, "(?, ?, ?, ?, ?, ?, ?)")
+		histArgs = append(histArgs,
+			row.TenantID, row.ResType, row.ResID, row.ResVersion, row.IsDeleted, row.LastUpdated, row.ResourceProtoHex,
+		)
+		if tbl, ok := CoreResourceTableName(row.ResType); ok {
+			if _, seen := coreByTbl[tbl]; !seen {
+				coreOrder = append(coreOrder, tbl)
+			}
+			coreByTbl[tbl] = append(coreByTbl[tbl], row)
+		}
+	}
+
+	batchUpsertStmt := "INSERT INTO fhir_resource (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, idempotency_key, patient_id, encounter_id, primary_code_sys, primary_code, primary_date_low, primary_date_high, primary_quantity, primary_unit_sys, primary_unit_code, resource_proto_hex) VALUES " + strings.Join(resTuples, ", ")
+	if err := s.execDorisSQL(ctx, batchUpsertStmt, resArgs...); err != nil {
+		return fmt.Errorf("doris batch upsert resource: %w", err)
+	}
+
+	batchHistStmt := "INSERT INTO fhir_resource_history (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES " + strings.Join(histTuples, ", ")
+	if err := s.execDorisSQL(ctx, batchHistStmt, histArgs...); err != nil {
+		return fmt.Errorf("doris batch insert history: %w", err)
+	}
+
+	for _, tbl := range coreOrder {
+		tblRows := coreByTbl[tbl]
+		coreTuples := make([]string, 0, len(tblRows))
+		coreArgs := make([]any, 0, len(tblRows)*14)
+		for _, row := range tblRows {
+			coreTuples = append(coreTuples, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+			coreArgs = append(coreArgs,
+				row.TenantID, row.ResID, row.ResVersion, row.IsDeleted, row.LastUpdated,
+				row.PatientID, row.EncounterID, row.PrimaryCodeSys, row.PrimaryCode,
+				row.PrimaryDateLow, row.PrimaryDateHigh, row.PrimaryQuantity, row.PrimaryUnitSys, row.PrimaryUnitCode,
+			)
+		}
+		coreStmt := fmt.Sprintf("INSERT INTO %s (tenant_id, res_id, res_version, is_deleted, last_updated, patient_id, encounter_id, code_system, code, effective_start, effective_end, value_quantity, value_unit_sys, value_unit_code) VALUES %s", tbl, strings.Join(coreTuples, ", "))
+		if err := s.execDorisSQL(ctx, coreStmt, coreArgs...); err != nil {
+			return fmt.Errorf("doris batch project core resource %s: %w", tbl, err)
+		}
+	}
+
 	return nil
 }
 

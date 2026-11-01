@@ -7,9 +7,9 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Code of Conduct](https://img.shields.io/badge/Contributor%20Covenant-2.1-4baaaa.svg)](CODE_OF_CONDUCT.md)
 
-**Flint** is an open-source, cloud-agnostic **FHIR R4 server** built in Go on PostgreSQL. It provides high-throughput transactional EHR persistence, sub-10ms covering-index search, SMART on FHIR v2 authorization, US Core v6.1.0 & v7.0.0 conformance, and ONC `(g)(10)` Bulk Data capabilities.
+**Flint** is an open-source, cloud-agnostic **FHIR R4 server** built in Go with a **100% Zero-JSON Proto3 Wire storage architecture** supporting 5 pluggable backends (**PostgreSQL**, **SQLite** zero-dependency single-node, **Apache Doris** columnar MPP lakehouse, **`postgres+doris`** hybrid OLTP+OLAP, and **`sqlite+doris`** hybrid edge+analytical). It provides high-throughput transactional EHR persistence, sub-10ms covering-index search, **HL7 SQL-on-FHIR v2 (`ViewDefinition/$run`, `$export`, and Zero-JSON `$sql` transpiler)**, SMART on FHIR v2 authorization, US Core v6.1.0 & v7.0.0 conformance, and ONC `(g)(10)` Bulk Data capabilities.
 
-All domain models, search index extractors, and storage structures are compiled directly from `google/fhir` Protocol Buffers using [proto2type](https://github.com/protocgen/proto2type).
+All domain models, search index extractors, and storage structures are compiled directly from `google/fhir` Protocol Buffers using [proto2type](https://github.com/protocgen/proto2type) — **zero JSON/JSONB/VARIANT blobs are stored in any backend**.
 
 ---
 
@@ -19,8 +19,10 @@ Traditional FHIR servers (e.g. HAPI FHIR, Medplum) often incur heavy runtime ove
 
 | Dimension | Traditional FHIR Servers | Flint |
 |:----------|:-------------------------|:------|
-| **Data Format** | Heavy JSON / relational table sprawl | Compact Protocol Buffers (**16× wire reduction**, 124B vs ~2KB) |
-| **Search Indexing** | Deep relational joins or Elasticsearch sync | **6 static covering index tables** per tenant (HAPI pattern), sub-10ms queries |
+| **Data Format** | Heavy JSONB / relational table sprawl | **100% Zero-JSON Protocol Buffers** (**16× wire reduction**, 124B vs ~2KB) |
+| **Storage Backends** | Locked to a single relational DB | **5 Pluggable Backends**: `postgres`, `sqlite`, `doris`, `postgres+doris`, `sqlite+doris` |
+| **Search Indexing** | Deep relational joins or Elasticsearch sync | **6 static covering `spidx_*` tables** (Postgres/SQLite) or **Doris `ARRAY<VARCHAR>` inverted indexes** |
+| **SQL-on-FHIR v2** | Runtime JSONB path extraction (`jsonb_path_query`) | **Zero-JSON `ViewDefinition/$run`, `$export` & `$sql` transpiler** (`protoreflect` + zero-blob Doris US Core tables) |
 | **Schema Maintenance** | Manual migrations across hundreds of FHIR types | **100% generated** via `proto2type` from official HL7 SearchParameter JSON |
 | **Multi-Tenancy** | Soft tenancy (`tenant_id` column filters) | **Schema-per-tenant physical isolation** for HIPAA compliance |
 | **Throughput** | Bottlenecked by JVM garbage collection | **>1,400 resources/sec** transactional store, **>1,000 resources/sec** HTTP |
@@ -35,18 +37,24 @@ flowchart TD
         EHR["EHR / SMART Apps / Synthea"] -->|FHIR R4 Resources & Bundles| API["Flint HTTP API (flintd)"]
     end
 
-    subgraph Server ["Flint FHIR R4 Server"]
+    subgraph Server ["Flint FHIR R4 Server (100% Zero-JSON Proto3 Wire)"]
         API --> Auth["SMART on FHIR v2 Auth & Scope Enforcer"]
         Auth --> Val["StructureDefinition & ValueSet Validator"]
-        Val --> Engine["REST / Bundle / Terminology / CDS Hooks / eCQM Engine"]
+        Val --> Engine["REST / Bundle / Terminology / CDS Hooks / eCQM / SQL-on-FHIR v2 Engine"]
         Engine -->|rest-hook Webhooks| Sub["FHIR R4 Subscriptions (rest-hook)"]
     end
 
-    subgraph OLTP ["Operational Plane (PostgreSQL)"]
-        Engine -->|ACID Transactions| PG["PostgreSQL (Schema-per-Tenant)"]
-        PG --> RProto["fhir_resource & fhir_resource_history (Proto Blobs)"]
+    subgraph OLTP ["Operational Plane (PostgreSQL or SQLite WAL)"]
+        Engine -->|ACID Transactions| PG["PostgreSQL / SQLite"]
+        PG --> RProto["fhir_resource & fhir_resource_history (Proto3 Wire Bytes)"]
         PG --> Spidx["6x Covering spidx_* Tables\n(string, token, date, ref, quantity, uri)"]
         PG --> Audit["fhir_audit_event & OAuth2 / $export State"]
+    end
+
+    subgraph OLAP ["Analytical Plane (Apache Doris 2.1+ Unique Key Merge-on-Write)"]
+        Engine -->|Hybrid Dual-Write or Direct| Doris["Apache Doris MPP"]
+        Doris --> DRes["fhir_resource (Proto3 VARBINARY + ARRAY<VARCHAR> Inverted Indexes)"]
+        Doris --> DCore["13x Zero-Blob US Core Tables (fhir_patient, fhir_observation, fhir_condition, ...)"]
     end
 ```
 
@@ -94,7 +102,8 @@ Flint implements full search index extraction, transactional persistence, SMART 
 | **`AuditEvent`** | ASTM E2147 / ONC `§170.315(d)(2)` Auditable Events | `read`, `search-type` | `_id`, `date`, `entity`, `patient`, `agent`, `action`, `subtype`, `outcome` | `user/AuditEvent.rs`, `system/AuditEvent.rs` | ✅ Production Ready |
 | **`Bundle`** | HL7 FHIR R4 Batch & ACID Transaction | `batch`, `transaction` (`POST`, `PUT`, `PATCH`, `DELETE`, `GET`, `HEAD`, `urn:uuid:` resolution, `ifNoneExist`, `ifMatch`, `ifNoneMatch`, `ifModifiedSince`, conditional `?searchParams` URLs) | N/A | Per-entry SMART scope & compartment validation | ✅ Production Ready |
 | **`$export`, `$import` & `Group` (`$everything`, `$add`, `$remove`, `$member-add`, `$member-remove`, `$confirm-attribution-list`, `$atr-summary`, `$pdex-provider-member-match`, `$davinci-data-export`)** | HL7 FHIR Bulk Data Access v2.0.0 / ONC `§170.315(g)(10)`, Da Vinci Member Attribution (ATR), CMS-0057-F / Da Vinci PDex v2.1.0 Provider Access & Payer-to-Payer Data Exchange & Cohort Management | `GET/POST` System (`/$export`), All-Patients (`/Patient/$export`), Active Group Member Cohort (`/Group/{id}/$export`, `/Group/{id}/$everything`, `/Group/{id}/$davinci-data-export`, `POST /Group/{id}/$add`, `POST /Group/{id}/$remove`, `POST /Group/{id}/$member-add`, `POST /Group/{id}/$member-remove`, `POST /Group/{id}/$confirm-attribution-list`, `GET/POST /Group/{id}/$atr-summary`, `POST /Group/$pdex-provider-member-match`), Single-Patient (`/Patient/{id}/$export`), Bulk NDJSON Import (`POST /$import`, `/$import-poll/{jobId}`), Postgres-persisted Async Poll (`/$export-poll/{jobId}`), NDJSON Download (`/$export-file/{jobId}/{file}`) | `_type`, `_since`, `_until`, `_elements`, `_typeFilter`, `patient`, `_outputFormat`, `inputFormat`, `input` (`application/fhir+ndjson`), `member`, `memberId`, `attributionPeriod` | `system/*.rs` (Export), `system/*.cruds` (Import), `patient/*.rs` (Single-Patient) | ✅ Production Ready |
-| **`$certify` & `TestScript/$evaluate` (Conformance)** | HL7 FHIR R4 `TestReport` / `TestScript` (AEGIS Touchstone / HL7 Inferno), US Core `v6.1.0` & `v7.0.0`, ONC `(g)(10)`, 110+ HL7 FHIRPath R4 Vectors, All 146 R4 Resource Corpus & 35+ National HL7 IGs | `GET/POST /fhir/r4/{tenant}/$certify`, `GET/POST /fhir/r4/{tenant}/TestScript/$evaluate`, `GET/POST /fhir/r4/{tenant}/TestScript/{id}/$evaluate` & CLI (`task certify`) | 78-check automated `$certify` harness across 8 suites + declarative HL7 `TestScript` runner | Public / Admin / `user/TestScript.rs` | ✅ Production Ready |
+| **`ViewDefinition` (`$run`, `$export`, `$sql`) & `$sync-analytics` (HL7 SQL-on-FHIR v2 & Hybrid Analytical Replica)** | HL7 SQL-on-FHIR v2 (`ViewDefinition` Tabular Projection & Zero-JSON SQL Transpiler) & Columnar Analytical Pushdown (`store.AnalyticalStore`) | `GET/POST /ViewDefinition`, `/ViewDefinition/{id}`, `GET/POST /ViewDefinition/$run`, `/ViewDefinition/{id}/$run` (`application/json`, `application/x-ndjson`, `text/csv`), `GET/POST /ViewDefinition/$export`, `/ViewDefinition/{id}/$export`, `GET/POST /$sql`, `/ViewDefinition/$sql`, `/ViewDefinition/{id}/$sql` (`?dialect=doris\|postgres\|sqlite`, `application/fhir+json` or `application/sql`), `POST /$sync-analytics` (batched primary → Doris replica backfill) | `patient`, `subject`, `_limit`, `_since`, `_format`, `dialect`, `forEach`, `forEachOrNull`, `unionAll`, `where`, `constant`, `getResourceKey()`, `getReferenceKey()`, built-in views (`patient-demographics`, `observation-vitals`, `condition-problems`, `encounter-summary`, `medication-requests`, `immunization-history`, `allergy-intolerances`, `procedure-history`) | `user/ViewDefinition.cruds`, `system/*.rs`, `patient/*.rs` | ✅ Production Ready |
+| **`$certify` & `TestScript/$evaluate` (Conformance)** | HL7 FHIR R4 `TestReport` / `TestScript` (AEGIS Touchstone / HL7 Inferno), US Core `v6.1.0` & `v7.0.0`, ONC `(g)(10)`, HL7 SQL-on-FHIR v2, 110+ HL7 FHIRPath R4 Vectors, All 146 R4 Resource Corpus & 35+ National HL7 IGs | `GET/POST /fhir/r4/{tenant}/$certify`, `GET/POST /fhir/r4/{tenant}/TestScript/$evaluate`, `GET/POST /fhir/r4/{tenant}/TestScript/{id}/$evaluate` & CLI (`task certify`) | 84-check automated `$certify` harness across 10 suites + declarative HL7 `TestScript` runner | Public / Admin / `user/TestScript.rs` | ✅ Production Ready |
 
 ---
 
@@ -157,7 +166,10 @@ FLINT_ADDR=":8080" \
 
 | Environment Variable | Default | Required | Description |
 |:---------------------|:--------|:---------|:------------|
-| `FLINT_POSTGRES_DSN` | `postgres://flint:flint@localhost:5432/flint?sslmode=disable` | **Yes** | PostgreSQL connection string (auto-runs embedded migrations on boot) |
+| `FLINT_STORAGE_BACKEND` | `postgres` | No | Storage backend: `postgres`, `sqlite`, `doris`, `postgres+doris`, or `sqlite+doris` |
+| `FLINT_POSTGRES_DSN` | `postgres://flint:flint@localhost:5432/flint?sslmode=disable` | When using `postgres` | PostgreSQL connection string (auto-runs embedded migrations on boot) |
+| `FLINT_SQLITE_PATH` | `flint.db` | When using `sqlite` | SQLite database file path or `:memory:` (pure-Go `modernc.org/sqlite` in WAL mode) |
+| `FLINT_DORIS_DSN` | *(empty — in-memory engine)* | When using `doris` | Apache Doris MySQL wire DSN (`user:pass@tcp(fe:9030)/flint?parseTime=true`) |
 | `FLINT_ADDR` | `:8080` | No | HTTP listen address |
 | `FLINT_OIDC_ISSUER` | *(empty — dev mode)* | No | Enable external OIDC / SMART v2 token validation |
 | `FLINT_OIDC_AUDIENCE` | *(empty)* | No | Expected JWT audience claim |

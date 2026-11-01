@@ -397,3 +397,38 @@ func TestProperty_NormalizeAndDenormalizeRoundTripValidates(t *testing.T) {
 		}
 	})
 }
+
+func TestProtoBytesToFHIRMap_ZeroJSON(t *testing.T) {
+	lastUpdated := time.Date(2026, 2, 1, 8, 15, 0, 0, time.UTC)
+	rawObs := []byte(`{
+		"resourceType": "Observation",
+		"id": "zero-json-obs-1",
+		"status": "final",
+		"code": {
+			"coding": [{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}]
+		},
+		"subject": {"reference": "Patient/pat-zero-1"},
+		"effectiveDateTime": "2026-02-01T08:00:00Z",
+		"valueQuantity": {"value": 74.5, "unit": "/min", "system": "http://unitsofmeasure.org", "code": "/min"}
+	}`)
+	md := (&obspb.Observation{}).ProtoReflect().Descriptor()
+	norm, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, rawObs)
+	require.NoError(t, err)
+	obs := &obspb.Observation{}
+	require.NoError(t, (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(norm, obs))
+	protoBytes, err := proto.Marshal(obs)
+	require.NoError(t, err)
+
+	// Decode binary proto3 wire bytes directly into in-memory map[string]any with zero JSON serialization
+	m, err := fhirutil.ProtoBytesToFHIRMap(md, "Observation", protoBytes, 4, lastUpdated)
+	require.NoError(t, err)
+	assert.Equal(t, "Observation", m["resourceType"])
+	assert.Equal(t, "zero-json-obs-1", m["id"])
+	assert.Equal(t, "final", m["status"])
+	assert.Equal(t, "Patient/pat-zero-1", m["subject"].(map[string]any)["reference"])
+	assert.Equal(t, "2026-02-01T08:00:00Z", m["effectiveDateTime"])
+	assert.Equal(t, 74.5, m["valueQuantity"].(map[string]any)["value"])
+	meta := m["meta"].(map[string]any)
+	assert.Equal(t, "4", meta["versionId"])
+	assert.Equal(t, "2026-02-01T08:15:00Z", meta["lastUpdated"])
+}

@@ -32,6 +32,8 @@ type HybridStore struct {
 	replicatedWrites  atomic.Uint64
 	replicatedDeletes atomic.Uint64
 	replicationErrors atomic.Uint64
+	syncedResources   atomic.Uint64
+	lastSyncUnixNano  atomic.Int64
 }
 
 // NewHybridStore creates a new HybridStore backed by primary (OLTP) and replica (OLAP).
@@ -73,13 +75,45 @@ func (h *HybridStore) ReplicationErrors() uint64 {
 	return h.replicationErrors.Load()
 }
 
+// SyncedResources returns the cumulative number of resources backfilled via SyncTenant.
+func (h *HybridStore) SyncedResources() uint64 {
+	return h.syncedResources.Load()
+}
+
+// LastSyncTime returns the UTC timestamp of the most recent completed SyncTenant run, or zero time.
+func (h *HybridStore) LastSyncTime() time.Time {
+	ns := h.lastSyncUnixNano.Load()
+	if ns <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns).UTC()
+}
+
 // SyncTenant backfills all active resources for tenantID from the primary operational store
-// into the analytical replica store, extracting search indexes automatically.
+// into the analytical replica store in multi-row batches, extracting search indexes automatically.
 func (h *HybridStore) SyncTenant(ctx context.Context, tenantID string) (int, error) {
 	if h == nil || IsNil(h.primary) || IsNil(h.replica) {
 		return 0, nil
 	}
+	const batchSize = 250
+	var batch []ResourceInput
 	synced := 0
+
+	flushBatch := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		wErr := h.replica.WriteBatch(ctx, batch)
+		h.recordWriteReplication(wErr, uint64(len(batch)))
+		if wErr != nil {
+			return wErr
+		}
+		synced += len(batch)
+		h.syncedResources.Add(uint64(len(batch)))
+		batch = batch[:0]
+		return nil
+	}
+
 	err := h.primary.StreamExportResources(ctx, ExportParams{TenantID: tenantID}, func(sr SearchResult) error {
 		repIn := h.ensureSearchIndexes(ResourceInput{
 			TenantID:      tenantID,
@@ -88,15 +122,20 @@ func (h *HybridStore) SyncTenant(ctx context.Context, tenantID string) (int, err
 			ResourceProto: sr.ResourceProto,
 			CreateOnly:    false,
 		})
-		_, wErr := h.replica.WriteResourceWithMeta(ctx, repIn)
-		h.recordWriteReplication(wErr, 1)
-		if wErr != nil {
-			return wErr
+		batch = append(batch, repIn)
+		if len(batch) >= batchSize {
+			return flushBatch()
 		}
-		synced++
 		return nil
 	})
-	return synced, err
+	if err != nil {
+		return synced, err
+	}
+	if err := flushBatch(); err != nil {
+		return synced, err
+	}
+	h.lastSyncUnixNano.Store(time.Now().UTC().UnixNano())
+	return synced, nil
 }
 
 func (h *HybridStore) recordWriteReplication(err error, count uint64) {
