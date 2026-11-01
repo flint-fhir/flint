@@ -1600,6 +1600,60 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 			}
 		}
 		return resolved
+
+	case "getresourcekey":
+		items := current
+		if len(items) == 0 && ctx.root != nil {
+			items = []any{ctx.root}
+		}
+		var keys []any
+		for _, it := range items {
+			if m, ok := it.(map[string]any); ok {
+				if id, ok := m["id"].(string); ok && strings.TrimSpace(id) != "" {
+					keys = append(keys, strings.TrimSpace(id))
+				}
+			}
+		}
+		return keys
+
+	case "getreferencekey":
+		targetType := ""
+		if len(args) >= 1 {
+			targetType = strings.Trim(strings.TrimSpace(args[0]), "'\"")
+		}
+		var keys []any
+		for _, it := range current {
+			refStr := ""
+			refType := ""
+			switch v := it.(type) {
+			case string:
+				refStr = strings.TrimSpace(v)
+			case map[string]any:
+				refStr, _ = v["reference"].(string)
+				refStr = strings.TrimSpace(refStr)
+				refType, _ = v["type"].(string)
+			}
+			if refStr == "" {
+				continue
+			}
+			if strings.HasPrefix(refStr, "urn:uuid:") {
+				if targetType == "" || strings.EqualFold(refType, targetType) {
+					keys = append(keys, strings.TrimPrefix(refStr, "urn:uuid:"))
+				}
+				continue
+			}
+			parts := strings.Split(refStr, "/")
+			if len(parts) >= 2 {
+				actualType := parts[len(parts)-2]
+				actualID := parts[len(parts)-1]
+				if (targetType == "" || strings.EqualFold(actualType, targetType)) && actualID != "" {
+					keys = append(keys, actualID)
+				}
+			} else if len(parts) == 1 && (targetType == "" || strings.EqualFold(refType, targetType)) {
+				keys = append(keys, parts[0])
+			}
+		}
+		return keys
 	}
 
 	return nil

@@ -73,6 +73,32 @@ func (h *HybridStore) ReplicationErrors() uint64 {
 	return h.replicationErrors.Load()
 }
 
+// SyncTenant backfills all active resources for tenantID from the primary operational store
+// into the analytical replica store, extracting search indexes automatically.
+func (h *HybridStore) SyncTenant(ctx context.Context, tenantID string) (int, error) {
+	if h == nil || IsNil(h.primary) || IsNil(h.replica) {
+		return 0, nil
+	}
+	synced := 0
+	err := h.primary.StreamExportResources(ctx, ExportParams{TenantID: tenantID}, func(sr SearchResult) error {
+		repIn := h.ensureSearchIndexes(ResourceInput{
+			TenantID:      tenantID,
+			ResType:       sr.ResType,
+			ResID:         sr.ResID,
+			ResourceProto: sr.ResourceProto,
+			CreateOnly:    false,
+		})
+		_, wErr := h.replica.WriteResourceWithMeta(ctx, repIn)
+		h.recordWriteReplication(wErr, 1)
+		if wErr != nil {
+			return wErr
+		}
+		synced++
+		return nil
+	})
+	return synced, err
+}
+
 func (h *HybridStore) recordWriteReplication(err error, count uint64) {
 	if err != nil {
 		h.replicationErrors.Add(1)

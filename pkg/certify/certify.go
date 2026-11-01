@@ -2339,6 +2339,39 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("COMP-04", suite9, "TEFCA Exchange Purpose (X-Purpose-Of-Use) & HIPAA / ONC §170.315(d)(2) Tamper-Evident Audit Chain ($verify-integrity)", t0, err, "TEFCA PurposeOfUse (TREAT) enforcement & SHA-256 AuditEvent integrity chain verified")
 
+	// =========================================================================
+	// Suite 10: HL7 SQL-on-FHIR v2 & Columnar Analytical Pushdown
+	// =========================================================================
+	const suite10 = "10. HL7 SQL-on-FHIR v2 & Columnar Analytical Pushdown"
+
+	t0 = time.Now()
+	{
+		respVDJSON, bVDJSON, errVDJSON := doReq(http.MethodGet, basePath+"/ViewDefinition/patient-demographics/$run", "", nil, nil)
+		respVDCSV, bVDCSV, errVDCSV := doReq(http.MethodGet, basePath+"/ViewDefinition/observation-vitals/$run?_format=text/csv", "", nil, nil)
+		if errVDJSON != nil || respVDJSON.StatusCode != http.StatusOK || !strings.Contains(string(bVDJSON), `"cert-pat-1"`) || !strings.Contains(string(bVDJSON), `"female"`) {
+			err = fmt.Errorf("expected GET /ViewDefinition/patient-demographics/$run to return JSON row for cert-pat-1, got %d: %s", respVDJSON.StatusCode, string(bVDJSON))
+		} else if errVDCSV != nil || respVDCSV.StatusCode != http.StatusOK || !strings.Contains(string(bVDCSV), "id,patient_id,status,code") || !strings.Contains(string(bVDCSV), "cert-obs-1,cert-pat-1,final,8867-4") {
+			err = fmt.Errorf("expected GET /ViewDefinition/observation-vitals/$run?_format=text/csv to return CSV rows, got %d: %s", respVDCSV.StatusCode, string(bVDCSV))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-01", suite10, "HL7 SQL-on-FHIR v2 Tabular Projection (ViewDefinition/$run & $export — JSON, NDJSON & CSV)", t0, err, "SQL-on-FHIR v2 ViewDefinition patient-demographics JSON & observation-vitals CSV projections verified")
+
+	t0 = time.Now()
+	{
+		respSync, bSync, errSync := doReq(http.MethodPost, basePath+"/$sync-analytics", "application/fhir+json", nil, nil)
+		respStats, bStats, errStats := doReq(http.MethodGet, basePath+"/Observation/$stats?subject=Patient/cert-pat-1&code=8867-4", "", nil, nil)
+		if errSync != nil || respSync.StatusCode != http.StatusOK || !strings.Contains(string(bSync), `"syncedResources"`) {
+			err = fmt.Errorf("expected POST /$sync-analytics to return Parameters with syncedResources, got %d: %s", respSync.StatusCode, string(bSync))
+		} else if errStats != nil || respStats.StatusCode != http.StatusOK || !strings.Contains(string(bStats), `"average"`) {
+			err = fmt.Errorf("expected GET /Observation/$stats?subject=Patient/cert-pat-1&code=8867-4 to return statistical metrics, got %d: %s", respStats.StatusCode, string(bStats))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-02", suite10, "Analytical Store Pushdown & Hybrid Replica Sync ($sync-analytics & Observation/$stats)", t0, err, "Analytical backfill ($sync-analytics) & columnar Observation/$stats verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

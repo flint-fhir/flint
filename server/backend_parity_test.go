@@ -105,7 +105,7 @@ func TestAllBackends_82CheckCertifyParity(t *testing.T) {
 			assert.Equal(t, "pass", rep.Result, "expected 100%% certification pass on %s:\n%s", tc.name, rep.FormatScorecard())
 			assert.Equal(t, rep.TotalChecks, rep.Passed)
 			assert.Equal(t, 0, rep.Failed)
-			assert.GreaterOrEqual(t, rep.TotalChecks, 82)
+			assert.GreaterOrEqual(t, rep.TotalChecks, 84)
 		})
 	}
 }

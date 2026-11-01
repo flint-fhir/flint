@@ -289,4 +289,30 @@ func TestHybridStore_ReplicationAndAnalyticalPushdown(t *testing.T) {
 	assert.GreaterOrEqual(t, hyb.ReplicatedWrites(), uint64(5))
 	assert.GreaterOrEqual(t, hyb.ReplicatedDeletes(), uint64(5))
 	assert.Equal(t, uint64(0), hyb.ReplicationErrors())
+
+	// 8. SyncTenant backfills pre-existing primary resources into a fresh analytical replica
+	freshReplica := doris.New(nil)
+	backfillHyb := store.NewHybridStore(primary, freshReplica)
+	require.NoError(t, primary.WriteResource(ctx, store.ResourceInput{
+		TenantID:      "t-backfill",
+		ResType:       "Patient",
+		ResID:         "bf-p1",
+		ResourceProto: buildHybridPatientProto(t, "bf-p1", "BackfillFamily"),
+	}))
+	syncedCount, err := backfillHyb.SyncTenant(ctx, "t-backfill")
+	require.NoError(t, err)
+	assert.Equal(t, 1, syncedCount)
+
+	bfSearch, err := freshReplica.Search(ctx, store.SearchParams{
+		TenantID: "t-backfill",
+		ResType:  "Patient",
+		Strings:  map[string]string{"family": "BackfillFamily"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, bfSearch.Total)
+
+	var nilHyb *store.HybridStore
+	n, err := nilHyb.SyncTenant(ctx, "t-backfill")
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
 }

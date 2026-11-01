@@ -79,6 +79,8 @@ type Server struct {
 	exportJobs                 map[string]*exportJob
 	importMu                   sync.RWMutex
 	importJobs                 map[string]*importJob
+	viewDefsMu                 sync.RWMutex
+	viewDefs                   map[string]map[string]sqlOnFHIRViewDefinition
 	subSem                     chan struct{}
 	subStatsMu                 sync.RWMutex
 	subStats                   map[string]*subscriptionDeliveryStats
@@ -334,6 +336,23 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$convert", s.handleResourceConvert)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$certify", s.handleCertify)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$certify", s.handleCertify)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$sync-analytics", s.handleSyncAnalytics)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$sync-analytics", s.handleSyncAnalytics)
+
+	// HL7 SQL-on-FHIR v2 ViewDefinition CRUD, $run, and $export endpoints
+	mux.HandleFunc("GET /fhir/r4/{tenant}/ViewDefinition/$run", s.handleViewDefinitionRun)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/ViewDefinition/$run", s.handleViewDefinitionRun)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/ViewDefinition/{id}/$run", s.handleViewDefinitionRun)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/ViewDefinition/{id}/$run", s.handleViewDefinitionRun)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/ViewDefinition/$export", s.handleViewDefinitionExport)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/ViewDefinition/$export", s.handleViewDefinitionExport)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/ViewDefinition/{id}/$export", s.handleViewDefinitionExport)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/ViewDefinition/{id}/$export", s.handleViewDefinitionExport)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/ViewDefinition/{id}", s.handleViewDefinitionCRUD)
+	mux.HandleFunc("PUT /fhir/r4/{tenant}/ViewDefinition/{id}", s.handleViewDefinitionCRUD)
+	mux.HandleFunc("DELETE /fhir/r4/{tenant}/ViewDefinition/{id}", s.handleViewDefinitionCRUD)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/ViewDefinition", s.handleViewDefinitionCRUD)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/ViewDefinition", s.handleViewDefinitionCRUD)
 
 	// FHIR REST endpoints
 	mux.HandleFunc("GET /fhir/r4/{tenant}/AuditEvent/{id}", s.handleReadAuditEvent)
@@ -426,6 +445,16 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				if strings.EqualFold(parts[3], "Observation") && parts[4] == "$stats" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleObservationStats(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ViewDefinition") && parts[4] == "$run" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleViewDefinitionRun(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ViewDefinition") && parts[4] == "$export" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleViewDefinitionExport(w, r)
 					return
 				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Claim") && parts[4] == "$submit" {
@@ -1591,6 +1620,18 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleDaVinciBurdenReductionWave50(w, r, "burden-reduction-summary")
+					return
+				}
+				if strings.EqualFold(parts[3], "ViewDefinition") && parts[5] == "$run" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleViewDefinitionRun(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "ViewDefinition") && parts[5] == "$export" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleViewDefinitionExport(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$mcode-trial-summary" {
@@ -6662,6 +6703,34 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 		}
 		resEntries = append(resEntries, entry)
 	}
+	resEntries = append(resEntries, map[string]any{
+		"type":              "ViewDefinition",
+		"profile":           "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/ViewDefinition",
+		"versioning":        "versioned-update",
+		"readHistory":       false,
+		"updateCreate":      true,
+		"conditionalCreate": false,
+		"conditionalRead":   "not-supported",
+		"conditionalUpdate": false,
+		"conditionalDelete": "not-supported",
+		"interaction": []map[string]string{
+			{"code": "read"},
+			{"code": "create"},
+			{"code": "update"},
+			{"code": "delete"},
+			{"code": "search-type"},
+		},
+		"operation": []map[string]string{
+			{
+				"name":       "run",
+				"definition": "http://hl7.org/fhir/uv/sql-on-fhir/OperationDefinition/ViewDefinition-run",
+			},
+			{
+				"name":       "export",
+				"definition": "http://hl7.org/fhir/uv/sql-on-fhir/OperationDefinition/ViewDefinition-export",
+			},
+		},
+	})
 
 	smartCfg := s.resolveSMARTConfig(r)
 
@@ -7178,6 +7247,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "pdex-payer-summary",
 						"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/Patient-pdex-payer-summary",
+					},
+					{
+						"name":       "run",
+						"definition": "http://hl7.org/fhir/uv/sql-on-fhir/OperationDefinition/ViewDefinition-run",
+					},
+					{
+						"name":       "sync-analytics",
+						"definition": "http://flint.fhir.org/OperationDefinition/System-sync-analytics",
 					},
 				},
 			},

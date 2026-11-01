@@ -177,6 +177,12 @@ func openDorisStore(getenv func(string) string, openDB func(dsn string) (*sql.DB
 		doris.WithGroupCommit(groupCommit),
 		doris.WithDatabase(getenv("FLINT_DORIS_DATABASE")),
 	)
+	if dorisDB != nil {
+		if err := ds.LoadFromDB(context.Background()); err != nil {
+			_ = dorisDB.Close()
+			return nil, nil, fmt.Errorf("load doris state from db: %w", err)
+		}
+	}
 	return ds, dorisDB, nil
 }
 
