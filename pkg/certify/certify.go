@@ -2415,6 +2415,29 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-04", suite10, "Resource/$convert Bidirectional Proto3 Wire Translation & SQL-on-FHIR v2 Multi-Predicate $sql Pushdown", t0, err, "Bidirectional JSON <-> binary Proto3 $convert & compound where/constant $sql pushdown verified")
 
+	// AN-05: Binary Proto3 Bundle Wire Transport (Search & _history) & SQL-on-FHIR v2 unionAll + Predicate Function $sql Pushdown
+	t0 = time.Now()
+	{
+		respProtoSearch, bProtoSearch, errProtoSearch := doReq(http.MethodGet, basePath+"/Patient?_id=cert-pat-1&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respProtoHist, bProtoHist, errProtoHist := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/_history?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		unionPredVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_union_pred_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"}],"unionAll":[{"column":[{"name":"val","path":"name.family.first()"}]},{"column":[{"name":"val","path":"name.given.first()"}]}]}],"where":[{"path":"birthDate.exists() and not(active = false) and name.family.startsWith('Cert')"}]}`)
+		respUnionSQL, bUnionSQL, errUnionSQL := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", unionPredVD, nil)
+		if errProtoSearch != nil || respProtoSearch.StatusCode != http.StatusOK || !strings.Contains(respProtoSearch.Header.Get("Content-Type"), "application/x-protobuf") || respProtoSearch.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bProtoSearch) == 0 {
+			err = fmt.Errorf("expected GET /Patient?_id=cert-pat-1&_format=application/x-protobuf to return binary Proto3 Bundle, got %d", respProtoSearch.StatusCode)
+		} else if errProtoHist != nil || respProtoHist.StatusCode != http.StatusOK || !strings.Contains(respProtoHist.Header.Get("Content-Type"), "application/x-protobuf") || respProtoHist.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bProtoHist) == 0 {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/_history?_format=application/x-protobuf to return binary Proto3 History Bundle, got %d", respProtoHist.StatusCode)
+		} else if errUnionSQL != nil || respUnionSQL.StatusCode != http.StatusOK || !strings.Contains(string(bUnionSQL), "UNION ALL") || !strings.Contains(string(bUnionSQL), "IS NOT NULL") || !strings.Contains(string(bUnionSQL), "LIKE 'family=Cert%'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql unionAll & predicate function pushdown, got %d: %s", respUnionSQL.StatusCode, string(bUnionSQL))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-05", suite10, "Binary Proto3 Bundle Wire Transport (Search & _history) & SQL-on-FHIR v2 unionAll/Predicate Function $sql Pushdown", t0, err, "Binary google.fhir.r4.core.Bundle search/history wire transport & unionAll/exists()/startsWith() $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

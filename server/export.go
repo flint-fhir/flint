@@ -715,24 +715,8 @@ func (s *Server) resolveExportGroupCohort(
 		return nil, false, err
 	}
 
-	jsonBytes, err := s.protoToJSONWithMeta("Group", res.ResourceProto, res.ResVersion, res.LastUpdated)
+	groupMap, err := s.protoToFHIRMapWithMeta("Group", res.ResourceProto, res.ResVersion, res.LastUpdated)
 	if err != nil {
-		return nil, false, err
-	}
-
-	var groupDoc struct {
-		Member []struct {
-			Entity struct {
-				Reference string `json:"reference"`
-				Type      string `json:"type"`
-			} `json:"entity"`
-			Period struct {
-				End string `json:"end"`
-			} `json:"period"`
-			Inactive bool `json:"inactive"`
-		} `json:"member"`
-	}
-	if err := json.Unmarshal(jsonBytes, &groupDoc); err != nil {
 		return nil, false, err
 	}
 
@@ -740,18 +724,27 @@ func (s *Server) resolveExportGroupCohort(
 	var patientIDs []string
 	seen := make(map[string]bool)
 
-	for _, m := range groupDoc.Member {
-		if m.Inactive {
+	members, _ := groupMap["member"].([]any)
+	for _, rawMember := range members {
+		m, ok := rawMember.(map[string]any)
+		if !ok {
 			continue
 		}
-		if endStr := strings.TrimSpace(m.Period.End); endStr != "" {
-			if dOp, err := postgres.ParseDateOp(endStr); err == nil {
-				if dOp.Value.Before(now) {
-					continue
+		if inactive, _ := m["inactive"].(bool); inactive {
+			continue
+		}
+		if periodMap, ok := m["period"].(map[string]any); ok {
+			if endStr, _ := periodMap["end"].(string); strings.TrimSpace(endStr) != "" {
+				if dOp, err := postgres.ParseDateOp(strings.TrimSpace(endStr)); err == nil {
+					if dOp.Value.Before(now) {
+						continue
+					}
 				}
 			}
 		}
-		ref := strings.TrimSpace(m.Entity.Reference)
+		entityMap, _ := m["entity"].(map[string]any)
+		ref, _ := entityMap["reference"].(string)
+		ref = strings.TrimSpace(ref)
 		if ref == "" {
 			continue
 		}
@@ -778,7 +771,8 @@ func (s *Server) resolveExportGroupCohort(
 			}
 			continue
 		}
-		if strings.EqualFold(m.Entity.Type, "Patient") && !strings.Contains(ref, "/") {
+		entityType, _ := entityMap["type"].(string)
+		if strings.EqualFold(entityType, "Patient") && !strings.Contains(ref, "/") {
 			if !seen[ref] {
 				seen[ref] = true
 				patientIDs = append(patientIDs, ref)
@@ -828,19 +822,18 @@ func matchesExportTypeFilter(allowed map[string]map[string]bool, resType, resID 
 }
 
 func (s *Server) formatExportNDJSONLine(res postgres.SearchResult, elements []string) ([]byte, bool) {
-	jsonBytes, err := s.protoToJSONWithMeta(res.ResType, res.ResourceProto, res.ResVersion, res.LastUpdated)
+	resource, err := s.protoToFHIRMapWithMeta(res.ResType, res.ResourceProto, res.ResVersion, res.LastUpdated)
 	if err != nil {
-		s.logger.Error("proto to json in export", "error", err, "type", res.ResType, "id", res.ResID)
+		s.logger.Error("proto to map in export", "error", err, "type", res.ResType, "id", res.ResID)
 		return nil, false
 	}
 	if len(elements) > 0 {
-		var resource map[string]any
-		if err := json.Unmarshal(jsonBytes, &resource); err == nil {
-			resource = applySummaryOrElements(resource, "", elements)
-			if projected, mErr := json.Marshal(resource); mErr == nil {
-				jsonBytes = projected
-			}
-		}
+		resource = applySummaryOrElements(resource, "", elements)
+	}
+	jsonBytes, err := json.Marshal(resource)
+	if err != nil {
+		s.logger.Error("marshal json in export", "error", err, "type", res.ResType, "id", res.ResID)
+		return nil, false
 	}
 	var compactLine bytes.Buffer
 	if err := json.Compact(&compactLine, jsonBytes); err != nil {

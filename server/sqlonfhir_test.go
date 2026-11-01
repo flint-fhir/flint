@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	dtpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto"
+	bcrpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/bundle_and_contained_resource_go_proto"
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 
 	"github.com/flint-fhir/flint/server"
@@ -531,4 +532,140 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	pgSQLStr := string(pgSQLBytes)
 	assert.Contains(t, pgSQLStr, "q.sp_value >= 120")
 	assert.Contains(t, pgSQLStr, "NOT EXISTS (SELECT 1 FROM spidx_token t")
+
+	// 9. GET /fhir/r4/proto/Patient?family=WireProtoUpdated with Accept: application/x-protobuf -> binary Proto3 Bundle
+	reqProtoSearch, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Patient?family=WireProtoUpdated", nil)
+	require.NoError(t, err)
+	reqProtoSearch.Header.Set("Accept", "application/x-protobuf")
+	respProtoSearch, err := client.Do(reqProtoSearch)
+	require.NoError(t, err)
+	protoSearchBytes, _ := io.ReadAll(respProtoSearch.Body)
+	respProtoSearch.Body.Close()
+	require.Equal(t, http.StatusOK, respProtoSearch.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respProtoSearch.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respProtoSearch.Header.Get("X-Flint-Wire-Format"))
+	assert.Equal(t, "zero-json-proto3", respProtoSearch.Header.Get("X-Flint-Storage-Model"))
+
+	var searchBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(protoSearchBytes, &searchBundle))
+	assert.Equal(t, uint32(1), searchBundle.GetTotal().GetValue())
+	require.Len(t, searchBundle.GetEntry(), 1)
+	matchedPat := searchBundle.GetEntry()[0].GetResource().GetPatient()
+	require.NotNil(t, matchedPat)
+	assert.Equal(t, patID, matchedPat.GetId().GetValue())
+	assert.Equal(t, "WireProtoUpdated", matchedPat.GetName()[0].GetFamily().GetValue())
+
+	// 10. POST /fhir/r4/proto/Bundle/$convert with binary Proto3 Bundle -> FHIR R4 JSON Bundle
+	reqBundleConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Bundle/$convert", bytes.NewReader(protoSearchBytes))
+	require.NoError(t, err)
+	reqBundleConv.Header.Set("Content-Type", "application/x-protobuf")
+	reqBundleConv.Header.Set("Accept", "application/fhir+json")
+	respBundleConv, err := client.Do(reqBundleConv)
+	require.NoError(t, err)
+	bundleConvJSON, _ := io.ReadAll(respBundleConv.Body)
+	respBundleConv.Body.Close()
+	require.Equal(t, http.StatusOK, respBundleConv.StatusCode)
+	assert.Contains(t, string(bundleConvJSON), `"resourceType":"Bundle"`)
+	assert.Contains(t, string(bundleConvJSON), `"WireProtoUpdated"`)
+
+	// 11. GET /fhir/r4/proto/Patient/{id}/_history with Accept: application/fhir+protobuf -> binary Proto3 History Bundle
+	reqProtoHist, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Patient/"+patID+"/_history", nil)
+	require.NoError(t, err)
+	reqProtoHist.Header.Set("Accept", "application/fhir+protobuf")
+	respProtoHist, err := client.Do(reqProtoHist)
+	require.NoError(t, err)
+	protoHistBytes, _ := io.ReadAll(respProtoHist.Body)
+	respProtoHist.Body.Close()
+	require.Equal(t, http.StatusOK, respProtoHist.StatusCode)
+	assert.Equal(t, "application/fhir+protobuf", respProtoHist.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respProtoHist.Header.Get("X-Flint-Wire-Format"))
+
+	var histBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(protoHistBytes, &histBundle))
+	assert.Equal(t, uint32(2), histBundle.GetTotal().GetValue())
+	require.Len(t, histBundle.GetEntry(), 2)
+	assert.Equal(t, patID, histBundle.GetEntry()[0].GetResource().GetPatient().GetId().GetValue())
+	assert.Contains(t, histBundle.GetEntry()[0].GetResponse().GetStatus().GetValue(), "200")
+
+	// 12. PATCH /fhir/r4/proto/Patient/{id} with Accept: application/x-protobuf -> binary Proto3 Patient response
+	patchPayload := `[{"op":"replace","path":"/name/0/family","value":"WireProtoPatched"}]`
+	reqProtoPatch, err := http.NewRequest(http.MethodPatch, ts.URL+"/fhir/r4/proto/Patient/"+patID, strings.NewReader(patchPayload))
+	require.NoError(t, err)
+	reqProtoPatch.Header.Set("Content-Type", "application/json-patch+json")
+	reqProtoPatch.Header.Set("Accept", "application/x-protobuf")
+	respProtoPatch, err := client.Do(reqProtoPatch)
+	require.NoError(t, err)
+	patchedWire, _ := io.ReadAll(respProtoPatch.Body)
+	respProtoPatch.Body.Close()
+	require.Equal(t, http.StatusOK, respProtoPatch.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respProtoPatch.Header.Get("Content-Type"))
+
+	var patchedPat patpb.Patient
+	require.NoError(t, proto.Unmarshal(patchedWire, &patchedPat))
+	assert.Equal(t, "3", patchedPat.GetMeta().GetVersionId().GetValue())
+	assert.Equal(t, "WireProtoPatched", patchedPat.GetName()[0].GetFamily().GetValue())
+
+	// 13. ViewDefinition/$sql with unionAll + predicate functions (.exists(), .empty(), not(...), .startsWith(), .contains())
+	unionPredVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "patient_union_pred_view",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"}
+				],
+				"unionAll": [
+					{
+						"column": [
+							{"name": "name_part", "path": "name.family.first()"},
+							{"name": "part_type", "path": "'family'"}
+						]
+					},
+					{
+						"column": [
+							{"name": "name_part", "path": "name.given.first()"},
+							{"name": "part_type", "path": "'given'"}
+						]
+					}
+				]
+			}
+		],
+		"where": [
+			{"path": "birthDate.exists() and deceasedDateTime.empty() and not(active = false) and name.family.startsWith('Wire') and name.given.contains('Al')"}
+		]
+	}`
+	reqUnionDoris, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", strings.NewReader(unionPredVD))
+	require.NoError(t, err)
+	reqUnionDoris.Header.Set("Content-Type", "application/fhir+json")
+	respUnionDoris, err := client.Do(reqUnionDoris)
+	require.NoError(t, err)
+	unionDorisBytes, _ := io.ReadAll(respUnionDoris.Body)
+	respUnionDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respUnionDoris.StatusCode)
+	unionDorisSQL := string(unionDorisBytes)
+	assert.Contains(t, unionDorisSQL, "UNION ALL")
+	assert.Contains(t, unionDorisSQL, "'family' AS part_type")
+	assert.Contains(t, unionDorisSQL, "'given' AS part_type")
+	assert.Contains(t, unionDorisSQL, "IS NOT NULL")
+	assert.Contains(t, unionDorisSQL, "NOT (")
+	assert.Contains(t, unionDorisSQL, "LIKE 'family=Wire%'")
+	assert.Contains(t, unionDorisSQL, "LIKE 'given=%Al%'")
+
+	reqUnionPg, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", strings.NewReader(unionPredVD))
+	require.NoError(t, err)
+	reqUnionPg.Header.Set("Content-Type", "application/fhir+json")
+	respUnionPg, err := client.Do(reqUnionPg)
+	require.NoError(t, err)
+	unionPgBytes, _ := io.ReadAll(respUnionPg.Body)
+	respUnionPg.Body.Close()
+	require.Equal(t, http.StatusOK, respUnionPg.StatusCode)
+	unionPgSQL := string(unionPgBytes)
+	assert.Contains(t, unionPgSQL, "UNION ALL")
+	assert.Contains(t, unionPgSQL, "'family' AS part_type")
+	assert.Contains(t, unionPgSQL, "'given' AS part_type")
+	assert.Contains(t, unionPgSQL, "spidx_date")
+	assert.Contains(t, unionPgSQL, "LIKE 'Wire%'")
+	assert.Contains(t, unionPgSQL, "LIKE '%Al%'")
 }
