@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/flint-fhir/flint/store/postgres"
@@ -24,10 +25,13 @@ var (
 // and analytical workloads (Observation/$stats, Bulk $export, cohort counts) execute
 // against the analytical replica.
 type HybridStore struct {
-	primary    Store
-	replica    Store
-	analytical AnalyticalStore
-	extractors map[string]IndexExtractorFunc
+	primary           Store
+	replica           Store
+	analytical        AnalyticalStore
+	extractors        map[string]IndexExtractorFunc
+	replicatedWrites  atomic.Uint64
+	replicatedDeletes atomic.Uint64
+	replicationErrors atomic.Uint64
 }
 
 // NewHybridStore creates a new HybridStore backed by primary (OLTP) and replica (OLAP).
@@ -52,6 +56,37 @@ func (h *HybridStore) Primary() Store {
 // Replica returns the underlying analytical replica store.
 func (h *HybridStore) Replica() Store {
 	return h.replica
+}
+
+// ReplicatedWrites returns the total number of resource writes replicated to the analytical store.
+func (h *HybridStore) ReplicatedWrites() uint64 {
+	return h.replicatedWrites.Load()
+}
+
+// ReplicatedDeletes returns the total number of resource deletes/purges replicated to the analytical store.
+func (h *HybridStore) ReplicatedDeletes() uint64 {
+	return h.replicatedDeletes.Load()
+}
+
+// ReplicationErrors returns the total number of replication errors encountered on the analytical store.
+func (h *HybridStore) ReplicationErrors() uint64 {
+	return h.replicationErrors.Load()
+}
+
+func (h *HybridStore) recordWriteReplication(err error, count uint64) {
+	if err != nil {
+		h.replicationErrors.Add(1)
+		return
+	}
+	h.replicatedWrites.Add(count)
+}
+
+func (h *HybridStore) recordDeleteReplication(err error, count uint64) {
+	if err != nil {
+		h.replicationErrors.Add(1)
+		return
+	}
+	h.replicatedDeletes.Add(count)
 }
 
 func (h *HybridStore) ensureSearchIndexes(in ResourceInput) ResourceInput {
@@ -90,7 +125,8 @@ func (h *HybridStore) replicateRecord(ctx context.Context, baseInput ResourceInp
 		repIn.ResourceProto = baseInput.ResourceProto
 	}
 	repIn = h.ensureSearchIndexes(repIn)
-	_, _ = h.replica.WriteResourceWithMeta(ctx, repIn)
+	_, err := h.replica.WriteResourceWithMeta(ctx, repIn)
+	h.recordWriteReplication(err, 1)
 }
 
 // Ping checks connectivity to both the primary store and the analytical replica.
@@ -136,7 +172,8 @@ func (h *HybridStore) WriteBatch(ctx context.Context, inputs []ResourceInput) er
 			in.ExpectedVersion = 0
 			repInputs[i] = h.ensureSearchIndexes(in)
 		}
-		_ = h.replica.WriteBatch(ctx, repInputs)
+		err := h.replica.WriteBatch(ctx, repInputs)
+		h.recordWriteReplication(err, uint64(len(repInputs)))
 	}
 	return nil
 }
@@ -187,7 +224,8 @@ func (h *HybridStore) ConditionalDeleteResource(
 		return nil, err
 	}
 	if !IsNil(h.replica) && rec != nil && rec.ResID != "" {
-		_, _ = h.replica.DeleteResourceWithMeta(ctx, tenantID, resType, rec.ResID)
+		_, rErr := h.replica.DeleteResourceWithMeta(ctx, tenantID, resType, rec.ResID)
+		h.recordDeleteReplication(rErr, 1)
 	}
 	return rec, nil
 }
@@ -207,7 +245,8 @@ func (h *HybridStore) ConditionalDeleteResources(
 	if !IsNil(h.replica) {
 		for _, rec := range recs {
 			if rec.ResID != "" {
-				_, _ = h.replica.DeleteResourceWithMeta(ctx, tenantID, resType, rec.ResID)
+				_, rErr := h.replica.DeleteResourceWithMeta(ctx, tenantID, resType, rec.ResID)
+				h.recordDeleteReplication(rErr, 1)
 			}
 		}
 	}
@@ -228,7 +267,8 @@ func (h *HybridStore) ExecuteTransactionBundle(ctx context.Context, ops []Bundle
 					resID = results[i].ResID
 				}
 				if resID != "" {
-					_, _ = h.replica.DeleteResourceWithMeta(ctx, op.Input.TenantID, op.Input.ResType, resID)
+					_, rErr := h.replica.DeleteResourceWithMeta(ctx, op.Input.TenantID, op.Input.ResType, resID)
+					h.recordDeleteReplication(rErr, 1)
 				}
 				continue
 			}
@@ -276,7 +316,8 @@ func (h *HybridStore) DeleteResource(ctx context.Context, tenantID, resType, res
 		return err
 	}
 	if !IsNil(h.replica) {
-		_ = h.replica.DeleteResource(ctx, tenantID, resType, resID)
+		rErr := h.replica.DeleteResource(ctx, tenantID, resType, resID)
+		h.recordDeleteReplication(rErr, 1)
 	}
 	return nil
 }
@@ -288,7 +329,8 @@ func (h *HybridStore) DeleteResourceWithMeta(ctx context.Context, tenantID, resT
 		return nil, err
 	}
 	if !IsNil(h.replica) {
-		_, _ = h.replica.DeleteResourceWithMeta(ctx, tenantID, resType, resID)
+		_, rErr := h.replica.DeleteResourceWithMeta(ctx, tenantID, resType, resID)
+		h.recordDeleteReplication(rErr, 1)
 	}
 	return rec, nil
 }
@@ -300,7 +342,8 @@ func (h *HybridStore) DeleteResourceWithExpectedVersion(ctx context.Context, ten
 		return nil, err
 	}
 	if !IsNil(h.replica) {
-		_, _ = h.replica.DeleteResourceWithMeta(ctx, tenantID, resType, resID)
+		_, rErr := h.replica.DeleteResourceWithMeta(ctx, tenantID, resType, resID)
+		h.recordDeleteReplication(rErr, 1)
 	}
 	return rec, nil
 }
@@ -312,7 +355,8 @@ func (h *HybridStore) PurgePatientCompartment(ctx context.Context, tenantID, pat
 		return nil, err
 	}
 	if !IsNil(h.replica) {
-		_, _ = h.replica.PurgePatientCompartment(ctx, tenantID, patientID, hardExpunge)
+		_, rErr := h.replica.PurgePatientCompartment(ctx, tenantID, patientID, hardExpunge)
+		h.recordDeleteReplication(rErr, uint64(len(recs)))
 	}
 	return recs, nil
 }
@@ -324,7 +368,8 @@ func (h *HybridStore) ExpungeResources(ctx context.Context, params ExpungeParams
 		return 0, err
 	}
 	if !IsNil(h.replica) {
-		_, _ = h.replica.ExpungeResources(ctx, params)
+		_, rErr := h.replica.ExpungeResources(ctx, params)
+		h.recordDeleteReplication(rErr, uint64(n))
 	}
 	return n, nil
 }

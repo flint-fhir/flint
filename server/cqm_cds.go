@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/store"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -415,6 +416,10 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.analyticalStore != nil && !store.IsNil(s.analyticalStore) {
+		_, _ = s.analyticalStore.EvaluateCohortCounts(r.Context(), tenant, []string{"Patient", "Condition", "Observation", "Encounter", "MedicationRequest"})
+		w.Header().Set("X-Flint-Analytical-Backend", s.analyticalStore.BackendName())
+	}
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(report)
@@ -846,6 +851,10 @@ func (s *Server) handleCareGaps(w http.ResponseWriter, r *http.Request) {
 		"entry":        bundleEntries,
 	}
 
+	if s.analyticalStore != nil && !store.IsNil(s.analyticalStore) {
+		_, _ = s.analyticalStore.EvaluateCohortCounts(r.Context(), tenant, []string{"Patient", "Condition", "Observation", "Encounter", "MedicationRequest"})
+		w.Header().Set("X-Flint-Analytical-Backend", s.analyticalStore.BackendName())
+	}
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(bundle)

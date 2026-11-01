@@ -6,6 +6,8 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -562,4 +564,157 @@ func TestSQLiteStore_Compartments_Audit_OAuth_Search_And_Maintenance(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, 1, advObs.Total)
 	assert.Len(t, advObs.Includes, 1)
+}
+
+type stubHydrationRows struct {
+	cols []string
+	data [][]driver.Value
+	idx  int
+}
+
+func (r *stubHydrationRows) Columns() []string { return r.cols }
+func (r *stubHydrationRows) Close() error      { return nil }
+func (r *stubHydrationRows) Next(dest []driver.Value) error {
+	if r.idx >= len(r.data) {
+		return io.EOF
+	}
+	copy(dest, r.data[r.idx])
+	r.idx++
+	return nil
+}
+
+type stubHydrationDriver struct{}
+type stubHydrationConn struct{}
+
+func (d *stubHydrationDriver) Open(_ string) (driver.Conn, error) {
+	return &stubHydrationConn{}, nil
+}
+
+func (c *stubHydrationConn) Prepare(_ string) (driver.Stmt, error) { return nil, nil }
+func (c *stubHydrationConn) Close() error                          { return nil }
+func (c *stubHydrationConn) Begin() (driver.Tx, error)             { return nil, nil }
+func (c *stubHydrationConn) ExecContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Result, error) {
+	return driver.RowsAffected(1), nil
+}
+func (c *stubHydrationConn) QueryContext(_ context.Context, q string, _ []driver.NamedValue) (driver.Rows, error) {
+	nowStr := "2025-05-01T12:00:00Z"
+	switch {
+	case strings.Contains(q, "FROM fhir_resource_history"):
+		return &stubHydrationRows{
+			cols: []string{"tenant_id", "res_type", "res_id", "res_version", "is_deleted", "last_updated", "resource_proto"},
+			data: [][]driver.Value{
+				{"t1", "Patient", "pat-1", int64(1), int64(0), nowStr, []byte{0x0a, 0x05, 'p', 'a', 't', '-', '1'}},
+				{"t1", "Patient", "pat-1", int64(2), int64(0), nowStr, []byte{0x0a, 0x05, 'p', 'a', 't', '-', '1'}},
+			},
+		}, nil
+	case strings.Contains(q, "FROM fhir_resource"):
+		return &stubHydrationRows{
+			cols: []string{"tenant_id", "res_type", "res_id", "res_version", "is_deleted", "last_updated", "idempotency_key", "resource_proto"},
+			data: [][]driver.Value{
+				{"t1", "Patient", "pat-1", int64(2), int64(0), nowStr, "idem-1", []byte{0x0a, 0x05, 'p', 'a', 't', '-', '1'}},
+				{"t1", "Observation", "obs-1", int64(1), int64(0), nowStr, "", []byte{0x0a, 0x05, 'o', 'b', 's', '-', '1'}},
+			},
+		}, nil
+	case strings.Contains(q, "FROM spidx_string"):
+		return &stubHydrationRows{
+			cols: []string{"tenant_id", "res_type", "res_id", "sp_name", "sp_value"},
+			data: [][]driver.Value{
+				{"t1", "Patient", "pat-1", "family", "HydratedSmith"},
+			},
+		}, nil
+	case strings.Contains(q, "FROM spidx_token"):
+		return &stubHydrationRows{
+			cols: []string{"tenant_id", "res_type", "res_id", "sp_name", "sp_system", "sp_value"},
+			data: [][]driver.Value{
+				{"t1", "Patient", "pat-1", "gender", "", "female"},
+				{"t1", "Observation", "obs-1", "code", "http://loinc.org", "8867-4"},
+			},
+		}, nil
+	case strings.Contains(q, "FROM spidx_date"):
+		return &stubHydrationRows{
+			cols: []string{"tenant_id", "res_type", "res_id", "sp_name", "sp_low", "sp_high"},
+			data: [][]driver.Value{
+				{"t1", "Patient", "pat-1", "birthdate", "1985-04-12T00:00:00Z", "1985-04-13T00:00:00Z"},
+			},
+		}, nil
+	case strings.Contains(q, "FROM spidx_reference"):
+		return &stubHydrationRows{
+			cols: []string{"tenant_id", "res_type", "res_id", "sp_name", "target_type", "target_id"},
+			data: [][]driver.Value{
+				{"t1", "Observation", "obs-1", "patient", "Patient", "pat-1"},
+			},
+		}, nil
+	case strings.Contains(q, "FROM spidx_quantity"):
+		return &stubHydrationRows{
+			cols: []string{"tenant_id", "res_type", "res_id", "sp_name", "sp_system", "sp_code", "sp_value"},
+			data: [][]driver.Value{
+				{"t1", "Observation", "obs-1", "value-quantity", "http://unitsofmeasure.org", "/min", float64(72.0)},
+			},
+		}, nil
+	case strings.Contains(q, "FROM spidx_uri"):
+		return &stubHydrationRows{
+			cols: []string{"tenant_id", "res_type", "res_id", "sp_name", "sp_value"},
+			data: [][]driver.Value{
+				{"t1", "Patient", "pat-1", "_profile", "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"},
+			},
+		}, nil
+	case strings.Contains(q, "FROM fhir_audit_event"):
+		return &stubHydrationRows{
+			cols: []string{
+				"tenant_id", "audit_id", "recorded", "action", "subtype_code", "outcome",
+				"outcome_desc", "http_method", "http_status", "request_uri",
+				"agent_subject", "agent_patient", "client_ip", "entity_type", "entity_id", "entity_version",
+			},
+			data: [][]driver.Value{
+				{"t1", "aud-hydrated", nowStr, "R", "read", "0", "", "GET", int64(200), "/fhir/r4/t1/Patient/pat-1", "doc-1", "pat-1", "127.0.0.1", "Patient", "pat-1", "2"},
+			},
+		}, nil
+	case strings.Contains(q, "FROM fhir_export_job"):
+		return &stubHydrationRows{
+			cols: []string{"tenant_id", "job_id", "patient_id", "request_url", "created_at"},
+			data: [][]driver.Value{
+				{"t1", "job-hydrated", "pat-1", "http://localhost/fhir/r4/t1/$export", nowStr},
+			},
+		}, nil
+	default:
+		return &stubHydrationRows{}, nil
+	}
+}
+
+var registerHydrationDriverOnce sync.Once
+
+func TestSQLiteStore_LoadFromDB_RoundTripHydration(t *testing.T) {
+	registerHydrationDriverOnce.Do(func() {
+		sql.Register("sqlite_stub_hydrate", &stubHydrationDriver{})
+	})
+	db, err := sql.Open("sqlite_stub_hydrate", "")
+	require.NoError(t, err)
+	defer db.Close()
+
+	ss := sqlite.New(db)
+	ctx := context.Background()
+	require.NoError(t, ss.LoadFromDB(ctx))
+
+	// Verify hydrated active resource & vread history
+	rec, err := ss.ReadResourceWithMeta(ctx, "t1", "Patient", "pat-1")
+	require.NoError(t, err)
+	assert.Equal(t, 2, rec.ResVersion)
+
+	v1, err := ss.ReadResourceVersion(ctx, "t1", "Patient", "pat-1", 1)
+	require.NoError(t, err)
+	assert.Equal(t, 1, v1.ResVersion)
+
+	// Verify hydrated spidx_* indexes & compartment linkage
+	belongs, err := ss.BelongsToPatientCompartment(ctx, "t1", "Observation", "obs-1", "pat-1")
+	require.NoError(t, err)
+	assert.True(t, belongs)
+
+	// Verify hydrated AuditRecord & ExportJobRecord
+	aud, err := ss.ReadAuditEvent(ctx, "t1", "aud-hydrated")
+	require.NoError(t, err)
+	assert.Equal(t, "doc-1", aud.AgentSubject)
+
+	job, err := ss.GetExportJob(ctx, "t1", "job-hydrated")
+	require.NoError(t, err)
+	assert.Equal(t, "pat-1", job.PatientID)
 }

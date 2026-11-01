@@ -285,4 +285,8 @@ func TestHybridStore_ReplicationAndAnalyticalPushdown(t *testing.T) {
 	require.NoError(t, hyb.RevokeToken(ctx, "tok1", time.Minute))
 	_, err = hyb.IsTokenRevoked(ctx, "tok1")
 	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, hyb.ReplicatedWrites(), uint64(5))
+	assert.GreaterOrEqual(t, hyb.ReplicatedDeletes(), uint64(5))
+	assert.Equal(t, uint64(0), hyb.ReplicationErrors())
 }

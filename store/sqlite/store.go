@@ -277,6 +277,10 @@ func (s *Store) writeUnlocked(ctx context.Context, input store.ResourceInput) (*
 	}
 
 	if input.SearchIndexes != nil {
+		for _, tbl := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri"} {
+			_ = s.execSQLite(ctx, fmt.Sprintf("DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ?", tbl),
+				entry.tenantID, entry.resType, entry.resID)
+		}
 		for _, st := range input.SearchIndexes.Strings {
 			_ = s.execSQLite(ctx, `INSERT INTO spidx_string (tenant_id, res_type, res_id, sp_name, sp_value, sp_value_lower) VALUES (?, ?, ?, ?, ?, ?)`,
 				entry.tenantID, entry.resType, entry.resID, st.SpName, st.SpValue, strings.ToLower(st.SpValue))
@@ -285,6 +289,10 @@ func (s *Store) writeUnlocked(ctx context.Context, input store.ResourceInput) (*
 			_ = s.execSQLite(ctx, `INSERT INTO spidx_token (tenant_id, res_type, res_id, sp_name, sp_system, sp_value) VALUES (?, ?, ?, ?, ?, ?)`,
 				entry.tenantID, entry.resType, entry.resID, tk.SpName, tk.SpSystem, tk.SpValue)
 		}
+		for _, dt := range input.SearchIndexes.Dates {
+			_ = s.execSQLite(ctx, `INSERT INTO spidx_date (tenant_id, res_type, res_id, sp_name, sp_low, sp_high) VALUES (?, ?, ?, ?, ?, ?)`,
+				entry.tenantID, entry.resType, entry.resID, dt.SpName, dt.SpLow.UTC().Format(time.RFC3339Nano), dt.SpHigh.UTC().Format(time.RFC3339Nano))
+		}
 		for _, rf := range input.SearchIndexes.References {
 			_ = s.execSQLite(ctx, `INSERT INTO spidx_reference (tenant_id, res_type, res_id, sp_name, target_type, target_id) VALUES (?, ?, ?, ?, ?, ?)`,
 				entry.tenantID, entry.resType, entry.resID, rf.SpName, rf.TargetType, rf.TargetID)
@@ -292,6 +300,10 @@ func (s *Store) writeUnlocked(ctx context.Context, input store.ResourceInput) (*
 		for _, qt := range input.SearchIndexes.Quantities {
 			_ = s.execSQLite(ctx, `INSERT INTO spidx_quantity (tenant_id, res_type, res_id, sp_name, sp_system, sp_code, sp_value) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 				entry.tenantID, entry.resType, entry.resID, qt.SpName, qt.SpSystem, qt.SpCode, qt.SpValue)
+		}
+		for _, u := range input.SearchIndexes.URIs {
+			_ = s.execSQLite(ctx, `INSERT INTO spidx_uri (tenant_id, res_type, res_id, sp_name, sp_value) VALUES (?, ?, ?, ?, ?)`,
+				entry.tenantID, entry.resType, entry.resID, u.SpName, u.SpValue)
 		}
 	}
 
@@ -808,6 +820,12 @@ func (s *Store) deleteUnlocked(ctx context.Context, tenantID, resType, resID str
 
 	_ = s.execSQLite(ctx, `UPDATE fhir_resource SET res_version = ?, is_deleted = 1, last_updated = ?, resource_proto = X'' WHERE tenant_id = ? AND res_type = ? AND res_id = ?`,
 		newVersion, now.Format(time.RFC3339Nano), tenantID, resType, resID)
+	_ = s.execSQLite(ctx, `INSERT INTO fhir_resource_history (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto) VALUES (?, ?, ?, ?, 1, ?, NULL)`,
+		tenantID, resType, resID, newVersion, now.Format(time.RFC3339Nano))
+	for _, tbl := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri"} {
+		_ = s.execSQLite(ctx, fmt.Sprintf("DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ?", tbl),
+			tenantID, resType, resID)
+	}
 
 	return &tombstoneRec, nil
 }
@@ -870,16 +888,17 @@ func (s *Store) Search(ctx context.Context, params store.SearchParams) (*store.S
 			ResourceProto: append([]byte(nil), entry.resourceProto...),
 		})
 	}
+	store.SortSearchResults(params.TenantID, matches, params.Sort, s.lookupIndexedViewLocked)
 	s.mu.RUnlock()
 
-	sort.Slice(matches, func(i, j int) bool {
-		if !matches[i].LastUpdated.Equal(matches[j].LastUpdated) {
-			return matches[i].LastUpdated.After(matches[j].LastUpdated)
-		}
-		return matches[i].ResID < matches[j].ResID
-	})
-
 	total := len(matches)
+	if strings.EqualFold(params.Summary, "count") {
+		return &store.SearchResults{
+			Matches: []store.SearchResult{},
+			Total:   total,
+		}, nil
+	}
+
 	count := params.Count
 	if count <= 0 {
 		count = 20
@@ -897,67 +916,14 @@ func (s *Store) Search(ctx context.Context, params store.SearchParams) (*store.S
 	var includes []store.SearchResult
 	if len(matches) > 0 && (len(params.Includes) > 0 || len(params.RevIncludes) > 0) {
 		s.mu.RLock()
-		seen := make(map[string]bool, len(matches))
-		for _, m := range matches {
-			seen[resKey(params.TenantID, m.ResType, m.ResID)] = true
-		}
-		for _, inc := range params.Includes {
-			for _, m := range matches {
-				if inc.SourceType != "" && inc.SourceType != "*" && !strings.EqualFold(inc.SourceType, m.ResType) {
-					continue
-				}
-				mEntry, ok := s.resources[resKey(params.TenantID, m.ResType, m.ResID)]
-				if !ok || mEntry.indexes == nil {
-					continue
-				}
-				for _, ref := range mEntry.indexes.References {
-					if inc.ParamName != "" && inc.ParamName != "*" && !strings.EqualFold(inc.ParamName, ref.SpName) {
-						continue
-					}
-					if inc.TargetType != "" && inc.TargetType != "*" && !strings.EqualFold(inc.TargetType, ref.TargetType) {
-						continue
-					}
-					s.appendIncludeByTargetLocked(params.TenantID, ref.TargetType, ref.TargetID, seen, &includes)
-				}
-			}
-		}
-		for _, rev := range params.RevIncludes {
-			for _, cand := range s.resources {
-				if cand.tenantID != params.TenantID || cand.isDeleted || cand.indexes == nil {
-					continue
-				}
-				if rev.SourceType != "" && rev.SourceType != "*" && !strings.EqualFold(rev.SourceType, cand.resType) {
-					continue
-				}
-				candKey := resKey(params.TenantID, cand.resType, cand.resID)
-				if seen[candKey] {
-					continue
-				}
-				for _, ref := range cand.indexes.References {
-					if rev.ParamName != "" && rev.ParamName != "*" && !strings.EqualFold(rev.ParamName, ref.SpName) {
-						continue
-					}
-					matchedTarget := false
-					for _, m := range matches {
-						if ref.TargetID == m.ResID && (ref.TargetType == "" || strings.EqualFold(ref.TargetType, m.ResType)) {
-							matchedTarget = true
-							break
-						}
-					}
-					if matchedTarget {
-						seen[candKey] = true
-						includes = append(includes, store.SearchResult{
-							ResType:       cand.resType,
-							ResID:         cand.resID,
-							ResVersion:    cand.resVersion,
-							LastUpdated:   cand.lastUpdated,
-							ResourceProto: append([]byte(nil), cand.resourceProto...),
-						})
-						break
-					}
-				}
-			}
-		}
+		includes = store.ResolveSearchIncludes(
+			params.TenantID,
+			matches,
+			params.Includes,
+			params.RevIncludes,
+			s.lookupIndexedViewLocked,
+			s.listTenantViewsLocked,
+		)
 		s.mu.RUnlock()
 	}
 
@@ -966,6 +932,50 @@ func (s *Store) Search(ctx context.Context, params store.SearchParams) (*store.S
 		Includes: includes,
 		Total:    total,
 	}, nil
+}
+
+func toIndexedView(entry sqliteEntry) store.IndexedResourceView {
+	return store.IndexedResourceView{
+		TenantID:      entry.tenantID,
+		ResType:       entry.resType,
+		ResID:         entry.resID,
+		ResVersion:    entry.resVersion,
+		LastUpdated:   entry.lastUpdated,
+		PatientID:     entry.patientID,
+		EncounterID:   entry.encounterID,
+		ResourceProto: entry.resourceProto,
+		Indexes:       entry.indexes,
+	}
+}
+
+func (s *Store) lookupIndexedViewLocked(tenantID, resType, resID string) (store.IndexedResourceView, bool) {
+	if resType != "" {
+		if entry, ok := s.resources[resKey(tenantID, resType, resID)]; ok && !entry.isDeleted {
+			return toIndexedView(entry), true
+		}
+		for _, entry := range s.resources {
+			if entry.tenantID == tenantID && !entry.isDeleted && entry.resID == resID && strings.EqualFold(entry.resType, resType) {
+				return toIndexedView(entry), true
+			}
+		}
+		return store.IndexedResourceView{}, false
+	}
+	for _, entry := range s.resources {
+		if entry.tenantID == tenantID && !entry.isDeleted && entry.resID == resID {
+			return toIndexedView(entry), true
+		}
+	}
+	return store.IndexedResourceView{}, false
+}
+
+func (s *Store) listTenantViewsLocked(tenantID string) []store.IndexedResourceView {
+	out := make([]store.IndexedResourceView, 0, len(s.resources))
+	for _, entry := range s.resources {
+		if entry.tenantID == tenantID && !entry.isDeleted {
+			out = append(out, toIndexedView(entry))
+		}
+	}
+	return out
 }
 
 func (s *Store) appendIncludeByTargetLocked(tenantID, targetType, targetID string, seen map[string]bool, includes *[]store.SearchResult) {
@@ -1087,7 +1097,7 @@ func (s *Store) matchesSearchParams(entry sqliteEntry, params store.SearchParams
 			}
 		}
 	}
-	return true
+	return store.EvaluateAdvancedSearchParams(toIndexedView(entry), params, s.lookupIndexedViewLocked, s.listTenantViewsLocked)
 }
 
 func matchURI(idx *store.SearchIndexes, spName, rawURI string) bool {
@@ -2103,14 +2113,19 @@ func (s *Store) IsTokenRevoked(_ context.Context, rawToken string) (bool, error)
 }
 
 // SaveExportJob persists a Bulk Data ($export) job record.
-func (s *Store) SaveExportJob(_ context.Context, job store.ExportJobRecord) error {
+func (s *Store) SaveExportJob(ctx context.Context, job store.ExportJobRecord) error {
 	if job.ID == "" {
 		return nil
+	}
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = time.Now().UTC()
 	}
 	s.mu.Lock()
 	s.exportJobs[job.TenantID+"|"+job.ID] = job
 	s.mu.Unlock()
-	return nil
+
+	stmt := `INSERT INTO fhir_export_job (tenant_id, job_id, patient_id, request_url, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (tenant_id, job_id) DO UPDATE SET patient_id = excluded.patient_id, request_url = excluded.request_url, created_at = excluded.created_at`
+	return s.execSQLite(ctx, stmt, job.TenantID, job.ID, job.PatientID, job.RequestURL, job.CreatedAt.UTC().Format(time.RFC3339Nano))
 }
 
 // GetExportJob retrieves a persisted Bulk Data ($export) job record.
@@ -2126,13 +2141,245 @@ func (s *Store) GetExportJob(_ context.Context, tenantID, jobID string) (*store.
 }
 
 // DeleteExportJob deletes a Bulk Data ($export) job record.
-func (s *Store) DeleteExportJob(_ context.Context, tenantID, jobID string) (bool, error) {
+func (s *Store) DeleteExportJob(ctx context.Context, tenantID, jobID string) (bool, error) {
 	key := tenantID + "|" + jobID
 	s.mu.Lock()
 	_, ok := s.exportJobs[key]
 	delete(s.exportJobs, key)
 	s.mu.Unlock()
+	_ = s.execSQLite(ctx, `DELETE FROM fhir_export_job WHERE tenant_id = ? AND job_id = ?`, tenantID, jobID)
 	return ok, nil
+}
+
+// LoadFromDB hydrates the in-memory resource, history, spidx_*, audit, and export job indexes
+// from the persisted SQLite WAL tables on server startup or restart.
+func (s *Store) LoadFromDB(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+
+	resources := make(map[string]sqliteEntry)
+	history := make(map[string][]store.ResourceRecord)
+	audits := make(map[string][]store.AuditRecord)
+	exportJobs := make(map[string]store.ExportJobRecord)
+
+	resRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, res_version, is_deleted, last_updated, COALESCE(idempotency_key, ''), resource_proto FROM fhir_resource`)
+	if err != nil {
+		return fmt.Errorf("sqlite load fhir_resource: %w", err)
+	}
+	defer resRows.Close()
+	for resRows.Next() {
+		var (
+			tenantID, resType, resID, lastUpdStr, idemKey string
+			resVersion, isDelInt                          int
+			protoBytes                                    []byte
+		)
+		if err := resRows.Scan(&tenantID, &resType, &resID, &resVersion, &isDelInt, &lastUpdStr, &idemKey, &protoBytes); err != nil {
+			return fmt.Errorf("sqlite scan fhir_resource: %w", err)
+		}
+		lu, _ := time.Parse(time.RFC3339Nano, lastUpdStr)
+		isDeleted := isDelInt != 0
+		var idx *store.SearchIndexes
+		if !isDeleted {
+			idx = &store.SearchIndexes{}
+		}
+		key := resKey(tenantID, resType, resID)
+		resources[key] = sqliteEntry{
+			tenantID:       tenantID,
+			resType:        resType,
+			resID:          resID,
+			resVersion:     resVersion,
+			isDeleted:      isDeleted,
+			lastUpdated:    lu,
+			idempotencyKey: idemKey,
+			resourceProto:  append([]byte(nil), protoBytes...),
+			indexes:        idx,
+		}
+	}
+	if err := resRows.Err(); err != nil {
+		return fmt.Errorf("sqlite iterate fhir_resource: %w", err)
+	}
+
+	histRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto FROM fhir_resource_history ORDER BY res_version ASC`)
+	if err != nil {
+		return fmt.Errorf("sqlite load fhir_resource_history: %w", err)
+	}
+	defer histRows.Close()
+	for histRows.Next() {
+		var (
+			tenantID, resType, resID, lastUpdStr string
+			resVersion, isDelInt                 int
+			protoBytes                           []byte
+		)
+		if err := histRows.Scan(&tenantID, &resType, &resID, &resVersion, &isDelInt, &lastUpdStr, &protoBytes); err != nil {
+			return fmt.Errorf("sqlite scan fhir_resource_history: %w", err)
+		}
+		lu, _ := time.Parse(time.RFC3339Nano, lastUpdStr)
+		key := resKey(tenantID, resType, resID)
+		history[key] = append(history[key], store.ResourceRecord{
+			TenantID:      tenantID,
+			ResType:       resType,
+			ResID:         resID,
+			ResVersion:    resVersion,
+			LastUpdated:   lu,
+			ResourceProto: append([]byte(nil), protoBytes...),
+			IsDeleted:     isDelInt != 0,
+		})
+	}
+	if err := histRows.Err(); err != nil {
+		return fmt.Errorf("sqlite iterate fhir_resource_history: %w", err)
+	}
+
+	strRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, sp_name, sp_value FROM spidx_string`)
+	if err != nil {
+		return fmt.Errorf("sqlite load spidx_string: %w", err)
+	}
+	defer strRows.Close()
+	for strRows.Next() {
+		var tenantID, resType, resID, spName, spValue string
+		if err := strRows.Scan(&tenantID, &resType, &resID, &spName, &spValue); err != nil {
+			return fmt.Errorf("sqlite scan spidx_string: %w", err)
+		}
+		key := resKey(tenantID, resType, resID)
+		if e, ok := resources[key]; ok && !e.isDeleted && e.indexes != nil {
+			e.indexes.Strings = append(e.indexes.Strings, store.SpidxString{SpName: spName, SpValue: spValue})
+		}
+	}
+
+	tokRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, sp_name, sp_system, sp_value FROM spidx_token`)
+	if err != nil {
+		return fmt.Errorf("sqlite load spidx_token: %w", err)
+	}
+	defer tokRows.Close()
+	for tokRows.Next() {
+		var tenantID, resType, resID, spName, spSystem, spValue string
+		if err := tokRows.Scan(&tenantID, &resType, &resID, &spName, &spSystem, &spValue); err != nil {
+			return fmt.Errorf("sqlite scan spidx_token: %w", err)
+		}
+		key := resKey(tenantID, resType, resID)
+		if e, ok := resources[key]; ok && !e.isDeleted && e.indexes != nil {
+			e.indexes.Tokens = append(e.indexes.Tokens, store.SpidxToken{SpName: spName, SpSystem: spSystem, SpValue: spValue})
+		}
+	}
+
+	dateRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, sp_name, sp_low, sp_high FROM spidx_date`)
+	if err != nil {
+		return fmt.Errorf("sqlite load spidx_date: %w", err)
+	}
+	defer dateRows.Close()
+	for dateRows.Next() {
+		var tenantID, resType, resID, spName, spLowStr, spHighStr string
+		if err := dateRows.Scan(&tenantID, &resType, &resID, &spName, &spLowStr, &spHighStr); err != nil {
+			return fmt.Errorf("sqlite scan spidx_date: %w", err)
+		}
+		low, _ := time.Parse(time.RFC3339Nano, spLowStr)
+		high, _ := time.Parse(time.RFC3339Nano, spHighStr)
+		key := resKey(tenantID, resType, resID)
+		if e, ok := resources[key]; ok && !e.isDeleted && e.indexes != nil {
+			e.indexes.Dates = append(e.indexes.Dates, store.SpidxDate{SpName: spName, SpLow: low, SpHigh: high})
+		}
+	}
+
+	refRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, sp_name, target_type, target_id FROM spidx_reference`)
+	if err != nil {
+		return fmt.Errorf("sqlite load spidx_reference: %w", err)
+	}
+	defer refRows.Close()
+	for refRows.Next() {
+		var tenantID, resType, resID, spName, targetType, targetID string
+		if err := refRows.Scan(&tenantID, &resType, &resID, &spName, &targetType, &targetID); err != nil {
+			return fmt.Errorf("sqlite scan spidx_reference: %w", err)
+		}
+		key := resKey(tenantID, resType, resID)
+		if e, ok := resources[key]; ok && !e.isDeleted && e.indexes != nil {
+			e.indexes.References = append(e.indexes.References, store.SpidxReference{SpName: spName, TargetType: targetType, TargetID: targetID})
+		}
+	}
+
+	qtyRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, sp_name, sp_system, sp_code, sp_value FROM spidx_quantity`)
+	if err != nil {
+		return fmt.Errorf("sqlite load spidx_quantity: %w", err)
+	}
+	defer qtyRows.Close()
+	for qtyRows.Next() {
+		var tenantID, resType, resID, spName, spSystem, spCode string
+		var spValue float64
+		if err := qtyRows.Scan(&tenantID, &resType, &resID, &spName, &spSystem, &spCode, &spValue); err != nil {
+			return fmt.Errorf("sqlite scan spidx_quantity: %w", err)
+		}
+		key := resKey(tenantID, resType, resID)
+		if e, ok := resources[key]; ok && !e.isDeleted && e.indexes != nil {
+			e.indexes.Quantities = append(e.indexes.Quantities, store.SpidxQuantity{SpName: spName, SpSystem: spSystem, SpCode: spCode, SpValue: spValue})
+		}
+	}
+
+	uriRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, sp_name, sp_value FROM spidx_uri`)
+	if err != nil {
+		return fmt.Errorf("sqlite load spidx_uri: %w", err)
+	}
+	defer uriRows.Close()
+	for uriRows.Next() {
+		var tenantID, resType, resID, spName, spValue string
+		if err := uriRows.Scan(&tenantID, &resType, &resID, &spName, &spValue); err != nil {
+			return fmt.Errorf("sqlite scan spidx_uri: %w", err)
+		}
+		key := resKey(tenantID, resType, resID)
+		if e, ok := resources[key]; ok && !e.isDeleted && e.indexes != nil {
+			e.indexes.URIs = append(e.indexes.URIs, store.SpidxURI{SpName: spName, SpValue: spValue})
+		}
+	}
+
+	for k, e := range resources {
+		if !e.isDeleted {
+			e.patientID, e.encounterID = extractCompartmentLinks(e.resType, e.resID, e.indexes)
+			resources[k] = e
+		}
+	}
+
+	auditRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, audit_id, recorded, action, subtype_code, outcome, COALESCE(outcome_desc, ''), COALESCE(http_method, ''), COALESCE(http_status, 0), COALESCE(request_uri, ''), COALESCE(agent_subject, ''), COALESCE(agent_patient, ''), COALESCE(client_ip, ''), COALESCE(entity_type, ''), COALESCE(entity_id, ''), COALESCE(entity_version, '') FROM fhir_audit_event`)
+	if err != nil {
+		return fmt.Errorf("sqlite load fhir_audit_event: %w", err)
+	}
+	defer auditRows.Close()
+	for auditRows.Next() {
+		var rec store.AuditRecord
+		var recStr string
+		if err := auditRows.Scan(
+			&rec.TenantID, &rec.AuditID, &recStr, &rec.Action, &rec.SubtypeCode, &rec.Outcome,
+			&rec.OutcomeDesc, &rec.HTTPMethod, &rec.HTTPStatus, &rec.RequestURI,
+			&rec.AgentSubject, &rec.AgentPatient, &rec.ClientIP, &rec.EntityType,
+			&rec.EntityID, &rec.EntityVersion,
+		); err != nil {
+			return fmt.Errorf("sqlite scan fhir_audit_event: %w", err)
+		}
+		rec.Recorded, _ = time.Parse(time.RFC3339Nano, recStr)
+		audits[rec.TenantID] = append(audits[rec.TenantID], rec)
+	}
+
+	jobRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, job_id, COALESCE(patient_id, ''), COALESCE(request_url, ''), created_at FROM fhir_export_job`)
+	if err != nil {
+		return fmt.Errorf("sqlite load fhir_export_job: %w", err)
+	}
+	defer jobRows.Close()
+	for jobRows.Next() {
+		var job store.ExportJobRecord
+		var createdStr string
+		if err := jobRows.Scan(&job.TenantID, &job.ID, &job.PatientID, &job.RequestURL, &createdStr); err != nil {
+			return fmt.Errorf("sqlite scan fhir_export_job: %w", err)
+		}
+		job.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
+		exportJobs[job.TenantID+"|"+job.ID] = job
+	}
+
+	s.mu.Lock()
+	s.resources = resources
+	s.history = history
+	s.audits = audits
+	s.exportJobs = exportJobs
+	s.mu.Unlock()
+	return nil
 }
 
 func cloneSearchIndexes(idx *store.SearchIndexes) *store.SearchIndexes {
