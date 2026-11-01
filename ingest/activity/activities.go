@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/flint-fhir/flint/automq"
+	"github.com/flint-fhir/flint/store"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -62,9 +63,14 @@ type PublishToAutoMQInput struct {
 
 // --- Activities ---
 
+// BatchStore is the operational store interface required for batch ingestion.
+type BatchStore interface {
+	WriteBatch(ctx context.Context, inputs []postgres.ResourceInput) error
+}
+
 // Activities holds dependencies for all ingest activities.
 type Activities struct {
-	Store    *postgres.Store
+	Store    BatchStore
 	Producer automq.Publisher // nil = skip AutoMQ publish
 	Logger   *slog.Logger
 	// IndexExtractors maps resource type → extraction function.
@@ -100,7 +106,7 @@ func (a *Activities) WritePostgresBatch(ctx context.Context, input WritePostgres
 		return fmt.Errorf("mismatched batch input lengths: protos=%d, types=%d, ids=%d",
 			len(input.ResourceProtos), len(input.ResourceTypes), len(input.ResourceIDs))
 	}
-	if len(input.ResourceProtos) > 0 && a.Store == nil {
+	if len(input.ResourceProtos) > 0 && store.IsNil(a.Store) {
 		return fmt.Errorf("postgres store is nil")
 	}
 
@@ -139,7 +145,7 @@ func (a *Activities) WritePostgresBatch(ctx context.Context, input WritePostgres
 		inputs[i] = ri
 	}
 
-	if a.Store != nil {
+	if !store.IsNil(a.Store) {
 		if err := a.Store.WriteBatch(ctx, inputs); err != nil {
 			return fmt.Errorf("postgres batch write: %w", err)
 		}

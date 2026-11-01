@@ -601,7 +601,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		if patientRestricted {
 			allowedPat = cleanID(secCtx.GetPatientId())
 		}
-		_ = s.store.StreamExportResources(r.Context(), exportParams, func(res postgres.SearchResult) error {
+		_ = s.streamExportResources(r.Context(), exportParams, func(res postgres.SearchResult) error {
 			if !matchesExportTypeFilter(typeFilterAllowed, res.ResType, res.ResID) {
 				return nil
 			}
@@ -851,6 +851,13 @@ func (s *Server) formatExportNDJSONLine(res postgres.SearchResult, elements []st
 	return compactLine.Bytes(), true
 }
 
+func (s *Server) streamExportResources(ctx context.Context, params postgres.ExportParams, emit func(postgres.SearchResult) error) error {
+	if s.analyticalStore != nil && params.PatientID == "" && len(params.PatientIDs) == 0 && !params.PatientCompartment {
+		return s.analyticalStore.StreamAnalyticalExport(ctx, params, emit)
+	}
+	return s.store.StreamExportResources(ctx, params, emit)
+}
+
 func (s *Server) populateExportJob(
 	ctx context.Context,
 	job *exportJob,
@@ -877,7 +884,7 @@ func (s *Server) populateExportJob(
 		allowedPat = cleanID(secCtx.GetPatientId())
 	}
 
-	err := s.store.StreamExportResources(ctx, exportParams, func(res postgres.SearchResult) error {
+	err := s.streamExportResources(ctx, exportParams, func(res postgres.SearchResult) error {
 		if !matchesExportTypeFilter(typeFilterAllowed, res.ResType, res.ResID) {
 			return nil
 		}

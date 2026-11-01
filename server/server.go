@@ -49,6 +49,7 @@ import (
 	automq "github.com/flint-fhir/flint/pkg/cdc"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/pkg/validation"
+	"github.com/flint-fhir/flint/store"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -56,8 +57,9 @@ var idSeq atomic.Uint64
 
 // Server is the Flint FHIR REST API server.
 type Server struct {
-	store  *postgres.Store
-	logger *slog.Logger
+	store           store.Store
+	analyticalStore store.AnalyticalStore
+	logger          *slog.Logger
 	// protoRegistry maps FHIR resource type names to proto message descriptors.
 	// Used to unmarshal proto bytes back to proto messages for JSON conversion.
 	protoRegistry              map[string]protoreflect.MessageDescriptor
@@ -87,11 +89,20 @@ type Server struct {
 	metrics                    *serverMetrics
 }
 
-// New creates a new FHIR server.
-func New(store *postgres.Store, logger *slog.Logger) *Server {
+// New creates a new FHIR server backed by any pluggable store.Store implementation
+// (such as *postgres.Store or *doris.Store). If st also implements store.AnalyticalStore,
+// it is automatically registered as the server's analytical engine.
+func New(st store.Store, logger *slog.Logger) *Server {
+	if store.IsNil(st) {
+		st = nil
+	}
 	var auditRec audit.Recorder
-	if store != nil {
-		auditRec = audit.NewStoreRecorder(store)
+	var analytical store.AnalyticalStore
+	if st != nil {
+		auditRec = audit.NewStoreRecorder(st)
+		if as, ok := st.(store.AnalyticalStore); ok && !store.IsNil(as) {
+			analytical = as
+		}
 	} else {
 		auditRec = audit.NewMemoryRecorder()
 	}
@@ -99,21 +110,42 @@ func New(store *postgres.Store, logger *slog.Logger) *Server {
 	valEngine := validation.NewEngine(validation.DefaultOptions())
 	valEngine.SetFHIRPathEvaluator(evalFHIRPath)
 	return &Server{
-		store:         store,
-		logger:        logger,
-		protoRegistry: make(map[string]protoreflect.MessageDescriptor),
-		extractors:    postgres.DefaultIndexExtractors(),
-		devAuth:       devAuth,
-		oauthCodes:    make(map[string]authCodeEntry),
-		refreshTokens: make(map[string]refreshTokenEntry),
-		revokedTokens: make(map[string]time.Time),
-		clientJWKs:    make(map[string]auth.JWK),
-		validator:     valEngine,
-		auditRecorder: auditRec,
-		exportJobs:    make(map[string]*exportJob),
-		subSem:        make(chan struct{}, 32),
-		metrics:       newServerMetrics(),
+		store:           st,
+		analyticalStore: analytical,
+		logger:          logger,
+		protoRegistry:   make(map[string]protoreflect.MessageDescriptor),
+		extractors:      postgres.DefaultIndexExtractors(),
+		devAuth:         devAuth,
+		oauthCodes:      make(map[string]authCodeEntry),
+		refreshTokens:   make(map[string]refreshTokenEntry),
+		revokedTokens:   make(map[string]time.Time),
+		clientJWKs:      make(map[string]auth.JWK),
+		validator:       valEngine,
+		auditRecorder:   auditRec,
+		exportJobs:      make(map[string]*exportJob),
+		subSem:          make(chan struct{}, 32),
+		metrics:         newServerMetrics(),
 	}
+}
+
+// Store returns the configured operational store.Store.
+func (s *Server) Store() store.Store {
+	return s.store
+}
+
+// SetAnalyticalStore configures an optional columnar AnalyticalStore (such as *doris.Store)
+// for hybrid OLTP + OLAP deployments (--store=postgres --analytics-store=doris).
+func (s *Server) SetAnalyticalStore(as store.AnalyticalStore) {
+	if store.IsNil(as) {
+		s.analyticalStore = nil
+		return
+	}
+	s.analyticalStore = as
+}
+
+// AnalyticalStore returns the configured AnalyticalStore, or nil if none is active.
+func (s *Server) AnalyticalStore() store.AnalyticalStore {
+	return s.analyticalStore
 }
 
 // RegisterDefaultResourceTypes registers all ~146 official HL7 FHIR R4 resource types

@@ -211,4 +211,61 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 		capturedHandler.ServeHTTP(recFHIR, reqFHIR)
 		assert.Equal(t, http.StatusUnauthorized, recFHIR.Code)
 	})
+
+	t.Run("standalone doris store and hybrid postgres+doris analytics wiring", func(t *testing.T) {
+		var capturedHandler http.Handler
+		err := run(
+			[]string{"-store", "doris"},
+			func(k string) string {
+				if k == "FLINT_DORIS_DSN" {
+					return "root:@tcp(127.0.0.1:9030)/flint"
+				}
+				if k == "FLINT_DORIS_GROUP_COMMIT" {
+					return "async_mode"
+				}
+				return ""
+			},
+			io.Discard,
+			logger,
+			func(string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
+			func(_ string, h http.Handler) error {
+				capturedHandler = h
+				return nil
+			},
+		)
+		require.NoError(t, err)
+		require.NotNil(t, capturedHandler)
+
+		// Hybrid mode: --store=postgres --analytics-store=doris
+		err = run(
+			[]string{"-store", "postgres", "-analytics-store", "doris"},
+			func(string) string { return "" },
+			io.Discard,
+			logger,
+			func(string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
+			func(_ string, _ http.Handler) error { return nil },
+		)
+		require.NoError(t, err)
+
+		// Invalid store backend or analytics backend
+		err = run(
+			[]string{"-store", "invalid-backend"},
+			func(string) string { return "" },
+			io.Discard,
+			logger,
+			func(string) (*sql.DB, error) { return nil, nil },
+			func(string, http.Handler) error { return nil },
+		)
+		require.ErrorContains(t, err, "invalid store backend")
+
+		err = run(
+			[]string{"-analytics-store", "invalid-analytics"},
+			func(string) string { return "" },
+			io.Discard,
+			logger,
+			func(string) (*sql.DB, error) { return nil, nil },
+			func(string, http.Handler) error { return nil },
+		)
+		require.ErrorContains(t, err, "invalid analytics backend")
+	})
 }
