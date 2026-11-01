@@ -26,6 +26,8 @@ const (
 	BackendPostgres BackendType = "postgres"
 	// BackendDoris is the Zero-JSON Apache Doris Unique Key Merge-on-Write (MoW) store.
 	BackendDoris BackendType = "doris"
+	// BackendSQLite is the embedded zero-dependency SQLite WAL operational & analytical store.
+	BackendSQLite BackendType = "sqlite"
 )
 
 // ParseBackendType parses a configuration string (e.g. from --store or FLINT_STORE_BACKEND)
@@ -36,8 +38,10 @@ func ParseBackendType(raw string) (BackendType, error) {
 		return BackendPostgres, nil
 	case "doris", "apache-doris":
 		return BackendDoris, nil
+	case "sqlite", "sqlite3":
+		return BackendSQLite, nil
 	default:
-		return "", fmt.Errorf("invalid store backend %q (valid backends: %q, %q)", raw, BackendPostgres, BackendDoris)
+		return "", fmt.Errorf("invalid store backend %q (valid backends: %q, %q, %q)", raw, BackendPostgres, BackendDoris, BackendSQLite)
 	}
 }
 
@@ -51,8 +55,10 @@ func ParseOptionalBackendType(raw string) (BackendType, error) {
 		return BackendDoris, nil
 	case "postgres", "postgresql", "pg":
 		return BackendPostgres, nil
+	case "sqlite", "sqlite3":
+		return BackendSQLite, nil
 	default:
-		return "", fmt.Errorf("invalid analytics backend %q (valid backends: %q, %q, or \"none\")", raw, BackendDoris, BackendPostgres)
+		return "", fmt.Errorf("invalid analytics backend %q (valid backends: %q, %q, %q, or \"none\")", raw, BackendDoris, BackendPostgres, BackendSQLite)
 	}
 }
 

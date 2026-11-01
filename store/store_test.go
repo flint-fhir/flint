@@ -28,6 +28,12 @@ func TestParseBackendType(t *testing.T) {
 		assert.Equal(t, store.BackendDoris, b)
 	}
 
+	for _, raw := range []string{"sqlite", "SQLite3", "SQLITE"} {
+		b, err = store.ParseBackendType(raw)
+		require.NoError(t, err)
+		assert.Equal(t, store.BackendSQLite, b)
+	}
+
 	_, err = store.ParseBackendType("mysql")
 	require.ErrorContains(t, err, "invalid store backend")
 }
@@ -46,6 +52,10 @@ func TestParseOptionalBackendType(t *testing.T) {
 	b, err = store.ParseOptionalBackendType("postgres")
 	require.NoError(t, err)
 	assert.Equal(t, store.BackendPostgres, b)
+
+	b, err = store.ParseOptionalBackendType("sqlite")
+	require.NoError(t, err)
+	assert.Equal(t, store.BackendSQLite, b)
 
 	_, err = store.ParseOptionalBackendType("oracle")
 	require.ErrorContains(t, err, "invalid analytics backend")

@@ -247,6 +247,22 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 		)
 		require.NoError(t, err)
 
+		// Embedded SQLite mode: --store=sqlite --sqlite-dsn=flint.db
+		err = run(
+			[]string{"-store", "sqlite", "-sqlite-dsn", "flint.db"},
+			func(k string) string {
+				if k == "FLINT_SQLITE_JOURNAL_MODE" {
+					return "WAL"
+				}
+				return ""
+			},
+			io.Discard,
+			logger,
+			func(string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
+			func(_ string, _ http.Handler) error { return nil },
+		)
+		require.NoError(t, err)
+
 		// Invalid store backend or analytics backend
 		err = run(
 			[]string{"-store", "invalid-backend"},

@@ -66,6 +66,11 @@ func TestDorisDDLAndGroupCommit(t *testing.T) {
 	_, err = doris.ParseGroupCommitMode("invalid")
 	require.ErrorContains(t, err, "invalid doris group commit mode")
 
+	unifiedDDL := doris.GenerateResourceTableDDL("")
+	assert.Contains(t, unifiedDDL, "PARTITION BY LIST (res_type)")
+	assert.Contains(t, unifiedDDL, `PARTITION p_observation`)
+	assert.Contains(t, unifiedDDL, `PARTITION p_patient`)
+
 	ddl := doris.GenerateResourceTableDDL("Observation")
 	assert.Contains(t, ddl, "CREATE TABLE IF NOT EXISTS fhir_observation")
 	assert.Contains(t, ddl, `"enable_unique_key_merge_on_write" = "true"`)
@@ -74,8 +79,24 @@ func TestDorisDDLAndGroupCommit(t *testing.T) {
 	assert.Contains(t, ddl, "USING INVERTED")
 	assert.Contains(t, ddl, "resource_proto_hex STRING")
 
+	customDDL := doris.GenerateResourceTableDDL("Binary")
+	assert.Contains(t, customDDL, "CREATE TABLE IF NOT EXISTS fhir_binary")
+
+	coreDDLs := doris.CoreResourceTableDDLs()
+	assert.Len(t, coreDDLs, 13)
+	for _, cddl := range coreDDLs {
+		assert.NotContains(t, cddl, "resource_proto_hex")
+		assert.Contains(t, cddl, `"enable_unique_key_merge_on_write" = "true"`)
+	}
+	_, ok := doris.CoreResourceTableDDL("Binary")
+	assert.False(t, ok)
+	_, _, ok = doris.ProjectCoreResourceUpsertSQL(doris.DorisResourceRow{ResType: "Binary"})
+	assert.False(t, ok)
+	_, _, ok = doris.ProjectCoreResourceDeleteSQL("t1", "Binary", "b1", 1, time.Now())
+	assert.False(t, ok)
+
 	stmts := doris.SchemaDDL()
-	assert.Len(t, stmts, 4)
+	assert.Len(t, stmts, 17)
 
 	require.NoError(t, doris.RunMigrations(context.Background(), nil))
 

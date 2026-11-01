@@ -255,6 +255,12 @@ func (s *Store) writeUnlocked(ctx context.Context, input store.ResourceInput) (*
 		return nil, fmt.Errorf("doris insert history: %w", err)
 	}
 
+	if coreStmt, coreArgs, ok := ProjectCoreResourceUpsertSQL(row); ok {
+		if err := s.execDorisSQL(ctx, coreStmt, coreArgs...); err != nil {
+			return nil, fmt.Errorf("doris project core resource %s: %w", row.ResType, err)
+		}
+	}
+
 	return &rec, nil
 }
 
@@ -770,6 +776,9 @@ func (s *Store) deleteUnlocked(ctx context.Context, tenantID, resType, resID str
 
 	delStmt := `INSERT INTO fhir_resource (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES (?, ?, ?, ?, TRUE, ?, '')`
 	_ = s.execDorisSQL(ctx, delStmt, tenantID, resType, resID, newVersion, now)
+	if coreDelStmt, coreDelArgs, ok := ProjectCoreResourceDeleteSQL(tenantID, resType, resID, newVersion, now); ok {
+		_ = s.execDorisSQL(ctx, coreDelStmt, coreDelArgs...)
+	}
 
 	return &tombstoneRec, nil
 }
@@ -1334,9 +1343,9 @@ func (s *Store) StreamAnalyticalExport(ctx context.Context, params store.ExportP
 }
 
 // EvaluateObservationStats implements store.AnalyticalStore using Doris vectorized columnar
-// aggregations (AVG, MIN, MAX, SUM, STDDEV_SAMP, VAR_SAMP, PERCENTILE_APPROX).
+// aggregations (AVG, MIN, MAX, SUM, STDDEV_SAMP, VAR_SAMP) on the strongly-typed fhir_observation table.
 func (s *Store) EvaluateObservationStats(ctx context.Context, params store.ObservationStatsParams) (*store.ObservationStatsResult, error) {
-	statsSQL := `SELECT primary_code_sys, primary_code, primary_unit_code, COUNT(*), AVG(primary_quantity), MIN(primary_quantity), MAX(primary_quantity), SUM(primary_quantity), STDDEV_SAMP(primary_quantity), VAR_SAMP(primary_quantity) FROM fhir_resource WHERE tenant_id = ? AND res_type = 'Observation' AND is_deleted = FALSE AND primary_quantity IS NOT NULL GROUP BY primary_code_sys, primary_code, primary_unit_code`
+	statsSQL := `SELECT code_system, code, value_unit_code, COUNT(*), AVG(value_quantity), MIN(value_quantity), MAX(value_quantity), SUM(value_quantity), STDDEV_SAMP(value_quantity), VAR_SAMP(value_quantity) FROM fhir_observation WHERE tenant_id = ? AND is_deleted = FALSE AND value_quantity IS NOT NULL GROUP BY code_system, code, value_unit_code`
 	_ = s.execDorisSQL(ctx, statsSQL, params.TenantID)
 
 	type bucket struct {
