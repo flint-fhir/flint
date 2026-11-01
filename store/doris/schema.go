@@ -209,12 +209,76 @@ func ExtractRow(input store.ResourceInput, version int, lastUpdated time.Time, i
 	return row
 }
 
+// USCoreResourceTypes lists the 13 core US Core FHIR R4 resource types defined in buf.gen.yaml
+// that receive both dedicated physical LIST partitions in fhir_resource and strongly-typed
+// zero-blob projection tables (fhir_patient, fhir_observation, etc.) in Apache Doris.
+var USCoreResourceTypes = []string{
+	"Patient",
+	"Encounter",
+	"Observation",
+	"Condition",
+	"Practitioner",
+	"MedicationRequest",
+	"AllergyIntolerance",
+	"Procedure",
+	"DiagnosticReport",
+	"Immunization",
+	"Organization",
+	"Specimen",
+	"Location",
+}
+
+var usCoreTableNames = map[string]string{
+	"patient":            "fhir_patient",
+	"encounter":          "fhir_encounter",
+	"observation":        "fhir_observation",
+	"condition":          "fhir_condition",
+	"practitioner":       "fhir_practitioner",
+	"medicationrequest":  "fhir_medication_request",
+	"allergyintolerance": "fhir_allergy_intolerance",
+	"procedure":          "fhir_procedure",
+	"diagnosticreport":   "fhir_diagnostic_report",
+	"immunization":       "fhir_immunization",
+	"organization":       "fhir_organization",
+	"specimen":           "fhir_specimen",
+	"location":           "fhir_location",
+}
+
+// CoreResourceTableName returns the strongly-typed Apache Doris table name (e.g. "fhir_observation")
+// for a US Core FHIR R4 resource type, or ("", false) for long-tail resource types.
+func CoreResourceTableName(resType string) (string, bool) {
+	tbl, ok := usCoreTableNames[strings.ToLower(strings.TrimSpace(resType))]
+	return tbl, ok
+}
+
 // GenerateResourceTableDDL generates the Zero-JSON Apache Doris Unique Key Merge-on-Write (MoW)
-// table DDL for a specific FHIR R4 resource type (or the unified fhir_resource table when resType == "").
+// table DDL for a specific FHIR R4 resource type (or the PARTITION BY LIST (res_type) unified
+// fhir_resource table when resType == "").
 func GenerateResourceTableDDL(resType string) string {
 	tableName := "fhir_resource"
+	partitionClause := `
+PARTITION BY LIST (res_type) (
+    PARTITION p_patient             VALUES IN ("Patient"),
+    PARTITION p_encounter           VALUES IN ("Encounter"),
+    PARTITION p_observation         VALUES IN ("Observation"),
+    PARTITION p_condition           VALUES IN ("Condition"),
+    PARTITION p_practitioner        VALUES IN ("Practitioner"),
+    PARTITION p_medication_request  VALUES IN ("MedicationRequest"),
+    PARTITION p_allergy_intolerance VALUES IN ("AllergyIntolerance"),
+    PARTITION p_procedure           VALUES IN ("Procedure"),
+    PARTITION p_diagnostic_report   VALUES IN ("DiagnosticReport"),
+    PARTITION p_immunization        VALUES IN ("Immunization"),
+    PARTITION p_organization        VALUES IN ("Organization"),
+    PARTITION p_specimen            VALUES IN ("Specimen"),
+    PARTITION p_location            VALUES IN ("Location")
+)`
 	if cleaned := strings.ToLower(strings.TrimSpace(resType)); cleaned != "" {
-		tableName = "fhir_" + cleaned
+		if tbl, ok := CoreResourceTableName(cleaned); ok {
+			tableName = tbl
+		} else {
+			tableName = "fhir_" + cleaned
+		}
+		partitionClause = ""
 	}
 	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
     tenant_id          VARCHAR(64)    NOT NULL,
@@ -223,7 +287,7 @@ func GenerateResourceTableDDL(resType string) string {
     res_version        INT            NOT NULL DEFAULT 1,
     is_deleted         BOOLEAN        NOT NULL DEFAULT FALSE,
     last_updated       DATETIME(6)    NOT NULL,
-    idempotency_key    VARCHAR(128)    NULL,
+    idempotency_key    VARCHAR(128)   NULL,
     patient_id         VARCHAR(64)    NULL,
     encounter_id       VARCHAR(64)    NULL,
     primary_code_sys   VARCHAR(256)   NULL,
@@ -246,20 +310,112 @@ func GenerateResourceTableDDL(resType string) string {
     INDEX idx_reference_tokens (reference_tokens) USING INVERTED,
     INDEX idx_uri_tokens (uri_tokens) USING INVERTED
 )
-UNIQUE KEY(tenant_id, res_type, res_id)
+UNIQUE KEY(tenant_id, res_type, res_id)%s
 DISTRIBUTED BY HASH(tenant_id, res_id) BUCKETS 16
 PROPERTIES (
     "enable_unique_key_merge_on_write" = "true",
     "function_column.sequence_col" = "res_version",
     "store_row_column" = "true",
     "replication_num" = "1"
-);`, tableName)
+);`, tableName, partitionClause)
+}
+
+// CoreResourceTableDDL generates the strongly-typed, zero-blob Apache Doris Unique Key MoW table DDL
+// for one of the 13 US Core clinical resource types (Option C). Because fhir_resource already stores
+// resource_proto_hex, these 13 tables omit the proto payload and store only typed clinical scalars
+// and inverted-index arrays (~15 bytes/row compressed) for vectorized SQLMesh, CQL, and $stats queries.
+func CoreResourceTableDDL(resType string) (string, bool) {
+	tableName, ok := CoreResourceTableName(resType)
+	if !ok {
+		return "", false
+	}
+	buckets := 8
+	if strings.EqualFold(resType, "Observation") {
+		buckets = 16
+	}
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
+    tenant_id          VARCHAR(64)    NOT NULL,
+    res_id             VARCHAR(64)    NOT NULL,
+    res_version        INT            NOT NULL DEFAULT 1,
+    is_deleted         BOOLEAN        NOT NULL DEFAULT FALSE,
+    last_updated       DATETIME(6)    NOT NULL,
+    patient_id         VARCHAR(64)    NULL,
+    encounter_id       VARCHAR(64)    NULL,
+    code_system        VARCHAR(256)   NULL,
+    code               VARCHAR(128)   NULL,
+    effective_start    DATETIME(6)    NULL,
+    effective_end      DATETIME(6)    NULL,
+    value_quantity     DOUBLE         NULL,
+    value_unit_sys     VARCHAR(128)   NULL,
+    value_unit_code    VARCHAR(64)    NULL,
+    string_tokens      ARRAY<VARCHAR(512)> NULL,
+    code_tokens        ARRAY<VARCHAR(512)> NULL,
+    reference_tokens   ARRAY<VARCHAR(512)> NULL,
+    uri_tokens         ARRAY<VARCHAR(512)> NULL,
+    INDEX idx_patient_id (patient_id) USING INVERTED,
+    INDEX idx_encounter_id (encounter_id) USING INVERTED,
+    INDEX idx_code (code) USING INVERTED,
+    INDEX idx_string_tokens (string_tokens) USING INVERTED,
+    INDEX idx_code_tokens (code_tokens) USING INVERTED,
+    INDEX idx_reference_tokens (reference_tokens) USING INVERTED
+)
+UNIQUE KEY(tenant_id, res_id)
+DISTRIBUTED BY HASH(tenant_id, res_id) BUCKETS %d
+PROPERTIES (
+    "enable_unique_key_merge_on_write" = "true",
+    "function_column.sequence_col" = "res_version",
+    "replication_num" = "1"
+);`, tableName, buckets), true
+}
+
+// CoreResourceTableDDLs returns the 13 strongly-typed US Core Apache Doris table DDL statements.
+func CoreResourceTableDDLs() []string {
+	ddls := make([]string, 0, len(USCoreResourceTypes))
+	for _, rt := range USCoreResourceTypes {
+		if ddl, ok := CoreResourceTableDDL(rt); ok {
+			ddls = append(ddls, ddl)
+		}
+	}
+	return ddls
+}
+
+// ProjectCoreResourceUpsertSQL builds the INSERT statement into the strongly-typed US Core Doris table
+// (e.g. fhir_patient, fhir_observation) when row.ResType is one of the 13 US Core resource types.
+func ProjectCoreResourceUpsertSQL(row DorisResourceRow) (string, []any, bool) {
+	tableName, ok := CoreResourceTableName(row.ResType)
+	if !ok {
+		return "", nil, false
+	}
+	stmt := fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, res_id, res_version, is_deleted, last_updated, patient_id, encounter_id, code_system, code, effective_start, effective_end, value_quantity, value_unit_sys, value_unit_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		tableName,
+	)
+	args := []any{
+		row.TenantID, row.ResID, row.ResVersion, row.IsDeleted, row.LastUpdated,
+		row.PatientID, row.EncounterID, row.PrimaryCodeSys, row.PrimaryCode,
+		row.PrimaryDateLow, row.PrimaryDateHigh, row.PrimaryQuantity, row.PrimaryUnitSys, row.PrimaryUnitCode,
+	}
+	return stmt, args, true
+}
+
+// ProjectCoreResourceDeleteSQL builds the Merge-on-Write tombstone INSERT statement for a US Core Doris table.
+func ProjectCoreResourceDeleteSQL(tenantID, resType, resID string, version int, now time.Time) (string, []any, bool) {
+	tableName, ok := CoreResourceTableName(resType)
+	if !ok {
+		return "", nil, false
+	}
+	stmt := fmt.Sprintf(
+		`INSERT INTO %s (tenant_id, res_id, res_version, is_deleted, last_updated) VALUES (?, ?, ?, TRUE, ?)`,
+		tableName,
+	)
+	return stmt, []any{tenantID, resID, version, now}, true
 }
 
 // SchemaDDL returns all Apache Doris Unique Key Merge-on-Write DDL statements required
-// to initialize the Flint operational and analytical store.
+// to initialize the Flint operational and analytical store (Option C: LIST-partitioned
+// fhir_resource + 13 strongly-typed US Core tables + history, audit, and export tables).
 func SchemaDDL() []string {
-	return []string{
+	stmts := []string{
 		GenerateResourceTableDDL(""),
 		`CREATE TABLE IF NOT EXISTS fhir_resource_history (
     tenant_id          VARCHAR(64)  NOT NULL,
@@ -321,6 +477,7 @@ PROPERTIES (
     "replication_num" = "1"
 );`,
 	}
+	return append(stmts, CoreResourceTableDDLs()...)
 }
 
 // RunMigrations applies the Apache Doris Unique Key Merge-on-Write schema DDL statements.

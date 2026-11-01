@@ -25,6 +25,7 @@ import (
 	"github.com/flint-fhir/flint/store"
 	"github.com/flint-fhir/flint/store/doris"
 	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store/sqlite"
 )
 
 var version = "dev"
@@ -34,6 +35,7 @@ type cliOptions struct {
 	tenantIsolation  string
 	storeBackend     string
 	analyticsBackend string
+	sqliteDSN        string
 }
 
 func main() {
@@ -62,8 +64,9 @@ func parseCLIOptions(args []string, errOut io.Writer) (cliOptions, error) {
 	}
 	fs.BoolVar(&opts.showVersion, "version", false, "Print flintd version and exit")
 	fs.StringVar(&opts.tenantIsolation, "tenant-isolation", "", "Multi-tenant PostgreSQL isolation mode: 'schema' (default, schema-per-tenant) or 'shared' (shared public tables)")
-	fs.StringVar(&opts.storeBackend, "store", "", "Primary operational store backend: 'postgres' (default) or 'doris' (Zero-JSON Apache Doris MoW)")
-	fs.StringVar(&opts.analyticsBackend, "analytics-store", "", "Optional analytical store backend: 'doris' or 'none' (enables hybrid OLTP + OLAP mode when paired with --store=postgres)")
+	fs.StringVar(&opts.storeBackend, "store", "", "Primary operational store backend: 'postgres' (default), 'doris' (Apache Doris MoW), or 'sqlite' (embedded SQLite WAL)")
+	fs.StringVar(&opts.analyticsBackend, "analytics-store", "", "Optional analytical store backend: 'doris', 'sqlite', or 'none' (enables hybrid OLTP + OLAP mode)")
+	fs.StringVar(&opts.sqliteDSN, "sqlite-dsn", "", "SQLite file path or URI when --store=sqlite (e.g. 'flint.db' or ':memory:')")
 	if err := fs.Parse(args); err != nil {
 		return cliOptions{}, err
 	}
@@ -177,6 +180,38 @@ func openDorisStore(getenv func(string) string, openDB func(dsn string) (*sql.DB
 	return ds, dorisDB, nil
 }
 
+func openSQLiteStore(cliDSN string, getenv func(string) string, openDB func(dsn string) (*sql.DB, error)) (*sqlite.Store, *sql.DB, error) {
+	journalMode, err := sqlite.ParseJournalMode(getenv("FLINT_SQLITE_JOURNAL_MODE"))
+	if err != nil {
+		return nil, nil, err
+	}
+	sqliteDSN := strings.TrimSpace(cliDSN)
+	if sqliteDSN == "" {
+		sqliteDSN = strings.TrimSpace(getenv("FLINT_SQLITE_DSN"))
+	}
+	var sqliteDB *sql.DB
+	if sqliteDSN != "" && sqliteDSN != ":memory:" {
+		sqliteDB, err = openDB(sqliteDSN)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open sqlite db: %w", err)
+		}
+		if err := sqliteDB.Ping(); err != nil {
+			_ = sqliteDB.Close()
+			return nil, nil, fmt.Errorf("ping sqlite db: %w", err)
+		}
+		if err := sqlite.RunMigrations(context.Background(), sqliteDB, journalMode); err != nil {
+			_ = sqliteDB.Close()
+			return nil, nil, fmt.Errorf("run sqlite migrations: %w", err)
+		}
+	}
+	ss := sqlite.New(
+		sqliteDB,
+		sqlite.WithJournalMode(journalMode),
+		sqlite.WithDSN(sqliteDSN),
+	)
+	return ss, sqliteDB, nil
+}
+
 func run(
 	args []string,
 	getenv func(string) string,
@@ -215,7 +250,8 @@ func run(
 	var primaryStore store.Store
 	var analyticalStore store.AnalyticalStore
 
-	if storeBackend == store.BackendDoris {
+	switch storeBackend {
+	case store.BackendDoris:
 		ds, dorisDB, err := openDorisStore(getenv, openDB)
 		if err != nil {
 			return err
@@ -226,7 +262,18 @@ func run(
 		primaryStore = ds
 		analyticalStore = ds
 		logger.Info("Zero-JSON Apache Doris store initialized", "group_commit", string(ds.GroupCommit()), "database", ds.Database())
-	} else {
+	case store.BackendSQLite:
+		ss, sqliteDB, err := openSQLiteStore(cliOpts.sqliteDSN, getenv, openDB)
+		if err != nil {
+			return err
+		}
+		if sqliteDB != nil {
+			defer sqliteDB.Close()
+		}
+		primaryStore = ss
+		analyticalStore = ss
+		logger.Info("Embedded Zero-JSON SQLite WAL store initialized", "journal_mode", string(ss.JournalMode()), "dsn", ss.DSN())
+	default:
 		rawIsolation := strings.TrimSpace(cliOpts.tenantIsolation)
 		if rawIsolation == "" {
 			rawIsolation = strings.TrimSpace(getenv("FLINT_TENANT_ISOLATION"))

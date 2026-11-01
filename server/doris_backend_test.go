@@ -17,6 +17,7 @@ import (
 	"github.com/flint-fhir/flint/store"
 	"github.com/flint-fhir/flint/store/doris"
 	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store/sqlite"
 )
 
 func TestDorisStandaloneBackend_EndToEndFHIR(t *testing.T) {
@@ -211,4 +212,53 @@ func TestHybridPostgresAndDorisAnalyticalStore(t *testing.T) {
 	// Clear AnalyticalStore and verify SetAnalyticalStore(nil) resets cleanly
 	srv.SetAnalyticalStore(nil)
 	assert.Nil(t, srv.AnalyticalStore())
+}
+
+func TestSQLiteStandaloneBackend_EndToEndFHIR(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ss := sqlite.New(nil, sqlite.WithDSN(":memory:"))
+	srv := server.New(ss, logger)
+	server.RegisterDefaultResourceTypes(srv)
+
+	assert.Equal(t, ss, srv.Store())
+	require.NotNil(t, srv.AnalyticalStore())
+	assert.Equal(t, "sqlite", srv.AnalyticalStore().BackendName())
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	client := ts.Client()
+
+	patJSON := `{
+		"resourceType": "Patient",
+		"id": "pat-sqlite-1",
+		"name": [{"family": "SQLiteFamily", "given": ["Grace"]}],
+		"gender": "female",
+		"birthDate": "1992-07-19"
+	}`
+	reqCreate, err := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/demo/Patient/pat-sqlite-1", strings.NewReader(patJSON))
+	require.NoError(t, err)
+	reqCreate.Header.Set("Content-Type", "application/fhir+json")
+	respCreate, err := client.Do(reqCreate)
+	require.NoError(t, err)
+	respCreate.Body.Close()
+	assert.Equal(t, http.StatusCreated, respCreate.StatusCode)
+
+	respSearch, err := client.Get(ts.URL + "/fhir/r4/demo/Patient?family=SQLiteFamily")
+	require.NoError(t, err)
+	defer respSearch.Body.Close()
+	assert.Equal(t, http.StatusOK, respSearch.StatusCode)
+	var searchBundle map[string]any
+	require.NoError(t, json.NewDecoder(respSearch.Body).Decode(&searchBundle))
+	assert.Equal(t, float64(1), searchBundle["total"])
+
+	reqExp, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/demo/$export?_type=Patient", nil)
+	require.NoError(t, err)
+	reqExp.Header.Set("Accept", "application/fhir+ndjson")
+	respExp, err := client.Do(reqExp)
+	require.NoError(t, err)
+	defer respExp.Body.Close()
+	assert.Equal(t, http.StatusOK, respExp.StatusCode)
+	expBytes, err := io.ReadAll(respExp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(expBytes), `"id":"pat-sqlite-1"`)
 }
