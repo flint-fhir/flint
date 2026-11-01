@@ -894,10 +894,113 @@ func (s *Store) Search(ctx context.Context, params store.SearchParams) (*store.S
 		matches = matches[offset:min(offset+count, total)]
 	}
 
+	var includes []store.SearchResult
+	if len(matches) > 0 && (len(params.Includes) > 0 || len(params.RevIncludes) > 0) {
+		s.mu.RLock()
+		seen := make(map[string]bool, len(matches))
+		for _, m := range matches {
+			seen[resKey(params.TenantID, m.ResType, m.ResID)] = true
+		}
+		for _, inc := range params.Includes {
+			for _, m := range matches {
+				if inc.SourceType != "" && inc.SourceType != "*" && !strings.EqualFold(inc.SourceType, m.ResType) {
+					continue
+				}
+				mEntry, ok := s.resources[resKey(params.TenantID, m.ResType, m.ResID)]
+				if !ok || mEntry.indexes == nil {
+					continue
+				}
+				for _, ref := range mEntry.indexes.References {
+					if inc.ParamName != "" && inc.ParamName != "*" && !strings.EqualFold(inc.ParamName, ref.SpName) {
+						continue
+					}
+					if inc.TargetType != "" && inc.TargetType != "*" && !strings.EqualFold(inc.TargetType, ref.TargetType) {
+						continue
+					}
+					s.appendIncludeByTargetLocked(params.TenantID, ref.TargetType, ref.TargetID, seen, &includes)
+				}
+			}
+		}
+		for _, rev := range params.RevIncludes {
+			for _, cand := range s.resources {
+				if cand.tenantID != params.TenantID || cand.isDeleted || cand.indexes == nil {
+					continue
+				}
+				if rev.SourceType != "" && rev.SourceType != "*" && !strings.EqualFold(rev.SourceType, cand.resType) {
+					continue
+				}
+				candKey := resKey(params.TenantID, cand.resType, cand.resID)
+				if seen[candKey] {
+					continue
+				}
+				for _, ref := range cand.indexes.References {
+					if rev.ParamName != "" && rev.ParamName != "*" && !strings.EqualFold(rev.ParamName, ref.SpName) {
+						continue
+					}
+					matchedTarget := false
+					for _, m := range matches {
+						if ref.TargetID == m.ResID && (ref.TargetType == "" || strings.EqualFold(ref.TargetType, m.ResType)) {
+							matchedTarget = true
+							break
+						}
+					}
+					if matchedTarget {
+						seen[candKey] = true
+						includes = append(includes, store.SearchResult{
+							ResType:       cand.resType,
+							ResID:         cand.resID,
+							ResVersion:    cand.resVersion,
+							LastUpdated:   cand.lastUpdated,
+							ResourceProto: append([]byte(nil), cand.resourceProto...),
+						})
+						break
+					}
+				}
+			}
+		}
+		s.mu.RUnlock()
+	}
+
 	return &store.SearchResults{
-		Matches: matches,
-		Total:   total,
+		Matches:  matches,
+		Includes: includes,
+		Total:    total,
 	}, nil
+}
+
+func (s *Store) appendIncludeByTargetLocked(tenantID, targetType, targetID string, seen map[string]bool, includes *[]store.SearchResult) {
+	if targetID == "" {
+		return
+	}
+	if targetType != "" {
+		key := resKey(tenantID, targetType, targetID)
+		if seen[key] {
+			return
+		}
+		if entry, ok := s.resources[key]; ok && !entry.isDeleted {
+			seen[key] = true
+			*includes = append(*includes, store.SearchResult{
+				ResType:       entry.resType,
+				ResID:         entry.resID,
+				ResVersion:    entry.resVersion,
+				LastUpdated:   entry.lastUpdated,
+				ResourceProto: append([]byte(nil), entry.resourceProto...),
+			})
+		}
+		return
+	}
+	for key, entry := range s.resources {
+		if entry.tenantID == tenantID && !entry.isDeleted && entry.resID == targetID && !seen[key] {
+			seen[key] = true
+			*includes = append(*includes, store.SearchResult{
+				ResType:       entry.resType,
+				ResID:         entry.resID,
+				ResVersion:    entry.resVersion,
+				LastUpdated:   entry.lastUpdated,
+				ResourceProto: append([]byte(nil), entry.resourceProto...),
+			})
+		}
+	}
 }
 
 func (s *Store) matchesSearchParams(entry sqliteEntry, params store.SearchParams) bool {
@@ -949,13 +1052,13 @@ func (s *Store) matchesSearchParams(entry sqliteEntry, params store.SearchParams
 		}
 	}
 	for spName, ref := range params.References {
-		if !matchRef(entry.indexes, spName, ref) {
+		if !s.matchRef(params.TenantID, entry.indexes, spName, ref) {
 			return false
 		}
 	}
 	for spName, refs := range params.ReferenceFilters {
 		for _, r := range refs {
-			if !matchRef(entry.indexes, spName, r) {
+			if !s.matchRef(params.TenantID, entry.indexes, spName, r) {
 				return false
 			}
 		}
@@ -973,21 +1076,48 @@ func (s *Store) matchesSearchParams(entry sqliteEntry, params store.SearchParams
 		}
 	}
 	for spName, uriVal := range params.URIs {
-		if entry.indexes == nil {
-			return false
-		}
-		foundURI := false
-		for _, u := range entry.indexes.URIs {
-			if u.SpName == spName && u.SpValue == uriVal {
-				foundURI = true
-				break
-			}
-		}
-		if !foundURI {
+		if !matchURI(entry.indexes, spName, uriVal) {
 			return false
 		}
 	}
+	for spName, uriVals := range params.URIFilters {
+		for _, uv := range uriVals {
+			if !matchURI(entry.indexes, spName, uv) {
+				return false
+			}
+		}
+	}
 	return true
+}
+
+func matchURI(idx *store.SearchIndexes, spName, rawURI string) bool {
+	if idx == nil {
+		return false
+	}
+	baseName, mod, _ := strings.Cut(spName, ":")
+	for item := range strings.SplitSeq(rawURI, ",") {
+		want := strings.TrimSpace(item)
+		for _, u := range idx.URIs {
+			if u.SpName != baseName {
+				continue
+			}
+			switch mod {
+			case "below":
+				if strings.HasPrefix(u.SpValue, strings.TrimSuffix(want, "/")) {
+					return true
+				}
+			case "above":
+				if strings.HasPrefix(strings.TrimSuffix(want, "/"), strings.TrimSuffix(u.SpValue, "/")) {
+					return true
+				}
+			default:
+				if u.SpValue == want {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func matchToken(idx *store.SearchIndexes, spName, rawVal string) bool {
@@ -997,10 +1127,27 @@ func matchToken(idx *store.SearchIndexes, spName, rawVal string) bool {
 		baseName = strings.TrimSuffix(baseName, ":not")
 		negate = true
 	}
+	isOfType := strings.HasSuffix(baseName, ":of-type")
 	matched := false
 	if idx != nil {
 		for item := range strings.SplitSeq(rawVal, ",") {
 			item = strings.TrimSpace(item)
+			if isOfType {
+				if parts := strings.SplitN(item, "|", 3); len(parts) == 3 {
+					sys := parts[0] + "|" + parts[1]
+					code := parts[2]
+					for _, t := range idx.Tokens {
+						if t.SpName == baseName && t.SpSystem == sys && t.SpValue == code {
+							matched = true
+							break
+						}
+					}
+					if matched {
+						break
+					}
+				}
+				continue
+			}
 			sys := ""
 			code := item
 			hasSys := false
@@ -1033,8 +1180,35 @@ func matchToken(idx *store.SearchIndexes, spName, rawVal string) bool {
 	return matched
 }
 
-func matchRef(idx *store.SearchIndexes, spName, rawRef string) bool {
+func (s *Store) matchRef(tenantID string, idx *store.SearchIndexes, spName, rawRef string) bool {
 	if idx == nil {
+		return false
+	}
+	if strings.HasSuffix(spName, ":identifier") {
+		if matchToken(idx, spName, rawRef) {
+			return true
+		}
+		baseName := strings.TrimSuffix(spName, ":identifier")
+		for _, r := range idx.References {
+			if r.SpName != baseName {
+				continue
+			}
+			if r.TargetType != "" {
+				if target, ok := s.resources[resKey(tenantID, r.TargetType, r.TargetID)]; ok && !target.isDeleted {
+					if matchToken(target.indexes, "identifier", rawRef) {
+						return true
+					}
+				}
+			} else {
+				for _, target := range s.resources {
+					if target.tenantID == tenantID && !target.isDeleted && target.resID == r.TargetID {
+						if matchToken(target.indexes, "identifier", rawRef) {
+							return true
+						}
+					}
+				}
+			}
+		}
 		return false
 	}
 	for item := range strings.SplitSeq(rawRef, ",") {
@@ -1058,11 +1232,12 @@ func matchString(idx *store.SearchIndexes, spName, rawStr string) bool {
 	}
 	baseName := strings.Split(spName, ":")[0]
 	exact := strings.HasSuffix(spName, ":exact")
-	contains := strings.HasSuffix(spName, ":contains")
+	contains := strings.HasSuffix(spName, ":contains") || strings.HasSuffix(spName, ":text")
+	isText := strings.HasSuffix(spName, ":text")
 	for item := range strings.SplitSeq(rawStr, ",") {
 		needle := strings.ToLower(strings.TrimSpace(item))
 		for _, st := range idx.Strings {
-			if st.SpName != baseName {
+			if st.SpName != baseName && (!isText || st.SpName != baseName+":text") {
 				continue
 			}
 			val := strings.ToLower(strings.TrimSpace(st.SpValue))
@@ -1080,40 +1255,132 @@ func matchString(idx *store.SearchIndexes, spName, rawStr string) bool {
 	return false
 }
 
+func matchesEverythingFilters(resType string, lastUpdated time.Time, allowedTypes []string, since, until *time.Time) bool {
+	if len(allowedTypes) > 0 {
+		found := false
+		for _, rt := range allowedTypes {
+			if strings.EqualFold(rt, resType) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	if since != nil && lastUpdated.Before(*since) {
+		return false
+	}
+	if until != nil && lastUpdated.After(*until) {
+		return false
+	}
+	return true
+}
+
+func paginateEverythingIncludes(includes []store.SearchResult, offset, count int) ([]store.SearchResult, int) {
+	sort.Slice(includes, func(i, j int) bool {
+		if !includes[i].LastUpdated.Equal(includes[j].LastUpdated) {
+			return includes[i].LastUpdated.After(includes[j].LastUpdated)
+		}
+		return includes[i].ResID < includes[j].ResID
+	})
+	compTotal := len(includes)
+	if count <= 0 {
+		count = 100
+	}
+	if count > store.MaxSearchCount {
+		count = store.MaxSearchCount
+	}
+	off := max(offset, 0)
+	if off >= compTotal {
+		return []store.SearchResult{}, compTotal
+	}
+	return includes[off:min(off+count, compTotal)], compTotal
+}
+
 // PatientEverything returns the target Patient and all compartment-linked resources.
 func (s *Store) PatientEverything(ctx context.Context, params store.PatientEverythingParams) (*store.SearchResults, error) {
 	patRec, err := s.ReadResourceWithMeta(ctx, params.TenantID, "Patient", params.PatientID)
 	if err != nil {
 		return nil, err
 	}
-	matches := []store.SearchResult{{
-		ResType:       "Patient",
-		ResID:         patRec.ResID,
-		ResVersion:    patRec.ResVersion,
-		LastUpdated:   patRec.LastUpdated,
-		ResourceProto: patRec.ResourceProto,
-	}}
+	var matches []store.SearchResult
+	if matchesEverythingFilters("Patient", patRec.LastUpdated, params.ResourceTypes, params.Since, params.Until) {
+		matches = append(matches, store.SearchResult{
+			ResType:       "Patient",
+			ResID:         patRec.ResID,
+			ResVersion:    patRec.ResVersion,
+			LastUpdated:   patRec.LastUpdated,
+			ResourceProto: patRec.ResourceProto,
+		})
+	}
 	s.mu.RLock()
-	var includes []store.SearchResult
-	for _, entry := range s.resources {
+	compKeys := map[string]bool{
+		resKey(params.TenantID, "Patient", params.PatientID): true,
+	}
+	refTargets := make(map[string]bool)
+	if patEntry, ok := s.resources[resKey(params.TenantID, "Patient", params.PatientID)]; ok && patEntry.indexes != nil {
+		for _, ref := range patEntry.indexes.References {
+			if ref.TargetType != "" && ref.TargetID != "" {
+				refTargets[resKey(params.TenantID, ref.TargetType, ref.TargetID)] = true
+			}
+		}
+	}
+	for key, entry := range s.resources {
 		if entry.tenantID != params.TenantID || entry.isDeleted || entry.resType == "Patient" {
 			continue
 		}
 		if entry.patientID == params.PatientID {
-			includes = append(includes, store.SearchResult{
-				ResType:       entry.resType,
-				ResID:         entry.resID,
-				ResVersion:    entry.resVersion,
-				LastUpdated:   entry.lastUpdated,
-				ResourceProto: append([]byte(nil), entry.resourceProto...),
-			})
+			compKeys[key] = true
+			if entry.indexes != nil {
+				for _, ref := range entry.indexes.References {
+					if ref.TargetType != "" && ref.TargetID != "" {
+						refTargets[resKey(params.TenantID, ref.TargetType, ref.TargetID)] = true
+					}
+				}
+			}
 		}
 	}
+	for key, entry := range s.resources {
+		if entry.tenantID != params.TenantID || entry.isDeleted || compKeys[key] || entry.resType == "Patient" {
+			continue
+		}
+		if refTargets[key] {
+			compKeys[key] = true
+			continue
+		}
+		if entry.resType == "Provenance" && entry.indexes != nil {
+			for _, ref := range entry.indexes.References {
+				if compKeys[resKey(params.TenantID, ref.TargetType, ref.TargetID)] {
+					compKeys[key] = true
+					break
+				}
+			}
+		}
+	}
+	var includes []store.SearchResult
+	for key := range compKeys {
+		entry, ok := s.resources[key]
+		if !ok || entry.resType == "Patient" {
+			continue
+		}
+		if !matchesEverythingFilters(entry.resType, entry.lastUpdated, params.ResourceTypes, params.Since, params.Until) {
+			continue
+		}
+		includes = append(includes, store.SearchResult{
+			ResType:       entry.resType,
+			ResID:         entry.resID,
+			ResVersion:    entry.resVersion,
+			LastUpdated:   entry.lastUpdated,
+			ResourceProto: append([]byte(nil), entry.resourceProto...),
+		})
+	}
 	s.mu.RUnlock()
+	pagedIncludes, compTotal := paginateEverythingIncludes(includes, params.Offset, params.Count)
 	return &store.SearchResults{
 		Matches:  matches,
-		Includes: includes,
-		Total:    len(matches) + len(includes),
+		Includes: pagedIncludes,
+		Total:    len(matches) + compTotal,
 	}, nil
 }
 
@@ -1123,34 +1390,73 @@ func (s *Store) EncounterEverything(ctx context.Context, params store.EncounterE
 	if err != nil {
 		return nil, err
 	}
-	matches := []store.SearchResult{{
-		ResType:       "Encounter",
-		ResID:         encRec.ResID,
-		ResVersion:    encRec.ResVersion,
-		LastUpdated:   encRec.LastUpdated,
-		ResourceProto: encRec.ResourceProto,
-	}}
+	var matches []store.SearchResult
+	if matchesEverythingFilters("Encounter", encRec.LastUpdated, params.ResourceTypes, params.Since, params.Until) {
+		matches = append(matches, store.SearchResult{
+			ResType:       "Encounter",
+			ResID:         encRec.ResID,
+			ResVersion:    encRec.ResVersion,
+			LastUpdated:   encRec.LastUpdated,
+			ResourceProto: encRec.ResourceProto,
+		})
+	}
+	focalKey := resKey(params.TenantID, "Encounter", params.EncounterID)
 	s.mu.RLock()
-	var includes []store.SearchResult
-	for _, entry := range s.resources {
-		if entry.tenantID != params.TenantID || entry.isDeleted || (entry.resType == "Encounter" && entry.resID == params.EncounterID) {
+	compKeys := map[string]bool{focalKey: true}
+	refTargets := make(map[string]bool)
+	if encEntry, ok := s.resources[focalKey]; ok && encEntry.indexes != nil {
+		for _, ref := range encEntry.indexes.References {
+			if ref.TargetType != "" && ref.TargetID != "" {
+				refTargets[resKey(params.TenantID, ref.TargetType, ref.TargetID)] = true
+			}
+		}
+	}
+	for key, entry := range s.resources {
+		if entry.tenantID != params.TenantID || entry.isDeleted || key == focalKey {
 			continue
 		}
 		if entry.encounterID == params.EncounterID {
-			includes = append(includes, store.SearchResult{
-				ResType:       entry.resType,
-				ResID:         entry.resID,
-				ResVersion:    entry.resVersion,
-				LastUpdated:   entry.lastUpdated,
-				ResourceProto: append([]byte(nil), entry.resourceProto...),
-			})
+			compKeys[key] = true
+			if entry.indexes != nil {
+				for _, ref := range entry.indexes.References {
+					if ref.TargetType != "" && ref.TargetID != "" {
+						refTargets[resKey(params.TenantID, ref.TargetType, ref.TargetID)] = true
+					}
+				}
+			}
 		}
 	}
+	for key, entry := range s.resources {
+		if entry.tenantID != params.TenantID || entry.isDeleted || compKeys[key] {
+			continue
+		}
+		if refTargets[key] {
+			compKeys[key] = true
+		}
+	}
+	var includes []store.SearchResult
+	for key := range compKeys {
+		if key == focalKey {
+			continue
+		}
+		entry, ok := s.resources[key]
+		if !ok || !matchesEverythingFilters(entry.resType, entry.lastUpdated, params.ResourceTypes, params.Since, params.Until) {
+			continue
+		}
+		includes = append(includes, store.SearchResult{
+			ResType:       entry.resType,
+			ResID:         entry.resID,
+			ResVersion:    entry.resVersion,
+			LastUpdated:   entry.lastUpdated,
+			ResourceProto: append([]byte(nil), entry.resourceProto...),
+		})
+	}
 	s.mu.RUnlock()
+	pagedIncludes, compTotal := paginateEverythingIncludes(includes, params.Offset, params.Count)
 	return &store.SearchResults{
 		Matches:  matches,
-		Includes: includes,
-		Total:    len(matches) + len(includes),
+		Includes: pagedIncludes,
+		Total:    len(matches) + compTotal,
 	}, nil
 }
 
@@ -1158,13 +1464,15 @@ func (s *Store) EncounterEverything(ctx context.Context, params store.EncounterE
 func (s *Store) GroupEverything(ctx context.Context, params store.GroupEverythingParams) (*store.SearchResults, error) {
 	var matches []store.SearchResult
 	if grpRec, err := s.ReadResourceWithMeta(ctx, params.TenantID, "Group", params.GroupID); err == nil {
-		matches = append(matches, store.SearchResult{
-			ResType:       "Group",
-			ResID:         grpRec.ResID,
-			ResVersion:    grpRec.ResVersion,
-			LastUpdated:   grpRec.LastUpdated,
-			ResourceProto: grpRec.ResourceProto,
-		})
+		if matchesEverythingFilters("Group", grpRec.LastUpdated, params.ResourceTypes, params.Since, params.Until) {
+			matches = append(matches, store.SearchResult{
+				ResType:       "Group",
+				ResID:         grpRec.ResID,
+				ResVersion:    grpRec.ResVersion,
+				LastUpdated:   grpRec.LastUpdated,
+				ResourceProto: grpRec.ResourceProto,
+			})
+		}
 	} else if !params.AllPatients {
 		return nil, err
 	}
@@ -1178,21 +1486,24 @@ func (s *Store) GroupEverything(ctx context.Context, params store.GroupEverythin
 		if entry.tenantID != params.TenantID || entry.isDeleted || entry.resType == "Group" {
 			continue
 		}
-		if params.AllPatients || patientSet[entry.patientID] {
-			includes = append(includes, store.SearchResult{
-				ResType:       entry.resType,
-				ResID:         entry.resID,
-				ResVersion:    entry.resVersion,
-				LastUpdated:   entry.lastUpdated,
-				ResourceProto: append([]byte(nil), entry.resourceProto...),
-			})
+		inCohort := params.AllPatients || patientSet[entry.patientID] || (entry.resType == "Patient" && patientSet[entry.resID])
+		if !inCohort || !matchesEverythingFilters(entry.resType, entry.lastUpdated, params.ResourceTypes, params.Since, params.Until) {
+			continue
 		}
+		includes = append(includes, store.SearchResult{
+			ResType:       entry.resType,
+			ResID:         entry.resID,
+			ResVersion:    entry.resVersion,
+			LastUpdated:   entry.lastUpdated,
+			ResourceProto: append([]byte(nil), entry.resourceProto...),
+		})
 	}
 	s.mu.RUnlock()
+	pagedIncludes, compTotal := paginateEverythingIncludes(includes, params.Offset, params.Count)
 	return &store.SearchResults{
 		Matches:  matches,
-		Includes: includes,
-		Total:    len(matches) + len(includes),
+		Includes: pagedIncludes,
+		Total:    len(matches) + compTotal,
 	}, nil
 }
 
@@ -1250,6 +1561,40 @@ func (s *Store) ResourceGraph(ctx context.Context, params store.ResourceGraphPar
 		LastUpdated:   focal.LastUpdated,
 		ResourceProto: focal.ResourceProto,
 	}}
+	focalKey := resKey(params.TenantID, params.ResourceType, params.ResourceID)
+	s.mu.RLock()
+	seen := map[string]bool{focalKey: true}
+	if focalEntry, ok := s.resources[focalKey]; ok && focalEntry.indexes != nil {
+		for _, ref := range focalEntry.indexes.References {
+			s.appendIncludeByTargetLocked(params.TenantID, ref.TargetType, ref.TargetID, seen, &matches)
+		}
+	}
+	for key, entry := range s.resources {
+		if entry.tenantID != params.TenantID || entry.isDeleted || seen[key] {
+			continue
+		}
+		linked := (strings.EqualFold(params.ResourceType, "Patient") && entry.patientID == params.ResourceID) ||
+			(strings.EqualFold(params.ResourceType, "Encounter") && entry.encounterID == params.ResourceID)
+		if !linked && entry.indexes != nil {
+			for _, ref := range entry.indexes.References {
+				if ref.TargetID == params.ResourceID && (ref.TargetType == "" || strings.EqualFold(ref.TargetType, params.ResourceType)) {
+					linked = true
+					break
+				}
+			}
+		}
+		if linked {
+			seen[key] = true
+			matches = append(matches, store.SearchResult{
+				ResType:       entry.resType,
+				ResID:         entry.resID,
+				ResVersion:    entry.resVersion,
+				LastUpdated:   entry.lastUpdated,
+				ResourceProto: append([]byte(nil), entry.resourceProto...),
+			})
+		}
+	}
+	s.mu.RUnlock()
 	return &store.SearchResults{
 		Matches: matches,
 		Total:   len(matches),

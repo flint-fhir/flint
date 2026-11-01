@@ -852,7 +852,7 @@ func (s *Server) formatExportNDJSONLine(res postgres.SearchResult, elements []st
 }
 
 func (s *Server) streamExportResources(ctx context.Context, params postgres.ExportParams, emit func(postgres.SearchResult) error) error {
-	if s.analyticalStore != nil && params.PatientID == "" && len(params.PatientIDs) == 0 && !params.PatientCompartment {
+	if s.analyticalStore != nil {
 		return s.analyticalStore.StreamAnalyticalExport(ctx, params, emit)
 	}
 	return s.store.StreamExportResources(ctx, params, emit)

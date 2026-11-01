@@ -100,6 +100,7 @@ type (
 	ReindexParams               = postgres.ReindexParams
 	ReindexResult               = postgres.ReindexResult
 	SearchParams                = postgres.SearchParams
+	IncludeParam                = postgres.IncludeParam
 	SearchResult                = postgres.SearchResult
 	SearchResults               = postgres.SearchResults
 	PatientEverythingParams     = postgres.PatientEverythingParams
