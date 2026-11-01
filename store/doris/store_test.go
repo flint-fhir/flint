@@ -6,12 +6,18 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
+
+	dtpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto"
+	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 
 	"github.com/flint-fhir/flint/store"
 	"github.com/flint-fhir/flint/store/doris"
@@ -727,4 +733,221 @@ func TestDorisStore_ConditionalOps_SearchModifiers_And_EdgeCases(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, advObs.Total)
 	assert.Len(t, advObs.Includes, 1)
+}
+
+type statefulDorisDriver struct {
+	mu     sync.Mutex
+	tables map[string][][]driver.Value
+}
+
+type statefulDorisConn struct {
+	drv *statefulDorisDriver
+}
+
+type statefulDorisRows struct {
+	cols []string
+	rows [][]driver.Value
+	idx  int
+}
+
+func (r *statefulDorisRows) Columns() []string { return r.cols }
+func (r *statefulDorisRows) Close() error      { return nil }
+func (r *statefulDorisRows) Next(dest []driver.Value) error {
+	if r.idx >= len(r.rows) {
+		return io.EOF
+	}
+	row := r.rows[r.idx]
+	r.idx++
+	for i := range dest {
+		if i < len(row) {
+			dest[i] = row[i]
+		}
+	}
+	return nil
+}
+
+func (d *statefulDorisDriver) Open(_ string) (driver.Conn, error) {
+	return &statefulDorisConn{drv: d}, nil
+}
+
+func (c *statefulDorisConn) Prepare(_ string) (driver.Stmt, error) {
+	return nil, errors.New("unsupported")
+}
+func (c *statefulDorisConn) Close() error              { return nil }
+func (c *statefulDorisConn) Begin() (driver.Tx, error) { return nil, errors.New("unsupported") }
+
+func (c *statefulDorisConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	c.drv.mu.Lock()
+	defer c.drv.mu.Unlock()
+	if c.drv.tables == nil {
+		c.drv.tables = make(map[string][][]driver.Value)
+	}
+	vals := make([]driver.Value, len(args))
+	for i, a := range args {
+		vals[i] = a.Value
+	}
+	switch {
+	case strings.HasPrefix(query, "INSERT INTO fhir_resource ("):
+		// Store the 8 columns queried by LoadFromDB:
+		// tenant_id(0), res_type(1), res_id(2), res_version(3), is_deleted(4), last_updated(5), idempotency_key(6), resource_proto_hex(16)
+		if len(vals) >= 17 {
+			row := []driver.Value{vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[16]}
+			c.drv.tables["fhir_resource"] = append(c.drv.tables["fhir_resource"], row)
+		}
+	case strings.HasPrefix(query, "INSERT INTO fhir_resource_history"):
+		c.drv.tables["fhir_resource_history"] = append(c.drv.tables["fhir_resource_history"], vals)
+	case strings.HasPrefix(query, "INSERT INTO fhir_audit_event"):
+		c.drv.tables["fhir_audit_event"] = append(c.drv.tables["fhir_audit_event"], vals)
+	case strings.HasPrefix(query, "INSERT INTO fhir_export_job"):
+		c.drv.tables["fhir_export_job"] = append(c.drv.tables["fhir_export_job"], vals)
+	}
+	return driver.RowsAffected(1), nil
+}
+
+func (c *statefulDorisConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	c.drv.mu.Lock()
+	defer c.drv.mu.Unlock()
+	var tbl string
+	switch {
+	case strings.Contains(query, "FROM fhir_resource_history"):
+		tbl = "fhir_resource_history"
+	case strings.Contains(query, "FROM fhir_resource"):
+		tbl = "fhir_resource"
+	case strings.Contains(query, "FROM fhir_audit_event"):
+		tbl = "fhir_audit_event"
+	case strings.Contains(query, "FROM fhir_export_job"):
+		tbl = "fhir_export_job"
+	}
+	rows := c.drv.tables[tbl]
+	var cols []string
+	if len(rows) > 0 {
+		cols = make([]string, len(rows[0]))
+	}
+	return &statefulDorisRows{cols: cols, rows: rows}, nil
+}
+
+var registerStatefulDorisOnce sync.Once
+var sharedStatefulDoris = &statefulDorisDriver{}
+
+func TestDorisStore_LoadFromDB_And_CompensatingRollback(t *testing.T) {
+	registerStatefulDorisOnce.Do(func() {
+		sql.Register("doris_stateful_stub", sharedStatefulDoris)
+	})
+	ctx := context.Background()
+
+	var nilStore *doris.Store
+	require.NoError(t, nilStore.LoadFromDB(ctx))
+
+	db, err := sql.Open("doris_stateful_stub", "flint")
+	require.NoError(t, err)
+	defer db.Close()
+
+	writer := doris.New(db)
+	patProto, err := proto.Marshal(&patpb.Patient{
+		Id: &dtpb.Id{Value: "p-hydrate"},
+		Name: []*dtpb.HumanName{
+			{
+				Family: &dtpb.String{Value: "HydratedFamily"},
+				Given:  []*dtpb.String{{Value: "Alice"}},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	_, err = writer.WriteResourceWithMeta(ctx, store.ResourceInput{
+		TenantID:       "t-hyd",
+		ResType:        "Patient",
+		ResID:          "p-hydrate",
+		IdempotencyKey: "idem-doris-1",
+		ResourceProto:  patProto,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, writer.WriteAuditEvent(ctx, store.AuditRecord{
+		TenantID: "t-hyd",
+		AuditID:  "aud-hyd-1",
+		Action:   "C",
+		Outcome:  "0",
+	}))
+	require.NoError(t, writer.SaveExportJob(ctx, store.ExportJobRecord{
+		TenantID:   "t-hyd",
+		ID:         "job-hyd-1",
+		PatientID:  "p-hydrate",
+		RequestURL: "http://example.org/fhir/r4/t-hyd/$export",
+	}))
+
+	// Hydrate a brand new doris.Store from the persisted Doris tables
+	restarted := doris.New(db)
+	require.NoError(t, restarted.LoadFromDB(ctx))
+
+	rec, err := restarted.ReadResourceWithMeta(ctx, "t-hyd", "Patient", "p-hydrate")
+	require.NoError(t, err)
+	assert.Equal(t, 1, rec.ResVersion)
+	assert.Equal(t, patProto, rec.ResourceProto)
+
+	// Search index was automatically re-extracted from the protobuf payload during LoadFromDB
+	sr, err := restarted.Search(ctx, store.SearchParams{
+		TenantID: "t-hyd",
+		ResType:  "Patient",
+		Strings:  map[string]string{"family": "HydratedFamily"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, sr.Total)
+
+	hist, totalHist, err := restarted.ListResourceHistory(ctx, "t-hyd", "Patient", "p-hydrate", 10, 0)
+	require.NoError(t, err)
+	assert.Equal(t, 1, totalHist)
+	assert.Len(t, hist, 1)
+
+	aud, err := restarted.ReadAuditEvent(ctx, "t-hyd", "aud-hyd-1")
+	require.NoError(t, err)
+	assert.Equal(t, "C", aud.Action)
+
+	job, err := restarted.GetExportJob(ctx, "t-hyd", "job-hyd-1")
+	require.NoError(t, err)
+	assert.Equal(t, "p-hydrate", job.PatientID)
+
+	// Compensating transaction bundle rollback test:
+	// Op 0 updates p-hydrate, Op 1 creates p-temp, Op 2 fails with version conflict -> both rolled back!
+	_, err = restarted.ExecuteTransactionBundle(ctx, []store.BundleOperation{
+		{
+			OpType: store.BundleOpWrite,
+			Method: "PUT",
+			Input: store.ResourceInput{
+				TenantID:      "t-hyd",
+				ResType:       "Patient",
+				ResID:         "p-hydrate",
+				ResourceProto: patProto,
+			},
+		},
+		{
+			OpType: store.BundleOpWrite,
+			Method: "POST",
+			Input: store.ResourceInput{
+				TenantID:      "t-hyd",
+				ResType:       "Patient",
+				ResID:         "p-temp",
+				ResourceProto: patProto,
+			},
+		},
+		{
+			OpType: store.BundleOpWrite,
+			Method: "PUT",
+			Input: store.ResourceInput{
+				TenantID:        "t-hyd",
+				ResType:         "Patient",
+				ResID:           "p-hydrate",
+				ResourceProto:   patProto,
+				ExpectedVersion: 99,
+			},
+		},
+	})
+	require.ErrorIs(t, err, store.ErrVersionConflict)
+
+	// Verify p-hydrate was restored to version 1 and p-temp was removed
+	afterRollback, err := restarted.ReadResourceWithMeta(ctx, "t-hyd", "Patient", "p-hydrate")
+	require.NoError(t, err)
+	assert.Equal(t, 1, afterRollback.ResVersion)
+	_, err = restarted.ReadResourceWithMeta(ctx, "t-hyd", "Patient", "p-temp")
+	require.ErrorIs(t, err, sql.ErrNoRows)
 }

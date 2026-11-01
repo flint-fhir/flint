@@ -450,9 +450,39 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []store.Bundle
 
 	rollback := func() {
 		s.mu.Lock()
+		currentResources := s.resources
 		s.resources = snapResources
 		s.history = snapHistory
 		s.mu.Unlock()
+
+		for k, cur := range currentResources {
+			prev, hadPrev := snapResources[k]
+			if !hadPrev {
+				_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, cur.row.TenantID, cur.row.ResType, cur.row.ResID)
+				_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource_history WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, cur.row.TenantID, cur.row.ResType, cur.row.ResID)
+				if tbl, ok := CoreResourceTableName(cur.row.ResType); ok {
+					_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_id = ?`, tbl), cur.row.TenantID, cur.row.ResID)
+				}
+				continue
+			}
+			if cur.row.ResVersion != prev.row.ResVersion || cur.row.IsDeleted != prev.row.IsDeleted {
+				_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource_history WHERE tenant_id = ? AND res_type = ? AND res_id = ? AND res_version > ?`, prev.row.TenantID, prev.row.ResType, prev.row.ResID, prev.row.ResVersion)
+				upsertStmt := `INSERT INTO fhir_resource (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, idempotency_key, patient_id, encounter_id, primary_code_sys, primary_code, primary_date_low, primary_date_high, primary_quantity, primary_unit_sys, primary_unit_code, resource_proto_hex) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+				_ = s.execDorisSQL(ctx, upsertStmt,
+					prev.row.TenantID, prev.row.ResType, prev.row.ResID, prev.row.ResVersion, prev.row.IsDeleted, prev.row.LastUpdated,
+					prev.row.IdempotencyKey, prev.row.PatientID, prev.row.EncounterID, prev.row.PrimaryCodeSys, prev.row.PrimaryCode,
+					prev.row.PrimaryDateLow, prev.row.PrimaryDateHigh, prev.row.PrimaryQuantity, prev.row.PrimaryUnitSys, prev.row.PrimaryUnitCode,
+					prev.row.ResourceProtoHex,
+				)
+				if prev.row.IsDeleted {
+					if coreDelStmt, coreDelArgs, ok := ProjectCoreResourceDeleteSQL(prev.row.TenantID, prev.row.ResType, prev.row.ResID, prev.row.ResVersion, prev.row.LastUpdated); ok {
+						_ = s.execDorisSQL(ctx, coreDelStmt, coreDelArgs...)
+					}
+				} else if coreStmt, coreArgs, ok := ProjectCoreResourceUpsertSQL(prev.row); ok {
+					_ = s.execDorisSQL(ctx, coreStmt, coreArgs...)
+				}
+			}
+		}
 	}
 
 	results := make([]store.BundleOpResult, 0, len(ops))
@@ -776,6 +806,8 @@ func (s *Store) deleteUnlocked(ctx context.Context, tenantID, resType, resID str
 
 	delStmt := `INSERT INTO fhir_resource (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES (?, ?, ?, ?, TRUE, ?, '')`
 	_ = s.execDorisSQL(ctx, delStmt, tenantID, resType, resID, newVersion, now)
+	histDelStmt := `INSERT INTO fhir_resource_history (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES (?, ?, ?, ?, TRUE, ?, '')`
+	_ = s.execDorisSQL(ctx, histDelStmt, tenantID, resType, resID, newVersion, now)
 	if coreDelStmt, coreDelArgs, ok := ProjectCoreResourceDeleteSQL(tenantID, resType, resID, newVersion, now); ok {
 		_ = s.execDorisSQL(ctx, coreDelStmt, coreDelArgs...)
 	}
@@ -1867,18 +1899,35 @@ func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID
 		}
 	}
 	s.mu.Unlock()
+
+	for _, rec := range purged {
+		if hardExpunge {
+			_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, tenantID, rec.ResType, rec.ResID)
+			_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource_history WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, tenantID, rec.ResType, rec.ResID)
+		} else {
+			_ = s.execDorisSQL(ctx, `INSERT INTO fhir_resource (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES (?, ?, ?, ?, TRUE, ?, '')`,
+				tenantID, rec.ResType, rec.ResID, rec.ResVersion, rec.LastUpdated)
+			_ = s.execDorisSQL(ctx, `INSERT INTO fhir_resource_history (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES (?, ?, ?, ?, TRUE, ?, '')`,
+				tenantID, rec.ResType, rec.ResID, rec.ResVersion, rec.LastUpdated)
+		}
+	}
 	return purged, nil
 }
 
 // ExpungeResources physically removes soft-deleted resources or historical versions.
-func (s *Store) ExpungeResources(_ context.Context, params store.ExpungeParams) (int, error) {
+func (s *Store) ExpungeResources(ctx context.Context, params store.ExpungeParams) (int, error) {
 	if !params.ExpungeDeletedResources && !params.ExpungePreviousVersions && !params.ExpungeEverything {
 		params.ExpungeDeletedResources = true
 	}
 	expunged := 0
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	type expungedSQL struct {
+		resType string
+		resID   string
+		keepVer int
+	}
+	var sqlOps []expungedSQL
 
+	s.mu.Lock()
 	for k, entry := range s.resources {
 		if entry.row.TenantID != params.TenantID {
 			continue
@@ -1891,6 +1940,7 @@ func (s *Store) ExpungeResources(_ context.Context, params store.ExpungeParams) 
 		}
 		if params.ExpungeEverything || (params.ExpungeDeletedResources && entry.row.IsDeleted) {
 			expunged += 1 + len(s.history[k])
+			sqlOps = append(sqlOps, expungedSQL{resType: entry.row.ResType, resID: entry.row.ResID})
 			delete(s.resources, k)
 			delete(s.history, k)
 			continue
@@ -1899,8 +1949,23 @@ func (s *Store) ExpungeResources(_ context.Context, params store.ExpungeParams) 
 			versions := s.history[k]
 			if len(versions) > 1 {
 				expunged += len(versions) - 1
-				s.history[k] = versions[len(versions)-1:]
+				latest := versions[len(versions)-1]
+				s.history[k] = []store.ResourceRecord{latest}
+				sqlOps = append(sqlOps, expungedSQL{resType: entry.row.ResType, resID: entry.row.ResID, keepVer: latest.ResVersion})
 			}
+		}
+	}
+	s.mu.Unlock()
+
+	for _, op := range sqlOps {
+		if op.keepVer > 0 {
+			_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource_history WHERE tenant_id = ? AND res_type = ? AND res_id = ? AND res_version < ?`,
+				params.TenantID, op.resType, op.resID, op.keepVer)
+		} else {
+			_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource WHERE tenant_id = ? AND res_type = ? AND res_id = ?`,
+				params.TenantID, op.resType, op.resID)
+			_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource_history WHERE tenant_id = ? AND res_type = ? AND res_id = ?`,
+				params.TenantID, op.resType, op.resID)
 		}
 	}
 	return expunged, nil
@@ -2084,14 +2149,19 @@ func (s *Store) IsTokenRevoked(_ context.Context, rawToken string) (bool, error)
 }
 
 // SaveExportJob persists a Bulk Data ($export) job record.
-func (s *Store) SaveExportJob(_ context.Context, job store.ExportJobRecord) error {
+func (s *Store) SaveExportJob(ctx context.Context, job store.ExportJobRecord) error {
 	if job.ID == "" {
 		return nil
+	}
+	if job.CreatedAt.IsZero() {
+		job.CreatedAt = time.Now().UTC()
 	}
 	s.mu.Lock()
 	s.exportJobs[job.TenantID+"|"+job.ID] = job
 	s.mu.Unlock()
-	return nil
+
+	stmt := `INSERT INTO fhir_export_job (tenant_id, job_id, patient_id, request_url, created_at) VALUES (?, ?, ?, ?, ?)`
+	return s.execDorisSQL(ctx, stmt, job.TenantID, job.ID, job.PatientID, job.RequestURL, job.CreatedAt.UTC())
 }
 
 // GetExportJob retrieves a persisted Bulk Data ($export) job record.
@@ -2107,13 +2177,186 @@ func (s *Store) GetExportJob(_ context.Context, tenantID, jobID string) (*store.
 }
 
 // DeleteExportJob deletes a Bulk Data ($export) job record.
-func (s *Store) DeleteExportJob(_ context.Context, tenantID, jobID string) (bool, error) {
+func (s *Store) DeleteExportJob(ctx context.Context, tenantID, jobID string) (bool, error) {
 	key := tenantID + "|" + jobID
 	s.mu.Lock()
 	_, ok := s.exportJobs[key]
 	delete(s.exportJobs, key)
 	s.mu.Unlock()
+	_ = s.execDorisSQL(ctx, `DELETE FROM fhir_export_job WHERE tenant_id = ? AND job_id = ?`, tenantID, jobID)
 	return ok, nil
+}
+
+func parseDorisBool(v any) bool {
+	switch val := v.(type) {
+	case bool:
+		return val
+	case int64:
+		return val != 0
+	case int:
+		return val != 0
+	case []byte:
+		str := strings.TrimSpace(strings.ToLower(string(val)))
+		return str == "1" || str == "true"
+	case string:
+		str := strings.TrimSpace(strings.ToLower(val))
+		return str == "1" || str == "true"
+	default:
+		return false
+	}
+}
+
+func parseDorisTime(v any) time.Time {
+	switch val := v.(type) {
+	case time.Time:
+		return val.UTC()
+	case []byte:
+		return parseDorisTimeString(string(val))
+	case string:
+		return parseDorisTimeString(val)
+	default:
+		return time.Time{}
+	}
+}
+
+func parseDorisTimeString(raw string) time.Time {
+	raw = strings.TrimSpace(raw)
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05.999999", "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+// LoadFromDB hydrates the in-memory resource, history, inverted-index, audit, and export job
+// state from the persisted Apache Doris Unique Key Merge-on-Write tables on server startup or restart.
+func (s *Store) LoadFromDB(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+
+	extractors := postgres.DefaultIndexExtractors()
+	resources := make(map[string]storedEntry)
+	history := make(map[string][]store.ResourceRecord)
+	audits := make(map[string][]store.AuditRecord)
+	exportJobs := make(map[string]store.ExportJobRecord)
+
+	resRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, res_version, is_deleted, last_updated, COALESCE(idempotency_key, ''), COALESCE(resource_proto_hex, '') FROM fhir_resource`)
+	if err != nil {
+		return fmt.Errorf("doris load fhir_resource: %w", err)
+	}
+	defer resRows.Close()
+	for resRows.Next() {
+		var (
+			tenantID, resType, resID, idemKey, protoHex string
+			resVersion                                  int
+			rawDeleted, rawLastUpd                      any
+		)
+		if err := resRows.Scan(&tenantID, &resType, &resID, &resVersion, &rawDeleted, &rawLastUpd, &idemKey, &protoHex); err != nil {
+			return fmt.Errorf("doris scan fhir_resource: %w", err)
+		}
+		isDeleted := parseDorisBool(rawDeleted)
+		lu := parseDorisTime(rawLastUpd)
+		protoBytes, _ := hex.DecodeString(strings.TrimSpace(protoHex))
+
+		var idx *store.SearchIndexes
+		if !isDeleted && len(protoBytes) > 0 {
+			if ext := extractors[resType]; ext != nil {
+				idx, _ = ext(tenantID, resID, protoBytes)
+			}
+		}
+		row := ExtractRow(store.ResourceInput{
+			TenantID:       tenantID,
+			ResType:        resType,
+			ResID:          resID,
+			IdempotencyKey: idemKey,
+			ResourceProto:  protoBytes,
+			SearchIndexes:  idx,
+		}, resVersion, lu, isDeleted)
+
+		key := resKey(tenantID, resType, resID)
+		resources[key] = storedEntry{
+			row:     row,
+			indexes: idx,
+		}
+	}
+	if err := resRows.Err(); err != nil {
+		return fmt.Errorf("doris iterate fhir_resource: %w", err)
+	}
+
+	histRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, res_version, is_deleted, last_updated, COALESCE(resource_proto_hex, '') FROM fhir_resource_history ORDER BY res_version ASC`)
+	if err != nil {
+		return fmt.Errorf("doris load fhir_resource_history: %w", err)
+	}
+	defer histRows.Close()
+	for histRows.Next() {
+		var (
+			tenantID, resType, resID, protoHex string
+			resVersion                         int
+			rawDeleted, rawLastUpd             any
+		)
+		if err := histRows.Scan(&tenantID, &resType, &resID, &resVersion, &rawDeleted, &rawLastUpd, &protoHex); err != nil {
+			return fmt.Errorf("doris scan fhir_resource_history: %w", err)
+		}
+		protoBytes, _ := hex.DecodeString(strings.TrimSpace(protoHex))
+		key := resKey(tenantID, resType, resID)
+		history[key] = append(history[key], store.ResourceRecord{
+			TenantID:      tenantID,
+			ResType:       resType,
+			ResID:         resID,
+			ResVersion:    resVersion,
+			LastUpdated:   parseDorisTime(rawLastUpd),
+			ResourceProto: protoBytes,
+			IsDeleted:     parseDorisBool(rawDeleted),
+		})
+	}
+	if err := histRows.Err(); err != nil {
+		return fmt.Errorf("doris iterate fhir_resource_history: %w", err)
+	}
+
+	auditRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, audit_id, recorded, action, subtype_code, outcome, COALESCE(outcome_desc, ''), COALESCE(http_method, ''), COALESCE(http_status, 0), COALESCE(request_uri, ''), COALESCE(agent_subject, ''), COALESCE(agent_patient, ''), COALESCE(client_ip, ''), COALESCE(entity_type, ''), COALESCE(entity_id, ''), COALESCE(entity_version, '') FROM fhir_audit_event`)
+	if err != nil {
+		return fmt.Errorf("doris load fhir_audit_event: %w", err)
+	}
+	defer auditRows.Close()
+	for auditRows.Next() {
+		var rec store.AuditRecord
+		var rawRecorded any
+		if err := auditRows.Scan(
+			&rec.TenantID, &rec.AuditID, &rawRecorded, &rec.Action, &rec.SubtypeCode, &rec.Outcome,
+			&rec.OutcomeDesc, &rec.HTTPMethod, &rec.HTTPStatus, &rec.RequestURI,
+			&rec.AgentSubject, &rec.AgentPatient, &rec.ClientIP, &rec.EntityType,
+			&rec.EntityID, &rec.EntityVersion,
+		); err != nil {
+			return fmt.Errorf("doris scan fhir_audit_event: %w", err)
+		}
+		rec.Recorded = parseDorisTime(rawRecorded)
+		audits[rec.TenantID] = append(audits[rec.TenantID], rec)
+	}
+
+	jobRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, job_id, COALESCE(patient_id, ''), COALESCE(request_url, ''), created_at FROM fhir_export_job`)
+	if err != nil {
+		return fmt.Errorf("doris load fhir_export_job: %w", err)
+	}
+	defer jobRows.Close()
+	for jobRows.Next() {
+		var job store.ExportJobRecord
+		var rawCreated any
+		if err := jobRows.Scan(&job.TenantID, &job.ID, &job.PatientID, &job.RequestURL, &rawCreated); err != nil {
+			return fmt.Errorf("doris scan fhir_export_job: %w", err)
+		}
+		job.CreatedAt = parseDorisTime(rawCreated)
+		exportJobs[job.TenantID+"|"+job.ID] = job
+	}
+
+	s.mu.Lock()
+	s.resources = resources
+	s.history = history
+	s.audits = audits
+	s.exportJobs = exportJobs
+	s.mu.Unlock()
+	return nil
 }
 
 func cloneSearchIndexes(idx *store.SearchIndexes) *store.SearchIndexes {

@@ -873,6 +873,19 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"verified","valueBoolean":true},{"name":"algorithm","valueString":"SHA-256-HASH-CHAIN"}]}`))
 			return
 		}
+		if strings.HasSuffix(path, "/ViewDefinition/patient-demographics/$run") {
+			_, _ = w.Write([]byte(`[{"id":"cert-pat-1","family":"Certify","given":"Alice","gender":"female","birth_date":"1985-04-12","active":true}]`))
+			return
+		}
+		if strings.HasSuffix(path, "/ViewDefinition/observation-vitals/$run") {
+			w.Header().Set("Content-Type", "text/csv")
+			_, _ = w.Write([]byte("id,patient_id,status,code,system,value,unit,effective\ncert-obs-1,cert-pat-1,final,8867-4,http://loinc.org,72,/min,2026-01-15T09:15:00Z\n"))
+			return
+		}
+		if strings.HasSuffix(path, "/$sync-analytics") {
+			_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"syncedResources","valueInteger":18},{"name":"replicationErrors","valueInteger":0}]}`))
+			return
+		}
 		if pou := r.Header.Get("X-Purpose-Of-Use"); pou != "" {
 			w.Header().Set("X-TEFCA-Exchange-Purpose", pou)
 		}
@@ -928,13 +941,13 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 82 {
-		t.Fatalf("expected all 82 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 84 {
+		t.Fatalf("expected all 84 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()
 	trTests, ok := tr["test"].([]map[string]any)
-	if !ok || len(trTests) != 9 {
-		t.Fatalf("expected 9 suites in TestReport.test, got %d", len(trTests))
+	if !ok || len(trTests) != 10 {
+		t.Fatalf("expected 10 suites in TestReport.test, got %d", len(trTests))
 	}
 }

@@ -5461,6 +5461,102 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/$run": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ViewDefinition", "System"},
+				"summary":     "Execute an inline HL7 SQL-on-FHIR v2 ViewDefinition and return flat tabular rows (JSON, NDJSON, or CSV)",
+				"operationId": "systemViewDefinitionRunPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Tabular rows projected by the SQL-on-FHIR v2 ViewDefinition"},
+				},
+			},
+		},
+		"/$sync-analytics": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"System"},
+				"summary":     "Synchronize and backfill current-version resources into the analytical replica store",
+				"operationId": "systemSyncAnalyticsGet",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, tenant, backend, and syncedResources"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"System"},
+				"summary":     "Synchronize and backfill current-version resources into the analytical replica store",
+				"operationId": "systemSyncAnalyticsPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing status, tenant, backend, and syncedResources"},
+				},
+			},
+		},
+		"/ViewDefinition/$run": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ViewDefinition"},
+				"summary":     "Execute an inline HL7 SQL-on-FHIR v2 ViewDefinition and return flat tabular rows (JSON, NDJSON, or CSV)",
+				"operationId": "viewDefinitionRunPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Tabular rows projected by the SQL-on-FHIR v2 ViewDefinition"},
+				},
+			},
+		},
+		"/ViewDefinition/{id}/$run": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ViewDefinition"},
+				"summary":     "Execute stored or built-in HL7 SQL-on-FHIR v2 ViewDefinition/{id} and return flat tabular rows (JSON, NDJSON, or CSV)",
+				"operationId": "viewDefinitionInstanceRunGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Tabular rows projected by ViewDefinition/{id}"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ViewDefinition"},
+				"summary":     "Execute stored or built-in HL7 SQL-on-FHIR v2 ViewDefinition/{id} and return flat tabular rows (JSON, NDJSON, or CSV)",
+				"operationId": "viewDefinitionInstanceRunPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Tabular rows projected by ViewDefinition/{id}"},
+				},
+			},
+		},
+		"/ViewDefinition/$export": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ViewDefinition"},
+				"summary":     "Export an inline HL7 SQL-on-FHIR v2 ViewDefinition as NDJSON or CSV",
+				"operationId": "viewDefinitionExportPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Tabular export (NDJSON or CSV)"},
+				},
+			},
+		},
+		"/ViewDefinition/{id}/$export": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ViewDefinition"},
+				"summary":     "Export stored or built-in HL7 SQL-on-FHIR v2 ViewDefinition/{id} as NDJSON or CSV",
+				"operationId": "viewDefinitionInstanceExportGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Tabular export (NDJSON or CSV)"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ViewDefinition"},
+				"summary":     "Export stored or built-in HL7 SQL-on-FHIR v2 ViewDefinition/{id} as NDJSON or CSV",
+				"operationId": "viewDefinitionInstanceExportPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Tabular export (NDJSON or CSV)"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

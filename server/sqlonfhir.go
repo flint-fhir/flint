@@ -1,0 +1,1009 @@
+package server
+
+import (
+	"bytes"
+	"context"
+	"encoding/csv"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/flint-fhir/flint/store"
+)
+
+// sqlOnFHIRViewDefinition represents an HL7 SQL-on-FHIR v2 ViewDefinition resource
+// (https://build.fhir.org/ig/FHIR/sql-on-fhir-v2/StructureDefinition-ViewDefinition.html).
+type sqlOnFHIRViewDefinition struct {
+	ResourceType string              `json:"resourceType"`
+	ID           string              `json:"id,omitempty"`
+	URL          string              `json:"url,omitempty"`
+	Name         string              `json:"name,omitempty"`
+	Title        string              `json:"title,omitempty"`
+	Status       string              `json:"status,omitempty"`
+	Resource     string              `json:"resource"`
+	Constant     []sqlOnFHIRConstant `json:"constant,omitempty"`
+	Where        []sqlOnFHIRWhere    `json:"where,omitempty"`
+	Select       []sqlOnFHIRSelect   `json:"select"`
+}
+
+type sqlOnFHIRConstant struct {
+	Name          string   `json:"name"`
+	ValueString   *string  `json:"valueString,omitempty"`
+	ValueCode     *string  `json:"valueCode,omitempty"`
+	ValueURI      *string  `json:"valueUri,omitempty"`
+	ValueDate     *string  `json:"valueDate,omitempty"`
+	ValueDateTime *string  `json:"valueDateTime,omitempty"`
+	ValueInteger  *int     `json:"valueInteger,omitempty"`
+	ValueDecimal  *float64 `json:"valueDecimal,omitempty"`
+	ValueBoolean  *bool    `json:"valueBoolean,omitempty"`
+}
+
+type sqlOnFHIRWhere struct {
+	Path        string `json:"path"`
+	Description string `json:"description,omitempty"`
+}
+
+type sqlOnFHIRSelect struct {
+	Column        []sqlOnFHIRColumn `json:"column,omitempty"`
+	Select        []sqlOnFHIRSelect `json:"select,omitempty"`
+	ForEach       string            `json:"forEach,omitempty"`
+	ForEachOrNull string            `json:"forEachOrNull,omitempty"`
+	UnionAll      []sqlOnFHIRSelect `json:"unionAll,omitempty"`
+}
+
+type sqlOnFHIRColumn struct {
+	Name        string `json:"name"`
+	Path        string `json:"path"`
+	Description string `json:"description,omitempty"`
+	Type        string `json:"type,omitempty"`
+	Collection  bool   `json:"collection,omitempty"`
+}
+
+func builtinViewDefinitions() map[string]sqlOnFHIRViewDefinition {
+	return map[string]sqlOnFHIRViewDefinition{
+		"patient-demographics": {
+			ResourceType: "ViewDefinition",
+			ID:           "patient-demographics",
+			Name:         "patient_demographics",
+			Title:        "US Core Patient Demographics Tabular View",
+			Status:       "active",
+			Resource:     "Patient",
+			Select: []sqlOnFHIRSelect{
+				{
+					Column: []sqlOnFHIRColumn{
+						{Name: "id", Path: "getResourceKey()", Type: "string"},
+						{Name: "family", Path: "name.family.first()", Type: "string"},
+						{Name: "given", Path: "name.given.first()", Type: "string"},
+						{Name: "gender", Path: "gender", Type: "code"},
+						{Name: "birth_date", Path: "birthDate", Type: "date"},
+						{Name: "active", Path: "active", Type: "boolean"},
+					},
+				},
+			},
+		},
+		"observation-vitals": {
+			ResourceType: "ViewDefinition",
+			ID:           "observation-vitals",
+			Name:         "observation_vitals",
+			Title:        "US Core Vital Signs & Laboratory Observations Tabular View",
+			Status:       "active",
+			Resource:     "Observation",
+			Select: []sqlOnFHIRSelect{
+				{
+					Column: []sqlOnFHIRColumn{
+						{Name: "id", Path: "getResourceKey()", Type: "string"},
+						{Name: "patient_id", Path: "subject.getReferenceKey('Patient')", Type: "string"},
+						{Name: "status", Path: "status", Type: "code"},
+						{Name: "code", Path: "code.coding.code.first()", Type: "code"},
+						{Name: "system", Path: "code.coding.system.first()", Type: "uri"},
+						{Name: "value", Path: "valueQuantity.value", Type: "decimal"},
+						{Name: "unit", Path: "valueQuantity.code", Type: "code"},
+						{Name: "effective", Path: "effectiveDateTime", Type: "dateTime"},
+					},
+				},
+			},
+		},
+		"condition-problems": {
+			ResourceType: "ViewDefinition",
+			ID:           "condition-problems",
+			Name:         "condition_problems",
+			Title:        "US Core Condition Problems & Health Concerns Tabular View",
+			Status:       "active",
+			Resource:     "Condition",
+			Select: []sqlOnFHIRSelect{
+				{
+					Column: []sqlOnFHIRColumn{
+						{Name: "id", Path: "getResourceKey()", Type: "string"},
+						{Name: "patient_id", Path: "subject.getReferenceKey('Patient')", Type: "string"},
+						{Name: "clinical_status", Path: "clinicalStatus.coding.code.first()", Type: "code"},
+						{Name: "code", Path: "code.coding.code.first()", Type: "code"},
+						{Name: "system", Path: "code.coding.system.first()", Type: "uri"},
+					},
+				},
+			},
+		},
+	}
+}
+
+func (s *Server) saveViewDefinition(tenant string, vd sqlOnFHIRViewDefinition) sqlOnFHIRViewDefinition {
+	vd.ResourceType = "ViewDefinition"
+	if strings.TrimSpace(vd.ID) == "" {
+		vd.ID = uuid.NewString()
+	}
+	if strings.TrimSpace(vd.Status) == "" {
+		vd.Status = "active"
+	}
+	s.viewDefsMu.Lock()
+	if s.viewDefs == nil {
+		s.viewDefs = make(map[string]map[string]sqlOnFHIRViewDefinition)
+	}
+	if s.viewDefs[tenant] == nil {
+		s.viewDefs[tenant] = make(map[string]sqlOnFHIRViewDefinition)
+	}
+	s.viewDefs[tenant][vd.ID] = vd
+	s.viewDefsMu.Unlock()
+	return vd
+}
+
+func (s *Server) resolveViewDefinitionByID(ctx context.Context, tenant, id string) (sqlOnFHIRViewDefinition, bool) {
+	id = strings.TrimSpace(id)
+	if slash := strings.LastIndexByte(id, '/'); slash != -1 {
+		id = id[slash+1:]
+	}
+	if id == "" {
+		return sqlOnFHIRViewDefinition{}, false
+	}
+
+	s.viewDefsMu.RLock()
+	if byTenant, ok := s.viewDefs[tenant]; ok {
+		if vd, found := byTenant[id]; found {
+			s.viewDefsMu.RUnlock()
+			return vd, true
+		}
+		for _, vd := range byTenant {
+			if strings.EqualFold(vd.Name, id) || (vd.URL != "" && strings.EqualFold(vd.URL, id)) {
+				s.viewDefsMu.RUnlock()
+				return vd, true
+			}
+		}
+	}
+	s.viewDefsMu.RUnlock()
+
+	builtins := builtinViewDefinitions()
+	if vd, ok := builtins[id]; ok {
+		return vd, true
+	}
+	for _, vd := range builtins {
+		if strings.EqualFold(vd.Name, id) {
+			return vd, true
+		}
+	}
+
+	if s.store != nil {
+		if rec, err := s.store.ReadResourceWithMeta(ctx, tenant, "Basic", id); err == nil && rec != nil {
+			if jsonBytes, err := s.protoToJSONWithMeta("Basic", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+				var vd sqlOnFHIRViewDefinition
+				if json.Unmarshal(jsonBytes, &vd) == nil && vd.Resource != "" && len(vd.Select) > 0 {
+					vd.ResourceType = "ViewDefinition"
+					return vd, true
+				}
+			}
+		}
+	}
+	return sqlOnFHIRViewDefinition{}, false
+}
+
+// handleViewDefinitionCRUD handles RESTful CRUD operations on /fhir/r4/{tenant}/ViewDefinition
+// and /fhir/r4/{tenant}/ViewDefinition/{id}.
+func (s *Server) handleViewDefinitionCRUD(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	id := strings.TrimSpace(r.PathValue("id"))
+
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		if id != "" {
+			vd, ok := s.resolveViewDefinitionByID(r.Context(), tenant, id)
+			if !ok {
+				writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("ViewDefinition/%s not found", id))
+				return
+			}
+			w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			if r.Method != http.MethodHead {
+				_ = json.NewEncoder(w).Encode(vd)
+			}
+			return
+		}
+		var entries []map[string]any
+		seen := make(map[string]bool)
+		s.viewDefsMu.RLock()
+		for k, vd := range s.viewDefs[tenant] {
+			seen[k] = true
+			entries = append(entries, map[string]any{
+				"fullUrl":  fmt.Sprintf("ViewDefinition/%s", vd.ID),
+				"resource": vd,
+			})
+		}
+		s.viewDefsMu.RUnlock()
+		for k, vd := range builtinViewDefinitions() {
+			if !seen[k] {
+				entries = append(entries, map[string]any{
+					"fullUrl":  fmt.Sprintf("ViewDefinition/%s", vd.ID),
+					"resource": vd,
+				})
+			}
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			return fmt.Sprint(entries[i]["fullUrl"]) < fmt.Sprint(entries[j]["fullUrl"])
+		})
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodHead {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"resourceType": "Bundle",
+				"type":         "searchset",
+				"total":        len(entries),
+				"entry":        entries,
+			})
+		}
+
+	case http.MethodPost, http.MethodPut:
+		body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read request body")
+			return
+		}
+		var vd sqlOnFHIRViewDefinition
+		if err := json.Unmarshal(body, &vd); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid ViewDefinition JSON: %v", err))
+			return
+		}
+		if id != "" {
+			vd.ID = id
+		}
+		if err := validateViewDefinition(vd); err != nil {
+			writeOperationOutcome(w, http.StatusUnprocessableEntity, "invalid", err.Error())
+			return
+		}
+		_, existed := s.resolveViewDefinitionByID(r.Context(), tenant, vd.ID)
+		saved := s.saveViewDefinition(tenant, vd)
+		status := http.StatusCreated
+		if r.Method == http.MethodPut && existed {
+			status = http.StatusOK
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/ViewDefinition/%s", tenant, saved.ID))
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(saved)
+
+	case http.MethodDelete:
+		if id == "" {
+			writeOperationOutcome(w, http.StatusBadRequest, "required", "ViewDefinition id is required for DELETE")
+			return
+		}
+		s.viewDefsMu.Lock()
+		if s.viewDefs != nil && s.viewDefs[tenant] != nil {
+			delete(s.viewDefs[tenant], id)
+		}
+		s.viewDefsMu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+
+	default:
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", fmt.Sprintf("method %s not allowed", r.Method))
+	}
+}
+
+func validateViewDefinition(vd sqlOnFHIRViewDefinition) error {
+	if strings.TrimSpace(vd.Resource) == "" {
+		return fmt.Errorf("ViewDefinition.resource is required")
+	}
+	if len(vd.Select) == 0 {
+		return fmt.Errorf("ViewDefinition.select must contain at least one select clause")
+	}
+	cols := collectViewDefinitionColumns(vd.Select)
+	if len(cols) == 0 {
+		return fmt.Errorf("ViewDefinition must declare at least one column")
+	}
+	seen := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		if strings.TrimSpace(c.Name) == "" {
+			return fmt.Errorf("ViewDefinition column name is required")
+		}
+		if strings.TrimSpace(c.Path) == "" {
+			return fmt.Errorf("ViewDefinition column %q path is required", c.Name)
+		}
+		if seen[c.Name] {
+			return fmt.Errorf("duplicate ViewDefinition column name %q", c.Name)
+		}
+		seen[c.Name] = true
+	}
+	return nil
+}
+
+func collectViewDefinitionColumns(selects []sqlOnFHIRSelect) []sqlOnFHIRColumn {
+	var out []sqlOnFHIRColumn
+	seen := make(map[string]bool)
+	var walk func(sels []sqlOnFHIRSelect)
+	walk = func(sels []sqlOnFHIRSelect) {
+		for _, sel := range sels {
+			for _, col := range sel.Column {
+				if !seen[col.Name] {
+					seen[col.Name] = true
+					out = append(out, col)
+				}
+			}
+			walk(sel.Select)
+			walk(sel.UnionAll)
+		}
+	}
+	walk(selects)
+	return out
+}
+
+type viewRunOptions struct {
+	viewDef     sqlOnFHIRViewDefinition
+	format      string
+	limit       int
+	patientID   string
+	groupID     string
+	since       *time.Time
+	includeHdrs bool
+}
+
+func (s *Server) parseViewRunRequest(r *http.Request, defaultFormat string) (viewRunOptions, int, error) {
+	tenant := r.PathValue("tenant")
+	instanceID := strings.TrimSpace(r.PathValue("id"))
+	q := r.URL.Query()
+
+	opts := viewRunOptions{
+		format:      strings.TrimSpace(q.Get("_format")),
+		patientID:   strings.TrimSpace(q.Get("patient")),
+		groupID:     strings.TrimSpace(q.Get("group")),
+		includeHdrs: true,
+	}
+	if hdrParam := strings.TrimSpace(q.Get("header")); strings.EqualFold(hdrParam, "false") || hdrParam == "0" {
+		opts.includeHdrs = false
+	}
+	if limStr := strings.TrimSpace(q.Get("_limit")); limStr != "" {
+		if n, err := strconv.Atoi(limStr); err == nil && n > 0 {
+			opts.limit = n
+		}
+	}
+	if sinceStr := strings.TrimSpace(q.Get("_since")); sinceStr != "" {
+		if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
+			opts.since = &t
+		}
+	}
+	viewRef := strings.TrimSpace(q.Get("view"))
+	if viewRef == "" {
+		viewRef = strings.TrimSpace(q.Get("viewReference"))
+	}
+
+	var parsedVD *sqlOnFHIRViewDefinition
+	if r.Method == http.MethodPost && r.Body != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+		if err != nil {
+			return opts, http.StatusBadRequest, fmt.Errorf("failed to read request body")
+		}
+		trimmed := bytes.TrimSpace(body)
+		if len(trimmed) > 0 {
+			var probe struct {
+				ResourceType string `json:"resourceType"`
+			}
+			if err := json.Unmarshal(trimmed, &probe); err != nil {
+				return opts, http.StatusBadRequest, fmt.Errorf("invalid JSON payload: %v", err)
+			}
+			switch probe.ResourceType {
+			case "ViewDefinition":
+				var vd sqlOnFHIRViewDefinition
+				if err := json.Unmarshal(trimmed, &vd); err != nil {
+					return opts, http.StatusBadRequest, fmt.Errorf("invalid ViewDefinition JSON: %v", err)
+				}
+				parsedVD = &vd
+			case "Parameters":
+				var params struct {
+					Parameter []struct {
+						Name           string `json:"name"`
+						ValueString    string `json:"valueString"`
+						ValueCode      string `json:"valueCode"`
+						ValueInteger   *int   `json:"valueInteger"`
+						ValueBoolean   *bool  `json:"valueBoolean"`
+						ValueInstant   string `json:"valueInstant"`
+						ValueDateTime  string `json:"valueDateTime"`
+						ValueReference *struct {
+							Reference string `json:"reference"`
+						} `json:"valueReference"`
+						Resource json.RawMessage `json:"resource"`
+					} `json:"parameter"`
+				}
+				if err := json.Unmarshal(trimmed, &params); err != nil {
+					return opts, http.StatusBadRequest, fmt.Errorf("invalid Parameters JSON: %v", err)
+				}
+				for _, p := range params.Parameter {
+					switch p.Name {
+					case "viewResource", "view":
+						if len(p.Resource) > 0 {
+							var vd sqlOnFHIRViewDefinition
+							if err := json.Unmarshal(p.Resource, &vd); err != nil {
+								return opts, http.StatusBadRequest, fmt.Errorf("invalid viewResource parameter: %v", err)
+							}
+							parsedVD = &vd
+						} else if p.ValueString != "" {
+							viewRef = p.ValueString
+						}
+					case "viewReference":
+						if p.ValueReference != nil && p.ValueReference.Reference != "" {
+							viewRef = p.ValueReference.Reference
+						} else if p.ValueString != "" {
+							viewRef = p.ValueString
+						}
+					case "_format", "format":
+						if p.ValueCode != "" {
+							opts.format = p.ValueCode
+						} else if p.ValueString != "" {
+							opts.format = p.ValueString
+						}
+					case "_limit", "limit":
+						if p.ValueInteger != nil && *p.ValueInteger > 0 {
+							opts.limit = *p.ValueInteger
+						}
+					case "patient":
+						if p.ValueReference != nil && p.ValueReference.Reference != "" {
+							opts.patientID = p.ValueReference.Reference
+						} else if p.ValueString != "" {
+							opts.patientID = p.ValueString
+						}
+					case "group":
+						if p.ValueReference != nil && p.ValueReference.Reference != "" {
+							opts.groupID = p.ValueReference.Reference
+						} else if p.ValueString != "" {
+							opts.groupID = p.ValueString
+						}
+					case "_since", "since":
+						rawSince := p.ValueInstant
+						if rawSince == "" {
+							rawSince = p.ValueDateTime
+						}
+						if rawSince == "" {
+							rawSince = p.ValueString
+						}
+						if t, err := time.Parse(time.RFC3339, strings.TrimSpace(rawSince)); err == nil {
+							opts.since = &t
+						}
+					case "header":
+						if p.ValueBoolean != nil {
+							opts.includeHdrs = *p.ValueBoolean
+						}
+					}
+				}
+			default:
+				return opts, http.StatusBadRequest, fmt.Errorf("expected ViewDefinition or Parameters resource, got %q", probe.ResourceType)
+			}
+		}
+	}
+
+	if parsedVD != nil {
+		opts.viewDef = *parsedVD
+	} else {
+		lookupID := instanceID
+		if lookupID == "" {
+			lookupID = viewRef
+		}
+		if lookupID == "" {
+			return opts, http.StatusBadRequest, fmt.Errorf("ViewDefinition is required (provide instance ID, 'view' query parameter, or inline ViewDefinition / Parameters body)")
+		}
+		vd, ok := s.resolveViewDefinitionByID(r.Context(), tenant, lookupID)
+		if !ok {
+			return opts, http.StatusNotFound, fmt.Errorf("ViewDefinition/%s not found", lookupID)
+		}
+		opts.viewDef = vd
+	}
+
+	if err := validateViewDefinition(opts.viewDef); err != nil {
+		return opts, http.StatusUnprocessableEntity, err
+	}
+
+	if opts.format == "" {
+		accept := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
+		switch {
+		case strings.Contains(accept, "text/csv"):
+			opts.format = "text/csv"
+		case strings.Contains(accept, "ndjson"):
+			opts.format = "application/ndjson"
+		case strings.Contains(accept, "json"):
+			opts.format = "application/json"
+		default:
+			opts.format = defaultFormat
+		}
+	}
+	return opts, http.StatusOK, nil
+}
+
+// handleViewDefinitionRun handles GET/POST /fhir/r4/{tenant}/ViewDefinition/$run
+// and /fhir/r4/{tenant}/ViewDefinition/{id}/$run per the HL7 SQL-on-FHIR v2 specification.
+func (s *Server) handleViewDefinitionRun(w http.ResponseWriter, r *http.Request) {
+	s.executeViewDefinition(w, r, "application/json")
+}
+
+// handleViewDefinitionExport handles GET/POST /fhir/r4/{tenant}/ViewDefinition/$export
+// and /fhir/r4/{tenant}/ViewDefinition/{id}/$export per the HL7 SQL-on-FHIR v2 specification.
+func (s *Server) handleViewDefinitionExport(w http.ResponseWriter, r *http.Request) {
+	s.executeViewDefinition(w, r, "application/ndjson")
+}
+
+func (s *Server) executeViewDefinition(w http.ResponseWriter, r *http.Request, defaultFormat string) {
+	tenant := r.PathValue("tenant")
+	opts, status, err := s.parseViewRunRequest(r, defaultFormat)
+	if err != nil {
+		code := "invalid"
+		if status == http.StatusNotFound {
+			code = "not-found"
+		}
+		writeOperationOutcome(w, status, code, err.Error())
+		return
+	}
+
+	targetType := strings.TrimSpace(opts.viewDef.Resource)
+	if _, ok := s.protoRegistry[targetType]; !ok {
+		writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-supported", fmt.Sprintf("unsupported ViewDefinition target resource type %q", targetType))
+		return
+	}
+
+	exportParams := store.ExportParams{
+		TenantID:      tenant,
+		ResourceTypes: []string{targetType},
+		Since:         opts.since,
+	}
+	if opts.patientID != "" {
+		patID := opts.patientID
+		if slash := strings.LastIndexByte(patID, '/'); slash != -1 {
+			patID = patID[slash+1:]
+		}
+		exportParams.PatientID = patID
+	}
+	if opts.groupID != "" {
+		grpID := opts.groupID
+		if slash := strings.LastIndexByte(grpID, '/'); slash != -1 {
+			grpID = grpID[slash+1:]
+		}
+		grpRes, err := s.store.GroupEverything(r.Context(), store.GroupEverythingParams{
+			TenantID: tenant,
+			GroupID:  grpID,
+		})
+		if err == nil && grpRes != nil {
+			var patIDs []string
+			for _, m := range grpRes.Matches {
+				if m.ResType == "Patient" {
+					patIDs = append(patIDs, m.ResID)
+				}
+			}
+			exportParams.PatientIDs = patIDs
+		}
+	}
+
+	constMap := buildViewConstantReplacements(opts.viewDef.Constant)
+	columns := collectViewDefinitionColumns(opts.viewDef.Select)
+
+	var rows []map[string]any
+	err = s.streamExportResources(r.Context(), exportParams, func(sr store.SearchResult) error {
+		if opts.limit > 0 && len(rows) >= opts.limit {
+			return nil
+		}
+		jsonBytes, err := s.protoToJSONWithMeta(sr.ResType, sr.ResourceProto, sr.ResVersion, sr.LastUpdated)
+		if err != nil {
+			return nil
+		}
+		var root map[string]any
+		if err := json.Unmarshal(jsonBytes, &root); err != nil {
+			return nil
+		}
+		resRows, evalErr := evaluateViewDefinitionOnResource(root, opts.viewDef, constMap)
+		if evalErr != nil {
+			return evalErr
+		}
+		for _, row := range resRows {
+			rows = append(rows, row)
+			if opts.limit > 0 && len(rows) >= opts.limit {
+				break
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		writeOperationOutcome(w, http.StatusUnprocessableEntity, "business-rule", err.Error())
+		return
+	}
+
+	if s.analyticalStore != nil {
+		if backend := strings.TrimSpace(s.analyticalStore.BackendName()); backend != "" {
+			w.Header().Set("X-Flint-Analytical-Backend", backend)
+		}
+	}
+
+	fmtLower := strings.ToLower(strings.TrimSpace(opts.format))
+	switch {
+	case strings.Contains(fmtLower, "csv"):
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		cw := csv.NewWriter(w)
+		if opts.includeHdrs {
+			hdr := make([]string, len(columns))
+			for i, c := range columns {
+				hdr[i] = c.Name
+			}
+			_ = cw.Write(hdr)
+		}
+		for _, row := range rows {
+			rec := make([]string, len(columns))
+			for i, c := range columns {
+				rec[i] = formatCSVCellValue(row[c.Name])
+			}
+			_ = cw.Write(rec)
+		}
+		cw.Flush()
+
+	case strings.Contains(fmtLower, "ndjson"):
+		w.Header().Set("Content-Type", "application/ndjson; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		for _, row := range rows {
+			line, _ := marshalOrderedViewRow(row, columns)
+			_, _ = w.Write(line)
+			_, _ = w.Write([]byte("\n"))
+		}
+
+	default:
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		var buf bytes.Buffer
+		buf.WriteByte('[')
+		for i, row := range rows {
+			if i > 0 {
+				buf.WriteByte(',')
+			}
+			b, _ := marshalOrderedViewRow(row, columns)
+			buf.Write(b)
+		}
+		buf.WriteByte(']')
+		_, _ = w.Write(buf.Bytes())
+	}
+}
+
+func buildViewConstantReplacements(constants []sqlOnFHIRConstant) map[string]string {
+	out := make(map[string]string, len(constants))
+	for _, c := range constants {
+		name := strings.TrimSpace(c.Name)
+		if name == "" {
+			continue
+		}
+		var lit string
+		switch {
+		case c.ValueString != nil:
+			lit = "'" + strings.ReplaceAll(*c.ValueString, "'", "\\'") + "'"
+		case c.ValueCode != nil:
+			lit = "'" + strings.ReplaceAll(*c.ValueCode, "'", "\\'") + "'"
+		case c.ValueURI != nil:
+			lit = "'" + strings.ReplaceAll(*c.ValueURI, "'", "\\'") + "'"
+		case c.ValueDate != nil:
+			lit = "'" + strings.ReplaceAll(*c.ValueDate, "'", "\\'") + "'"
+		case c.ValueDateTime != nil:
+			lit = "'" + strings.ReplaceAll(*c.ValueDateTime, "'", "\\'") + "'"
+		case c.ValueInteger != nil:
+			lit = strconv.Itoa(*c.ValueInteger)
+		case c.ValueDecimal != nil:
+			lit = strconv.FormatFloat(*c.ValueDecimal, 'f', -1, 64)
+		case c.ValueBoolean != nil:
+			if *c.ValueBoolean {
+				lit = "true"
+			} else {
+				lit = "false"
+			}
+		}
+		if lit != "" {
+			out["%"+name] = lit
+		}
+	}
+	return out
+}
+
+func substituteViewConstants(expr string, constMap map[string]string) string {
+	if len(constMap) == 0 || !strings.Contains(expr, "%") {
+		return expr
+	}
+	// Replace longest constant names first to avoid prefix collisions
+	keys := make([]string, 0, len(constMap))
+	for k := range constMap {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return len(keys[i]) > len(keys[j])
+	})
+	for _, k := range keys {
+		expr = strings.ReplaceAll(expr, k, constMap[k])
+	}
+	return expr
+}
+
+func evaluateViewDefinitionOnResource(root map[string]any, vd sqlOnFHIRViewDefinition, constMap map[string]string) ([]map[string]any, error) {
+	ctx := fhirPathContext{
+		root:     root,
+		thisItem: root,
+		index:    0,
+		total:    1,
+	}
+	for _, w := range vd.Where {
+		path := substituteViewConstants(strings.TrimSpace(w.Path), constMap)
+		if path == "" {
+			continue
+		}
+		vals := evalFHIRPathExpr([]any{root}, ctx, path)
+		b, ok := singletonBool(vals)
+		if !ok || !b {
+			return nil, nil
+		}
+	}
+	return evaluateSelectList(root, root, vd.Select, constMap)
+}
+
+func evaluateSelectList(root map[string]any, focus any, selects []sqlOnFHIRSelect, constMap map[string]string) ([]map[string]any, error) {
+	acc := []map[string]any{{}}
+	for _, sel := range selects {
+		selRows, err := evaluateSingleSelect(root, focus, sel, constMap)
+		if err != nil {
+			return nil, err
+		}
+		if len(selRows) == 0 {
+			return nil, nil
+		}
+		acc = cartesianMergeRows(acc, selRows)
+	}
+	return acc, nil
+}
+
+func evaluateSingleSelect(root map[string]any, focus any, sel sqlOnFHIRSelect, constMap map[string]string) ([]map[string]any, error) {
+	var focusItems []any
+	isForEachOrNull := false
+
+	switch {
+	case strings.TrimSpace(sel.ForEach) != "":
+		expr := substituteViewConstants(strings.TrimSpace(sel.ForEach), constMap)
+		focusItems = evalFHIRPathExpr([]any{focus}, fhirPathContext{root: root, thisItem: focus, index: 0, total: 1}, expr)
+		if len(focusItems) == 0 {
+			return nil, nil
+		}
+	case strings.TrimSpace(sel.ForEachOrNull) != "":
+		isForEachOrNull = true
+		expr := substituteViewConstants(strings.TrimSpace(sel.ForEachOrNull), constMap)
+		focusItems = evalFHIRPathExpr([]any{focus}, fhirPathContext{root: root, thisItem: focus, index: 0, total: 1}, expr)
+		if len(focusItems) == 0 {
+			focusItems = []any{nil}
+		}
+	default:
+		focusItems = []any{focus}
+	}
+
+	var out []map[string]any
+	for _, item := range focusItems {
+		itemRows := []map[string]any{{}}
+
+		if len(sel.Column) > 0 {
+			colRow := make(map[string]any, len(sel.Column))
+			for _, col := range sel.Column {
+				if item == nil && isForEachOrNull {
+					if col.Collection {
+						colRow[col.Name] = []any{}
+					} else {
+						colRow[col.Name] = nil
+					}
+					continue
+				}
+				expr := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
+				vals := evalFHIRPathExpr([]any{item}, fhirPathContext{root: root, thisItem: item, index: 0, total: 1}, expr)
+				if col.Collection {
+					if vals == nil {
+						vals = []any{}
+					}
+					colRow[col.Name] = vals
+				} else {
+					if len(vals) > 1 {
+						return nil, fmt.Errorf("column %q evaluated to %d values for single-valued column (set collection: true to allow multiple values)", col.Name, len(vals))
+					}
+					if len(vals) == 1 {
+						colRow[col.Name] = vals[0]
+					} else {
+						colRow[col.Name] = nil
+					}
+				}
+			}
+			itemRows = []map[string]any{colRow}
+		}
+
+		if len(sel.Select) > 0 {
+			if item == nil && isForEachOrNull {
+				nestedCols := collectViewDefinitionColumns(sel.Select)
+				nullNested := make(map[string]any, len(nestedCols))
+				for _, nc := range nestedCols {
+					if nc.Collection {
+						nullNested[nc.Name] = []any{}
+					} else {
+						nullNested[nc.Name] = nil
+					}
+				}
+				itemRows = cartesianMergeRows(itemRows, []map[string]any{nullNested})
+			} else {
+				nestedRows, err := evaluateSelectList(root, item, sel.Select, constMap)
+				if err != nil {
+					return nil, err
+				}
+				if len(nestedRows) == 0 {
+					continue
+				}
+				itemRows = cartesianMergeRows(itemRows, nestedRows)
+			}
+		}
+
+		if len(sel.UnionAll) > 0 {
+			var unionRows []map[string]any
+			if item == nil && isForEachOrNull {
+				uCols := collectViewDefinitionColumns(sel.UnionAll)
+				nullUnion := make(map[string]any, len(uCols))
+				for _, uc := range uCols {
+					if uc.Collection {
+						nullUnion[uc.Name] = []any{}
+					} else {
+						nullUnion[uc.Name] = nil
+					}
+				}
+				unionRows = []map[string]any{nullUnion}
+			} else {
+				for _, branch := range sel.UnionAll {
+					branchRows, err := evaluateSingleSelect(root, item, branch, constMap)
+					if err != nil {
+						return nil, err
+					}
+					unionRows = append(unionRows, branchRows...)
+				}
+			}
+			if len(unionRows) == 0 {
+				continue
+			}
+			itemRows = cartesianMergeRows(itemRows, unionRows)
+		}
+
+		out = append(out, itemRows...)
+	}
+	return out, nil
+}
+
+func cartesianMergeRows(left, right []map[string]any) []map[string]any {
+	if len(left) == 0 || len(right) == 0 {
+		return nil
+	}
+	merged := make([]map[string]any, 0, len(left)*len(right))
+	for _, l := range left {
+		for _, r := range right {
+			m := make(map[string]any, len(l)+len(r))
+			for k, v := range l {
+				m[k] = v
+			}
+			for k, v := range r {
+				m[k] = v
+			}
+			merged = append(merged, m)
+		}
+	}
+	return merged
+}
+
+func marshalOrderedViewRow(row map[string]any, columns []sqlOnFHIRColumn) ([]byte, error) {
+	var buf bytes.Buffer
+	buf.WriteByte('{')
+	for i, c := range columns {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		keyBytes, _ := json.Marshal(c.Name)
+		buf.Write(keyBytes)
+		buf.WriteByte(':')
+		val, exists := row[c.Name]
+		if !exists {
+			val = nil
+		}
+		valBytes, err := json.Marshal(val)
+		if err != nil {
+			buf.WriteString("null")
+		} else {
+			buf.Write(valBytes)
+		}
+	}
+	buf.WriteByte('}')
+	return buf.Bytes(), nil
+}
+
+func formatCSVCellValue(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch val := v.(type) {
+	case string:
+		return val
+	case bool:
+		if val {
+			return "true"
+		}
+		return "false"
+	case int:
+		return strconv.Itoa(val)
+	case int64:
+		return strconv.FormatInt(val, 10)
+	case float64:
+		return strconv.FormatFloat(val, 'f', -1, 64)
+	case []any:
+		b, _ := json.Marshal(val)
+		return string(b)
+	default:
+		b, _ := json.Marshal(val)
+		return string(b)
+	}
+}
+
+// handleSyncAnalytics handles POST/GET /fhir/r4/{tenant}/$sync-analytics to backfill or verify
+// synchronization between the primary transactional store and the analytical replica store.
+func (s *Server) handleSyncAnalytics(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	storageBackend := string(store.BackendPostgres)
+	analyticalBackend := "none"
+
+	if s.analyticalStore != nil {
+		if b := strings.TrimSpace(s.analyticalStore.BackendName()); b != "" {
+			analyticalBackend = b
+			w.Header().Set("X-Flint-Analytical-Backend", b)
+		}
+	}
+	if as, ok := s.primaryStore.(store.AnalyticalStore); ok && !store.IsNil(as) {
+		if b := strings.TrimSpace(as.BackendName()); b != "" {
+			storageBackend = b
+		}
+	}
+
+	synced := 0
+	var repWrites, repDeletes, repErrors uint64
+
+	if hyb, ok := s.store.(*store.HybridStore); ok && hyb != nil {
+		n, err := hyb.SyncTenant(r.Context(), tenant)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", fmt.Sprintf("analytical sync failed: %v", err))
+			return
+		}
+		synced = n
+		repWrites = hyb.ReplicatedWrites()
+		repDeletes = hyb.ReplicatedDeletes()
+		repErrors = hyb.ReplicationErrors()
+	} else if s.store != nil {
+		_ = s.streamExportResources(r.Context(), store.ExportParams{TenantID: tenant}, func(_ store.SearchResult) error {
+			synced++
+			return nil
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter": []map[string]any{
+			{"name": "tenant", "valueString": tenant},
+			{"name": "storageBackend", "valueCode": storageBackend},
+			{"name": "analyticalBackend", "valueCode": analyticalBackend},
+			{"name": "syncedResources", "valueInteger": synced},
+			{"name": "replicatedWrites", "valueInteger": repWrites},
+			{"name": "replicatedDeletes", "valueInteger": repDeletes},
+			{"name": "replicationErrors", "valueInteger": repErrors},
+		},
+	})
+}
