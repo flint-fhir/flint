@@ -148,9 +148,10 @@ func TestExecuteLoadTest_HTTPStoreAndUnknownTarget(t *testing.T) {
 	assert.GreaterOrEqual(t, m1.totalBundles.Load(), int64(1))
 	assert.GreaterOrEqual(t, m1.totalResources.Load(), int64(5))
 
-	// 2. Unthrottled HTTP load test (Rate == 0)
+	// 2. Unthrottled HTTP load test (Rate == 0) + binary Proto3 wire mode (-wire=proto)
 	m2, _, err := executeLoadTest(t.Context(), Config{
 		Target:     "http",
+		Wire:       "proto",
 		URL:        ts.URL,
 		Rate:       0,
 		Duration:   40 * time.Millisecond,

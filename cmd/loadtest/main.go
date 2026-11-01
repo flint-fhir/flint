@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -37,6 +38,7 @@ import (
 type Config struct {
 	Target         string        // "http", "store", "temporal"
 	Backend        string        // "postgres", "sqlite", "doris", "postgres+doris", "sqlite+doris" (for store target)
+	Wire           string        // "json" or "proto" (for http target)
 	URL            string        // e.g. "http://localhost:8080/fhir/r4/loadtest"
 	Rate           int           // target bundles/sec (0 = unthrottled benchmark)
 	Duration       time.Duration // test duration
@@ -77,6 +79,7 @@ func parseLoadConfig(args []string) (Config, error) {
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&cfg.Target, "target", "http", "Target mode: http, store, temporal")
 	fs.StringVar(&cfg.Backend, "backend", "postgres", "Storage backend for -target=store: postgres, sqlite, doris, postgres+doris, sqlite+doris")
+	fs.StringVar(&cfg.Wire, "wire", "json", "HTTP wire format for -target=http: json or proto (application/x-protobuf)")
 	fs.StringVar(&cfg.URL, "url", "http://localhost:8082/fhir/r4/loadtest", "Flint HTTP server bundle URL")
 	fs.IntVar(&cfg.Rate, "rate", 1000, "Target bundles/second (0 for maximum uncapped throughput)")
 	fs.DurationVar(&cfg.Duration, "duration", 30*time.Second, "Test run duration (e.g. 30s, 5m, 1h)")
@@ -158,8 +161,20 @@ func runHTTPLoad(ctx context.Context, cfg Config, m *Metrics) {
 		Timeout:   10 * time.Second,
 	}
 
-	// Pre-generate raw bundle templates
-	templates := generateBundlePayloads(100, cfg.BundleSize)
+	// Pre-generate raw bundle or binary Proto3 wire templates
+	isProtoWire := strings.EqualFold(cfg.Wire, "proto") || strings.EqualFold(cfg.Wire, "protobuf") || strings.EqualFold(cfg.Wire, "x-protobuf")
+	var templates [][]byte
+	targetURL := cfg.URL
+	contentType := "application/fhir+json"
+	if isProtoWire {
+		templates = generateProtoPayloads(100)
+		contentType = "application/x-protobuf"
+		if !strings.HasSuffix(strings.TrimRight(targetURL, "/"), "/Patient") {
+			targetURL = strings.TrimRight(targetURL, "/") + "/Patient"
+		}
+	} else {
+		templates = generateBundlePayloads(100, cfg.BundleSize)
+	}
 
 	jobs := make(chan []byte, cfg.Workers*4)
 	var wg sync.WaitGroup
@@ -178,12 +193,15 @@ func runHTTPLoad(ctx context.Context, cfg Config, m *Metrics) {
 						return
 					}
 					t0 := time.Now()
-					req, err := http.NewRequestWithContext(ctx, "POST", cfg.URL, bytes.NewReader(payload))
+					req, err := http.NewRequestWithContext(ctx, "POST", targetURL, bytes.NewReader(payload))
 					if err != nil {
 						m.totalErrors.Add(1)
 						continue
 					}
-					req.Header.Set("Content-Type", "application/fhir+json")
+					req.Header.Set("Content-Type", contentType)
+					if isProtoWire {
+						req.Header.Set("Accept", "application/x-protobuf")
+					}
 
 					resp, err := client.Do(req)
 					lat := time.Since(t0)
@@ -703,6 +721,15 @@ func generateBundlePayloads(count, bundleSize int) [][]byte {
 			"entry":        entries,
 		}
 		b, _ := json.Marshal(bundle)
+		payloads[i] = b
+	}
+	return payloads
+}
+
+func generateProtoPayloads(count int) [][]byte {
+	payloads := make([][]byte, count)
+	for i := 0; i < count; i++ {
+		b, _ := proto.Marshal(&patpb.Patient{})
 		payloads[i] = b
 	}
 	return payloads

@@ -2375,6 +2375,22 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-02", suite10, "Analytical Store Pushdown & Hybrid Replica Sync ($sync-analytics & Observation/$stats)", t0, err, "Analytical backfill ($sync-analytics) & columnar Observation/$stats verified")
 
+	t0 = time.Now()
+	{
+		respProtoRead, bProtoRead, errProtoRead := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respVDTSV, bVDTSV, errVDTSV := doReq(http.MethodGet, basePath+"/ViewDefinition/observation-vitals/$run?_format=text/tab-separated-values", "", nil, nil)
+		if errProtoRead != nil || respProtoRead.StatusCode != http.StatusOK || !strings.Contains(respProtoRead.Header.Get("Content-Type"), "application/x-protobuf") || respProtoRead.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bProtoRead) == 0 {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1?_format=application/x-protobuf to return binary Proto3 wire payload, got %d (ct=%q, wire=%q, len=%d)", respProtoRead.StatusCode, respProtoRead.Header.Get("Content-Type"), respProtoRead.Header.Get("X-Flint-Wire-Format"), len(bProtoRead))
+		} else if errVDTSV != nil || respVDTSV.StatusCode != http.StatusOK || !strings.Contains(respVDTSV.Header.Get("Content-Type"), "text/tab-separated-values") || !strings.Contains(string(bVDTSV), "id\tpatient_id\tstatus\tcode") {
+			err = fmt.Errorf("expected GET /ViewDefinition/observation-vitals/$run?_format=text/tab-separated-values to return TSV rows, got %d: %s", respVDTSV.StatusCode, string(bVDTSV))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-03", suite10, "Binary Proto3 Wire HTTP Transport (application/x-protobuf) & SQL-on-FHIR v2 TSV Projection (text/tab-separated-values)", t0, err, "End-to-end google.fhir.r4.proto3 HTTP wire transport & TSV tabular projection verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}
