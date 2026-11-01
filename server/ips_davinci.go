@@ -79,8 +79,8 @@ func (s *Server) assembleIPSSummaryBundle(r *http.Request, tenant, patientID str
 
 	var patientRes map[string]any
 	if len(sr.Matches) > 0 {
-		if jb, err := s.protoToJSONWithMeta("Patient", sr.Matches[0].ResourceProto, sr.Matches[0].ResVersion, sr.Matches[0].LastUpdated); err == nil {
-			_ = json.Unmarshal(jb, &patientRes)
+		if m, err := s.protoToFHIRMapWithMeta("Patient", sr.Matches[0].ResourceProto, sr.Matches[0].ResVersion, sr.Matches[0].LastUpdated); err == nil {
+			patientRes = m
 		}
 	}
 	if patientRes == nil {
@@ -104,12 +104,8 @@ func (s *Server) assembleIPSSummaryBundle(r *http.Request, tenant, patientID str
 	)
 
 	for _, inc := range sr.Includes {
-		jb, err := s.protoToJSONWithMeta(inc.ResType, inc.ResourceProto, inc.ResVersion, inc.LastUpdated)
+		res, err := s.protoToFHIRMapWithMeta(inc.ResType, inc.ResourceProto, inc.ResVersion, inc.LastUpdated)
 		if err != nil {
-			continue
-		}
-		var res map[string]any
-		if err := json.Unmarshal(jb, &res); err != nil {
 			continue
 		}
 		ref := map[string]any{
@@ -430,12 +426,8 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 	coveragePatients := make(map[string]string) // patientID -> memberIdentifierValue
 	if covSR != nil {
 		for _, m := range covSR.Matches {
-			jb, err := s.protoToJSONWithMeta("Coverage", m.ResourceProto, m.ResVersion, m.LastUpdated)
+			cov, err := s.protoToFHIRMapWithMeta("Coverage", m.ResourceProto, m.ResVersion, m.LastUpdated)
 			if err != nil {
-				continue
-			}
-			var cov map[string]any
-			if err := json.Unmarshal(jb, &cov); err != nil {
 				continue
 			}
 			patID := extractCoverageBeneficiaryPatientID(cov)
@@ -524,12 +516,8 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 		if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, "Patient", m.ResID, m.ResourceProto) {
 			continue
 		}
-		jb, err := s.protoToJSONWithMeta("Patient", m.ResourceProto, m.ResVersion, m.LastUpdated)
+		candMap, err := s.protoToFHIRMapWithMeta("Patient", m.ResourceProto, m.ResVersion, m.LastUpdated)
 		if err != nil {
-			continue
-		}
-		var candMap map[string]any
-		if err := json.Unmarshal(jb, &candMap); err != nil {
 			continue
 		}
 		candDemo := extractPatientDemographics(candMap)

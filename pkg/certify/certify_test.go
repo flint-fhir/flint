@@ -443,7 +443,13 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			return
 		}
 		if strings.HasSuffix(path, "/$convert") {
-			_, _ = w.Write([]byte(`{"resourceType":"Patient","id":"conv-pat-1"}`))
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x0c, 0x0a, 0x0a, 0x63, 0x65, 0x72, 0x74, 0x2d, 0x63, 0x6f, 0x6e, 0x76, 0x31})
+				return
+			}
+			_, _ = w.Write([]byte(`{"resourceType":"Patient","id":"conv-pat-1","name":[{"family":"CertifyProto"}]}`))
 			return
 		}
 		if strings.HasSuffix(path, "/ValueSet/$expand") {
@@ -898,6 +904,11 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"dialect","valueCode":"doris"},{"name":"storageModel","valueString":"zero-json-proto3-wire"},{"name":"targetTable","valueString":"fhir_observation"},{"name":"sql","valueString":"SELECT r.res_id AS ` + "`id`" + ` FROM fhir_observation r"}]}`))
 			return
 		}
+		if strings.HasSuffix(path, "/ViewDefinition/$sql") {
+			w.Header().Set("Content-Type", "application/sql; charset=utf-8")
+			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error')\n"))
+			return
+		}
 		if strings.HasSuffix(path, "/$sync-analytics") {
 			_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"syncedResources","valueInteger":18},{"name":"replicationErrors","valueInteger":0}]}`))
 			return
@@ -957,8 +968,8 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 85 {
-		t.Fatalf("expected all 85 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 86 {
+		t.Fatalf("expected all 86 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()

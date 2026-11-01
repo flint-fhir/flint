@@ -2391,6 +2391,30 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-03", suite10, "Binary Proto3 Wire HTTP Transport (application/x-protobuf) & SQL-on-FHIR v2 TSV Projection (text/tab-separated-values)", t0, err, "End-to-end google.fhir.r4.proto3 HTTP wire transport & TSV tabular projection verified")
 
+	// AN-04: Resource/$convert Bidirectional Proto3 Wire Translation & SQL-on-FHIR v2 Multi-Predicate/Constant $sql Pushdown
+	t0 = time.Now()
+	{
+		convInput := []byte(`{"resourceType":"Patient","id":"cert-conv-p1","name":[{"family":"CertifyProto","given":["Ada"]}],"birthDate":"1980-01-01"}`)
+		respConvProto, bConvProto, errConvProto := doReq(http.MethodPost, basePath+"/Patient/$convert", "application/fhir+json", convInput, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respConvJSON, bConvJSON, errConvJSON := doReq(http.MethodPost, basePath+"/Patient/$convert", "application/x-protobuf", bConvProto, map[string]string{
+			"Accept": "application/fhir+json",
+		})
+		multiPredVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_bp_view","status":"active","resource":"Observation","constant":[{"name":"minVal","valueDecimal":120}],"select":[{"column":[{"name":"id","path":"id"},{"name":"val","path":"valueQuantity.value"}]}],"where":[{"path":"valueQuantity.value >= %minVal and status != 'entered-in-error'"}]}`)
+		respMultiSQL, bMultiSQL, errMultiSQL := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", multiPredVD, nil)
+		if errConvProto != nil || respConvProto.StatusCode != http.StatusOK || !strings.Contains(respConvProto.Header.Get("Content-Type"), "application/x-protobuf") || respConvProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bConvProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$convert with Accept: application/x-protobuf to return binary Proto3 wire bytes, got %d", respConvProto.StatusCode)
+		} else if errConvJSON != nil || respConvJSON.StatusCode != http.StatusOK || !strings.Contains(string(bConvJSON), "CertifyProto") {
+			err = fmt.Errorf("expected POST /Patient/$convert with Content-Type: application/x-protobuf to return FHIR JSON, got %d: %s", respConvJSON.StatusCode, string(bConvJSON))
+		} else if errMultiSQL != nil || respMultiSQL.StatusCode != http.StatusOK || !strings.Contains(string(bMultiSQL), "r.value_quantity >= 120") || !strings.Contains(string(bMultiSQL), "NOT array_contains") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql multi-predicate constant pushdown, got %d: %s", respMultiSQL.StatusCode, string(bMultiSQL))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-04", suite10, "Resource/$convert Bidirectional Proto3 Wire Translation & SQL-on-FHIR v2 Multi-Predicate $sql Pushdown", t0, err, "Bidirectional JSON <-> binary Proto3 $convert & compound where/constant $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

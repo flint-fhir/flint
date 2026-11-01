@@ -633,6 +633,7 @@ func (s *Server) executeViewDefinition(w http.ResponseWriter, r *http.Request, d
 	}
 
 	w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+	w.Header().Set("X-Flint-Execution-Mode", "zero-json-protoreflect")
 	if s.analyticalStore != nil {
 		if backend := strings.TrimSpace(s.analyticalStore.BackendName()); backend != "" {
 			w.Header().Set("X-Flint-Analytical-Backend", backend)
@@ -1352,9 +1353,39 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 
 func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 	p := strings.TrimSpace(fhirPath)
+	if p == "" {
+		return ""
+	}
+	if orParts := splitTopLevelBooleanWord(p, "or"); len(orParts) > 1 {
+		var compiled []string
+		for _, part := range orParts {
+			if sub := dorisZeroJSONWhereExpr(part, isCore); sub != "" {
+				compiled = append(compiled, sub)
+			}
+		}
+		if len(compiled) > 0 {
+			return "(" + strings.Join(compiled, " OR ") + ")"
+		}
+	}
+	if andParts := splitTopLevelBooleanWord(p, "and"); len(andParts) > 1 {
+		var compiled []string
+		for _, part := range andParts {
+			if sub := dorisZeroJSONWhereExpr(part, isCore); sub != "" {
+				compiled = append(compiled, sub)
+			}
+		}
+		if len(compiled) > 0 {
+			return strings.Join(compiled, " AND ")
+		}
+	}
+
 	codeCol := "r.primary_code"
+	qtyCol := "r.primary_quantity"
+	dateLowCol := "r.primary_date_low"
 	if isCore {
 		codeCol = "r.code"
+		qtyCol = "r.value_quantity"
+		dateLowCol = "r.effective_start"
 	}
 	if strings.HasPrefix(p, "code.coding.exists(") && strings.HasSuffix(p, ")") {
 		inner := strings.TrimSpace(p[len("code.coding.exists(") : len(p)-1])
@@ -1368,14 +1399,36 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 			}
 		}
 	}
-	if parts := strings.SplitN(p, "=", 2); len(parts) == 2 {
-		lhs := strings.TrimSpace(parts[0])
-		rhs := strings.Trim(strings.TrimSpace(parts[1]), "'\"")
-		escapedRHS := strings.ReplaceAll(rhs, "'", "''")
-		sp := normalizeFHIRPathToSearchParam(lhs)
-		return fmt.Sprintf("array_contains(r.code_tokens, '%s=|%s')", sp, escapedRHS)
+	lhs, op, rhs, ok := parseViewWhereComparison(p)
+	if !ok {
+		return ""
 	}
-	return ""
+	trimmedRHS := strings.Trim(strings.TrimSpace(rhs), "'\"")
+	escapedRHS := strings.ReplaceAll(trimmedRHS, "'", "''")
+
+	if lhs == "valueQuantity.value" {
+		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
+			sqlOp := op
+			if sqlOp == "!=" {
+				sqlOp = "<>"
+			}
+			return fmt.Sprintf("%s %s %s", qtyCol, sqlOp, trimmedRHS)
+		}
+	}
+	switch lhs {
+	case "effectiveDateTime", "effectivePeriod.start", "onsetDateTime", "birthDate", "authoredOn", "issued":
+		sqlOp := op
+		if sqlOp == "!=" {
+			sqlOp = "<>"
+		}
+		return fmt.Sprintf("%s %s '%s'", dateLowCol, sqlOp, escapedRHS)
+	}
+
+	sp := normalizeFHIRPathToSearchParam(lhs)
+	if op == "!=" || op == "<>" {
+		return fmt.Sprintf("NOT array_contains(r.code_tokens, '%s=|%s')", sp, escapedRHS)
+	}
+	return fmt.Sprintf("array_contains(r.code_tokens, '%s=|%s')", sp, escapedRHS)
 }
 
 func spidxZeroJSONColumnExpr(fhirPath string) (string, string) {
@@ -1421,6 +1474,32 @@ func spidxZeroJSONColumnExpr(fhirPath string) (string, string) {
 
 func spidxZeroJSONWhereExpr(fhirPath string) string {
 	p := strings.TrimSpace(fhirPath)
+	if p == "" {
+		return ""
+	}
+	if orParts := splitTopLevelBooleanWord(p, "or"); len(orParts) > 1 {
+		var compiled []string
+		for _, part := range orParts {
+			if sub := spidxZeroJSONWhereExpr(part); sub != "" {
+				compiled = append(compiled, sub)
+			}
+		}
+		if len(compiled) > 0 {
+			return "(" + strings.Join(compiled, " OR ") + ")"
+		}
+	}
+	if andParts := splitTopLevelBooleanWord(p, "and"); len(andParts) > 1 {
+		var compiled []string
+		for _, part := range andParts {
+			if sub := spidxZeroJSONWhereExpr(part); sub != "" {
+				compiled = append(compiled, sub)
+			}
+		}
+		if len(compiled) > 0 {
+			return strings.Join(compiled, " AND ")
+		}
+	}
+
 	if strings.HasPrefix(p, "code.coding.exists(") && strings.HasSuffix(p, ")") {
 		inner := strings.TrimSpace(p[len("code.coding.exists(") : len(p)-1])
 		if idx := strings.Index(inner, "code"); idx != -1 {
@@ -1433,14 +1512,123 @@ func spidxZeroJSONWhereExpr(fhirPath string) string {
 			}
 		}
 	}
-	if parts := strings.SplitN(p, "=", 2); len(parts) == 2 {
-		lhs := strings.TrimSpace(parts[0])
-		rhs := strings.Trim(strings.TrimSpace(parts[1]), "'\"")
-		escapedRHS := strings.ReplaceAll(rhs, "'", "''")
-		sp := normalizeFHIRPathToSearchParam(lhs)
-		return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_value = '%s')", sp, escapedRHS)
+	lhs, op, rhs, ok := parseViewWhereComparison(p)
+	if !ok {
+		return ""
 	}
-	return ""
+	trimmedRHS := strings.Trim(strings.TrimSpace(rhs), "'\"")
+	escapedRHS := strings.ReplaceAll(trimmedRHS, "'", "''")
+
+	if lhs == "valueQuantity.value" {
+		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
+			sqlOp := op
+			if sqlOp == "!=" {
+				sqlOp = "<>"
+			}
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' AND q.sp_value %s %s)", sqlOp, trimmedRHS)
+		}
+	}
+	switch lhs {
+	case "effectiveDateTime", "effectivePeriod.start", "onsetDateTime", "birthDate", "authoredOn", "issued":
+		sp := "date"
+		switch lhs {
+		case "birthDate":
+			sp = "birthdate"
+		case "onsetDateTime":
+			sp = "onset-date"
+		case "authoredOn":
+			sp = "authoredon"
+		}
+		sqlOp := op
+		if sqlOp == "!=" {
+			sqlOp = "<>"
+		}
+		return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_date d WHERE d.tenant_id = r.tenant_id AND d.res_type = r.res_type AND d.res_id = r.res_id AND d.sp_name = '%s' AND d.sp_low %s '%s')", sp, sqlOp, escapedRHS)
+	}
+
+	sp := normalizeFHIRPathToSearchParam(lhs)
+	if op == "!=" || op == "<>" {
+		return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_value = '%s')", sp, escapedRHS)
+	}
+	return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_value = '%s')", sp, escapedRHS)
+}
+
+func splitTopLevelBooleanWord(expr, keyword string) []string {
+	kw := " " + strings.ToLower(keyword) + " "
+	lower := strings.ToLower(expr)
+	var out []string
+	inQuote := false
+	parenDepth := 0
+	start := 0
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		if ch == '\'' {
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			continue
+		}
+		if ch == '(' {
+			parenDepth++
+			continue
+		}
+		if ch == ')' && parenDepth > 0 {
+			parenDepth--
+			continue
+		}
+		if parenDepth == 0 && i+len(kw) <= len(expr) && lower[i:i+len(kw)] == kw {
+			part := strings.TrimSpace(expr[start:i])
+			if part != "" {
+				out = append(out, part)
+			}
+			i += len(kw) - 1
+			start = i + 1
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	if tail := strings.TrimSpace(expr[start:]); tail != "" {
+		out = append(out, tail)
+	}
+	return out
+}
+
+func parseViewWhereComparison(expr string) (lhs, op, rhs string, ok bool) {
+	inQuote := false
+	parenDepth := 0
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		if ch == '\'' {
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			continue
+		}
+		if ch == '(' {
+			parenDepth++
+			continue
+		}
+		if ch == ')' && parenDepth > 0 {
+			parenDepth--
+			continue
+		}
+		if parenDepth > 0 {
+			continue
+		}
+		if i+2 <= len(expr) {
+			two := expr[i : i+2]
+			if two == ">=" || two == "<=" || two == "!=" || two == "<>" {
+				return strings.TrimSpace(expr[:i]), two, strings.TrimSpace(expr[i+2:]), true
+			}
+		}
+		if ch == '=' || ch == '>' || ch == '<' {
+			return strings.TrimSpace(expr[:i]), string(ch), strings.TrimSpace(expr[i+1:]), true
+		}
+	}
+	return "", "", "", false
 }
 
 func normalizeFHIRPathToSearchParam(path string) string {

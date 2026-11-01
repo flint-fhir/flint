@@ -123,12 +123,8 @@ func measureSpecFromSearchResult(s *Server, rec postgres.SearchResult) (*measure
 }
 
 func measureSpecFromProto(s *Server, resID string, protoBytes []byte, version int, lastUpdated time.Time) (*measureSpec, error) {
-	jsonBytes, err := s.protoToJSONWithMeta("Measure", protoBytes, version, lastUpdated)
+	m, err := s.protoToFHIRMapWithMeta("Measure", protoBytes, version, lastUpdated)
 	if err != nil {
-		return nil, err
-	}
-	var m map[string]any
-	if err := json.Unmarshal(jsonBytes, &m); err != nil {
 		return nil, err
 	}
 	urlStr, _ := m["url"].(string)
@@ -650,11 +646,8 @@ func (s *Server) handleCareGaps(w http.ResponseWriter, r *http.Request) {
 	patMaps := make(map[string]map[string]any, len(patResults.Matches))
 	for _, patRec := range patResults.Matches {
 		patIDs = append(patIDs, patRec.ResID)
-		if jb, err := s.protoToJSONWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated); err == nil {
-			var pm map[string]any
-			if json.Unmarshal(jb, &pm) == nil {
-				patMaps[patRec.ResID] = pm
-			}
+		if pm, err := s.protoToFHIRMapWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated); err == nil {
+			patMaps[patRec.ResID] = pm
 		}
 	}
 	cohortSnaps := s.loadCohortClinicalSnapshots(r.Context(), tenant, patIDs)
@@ -912,12 +905,8 @@ func (s *Server) loadCohortClinicalSnapshots(ctx context.Context, tenant string,
 			return
 		}
 		for _, rec := range sr.Matches {
-			jb, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+			m, err := s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 			if err != nil {
-				continue
-			}
-			var m map[string]any
-			if err := json.Unmarshal(jb, &m); err != nil {
 				continue
 			}
 			pid := extractClinicalSubjectPatientID(m)
@@ -956,12 +945,7 @@ func (s *Server) loadPatientClinicalSnapshot(ctx context.Context, tenant, patID 
 		Count:      200,
 	}); err == nil {
 		for _, rec := range sr.Matches {
-			jb, err := s.protoToJSONWithMeta("AllergyIntolerance", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
-			if err != nil {
-				continue
-			}
-			var m map[string]any
-			if err := json.Unmarshal(jb, &m); err == nil {
+			if m, err := s.protoToFHIRMapWithMeta("AllergyIntolerance", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
 				snap.allergies = append(snap.allergies, m)
 			}
 		}

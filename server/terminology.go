@@ -266,8 +266,8 @@ func (s *Server) resolveValueSetConceptsWithDepth(ctx context.Context, tenant, v
 		if err != nil {
 			return "", "", nil, err
 		}
-		if jsonBytes, err := s.protoToJSONWithMeta("ValueSet", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
-			_ = json.Unmarshal(jsonBytes, &vsMap)
+		if m, err := s.protoToFHIRMapWithMeta("ValueSet", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+			vsMap = m
 		}
 	} else if vsURL != "" && s.store != nil {
 		sr, err := s.store.Search(ctx, postgres.SearchParams{
@@ -286,8 +286,8 @@ func (s *Server) resolveValueSetConceptsWithDepth(ctx context.Context, tenant, v
 		}
 		if err == nil && len(sr.Matches) > 0 {
 			res := sr.Matches[0]
-			if jsonBytes, err := s.protoToJSONWithMeta("ValueSet", res.ResourceProto, res.ResVersion, res.LastUpdated); err == nil {
-				_ = json.Unmarshal(jsonBytes, &vsMap)
+			if m, err := s.protoToFHIRMapWithMeta("ValueSet", res.ResourceProto, res.ResVersion, res.LastUpdated); err == nil {
+				vsMap = m
 			}
 		}
 	}
@@ -587,8 +587,8 @@ func (s *Server) resolveCodeSystemConceptsWithInline(ctx context.Context, tenant
 		if err != nil {
 			return nil, "", err
 		}
-		if jsonBytes, err := s.protoToJSONWithMeta("CodeSystem", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
-			_ = json.Unmarshal(jsonBytes, &csMap)
+		if m, err := s.protoToFHIRMapWithMeta("CodeSystem", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+			csMap = m
 		}
 	} else if csURL != "" && s.store != nil {
 		sr, err := s.store.Search(ctx, postgres.SearchParams{
@@ -607,8 +607,8 @@ func (s *Server) resolveCodeSystemConceptsWithInline(ctx context.Context, tenant
 		}
 		if err == nil && len(sr.Matches) > 0 {
 			res := sr.Matches[0]
-			if jsonBytes, err := s.protoToJSONWithMeta("CodeSystem", res.ResourceProto, res.ResVersion, res.LastUpdated); err == nil {
-				_ = json.Unmarshal(jsonBytes, &csMap)
+			if m, err := s.protoToFHIRMapWithMeta("CodeSystem", res.ResourceProto, res.ResVersion, res.LastUpdated); err == nil {
+				csMap = m
 			}
 		}
 	}
@@ -1230,12 +1230,9 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("ConceptMap/%s not found", cmID))
 			return
 		}
-		if jb, err := s.protoToJSONWithMeta("ConceptMap", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
-			var cmMap map[string]any
-			if json.Unmarshal(jb, &cmMap) == nil {
-				candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
-				foundExplicitMap = true
-			}
+		if cmMap, err := s.protoToFHIRMapWithMeta("ConceptMap", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+			candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
+			foundExplicitMap = true
 		}
 	} else if cmURL != "" && s.store != nil {
 		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
@@ -1254,12 +1251,9 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 		}
 		if err == nil && len(sr.Matches) > 0 {
 			for _, m := range sr.Matches {
-				if jb, err := s.protoToJSONWithMeta("ConceptMap", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
-					var cmMap map[string]any
-					if json.Unmarshal(jb, &cmMap) == nil {
-						candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
-						foundExplicitMap = true
-					}
+				if cmMap, err := s.protoToFHIRMapWithMeta("ConceptMap", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
+					candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
+					foundExplicitMap = true
 				}
 			}
 		}
@@ -1303,11 +1297,8 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 			}
 			if err == nil && sr != nil {
 				for _, m := range sr.Matches {
-					if jb, err := s.protoToJSONWithMeta("ConceptMap", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
-						var cmMap map[string]any
-						if json.Unmarshal(jb, &cmMap) == nil {
-							candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
-						}
+					if cmMap, err := s.protoToFHIRMapWithMeta("ConceptMap", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
+						candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
 					}
 				}
 			}
