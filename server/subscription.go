@@ -48,8 +48,8 @@ func (s *Server) recordSubscriptionEvent(tenant, subID, resType, resID string, r
 	}
 	var resMap map[string]any
 	if len(resourceProto) > 0 {
-		if jb, err := s.protoToJSONWithMeta(resType, resourceProto, resVersion, ts); err == nil {
-			_ = json.Unmarshal(jb, &resMap)
+		if m, err := s.protoToFHIRMapWithMeta(resType, resourceProto, resVersion, ts); err == nil {
+			resMap = m
 		}
 	}
 	if resMap == nil {
@@ -306,12 +306,8 @@ func (s *Server) dispatchSubscriptions(ctx context.Context, tenant, resType, res
 
 	now := time.Now().UTC()
 	for _, subRes := range sr.Matches {
-		subJSON, err := s.protoToJSONWithMeta("Subscription", subRes.ResourceProto, subRes.ResVersion, subRes.LastUpdated)
+		subMap, err := s.protoToFHIRMapWithMeta("Subscription", subRes.ResourceProto, subRes.ResVersion, subRes.LastUpdated)
 		if err != nil {
-			continue
-		}
-		var subMap map[string]any
-		if err := json.Unmarshal(subJSON, &subMap); err != nil {
 			continue
 		}
 
@@ -369,6 +365,8 @@ func (s *Server) dispatchSubscriptions(ctx context.Context, tenant, resType, res
 				},
 			})
 			payloadType = "application/fhir+json; charset=utf-8"
+		case strings.Contains(lowerPayload, "proto"):
+			bodyBytes = resourceProto
 		case strings.Contains(lowerPayload, "json"):
 			if jb, err := s.protoToJSONWithMeta(resType, resourceProto, resVersion, lastUpdated); err == nil {
 				bodyBytes = jb
@@ -1152,12 +1150,8 @@ func (s *Server) buildSubscriptionStatusParameters(
 	lastUpdated time.Time,
 	now time.Time,
 ) (map[string]any, error) {
-	subJSON, err := s.protoToJSONWithMeta("Subscription", resourceProto, resVersion, lastUpdated)
+	subMap, err := s.protoToFHIRMapWithMeta("Subscription", resourceProto, resVersion, lastUpdated)
 	if err != nil {
-		return nil, err
-	}
-	var subMap map[string]any
-	if err := json.Unmarshal(subJSON, &subMap); err != nil {
 		return nil, err
 	}
 
@@ -1382,13 +1376,11 @@ func (s *Server) handleSubscriptionEvents(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	subJSON, err := s.protoToJSONWithMeta("Subscription", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+	subMap, err := s.protoToFHIRMapWithMeta("Subscription", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode Subscription")
 		return
 	}
-	var subMap map[string]any
-	_ = json.Unmarshal(subJSON, &subMap)
 
 	now := time.Now().UTC()
 	status, _ := subMap["status"].(string)

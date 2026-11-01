@@ -121,13 +121,11 @@ func (s *Server) handleQuestionnairePopulate(w http.ResponseWriter, r *http.Requ
 		writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope to read Patient for Questionnaire/$populate")
 		return
 	}
-	patJSON, err := s.protoToJSONWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated)
+	patMap, err := s.protoToFHIRMapWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize Patient for $populate")
 		return
 	}
-	var patMap map[string]any
-	_ = json.Unmarshal(patJSON, &patMap)
 
 	// Load Questionnaire if not provided inline
 	if questionnaireMap == nil && qID != "" && qID != "phq-9" && qID != "clinical-intake" {
@@ -140,13 +138,13 @@ func (s *Server) handleQuestionnairePopulate(w http.ResponseWriter, r *http.Requ
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read Questionnaire")
 			return
 		}
-		if qBytes, err := s.protoToJSONWithMeta("Questionnaire", qRec.ResourceProto, qRec.ResVersion, qRec.LastUpdated); err == nil {
-			_ = json.Unmarshal(qBytes, &questionnaireMap)
+		if qm, err := s.protoToFHIRMapWithMeta("Questionnaire", qRec.ResourceProto, qRec.ResVersion, qRec.LastUpdated); err == nil {
+			questionnaireMap = qm
 		}
 	} else if questionnaireMap == nil && (qID == "phq-9" || qID == "clinical-intake") {
 		if qRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Questionnaire", qID); err == nil {
-			if qBytes, err := s.protoToJSONWithMeta("Questionnaire", qRec.ResourceProto, qRec.ResVersion, qRec.LastUpdated); err == nil {
-				_ = json.Unmarshal(qBytes, &questionnaireMap)
+			if qm, err := s.protoToFHIRMapWithMeta("Questionnaire", qRec.ResourceProto, qRec.ResVersion, qRec.LastUpdated); err == nil {
+				questionnaireMap = qm
 			}
 		}
 	}
@@ -167,8 +165,8 @@ func (s *Server) handleQuestionnairePopulate(w http.ResponseWriter, r *http.Requ
 		}
 		if err == nil && len(sr.Matches) > 0 {
 			m := sr.Matches[0]
-			if qBytes, err := s.protoToJSONWithMeta("Questionnaire", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
-				_ = json.Unmarshal(qBytes, &questionnaireMap)
+			if qm, err := s.protoToFHIRMapWithMeta("Questionnaire", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
+				questionnaireMap = qm
 			}
 		}
 	}
@@ -189,12 +187,8 @@ func (s *Server) handleQuestionnairePopulate(w http.ResponseWriter, r *http.Requ
 			includes = s.filterAuthorizedIncludes(r, tenant, secCtx, includes)
 		}
 		for _, m := range includes {
-			jb, err := s.protoToJSONWithMeta(m.ResType, m.ResourceProto, m.ResVersion, m.LastUpdated)
+			rm, err := s.protoToFHIRMapWithMeta(m.ResType, m.ResourceProto, m.ResVersion, m.LastUpdated)
 			if err != nil {
-				continue
-			}
-			var rm map[string]any
-			if json.Unmarshal(jb, &rm) != nil {
 				continue
 			}
 			switch m.ResType {
@@ -593,8 +587,8 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope to read QuestionnaireResponse for $extract")
 			return
 		}
-		if jb, err := s.protoToJSONWithMeta("QuestionnaireResponse", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
-			_ = json.Unmarshal(jb, &qrMap)
+		if qrm, err := s.protoToFHIRMapWithMeta("QuestionnaireResponse", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+			qrMap = qrm
 		}
 	}
 
@@ -975,14 +969,9 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 		writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope to read Composition for $document")
 		return
 	}
-	compJSON, err := s.protoToJSONWithMeta("Composition", compRec.ResourceProto, compRec.ResVersion, compRec.LastUpdated)
+	compMap, err := s.protoToFHIRMapWithMeta("Composition", compRec.ResourceProto, compRec.ResVersion, compRec.LastUpdated)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize Composition")
-		return
-	}
-	var compMap map[string]any
-	if err := json.Unmarshal(compJSON, &compMap); err != nil {
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode Composition JSON")
 		return
 	}
 
@@ -1125,12 +1114,8 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 		if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, resType, resID, rec.ResourceProto) {
 			continue
 		}
-		jb, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		rm, err := s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if err != nil {
-			continue
-		}
-		var rm map[string]any
-		if json.Unmarshal(jb, &rm) != nil {
 			continue
 		}
 		entries = append(entries, map[string]any{
@@ -1411,12 +1396,8 @@ func (s *Server) handleDocumentReferenceDocref(w http.ResponseWriter, r *http.Re
 		if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, "DocumentReference", m.ResID, m.ResourceProto) {
 			continue
 		}
-		jb, err := s.protoToJSONWithMeta("DocumentReference", m.ResourceProto, m.ResVersion, m.LastUpdated)
+		docMap, err := s.protoToFHIRMapWithMeta("DocumentReference", m.ResourceProto, m.ResVersion, m.LastUpdated)
 		if err != nil {
-			continue
-		}
-		var docMap map[string]any
-		if json.Unmarshal(jb, &docMap) != nil {
 			continue
 		}
 		entries = append(entries, map[string]any{

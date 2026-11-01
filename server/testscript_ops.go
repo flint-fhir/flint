@@ -155,8 +155,9 @@ func (s *Server) handleTestScriptEvaluate(w http.ResponseWriter, r *http.Request
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to load TestScript")
 			return
 		}
-		jb, err := s.protoToJSONWithMeta("TestScript", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
-		if err != nil || json.Unmarshal(jb, &scriptMap) != nil {
+		var decErr error
+		scriptMap, decErr = s.protoToFHIRMapWithMeta("TestScript", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if decErr != nil {
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode TestScript")
 			return
 		}

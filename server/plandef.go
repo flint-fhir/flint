@@ -6148,6 +6148,9 @@ func slicesContainsFold(list []string, target string) bool {
 
 // handleResourceConvert implements HL7 FHIR R4 Resource/$convert (§3.1.0.15)
 // (POST /fhir/r4/{tenant}/$convert and POST /fhir/r4/{tenant}/{resourceType}/$convert).
+// Supports bidirectional conversion between canonical HL7 FHIR R4 JSON,
+// google.fhir.r4.core ProtoJSON, and binary google/fhir R4 Proto3 wire bytes
+// (application/x-protobuf and application/fhir+protobuf).
 func (s *Server) handleResourceConvert(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", "$convert only supports POST")
@@ -6159,14 +6162,8 @@ func (s *Server) handleResourceConvert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
-	if err != nil || len(bytes.TrimSpace(rawBody)) == 0 {
-		writeOperationOutcome(w, http.StatusBadRequest, "required", "$convert requires a non-empty JSON payload")
-		return
-	}
-
-	var bodyMap map[string]any
-	if err := json.Unmarshal(rawBody, &bodyMap); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON in $convert payload: "+err.Error())
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "required", "failed to read $convert request body")
 		return
 	}
 
@@ -6175,77 +6172,139 @@ func (s *Server) handleResourceConvert(w http.ResponseWriter, r *http.Request) {
 		targetFormat = strings.ToLower(strings.TrimSpace(r.URL.Query().Get("_format")))
 	}
 
-	inputMap := bodyMap
-	if bodyMap["resourceType"] == "Parameters" {
-		inputMap = nil
-		if params, ok := bodyMap["parameter"].([]any); ok {
-			for _, rawP := range params {
-				pm, ok := rawP.(map[string]any)
-				if !ok {
-					continue
-				}
-				name, _ := pm["name"].(string)
-				switch name {
-				case "input", "resource", "content":
-					if res, ok := pm["resource"].(map[string]any); ok {
-						inputMap = res
-					} else if sVal := extractParamString(pm); sVal != "" {
-						var parsed map[string]any
-						if json.Unmarshal([]byte(sVal), &parsed) == nil {
-							inputMap = parsed
-						}
+	var resType string
+	var md protoreflect.MessageDescriptor
+	var msg *dynamicpb.Message
+
+	if isProtoContentType(r) {
+		if len(rawBody) == 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "required", "$convert requires a non-empty protobuf payload")
+			return
+		}
+		resType = strings.TrimSpace(r.PathValue("resourceType"))
+		if strings.HasPrefix(resType, "$") {
+			resType = ""
+		}
+		if resType == "" {
+			resType = strings.TrimSpace(r.URL.Query().Get("resourceType"))
+		}
+		if resType == "" {
+			resType = strings.TrimSpace(r.URL.Query().Get("type"))
+		}
+		if resType == "" {
+			writeOperationOutcome(w, http.StatusBadRequest, "required",
+				"$convert with binary protobuf input requires resourceType in path (/fhir/r4/{tenant}/{resourceType}/$convert) or ?resourceType= query parameter")
+			return
+		}
+		var ok bool
+		md, ok = s.protoRegistry[resType]
+		if !ok {
+			writeOperationOutcome(w, http.StatusBadRequest, "not-supported", fmt.Sprintf("unsupported FHIR resourceType %q for $convert", resType))
+			return
+		}
+		msg = dynamicpb.NewMessage(md)
+		if err := proto.Unmarshal(rawBody, msg); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid FHIR Protobuf wire payload: %v", err))
+			return
+		}
+	} else {
+		if len(bytes.TrimSpace(rawBody)) == 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "required", "$convert requires a non-empty JSON payload")
+			return
+		}
+		var bodyMap map[string]any
+		if err := json.Unmarshal(rawBody, &bodyMap); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON in $convert payload: "+err.Error())
+			return
+		}
+
+		inputMap := bodyMap
+		if bodyMap["resourceType"] == "Parameters" {
+			inputMap = nil
+			if params, ok := bodyMap["parameter"].([]any); ok {
+				for _, rawP := range params {
+					pm, ok := rawP.(map[string]any)
+					if !ok {
+						continue
 					}
-				case "to", "format":
-					if sVal := extractParamString(pm); sVal != "" && targetFormat == "" {
-						targetFormat = strings.ToLower(sVal)
+					name, _ := pm["name"].(string)
+					switch name {
+					case "input", "resource", "content":
+						if res, ok := pm["resource"].(map[string]any); ok {
+							inputMap = res
+						} else if sVal := extractParamString(pm); sVal != "" {
+							var parsed map[string]any
+							if json.Unmarshal([]byte(sVal), &parsed) == nil {
+								inputMap = parsed
+							}
+						}
+					case "to", "format":
+						if sVal := extractParamString(pm); sVal != "" && targetFormat == "" {
+							targetFormat = strings.ToLower(sVal)
+						}
 					}
 				}
 			}
 		}
-	}
 
-	if inputMap == nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "required", "$convert requires an input FHIR resource")
-		return
-	}
+		if inputMap == nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "required", "$convert requires an input FHIR resource")
+			return
+		}
 
-	resType, _ := inputMap["resourceType"].(string)
-	if resType == "" {
-		resType = strings.TrimSpace(r.PathValue("resourceType"))
-		if resType != "" {
-			inputMap["resourceType"] = resType
+		resType, _ = inputMap["resourceType"].(string)
+		if resType == "" {
+			resType = strings.TrimSpace(r.PathValue("resourceType"))
+			if resType != "" {
+				inputMap["resourceType"] = resType
+			}
+		}
+		if pathRT := strings.TrimSpace(r.PathValue("resourceType")); pathRT != "" && !strings.HasPrefix(pathRT, "$") && !strings.EqualFold(pathRT, resType) {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("$convert path resourceType %q does not match payload resourceType %q", pathRT, resType))
+			return
+		}
+
+		var ok bool
+		md, ok = s.protoRegistry[resType]
+		if !ok {
+			writeOperationOutcome(w, http.StatusBadRequest, "not-supported", fmt.Sprintf("unsupported FHIR resourceType %q for $convert", resType))
+			return
+		}
+
+		inputBytes, err := json.Marshal(inputMap)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to serialize input resource: "+err.Error())
+			return
+		}
+
+		normJSON, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, inputBytes)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("failed to normalize %s JSON: %v", resType, err))
+			return
+		}
+
+		msg = dynamicpb.NewMessage(md)
+		if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(normJSON, msg); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("failed to parse %s into google.fhir.r4.core protobuf: %v", resType, err))
+			return
+		}
+		if rid, _ := inputMap["id"].(string); strings.TrimSpace(rid) != "" {
+			setProtoResourceID(msg, strings.TrimSpace(rid))
 		}
 	}
-	if pathRT := strings.TrimSpace(r.PathValue("resourceType")); pathRT != "" && !strings.HasPrefix(pathRT, "$") && !strings.EqualFold(pathRT, resType) {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("$convert path resourceType %q does not match payload resourceType %q", pathRT, resType))
-		return
-	}
 
-	md, ok := s.protoRegistry[resType]
-	if !ok {
-		writeOperationOutcome(w, http.StatusBadRequest, "not-supported", fmt.Sprintf("unsupported FHIR resourceType %q for $convert", resType))
+	if wantBinary, protoCT := wantsBinaryProtoConvertOutput(targetFormat, r.Header.Get("Accept")); wantBinary {
+		protoBytes, mErr := proto.Marshal(msg)
+		if mErr != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to marshal protobuf wire bytes: "+mErr.Error())
+			return
+		}
+		w.Header().Set("Content-Type", protoCT)
+		w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+		w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(protoBytes)
 		return
-	}
-
-	inputBytes, err := json.Marshal(inputMap)
-	if err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to serialize input resource: "+err.Error())
-		return
-	}
-
-	normJSON, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, inputBytes)
-	if err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("failed to normalize %s JSON: %v", resType, err))
-		return
-	}
-
-	msg := dynamicpb.NewMessage(md)
-	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(normJSON, msg); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("failed to parse %s into google.fhir.r4.core protobuf: %v", resType, err))
-		return
-	}
-	if rid, _ := inputMap["id"].(string); strings.TrimSpace(rid) != "" {
-		setProtoResourceID(msg, strings.TrimSpace(rid))
 	}
 
 	if strings.Contains(targetFormat, "proto") {
@@ -6271,9 +6330,32 @@ func (s *Server) handleResourceConvert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(canonicalJSON)
+}
+
+func wantsBinaryProtoConvertOutput(targetFormat, acceptHeader string) (bool, string) {
+	tf := strings.ToLower(strings.TrimSpace(targetFormat))
+	switch tf {
+	case "application/fhir+protobuf", "fhir+protobuf":
+		return true, "application/fhir+protobuf"
+	case "application/x-protobuf", "application/protobuf", "x-protobuf", "protobuf", "proto3", "binary":
+		return true, "application/x-protobuf"
+	}
+	if tf != "" {
+		return false, ""
+	}
+	acc := strings.ToLower(strings.TrimSpace(acceptHeader))
+	switch {
+	case strings.Contains(acc, "application/fhir+protobuf"):
+		return true, "application/fhir+protobuf"
+	case strings.Contains(acc, "application/x-protobuf"), strings.Contains(acc, "application/protobuf"):
+		return true, "application/x-protobuf"
+	default:
+		return false, ""
+	}
 }
 
 // handleListFind implements HL7 FHIR R4 List/$find (§9.3.8.1)

@@ -448,4 +448,87 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	require.Equal(t, http.StatusOK, respSearch.StatusCode)
 	assert.Contains(t, string(searchBytes), patID)
 	assert.Contains(t, string(searchBytes), "WireProtoUpdated")
+
+	// 6. POST /fhir/r4/proto/Patient/$convert with JSON -> binary Proto3 wire bytes (Accept: application/x-protobuf)
+	jsonInput := `{"resourceType":"Patient","id":"conv-proto-1","name":[{"family":"Lovelace","given":["Ada"]}],"birthDate":"1815-12-10"}`
+	reqConvToProto, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/$convert", strings.NewReader(jsonInput))
+	require.NoError(t, err)
+	reqConvToProto.Header.Set("Content-Type", "application/fhir+json")
+	reqConvToProto.Header.Set("Accept", "application/x-protobuf")
+	respConvToProto, err := client.Do(reqConvToProto)
+	require.NoError(t, err)
+	convProtoBytes, _ := io.ReadAll(respConvToProto.Body)
+	respConvToProto.Body.Close()
+	require.Equal(t, http.StatusOK, respConvToProto.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respConvToProto.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respConvToProto.Header.Get("X-Flint-Wire-Format"))
+	assert.Equal(t, "zero-json-proto3", respConvToProto.Header.Get("X-Flint-Storage-Model"))
+
+	var convPat patpb.Patient
+	require.NoError(t, proto.Unmarshal(convProtoBytes, &convPat))
+	assert.Equal(t, "conv-proto-1", convPat.GetId().GetValue())
+	require.Len(t, convPat.GetName(), 1)
+	assert.Equal(t, "Lovelace", convPat.GetName()[0].GetFamily().GetValue())
+
+	// 7. POST /fhir/r4/proto/Patient/$convert with binary Proto3 wire bytes -> canonical FHIR R4 JSON
+	reqConvToJSON, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/$convert", bytes.NewReader(convProtoBytes))
+	require.NoError(t, err)
+	reqConvToJSON.Header.Set("Content-Type", "application/x-protobuf")
+	reqConvToJSON.Header.Set("Accept", "application/fhir+json")
+	respConvToJSON, err := client.Do(reqConvToJSON)
+	require.NoError(t, err)
+	convJSONBytes, _ := io.ReadAll(respConvToJSON.Body)
+	respConvToJSON.Body.Close()
+	require.Equal(t, http.StatusOK, respConvToJSON.StatusCode)
+	assert.Contains(t, respConvToJSON.Header.Get("Content-Type"), "application/fhir+json")
+	assert.Equal(t, "zero-json-proto3", respConvToJSON.Header.Get("X-Flint-Storage-Model"))
+	assert.Contains(t, string(convJSONBytes), `"Lovelace"`)
+	assert.Contains(t, string(convJSONBytes), `"1815-12-10"`)
+
+	// 8. POST /fhir/r4/proto/ViewDefinition/$sql with constants + compound AND/OR where predicates + numeric >= & !=
+	multiPredVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "bp_threshold_view",
+		"status": "active",
+		"resource": "Observation",
+		"constant": [
+			{"name": "minVal", "valueDecimal": 120},
+			{"name": "errStatus", "valueCode": "entered-in-error"}
+		],
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "patient_id", "path": "subject.getReferenceKey('Patient')"},
+					{"name": "value", "path": "valueQuantity.value"}
+				]
+			}
+		],
+		"where": [
+			{"path": "valueQuantity.value >= %minVal and status != %errStatus"}
+		]
+	}`
+	reqDorisSQL, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", strings.NewReader(multiPredVD))
+	require.NoError(t, err)
+	reqDorisSQL.Header.Set("Content-Type", "application/fhir+json")
+	respDorisSQL, err := client.Do(reqDorisSQL)
+	require.NoError(t, err)
+	dorisSQLBytes, _ := io.ReadAll(respDorisSQL.Body)
+	respDorisSQL.Body.Close()
+	require.Equal(t, http.StatusOK, respDorisSQL.StatusCode)
+	dorisSQLStr := string(dorisSQLBytes)
+	assert.Contains(t, dorisSQLStr, "r.value_quantity >= 120")
+	assert.Contains(t, dorisSQLStr, "NOT array_contains(r.code_tokens, 'status=|entered-in-error')")
+
+	reqPgSQL, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", strings.NewReader(multiPredVD))
+	require.NoError(t, err)
+	reqPgSQL.Header.Set("Content-Type", "application/fhir+json")
+	respPgSQL, err := client.Do(reqPgSQL)
+	require.NoError(t, err)
+	pgSQLBytes, _ := io.ReadAll(respPgSQL.Body)
+	respPgSQL.Body.Close()
+	require.Equal(t, http.StatusOK, respPgSQL.StatusCode)
+	pgSQLStr := string(pgSQLBytes)
+	assert.Contains(t, pgSQLStr, "q.sp_value >= 120")
+	assert.Contains(t, pgSQLStr, "NOT EXISTS (SELECT 1 FROM spidx_token t")
 }

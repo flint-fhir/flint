@@ -1196,14 +1196,66 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func parseGraphLinksFromSlice(rawLinks any) []postgres.GraphLink {
+	arr, ok := rawLinks.([]any)
+	if !ok || len(arr) == 0 {
+		return nil
+	}
+	links := make([]postgres.GraphLink, 0, len(arr))
+	for _, rawItem := range arr {
+		lm, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		gl := postgres.GraphLink{
+			Path:        stringField(lm, "path"),
+			SliceName:   stringField(lm, "sliceName"),
+			Max:         stringField(lm, "max"),
+			Description: stringField(lm, "description"),
+		}
+		if minFloat, ok := lm["min"].(float64); ok {
+			gl.Min = int(minFloat)
+		}
+		if rawTargets, ok := lm["target"].([]any); ok {
+			for _, rt := range rawTargets {
+				tm, ok := rt.(map[string]any)
+				if !ok {
+					continue
+				}
+				gl.Target = append(gl.Target, postgres.GraphTarget{
+					Type:   stringField(tm, "type"),
+					Params: stringField(tm, "params"),
+					Link:   parseGraphLinksFromSlice(tm["link"]),
+				})
+			}
+		}
+		links = append(links, gl)
+	}
+	return links
+}
+
+func parseGraphDefinitionFromMap(m map[string]any) *parsedGraphDefinition {
+	if m == nil {
+		return nil
+	}
+	return &parsedGraphDefinition{
+		ResourceType: stringField(m, "resourceType"),
+		ID:           stringField(m, "id"),
+		URL:          stringField(m, "url"),
+		Name:         stringField(m, "name"),
+		Status:       stringField(m, "status"),
+		Start:        stringField(m, "start"),
+		Link:         parseGraphLinksFromSlice(m["link"]),
+	}
+}
+
 func (s *Server) resolveStoredOrBuiltinGraphDefinition(r *http.Request, tenant, graphRef, resType string) (*parsedGraphDefinition, bool, error) {
 	if s.store != nil {
 		candID := cleanID(graphRef)
 		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "GraphDefinition", candID); err == nil && rec != nil {
-			if jb, err := s.protoToJSONWithMeta("GraphDefinition", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
-				var gd parsedGraphDefinition
-				if json.Unmarshal(jb, &gd) == nil {
-					return &gd, true, nil
+			if m, err := s.protoToFHIRMapWithMeta("GraphDefinition", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+				if gd := parseGraphDefinitionFromMap(m); gd != nil {
+					return gd, true, nil
 				}
 			}
 		}
@@ -1215,10 +1267,9 @@ func (s *Server) resolveStoredOrBuiltinGraphDefinition(r *http.Request, tenant, 
 			Count:    1,
 		}); err == nil && sr != nil && len(sr.Matches) > 0 {
 			m := sr.Matches[0]
-			if jb, err := s.protoToJSONWithMeta("GraphDefinition", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
-				var gd parsedGraphDefinition
-				if json.Unmarshal(jb, &gd) == nil {
-					return &gd, true, nil
+			if gMap, err := s.protoToFHIRMapWithMeta("GraphDefinition", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
+				if gd := parseGraphDefinitionFromMap(gMap); gd != nil {
+					return gd, true, nil
 				}
 			}
 		}
@@ -1230,10 +1281,9 @@ func (s *Server) resolveStoredOrBuiltinGraphDefinition(r *http.Request, tenant, 
 			Count:    1,
 		}); err == nil && sr != nil && len(sr.Matches) > 0 {
 			m := sr.Matches[0]
-			if jb, err := s.protoToJSONWithMeta("GraphDefinition", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
-				var gd parsedGraphDefinition
-				if json.Unmarshal(jb, &gd) == nil {
-					return &gd, true, nil
+			if gMap, err := s.protoToFHIRMapWithMeta("GraphDefinition", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
+				if gd := parseGraphDefinitionFromMap(gMap); gd != nil {
+					return gd, true, nil
 				}
 			}
 		}
@@ -1244,14 +1294,13 @@ func (s *Server) resolveStoredOrBuiltinGraphDefinition(r *http.Request, tenant, 
 			Count:    50,
 		}); err == nil && sr != nil {
 			for _, m := range sr.Matches {
-				jb, cErr := s.protoToJSONWithMeta("GraphDefinition", m.ResourceProto, m.ResVersion, m.LastUpdated)
+				gMap, cErr := s.protoToFHIRMapWithMeta("GraphDefinition", m.ResourceProto, m.ResVersion, m.LastUpdated)
 				if cErr != nil {
 					continue
 				}
-				var gd parsedGraphDefinition
-				if json.Unmarshal(jb, &gd) == nil {
+				if gd := parseGraphDefinitionFromMap(gMap); gd != nil {
 					if strings.EqualFold(gd.URL, graphRef) || strings.EqualFold(gd.Name, graphRef) || strings.EqualFold(gd.ID, candID) {
-						return &gd, true, nil
+						return gd, true, nil
 					}
 				}
 			}

@@ -844,19 +844,16 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromBytes, err := s.protoToJSONWithMeta(resType, fromRec.ResourceProto, fromRec.ResVersion, fromRec.LastUpdated)
+	fromMap, err = s.protoToFHIRMapWithMeta(resType, fromRec.ResourceProto, fromRec.ResVersion, fromRec.LastUpdated)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize fromVersion")
 		return
 	}
-	toBytes, err := s.protoToJSONWithMeta(resType, toRec.ResourceProto, toRec.ResVersion, toRec.LastUpdated)
+	toMap, err = s.protoToFHIRMapWithMeta(resType, toRec.ResourceProto, toRec.ResVersion, toRec.LastUpdated)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize target version")
 		return
 	}
-
-	_ = json.Unmarshal(fromBytes, &fromMap)
-	_ = json.Unmarshal(toBytes, &toMap)
 
 	diffParams := computeFHIRParametersDiff(resType, fromMap, toMap, includeMeta)
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
