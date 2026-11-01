@@ -192,16 +192,33 @@ func TestExecuteLoadTest_HTTPStoreAndUnknownTarget(t *testing.T) {
 
 	m4, _, err := executeLoadTest(t.Context(), Config{
 		Target:     "store",
-		DBDriver:   "loadtest_stub_ok",
-		PGDSN:      "stub",
+		Backend:    "sqlite",
+		SQLitePath: ":memory:",
 		Rate:       0,
 		Duration:   30 * time.Millisecond,
-		Workers:    2,
+		Workers:    1,
 		BundleSize: 2,
 		Tenant:     "loadtest",
 	})
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, m4.totalBundles.Load(), int64(1))
+
+	// Test openStoreForLoadTest across doris, postgres+doris, sqlite+doris, and unsupported backend
+	for _, b := range []string{"doris", "postgres+doris", "sqlite+doris"} {
+		st, cleanup, openErr := openStoreForLoadTest(t.Context(), Config{
+			Backend:    b,
+			DBDriver:   "loadtest_stub_ok",
+			PGDSN:      "stub",
+			DorisDSN:   "stub",
+			SQLitePath: ":memory:",
+			Workers:    2,
+		})
+		require.NoError(t, openErr, "backend %s", b)
+		require.NotNil(t, st)
+		cleanup()
+	}
+	_, _, openErr := openStoreForLoadTest(t.Context(), Config{Backend: "unsupported"})
+	require.ErrorContains(t, openErr, "unsupported store backend")
 
 	// 6. Temporal target with mock WorkflowRunner (success + error, throttled + unthrottled)
 	var wfCall atomic.Int64

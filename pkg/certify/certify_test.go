@@ -882,6 +882,10 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			_, _ = w.Write([]byte("id,patient_id,status,code,system,value,unit,effective\ncert-obs-1,cert-pat-1,final,8867-4,http://loinc.org,72,/min,2026-01-15T09:15:00Z\n"))
 			return
 		}
+		if strings.HasSuffix(path, "/ViewDefinition/observation-vitals/$sql") {
+			_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"dialect","valueCode":"doris"},{"name":"storageModel","valueString":"zero-json-proto3-wire"},{"name":"targetTable","valueString":"fhir_observation"},{"name":"sql","valueString":"SELECT r.res_id AS ` + "`id`" + ` FROM fhir_observation r"}]}`))
+			return
+		}
 		if strings.HasSuffix(path, "/$sync-analytics") {
 			_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"syncedResources","valueInteger":18},{"name":"replicationErrors","valueInteger":0}]}`))
 			return

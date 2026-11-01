@@ -2,13 +2,13 @@ package fhirutil
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
-	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
@@ -26,34 +26,24 @@ func NormalizeFHIRJSONToProtoJSON(md protoreflect.MessageDescriptor, rawJSON []b
 	return json.Marshal(root)
 }
 
-// DenormalizeProtoJSONToFHIRJSON converts google/fhir binary proto bytes or protojson output
-// into standard flat HL7 FHIR R4 JSON (unwrapping primitive wrappers, formatting temporal
-// fields as ISO-8601 strings, converting typed Reference fields to {"reference": "Type/id"},
-// flattening choice[x] containers like valueQuantity/effectiveDateTime, and injecting
-// resourceType and server meta.versionId / meta.lastUpdated).
-func DenormalizeProtoJSONToFHIRJSON(md protoreflect.MessageDescriptor, resType string, inputBytes []byte, version int, lastUpdated time.Time) ([]byte, error) {
-	protoJSONBytes := inputBytes
+// ProtoBytesToFHIRMap decodes google/fhir binary wire protobuf bytes directly into an
+// in-memory flat HL7 FHIR R4 map[string]any using protoreflect without any intermediate
+// JSON / protojson text serialization or json.Unmarshal round-trip.
+func ProtoBytesToFHIRMap(md protoreflect.MessageDescriptor, resType string, inputBytes []byte, version int, lastUpdated time.Time) (map[string]any, error) {
+	var m map[string]any
 	trimmed := bytes.TrimSpace(inputBytes)
 	if (len(trimmed) == 0 || trimmed[0] != '{') && md != nil {
 		msg := dynamicpb.NewMessage(md)
 		if err := proto.Unmarshal(inputBytes, msg); err != nil {
 			return nil, fmt.Errorf("unmarshal %s proto: %w", resType, err)
 		}
-		marshaler := protojson.MarshalOptions{
-			UseProtoNames:   false,
-			EmitUnpopulated: false,
-		}
-		var err error
-		protoJSONBytes, err = marshaler.Marshal(msg)
-		if err != nil {
+		m = protoReflectToMap(msg.ProtoReflect())
+	} else {
+		if err := json.Unmarshal(inputBytes, &m); err != nil {
 			return nil, err
 		}
 	}
 
-	var m map[string]any
-	if err := json.Unmarshal(protoJSONBytes, &m); err != nil {
-		return protoJSONBytes, err
-	}
 	if md != nil {
 		denormalizeMessageMap(md, m)
 	} else {
@@ -74,6 +64,93 @@ func DenormalizeProtoJSONToFHIRJSON(md protoreflect.MessageDescriptor, resType s
 			metaMap["lastUpdated"] = lastUpdated.UTC().Format(time.RFC3339)
 		}
 		m["meta"] = metaMap
+	}
+	return m, nil
+}
+
+func protoReflectToMap(pm protoreflect.Message) map[string]any {
+	if pm == nil {
+		return nil
+	}
+	md := pm.Descriptor()
+	if string(md.FullName()) == "google.protobuf.Any" {
+		typeURLFD := md.Fields().ByName("type_url")
+		valueFD := md.Fields().ByName("value")
+		if typeURLFD != nil && valueFD != nil {
+			typeURL := pm.Get(typeURLFD).String()
+			rawBytes := pm.Get(valueFD).Bytes()
+			var rt string
+			if dotIdx := strings.LastIndexByte(typeURL, '.'); dotIdx != -1 && dotIdx+1 < len(typeURL) {
+				rt = typeURL[dotIdx+1:]
+			}
+			if subMD := AllR4ResourceDescriptors()[rt]; subMD != nil {
+				subMsg := dynamicpb.NewMessage(subMD)
+				if err := proto.Unmarshal(rawBytes, subMsg); err == nil {
+					subMap := protoReflectToMap(subMsg.ProtoReflect())
+					subMap["@type"] = typeURL
+					return subMap
+				}
+			}
+		}
+	}
+
+	out := make(map[string]any)
+	pm.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		key := fd.JSONName()
+		if fd.IsList() {
+			l := v.List()
+			arr := make([]any, l.Len())
+			for i := 0; i < l.Len(); i++ {
+				arr[i] = protoReflectValueToAny(fd, l.Get(i))
+			}
+			out[key] = arr
+			return true
+		}
+		out[key] = protoReflectValueToAny(fd, v)
+		return true
+	})
+	return out
+}
+
+func protoReflectValueToAny(fd protoreflect.FieldDescriptor, v protoreflect.Value) any {
+	switch fd.Kind() {
+	case protoreflect.BoolKind:
+		return v.Bool()
+	case protoreflect.EnumKind:
+		if ev := fd.Enum().Values().ByNumber(v.Enum()); ev != nil {
+			return string(ev.Name())
+		}
+		return strconv.Itoa(int(v.Enum()))
+	case protoreflect.Int32Kind, protoreflect.Sint32Kind, protoreflect.Sfixed32Kind:
+		return float64(v.Int())
+	case protoreflect.Int64Kind, protoreflect.Sint64Kind, protoreflect.Sfixed64Kind:
+		return strconv.FormatInt(v.Int(), 10)
+	case protoreflect.Uint32Kind, protoreflect.Fixed32Kind:
+		return float64(v.Uint())
+	case protoreflect.Uint64Kind, protoreflect.Fixed64Kind:
+		return strconv.FormatUint(v.Uint(), 10)
+	case protoreflect.FloatKind, protoreflect.DoubleKind:
+		return v.Float()
+	case protoreflect.StringKind:
+		return v.String()
+	case protoreflect.BytesKind:
+		return base64.StdEncoding.EncodeToString(v.Bytes())
+	case protoreflect.MessageKind, protoreflect.GroupKind:
+		return protoReflectToMap(v.Message())
+	default:
+		return v.Interface()
+	}
+}
+
+// DenormalizeProtoJSONToFHIRJSON converts google/fhir binary proto bytes or protojson output
+// into standard flat HL7 FHIR R4 JSON (unwrapping primitive wrappers, formatting temporal
+// fields as ISO-8601 strings, converting typed Reference fields to {"reference": "Type/id"},
+// flattening choice[x] containers like valueQuantity/effectiveDateTime, and injecting
+// resourceType and server meta.versionId / meta.lastUpdated).
+func DenormalizeProtoJSONToFHIRJSON(md protoreflect.MessageDescriptor, resType string, inputBytes []byte, version int, lastUpdated time.Time) ([]byte, error) {
+	m, err := ProtoBytesToFHIRMap(md, resType, inputBytes, version, lastUpdated)
+	if err != nil {
+		return inputBytes, err
 	}
 	return json.Marshal(m)
 }

@@ -78,7 +78,7 @@ tasks:
       - go run ./cmd/seed {{.CLI_ARGS}}
 
   certify:
-    desc: Run automated 78-check FHIR R4, US Core v6.1.0 & v7.0.0, ONC (g)(10), National IG, and TestScript conformance certification suite
+    desc: Run automated 84-check FHIR R4, US Core v6.1.0 & v7.0.0, ONC (g)(10), SQL-on-FHIR v2, National IG, and TestScript conformance certification suite
     cmds:
       - go run ./cmd/certify {{.CLI_ARGS}}
 
@@ -124,7 +124,13 @@ tasks:
     desc: Run load test against Postgres operational store directly
     deps: [build]
     cmds:
-      - ./bin/loadtest -target=store -duration=30s -workers=40 -bundle-size=5
+      - ./bin/loadtest -target=store -backend=postgres -duration=30s -workers=40 -bundle-size=5
+
+  bench-sqlite:
+    desc: Run load test against zero-dependency SQLite WAL operational store directly
+    deps: [build]
+    cmds:
+      - ./bin/loadtest -target=store -backend=sqlite -sqlite-path=:memory: -duration=10s -workers=4 -bundle-size=5
 
   bench-http:
     desc: Run load test against Flint FHIR HTTP server
@@ -137,6 +143,12 @@ tasks:
     deps: [build]
     cmds:
       - FLINT_POSTGRES_DSN="{{.PG_DSN}}" bin/flintd
+
+  run-sqlite:
+    desc: Run flintd locally with zero-dependency embedded SQLite WAL backend (no Postgres needed)
+    deps: [build]
+    cmds:
+      - FLINT_STORAGE_BACKEND=sqlite FLINT_SQLITE_PATH=flint.db bin/flintd
 
   down:
     desc: Tear down k3d cluster

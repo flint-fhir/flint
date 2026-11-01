@@ -2348,15 +2348,18 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	{
 		respVDJSON, bVDJSON, errVDJSON := doReq(http.MethodGet, basePath+"/ViewDefinition/patient-demographics/$run", "", nil, nil)
 		respVDCSV, bVDCSV, errVDCSV := doReq(http.MethodGet, basePath+"/ViewDefinition/observation-vitals/$run?_format=text/csv", "", nil, nil)
+		respVDSQL, bVDSQL, errVDSQL := doReq(http.MethodGet, basePath+"/ViewDefinition/observation-vitals/$sql?dialect=doris", "", nil, nil)
 		if errVDJSON != nil || respVDJSON.StatusCode != http.StatusOK || !strings.Contains(string(bVDJSON), `"cert-pat-1"`) || !strings.Contains(string(bVDJSON), `"female"`) {
 			err = fmt.Errorf("expected GET /ViewDefinition/patient-demographics/$run to return JSON row for cert-pat-1, got %d: %s", respVDJSON.StatusCode, string(bVDJSON))
 		} else if errVDCSV != nil || respVDCSV.StatusCode != http.StatusOK || !strings.Contains(string(bVDCSV), "id,patient_id,status,code") || !strings.Contains(string(bVDCSV), "cert-obs-1,cert-pat-1,final,8867-4") {
 			err = fmt.Errorf("expected GET /ViewDefinition/observation-vitals/$run?_format=text/csv to return CSV rows, got %d: %s", respVDCSV.StatusCode, string(bVDCSV))
+		} else if errVDSQL != nil || respVDSQL.StatusCode != http.StatusOK || !strings.Contains(string(bVDSQL), "fhir_observation") || !strings.Contains(string(bVDSQL), "zero-json-proto3") {
+			err = fmt.Errorf("expected GET /ViewDefinition/observation-vitals/$sql?dialect=doris to return Zero-JSON Doris SQL, got %d: %s", respVDSQL.StatusCode, string(bVDSQL))
 		} else {
 			err = nil
 		}
 	}
-	record("AN-01", suite10, "HL7 SQL-on-FHIR v2 Tabular Projection (ViewDefinition/$run & $export — JSON, NDJSON & CSV)", t0, err, "SQL-on-FHIR v2 ViewDefinition patient-demographics JSON & observation-vitals CSV projections verified")
+	record("AN-01", suite10, "HL7 SQL-on-FHIR v2 Zero-JSON Tabular Projection & SQL Transpiler (ViewDefinition/$run, $export & $sql)", t0, err, "SQL-on-FHIR v2 Zero-JSON ViewDefinition/$run, $export & $sql (Doris/Postgres/SQLite) verified")
 
 	t0 = time.Now()
 	{

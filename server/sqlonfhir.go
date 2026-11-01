@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/flint-fhir/flint/store"
+	"github.com/flint-fhir/flint/store/doris"
 )
 
 // sqlOnFHIRViewDefinition represents an HL7 SQL-on-FHIR v2 ViewDefinition resource
@@ -350,6 +351,7 @@ func collectViewDefinitionColumns(selects []sqlOnFHIRSelect) []sqlOnFHIRColumn {
 type viewRunOptions struct {
 	viewDef     sqlOnFHIRViewDefinition
 	format      string
+	dialect     string
 	limit       int
 	patientID   string
 	groupID     string
@@ -364,6 +366,7 @@ func (s *Server) parseViewRunRequest(r *http.Request, defaultFormat string) (vie
 
 	opts := viewRunOptions{
 		format:      strings.TrimSpace(q.Get("_format")),
+		dialect:     strings.ToLower(strings.TrimSpace(q.Get("dialect"))),
 		patientID:   strings.TrimSpace(q.Get("patient")),
 		groupID:     strings.TrimSpace(q.Get("group")),
 		includeHdrs: true,
@@ -449,6 +452,12 @@ func (s *Server) parseViewRunRequest(r *http.Request, defaultFormat string) (vie
 							opts.format = p.ValueCode
 						} else if p.ValueString != "" {
 							opts.format = p.ValueString
+						}
+					case "dialect":
+						if p.ValueCode != "" {
+							opts.dialect = strings.ToLower(strings.TrimSpace(p.ValueCode))
+						} else if p.ValueString != "" {
+							opts.dialect = strings.ToLower(strings.TrimSpace(p.ValueString))
 						}
 					case "_limit", "limit":
 						if p.ValueInteger != nil && *p.ValueInteger > 0 {
@@ -591,17 +600,17 @@ func (s *Server) executeViewDefinition(w http.ResponseWriter, r *http.Request, d
 	constMap := buildViewConstantReplacements(opts.viewDef.Constant)
 	columns := collectViewDefinitionColumns(opts.viewDef.Select)
 
+	if s.metrics != nil {
+		s.metrics.sqlOnFHIRRunsTotal.Add(1)
+	}
+
 	var rows []map[string]any
 	err = s.streamExportResources(r.Context(), exportParams, func(sr store.SearchResult) error {
 		if opts.limit > 0 && len(rows) >= opts.limit {
 			return nil
 		}
-		jsonBytes, err := s.protoToJSONWithMeta(sr.ResType, sr.ResourceProto, sr.ResVersion, sr.LastUpdated)
+		root, err := s.protoToFHIRMapWithMeta(sr.ResType, sr.ResourceProto, sr.ResVersion, sr.LastUpdated)
 		if err != nil {
-			return nil
-		}
-		var root map[string]any
-		if err := json.Unmarshal(jsonBytes, &root); err != nil {
 			return nil
 		}
 		resRows, evalErr := evaluateViewDefinitionOnResource(root, opts.viewDef, constMap)
@@ -621,10 +630,14 @@ func (s *Server) executeViewDefinition(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 
+	w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
 	if s.analyticalStore != nil {
 		if backend := strings.TrimSpace(s.analyticalStore.BackendName()); backend != "" {
 			w.Header().Set("X-Flint-Analytical-Backend", backend)
 		}
+	}
+	if sqlRes, sqlErr := s.transpileViewDefinitionToZeroJSONSQL(tenant, opts); sqlErr == nil && sqlRes.sql != "" {
+		w.Header().Set("X-Flint-Generated-SQL", strings.Join(strings.Fields(sqlRes.sql), " "))
 	}
 
 	fmtLower := strings.ToLower(strings.TrimSpace(opts.format))
@@ -973,7 +986,8 @@ func (s *Server) handleSyncAnalytics(w http.ResponseWriter, r *http.Request) {
 	}
 
 	synced := 0
-	var repWrites, repDeletes, repErrors uint64
+	var repWrites, repDeletes, repErrors, totalSynced uint64
+	var lastSyncTime string
 
 	if hyb, ok := s.store.(*store.HybridStore); ok && hyb != nil {
 		n, err := hyb.SyncTenant(r.Context(), tenant)
@@ -985,25 +999,442 @@ func (s *Server) handleSyncAnalytics(w http.ResponseWriter, r *http.Request) {
 		repWrites = hyb.ReplicatedWrites()
 		repDeletes = hyb.ReplicatedDeletes()
 		repErrors = hyb.ReplicationErrors()
+		totalSynced = hyb.SyncedResources()
+		if ts := hyb.LastSyncTime(); !ts.IsZero() {
+			lastSyncTime = ts.Format(time.RFC3339)
+		}
 	} else if s.store != nil {
 		_ = s.streamExportResources(r.Context(), store.ExportParams{TenantID: tenant}, func(_ store.SearchResult) error {
 			synced++
 			return nil
 		})
+		totalSynced = uint64(synced)
+	}
+
+	params := []map[string]any{
+		{"name": "tenant", "valueString": tenant},
+		{"name": "storageBackend", "valueCode": storageBackend},
+		{"name": "analyticalBackend", "valueCode": analyticalBackend},
+		{"name": "syncedResources", "valueInteger": synced},
+		{"name": "totalSyncedResources", "valueInteger": totalSynced},
+		{"name": "replicatedWrites", "valueInteger": repWrites},
+		{"name": "replicatedDeletes", "valueInteger": repDeletes},
+		{"name": "replicationErrors", "valueInteger": repErrors},
+	}
+	if lastSyncTime != "" {
+		params = append(params, map[string]any{"name": "lastSyncTime", "valueDateTime": lastSyncTime})
 	}
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"resourceType": "Parameters",
-		"parameter": []map[string]any{
-			{"name": "tenant", "valueString": tenant},
-			{"name": "storageBackend", "valueCode": storageBackend},
-			{"name": "analyticalBackend", "valueCode": analyticalBackend},
-			{"name": "syncedResources", "valueInteger": synced},
-			{"name": "replicatedWrites", "valueInteger": repWrites},
-			{"name": "replicatedDeletes", "valueInteger": repDeletes},
-			{"name": "replicationErrors", "valueInteger": repErrors},
-		},
+		"parameter":    params,
 	})
+}
+
+type zeroJSONTranspiledSQL struct {
+	dialect      string
+	storageModel string
+	targetTable  string
+	sql          string
+	columnMaps   []map[string]any
+}
+
+// handleViewDefinitionSQL handles GET/POST /fhir/r4/{tenant}/ViewDefinition/$sql,
+// /fhir/r4/{tenant}/ViewDefinition/{id}/$sql, and /fhir/r4/{tenant}/$sql.
+// It transpiles an HL7 SQL-on-FHIR v2 ViewDefinition directly into Zero-JSON SQL
+// targeting either Apache Doris Unique Key Merge-on-Write columnar tables
+// (fhir_patient, fhir_observation, fhir_condition, fhir_resource) or PostgreSQL/SQLite
+// covering spidx_* tables (with zero JSONB / VARIANT / json_extract).
+func (s *Server) handleViewDefinitionSQL(w http.ResponseWriter, r *http.Request) {
+	tenant := r.PathValue("tenant")
+	opts, status, err := s.parseViewRunRequest(r, "application/fhir+json")
+	if err != nil {
+		code := "invalid"
+		if status == http.StatusNotFound {
+			code = "not-found"
+		}
+		writeOperationOutcome(w, status, code, err.Error())
+		return
+	}
+
+	targetType := strings.TrimSpace(opts.viewDef.Resource)
+	if _, ok := s.protoRegistry[targetType]; !ok {
+		writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-supported", fmt.Sprintf("unsupported ViewDefinition target resource type %q", targetType))
+		return
+	}
+
+	res, err := s.transpileViewDefinitionToZeroJSONSQL(tenant, opts)
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+		return
+	}
+
+	w.Header().Set("X-Flint-Storage-Model", res.storageModel)
+	if s.analyticalStore != nil {
+		if b := strings.TrimSpace(s.analyticalStore.BackendName()); b != "" {
+			w.Header().Set("X-Flint-Analytical-Backend", b)
+		}
+	}
+
+	fmtLower := strings.ToLower(strings.TrimSpace(opts.format))
+	acceptLower := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
+	if strings.Contains(fmtLower, "sql") || strings.Contains(fmtLower, "text/plain") || strings.Contains(acceptLower, "application/sql") {
+		w.Header().Set("Content-Type", "application/sql; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(res.sql + "\n"))
+		return
+	}
+
+	viewName := opts.viewDef.Name
+	if viewName == "" {
+		viewName = opts.viewDef.ID
+	}
+	params := []map[string]any{
+		{"name": "viewName", "valueString": viewName},
+		{"name": "resource", "valueCode": targetType},
+		{"name": "dialect", "valueCode": res.dialect},
+		{"name": "storageModel", "valueString": res.storageModel},
+		{"name": "targetTable", "valueString": res.targetTable},
+		{"name": "sql", "valueString": res.sql},
+	}
+	params = append(params, res.columnMaps...)
+
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    params,
+	})
+}
+
+func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRunOptions) (zeroJSONTranspiledSQL, error) {
+	dialect := strings.ToLower(strings.TrimSpace(opts.dialect))
+	if dialect == "" {
+		if s.analyticalStore != nil {
+			b := strings.ToLower(strings.TrimSpace(s.analyticalStore.BackendName()))
+			switch {
+			case strings.Contains(b, "doris"):
+				dialect = "doris"
+			case strings.Contains(b, "sqlite"):
+				dialect = "sqlite"
+			default:
+				dialect = "postgres"
+			}
+		} else {
+			dialect = "postgres"
+		}
+	}
+	switch dialect {
+	case "doris", "postgres", "postgresql", "sqlite":
+		if dialect == "postgresql" {
+			dialect = "postgres"
+		}
+	default:
+		return zeroJSONTranspiledSQL{}, fmt.Errorf("unsupported SQL dialect %q (valid: doris, postgres, sqlite)", dialect)
+	}
+
+	constMap := buildViewConstantReplacements(opts.viewDef.Constant)
+	columns := collectViewDefinitionColumns(opts.viewDef.Select)
+	resType := strings.TrimSpace(opts.viewDef.Resource)
+	escapedTenant := strings.ReplaceAll(tenant, "'", "''")
+
+	if dialect == "doris" {
+		coreTable, isCore := doris.CoreResourceTableName(resType)
+		targetTable := "fhir_resource"
+		if isCore {
+			targetTable = coreTable
+		}
+
+		selectExprs := make([]string, 0, len(columns))
+		colMaps := make([]map[string]any, 0, len(columns))
+		for _, col := range columns {
+			exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
+			sqlExpr, sourceCol := dorisZeroJSONColumnExpr(exprPath, isCore)
+			selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
+			colMaps = append(colMaps, map[string]any{
+				"name": "column",
+				"part": []map[string]any{
+					{"name": "name", "valueString": col.Name},
+					{"name": "fhirpath", "valueString": exprPath},
+					{"name": "storageColumn", "valueString": sourceCol},
+					{"name": "sqlExpression", "valueString": sqlExpr},
+				},
+			})
+		}
+
+		var whereConds []string
+		whereConds = append(whereConds, fmt.Sprintf("r.tenant_id = '%s'", escapedTenant))
+		if !isCore {
+			whereConds = append(whereConds, fmt.Sprintf("r.res_type = '%s'", strings.ReplaceAll(resType, "'", "''")))
+		}
+		whereConds = append(whereConds, "r.is_deleted = FALSE")
+		if opts.patientID != "" {
+			patID := opts.patientID
+			if slash := strings.LastIndexByte(patID, '/'); slash != -1 {
+				patID = patID[slash+1:]
+			}
+			whereConds = append(whereConds, fmt.Sprintf("r.patient_id = '%s'", strings.ReplaceAll(patID, "'", "''")))
+		}
+		if opts.since != nil && !opts.since.IsZero() {
+			whereConds = append(whereConds, fmt.Sprintf("r.last_updated >= '%s'", opts.since.UTC().Format("2006-01-02 15:04:05")))
+		}
+		for _, w := range opts.viewDef.Where {
+			wPath := substituteViewConstants(strings.TrimSpace(w.Path), constMap)
+			if wSQL := dorisZeroJSONWhereExpr(wPath, isCore); wSQL != "" {
+				whereConds = append(whereConds, wSQL)
+			}
+		}
+
+		sqlQuery := fmt.Sprintf("SELECT %s FROM %s r WHERE %s ORDER BY r.res_id ASC",
+			strings.Join(selectExprs, ", "),
+			targetTable,
+			strings.Join(whereConds, " AND "),
+		)
+		if opts.limit > 0 {
+			sqlQuery += fmt.Sprintf(" LIMIT %d", opts.limit)
+		}
+
+		return zeroJSONTranspiledSQL{
+			dialect:      "doris",
+			storageModel: "zero-json-proto3-doris-mow",
+			targetTable:  targetTable,
+			sql:          sqlQuery,
+			columnMaps:   colMaps,
+		}, nil
+	}
+
+	// PostgreSQL / SQLite Zero-JSONB spidx_* covering index transpilation
+	selectExprs := make([]string, 0, len(columns))
+	colMaps := make([]map[string]any, 0, len(columns))
+	for _, col := range columns {
+		exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
+		sqlExpr, sourceTbl := spidxZeroJSONColumnExpr(exprPath)
+		selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
+		colMaps = append(colMaps, map[string]any{
+			"name": "column",
+			"part": []map[string]any{
+				{"name": "name", "valueString": col.Name},
+				{"name": "fhirpath", "valueString": exprPath},
+				{"name": "storageTable", "valueString": sourceTbl},
+				{"name": "sqlExpression", "valueString": sqlExpr},
+			},
+		})
+	}
+
+	var whereConds []string
+	whereConds = append(whereConds, fmt.Sprintf("r.tenant_id = '%s'", escapedTenant))
+	whereConds = append(whereConds, fmt.Sprintf("r.res_type = '%s'", strings.ReplaceAll(resType, "'", "''")))
+	if dialect == "sqlite" {
+		whereConds = append(whereConds, "r.is_deleted = 0")
+	} else {
+		whereConds = append(whereConds, "r.is_deleted = FALSE")
+	}
+	if opts.patientID != "" {
+		patID := opts.patientID
+		if slash := strings.LastIndexByte(patID, '/'); slash != -1 {
+			patID = patID[slash+1:]
+		}
+		escapedPat := strings.ReplaceAll(patID, "'", "''")
+		if strings.EqualFold(resType, "Patient") {
+			whereConds = append(whereConds, fmt.Sprintf("r.res_id = '%s'", escapedPat))
+		} else {
+			whereConds = append(whereConds, fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_reference ref WHERE ref.tenant_id = r.tenant_id AND ref.res_type = r.res_type AND ref.res_id = r.res_id AND ref.sp_name IN ('patient', 'subject') AND ref.target_id = '%s')", escapedPat))
+		}
+	}
+	for _, w := range opts.viewDef.Where {
+		wPath := substituteViewConstants(strings.TrimSpace(w.Path), constMap)
+		if wSQL := spidxZeroJSONWhereExpr(wPath); wSQL != "" {
+			whereConds = append(whereConds, wSQL)
+		}
+	}
+
+	sqlQuery := fmt.Sprintf("SELECT %s FROM fhir_resource r WHERE %s ORDER BY r.res_id ASC",
+		strings.Join(selectExprs, ", "),
+		strings.Join(whereConds, " AND "),
+	)
+	if opts.limit > 0 {
+		sqlQuery += fmt.Sprintf(" LIMIT %d", opts.limit)
+	}
+
+	return zeroJSONTranspiledSQL{
+		dialect:      dialect,
+		storageModel: "zero-jsonb-proto3-spidx",
+		targetTable:  "fhir_resource",
+		sql:          sqlQuery,
+		columnMaps:   colMaps,
+	}, nil
+}
+
+func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
+	p := strings.TrimSpace(fhirPath)
+	codeCol := "r.primary_code"
+	codeSysCol := "r.primary_code_sys"
+	qtyCol := "r.primary_quantity"
+	unitCodeCol := "r.primary_unit_code"
+	unitSysCol := "r.primary_unit_sys"
+	dateLowCol := "r.primary_date_low"
+	dateHighCol := "r.primary_date_high"
+	if isCore {
+		codeCol = "r.code"
+		codeSysCol = "r.code_system"
+		qtyCol = "r.value_quantity"
+		unitCodeCol = "r.value_unit_code"
+		unitSysCol = "r.value_unit_sys"
+		dateLowCol = "r.effective_start"
+		dateHighCol = "r.effective_end"
+	}
+
+	switch p {
+	case "id", "getResourceKey()":
+		return "r.res_id", "res_id"
+	case "subject.getReferenceKey('Patient')", "subject.getReferenceKey()", "patient.getReferenceKey('Patient')", "patient.getReferenceKey()":
+		return "r.patient_id", "patient_id"
+	case "encounter.getReferenceKey('Encounter')", "encounter.getReferenceKey()", "context.getReferenceKey('Encounter')":
+		return "r.encounter_id", "encounter_id"
+	case "code.coding.code.first()", "code.coding.code", "code.coding.first().code":
+		return codeCol, strings.TrimPrefix(codeCol, "r.")
+	case "code.coding.system.first()", "code.coding.system", "code.coding.first().system":
+		return codeSysCol, strings.TrimPrefix(codeSysCol, "r.")
+	case "valueQuantity.value":
+		return qtyCol, strings.TrimPrefix(qtyCol, "r.")
+	case "valueQuantity.code", "valueQuantity.unit":
+		return unitCodeCol, strings.TrimPrefix(unitCodeCol, "r.")
+	case "valueQuantity.system":
+		return unitSysCol, strings.TrimPrefix(unitSysCol, "r.")
+	case "effectiveDateTime", "effectivePeriod.start", "onsetDateTime", "birthDate", "authoredOn", "issued":
+		return dateLowCol, strings.TrimPrefix(dateLowCol, "r.")
+	case "effectivePeriod.end", "abatementDateTime":
+		return dateHighCol, strings.TrimPrefix(dateHighCol, "r.")
+	case "name.family.first()", "name.family", "family":
+		return "element_at(array_map(x -> split_part(x, '=', 2), array_filter(x -> x LIKE 'family=%', r.string_tokens)), 1)", "string_tokens[family]"
+	case "name.given.first()", "name.given", "given":
+		return "element_at(array_map(x -> split_part(x, '=', 2), array_filter(x -> x LIKE 'given=%', r.string_tokens)), 1)", "string_tokens[given]"
+	case "gender":
+		return "element_at(array_map(x -> split_part(x, '|', 2), array_filter(x -> x LIKE 'gender=|%', r.code_tokens)), 1)", "code_tokens[gender]"
+	case "status":
+		return "element_at(array_map(x -> split_part(x, '|', 2), array_filter(x -> x LIKE 'status=|%', r.code_tokens)), 1)", "code_tokens[status]"
+	case "active":
+		return "array_contains(r.code_tokens, 'active=|true')", "code_tokens[active]"
+	case "clinicalStatus.coding.code.first()", "clinicalStatus.coding.code":
+		return "element_at(array_map(x -> split_part(x, '|', 2), array_filter(x -> x LIKE 'clinical-status=|%', r.code_tokens)), 1)", "code_tokens[clinical-status]"
+	case "verificationStatus.coding.code.first()", "verificationStatus.coding.code":
+		return "element_at(array_map(x -> split_part(x, '|', 2), array_filter(x -> x LIKE 'verification-status=|%', r.code_tokens)), 1)", "code_tokens[verification-status]"
+	default:
+		sp := normalizeFHIRPathToSearchParam(p)
+		return fmt.Sprintf("element_at(array_map(x -> split_part(x, '=', 2), array_filter(x -> x LIKE '%s=%%', r.string_tokens)), 1)", sp), "string_tokens[" + sp + "]"
+	}
+}
+
+func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
+	p := strings.TrimSpace(fhirPath)
+	codeCol := "r.primary_code"
+	if isCore {
+		codeCol = "r.code"
+	}
+	if strings.HasPrefix(p, "code.coding.exists(") && strings.HasSuffix(p, ")") {
+		inner := strings.TrimSpace(p[len("code.coding.exists(") : len(p)-1])
+		if idx := strings.Index(inner, "code"); idx != -1 {
+			if q1 := strings.IndexByte(inner[idx:], '\''); q1 != -1 {
+				rest := inner[idx+q1+1:]
+				if q2 := strings.IndexByte(rest, '\''); q2 != -1 {
+					codeVal := strings.ReplaceAll(rest[:q2], "'", "''")
+					return fmt.Sprintf("(%s = '%s' OR array_contains(r.code_tokens, 'code=|%s'))", codeCol, codeVal, codeVal)
+				}
+			}
+		}
+	}
+	if parts := strings.SplitN(p, "=", 2); len(parts) == 2 {
+		lhs := strings.TrimSpace(parts[0])
+		rhs := strings.Trim(strings.TrimSpace(parts[1]), "'\"")
+		escapedRHS := strings.ReplaceAll(rhs, "'", "''")
+		sp := normalizeFHIRPathToSearchParam(lhs)
+		return fmt.Sprintf("array_contains(r.code_tokens, '%s=|%s')", sp, escapedRHS)
+	}
+	return ""
+}
+
+func spidxZeroJSONColumnExpr(fhirPath string) (string, string) {
+	p := strings.TrimSpace(fhirPath)
+	switch p {
+	case "id", "getResourceKey()":
+		return "r.res_id", "fhir_resource.res_id"
+	case "subject.getReferenceKey('Patient')", "subject.getReferenceKey()", "patient.getReferenceKey('Patient')", "patient.getReferenceKey()":
+		return "(SELECT ref.target_id FROM spidx_reference ref WHERE ref.tenant_id = r.tenant_id AND ref.res_type = r.res_type AND ref.res_id = r.res_id AND ref.sp_name IN ('patient', 'subject') LIMIT 1)", "spidx_reference"
+	case "encounter.getReferenceKey('Encounter')", "encounter.getReferenceKey()":
+		return "(SELECT ref.target_id FROM spidx_reference ref WHERE ref.tenant_id = r.tenant_id AND ref.res_type = r.res_type AND ref.res_id = r.res_id AND ref.sp_name = 'encounter' LIMIT 1)", "spidx_reference"
+	case "code.coding.code.first()", "code.coding.code", "code.coding.first().code":
+		return "(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'code' LIMIT 1)", "spidx_token"
+	case "code.coding.system.first()", "code.coding.system", "code.coding.first().system":
+		return "(SELECT t.sp_system FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'code' LIMIT 1)", "spidx_token"
+	case "valueQuantity.value":
+		return "(SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1)", "spidx_quantity"
+	case "valueQuantity.code", "valueQuantity.unit":
+		return "(SELECT q.sp_code FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1)", "spidx_quantity"
+	case "effectiveDateTime", "effectivePeriod.start", "onsetDateTime", "birthDate", "authoredOn":
+		sp := "date"
+		switch p {
+		case "birthDate":
+			sp = "birthdate"
+		case "onsetDateTime":
+			sp = "onset-date"
+		case "authoredOn":
+			sp = "authoredon"
+		}
+		return fmt.Sprintf("(SELECT d.sp_low FROM spidx_date d WHERE d.tenant_id = r.tenant_id AND d.res_type = r.res_type AND d.res_id = r.res_id AND d.sp_name = '%s' LIMIT 1)", sp), "spidx_date"
+	case "name.family.first()", "name.family", "family":
+		return "(SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1)", "spidx_string"
+	case "name.given.first()", "name.given", "given":
+		return "(SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' LIMIT 1)", "spidx_string"
+	case "gender", "status", "active", "clinicalStatus.coding.code.first()", "verificationStatus.coding.code.first()":
+		sp := normalizeFHIRPathToSearchParam(p)
+		return fmt.Sprintf("(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' LIMIT 1)", sp), "spidx_token"
+	default:
+		sp := normalizeFHIRPathToSearchParam(p)
+		return fmt.Sprintf("(SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' LIMIT 1)", sp), "spidx_string"
+	}
+}
+
+func spidxZeroJSONWhereExpr(fhirPath string) string {
+	p := strings.TrimSpace(fhirPath)
+	if strings.HasPrefix(p, "code.coding.exists(") && strings.HasSuffix(p, ")") {
+		inner := strings.TrimSpace(p[len("code.coding.exists(") : len(p)-1])
+		if idx := strings.Index(inner, "code"); idx != -1 {
+			if q1 := strings.IndexByte(inner[idx:], '\''); q1 != -1 {
+				rest := inner[idx+q1+1:]
+				if q2 := strings.IndexByte(rest, '\''); q2 != -1 {
+					codeVal := strings.ReplaceAll(rest[:q2], "'", "''")
+					return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'code' AND t.sp_value = '%s')", codeVal)
+				}
+			}
+		}
+	}
+	if parts := strings.SplitN(p, "=", 2); len(parts) == 2 {
+		lhs := strings.TrimSpace(parts[0])
+		rhs := strings.Trim(strings.TrimSpace(parts[1]), "'\"")
+		escapedRHS := strings.ReplaceAll(rhs, "'", "''")
+		sp := normalizeFHIRPathToSearchParam(lhs)
+		return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_value = '%s')", sp, escapedRHS)
+	}
+	return ""
+}
+
+func normalizeFHIRPathToSearchParam(path string) string {
+	p := strings.TrimSpace(path)
+	switch {
+	case strings.HasPrefix(p, "clinicalStatus"):
+		return "clinical-status"
+	case strings.HasPrefix(p, "verificationStatus"):
+		return "verification-status"
+	case strings.HasPrefix(p, "name.family"):
+		return "family"
+	case strings.HasPrefix(p, "name.given"):
+		return "given"
+	default:
+		if dot := strings.IndexByte(p, '.'); dot != -1 {
+			p = p[:dot]
+		}
+		return strings.ToLower(strings.ReplaceAll(p, "'", ""))
+	}
 }

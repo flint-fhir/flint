@@ -5557,6 +5557,50 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 			},
 		},
+		"/$sql": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ViewDefinition", "System"},
+				"summary":     "Transpile an HL7 SQL-on-FHIR v2 ViewDefinition into Zero-JSON SQL for Doris, PostgreSQL, or SQLite",
+				"operationId": "systemViewDefinitionSQLPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters or application/sql containing the Zero-JSON SQL query"},
+				},
+			},
+		},
+		"/ViewDefinition/$sql": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"ViewDefinition"},
+				"summary":     "Transpile an inline HL7 SQL-on-FHIR v2 ViewDefinition into Zero-JSON SQL for Doris, PostgreSQL, or SQLite",
+				"operationId": "viewDefinitionSQLPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters or application/sql containing the Zero-JSON SQL query"},
+				},
+			},
+		},
+		"/ViewDefinition/{id}/$sql": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"ViewDefinition"},
+				"summary":     "Transpile stored or built-in HL7 SQL-on-FHIR v2 ViewDefinition/{id} into Zero-JSON SQL for Doris, PostgreSQL, or SQLite",
+				"operationId": "viewDefinitionInstanceSQLGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters or application/sql containing the Zero-JSON SQL query"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"ViewDefinition"},
+				"summary":     "Transpile stored or built-in HL7 SQL-on-FHIR v2 ViewDefinition/{id} into Zero-JSON SQL for Doris, PostgreSQL, or SQLite",
+				"operationId": "viewDefinitionInstanceSQLPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters or application/sql containing the Zero-JSON SQL query"},
+				},
+			},
+		},
 	}
 
 	spDefs := resourceSearchParamDefs()

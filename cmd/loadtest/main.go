@@ -28,11 +28,15 @@ import (
 	pracpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/practitioner_go_proto"
 
 	"github.com/flint-fhir/flint/ingest/workflow"
+	"github.com/flint-fhir/flint/store"
+	"github.com/flint-fhir/flint/store/doris"
 	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store/sqlite"
 )
 
 type Config struct {
 	Target         string        // "http", "store", "temporal"
+	Backend        string        // "postgres", "sqlite", "doris", "postgres+doris", "sqlite+doris" (for store target)
 	URL            string        // e.g. "http://localhost:8080/fhir/r4/loadtest"
 	Rate           int           // target bundles/sec (0 = unthrottled benchmark)
 	Duration       time.Duration // test duration
@@ -40,7 +44,9 @@ type Config struct {
 	BundleSize     int           // number of entries per bundle (1-5)
 	Tenant         string        // tenant ID
 	PGDSN          string        // Postgres DSN (for store target)
-	DBDriver       string        // SQL driver name (defaults to "postgres")
+	SQLitePath     string        // SQLite path (for sqlite / sqlite+doris store target)
+	DorisDSN       string        // Apache Doris MySQL DSN (for doris / *+doris store target)
+	DBDriver       string        // SQL driver name override (for testing)
 	TemporalAddr   string        // Temporal host:port (for temporal target)
 	WorkflowRunner func(ctx context.Context, bundleID string, input workflow.IngestInput) error
 }
@@ -70,6 +76,7 @@ func parseLoadConfig(args []string) (Config, error) {
 	fs := flag.NewFlagSet("loadtest", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.StringVar(&cfg.Target, "target", "http", "Target mode: http, store, temporal")
+	fs.StringVar(&cfg.Backend, "backend", "postgres", "Storage backend for -target=store: postgres, sqlite, doris, postgres+doris, sqlite+doris")
 	fs.StringVar(&cfg.URL, "url", "http://localhost:8082/fhir/r4/loadtest", "Flint HTTP server bundle URL")
 	fs.IntVar(&cfg.Rate, "rate", 1000, "Target bundles/second (0 for maximum uncapped throughput)")
 	fs.DurationVar(&cfg.Duration, "duration", 30*time.Second, "Test run duration (e.g. 30s, 5m, 1h)")
@@ -77,6 +84,8 @@ func parseLoadConfig(args []string) (Config, error) {
 	fs.IntVar(&cfg.BundleSize, "bundle-size", 5, "Number of Big 5 resources per Bundle (1-5)")
 	fs.StringVar(&cfg.Tenant, "tenant", "loadtest", "Tenant ID")
 	fs.StringVar(&cfg.PGDSN, "pg-dsn", "postgres://flint:flint@localhost:5432/flint?sslmode=disable", "Postgres DSN")
+	fs.StringVar(&cfg.SQLitePath, "sqlite-path", ":memory:", "SQLite database path (for -backend=sqlite or sqlite+doris)")
+	fs.StringVar(&cfg.DorisDSN, "doris-dsn", "root@tcp(127.0.0.1:9030)/flint?parseTime=true", "Apache Doris MySQL DSN (for -backend=doris or *+doris)")
 	fs.StringVar(&cfg.TemporalAddr, "temporal-addr", "localhost:7233", "Temporal service address")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -261,21 +270,121 @@ func runHTTPLoad(ctx context.Context, cfg Config, m *Metrics) {
 	}
 }
 
-func runStoreLoad(ctx context.Context, cfg Config, m *Metrics) {
-	drv := cfg.DBDriver
-	if drv == "" {
-		drv = "postgres"
+func openStoreForLoadTest(ctx context.Context, cfg Config) (store.Store, func(), error) {
+	backend := cfg.Backend
+	if backend == "" {
+		backend = "postgres"
 	}
-	db, err := sql.Open(drv, cfg.PGDSN)
+	switch backend {
+	case "postgres":
+		drv := cfg.DBDriver
+		if drv == "" {
+			drv = "postgres"
+		}
+		db, err := sql.Open(drv, cfg.PGDSN)
+		if err != nil {
+			return nil, nil, err
+		}
+		db.SetMaxOpenConns(cfg.Workers * 2)
+		db.SetMaxIdleConns(cfg.Workers)
+		return postgres.New(db), func() { _ = db.Close() }, nil
+
+	case "sqlite":
+		path := cfg.SQLitePath
+		if path == "" {
+			path = ":memory:"
+		}
+		var sqDB *sql.DB
+		if path != ":memory:" && cfg.DBDriver != "" {
+			var err error
+			sqDB, err = sql.Open(cfg.DBDriver, path)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		st := sqlite.New(sqDB, sqlite.WithDSN(path))
+		return st, func() {
+			if sqDB != nil {
+				_ = sqDB.Close()
+			}
+		}, nil
+
+	case "doris":
+		var dorisDB *sql.DB
+		if cfg.DorisDSN != "" && cfg.DBDriver != "" {
+			var err error
+			dorisDB, err = sql.Open(cfg.DBDriver, cfg.DorisDSN)
+			if err != nil {
+				return nil, nil, err
+			}
+			dorisDB.SetMaxOpenConns(cfg.Workers * 2)
+			dorisDB.SetMaxIdleConns(cfg.Workers)
+		}
+		return doris.New(dorisDB), func() {
+			if dorisDB != nil {
+				_ = dorisDB.Close()
+			}
+		}, nil
+
+	case "postgres+doris":
+		pgDrv := cfg.DBDriver
+		if pgDrv == "" {
+			pgDrv = "postgres"
+		}
+		pgDB, err := sql.Open(pgDrv, cfg.PGDSN)
+		if err != nil {
+			return nil, nil, err
+		}
+		var dorisDB *sql.DB
+		if cfg.DorisDSN != "" && cfg.DBDriver != "" {
+			dorisDB, err = sql.Open(cfg.DBDriver, cfg.DorisDSN)
+			if err != nil {
+				_ = pgDB.Close()
+				return nil, nil, err
+			}
+		}
+		hs := store.NewHybridStore(postgres.New(pgDB), doris.New(dorisDB))
+		return hs, func() {
+			_ = pgDB.Close()
+			if dorisDB != nil {
+				_ = dorisDB.Close()
+			}
+		}, nil
+
+	case "sqlite+doris":
+		path := cfg.SQLitePath
+		if path == "" {
+			path = ":memory:"
+		}
+		sqSt := sqlite.New(nil, sqlite.WithDSN(path))
+		var dorisDB *sql.DB
+		if cfg.DorisDSN != "" && cfg.DBDriver != "" {
+			var err error
+			dorisDB, err = sql.Open(cfg.DBDriver, cfg.DorisDSN)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+		hs := store.NewHybridStore(sqSt, doris.New(dorisDB))
+		return hs, func() {
+			if dorisDB != nil {
+				_ = dorisDB.Close()
+			}
+		}, nil
+
+	default:
+		return nil, nil, fmt.Errorf("unsupported store backend: %s", backend)
+	}
+}
+
+func runStoreLoad(ctx context.Context, cfg Config, m *Metrics) {
+	st, cleanup, err := openStoreForLoadTest(ctx, cfg)
 	if err != nil {
-		fmt.Printf("Failed to open Postgres: %v\n", err)
+		fmt.Printf("Failed to open store (%s): %v\n", cfg.Backend, err)
 		return
 	}
-	defer db.Close()
-	db.SetMaxOpenConns(cfg.Workers * 2)
-	db.SetMaxIdleConns(cfg.Workers)
+	defer cleanup()
 
-	store := postgres.New(db)
 	extractors := postgres.DefaultIndexExtractors()
 
 	// Pre-create protos
@@ -317,7 +426,7 @@ func runStoreLoad(ctx context.Context, cfg Config, m *Metrics) {
 				}
 
 				t0 := time.Now()
-				err := store.WriteBatch(ctx, inputs)
+				err := st.WriteBatch(ctx, inputs)
 				lat := time.Since(t0)
 
 				if err != nil {
