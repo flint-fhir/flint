@@ -2720,11 +2720,20 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Convert proto bytes to JSON
-	jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
-	if err != nil {
-		s.logger.Error("proto to json", "error", err, "type", resType, "id", resID)
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
+	if okProto, protoCT := wantsProtoResponse(r); okProto {
+		stamped := stampProtoResourceMeta(s.protoRegistry[resType], rec.ResourceProto, resID, rec.ResVersion, rec.LastUpdated)
+		w.Header().Set("Content-Type", protoCT)
+		w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+		w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+		w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+		w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+		if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodHead {
+			w.Write(stamped)
+		}
 		return
 	}
 
@@ -2737,48 +2746,62 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	var jsonBytes []byte
 	if (summary != "" && summary != "false") || len(elements) > 0 {
-		var resourceMap map[string]any
-		if err := json.Unmarshal(jsonBytes, &resourceMap); err == nil {
-			projected := applySummaryOrElements(resourceMap, summary, elements)
-			if b, err := json.Marshal(projected); err == nil {
-				jsonBytes = b
-			}
+		resourceMap, mErr := s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if mErr != nil {
+			s.logger.Error("proto to map", "error", mErr, "type", resType, "id", resID)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
+			return
 		}
-	} else if strings.EqualFold(resType, "Binary") {
-		formatParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("_format")))
-		acceptHdr := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
-		wantsFHIRJSON := strings.Contains(formatParam, "fhir") || strings.Contains(formatParam, "json") ||
-			strings.Contains(acceptHdr, "application/fhir+json") || strings.Contains(acceptHdr, "application/json")
-		if !wantsFHIRJSON && (formatParam != "" || acceptHdr != "") {
-			var binMap map[string]any
-			if json.Unmarshal(jsonBytes, &binMap) == nil {
-				ct, _ := binMap["contentType"].(string)
-				dataB64, _ := binMap["data"].(string)
-				ctTrim := strings.TrimSpace(ct)
-				ctLower := strings.ToLower(ctTrim)
-				if ctTrim != "" && dataB64 != "" &&
-					(formatParam == ctLower || strings.Contains(acceptHdr, ctLower) || acceptHdr == "*/*") {
-					if rawBytes, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(dataB64)); decErr == nil {
-						if secRefMap, ok := binMap["securityContext"].(map[string]any); ok {
-							if secRef, _ := secRefMap["reference"].(string); strings.TrimSpace(secRef) != "" {
-								w.Header().Set("X-Security-Context", strings.TrimSpace(secRef))
+		projected := applySummaryOrElements(resourceMap, summary, elements)
+		b, mErr := json.Marshal(projected)
+		if mErr != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
+			return
+		}
+		jsonBytes = b
+	} else {
+		if strings.EqualFold(resType, "Binary") {
+			formatParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("_format")))
+			acceptHdr := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
+			wantsFHIRJSON := strings.Contains(formatParam, "fhir") || strings.Contains(formatParam, "json") ||
+				strings.Contains(acceptHdr, "application/fhir+json") || strings.Contains(acceptHdr, "application/json")
+			if !wantsFHIRJSON && (formatParam != "" || acceptHdr != "") {
+				if binMap, mErr := s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); mErr == nil {
+					ct, _ := binMap["contentType"].(string)
+					dataB64, _ := binMap["data"].(string)
+					ctTrim := strings.TrimSpace(ct)
+					ctLower := strings.ToLower(ctTrim)
+					if ctTrim != "" && dataB64 != "" &&
+						(formatParam == ctLower || strings.Contains(acceptHdr, ctLower) || acceptHdr == "*/*") {
+						if rawBytes, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(dataB64)); decErr == nil {
+							if secRefMap, ok := binMap["securityContext"].(map[string]any); ok {
+								if secRef, _ := secRefMap["reference"].(string); strings.TrimSpace(secRef) != "" {
+									w.Header().Set("X-Security-Context", strings.TrimSpace(secRef))
+								}
 							}
-						}
-						w.Header().Set("Content-Type", ctTrim)
-						w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
-						w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
-						if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
+							w.Header().Set("Content-Type", ctTrim)
+							w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+							w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+							if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
+								return
+							}
+							w.WriteHeader(http.StatusOK)
+							if r.Method != http.MethodHead {
+								w.Write(rawBytes)
+							}
 							return
 						}
-						w.WriteHeader(http.StatusOK)
-						if r.Method != http.MethodHead {
-							w.Write(rawBytes)
-						}
-						return
 					}
 				}
 			}
+		}
+		jsonBytes, err = s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if err != nil {
+			s.logger.Error("proto to json", "error", err, "type", resType, "id", resID)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
+			return
 		}
 	}
 
@@ -2897,10 +2920,20 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
-	if err != nil {
-		s.logger.Error("proto to json in vread", "error", err, "type", resType, "id", resID, "version", version)
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
+	if okProto, protoCT := wantsProtoResponse(r); okProto {
+		stamped := stampProtoResourceMeta(s.protoRegistry[resType], rec.ResourceProto, resID, rec.ResVersion, rec.LastUpdated)
+		w.Header().Set("Content-Type", protoCT)
+		w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+		w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+		w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+		w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+		if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodHead {
+			w.Write(stamped)
+		}
 		return
 	}
 
@@ -2913,48 +2946,62 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	var jsonBytes []byte
 	if (summary != "" && summary != "false") || len(elements) > 0 {
-		var resourceMap map[string]any
-		if err := json.Unmarshal(jsonBytes, &resourceMap); err == nil {
-			projected := applySummaryOrElements(resourceMap, summary, elements)
-			if b, err := json.Marshal(projected); err == nil {
-				jsonBytes = b
-			}
+		resourceMap, mErr := s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if mErr != nil {
+			s.logger.Error("proto to map in vread", "error", mErr, "type", resType, "id", resID, "version", version)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
+			return
 		}
-	} else if strings.EqualFold(resType, "Binary") {
-		formatParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("_format")))
-		acceptHdr := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
-		wantsFHIRJSON := strings.Contains(formatParam, "fhir") || strings.Contains(formatParam, "json") ||
-			strings.Contains(acceptHdr, "application/fhir+json") || strings.Contains(acceptHdr, "application/json")
-		if !wantsFHIRJSON && (formatParam != "" || acceptHdr != "") {
-			var binMap map[string]any
-			if json.Unmarshal(jsonBytes, &binMap) == nil {
-				ct, _ := binMap["contentType"].(string)
-				dataB64, _ := binMap["data"].(string)
-				ctTrim := strings.TrimSpace(ct)
-				ctLower := strings.ToLower(ctTrim)
-				if ctTrim != "" && dataB64 != "" &&
-					(formatParam == ctLower || strings.Contains(acceptHdr, ctLower) || acceptHdr == "*/*") {
-					if rawBytes, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(dataB64)); decErr == nil {
-						if secRefMap, ok := binMap["securityContext"].(map[string]any); ok {
-							if secRef, _ := secRefMap["reference"].(string); strings.TrimSpace(secRef) != "" {
-								w.Header().Set("X-Security-Context", strings.TrimSpace(secRef))
+		projected := applySummaryOrElements(resourceMap, summary, elements)
+		b, mErr := json.Marshal(projected)
+		if mErr != nil {
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
+			return
+		}
+		jsonBytes = b
+	} else {
+		if strings.EqualFold(resType, "Binary") {
+			formatParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("_format")))
+			acceptHdr := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
+			wantsFHIRJSON := strings.Contains(formatParam, "fhir") || strings.Contains(formatParam, "json") ||
+				strings.Contains(acceptHdr, "application/fhir+json") || strings.Contains(acceptHdr, "application/json")
+			if !wantsFHIRJSON && (formatParam != "" || acceptHdr != "") {
+				if binMap, mErr := s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); mErr == nil {
+					ct, _ := binMap["contentType"].(string)
+					dataB64, _ := binMap["data"].(string)
+					ctTrim := strings.TrimSpace(ct)
+					ctLower := strings.ToLower(ctTrim)
+					if ctTrim != "" && dataB64 != "" &&
+						(formatParam == ctLower || strings.Contains(acceptHdr, ctLower) || acceptHdr == "*/*") {
+						if rawBytes, decErr := base64.StdEncoding.DecodeString(strings.TrimSpace(dataB64)); decErr == nil {
+							if secRefMap, ok := binMap["securityContext"].(map[string]any); ok {
+								if secRef, _ := secRefMap["reference"].(string); strings.TrimSpace(secRef) != "" {
+									w.Header().Set("X-Security-Context", strings.TrimSpace(secRef))
+								}
 							}
-						}
-						w.Header().Set("Content-Type", ctTrim)
-						w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
-						w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
-						if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
+							w.Header().Set("Content-Type", ctTrim)
+							w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+							w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+							if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
+								return
+							}
+							w.WriteHeader(http.StatusOK)
+							if r.Method != http.MethodHead {
+								w.Write(rawBytes)
+							}
 							return
 						}
-						w.WriteHeader(http.StatusOK)
-						if r.Method != http.MethodHead {
-							w.Write(rawBytes)
-						}
-						return
 					}
 				}
 			}
+		}
+		jsonBytes, err = s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if err != nil {
+			s.logger.Error("proto to json in vread", "error", err, "type", resType, "id", resID, "version", version)
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
+			return
 		}
 	}
 
@@ -3208,14 +3255,11 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if !rec.IsDeleted && len(rec.ResourceProto) > 0 {
-				if jsonBytes, err := s.protoToJSONWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
-					var resourceMap map[string]any
-					if err := json.Unmarshal(jsonBytes, &resourceMap); err == nil {
-						if needsProjection {
-							resourceMap = applySummaryOrElements(resourceMap, summary, elements)
-						}
-						entry["resource"] = resourceMap
+				if resourceMap, err := s.protoToFHIRMapWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+					if needsProjection {
+						resourceMap = applySummaryOrElements(resourceMap, summary, elements)
 					}
+					entry["resource"] = resourceMap
 				}
 			}
 
@@ -3257,43 +3301,55 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resolvedBody, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, body, nil)
-	if refErr != nil {
-		writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
-		return
-	}
-	body = resolvedBody
-
-	// Validate against FHIR R4 StructureDefinitions and ValueSets if validator configured
-	if s.validator != nil {
-		outcome := s.validator.ValidateJSON(resType, body)
-		if !outcome.IsValid() {
-			outcome.WriteHTTP(w, http.StatusBadRequest)
+	msg := dynamicpb.NewMessage(md)
+	if isProtoContentType(r) {
+		if len(body) == 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "empty protobuf request body")
 			return
 		}
-	}
+		if err := proto.Unmarshal(body, msg); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure",
+				fmt.Sprintf("invalid FHIR Protobuf wire payload: %v", err))
+			return
+		}
+	} else {
+		resolvedBody, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, body, nil)
+		if refErr != nil {
+			writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
+			return
+		}
+		body = resolvedBody
 
-	if err := s.validateSubscriptionResourceJSON(resType, body); err != nil {
-		writeOperationOutcome(w, http.StatusUnprocessableEntity, "security", err.Error())
-		return
-	}
-	body = normalizeSubscriptionOnWrite(resType, body)
+		// Validate against FHIR R4 StructureDefinitions and ValueSets if validator configured
+		if s.validator != nil {
+			outcome := s.validator.ValidateJSON(resType, body)
+			if !outcome.IsValid() {
+				outcome.WriteHTTP(w, http.StatusBadRequest)
+				return
+			}
+		}
 
-	// Normalize standard flat HL7 FHIR R4 JSON to google/fhir protojson shape
-	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, body)
-	if err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure",
-			fmt.Sprintf("invalid FHIR JSON: %v", err))
-		return
-	}
+		if err := s.validateSubscriptionResourceJSON(resType, body); err != nil {
+			writeOperationOutcome(w, http.StatusUnprocessableEntity, "security", err.Error())
+			return
+		}
+		body = normalizeSubscriptionOnWrite(resType, body)
 
-	// Unmarshal JSON → proto
-	msg := dynamicpb.NewMessage(md)
-	unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
-	if err := unmarshaler.Unmarshal(normalizedBody, msg); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure",
-			fmt.Sprintf("invalid FHIR JSON: %v", err))
-		return
+		// Normalize standard flat HL7 FHIR R4 JSON to google/fhir protojson shape
+		normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, body)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure",
+				fmt.Sprintf("invalid FHIR JSON: %v", err))
+			return
+		}
+
+		// Unmarshal JSON → proto
+		unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+		if err := unmarshaler.Unmarshal(normalizedBody, msg); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure",
+				fmt.Sprintf("invalid FHIR JSON: %v", err))
+			return
+		}
 	}
 
 	// Extract resource ID from the proto
@@ -3389,12 +3445,6 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			s.dispatchSubscriptions(r.Context(), tenant, resType, rec.ResID, rec.ResourceProto, rec.ResVersion, rec.LastUpdated, idx)
 			s.recordAutoProvenance(r, w, tenant, resType, rec.ResID, rec.ResVersion, idx, provSpec)
 		}
-		jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
-		if err != nil {
-			s.logger.Error("conditional create proto to json", "error", err, "type", resType, "id", rec.ResID)
-			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
-			return
-		}
 		w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, rec.ResID))
 		w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 		w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
@@ -3402,7 +3452,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		if created {
 			status = http.StatusCreated
 		}
-		writePreferResourceResponse(w, r, status, resType, rec.ResID, rec.ResVersion, jsonBytes)
+		s.writeResourceWriteResponse(w, r, status, md, resType, rec.ResID, rec.ResVersion, rec.LastUpdated, rec.ResourceProto, body)
 		return
 	}
 
@@ -3428,16 +3478,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	s.dispatchSubscriptions(r.Context(), tenant, resType, resID, rec.ResourceProto, rec.ResVersion, rec.LastUpdated, idx)
 	s.recordAutoProvenance(r, w, tenant, resType, resID, rec.ResVersion, idx, provSpec)
 
-	jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
-	if err != nil {
-		jsonBytes = body
-	}
-
 	// Return the serialized resource (or Prefer representation/minimal/OperationOutcome) with 201 Created, Location, ETag, and Last-Modified
 	w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, resID))
 	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
-	writePreferResourceResponse(w, r, http.StatusCreated, resType, resID, rec.ResVersion, jsonBytes)
+	s.writeResourceWriteResponse(w, r, http.StatusCreated, md, resType, resID, rec.ResVersion, rec.LastUpdated, rec.ResourceProto, body)
 }
 
 func validateAndScopeIfNoneExistForPatient(condParams *postgres.SearchParams, resType, allowedPatientID, rawPatientID string) error {
@@ -3528,40 +3573,52 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resolvedBody, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, body, nil)
-	if refErr != nil {
-		writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
-		return
-	}
-	body = resolvedBody
-
-	if s.validator != nil {
-		outcome := s.validator.ValidateJSON(resType, body)
-		if !outcome.IsValid() {
-			outcome.WriteHTTP(w, http.StatusBadRequest)
+	msg := dynamicpb.NewMessage(md)
+	if isProtoContentType(r) {
+		if len(body) == 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "empty protobuf request body")
 			return
 		}
-	}
+		if err := proto.Unmarshal(body, msg); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure",
+				fmt.Sprintf("invalid FHIR Protobuf wire payload: %v", err))
+			return
+		}
+	} else {
+		resolvedBody, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, body, nil)
+		if refErr != nil {
+			writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
+			return
+		}
+		body = resolvedBody
 
-	if err := s.validateSubscriptionResourceJSON(resType, body); err != nil {
-		writeOperationOutcome(w, http.StatusUnprocessableEntity, "security", err.Error())
-		return
-	}
-	body = normalizeSubscriptionOnWrite(resType, body)
+		if s.validator != nil {
+			outcome := s.validator.ValidateJSON(resType, body)
+			if !outcome.IsValid() {
+				outcome.WriteHTTP(w, http.StatusBadRequest)
+				return
+			}
+		}
 
-	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, body)
-	if err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure",
-			fmt.Sprintf("invalid FHIR JSON: %v", err))
-		return
-	}
+		if err := s.validateSubscriptionResourceJSON(resType, body); err != nil {
+			writeOperationOutcome(w, http.StatusUnprocessableEntity, "security", err.Error())
+			return
+		}
+		body = normalizeSubscriptionOnWrite(resType, body)
 
-	msg := dynamicpb.NewMessage(md)
-	unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
-	if err := unmarshaler.Unmarshal(normalizedBody, msg); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure",
-			fmt.Sprintf("invalid FHIR JSON: %v", err))
-		return
+		normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, body)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure",
+				fmt.Sprintf("invalid FHIR JSON: %v", err))
+			return
+		}
+
+		unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+		if err := unmarshaler.Unmarshal(normalizedBody, msg); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure",
+				fmt.Sprintf("invalid FHIR JSON: %v", err))
+			return
+		}
 	}
 
 	bodyID := extractProtoResourceID(msg)
@@ -3636,11 +3693,6 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	s.dispatchSubscriptions(r.Context(), tenant, resType, resID, protoBytes, rec.ResVersion, rec.LastUpdated, idx)
 	s.recordAutoProvenance(r, w, tenant, resType, resID, rec.ResVersion, idx, provSpec)
 
-	jsonBytes, err := s.protoToJSONWithMeta(resType, protoBytes, rec.ResVersion, rec.LastUpdated)
-	if err != nil {
-		jsonBytes = body
-	}
-
 	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 	status := http.StatusOK
@@ -3648,7 +3700,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, resID))
 		status = http.StatusCreated
 	}
-	writePreferResourceResponse(w, r, status, resType, resID, rec.ResVersion, jsonBytes)
+	s.writeResourceWriteResponse(w, r, status, md, resType, resID, rec.ResVersion, rec.LastUpdated, protoBytes, body)
 }
 
 // handleDelete handles DELETE /{resourceType}/{id} — soft-delete a FHIR resource.
@@ -3717,6 +3769,106 @@ func setProtoResourceID(msg *dynamicpb.Message, resID string) {
 	if valField := idMsg.Descriptor().Fields().ByName("value"); valField != nil {
 		idMsg.Set(valField, protoreflect.ValueOfString(resID))
 	}
+}
+
+// isProtoContentType returns true when the request Content-Type indicates binary Protobuf wire payload
+// (application/x-protobuf, application/fhir+protobuf, or application/protobuf).
+func isProtoContentType(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if idx := strings.IndexByte(ct, ';'); idx >= 0 {
+		ct = strings.TrimSpace(ct[:idx])
+	}
+	switch ct {
+	case "application/x-protobuf", "application/fhir+protobuf", "application/protobuf", "application/vnd.google.protobuf":
+		return true
+	default:
+		return false
+	}
+}
+
+// wantsProtoResponse returns true and the negotiated Content-Type when the client requests binary Proto3
+// wire format via ?_format=, Accept:, or Content-Type negotiation (application/x-protobuf or application/fhir+protobuf).
+func wantsProtoResponse(r *http.Request) (bool, string) {
+	if r == nil {
+		return false, ""
+	}
+	if r.URL != nil {
+		formatParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("_format")))
+		switch formatParam {
+		case "application/fhir+protobuf", "fhir+protobuf":
+			return true, "application/fhir+protobuf"
+		case "application/x-protobuf", "application/protobuf", "protobuf", "proto", "x-protobuf":
+			return true, "application/x-protobuf"
+		default:
+			if formatParam != "" {
+				return false, ""
+			}
+		}
+	}
+	accept := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
+	if strings.Contains(accept, "application/fhir+protobuf") {
+		return true, "application/fhir+protobuf"
+	}
+	if strings.Contains(accept, "application/x-protobuf") || strings.Contains(accept, "application/protobuf") {
+		return true, "application/x-protobuf"
+	}
+	if strings.Contains(accept, "json") {
+		return false, ""
+	}
+	if isProtoContentType(r) {
+		if strings.Contains(strings.ToLower(r.Header.Get("Content-Type")), "fhir+protobuf") {
+			return true, "application/fhir+protobuf"
+		}
+		return true, "application/x-protobuf"
+	}
+	return false, ""
+}
+
+// stampProtoResourceMeta stamps id, meta.version_id, and meta.last_updated onto a google/fhir R4
+// binary Protobuf message via protoreflect without any JSON conversion.
+func stampProtoResourceMeta(md protoreflect.MessageDescriptor, protoBytes []byte, resID string, version int, lastUpdated time.Time) []byte {
+	if md == nil || len(protoBytes) == 0 {
+		return protoBytes
+	}
+	msg := dynamicpb.NewMessage(md)
+	if err := proto.Unmarshal(protoBytes, msg); err != nil {
+		return protoBytes
+	}
+	if resID != "" {
+		setProtoResourceID(msg, resID)
+	}
+	if metaField := md.Fields().ByName("meta"); metaField != nil && metaField.Kind() == protoreflect.MessageKind {
+		metaMsg := msg.Mutable(metaField).Message()
+		if version > 0 {
+			if vidField := metaMsg.Descriptor().Fields().ByName("version_id"); vidField != nil && vidField.Kind() == protoreflect.MessageKind {
+				vidMsg := metaMsg.Mutable(vidField).Message()
+				if valField := vidMsg.Descriptor().Fields().ByName("value"); valField != nil && valField.Kind() == protoreflect.StringKind {
+					vidMsg.Set(valField, protoreflect.ValueOfString(strconv.Itoa(version)))
+				}
+			}
+		}
+		if !lastUpdated.IsZero() {
+			if luField := metaMsg.Descriptor().Fields().ByName("last_updated"); luField != nil && luField.Kind() == protoreflect.MessageKind {
+				luMsg := metaMsg.Mutable(luField).Message()
+				if usField := luMsg.Descriptor().Fields().ByName("value_us"); usField != nil && usField.Kind() == protoreflect.Int64Kind {
+					luMsg.Set(usField, protoreflect.ValueOfInt64(lastUpdated.UTC().UnixMicro()))
+				}
+				if tzField := luMsg.Descriptor().Fields().ByName("timezone"); tzField != nil && tzField.Kind() == protoreflect.StringKind {
+					luMsg.Set(tzField, protoreflect.ValueOfString("Z"))
+				}
+				if precField := luMsg.Descriptor().Fields().ByName("precision"); precField != nil && precField.Kind() == protoreflect.EnumKind {
+					luMsg.Set(precField, protoreflect.ValueOfEnum(1)) // SECOND = 1
+				}
+			}
+		}
+	}
+	if out, err := proto.Marshal(msg); err == nil {
+		return out
+	}
+	return protoBytes
 }
 
 // handleValidate handles POST /{tenant}/{resourceType}/$validate, POST /{tenant}/$validate,
@@ -5089,14 +5241,9 @@ func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Req
 
 		// 1. Primary search matches
 		for _, res := range sr.Matches {
-			jsonBytes, err := s.protoToJSONWithMeta(res.ResType, res.ResourceProto, res.ResVersion, res.LastUpdated)
+			resource, err := s.protoToFHIRMapWithMeta(res.ResType, res.ResourceProto, res.ResVersion, res.LastUpdated)
 			if err != nil {
-				s.logger.Error("proto to json in search", "error", err, "type", res.ResType, "id", res.ResID)
-				continue
-			}
-
-			var resource map[string]any
-			if err := json.Unmarshal(jsonBytes, &resource); err != nil {
+				s.logger.Error("proto to map in search", "error", err, "type", res.ResType, "id", res.ResID)
 				continue
 			}
 			if needsProjection {
@@ -5114,14 +5261,9 @@ func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Req
 
 		// 2. Included resources (_include, _revinclude, and $everything compartment resources)
 		for _, inc := range sr.Includes {
-			jsonBytes, err := s.protoToJSONWithMeta(inc.ResType, inc.ResourceProto, inc.ResVersion, inc.LastUpdated)
+			resource, err := s.protoToFHIRMapWithMeta(inc.ResType, inc.ResourceProto, inc.ResVersion, inc.LastUpdated)
 			if err != nil {
-				s.logger.Error("proto to json for included resource", "error", err, "type", inc.ResType, "id", inc.ResID)
-				continue
-			}
-
-			var resource map[string]any
-			if err := json.Unmarshal(jsonBytes, &resource); err != nil {
+				s.logger.Error("proto to map for included resource", "error", err, "type", inc.ResType, "id", inc.ResID)
 				continue
 			}
 			if needsProjection && params.ResType == "$everything" {
@@ -6766,7 +6908,7 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			"http://hl7.org/fhir/us/core/CapabilityStatement/us-core-server",
 			"http://hl7.org/fhir/uv/bulkdata/CapabilityStatement/bulk-data",
 		},
-		"format":      []string{"json", "application/fhir+json", "application/fhir+ndjson"},
+		"format":      []string{"json", "application/fhir+json", "application/fhir+ndjson", "application/x-protobuf", "application/fhir+protobuf"},
 		"patchFormat": []string{"application/json-patch+json", "application/merge-patch+json", "application/fhir+json"},
 		"software": map[string]any{
 			"name":    "Flint FHIR Server",
@@ -7294,7 +7436,18 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 // protoToFHIRMapWithMeta decodes binary wire Protobuf bytes directly into an in-memory
 // FHIR R4 map[string]any using protoreflect without any intermediate JSON serialization.
 func (s *Server) protoToFHIRMapWithMeta(resType string, protoBytes []byte, version int, lastUpdated time.Time) (map[string]any, error) {
-	md := s.protoRegistry[resType]
+	md, ok := s.protoRegistry[resType]
+	if !ok {
+		jb, err := s.protoToJSONWithMeta(resType, protoBytes, version, lastUpdated)
+		if err != nil {
+			return nil, err
+		}
+		var m map[string]any
+		if err := json.Unmarshal(jb, &m); err != nil {
+			return nil, err
+		}
+		return m, nil
+	}
 	return fhirutil.ProtoBytesToFHIRMap(md, resType, protoBytes, version, lastUpdated)
 }
 
@@ -7355,6 +7508,53 @@ func parsePreferReturn(r *http.Request) string {
 		}
 	}
 	return ""
+}
+
+// writeResourceWriteResponse writes a resource write response honoring HTTP Prefer: return=...
+// and binary Proto3 wire negotiation (Accept: application/x-protobuf / application/fhir+protobuf).
+func (s *Server) writeResourceWriteResponse(
+	w http.ResponseWriter,
+	r *http.Request,
+	status int,
+	md protoreflect.MessageDescriptor,
+	resType, resID string,
+	version int,
+	lastUpdated time.Time,
+	protoBytes, fallbackBody []byte,
+) {
+	switch parsePreferReturn(r) {
+	case "minimal":
+		w.WriteHeader(status)
+		return
+	case "OperationOutcome":
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"resourceType": "OperationOutcome",
+			"issue": []map[string]any{
+				{
+					"severity":    "information",
+					"code":        "informational",
+					"diagnostics": fmt.Sprintf("%s/%s version %d stored", resType, resID, version),
+				},
+			},
+		})
+		return
+	}
+	if okProto, protoCT := wantsProtoResponse(r); okProto {
+		stamped := stampProtoResourceMeta(md, protoBytes, resID, version, lastUpdated)
+		w.Header().Set("Content-Type", protoCT)
+		w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+		w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+		w.WriteHeader(status)
+		_, _ = w.Write(stamped)
+		return
+	}
+	jsonBytes, err := s.protoToJSONWithMeta(resType, protoBytes, version, lastUpdated)
+	if err != nil {
+		jsonBytes = fallbackBody
+	}
+	writePreferResourceResponse(w, r, status, resType, resID, version, jsonBytes)
 }
 
 // writePreferResourceResponse writes a resource write response honoring the HTTP Prefer: return=... header.

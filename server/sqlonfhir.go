@@ -522,6 +522,8 @@ func (s *Server) parseViewRunRequest(r *http.Request, defaultFormat string) (vie
 	if opts.format == "" {
 		accept := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
 		switch {
+		case strings.Contains(accept, "text/tab-separated-values") || strings.Contains(accept, "text/tsv"):
+			opts.format = "text/tab-separated-values"
 		case strings.Contains(accept, "text/csv"):
 			opts.format = "text/csv"
 		case strings.Contains(accept, "ndjson"):
@@ -642,6 +644,27 @@ func (s *Server) executeViewDefinition(w http.ResponseWriter, r *http.Request, d
 
 	fmtLower := strings.ToLower(strings.TrimSpace(opts.format))
 	switch {
+	case strings.Contains(fmtLower, "tab-separated-values") || strings.Contains(fmtLower, "tsv"):
+		w.Header().Set("Content-Type", "text/tab-separated-values; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		cw := csv.NewWriter(w)
+		cw.Comma = '\t'
+		if opts.includeHdrs {
+			hdr := make([]string, len(columns))
+			for i, c := range columns {
+				hdr[i] = c.Name
+			}
+			_ = cw.Write(hdr)
+		}
+		for _, row := range rows {
+			rec := make([]string, len(columns))
+			for i, c := range columns {
+				rec[i] = formatCSVCellValue(row[c.Name])
+			}
+			_ = cw.Write(rec)
+		}
+		cw.Flush()
+
 	case strings.Contains(fmtLower, "csv"):
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		w.WriteHeader(http.StatusOK)

@@ -1163,11 +1163,8 @@ func (s *Server) buildBundleWriteEntry(preferReturn, tenant, resType, resID stri
 	switch preferReturn {
 	case "representation":
 		if len(protoBytes) > 0 {
-			if jsonBytes, err := s.protoToJSONWithMeta(resType, protoBytes, version, lastUpdated); err == nil {
-				var resObj map[string]any
-				if err := json.Unmarshal(jsonBytes, &resObj); err == nil {
-					entryMap["resource"] = resObj
-				}
+			if resObj, err := s.protoToFHIRMapWithMeta(resType, protoBytes, version, lastUpdated); err == nil {
+				entryMap["resource"] = resObj
 			}
 		}
 	case "OperationOutcome":

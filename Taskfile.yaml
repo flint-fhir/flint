@@ -78,7 +78,7 @@ tasks:
       - go run ./cmd/seed {{.CLI_ARGS}}
 
   certify:
-    desc: Run automated 84-check FHIR R4, US Core v6.1.0 & v7.0.0, ONC (g)(10), SQL-on-FHIR v2, National IG, and TestScript conformance certification suite
+    desc: Run automated 85-check FHIR R4, US Core v6.1.0 & v7.0.0, ONC (g)(10), SQL-on-FHIR v2, National IG, and TestScript conformance certification suite
     cmds:
       - go run ./cmd/certify {{.CLI_ARGS}}
 
@@ -137,6 +137,12 @@ tasks:
     deps: [build]
     cmds:
       - ./bin/loadtest -target=http -url=http://localhost:8082/fhir/r4/loadtest -duration=30s -workers=50 -bundle-size=5
+
+  bench-http-proto:
+    desc: Run binary Protobuf wire (-wire=proto) load test against Flint FHIR HTTP server
+    deps: [build]
+    cmds:
+      - ./bin/loadtest -target=http -wire=proto -url=http://localhost:8082/fhir/r4/loadtest -duration=30s -workers=50
 
   run:
     desc: Run flintd locally (connect to k3d Postgres)

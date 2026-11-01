@@ -321,4 +321,131 @@ func TestSQLOnFHIRv2_ViewDefinitionCRUD_Run_Export_And_SyncAnalytics(t *testing.
 		assert.Equal(t, http.StatusOK, respInlineSQL.StatusCode)
 		assert.Contains(t, string(inlineSQLBytes), "8867-4")
 	}
+
+	// 10. Execute GET /ViewDefinition/patient-demographics/$run?_format=text/tab-separated-values
+	respTSV, err := client.Get(ts.URL + "/fhir/r4/sof/ViewDefinition/patient-demographics/$run?_format=text/tab-separated-values")
+	require.NoError(t, err)
+	tsvBytes, _ := io.ReadAll(respTSV.Body)
+	respTSV.Body.Close()
+	assert.Equal(t, http.StatusOK, respTSV.StatusCode)
+	assert.Contains(t, respTSV.Header.Get("Content-Type"), "text/tab-separated-values")
+	assert.Equal(t, "zero-json-proto3", respTSV.Header.Get("X-Flint-Storage-Model"))
+	tsvStr := string(tsvBytes)
+	assert.Contains(t, tsvStr, "id\tfamily\tgiven\tgender\tbirth_date")
+	assert.Contains(t, tsvStr, "sof-pat-2\tVance\tMarcus\tmale\t1978-11-22\ttrue")
+}
+
+func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
+	db := openMemPostgres(t)
+	defer db.Close()
+
+	pgStore := postgres.New(db, postgres.WithTenantIsolation(postgres.TenantIsolationShared))
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := server.New(pgStore, logger)
+	server.RegisterDefaultResourceTypes(srv)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	client := ts.Client()
+
+	// 1. POST /fhir/r4/proto/Patient with binary google/fhir R4 Protobuf wire payload (Content-Type: application/x-protobuf)
+	createPat := &patpb.Patient{
+		Name: []*dtpb.HumanName{
+			{
+				Family: &dtpb.String{Value: "WireProto"},
+				Given:  []*dtpb.String{{Value: "Alan"}},
+			},
+		},
+	}
+	createWire, err := proto.Marshal(createPat)
+	require.NoError(t, err)
+
+	reqCreate, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient", bytes.NewReader(createWire))
+	require.NoError(t, err)
+	reqCreate.Header.Set("Content-Type", "application/x-protobuf")
+	respCreate, err := client.Do(reqCreate)
+	require.NoError(t, err)
+	createdWire, _ := io.ReadAll(respCreate.Body)
+	respCreate.Body.Close()
+	require.Equal(t, http.StatusCreated, respCreate.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respCreate.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respCreate.Header.Get("X-Flint-Wire-Format"))
+	assert.Equal(t, "zero-json-proto3", respCreate.Header.Get("X-Flint-Storage-Model"))
+
+	var createdPat patpb.Patient
+	require.NoError(t, proto.Unmarshal(createdWire, &createdPat))
+	patID := createdPat.GetId().GetValue()
+	require.NotEmpty(t, patID)
+	assert.Equal(t, "1", createdPat.GetMeta().GetVersionId().GetValue())
+	require.Len(t, createdPat.GetName(), 1)
+	assert.Equal(t, "WireProto", createdPat.GetName()[0].GetFamily().GetValue())
+
+	// 2. PUT /fhir/r4/proto/Patient/{id} with Content-Type: application/fhir+protobuf
+	updatePat := &patpb.Patient{
+		Id: &dtpb.Id{Value: patID},
+		Name: []*dtpb.HumanName{
+			{
+				Family: &dtpb.String{Value: "WireProtoUpdated"},
+				Given:  []*dtpb.String{{Value: "Alan"}, {Value: "Mathison"}},
+			},
+		},
+	}
+	updateWire, err := proto.Marshal(updatePat)
+	require.NoError(t, err)
+
+	reqUpdate, err := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Patient/"+patID, bytes.NewReader(updateWire))
+	require.NoError(t, err)
+	reqUpdate.Header.Set("Content-Type", "application/fhir+protobuf")
+	respUpdate, err := client.Do(reqUpdate)
+	require.NoError(t, err)
+	updatedWire, _ := io.ReadAll(respUpdate.Body)
+	respUpdate.Body.Close()
+	require.Equal(t, http.StatusOK, respUpdate.StatusCode)
+	assert.Equal(t, "application/fhir+protobuf", respUpdate.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respUpdate.Header.Get("X-Flint-Wire-Format"))
+
+	var updatedPat patpb.Patient
+	require.NoError(t, proto.Unmarshal(updatedWire, &updatedPat))
+	assert.Equal(t, "2", updatedPat.GetMeta().GetVersionId().GetValue())
+	assert.Equal(t, "WireProtoUpdated", updatedPat.GetName()[0].GetFamily().GetValue())
+
+	// 3. GET /fhir/r4/proto/Patient/{id} with Accept: application/x-protobuf
+	reqRead, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Patient/"+patID, nil)
+	require.NoError(t, err)
+	reqRead.Header.Set("Accept", "application/x-protobuf")
+	respRead, err := client.Do(reqRead)
+	require.NoError(t, err)
+	readWire, _ := io.ReadAll(respRead.Body)
+	respRead.Body.Close()
+	require.Equal(t, http.StatusOK, respRead.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respRead.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respRead.Header.Get("X-Flint-Wire-Format"))
+
+	var readPat patpb.Patient
+	require.NoError(t, proto.Unmarshal(readWire, &readPat))
+	assert.Equal(t, patID, readPat.GetId().GetValue())
+	assert.Equal(t, "2", readPat.GetMeta().GetVersionId().GetValue())
+	assert.Equal(t, "WireProtoUpdated", readPat.GetName()[0].GetFamily().GetValue())
+
+	// 4. GET /fhir/r4/proto/Patient/{id}/_history/1?_format=application/x-protobuf (vread binary Proto3)
+	respVRead, err := client.Get(ts.URL + "/fhir/r4/proto/Patient/" + patID + "/_history/1?_format=application/x-protobuf")
+	require.NoError(t, err)
+	vreadWire, _ := io.ReadAll(respVRead.Body)
+	respVRead.Body.Close()
+	require.Equal(t, http.StatusOK, respVRead.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respVRead.Header.Get("Content-Type"))
+
+	var vreadPat patpb.Patient
+	require.NoError(t, proto.Unmarshal(vreadWire, &vreadPat))
+	assert.Equal(t, "1", vreadPat.GetMeta().GetVersionId().GetValue())
+	assert.Equal(t, "WireProto", vreadPat.GetName()[0].GetFamily().GetValue())
+
+	// 5. Verify search index extraction worked directly on the binary Proto3 write (GET /Patient?family=WireProtoUpdated)
+	respSearch, err := client.Get(ts.URL + "/fhir/r4/proto/Patient?family=WireProtoUpdated")
+	require.NoError(t, err)
+	searchBytes, _ := io.ReadAll(respSearch.Body)
+	respSearch.Body.Close()
+	require.Equal(t, http.StatusOK, respSearch.StatusCode)
+	assert.Contains(t, string(searchBytes), patID)
+	assert.Contains(t, string(searchBytes), "WireProtoUpdated")
 }

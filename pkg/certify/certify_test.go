@@ -878,8 +878,20 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			return
 		}
 		if strings.HasSuffix(path, "/ViewDefinition/observation-vitals/$run") {
+			if strings.Contains(q.Get("_format"), "tab-separated-values") {
+				w.Header().Set("Content-Type", "text/tab-separated-values")
+				_, _ = w.Write([]byte("id\tpatient_id\tstatus\tcode\tsystem\tvalue\tunit\teffective\ncert-obs-1\tcert-pat-1\tfinal\t8867-4\thttp://loinc.org\t72\t/min\t2026-01-15T09:15:00Z\n"))
+				return
+			}
 			w.Header().Set("Content-Type", "text/csv")
 			_, _ = w.Write([]byte("id,patient_id,status,code,system,value,unit,effective\ncert-obs-1,cert-pat-1,final,8867-4,http://loinc.org,72,/min,2026-01-15T09:15:00Z\n"))
+			return
+		}
+		if strings.HasSuffix(path, "/Patient/cert-pat-1") && strings.Contains(q.Get("_format"), "protobuf") {
+			w.Header().Set("Content-Type", "application/x-protobuf")
+			w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+			w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+			_, _ = w.Write([]byte{0x0a, 0x0c, 0x0a, 0x0a, 0x63, 0x65, 0x72, 0x74, 0x2d, 0x70, 0x61, 0x74, 0x2d, 0x31})
 			return
 		}
 		if strings.HasSuffix(path, "/ViewDefinition/observation-vitals/$sql") {
@@ -945,8 +957,8 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 84 {
-		t.Fatalf("expected all 84 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 85 {
+		t.Fatalf("expected all 85 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()

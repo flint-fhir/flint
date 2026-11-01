@@ -345,12 +345,8 @@ func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
 		if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, "Patient", rec.ResID, rec.ResourceProto) {
 			continue
 		}
-		jsonBytes, err := s.protoToJSONWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		candMap, err := s.protoToFHIRMapWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if err != nil {
-			continue
-		}
-		var candMap map[string]any
-		if err := json.Unmarshal(jsonBytes, &candMap); err != nil {
 			continue
 		}
 		candDemo := extractPatientDemographics(candMap)
@@ -442,13 +438,11 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("insufficient granular scope to read %s/%s $meta", resType, resID))
 			return
 		}
-		jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		resMap, err := s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize resource meta")
 			return
 		}
-		var resMap map[string]any
-		_ = json.Unmarshal(jsonBytes, &resMap)
 		metaObj, _ := resMap["meta"].(map[string]any)
 		if metaObj == nil {
 			metaObj = make(map[string]any)
@@ -519,12 +513,8 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 			if hasSecCtx && !s.resourceAllowedByGranularScope(secCtx, tenant, rt, rec.ResID, rec.ResourceProto) {
 				continue
 			}
-			jsonBytes, err := s.protoToJSONWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+			resMap, err := s.protoToFHIRMapWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 			if err != nil {
-				continue
-			}
-			var resMap map[string]any
-			if err := json.Unmarshal(jsonBytes, &resMap); err != nil {
 				continue
 			}
 			metaMap, _ := resMap["meta"].(map[string]any)
@@ -666,15 +656,9 @@ func (s *Server) mutateInstanceMeta(w http.ResponseWriter, r *http.Request, isDe
 		}
 	}
 
-	jsonBytes, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+	resMap, err := s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to deserialize current resource")
-		return
-	}
-
-	var resMap map[string]any
-	if err := json.Unmarshal(jsonBytes, &resMap); err != nil {
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode current resource JSON")
 		return
 	}
 
@@ -743,13 +727,11 @@ func (s *Server) mutateInstanceMeta(w http.ResponseWriter, r *http.Request, isDe
 		Op:        "U",
 	})
 
-	finalJSON, err := s.protoToJSONWithMeta(resType, protoBytes, newRec.ResVersion, newRec.LastUpdated)
+	finalMap, err := s.protoToFHIRMapWithMeta(resType, protoBytes, newRec.ResVersion, newRec.LastUpdated)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize updated resource meta")
 		return
 	}
-	var finalMap map[string]any
-	_ = json.Unmarshal(finalJSON, &finalMap)
 	finalMeta, _ := finalMap["meta"].(map[string]any)
 	if finalMeta == nil {
 		finalMeta = curMeta
@@ -1190,12 +1172,8 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 
 	entries := make([]any, 0, len(sr.Matches))
 	for _, m := range sr.Matches {
-		jb, err := s.protoToJSONWithMeta(m.ResType, m.ResourceProto, m.ResVersion, m.LastUpdated)
+		resMap, err := s.protoToFHIRMapWithMeta(m.ResType, m.ResourceProto, m.ResVersion, m.LastUpdated)
 		if err != nil {
-			continue
-		}
-		var resMap map[string]any
-		if json.Unmarshal(jb, &resMap) != nil {
 			continue
 		}
 		entries = append(entries, map[string]any{
