@@ -437,3 +437,220 @@ func TestDorisStore_Compartments_Audit_OAuth_And_Maintenance(t *testing.T) {
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, expunged, 3)
 }
+
+func TestDorisStore_ConditionalOps_SearchModifiers_And_EdgeCases(t *testing.T) {
+	ds := doris.New(nil)
+	ctx := context.Background()
+
+	// Empty & nil receiver checks
+	var nilStore *doris.Store
+	assert.Equal(t, doris.GroupCommitSync, nilStore.GroupCommit())
+	assert.Equal(t, "flint", nilStore.Database())
+	require.NoError(t, nilStore.Ping(ctx))
+
+	// Missing tenant error
+	_, err := ds.WriteResourceWithMeta(ctx, store.ResourceInput{ResType: "Patient", ResID: "no-tenant"})
+	require.ErrorIs(t, err, store.ErrNoTenant)
+
+	// WriteBatch: empty, cross-tenant error, and valid batch
+	require.NoError(t, ds.WriteBatch(ctx, nil))
+	err = ds.WriteBatch(ctx, []store.ResourceInput{
+		{TenantID: "t1", ResType: "Patient", ResID: "b1"},
+		{TenantID: "t2", ResType: "Patient", ResID: "b2"},
+	})
+	require.ErrorIs(t, err, store.ErrCrossTenantBatch)
+
+	require.NoError(t, ds.WriteBatch(ctx, []store.ResourceInput{
+		{
+			TenantID:      "t1",
+			ResType:       "Patient",
+			ResID:         "b1",
+			ResourceProto: []byte{0x01},
+			SearchIndexes: &store.SearchIndexes{
+				Strings:    []store.SpidxString{{TenantID: "t1", ResType: "Patient", ResID: "b1", SpName: "family", SpValue: "Anderson"}},
+				Tokens:     []store.SpidxToken{{TenantID: "t1", ResType: "Patient", ResID: "b1", SpName: "gender", SpValue: "female"}, {TenantID: "t1", ResType: "Patient", ResID: "b1", SpName: "_security", SpSystem: "sec", SpValue: "R"}},
+				References: []store.SpidxReference{{TenantID: "t1", ResType: "Patient", ResID: "b1", SpName: "organization", TargetType: "Organization", TargetID: "org-1"}},
+				URIs:       []store.SpidxURI{{TenantID: "t1", ResType: "Patient", ResID: "b1", SpName: "_profile", SpValue: "http://example.org/PatientProfile"}},
+			},
+		},
+		{
+			TenantID:      "t1",
+			ResType:       "Patient",
+			ResID:         "b2",
+			ResourceProto: []byte{0x02},
+			SearchIndexes: &store.SearchIndexes{
+				Strings:    []store.SpidxString{{TenantID: "t1", ResType: "Patient", ResID: "b2", SpName: "family", SpValue: "Andrews"}},
+				Tokens:     []store.SpidxToken{{TenantID: "t1", ResType: "Patient", ResID: "b2", SpName: "gender", SpValue: "female"}},
+				References: []store.SpidxReference{{TenantID: "t1", ResType: "Patient", ResID: "b2", SpName: "organization", TargetType: "Organization", TargetID: "org-1"}},
+			},
+		},
+	}))
+
+	// BuildInvertedSearchSQL with multiple IDs, ResTypes, Strings, References, URIs
+	sqlStr, sqlArgs := doris.BuildInvertedSearchSQL(store.SearchParams{
+		TenantID:   "t1",
+		ResTypes:   []string{"Patient", "Observation"},
+		ID:         "b1, b2",
+		Tokens:     map[string]string{"gender": "female"},
+		References: map[string]string{"organization": "Organization/org-1"},
+		Strings:    map[string]string{"family": "And"},
+		URIs:       map[string]string{"_profile": "http://example.org/PatientProfile"},
+		Count:      5000,
+		Offset:     -5,
+	})
+	assert.Contains(t, sqlStr, "res_type IN (?, ?)")
+	assert.Contains(t, sqlStr, "res_id IN (?, ?)")
+	assert.NotEmpty(t, sqlArgs)
+
+	// Search modifiers: ResTypes, comma-separated IDs, :exact, :contains, :not token, ReferenceFilters, StringFilters, TokenFilters, URIs
+	sr, err := ds.Search(ctx, store.SearchParams{
+		TenantID:         "t1",
+		ResTypes:         []string{"Patient"},
+		ID:               "Patient/b1,b2",
+		Strings:          map[string]string{"family:exact": "anderson", "family:contains": "nder"},
+		StringFilters:    map[string][]string{"family": {"and"}},
+		Tokens:           map[string]string{"gender": "female", "gender:not": "male"},
+		TokenFilters:     map[string][]string{"gender": {"female"}},
+		References:       map[string]string{"organization": "Organization/org-1"},
+		ReferenceFilters: map[string][]string{"organization": {"org-1"}},
+		URIs:             map[string]string{"_profile": "http://example.org/PatientProfile"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, sr.Total)
+	assert.Equal(t, "b1", sr.Matches[0].ResID)
+
+	// ConditionalCreate when >1 match -> ErrPreconditionFailed
+	_, _, err = ds.ConditionalCreateResource(ctx, store.ResourceInput{
+		TenantID: "t1", ResType: "Patient", ResID: "b3",
+	}, store.SearchParams{
+		TenantID: "t1", ResType: "Patient", Tokens: map[string]string{"gender": "female"},
+	})
+	require.ErrorIs(t, err, store.ErrPreconditionFailed)
+
+	// ConditionalUpdate: >1 match -> ErrPreconditionFailed; 1 match -> updates; 0 match -> creates
+	_, err = ds.ConditionalUpdateResource(ctx, "t1", "Patient", store.SearchParams{
+		TenantID: "t1", ResType: "Patient", Tokens: map[string]string{"gender": "female"},
+	}, func(matchedID string, isExisting bool) (store.ResourceInput, error) {
+		return store.ResourceInput{TenantID: "t1", ResType: "Patient", ResID: matchedID}, nil
+	})
+	require.ErrorIs(t, err, store.ErrPreconditionFailed)
+
+	updRec, err := ds.ConditionalUpdateResource(ctx, "t1", "Patient", store.SearchParams{
+		TenantID: "t1", ResType: "Patient", ID: "b1",
+	}, func(matchedID string, isExisting bool) (store.ResourceInput, error) {
+		assert.True(t, isExisting)
+		assert.Equal(t, "b1", matchedID)
+		return store.ResourceInput{
+			TenantID:      "t1",
+			ResType:       "Patient",
+			ResID:         matchedID,
+			ResourceProto: []byte{0x09},
+			SearchIndexes: &store.SearchIndexes{
+				Tokens: []store.SpidxToken{{TenantID: "t1", ResType: "Patient", ResID: "b1", SpName: "gender", SpValue: "female"}},
+			},
+		}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 2, updRec.ResVersion)
+
+	newRec, err := ds.ConditionalUpdateResource(ctx, "t1", "Patient", store.SearchParams{
+		TenantID: "t1", ResType: "Patient", ID: "b-new",
+	}, func(_ string, isExisting bool) (store.ResourceInput, error) {
+		assert.False(t, isExisting)
+		return store.ResourceInput{TenantID: "t1", ResType: "Patient", ResID: "b-new", ResourceProto: []byte{0x0a}}, nil
+	})
+	require.NoError(t, err)
+	assert.True(t, newRec.Created)
+
+	// ConditionalDeleteResource & ConditionalDeleteResources
+	_, err = ds.ConditionalDeleteResource(ctx, "t1", "Patient", store.SearchParams{
+		TenantID: "t1", ResType: "Patient", Tokens: map[string]string{"gender": "female"},
+	}, nil)
+	require.ErrorIs(t, err, store.ErrPreconditionFailed)
+
+	noMatchDel, err := ds.ConditionalDeleteResource(ctx, "t1", "Patient", store.SearchParams{
+		TenantID: "t1", ResType: "Patient", ID: "nonexistent",
+	}, nil)
+	require.NoError(t, err)
+	assert.Nil(t, noMatchDel)
+
+	_, err = ds.ConditionalDeleteResource(ctx, "t1", "Patient", store.SearchParams{
+		TenantID: "t1", ResType: "Patient", ID: "nonexistent", ExpectedVersion: 1,
+	}, nil)
+	require.ErrorIs(t, err, store.ErrVersionConflict)
+
+	delRec, err := ds.ConditionalDeleteResource(ctx, "t1", "Patient", store.SearchParams{
+		TenantID: "t1", ResType: "Patient", ID: "b-new",
+	}, func(matchedID string) error {
+		assert.Equal(t, "b-new", matchedID)
+		return nil
+	})
+	require.NoError(t, err)
+	require.NotNil(t, delRec)
+	assert.True(t, delRec.IsDeleted)
+
+	// Reading deleted resource & deleted version returns ErrResourceDeleted
+	_, err = ds.ReadResource(ctx, "t1", "Patient", "b-new")
+	require.ErrorIs(t, err, store.ErrResourceDeleted)
+	_, err = ds.ReadResourceVersion(ctx, "t1", "Patient", "b-new", delRec.ResVersion)
+	require.ErrorIs(t, err, store.ErrResourceDeleted)
+
+	// Deleting already-deleted resource or non-existent resource via DeleteResource
+	require.NoError(t, ds.DeleteResource(ctx, "t1", "Patient", "b-new"))
+	require.NoError(t, ds.DeleteResource(ctx, "t1", "Patient", "never-existed"))
+
+	// ExecuteTransactionBundle: empty, cross-tenant, conditional POST, conditional PUT, conditional DELETE
+	emptyRes, err := ds.ExecuteTransactionBundle(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, emptyRes)
+
+	_, err = ds.ExecuteTransactionBundle(ctx, []store.BundleOperation{
+		{Input: store.ResourceInput{TenantID: "t1"}},
+		{Input: store.ResourceInput{TenantID: "t2"}},
+	})
+	require.ErrorIs(t, err, store.ErrCrossTenantBatch)
+
+	txRes, err := ds.ExecuteTransactionBundle(ctx, []store.BundleOperation{
+		{
+			OpType:      store.BundleOpWrite,
+			Method:      "POST",
+			Input:       store.ResourceInput{TenantID: "t1", ResType: "Patient", ResID: "tx-post", ResourceProto: []byte{0x01}},
+			IfNoneExist: &store.SearchParams{TenantID: "t1", ResType: "Patient", ID: "b1"},
+		},
+		{
+			OpType:            store.BundleOpWrite,
+			Method:            "PUT",
+			Input:             store.ResourceInput{TenantID: "t1", ResType: "Patient"},
+			ConditionalParams: &store.SearchParams{TenantID: "t1", ResType: "Patient", ID: "b2"},
+			BuildWriteInput: func(matchedID string, _ bool) (store.ResourceInput, error) {
+				return store.ResourceInput{TenantID: "t1", ResType: "Patient", ResID: matchedID, ResourceProto: []byte{0x03}}, nil
+			},
+		},
+		{
+			OpType:            store.BundleOpDelete,
+			Method:            "DELETE",
+			Input:             store.ResourceInput{TenantID: "t1", ResType: "Patient"},
+			ConditionalParams: &store.SearchParams{TenantID: "t1", ResType: "Patient", ID: "b2"},
+			VerifyDeleteMatch: func(_ string) error { return nil },
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, txRes, 3)
+	assert.Equal(t, "200 OK", txRes[0].Status)
+	assert.Equal(t, "200 OK", txRes[1].Status)
+	assert.Equal(t, "204 No Content", txRes[2].Status)
+
+	// ExpungePreviousVersions & hard PurgePatientCompartment
+	expPrev, err := ds.ExpungeResources(ctx, store.ExpungeParams{
+		TenantID:                "t1",
+		ResType:                 "Patient",
+		ResID:                   "b1",
+		ExpungePreviousVersions: true,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, expPrev)
+
+	hardPurged, err := ds.PurgePatientCompartment(ctx, "t1", "b1", true)
+	require.NoError(t, err)
+	assert.Len(t, hardPurged, 1)
+}
