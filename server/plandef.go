@@ -26,6 +26,7 @@ import (
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/pkg/validation"
+	"github.com/flint-fhir/flint/store"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -3169,7 +3170,27 @@ func (s *Server) handleObservationStats(w http.ResponseWriter, r *http.Request) 
 			}
 		}
 
-		statComps := buildStatisticComponents(vals, statsWanted, unit, uSystem, uCode)
+		var statComps []any
+		if s.analyticalStore != nil {
+			w.Header().Set("X-Flint-Analytical-Backend", s.analyticalStore.BackendName())
+			aRes, aErr := s.analyticalStore.EvaluateObservationStats(r.Context(), store.ObservationStatsParams{
+				TenantID:  tenant,
+				PatientID: patID,
+				Code:      wantCode,
+				System:    wantSys,
+			})
+			if len(vals) == 0 && aErr == nil && aRes != nil && len(aRes.Series) > 0 && aRes.Series[0].Count > 0 {
+				m := aRes.Series[0]
+				if unit == "" && m.Unit != "" {
+					unit = m.Unit
+					uCode = m.Unit
+				}
+				statComps = buildStatisticComponentsFromMetrics(m, statsWanted, unit, uSystem, uCode)
+			}
+		}
+		if statComps == nil {
+			statComps = buildStatisticComponents(vals, statsWanted, unit, uSystem, uCode)
+		}
 		statObs := map[string]any{
 			"resourceType": "Observation",
 			"id":           "stats-" + wantCode + "-" + patID,
@@ -3254,6 +3275,65 @@ func buildStatisticComponents(vals []float64, statsWanted []string, unit, uSyste
 			val = stdDev
 		case "count", "totalcount":
 			val = count
+			isCount = true
+		default:
+			continue
+		}
+		vq := map[string]any{
+			"value": math.Round(val*1000) / 1000,
+		}
+		if isCount {
+			vq["unit"] = "1"
+			vq["system"] = "http://unitsofmeasure.org"
+			vq["code"] = "1"
+		} else {
+			if unit != "" {
+				vq["unit"] = unit
+			}
+			if uSystem != "" {
+				vq["system"] = uSystem
+			}
+			if uCode != "" {
+				vq["code"] = uCode
+			}
+		}
+		comps = append(comps, map[string]any{
+			"code": map[string]any{
+				"coding": []any{
+					map[string]any{
+						"system": "http://terminology.hl7.org/CodeSystem/observation-statistics",
+						"code":   st,
+					},
+				},
+			},
+			"valueQuantity": vq,
+		})
+	}
+	return comps
+}
+
+func buildStatisticComponentsFromMetrics(m store.ObservationStatsMetrics, statsWanted []string, unit, uSystem, uCode string) []any {
+	var comps []any
+	for _, st := range statsWanted {
+		var val float64
+		isCount := false
+		switch st {
+		case "average", "mean":
+			val = m.Average
+		case "max", "maximum":
+			val = m.Max
+		case "min", "minimum":
+			val = m.Min
+		case "sum":
+			val = m.Sum
+		case "median":
+			val = m.Median
+		case "variance":
+			val = m.Variance
+		case "std-dev", "stddev":
+			val = m.StdDev
+		case "count", "totalcount":
+			val = float64(m.Count)
 			isCount = true
 		default:
 			continue

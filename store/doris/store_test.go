@@ -361,7 +361,7 @@ func TestDorisStore_Compartments_Audit_OAuth_And_Maintenance(t *testing.T) {
 
 	encEv, err := ds.EncounterEverything(ctx, store.EncounterEverythingParams{TenantID: "t1", EncounterID: "e1"})
 	require.NoError(t, err)
-	assert.Equal(t, 2, encEv.Total)
+	assert.Equal(t, 3, encEv.Total)
 
 	grpEv, err := ds.GroupEverything(ctx, store.GroupEverythingParams{TenantID: "t1", GroupID: "all", AllPatients: true})
 	require.NoError(t, err)
@@ -377,7 +377,7 @@ func TestDorisStore_Compartments_Audit_OAuth_And_Maintenance(t *testing.T) {
 
 	graphRes, err := ds.ResourceGraph(ctx, store.ResourceGraphParams{TenantID: "t1", ResourceType: "Patient", ResourceID: "p1"})
 	require.NoError(t, err)
-	assert.Equal(t, 1, graphRes.Total)
+	assert.Equal(t, 3, graphRes.Total)
 
 	metaRes, err := ds.AggregateMeta(ctx, "t1", "")
 	require.NoError(t, err)
@@ -674,4 +674,57 @@ func TestDorisStore_ConditionalOps_SearchModifiers_And_EdgeCases(t *testing.T) {
 	hardPurged, err := ds.PurgePatientCompartment(ctx, "t1", "b1", true)
 	require.NoError(t, err)
 	assert.Len(t, hardPurged, 1)
+
+	// Advanced Search: Includes, RevIncludes, :of-type, :identifier, :text, URIFilters (:below/:above)
+	require.NoError(t, ds.WriteResource(ctx, store.ResourceInput{
+		TenantID:      "t2",
+		ResType:       "Patient",
+		ResID:         "pat-adv",
+		ResourceProto: []byte{0x01},
+		SearchIndexes: &store.SearchIndexes{
+			Tokens: []store.SpidxToken{
+				{TenantID: "t2", ResType: "Patient", ResID: "pat-adv", SpName: "identifier", SpSystem: "http://hospital.example.org/mrn", SpValue: "MRN-99"},
+				{TenantID: "t2", ResType: "Patient", ResID: "pat-adv", SpName: "identifier:of-type", SpSystem: "http://terminology.hl7.org/CodeSystem/v2-0203|MR", SpValue: "MRN-99"},
+			},
+			URIs: []store.SpidxURI{
+				{TenantID: "t2", ResType: "Patient", ResID: "pat-adv", SpName: "_profile", SpValue: "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"},
+			},
+		},
+	}))
+	require.NoError(t, ds.WriteResource(ctx, store.ResourceInput{
+		TenantID:      "t2",
+		ResType:       "Observation",
+		ResID:         "obs-adv",
+		ResourceProto: []byte{0x02},
+		SearchIndexes: &store.SearchIndexes{
+			Strings: []store.SpidxString{
+				{TenantID: "t2", ResType: "Observation", ResID: "obs-adv", SpName: "code:text", SpValue: "essential hypertension"},
+			},
+			References: []store.SpidxReference{
+				{TenantID: "t2", ResType: "Observation", ResID: "obs-adv", SpName: "patient", TargetType: "Patient", TargetID: "pat-adv"},
+			},
+		},
+	}))
+
+	advPat, err := ds.Search(ctx, store.SearchParams{
+		TenantID:    "t2",
+		ResType:     "Patient",
+		Tokens:      map[string]string{"identifier:of-type": "http://terminology.hl7.org/CodeSystem/v2-0203|MR|MRN-99"},
+		URIFilters:  map[string][]string{"_profile:below": {"http://hl7.org/fhir/us/core/StructureDefinition/"}, "_profile:above": {"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient/v1"}},
+		RevIncludes: []store.IncludeParam{{SourceType: "Observation", ParamName: "patient"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, advPat.Total)
+	assert.Len(t, advPat.Includes, 1)
+
+	advObs, err := ds.Search(ctx, store.SearchParams{
+		TenantID:   "t2",
+		ResType:    "Observation",
+		Strings:    map[string]string{"code:text": "hypertension"},
+		References: map[string]string{"patient:identifier": "http://hospital.example.org/mrn|MRN-99"},
+		Includes:   []store.IncludeParam{{SourceType: "Observation", ParamName: "patient"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, advObs.Total)
+	assert.Len(t, advObs.Includes, 1)
 }

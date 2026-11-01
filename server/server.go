@@ -57,6 +57,7 @@ var idSeq atomic.Uint64
 
 // Server is the Flint FHIR REST API server.
 type Server struct {
+	primaryStore    store.Store
 	store           store.Store
 	analyticalStore store.AnalyticalStore
 	logger          *slog.Logger
@@ -90,8 +91,8 @@ type Server struct {
 }
 
 // New creates a new FHIR server backed by any pluggable store.Store implementation
-// (such as *postgres.Store or *doris.Store). If st also implements store.AnalyticalStore,
-// it is automatically registered as the server's analytical engine.
+// (such as *postgres.Store, *doris.Store, or *sqlite.Store). If st also implements
+// store.AnalyticalStore, it is automatically registered as the server's analytical engine.
 func New(st store.Store, logger *slog.Logger) *Server {
 	if store.IsNil(st) {
 		st = nil
@@ -110,6 +111,7 @@ func New(st store.Store, logger *slog.Logger) *Server {
 	valEngine := validation.NewEngine(validation.DefaultOptions())
 	valEngine.SetFHIRPathEvaluator(evalFHIRPath)
 	return &Server{
+		primaryStore:    st,
 		store:           st,
 		analyticalStore: analytical,
 		logger:          logger,
@@ -133,14 +135,32 @@ func (s *Server) Store() store.Store {
 	return s.store
 }
 
-// SetAnalyticalStore configures an optional columnar AnalyticalStore (such as *doris.Store)
-// for hybrid OLTP + OLAP deployments (--store=postgres --analytics-store=doris).
+// SetAnalyticalStore configures an optional columnar AnalyticalStore (such as *doris.Store
+// or *sqlite.Store) for hybrid OLTP + OLAP deployments (--store=postgres --analytics-store=doris).
+// When as also implements store.Store and is distinct from the primary operational store,
+// s.store is automatically wrapped in a *store.HybridStore so all committed mutations
+// replicate to the analytical store in real time.
 func (s *Server) SetAnalyticalStore(as store.AnalyticalStore) {
 	if store.IsNil(as) {
 		s.analyticalStore = nil
+		s.store = s.primaryStore
+		if s.primaryStore != nil {
+			s.auditRecorder = audit.NewStoreRecorder(s.primaryStore)
+		}
 		return
 	}
+	if asStore, ok := as.(store.Store); ok && !store.IsNil(asStore) && s.primaryStore != nil && any(asStore) != any(s.primaryStore) {
+		hyb := store.NewHybridStore(s.primaryStore, asStore)
+		s.store = hyb
+		s.analyticalStore = hyb
+		s.auditRecorder = audit.NewStoreRecorder(hyb)
+		return
+	}
+	s.store = s.primaryStore
 	s.analyticalStore = as
+	if s.primaryStore != nil {
+		s.auditRecorder = audit.NewStoreRecorder(s.primaryStore)
+	}
 }
 
 // AnalyticalStore returns the configured AnalyticalStore, or nil if none is active.
