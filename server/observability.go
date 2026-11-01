@@ -10,7 +10,36 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/flint-fhir/flint/store"
 )
+
+func (s *Server) storageBackendLabel() string {
+	if s.store == nil {
+		return "none"
+	}
+	if hyb, ok := s.store.(*store.HybridStore); ok && hyb != nil {
+		return "hybrid(" + hyb.BackendName() + ")"
+	}
+	if as, ok := s.store.(store.AnalyticalStore); ok && !store.IsNil(as) {
+		return as.BackendName()
+	}
+	return string(store.BackendPostgres)
+}
+
+func (s *Server) attachStorageTopology(payload map[string]any) {
+	payload["storageBackend"] = s.storageBackendLabel()
+	if s.analyticalStore != nil && !store.IsNil(s.analyticalStore) {
+		payload["analyticalBackend"] = s.analyticalStore.BackendName()
+	}
+	if hyb, ok := s.store.(*store.HybridStore); ok && hyb != nil {
+		payload["hybridReplication"] = map[string]any{
+			"replicatedWrites":  hyb.ReplicatedWrites(),
+			"replicatedDeletes": hyb.ReplicatedDeletes(),
+			"replicationErrors": hyb.ReplicationErrors(),
+		}
+	}
+}
 
 type serverMetrics struct {
 	mu                              sync.Mutex
@@ -59,11 +88,13 @@ func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
 func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	payload := map[string]any{
 		"status":      "ok",
 		"service":     "flintd",
 		"fhirVersion": "4.0.1",
-	})
+	}
+	s.attachStorageTopology(payload)
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 // handleReadyz serves GET /readyz and GET /fhir/r4/{tenant}/readyz readiness probes.
@@ -81,11 +112,13 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	payload := map[string]any{
 		"status":                  "ready",
 		"store":                   "ok",
 		"registeredResourceTypes": len(s.protoRegistry),
-	})
+	}
+	s.attachStorageTopology(payload)
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 // handleMetrics serves GET /metrics and GET /fhir/r4/{tenant}/metrics in Prometheus exposition format.
@@ -167,6 +200,24 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString("# HELP flint_subscription_delivery_errors_total Total number of FHIR Subscription rest-hook delivery errors.\n")
 	b.WriteString("# TYPE flint_subscription_delivery_errors_total counter\n")
 	fmt.Fprintf(&b, "flint_subscription_delivery_errors_total %d\n", subDeliveryErr)
+
+	var hybWrites, hybDeletes, hybErrors uint64
+	if hyb, ok := s.store.(*store.HybridStore); ok && hyb != nil {
+		hybWrites = hyb.ReplicatedWrites()
+		hybDeletes = hyb.ReplicatedDeletes()
+		hybErrors = hyb.ReplicationErrors()
+	}
+	b.WriteString("# HELP flint_hybrid_replicated_writes_total Total number of FHIR resource writes replicated to the analytical store in hybrid mode.\n")
+	b.WriteString("# TYPE flint_hybrid_replicated_writes_total counter\n")
+	fmt.Fprintf(&b, "flint_hybrid_replicated_writes_total %d\n", hybWrites)
+
+	b.WriteString("# HELP flint_hybrid_replicated_deletes_total Total number of FHIR resource deletes replicated to the analytical store in hybrid mode.\n")
+	b.WriteString("# TYPE flint_hybrid_replicated_deletes_total counter\n")
+	fmt.Fprintf(&b, "flint_hybrid_replicated_deletes_total %d\n", hybDeletes)
+
+	b.WriteString("# HELP flint_hybrid_replication_errors_total Total number of hybrid OLTP-to-OLAP replication errors.\n")
+	b.WriteString("# TYPE flint_hybrid_replication_errors_total counter\n")
+	fmt.Fprintf(&b, "flint_hybrid_replication_errors_total %d\n", hybErrors)
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

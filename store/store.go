@@ -78,6 +78,9 @@ var (
 	ErrPreconditionFailed    = postgres.ErrPreconditionFailed
 	ErrCrossTenantBatch      = postgres.ErrCrossTenantBatch
 	ErrNoTenant              = postgres.ErrNoTenant
+	ParseDateOp              = postgres.ParseDateOp
+	ParseQuantityOp          = postgres.ParseQuantityOp
+	ParseChainedParam        = postgres.ParseChainedParam
 )
 
 // Re-exported domain types from store/postgres so callers and backend implementations
@@ -100,7 +103,18 @@ type (
 	ReindexParams               = postgres.ReindexParams
 	ReindexResult               = postgres.ReindexResult
 	SearchParams                = postgres.SearchParams
+	DateOp                      = postgres.DateOp
+	QuantityOp                  = postgres.QuantityOp
 	IncludeParam                = postgres.IncludeParam
+	ChainedHop                  = postgres.ChainedHop
+	ChainedParam                = postgres.ChainedParam
+	HasParam                    = postgres.HasParam
+	SortSpec                    = postgres.SortSpec
+	CompositeTokenQuantityParam = postgres.CompositeTokenQuantityParam
+	CompositeTokenTokenParam    = postgres.CompositeTokenTokenParam
+	CompositeTokenDateParam     = postgres.CompositeTokenDateParam
+	CompositeTokenStringParam   = postgres.CompositeTokenStringParam
+	FilterExpr                  = postgres.FilterExpr
 	SearchResult                = postgres.SearchResult
 	SearchResults               = postgres.SearchResults
 	PatientEverythingParams     = postgres.PatientEverythingParams

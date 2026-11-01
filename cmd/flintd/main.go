@@ -209,6 +209,12 @@ func openSQLiteStore(cliDSN string, getenv func(string) string, openDB func(dsn 
 		sqlite.WithJournalMode(journalMode),
 		sqlite.WithDSN(sqliteDSN),
 	)
+	if sqliteDB != nil {
+		if err := ss.LoadFromDB(context.Background()); err != nil {
+			_ = sqliteDB.Close()
+			return nil, nil, fmt.Errorf("load sqlite state from db: %w", err)
+		}
+	}
 	return ss, sqliteDB, nil
 }
 
@@ -307,7 +313,8 @@ func run(
 		primaryStore = pgStore
 		logger.Info("PostgreSQL store initialized", "tenant_isolation", string(isolationMode))
 
-		if analyticsBackend == store.BackendDoris {
+		switch analyticsBackend {
+		case store.BackendDoris:
 			ds, dorisDB, err := openDorisStore(getenv, openDB)
 			if err != nil {
 				return err
@@ -317,6 +324,16 @@ func run(
 			}
 			analyticalStore = ds
 			logger.Info("Hybrid OLTP+OLAP mode enabled: Apache Doris analytical store attached", "group_commit", string(ds.GroupCommit()))
+		case store.BackendSQLite:
+			ss, sqliteDB, err := openSQLiteStore(cliOpts.sqliteDSN, getenv, openDB)
+			if err != nil {
+				return err
+			}
+			if sqliteDB != nil {
+				defer sqliteDB.Close()
+			}
+			analyticalStore = ss
+			logger.Info("Hybrid OLTP+OLAP mode enabled: SQLite analytical store attached", "journal_mode", string(ss.JournalMode()), "dsn", ss.DSN())
 		}
 	}
 

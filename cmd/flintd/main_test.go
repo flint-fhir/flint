@@ -31,6 +31,11 @@ type stubSQLConn struct {
 }
 
 type stubSQLTx struct{}
+type stubSQLRows struct{}
+
+func (r *stubSQLRows) Columns() []string           { return nil }
+func (r *stubSQLRows) Close() error                { return nil }
+func (r *stubSQLRows) Next(_ []driver.Value) error { return io.EOF }
 
 func (d *stubSQLDriver) Open(_ string) (driver.Conn, error) {
 	return &stubSQLConn{pingErr: d.pingErr, execErr: d.execErr}, nil
@@ -45,6 +50,9 @@ func (c *stubSQLConn) ExecContext(_ context.Context, _ string, _ []driver.NamedV
 		return nil, c.execErr
 	}
 	return driver.RowsAffected(1), nil
+}
+func (c *stubSQLConn) QueryContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Rows, error) {
+	return &stubSQLRows{}, nil
 }
 
 func (t *stubSQLTx) Commit() error   { return nil }
@@ -256,6 +264,17 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 				}
 				return ""
 			},
+			io.Discard,
+			logger,
+			func(string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
+			func(_ string, _ http.Handler) error { return nil },
+		)
+		require.NoError(t, err)
+
+		// Hybrid mode: --store=postgres --analytics-store=sqlite
+		err = run(
+			[]string{"-store", "postgres", "-analytics-store", "sqlite"},
+			func(string) string { return "" },
 			io.Discard,
 			logger,
 			func(string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },

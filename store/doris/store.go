@@ -848,16 +848,17 @@ func (s *Store) Search(ctx context.Context, params store.SearchParams) (*store.S
 			ResourceProto: append([]byte(nil), entry.row.ResourceProto...),
 		})
 	}
+	store.SortSearchResults(params.TenantID, matches, params.Sort, s.lookupIndexedViewLocked)
 	s.mu.RUnlock()
 
-	sort.Slice(matches, func(i, j int) bool {
-		if !matches[i].LastUpdated.Equal(matches[j].LastUpdated) {
-			return matches[i].LastUpdated.After(matches[j].LastUpdated)
-		}
-		return matches[i].ResID < matches[j].ResID
-	})
-
 	total := len(matches)
+	if strings.EqualFold(params.Summary, "count") {
+		return &store.SearchResults{
+			Matches: []store.SearchResult{},
+			Total:   total,
+		}, nil
+	}
+
 	count := params.Count
 	if count <= 0 {
 		count = 20
@@ -875,67 +876,14 @@ func (s *Store) Search(ctx context.Context, params store.SearchParams) (*store.S
 	var includes []store.SearchResult
 	if len(matches) > 0 && (len(params.Includes) > 0 || len(params.RevIncludes) > 0) {
 		s.mu.RLock()
-		seen := make(map[string]bool, len(matches))
-		for _, m := range matches {
-			seen[resKey(params.TenantID, m.ResType, m.ResID)] = true
-		}
-		for _, inc := range params.Includes {
-			for _, m := range matches {
-				if inc.SourceType != "" && inc.SourceType != "*" && !strings.EqualFold(inc.SourceType, m.ResType) {
-					continue
-				}
-				mEntry, ok := s.resources[resKey(params.TenantID, m.ResType, m.ResID)]
-				if !ok || mEntry.indexes == nil {
-					continue
-				}
-				for _, ref := range mEntry.indexes.References {
-					if inc.ParamName != "" && inc.ParamName != "*" && !strings.EqualFold(inc.ParamName, ref.SpName) {
-						continue
-					}
-					if inc.TargetType != "" && inc.TargetType != "*" && !strings.EqualFold(inc.TargetType, ref.TargetType) {
-						continue
-					}
-					s.appendIncludeByTargetLocked(params.TenantID, ref.TargetType, ref.TargetID, seen, &includes)
-				}
-			}
-		}
-		for _, rev := range params.RevIncludes {
-			for _, cand := range s.resources {
-				if cand.row.TenantID != params.TenantID || cand.row.IsDeleted || cand.indexes == nil {
-					continue
-				}
-				if rev.SourceType != "" && rev.SourceType != "*" && !strings.EqualFold(rev.SourceType, cand.row.ResType) {
-					continue
-				}
-				candKey := resKey(params.TenantID, cand.row.ResType, cand.row.ResID)
-				if seen[candKey] {
-					continue
-				}
-				for _, ref := range cand.indexes.References {
-					if rev.ParamName != "" && rev.ParamName != "*" && !strings.EqualFold(rev.ParamName, ref.SpName) {
-						continue
-					}
-					matchedTarget := false
-					for _, m := range matches {
-						if ref.TargetID == m.ResID && (ref.TargetType == "" || strings.EqualFold(ref.TargetType, m.ResType)) {
-							matchedTarget = true
-							break
-						}
-					}
-					if matchedTarget {
-						seen[candKey] = true
-						includes = append(includes, store.SearchResult{
-							ResType:       cand.row.ResType,
-							ResID:         cand.row.ResID,
-							ResVersion:    cand.row.ResVersion,
-							LastUpdated:   cand.row.LastUpdated,
-							ResourceProto: append([]byte(nil), cand.row.ResourceProto...),
-						})
-						break
-					}
-				}
-			}
-		}
+		includes = store.ResolveSearchIncludes(
+			params.TenantID,
+			matches,
+			params.Includes,
+			params.RevIncludes,
+			s.lookupIndexedViewLocked,
+			s.listTenantViewsLocked,
+		)
 		s.mu.RUnlock()
 	}
 
@@ -944,6 +892,50 @@ func (s *Store) Search(ctx context.Context, params store.SearchParams) (*store.S
 		Includes: includes,
 		Total:    total,
 	}, nil
+}
+
+func toIndexedView(entry storedEntry) store.IndexedResourceView {
+	return store.IndexedResourceView{
+		TenantID:      entry.row.TenantID,
+		ResType:       entry.row.ResType,
+		ResID:         entry.row.ResID,
+		ResVersion:    entry.row.ResVersion,
+		LastUpdated:   entry.row.LastUpdated,
+		PatientID:     entry.row.PatientID,
+		EncounterID:   entry.row.EncounterID,
+		ResourceProto: entry.row.ResourceProto,
+		Indexes:       entry.indexes,
+	}
+}
+
+func (s *Store) lookupIndexedViewLocked(tenantID, resType, resID string) (store.IndexedResourceView, bool) {
+	if resType != "" {
+		if entry, ok := s.resources[resKey(tenantID, resType, resID)]; ok && !entry.row.IsDeleted {
+			return toIndexedView(entry), true
+		}
+		for _, entry := range s.resources {
+			if entry.row.TenantID == tenantID && !entry.row.IsDeleted && entry.row.ResID == resID && strings.EqualFold(entry.row.ResType, resType) {
+				return toIndexedView(entry), true
+			}
+		}
+		return store.IndexedResourceView{}, false
+	}
+	for _, entry := range s.resources {
+		if entry.row.TenantID == tenantID && !entry.row.IsDeleted && entry.row.ResID == resID {
+			return toIndexedView(entry), true
+		}
+	}
+	return store.IndexedResourceView{}, false
+}
+
+func (s *Store) listTenantViewsLocked(tenantID string) []store.IndexedResourceView {
+	out := make([]store.IndexedResourceView, 0, len(s.resources))
+	for _, entry := range s.resources {
+		if entry.row.TenantID == tenantID && !entry.row.IsDeleted {
+			out = append(out, toIndexedView(entry))
+		}
+	}
+	return out
 }
 
 func (s *Store) appendIncludeByTargetLocked(tenantID, targetType, targetID string, seen map[string]bool, includes *[]store.SearchResult) {
@@ -1043,13 +1035,13 @@ func (s *Store) matchesSearchParams(entry storedEntry, params store.SearchParams
 		}
 	}
 	for spName, strVal := range params.Strings {
-		if !matchStringInRow(row, spName, strVal) {
+		if !matchStringInRow(row, spName, strVal) && !store.MatchIndexString(entry.indexes, spName, strVal) {
 			return false
 		}
 	}
 	for spName, strVals := range params.StringFilters {
 		for _, sv := range strVals {
-			if !matchStringInRow(row, spName, sv) {
+			if !matchStringInRow(row, spName, sv) && !store.MatchIndexString(entry.indexes, spName, sv) {
 				return false
 			}
 		}
@@ -1066,7 +1058,7 @@ func (s *Store) matchesSearchParams(entry storedEntry, params store.SearchParams
 			}
 		}
 	}
-	return true
+	return store.EvaluateAdvancedSearchParams(toIndexedView(entry), params, s.lookupIndexedViewLocked, s.listTenantViewsLocked)
 }
 
 func matchURIInRow(row DorisResourceRow, idx *store.SearchIndexes, spName, rawURI string) bool {

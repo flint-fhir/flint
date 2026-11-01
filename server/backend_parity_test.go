@@ -212,4 +212,162 @@ func TestHybridAutoSync_And_ObservationStatsPushdown(t *testing.T) {
 	assert.Contains(t, string(expBody), `"id":"auto-hyb-pat-1"`)
 	assert.Contains(t, string(expBody), `"id":"obs-hr-1"`)
 	assert.Contains(t, string(expBody), `"id":"obs-hr-2"`)
+
+	// 5. Verify /healthz, /readyz, and /metrics report storageBackend, analyticalBackend, and hybridReplication
+	for _, ep := range []string{"/healthz", "/readyz"} {
+		respH, hErr := client.Get(ts.URL + ep)
+		require.NoError(t, hErr)
+		var hMap map[string]any
+		require.NoError(t, json.NewDecoder(respH.Body).Decode(&hMap))
+		respH.Body.Close()
+		assert.Equal(t, http.StatusOK, respH.StatusCode)
+		assert.Equal(t, "hybrid(doris)", hMap["storageBackend"])
+		assert.Equal(t, "doris", hMap["analyticalBackend"])
+		hybRep, ok := hMap["hybridReplication"].(map[string]any)
+		require.True(t, ok, "expected hybridReplication in %s response", ep)
+		assert.GreaterOrEqual(t, hybRep["replicatedWrites"].(float64), float64(3))
+		assert.Equal(t, float64(0), hybRep["replicationErrors"].(float64))
+	}
+
+	respMet, err := client.Get(ts.URL + "/metrics")
+	require.NoError(t, err)
+	metBody, err := io.ReadAll(respMet.Body)
+	respMet.Body.Close()
+	require.NoError(t, err)
+	assert.Contains(t, string(metBody), `flint_hybrid_replicated_writes_total 3`)
+	assert.Contains(t, string(metBody), `flint_hybrid_replicated_deletes_total 0`)
+	assert.Contains(t, string(metBody), `flint_hybrid_replication_errors_total 0`)
+
+	// 6. Verify Measure/$evaluate-measure and Measure/$care-gaps invoke analytical pushdown and set X-Flint-Analytical-Backend
+	respEval, err := client.Get(ts.URL + "/fhir/r4/demo/Measure/cms122/$evaluate-measure?periodStart=2020-01-01&periodEnd=2030-12-31")
+	require.NoError(t, err)
+	respEval.Body.Close()
+	assert.Equal(t, http.StatusOK, respEval.StatusCode)
+	assert.Equal(t, "doris", respEval.Header.Get("X-Flint-Analytical-Backend"))
+
+	respGaps, err := client.Get(ts.URL + "/fhir/r4/demo/Measure/$care-gaps?periodStart=2020-01-01&periodEnd=2030-12-31&subject=Patient/auto-hyb-pat-1&status=open-gap")
+	require.NoError(t, err)
+	respGaps.Body.Close()
+	assert.Equal(t, http.StatusOK, respGaps.StatusCode)
+	assert.Equal(t, "doris", respGaps.Header.Get("X-Flint-Analytical-Backend"))
+}
+
+func TestWave66_DorisAndSQLite_AdvancedSearchHTTPParity(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	for _, tc := range []struct {
+		name string
+		st   store.Store
+	}{
+		{"doris", doris.New(nil)},
+		{"sqlite", sqlite.New(nil, sqlite.WithDSN(":memory:"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := server.New(tc.st, logger)
+			server.RegisterDefaultResourceTypes(srv)
+
+			ts := httptest.NewServer(srv.Handler())
+			defer ts.Close()
+			client := ts.Client()
+
+			putJSON := func(path, body string) {
+				req, err := http.NewRequest(http.MethodPut, ts.URL+path, bytes.NewBufferString(body))
+				require.NoError(t, err)
+				req.Header.Set("Content-Type", "application/fhir+json")
+				resp, err := client.Do(req)
+				require.NoError(t, err)
+				resp.Body.Close()
+				require.Contains(t, []int{http.StatusOK, http.StatusCreated}, resp.StatusCode)
+			}
+
+			putJSON("/fhir/r4/t1/Organization/org-1", `{"resourceType":"Organization","id":"org-1","name":"General Health System"}`)
+			putJSON("/fhir/r4/t1/Patient/pat-1", `{
+				"resourceType":"Patient",
+				"id":"pat-1",
+				"text":{"status":"generated","div":"<div xmlns=\"http://www.w3.org/1999/xhtml\">Narrative for Alice Smith</div>"},
+				"name":[{"family":"Smith","given":["Alice"]}],
+				"gender":"female",
+				"birthDate":"1985-06-15",
+				"managingOrganization":{"reference":"Organization/org-1"}
+			}`)
+			putJSON("/fhir/r4/t1/Patient/pat-2", `{
+				"resourceType":"Patient",
+				"id":"pat-2",
+				"name":[{"family":"Zimmerman","given":["Bob"]}],
+				"gender":"male",
+				"birthDate":"1970-01-01",
+				"deceasedBoolean":true
+			}`)
+			putJSON("/fhir/r4/t1/Observation/obs-1", `{
+				"resourceType":"Observation",
+				"id":"obs-1",
+				"status":"final",
+				"code":{"coding":[{"system":"http://loinc.org","code":"8480-6"}]},
+				"subject":{"reference":"Patient/pat-1"},
+				"valueQuantity":{"value":70,"unit":"kg","system":"http://unitsofmeasure.org","code":"kg"}
+			}`)
+			putJSON("/fhir/r4/t1/List/list-1", `{
+				"resourceType":"List",
+				"id":"list-1",
+				"status":"current",
+				"mode":"working",
+				"entry":[{"item":{"reference":"Patient/pat-1"}}]
+			}`)
+
+			searchTotal := func(query string) (int, map[string]any) {
+				resp, err := client.Get(ts.URL + "/fhir/r4/t1/" + query)
+				require.NoError(t, err)
+				defer resp.Body.Close()
+				require.Equal(t, http.StatusOK, resp.StatusCode, "query %s failed", query)
+				var b map[string]any
+				require.NoError(t, json.NewDecoder(resp.Body).Decode(&b))
+				tot, _ := b["total"].(float64)
+				return int(tot), b
+			}
+
+			// 1. Date range (ge + le)
+			tot, _ := searchTotal("Patient?birthdate=ge1980-01-01&birthdate=le1990-12-31")
+			assert.Equal(t, 1, tot)
+
+			// 2. Quantity + UCUM unit conversion (70 kg == 70000 g)
+			tot, _ = searchTotal("Observation?value-quantity=70000%7Chttp://unitsofmeasure.org%7Cg")
+			assert.Equal(t, 1, tot)
+
+			// 3. :missing modifier
+			tot, _ = searchTotal("Patient?deceased:missing=true")
+			assert.Equal(t, 1, tot)
+
+			// 4. Single-hop and multi-hop chained search
+			tot, _ = searchTotal("Observation?subject:Patient.family=Smith")
+			assert.Equal(t, 1, tot)
+			tot, _ = searchTotal("Observation?subject:Patient.organization:Organization.name=General")
+			assert.Equal(t, 1, tot)
+
+			// 5. Reverse chaining (_has)
+			tot, _ = searchTotal("Patient?_has:Observation:patient:code=8480-6")
+			assert.Equal(t, 1, tot)
+
+			// 6. _filter boolean AST
+			tot, _ = searchTotal("Patient?_filter=family%20eq%20%22Smith%22%20and%20not%20(gender%20eq%20%22male%22)")
+			assert.Equal(t, 1, tot)
+
+			// 7. Composite token$quantity with UCUM conversion
+			tot, _ = searchTotal("Observation?code-value-quantity=http://loinc.org%7C8480-6$70000%7Chttp://unitsofmeasure.org%7Cg")
+			assert.Equal(t, 1, tot)
+
+			// 8. _content, _text, _list
+			tot, _ = searchTotal("Patient?_content=Smith&_text=Narrative&_list=list-1")
+			assert.Equal(t, 1, tot)
+
+			// 9. _summary=count & _sort & _include:iterate
+			tot, bCount := searchTotal("Patient?_summary=count")
+			assert.Equal(t, 2, tot)
+			assert.Nil(t, bCount["entry"])
+
+			tot, bInc := searchTotal("Observation?_include=Observation:patient&_include:iterate=Patient:organization")
+			assert.Equal(t, 1, tot)
+			entries, _ := bInc["entry"].([]any)
+			assert.Len(t, entries, 3, "expected Observation + Patient + iterative Organization")
+		})
+	}
 }
