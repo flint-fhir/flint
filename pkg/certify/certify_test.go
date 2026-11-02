@@ -465,6 +465,15 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			_, _ = w.Write([]byte(`{"resourceType":"Patient","id":"conv-pat-1","name":[{"family":"CertifyProto"}]}`))
 			return
 		}
+		if strings.HasSuffix(path, "/ValueSet/$expand") || strings.HasSuffix(path, "/$validate-code") || strings.HasSuffix(path, "/CodeSystem/$lookup") || strings.HasSuffix(path, "/CodeSystem/$subsumes") || strings.HasSuffix(path, "/ConceptMap/$translate") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x74, 0x65, 0x72, 0x6d})
+				return
+			}
+		}
 		if strings.HasSuffix(path, "/ValueSet/$expand") {
 			_, _ = w.Write([]byte(`{"resourceType":"ValueSet","expansion":{"contains":[{"code":"8867-4","display":"Heart rate"}]}}`))
 			return
@@ -919,7 +928,7 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 		}
 		if strings.HasSuffix(path, "/ViewDefinition/$sql") {
 			w.Header().Set("Content-Type", "application/sql; charset=utf-8")
-			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val, ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens), ARRAY_JOIN(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), ' '), ARRAY_SIZE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))), LOWER(r.res_id), UPPER(r.res_id), CHAR_LENGTH(r.res_id), LENGTH(r.res_id), (SELECT COUNT(*) FROM spidx_string s), ARRAY_TO_STRING(ARRAY_AGG(s.sp_value), ' '), ARRAY_AGG(s.sp_value) FROM fhir_observation r LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok INNER JOIN spidx_token fe ON fe.tenant_id = r.tenant_id WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error') AND r.effective_start IS NOT NULL AND array_exists(x -> x LIKE 'family=Cert%', r.string_tokens) AND array_exists(x -> x LIKE 'family=%tify', r.string_tokens) AND array_exists(x -> x LIKE 'given=%lic%', r.string_tokens) UNION ALL SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r\n"))
+			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val, ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens), ARRAY_JOIN(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), ' '), ARRAY_SIZE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))), element_at(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), -1), ARRAY_SLICE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), 2), ORDER BY s.sp_value DESC LIMIT 1, LIMIT 1 OFFSET 1, LIMIT 2) sub, COALESCE(r.res_id, 'Unknown'), LOWER(r.res_id), UPPER(r.res_id), CHAR_LENGTH(r.res_id), LENGTH(r.res_id), (SELECT COUNT(*) FROM spidx_string s), ARRAY_TO_STRING(ARRAY_AGG(s.sp_value), ' '), ARRAY_AGG(s.sp_value) FROM fhir_observation r LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok INNER JOIN spidx_token fe ON fe.tenant_id = r.tenant_id WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error') AND r.effective_start IS NOT NULL AND array_exists(x -> x LIKE 'family=Cert%', r.string_tokens) AND array_exists(x -> x LIKE 'family=%tify', r.string_tokens) AND array_exists(x -> x LIKE 'given=%lic%', r.string_tokens) UNION ALL SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r\n"))
 			return
 		}
 		if strings.HasSuffix(path, "/$sync-analytics") {
@@ -981,8 +990,8 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 91 {
-		t.Fatalf("expected all 91 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 92 {
+		t.Fatalf("expected all 92 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()

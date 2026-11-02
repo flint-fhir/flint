@@ -1602,11 +1602,60 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 
 func dorisZeroJSONCollectionColumnExpr(fhirPath string) (string, string) {
 	p := strings.TrimSpace(fhirPath)
+	if idx := strings.Index(p, ".skip("); idx != -1 && strings.HasSuffix(p, ")") {
+		basePath := strings.TrimSpace(p[:idx])
+		if n, err := strconv.Atoi(strings.TrimSpace(p[idx+len(".skip(") : len(p)-1])); err == nil && n >= 0 {
+			collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+			return fmt.Sprintf("ARRAY_SLICE(%s, %d)", collExpr, n+1), strings.TrimSuffix(collSrc, "[]") + ".skip[]"
+		}
+	}
+	if idx := strings.Index(p, ".take("); idx != -1 && strings.HasSuffix(p, ")") {
+		basePath := strings.TrimSpace(p[:idx])
+		if n, err := strconv.Atoi(strings.TrimSpace(p[idx+len(".take(") : len(p)-1])); err == nil && n >= 0 {
+			collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+			return fmt.Sprintf("ARRAY_SLICE(%s, 1, %d)", collExpr, n), strings.TrimSuffix(collSrc, "[]") + ".take[]"
+		}
+	}
 	sp := normalizeFHIRPathToSearchParam(p)
 	if strings.HasPrefix(p, "name") || p == "given" || p == "family" || strings.HasPrefix(p, "address") || strings.HasPrefix(p, "telecom") {
 		return fmt.Sprintf("ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE '%s=%%', r.string_tokens))", sp), "string_tokens[" + sp + "][]"
 	}
 	return fmt.Sprintf("ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE '%s=|%%', r.code_tokens))", sp), "code_tokens[" + sp + "][]"
+}
+
+func splitTopLevelCommaArgs(inner string) []string {
+	var out []string
+	inQuote := false
+	parenDepth := 0
+	start := 0
+	for i := 0; i < len(inner); i++ {
+		ch := inner[i]
+		if ch == '\'' {
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			continue
+		}
+		if ch == '(' {
+			parenDepth++
+			continue
+		}
+		if ch == ')' && parenDepth > 0 {
+			parenDepth--
+			continue
+		}
+		if parenDepth == 0 && ch == ',' {
+			if part := strings.TrimSpace(inner[start:i]); part != "" {
+				out = append(out, part)
+			}
+			start = i + 1
+		}
+	}
+	if tail := strings.TrimSpace(inner[start:]); tail != "" {
+		out = append(out, tail)
+	}
+	return out
 }
 
 func spidxZeroJSONCollectionColumnExpr(fhirPath, dialect string) (string, string) {
@@ -1661,12 +1710,33 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 	if strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") {
 		return p, "constant"
 	}
+	if strings.HasPrefix(strings.ToLower(p), "coalesce(") && strings.HasSuffix(p, ")") {
+		args := splitTopLevelCommaArgs(p[len("coalesce(") : len(p)-1])
+		if len(args) > 0 {
+			exprs := make([]string, 0, len(args))
+			for _, a := range args {
+				ce, _ := dorisZeroJSONColumnExpr(a, isCore)
+				exprs = append(exprs, ce)
+			}
+			return fmt.Sprintf("COALESCE(%s)", strings.Join(exprs, ", ")), "coalesce"
+		}
+	}
 	if idx := strings.Index(p, ".join("); idx != -1 && strings.HasSuffix(p, ")") {
 		basePath := strings.TrimSpace(p[:idx])
 		rawSep := strings.Trim(strings.TrimSpace(p[idx+len(".join("):len(p)-1]), "'\"")
 		escapedSep := strings.ReplaceAll(rawSep, "'", "''")
 		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
 		return fmt.Sprintf("ARRAY_JOIN(%s, '%s')", collExpr, escapedSep), strings.TrimSuffix(collSrc, "[]") + ".join"
+	}
+	if strings.HasSuffix(p, ".last()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".last()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("element_at(%s, -1)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".last"
+	}
+	if strings.HasSuffix(p, ".first()") && (strings.Contains(p, ".skip(") || strings.Contains(p, ".take(")) {
+		basePath := strings.TrimSpace(p[:len(p)-len(".first()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("element_at(%s, 1)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".first"
 	}
 	if strings.HasSuffix(p, ".count()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".count()")])
@@ -1918,12 +1988,43 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 	if strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") {
 		return p, "constant"
 	}
+	if strings.HasPrefix(strings.ToLower(p), "coalesce(") && strings.HasSuffix(p, ")") {
+		args := splitTopLevelCommaArgs(p[len("coalesce(") : len(p)-1])
+		if len(args) > 0 {
+			exprs := make([]string, 0, len(args))
+			for _, a := range args {
+				ce, _ := spidxZeroJSONColumnExpr(a, dialect)
+				exprs = append(exprs, ce)
+			}
+			return fmt.Sprintf("COALESCE(%s)", strings.Join(exprs, ", ")), "coalesce"
+		}
+	}
 	if idx := strings.Index(p, ".join("); idx != -1 && strings.HasSuffix(p, ")") {
 		basePath := strings.TrimSpace(p[:idx])
 		rawSep := strings.Trim(strings.TrimSpace(p[idx+len(".join("):len(p)-1]), "'\"")
 		escapedSep := strings.ReplaceAll(rawSep, "'", "''")
+		takeLimit := 0
+		if tIdx := strings.Index(basePath, ".take("); tIdx != -1 && strings.HasSuffix(basePath, ")") {
+			if n, err := strconv.Atoi(strings.TrimSpace(basePath[tIdx+len(".take(") : len(basePath)-1])); err == nil && n > 0 {
+				takeLimit = n
+				basePath = strings.TrimSpace(basePath[:tIdx])
+			}
+		}
 		sp := normalizeFHIRPathToSearchParam(basePath)
 		isStringParam := strings.HasPrefix(basePath, "name") || basePath == "given" || basePath == "family" || strings.HasPrefix(basePath, "address") || strings.HasPrefix(basePath, "telecom")
+		if takeLimit > 0 {
+			tbl := "spidx_token t"
+			src := "spidx_token.take.join"
+			if isStringParam {
+				tbl = "spidx_string s"
+				src = "spidx_string.take.join"
+			}
+			alias := tbl[len(tbl)-1:]
+			if dialect == "sqlite" {
+				return fmt.Sprintf("(SELECT COALESCE(group_concat(sub.sp_value, '%s'), '') FROM (SELECT %s.sp_value FROM %s WHERE %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = '%s' LIMIT %d) sub)", escapedSep, alias, tbl, alias, alias, alias, alias, sp, takeLimit), src
+			}
+			return fmt.Sprintf("(SELECT COALESCE(ARRAY_TO_STRING(ARRAY_AGG(sub.sp_value), '%s'), '') FROM (SELECT %s.sp_value FROM %s WHERE %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = '%s' LIMIT %d) sub)", escapedSep, alias, tbl, alias, alias, alias, alias, sp, takeLimit), src
+		}
 		if dialect == "sqlite" {
 			if isStringParam {
 				return fmt.Sprintf("(SELECT COALESCE(group_concat(s.sp_value, '%s'), '') FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s')", escapedSep, sp), "spidx_string.join"
@@ -1934,6 +2035,29 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 			return fmt.Sprintf("(SELECT COALESCE(ARRAY_TO_STRING(ARRAY_AGG(s.sp_value), '%s'), '') FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s')", escapedSep, sp), "spidx_string.join"
 		}
 		return fmt.Sprintf("(SELECT COALESCE(ARRAY_TO_STRING(ARRAY_AGG(t.sp_value), '%s'), '') FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s')", escapedSep, sp), "spidx_token.join"
+	}
+	if strings.HasSuffix(p, ".last()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".last()")])
+		sp := normalizeFHIRPathToSearchParam(basePath)
+		isStringParam := strings.HasPrefix(basePath, "name") || basePath == "given" || basePath == "family" || strings.HasPrefix(basePath, "address") || strings.HasPrefix(basePath, "telecom")
+		if isStringParam {
+			return fmt.Sprintf("(SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' ORDER BY s.sp_value DESC LIMIT 1)", sp), "spidx_string.last"
+		}
+		return fmt.Sprintf("(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' ORDER BY t.sp_value DESC LIMIT 1)", sp), "spidx_token.last"
+	}
+	if strings.HasSuffix(p, ".first()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".first()")])
+		if idx := strings.Index(basePath, ".skip("); idx != -1 && strings.HasSuffix(basePath, ")") {
+			rootPath := strings.TrimSpace(basePath[:idx])
+			if n, err := strconv.Atoi(strings.TrimSpace(basePath[idx+len(".skip(") : len(basePath)-1])); err == nil && n >= 0 {
+				sp := normalizeFHIRPathToSearchParam(rootPath)
+				isStringParam := strings.HasPrefix(rootPath, "name") || rootPath == "given" || rootPath == "family" || strings.HasPrefix(rootPath, "address") || strings.HasPrefix(rootPath, "telecom")
+				if isStringParam {
+					return fmt.Sprintf("(SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' LIMIT 1 OFFSET %d)", sp, n), "spidx_string.skip.first"
+				}
+				return fmt.Sprintf("(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' LIMIT 1 OFFSET %d)", sp, n), "spidx_token.skip.first"
+			}
+		}
 	}
 	if strings.HasSuffix(p, ".count()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".count()")])

@@ -19,7 +19,9 @@ import (
 	dtpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto"
 	bcrpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/bundle_and_contained_resource_go_proto"
 	oopb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/operation_outcome_go_proto"
+	parampb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/parameters_go_proto"
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
+	vspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/value_set_go_proto"
 
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store"
@@ -1134,6 +1136,110 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		require.Equal(t, http.StatusOK, respCnt.StatusCode)
 		for _, want := range tc.wantContains {
 			assert.Contains(t, string(cntBytes), want)
+		}
+	}
+
+	// 21. Binary Proto3 Terminology Operations ($expand, $validate-code, $lookup, $translate) & SQL-on-FHIR v2 .last(), .skip(N), .take(N) & coalesce() $sql pushdown
+	reqExpProto, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/ValueSet/$expand?url=http://hl7.org/fhir/ValueSet/administrative-gender&_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqExpProto.Header.Set("Accept", "application/x-protobuf")
+	respExpProto, err := client.Do(reqExpProto)
+	require.NoError(t, err)
+	vsExpProtoBytes, _ := io.ReadAll(respExpProto.Body)
+	respExpProto.Body.Close()
+	require.Equal(t, http.StatusOK, respExpProto.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respExpProto.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respExpProto.Header.Get("X-Flint-Wire-Format"))
+	var vsExpanded vspb.ValueSet
+	require.NoError(t, proto.Unmarshal(vsExpProtoBytes, &vsExpanded))
+	assert.GreaterOrEqual(t, len(vsExpanded.GetExpansion().GetContains()), 4)
+
+	vcParamsJSON := `{"resourceType":"Parameters","parameter":[{"name":"url","valueUri":"http://hl7.org/fhir/ValueSet/administrative-gender"},{"name":"code","valueCode":"female"}]}`
+	reqVCConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(vcParamsJSON))
+	require.NoError(t, err)
+	reqVCConv.Header.Set("Content-Type", "application/fhir+json")
+	reqVCConv.Header.Set("Accept", "application/x-protobuf")
+	respVCConv, err := client.Do(reqVCConv)
+	require.NoError(t, err)
+	vcParamsProtoBytes, _ := io.ReadAll(respVCConv.Body)
+	respVCConv.Body.Close()
+	require.Equal(t, http.StatusOK, respVCConv.StatusCode)
+
+	reqVCProto, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ValueSet/$validate-code", bytes.NewReader(vcParamsProtoBytes))
+	require.NoError(t, err)
+	reqVCProto.Header.Set("Content-Type", "application/x-protobuf")
+	reqVCProto.Header.Set("Accept", "application/x-protobuf")
+	respVCProto, err := client.Do(reqVCProto)
+	require.NoError(t, err)
+	vcOutProtoBytes, _ := io.ReadAll(respVCProto.Body)
+	respVCProto.Body.Close()
+	require.Equal(t, http.StatusOK, respVCProto.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respVCProto.Header.Get("Content-Type"))
+	var vcOutParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(vcOutProtoBytes, &vcOutParams))
+	assert.GreaterOrEqual(t, len(vcOutParams.GetParameter()), 2)
+
+	sliceCoalVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "patient_slice_coalesce",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "last_given", "path": "name.given.last()"},
+					{"name": "second_given", "path": "name.given.skip(1).first()"},
+					{"name": "first_two_given", "path": "name.given.take(2).join(' ')"},
+					{"name": "family_or_unk", "path": "coalesce(name.family, 'Unknown')"}
+				]
+			}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"element_at(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), -1)",
+				"element_at(ARRAY_SLICE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), 2), 1)",
+				"ARRAY_JOIN(ARRAY_SLICE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), 1, 2), ' ')",
+				"COALESCE(element_at(array_map(x -> split_part(x, '=', 2), array_filter(x -> x LIKE 'family=%', r.string_tokens)), 1), 'Unknown')",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"ORDER BY s.sp_value DESC LIMIT 1",
+				"LIMIT 1 OFFSET 1",
+				"COALESCE(ARRAY_TO_STRING(ARRAY_AGG(sub.sp_value), ' '), '')",
+				"LIMIT 2) sub",
+				"COALESCE((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1), 'Unknown')",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"ORDER BY s.sp_value DESC LIMIT 1",
+				"LIMIT 1 OFFSET 1",
+				"COALESCE(group_concat(sub.sp_value, ' '), '')",
+				"LIMIT 2) sub",
+				"COALESCE((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1), 'Unknown')",
+			},
+		},
+	} {
+		reqSl, sErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(sliceCoalVD))
+		require.NoError(t, sErr)
+		reqSl.Header.Set("Content-Type", "application/fhir+json")
+		respSl, sErr := client.Do(reqSl)
+		require.NoError(t, sErr)
+		slBytes, _ := io.ReadAll(respSl.Body)
+		respSl.Body.Close()
+		require.Equal(t, http.StatusOK, respSl.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(slBytes), want)
 		}
 	}
 }
