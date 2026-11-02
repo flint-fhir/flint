@@ -2471,6 +2471,36 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-06", suite10, "Binary Proto3 Transaction/Batch Bundle Wire Execution & SQL-on-FHIR v2 forEach/forEachOrNull Unnesting $sql Pushdown", t0, err, "Binary google.fhir.r4.core.Bundle transaction execution, Type _history Proto3 & LATERAL VIEW EXPLODE / JOIN spidx_* $sql pushdown verified")
 
+	// AN-07: Binary Proto3 Bulk Data $export & $import Round-Trip (_outputFormat=application/x-protobuf) & SQL-on-FHIR v2 collection:true Array Aggregation $sql Pushdown
+	t0 = time.Now()
+	{
+		respProtoExpKick, _, errProtoExpKick := doReq(http.MethodGet, basePath+"/$export?_outputFormat=application/x-protobuf&_type=Patient", "", nil, map[string]string{
+			"Prefer": "respond-async",
+		})
+		impBundleJSON := []byte(`{"resourceType":"Bundle","type":"collection","entry":[{"fullUrl":"Patient/cert-proto-imp-1","resource":{"resourceType":"Patient","id":"cert-proto-imp-1","name":[{"family":"ProtoImport","given":["Alan"]}]}}]}`)
+		respImpConv, bImpProto, errImpConv := doReq(http.MethodPost, basePath+"/Bundle/$convert", "application/fhir+json", impBundleJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respProtoImp, bProtoImpResp, errProtoImp := doReq(http.MethodPost, basePath+"/$import", "application/x-protobuf", bImpProto, nil)
+		collVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_collection_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"given_names","path":"name.given","collection":true},{"name":"identifiers","path":"identifier.value","collection":true}]}]}`)
+		respCollDoris, bCollDoris, errCollDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", collVD, nil)
+		respCollPg, bCollPg, errCollPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", collVD, nil)
+		if errProtoExpKick != nil || respProtoExpKick.StatusCode != http.StatusAccepted || respProtoExpKick.Header.Get("Content-Location") == "" {
+			err = fmt.Errorf("expected GET /$export?_outputFormat=application/x-protobuf to return 202 Accepted with Content-Location, got %d", respProtoExpKick.StatusCode)
+		} else if errImpConv != nil || respImpConv.StatusCode != http.StatusOK || len(bImpProto) == 0 {
+			err = fmt.Errorf("expected POST /Bundle/$convert to return binary Proto3 COLLECTION Bundle, got %d", respImpConv.StatusCode)
+		} else if errProtoImp != nil || respProtoImp.StatusCode != http.StatusOK || !strings.Contains(string(bProtoImpResp), "Successfully imported") {
+			err = fmt.Errorf("expected POST /$import with Content-Type: application/x-protobuf to succeed, got %d: %s", respProtoImp.StatusCode, string(bProtoImpResp))
+		} else if errCollDoris != nil || respCollDoris.StatusCode != http.StatusOK || !strings.Contains(string(bCollDoris), "ARRAY_FILTER") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with collection:true to emit ARRAY_FILTER, got %d: %s", respCollDoris.StatusCode, string(bCollDoris))
+		} else if errCollPg != nil || respCollPg.StatusCode != http.StatusOK || !strings.Contains(string(bCollPg), "ARRAY_AGG") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with collection:true to emit ARRAY_AGG, got %d: %s", respCollPg.StatusCode, string(bCollPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-07", suite10, "Binary Proto3 Bulk $export & $import (_outputFormat=application/x-protobuf) & SQL-on-FHIR v2 collection:true Array Aggregation $sql Pushdown", t0, err, "Binary Proto3 Bulk $export/$import round-trip & ARRAY_FILTER / ARRAY_AGG collection:true $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

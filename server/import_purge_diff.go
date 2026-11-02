@@ -69,7 +69,10 @@ func (s *Server) handleBulkImport(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read $import request body")
 		return
 	}
-	trimmedBody := bytes.TrimSpace(body)
+	trimmedBody := body
+	if !isProtoContentType(r) {
+		trimmedBody = bytes.TrimSpace(body)
+	}
 	if len(trimmedBody) == 0 {
 		writeOperationOutcome(w, http.StatusBadRequest, "required", "empty request body for $import")
 		return
@@ -176,6 +179,34 @@ func (s *Server) handleBulkImport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) parseBulkImportBlocks(ctx context.Context, contentType string, body []byte) ([]importSourceBlock, error) {
 	ct := strings.ToLower(strings.TrimSpace(contentType))
+	if strings.Contains(ct, "protobuf") || strings.Contains(ct, "fhir+proto") {
+		bundleMap, err := fhirutil.ProtoBytesToFHIRMap(fhirutil.BundleDescriptor(), "Bundle", body, 0, time.Time{})
+		if err != nil {
+			return nil, fmt.Errorf("invalid Bundle protobuf in $import request: %v", err)
+		}
+		entries, _ := bundleMap["entry"].([]any)
+		var blocks []importSourceBlock
+		for _, rawE := range entries {
+			em, ok := rawE.(map[string]any)
+			if !ok {
+				continue
+			}
+			resMap, ok := em["resource"].(map[string]any)
+			if !ok || resMap == nil {
+				continue
+			}
+			rt, _ := resMap["resourceType"].(string)
+			lineBytes, err := json.Marshal(resMap)
+			if err != nil {
+				continue
+			}
+			blocks = append(blocks, importSourceBlock{
+				ResourceType: rt,
+				NDJSON:       string(lineBytes),
+			})
+		}
+		return blocks, nil
+	}
 	if strings.Contains(ct, "ndjson") {
 		return []importSourceBlock{{NDJSON: string(body)}}, nil
 	}

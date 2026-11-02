@@ -15,8 +15,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -118,7 +122,25 @@ func (s *Server) deleteExportJob(tenant, jobID string) bool {
 	return true
 }
 
+func isProtoExportFormat(raw string) (bool, string) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if idx := strings.Index(v, ";"); idx != -1 {
+		v = strings.TrimSpace(v[:idx])
+	}
+	switch v {
+	case "application/x-protobuf", "application/protobuf":
+		return true, "application/x-protobuf"
+	case "application/fhir+protobuf", "application/fhir+proto":
+		return true, "application/fhir+protobuf"
+	default:
+		return false, ""
+	}
+}
+
 func isValidNDJSONFormat(raw string) bool {
+	if okProto, _ := isProtoExportFormat(raw); okProto {
+		return true
+	}
 	v := strings.ToLower(strings.TrimSpace(raw))
 	if idx := strings.Index(v, ";"); idx != -1 {
 		v = strings.TrimSpace(v[:idx])
@@ -590,6 +612,62 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 	wantsManifest := (strings.Contains(accept, "application/json") || strings.Contains(accept, "application/fhir+json")) &&
 		!strings.Contains(accept, "ndjson") || strings.EqualFold(reqParams.formatParam, "manifest")
 
+	okProtoOut, protoOutCT := isProtoExportFormat(reqParams.outputFormat)
+	okProtoReq, protoReqCT := wantsProtoResponse(r)
+	if !isAsync && (okProtoOut || okProtoReq) {
+		outCT := protoOutCT
+		if outCT == "" {
+			outCT = protoReqCT
+		}
+		if bundleDesc := fhirutil.BundleDescriptor(); bundleDesc != nil {
+			bundleMsg := dynamicpb.NewMessage(bundleDesc)
+			setProtoEnumWrapper(bundleMsg, "type", "COLLECTION")
+			entryFD := bundleDesc.Fields().ByName("entry")
+			var entryList protoreflect.List
+			if entryFD != nil && entryFD.IsList() {
+				entryList = bundleMsg.Mutable(entryFD).List()
+			}
+			patientRestricted := hasSecCtx && auth.IsPatientRestricted(secCtx)
+			allowedPat := ""
+			if patientRestricted {
+				allowedPat = cleanID(secCtx.GetPatientId())
+			}
+			total := 0
+			_ = s.streamExportResources(r.Context(), exportParams, func(res postgres.SearchResult) error {
+				if !matchesExportTypeFilter(typeFilterAllowed, res.ResType, res.ResID) {
+					return nil
+				}
+				if hasSecCtx {
+					if patientRestricted && patientID != "" && strings.EqualFold(res.ResType, "Patient") && cleanID(res.ResID) != allowedPat {
+						return nil
+					}
+					if !s.resourceAllowedByGranularScope(secCtx, tenant, res.ResType, res.ResID, res.ResourceProto) {
+						return nil
+					}
+				}
+				if entryList != nil && len(res.ResourceProto) > 0 {
+					entryMsg := entryList.NewElement().Message()
+					setProtoStringWrapper(entryMsg, "full_url", fmt.Sprintf("%s/%s", res.ResType, res.ResID))
+					if s.setBundleEntryProtoResource(entryMsg, res.ResType, res.ResID, res.ResourceProto, res.ResVersion, res.LastUpdated) {
+						entryList.Append(protoreflect.ValueOfMessage(entryMsg))
+						total++
+					}
+				}
+				return nil
+			})
+			setProtoUint32Wrapper(bundleMsg, "total", uint32(total))
+			if protoWire, mErr := proto.Marshal(bundleMsg); mErr == nil {
+				w.Header().Set("Content-Type", outCT)
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+				w.Header().Set("X-Flint-Execution-Mode", "zero-json-protoreflect")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write(protoWire)
+				return
+			}
+		}
+	}
+
 	// Fast path for direct NDJSON streaming (neither async nor manifest requested):
 	// stream each resource line directly to the response writer in paginated DB batches
 	// without buffering the entire export in memory or writing a job row to Postgres.
@@ -851,6 +929,14 @@ func (s *Server) streamExportResources(ctx context.Context, params postgres.Expo
 	return s.store.StreamExportResources(ctx, params, emit)
 }
 
+func isProtoExportJob(job *exportJob) bool {
+	if job == nil {
+		return false
+	}
+	u := strings.ToLower(job.RequestURL)
+	return strings.Contains(u, "x-protobuf") || strings.Contains(u, "fhir+protobuf") || strings.Contains(u, "fhir%2bprotobuf") || strings.Contains(u, "application/protobuf")
+}
+
 func (s *Server) populateExportJob(
 	ctx context.Context,
 	job *exportJob,
@@ -867,9 +953,12 @@ func (s *Server) populateExportJob(
 		}
 	}()
 
+	isProto := isProtoExportJob(job)
 	files := make(map[string]*bytes.Buffer)
+	protoBundles := make(map[string]*dynamicpb.Message)
 	counts := make(map[string]int)
 	var typesOrder []string
+	bundleDesc := fhirutil.BundleDescriptor()
 
 	patientRestricted := hasSecCtx && auth.IsPatientRestricted(secCtx)
 	allowedPat := ""
@@ -889,6 +978,25 @@ func (s *Server) populateExportJob(
 				return nil
 			}
 		}
+		if isProto && bundleDesc != nil {
+			bMsg, exists := protoBundles[res.ResType]
+			if !exists {
+				bMsg = dynamicpb.NewMessage(bundleDesc)
+				setProtoEnumWrapper(bMsg, "type", "COLLECTION")
+				protoBundles[res.ResType] = bMsg
+				typesOrder = append(typesOrder, res.ResType)
+			}
+			if entryFD := bundleDesc.Fields().ByName("entry"); entryFD != nil && entryFD.IsList() && len(res.ResourceProto) > 0 {
+				entryList := bMsg.Mutable(entryFD).List()
+				entryMsg := entryList.NewElement().Message()
+				setProtoStringWrapper(entryMsg, "full_url", fmt.Sprintf("%s/%s", res.ResType, res.ResID))
+				if s.setBundleEntryProtoResource(entryMsg, res.ResType, res.ResID, res.ResourceProto, res.ResVersion, res.LastUpdated) {
+					entryList.Append(protoreflect.ValueOfMessage(entryMsg))
+					counts[res.ResType]++
+				}
+			}
+			return nil
+		}
 		line, ok := s.formatExportNDJSONLine(res, elements)
 		if !ok {
 			return nil
@@ -904,9 +1012,18 @@ func (s *Server) populateExportJob(
 		return nil
 	})
 
-	fileBytes := make(map[string][]byte, len(files))
-	for rt, buf := range files {
-		fileBytes[rt] = buf.Bytes()
+	fileBytes := make(map[string][]byte, len(files)+len(protoBundles))
+	if isProto && len(protoBundles) > 0 {
+		for rt, bMsg := range protoBundles {
+			setProtoUint32Wrapper(bMsg, "total", uint32(counts[rt]))
+			if wire, mErr := proto.Marshal(bMsg); mErr == nil {
+				fileBytes[rt] = wire
+			}
+		}
+	} else {
+		for rt, buf := range files {
+			fileBytes[rt] = buf.Bytes()
+		}
 	}
 
 	s.exportMu.Lock()
@@ -1052,7 +1169,8 @@ func (s *Server) handleExportFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resType := strings.TrimSuffix(fileName, ".ndjson")
+	isProto := strings.HasSuffix(fileName, ".pb") || isProtoExportJob(job)
+	resType := strings.TrimSuffix(strings.TrimSuffix(fileName, ".ndjson"), ".pb")
 	if !s.authorizeExportJobAccess(w, r, job, resType) {
 		return
 	}
@@ -1068,7 +1186,14 @@ func (s *Server) handleExportFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+ndjson; charset=utf-8")
+	if isProto {
+		w.Header().Set("Content-Type", "application/x-protobuf")
+		w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+		w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+		w.Header().Set("X-Flint-Execution-Mode", "zero-json-protoreflect")
+	} else {
+		w.Header().Set("Content-Type", "application/fhir+ndjson; charset=utf-8")
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(ndjsonBytes)
 }
@@ -1122,11 +1247,15 @@ func (s *Server) authorizeExportJobAccess(w http.ResponseWriter, r *http.Request
 
 func (s *Server) writeExportManifest(w http.ResponseWriter, r *http.Request, job *exportJob) {
 	base := requestBaseURL(r)
+	ext := ".ndjson"
+	if isProtoExportJob(job) {
+		ext = ".pb"
+	}
 	outputs := make([]map[string]any, 0, len(job.TypesOrder))
 	for _, rt := range job.TypesOrder {
 		outputs = append(outputs, map[string]any{
 			"type":  rt,
-			"url":   fmt.Sprintf("%s/fhir/r4/%s/$export-file/%s/%s.ndjson", base, job.TenantID, job.ID, rt),
+			"url":   fmt.Sprintf("%s/fhir/r4/%s/$export-file/%s/%s%s", base, job.TenantID, job.ID, rt, ext),
 			"count": job.Counts[rt],
 		})
 	}

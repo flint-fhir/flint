@@ -55,8 +55,8 @@ func TestServer_CertifyEndpointAndRunner(t *testing.T) {
 		t.Fatalf("expected 100%% certification pass, got result=%s score=%.1f failed=%d:\n%s",
 			rep.Result, rep.Score, rep.Failed, rep.FormatScorecard())
 	}
-	if rep.TotalChecks != 88 {
-		t.Errorf("expected 88 certification checks, got %d", rep.TotalChecks)
+	if rep.TotalChecks != 89 {
+		t.Errorf("expected 89 certification checks, got %d", rep.TotalChecks)
 	}
 	scorecard := rep.FormatScorecard()
 	if !strings.Contains(scorecard, "OVERALL RESULT: PASS (100.0%") && !strings.Contains(scorecard, "Overall Result: PASS (100.0%") {

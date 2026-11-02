@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -816,4 +817,106 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	respFEOuterPg.Body.Close()
 	require.Equal(t, http.StatusOK, respFEOuterPg.StatusCode)
 	assert.Contains(t, string(feOuterPgBytes), "LEFT JOIN spidx_string fe ON fe.tenant_id = r.tenant_id")
+
+	// 17. Binary Proto3 Bulk Data $export (_outputFormat=application/x-protobuf) & $import (Content-Type: application/x-protobuf) Round-Trip
+	reqProtoExpKick, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/$export?_outputFormat=application/x-protobuf&_type=Patient", nil)
+	require.NoError(t, err)
+	reqProtoExpKick.Header.Set("Prefer", "respond-async")
+	respProtoExpKick, err := client.Do(reqProtoExpKick)
+	require.NoError(t, err)
+	respProtoExpKick.Body.Close()
+	require.Equal(t, http.StatusAccepted, respProtoExpKick.StatusCode)
+	pollURL := respProtoExpKick.Header.Get("Content-Location")
+	require.NotEmpty(t, pollURL)
+
+	var exportManifest struct {
+		Output []struct {
+			Type string `json:"type"`
+			URL  string `json:"url"`
+		} `json:"output"`
+	}
+	for i := 0; i < 40; i++ {
+		respPoll, pErr := client.Get(pollURL)
+		require.NoError(t, pErr)
+		if respPoll.StatusCode == http.StatusOK {
+			_ = json.NewDecoder(respPoll.Body).Decode(&exportManifest)
+			respPoll.Body.Close()
+			break
+		}
+		respPoll.Body.Close()
+		time.Sleep(15 * time.Millisecond)
+	}
+	require.NotEmpty(t, exportManifest.Output)
+	assert.True(t, strings.HasSuffix(exportManifest.Output[0].URL, ".pb"))
+
+	respProtoExpFile, err := client.Get(exportManifest.Output[0].URL)
+	require.NoError(t, err)
+	expProtoBytes, _ := io.ReadAll(respProtoExpFile.Body)
+	respProtoExpFile.Body.Close()
+	require.Equal(t, http.StatusOK, respProtoExpFile.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respProtoExpFile.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respProtoExpFile.Header.Get("X-Flint-Wire-Format"))
+
+	var expBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(expProtoBytes, &expBundle))
+	assert.GreaterOrEqual(t, len(expBundle.GetEntry()), 2)
+
+	// Re-import the exported binary Proto3 COLLECTION Bundle into a fresh tenant "proto-imp"
+	reqProtoImp, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto-imp/$import", bytes.NewReader(expProtoBytes))
+	require.NoError(t, err)
+	reqProtoImp.Header.Set("Content-Type", "application/x-protobuf")
+	respProtoImp, err := client.Do(reqProtoImp)
+	require.NoError(t, err)
+	impRespBytes, _ := io.ReadAll(respProtoImp.Body)
+	respProtoImp.Body.Close()
+	require.Equal(t, http.StatusOK, respProtoImp.StatusCode)
+	assert.Contains(t, string(impRespBytes), "Successfully imported")
+
+	// Verify imported Patient exists in "proto-imp" via Proto3 GET
+	reqImpCheck, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto-imp/Patient/tx-proto-pat-1", nil)
+	require.NoError(t, err)
+	reqImpCheck.Header.Set("Accept", "application/x-protobuf")
+	respImpCheck, err := client.Do(reqImpCheck)
+	require.NoError(t, err)
+	impCheckBytes, _ := io.ReadAll(respImpCheck.Body)
+	respImpCheck.Body.Close()
+	require.Equal(t, http.StatusOK, respImpCheck.StatusCode)
+	var impPatient patpb.Patient
+	require.NoError(t, proto.Unmarshal(impCheckBytes, &impPatient))
+	assert.Equal(t, "tx-proto-pat-1", impPatient.GetId().GetValue())
+
+	// 18. ViewDefinition/$sql with collection: true array aggregation pushdown across Doris, PostgreSQL, and SQLite
+	collectionVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "patient_collections",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "given_names", "path": "name.given", "collection": true},
+					{"name": "identifiers", "path": "identifier.value", "collection": true}
+				]
+			}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains string
+	}{
+		{dialect: "doris", wantContains: "ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)"},
+		{dialect: "postgres", wantContains: "COALESCE(ARRAY_AGG(s.sp_value), ARRAY[]::text[])"},
+		{dialect: "sqlite", wantContains: "json_group_array(s.sp_value)"},
+	} {
+		reqColl, cErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(collectionVD))
+		require.NoError(t, cErr)
+		reqColl.Header.Set("Content-Type", "application/fhir+json")
+		respColl, cErr := client.Do(reqColl)
+		require.NoError(t, cErr)
+		collBytes, _ := io.ReadAll(respColl.Body)
+		respColl.Body.Close()
+		require.Equal(t, http.StatusOK, respColl.StatusCode)
+		assert.Contains(t, string(collBytes), tc.wantContains)
+	}
 }
