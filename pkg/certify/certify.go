@@ -2438,6 +2438,39 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-05", suite10, "Binary Proto3 Bundle Wire Transport (Search & _history) & SQL-on-FHIR v2 unionAll/Predicate Function $sql Pushdown", t0, err, "Binary google.fhir.r4.core.Bundle search/history wire transport & unionAll/exists()/startsWith() $sql pushdown verified")
 
+	// AN-06: Binary Proto3 Batch/Transaction Bundle Execution, Type/System _history Proto3 Transport & SQL-on-FHIR v2 forEach/forEachOrNull Unnesting $sql Pushdown
+	t0 = time.Now()
+	{
+		txBundleJSON := []byte(`{"resourceType":"Bundle","type":"transaction","entry":[{"fullUrl":"Patient/cert-proto-tx-1","resource":{"resourceType":"Patient","id":"cert-proto-tx-1","name":[{"family":"ProtoTx","given":["Grace"]}]},"request":{"method":"PUT","url":"Patient/cert-proto-tx-1"}}]}`)
+		respTxConv, bTxProto, errTxConv := doReq(http.MethodPost, basePath+"/Bundle/$convert", "application/fhir+json", txBundleJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respProtoTx, bProtoTxResp, errProtoTx := doReq(http.MethodPost, basePath, "application/x-protobuf", bTxProto, map[string]string{
+			"Accept": "application/x-protobuf",
+			"Prefer": "return=representation",
+		})
+		respTypeHist, bTypeHist, errTypeHist := doReq(http.MethodGet, basePath+"/Patient/_history?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		forEachVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_foreach_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"}],"select":[{"forEach":"identifier","column":[{"name":"id_sys","path":"system"},{"name":"id_val","path":"value"}]}]}]}`)
+		respForEachDoris, bForEachDoris, errForEachDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", forEachVD, nil)
+		respForEachPg, bForEachPg, errForEachPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", forEachVD, nil)
+		if errTxConv != nil || respTxConv.StatusCode != http.StatusOK || len(bTxProto) == 0 {
+			err = fmt.Errorf("expected POST /Bundle/$convert to return binary Proto3 Bundle, got %d", respTxConv.StatusCode)
+		} else if errProtoTx != nil || respProtoTx.StatusCode != http.StatusOK || !strings.Contains(respProtoTx.Header.Get("Content-Type"), "application/x-protobuf") || respProtoTx.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bProtoTxResp) == 0 {
+			err = fmt.Errorf("expected POST /%s with binary Proto3 transaction Bundle to return binary Proto3 transaction-response Bundle, got %d", cfg.Tenant, respProtoTx.StatusCode)
+		} else if errTypeHist != nil || respTypeHist.StatusCode != http.StatusOK || !strings.Contains(respTypeHist.Header.Get("Content-Type"), "application/x-protobuf") || len(bTypeHist) == 0 {
+			err = fmt.Errorf("expected GET /Patient/_history?_format=application/x-protobuf to return binary Proto3 History Bundle, got %d", respTypeHist.StatusCode)
+		} else if errForEachDoris != nil || respForEachDoris.StatusCode != http.StatusOK || !strings.Contains(string(bForEachDoris), "LATERAL VIEW EXPLODE") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with forEach to emit LATERAL VIEW EXPLODE, got %d: %s", respForEachDoris.StatusCode, string(bForEachDoris))
+		} else if errForEachPg != nil || respForEachPg.StatusCode != http.StatusOK || !strings.Contains(string(bForEachPg), "INNER JOIN spidx_token fe") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with forEach to emit INNER JOIN spidx_token fe, got %d: %s", respForEachPg.StatusCode, string(bForEachPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-06", suite10, "Binary Proto3 Transaction/Batch Bundle Wire Execution & SQL-on-FHIR v2 forEach/forEachOrNull Unnesting $sql Pushdown", t0, err, "Binary google.fhir.r4.core.Bundle transaction execution, Type _history Proto3 & LATERAL VIEW EXPLODE / JOIN spidx_* $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

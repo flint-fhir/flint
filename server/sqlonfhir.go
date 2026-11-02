@@ -403,20 +403,30 @@ func validateViewDefinition(vd sqlOnFHIRViewDefinition) error {
 func collectViewDefinitionColumns(selects []sqlOnFHIRSelect) []sqlOnFHIRColumn {
 	var out []sqlOnFHIRColumn
 	seen := make(map[string]bool)
-	var walk func(sels []sqlOnFHIRSelect)
-	walk = func(sels []sqlOnFHIRSelect) {
+	var walk func(sels []sqlOnFHIRSelect, prefix string)
+	walk = func(sels []sqlOnFHIRSelect, prefix string) {
 		for _, sel := range sels {
+			curPrefix := prefix
+			fe := strings.TrimSpace(sel.ForEach)
+			if fe == "" {
+				fe = strings.TrimSpace(sel.ForEachOrNull)
+			}
+			if fe != "" {
+				curPrefix = qualifyForEachColumnPath(prefix, fe)
+			}
 			for _, col := range sel.Column {
 				if !seen[col.Name] {
 					seen[col.Name] = true
-					out = append(out, col)
+					c := col
+					c.Path = qualifyForEachColumnPath(curPrefix, c.Path)
+					out = append(out, c)
 				}
 			}
-			walk(sel.Select)
-			walk(sel.UnionAll)
+			walk(sel.Select, curPrefix)
+			walk(sel.UnionAll, curPrefix)
 		}
 	}
-	walk(selects)
+	walk(selects, "")
 	return out
 }
 
@@ -426,10 +436,42 @@ func qualifyForEachColumnPath(forEachPrefix, colPath string) string {
 	if prefix == "" || p == "" {
 		return p
 	}
-	if strings.HasPrefix(p, "'") || strings.HasPrefix(p, "%") || strings.HasPrefix(p, prefix+".") || p == prefix {
+	if strings.HasPrefix(p, "'") || strings.HasPrefix(p, "%") || strings.HasPrefix(p, "getResourceKey(") || p == "id" || strings.HasPrefix(p, prefix+".") || p == prefix {
 		return p
 	}
+	if p == "$this" {
+		return prefix
+	}
 	return prefix + "." + p
+}
+
+// extractViewForEachSpec returns the first forEach / forEachOrNull path and whether
+// outer unnesting (forEachOrNull) was requested.
+func extractViewForEachSpec(selects []sqlOnFHIRSelect) (forEachPath string, isOuter bool) {
+	var walk func(sels []sqlOnFHIRSelect, prefix string)
+	walk = func(sels []sqlOnFHIRSelect, prefix string) {
+		for _, sel := range sels {
+			if forEachPath != "" {
+				return
+			}
+			fe := strings.TrimSpace(sel.ForEach)
+			outer := false
+			if fe == "" {
+				fe = strings.TrimSpace(sel.ForEachOrNull)
+				outer = fe != ""
+			}
+			curPrefix := prefix
+			if fe != "" {
+				curPrefix = qualifyForEachColumnPath(prefix, fe)
+				forEachPath = curPrefix
+				isOuter = outer
+				return
+			}
+			walk(sel.Select, curPrefix)
+		}
+	}
+	walk(selects, "")
+	return forEachPath, isOuter
 }
 
 // extractViewUnionBranches expands top-level or nested select.unionAll clauses
@@ -1327,6 +1369,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 	constMap := buildViewConstantReplacements(opts.viewDef.Constant)
 	columns := collectViewDefinitionColumns(opts.viewDef.Select)
 	branches := extractViewUnionBranches(opts.viewDef.Select)
+	forEachPath, forEachOuter := extractViewForEachSpec(opts.viewDef.Select)
 	resType := strings.TrimSpace(opts.viewDef.Resource)
 	escapedTenant := strings.ReplaceAll(tenant, "'", "''")
 
@@ -1340,7 +1383,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		colMaps := make([]map[string]any, 0, len(columns))
 		for _, col := range columns {
 			exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
-			sqlExpr, sourceCol := dorisZeroJSONColumnExpr(exprPath, isCore)
+			sqlExpr, sourceCol := dorisZeroJSONForEachColumnExpr(exprPath, forEachPath, isCore)
 			colMaps = append(colMaps, map[string]any{
 				"name": "column",
 				"part": []map[string]any{
@@ -1375,6 +1418,19 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 			}
 		}
 
+		lateralClause := ""
+		if forEachPath != "" && len(branches) <= 1 {
+			explodeFunc := "EXPLODE"
+			if forEachOuter {
+				explodeFunc = "OUTER EXPLODE"
+			}
+			arrCol := "r.code_tokens"
+			if strings.HasPrefix(forEachPath, "name") || strings.HasPrefix(forEachPath, "address") || strings.HasPrefix(forEachPath, "telecom") {
+				arrCol = "r.string_tokens"
+			}
+			lateralClause = fmt.Sprintf(" LATERAL VIEW %s(%s) fe_tbl AS fe_tok", explodeFunc, arrCol)
+		}
+
 		whereClause := strings.Join(whereConds, " AND ")
 		var sqlQuery string
 		if len(branches) > 1 {
@@ -1397,12 +1453,13 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 			selectExprs := make([]string, 0, len(columns))
 			for _, col := range columns {
 				exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
-				sqlExpr, _ := dorisZeroJSONColumnExpr(exprPath, isCore)
+				sqlExpr, _ := dorisZeroJSONForEachColumnExpr(exprPath, forEachPath, isCore)
 				selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
 			}
-			sqlQuery = fmt.Sprintf("SELECT %s FROM %s r WHERE %s ORDER BY r.res_id ASC",
+			sqlQuery = fmt.Sprintf("SELECT %s FROM %s r%s WHERE %s ORDER BY r.res_id ASC",
 				strings.Join(selectExprs, ", "),
 				targetTable,
+				lateralClause,
 				whereClause,
 			)
 		}
@@ -1423,7 +1480,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 	colMaps := make([]map[string]any, 0, len(columns))
 	for _, col := range columns {
 		exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
-		sqlExpr, sourceTbl := spidxZeroJSONColumnExpr(exprPath)
+		sqlExpr, sourceTbl := spidxZeroJSONForEachColumnExpr(exprPath, forEachPath)
 		colMaps = append(colMaps, map[string]any{
 			"name": "column",
 			"part": []map[string]any{
@@ -1462,6 +1519,24 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		}
 	}
 
+	joinClause := ""
+	if forEachPath != "" && len(branches) <= 1 {
+		joinType := "INNER JOIN"
+		if forEachOuter {
+			joinType = "LEFT JOIN"
+		}
+		feTable := "spidx_token"
+		feSpCond := fmt.Sprintf("fe.sp_name = '%s'", normalizeFHIRPathToSearchParam(forEachPath))
+		if strings.HasPrefix(forEachPath, "name") {
+			feTable = "spidx_string"
+			feSpCond = "fe.sp_name IN ('family', 'given', 'name')"
+		} else if strings.HasPrefix(forEachPath, "address") {
+			feTable = "spidx_string"
+			feSpCond = "fe.sp_name = 'address'"
+		}
+		joinClause = fmt.Sprintf(" %s %s fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND %s", joinType, feTable, feSpCond)
+	}
+
 	whereClause := strings.Join(whereConds, " AND ")
 	var sqlQuery string
 	if len(branches) > 1 {
@@ -1483,11 +1558,12 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		selectExprs := make([]string, 0, len(columns))
 		for _, col := range columns {
 			exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
-			sqlExpr, _ := spidxZeroJSONColumnExpr(exprPath)
+			sqlExpr, _ := spidxZeroJSONForEachColumnExpr(exprPath, forEachPath)
 			selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
 		}
-		sqlQuery = fmt.Sprintf("SELECT %s FROM fhir_resource r WHERE %s ORDER BY r.res_id ASC",
+		sqlQuery = fmt.Sprintf("SELECT %s FROM fhir_resource r%s WHERE %s ORDER BY r.res_id ASC",
 			strings.Join(selectExprs, ", "),
+			joinClause,
 			whereClause,
 		)
 	}
@@ -1502,6 +1578,37 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		sql:          sqlQuery,
 		columnMaps:   colMaps,
 	}, nil
+}
+
+func dorisZeroJSONForEachColumnExpr(fhirPath, forEachPath string, isCore bool) (string, string) {
+	p := strings.TrimSpace(fhirPath)
+	fe := strings.TrimSpace(forEachPath)
+	if fe != "" && (p == fe || strings.HasPrefix(p, fe+".")) {
+		if strings.HasSuffix(p, ".system") {
+			return "SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '|', 1)", "fe_tok"
+		}
+		if strings.HasPrefix(fe, "name") || strings.HasPrefix(fe, "address") || strings.HasPrefix(fe, "telecom") {
+			return "SPLIT_PART(fe_tok, '=', 2)", "fe_tok"
+		}
+		return "SPLIT_PART(fe_tok, '|', 2)", "fe_tok"
+	}
+	return dorisZeroJSONColumnExpr(fhirPath, isCore)
+}
+
+func spidxZeroJSONForEachColumnExpr(fhirPath, forEachPath string) (string, string) {
+	p := strings.TrimSpace(fhirPath)
+	fe := strings.TrimSpace(forEachPath)
+	if fe != "" && (p == fe || strings.HasPrefix(p, fe+".")) {
+		feTable := "spidx_token"
+		if strings.HasPrefix(fe, "name") || strings.HasPrefix(fe, "address") {
+			feTable = "spidx_string"
+		}
+		if strings.HasSuffix(p, ".system") {
+			return "fe.sp_system", feTable
+		}
+		return "fe.sp_value", feTable
+	}
+	return spidxZeroJSONColumnExpr(fhirPath)
 }
 
 func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {

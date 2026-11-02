@@ -668,4 +668,152 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	assert.Contains(t, unionPgSQL, "spidx_date")
 	assert.Contains(t, unionPgSQL, "LIKE 'Wire%'")
 	assert.Contains(t, unionPgSQL, "LIKE '%Al%'")
+
+	// 14. Binary Proto3 Transaction Bundle (POST /fhir/r4/proto with Content-Type & Accept: application/x-protobuf)
+	txBundleJSON := `{
+		"resourceType": "Bundle",
+		"type": "transaction",
+		"entry": [
+			{
+				"fullUrl": "Patient/tx-proto-pat-1",
+				"resource": {
+					"resourceType": "Patient",
+					"id": "tx-proto-pat-1",
+					"active": true,
+					"gender": "female",
+					"birthDate": "1975-08-20",
+					"name": [{"family": "ProtoBundleTx", "given": ["Grace"]}],
+					"identifier": [{"system": "http://hospital.example.org/mrn", "value": "MRN-PROTO-TX-1"}]
+				},
+				"request": {
+					"method": "PUT",
+					"url": "Patient/tx-proto-tx-1"
+				}
+			}
+		]
+	}`
+	txBundleJSON = strings.ReplaceAll(txBundleJSON, "Patient/tx-proto-tx-1", "Patient/tx-proto-pat-1")
+	reqTxConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Bundle/$convert", strings.NewReader(txBundleJSON))
+	require.NoError(t, err)
+	reqTxConv.Header.Set("Content-Type", "application/fhir+json")
+	reqTxConv.Header.Set("Accept", "application/x-protobuf")
+	respTxConv, err := client.Do(reqTxConv)
+	require.NoError(t, err)
+	txProtoBytes, _ := io.ReadAll(respTxConv.Body)
+	respTxConv.Body.Close()
+	require.Equal(t, http.StatusOK, respTxConv.StatusCode)
+	require.NotEmpty(t, txProtoBytes)
+
+	reqProtoTx, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto", bytes.NewReader(txProtoBytes))
+	require.NoError(t, err)
+	reqProtoTx.Header.Set("Content-Type", "application/x-protobuf")
+	reqProtoTx.Header.Set("Accept", "application/x-protobuf")
+	reqProtoTx.Header.Set("Prefer", "return=representation")
+	respProtoTx, err := client.Do(reqProtoTx)
+	require.NoError(t, err)
+	txRespProtoBytes, _ := io.ReadAll(respProtoTx.Body)
+	respProtoTx.Body.Close()
+	require.Equal(t, http.StatusOK, respProtoTx.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respProtoTx.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respProtoTx.Header.Get("X-Flint-Wire-Format"))
+
+	var txRespBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(txRespProtoBytes, &txRespBundle))
+	require.Len(t, txRespBundle.GetEntry(), 1)
+	assert.Contains(t, txRespBundle.GetEntry()[0].GetResponse().GetStatus().GetValue(), "201")
+	assert.Equal(t, "tx-proto-pat-1", txRespBundle.GetEntry()[0].GetResource().GetPatient().GetId().GetValue())
+	assert.Equal(t, "ProtoBundleTx", txRespBundle.GetEntry()[0].GetResource().GetPatient().GetName()[0].GetFamily().GetValue())
+
+	// 15. Type-level and System-level _history with Accept: application/x-protobuf
+	reqTypeHist, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Patient/_history", nil)
+	require.NoError(t, err)
+	reqTypeHist.Header.Set("Accept", "application/x-protobuf")
+	respTypeHist, err := client.Do(reqTypeHist)
+	require.NoError(t, err)
+	typeHistBytes, _ := io.ReadAll(respTypeHist.Body)
+	respTypeHist.Body.Close()
+	require.Equal(t, http.StatusOK, respTypeHist.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respTypeHist.Header.Get("Content-Type"))
+	var typeHistBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(typeHistBytes, &typeHistBundle))
+	assert.GreaterOrEqual(t, int(typeHistBundle.GetTotal().GetValue()), 3)
+
+	reqSysHist, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/_history", nil)
+	require.NoError(t, err)
+	reqSysHist.Header.Set("Accept", "application/x-protobuf")
+	respSysHist, err := client.Do(reqSysHist)
+	require.NoError(t, err)
+	sysHistBytes, _ := io.ReadAll(respSysHist.Body)
+	respSysHist.Body.Close()
+	require.Equal(t, http.StatusOK, respSysHist.StatusCode)
+	var sysHistBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(sysHistBytes, &sysHistBundle))
+	assert.GreaterOrEqual(t, int(sysHistBundle.GetTotal().GetValue()), 3)
+
+	// 16. ViewDefinition/$sql with forEach (inner unnest) and forEachOrNull (outer unnest)
+	forEachVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "patient_identifiers_unnest",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"}
+				],
+				"select": [
+					{
+						"forEach": "identifier",
+						"column": [
+							{"name": "id_system", "path": "system"},
+							{"name": "id_value", "path": "value"}
+						]
+					}
+				]
+			}
+		]
+	}`
+	reqFEDoris, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", strings.NewReader(forEachVD))
+	require.NoError(t, err)
+	reqFEDoris.Header.Set("Content-Type", "application/fhir+json")
+	respFEDoris, err := client.Do(reqFEDoris)
+	require.NoError(t, err)
+	feDorisBytes, _ := io.ReadAll(respFEDoris.Body)
+	respFEDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respFEDoris.StatusCode)
+	assert.Contains(t, string(feDorisBytes), "LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok")
+	assert.Contains(t, string(feDorisBytes), "SPLIT_PART(fe_tok, '|', 2) AS id_value")
+
+	reqFEPg, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", strings.NewReader(forEachVD))
+	require.NoError(t, err)
+	reqFEPg.Header.Set("Content-Type", "application/fhir+json")
+	respFEPg, err := client.Do(reqFEPg)
+	require.NoError(t, err)
+	fePgBytes, _ := io.ReadAll(respFEPg.Body)
+	respFEPg.Body.Close()
+	require.Equal(t, http.StatusOK, respFEPg.StatusCode)
+	assert.Contains(t, string(fePgBytes), "INNER JOIN spidx_token fe ON fe.tenant_id = r.tenant_id")
+	assert.Contains(t, string(fePgBytes), "fe.sp_system AS id_system, fe.sp_value AS id_value")
+
+	forEachOrNullVD := strings.ReplaceAll(forEachVD, `"forEach": "identifier"`, `"forEachOrNull": "name"`)
+	forEachOrNullVD = strings.ReplaceAll(forEachOrNullVD, `"path": "value"`, `"path": "family"`)
+	reqFEOuterDoris, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", strings.NewReader(forEachOrNullVD))
+	require.NoError(t, err)
+	reqFEOuterDoris.Header.Set("Content-Type", "application/fhir+json")
+	respFEOuterDoris, err := client.Do(reqFEOuterDoris)
+	require.NoError(t, err)
+	feOuterDorisBytes, _ := io.ReadAll(respFEOuterDoris.Body)
+	respFEOuterDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respFEOuterDoris.StatusCode)
+	assert.Contains(t, string(feOuterDorisBytes), "LATERAL VIEW OUTER EXPLODE(r.string_tokens) fe_tbl AS fe_tok")
+
+	reqFEOuterPg, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", strings.NewReader(forEachOrNullVD))
+	require.NoError(t, err)
+	reqFEOuterPg.Header.Set("Content-Type", "application/fhir+json")
+	respFEOuterPg, err := client.Do(reqFEOuterPg)
+	require.NoError(t, err)
+	feOuterPgBytes, _ := io.ReadAll(respFEOuterPg.Body)
+	respFEOuterPg.Body.Close()
+	require.Equal(t, http.StatusOK, respFEOuterPg.StatusCode)
+	assert.Contains(t, string(feOuterPgBytes), "LEFT JOIN spidx_string fe ON fe.tenant_id = r.tenant_id")
 }
