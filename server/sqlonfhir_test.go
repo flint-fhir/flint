@@ -18,6 +18,7 @@ import (
 
 	dtpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto"
 	bcrpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/bundle_and_contained_resource_go_proto"
+	oopb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/operation_outcome_go_proto"
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
 
 	"github.com/flint-fhir/flint/server"
@@ -1019,6 +1020,120 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		require.Equal(t, http.StatusOK, respJoin.StatusCode)
 		for _, want := range tc.wantContains {
 			assert.Contains(t, string(joinBytes), want)
+		}
+	}
+
+	// 20. Binary Proto3 $validate (POST resource, POST Parameters, GET instance) & SQL-on-FHIR v2 .count(), .lower(), .upper(), .length() $sql pushdown
+	valPatProtoBytes, err := proto.Marshal(&patpb.Patient{
+		Id:     &dtpb.Id{Value: "val-proto-pat-1"},
+		Active: &dtpb.Boolean{Value: true},
+		Name: []*dtpb.HumanName{
+			{
+				Family: &dtpb.String{Value: "Hopper"},
+				Given:  []*dtpb.String{{Value: "Grace"}},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	reqValPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/$validate", bytes.NewReader(valPatProtoBytes))
+	require.NoError(t, err)
+	reqValPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqValPost.Header.Set("Accept", "application/x-protobuf")
+	respValPost, err := client.Do(reqValPost)
+	require.NoError(t, err)
+	valPostBytes, _ := io.ReadAll(respValPost.Body)
+	respValPost.Body.Close()
+	require.Equal(t, http.StatusOK, respValPost.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respValPost.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respValPost.Header.Get("X-Flint-Wire-Format"))
+	var ooPost oopb.OperationOutcome
+	require.NoError(t, proto.Unmarshal(valPostBytes, &ooPost))
+	require.GreaterOrEqual(t, len(ooPost.GetIssue()), 1)
+	assert.Contains(t, ooPost.GetIssue()[0].GetDiagnostics().GetValue(), "All validation checks passed with zero issues")
+
+	reqValGet, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Patient/tx-proto-pat-1/$validate?_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqValGet.Header.Set("Accept", "application/x-protobuf")
+	respValGet, err := client.Do(reqValGet)
+	require.NoError(t, err)
+	valGetBytes, _ := io.ReadAll(respValGet.Body)
+	respValGet.Body.Close()
+	require.Equal(t, http.StatusOK, respValGet.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respValGet.Header.Get("Content-Type"))
+	var ooGet oopb.OperationOutcome
+	require.NoError(t, proto.Unmarshal(valGetBytes, &ooGet))
+	require.GreaterOrEqual(t, len(ooGet.GetIssue()), 1)
+	assert.Contains(t, ooGet.GetIssue()[0].GetDiagnostics().GetValue(), "All validation checks passed with zero issues")
+
+	countCaseLenVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "patient_count_case_length",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "given_count", "path": "name.given.count()"},
+					{"name": "family_lower", "path": "name.family.lower()"},
+					{"name": "family_upper", "path": "name.family.upper()"},
+					{"name": "family_len", "path": "name.family.length()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "name.given.count() >= 1 and name.family.lower() = 'hopper' and name.family.length() >= 4"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_SIZE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)))",
+				"LOWER(element_at(array_map(x -> split_part(x, '=', 2), array_filter(x -> x LIKE 'family=%', r.string_tokens)), 1))",
+				"UPPER(element_at(array_map(x -> split_part(x, '=', 2), array_filter(x -> x LIKE 'family=%', r.string_tokens)), 1))",
+				"CHAR_LENGTH(element_at(array_map(x -> split_part(x, '=', 2), array_filter(x -> x LIKE 'family=%', r.string_tokens)), 1))",
+				">= 1",
+				"= 'hopper'",
+				">= 4",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"(SELECT COUNT(*) FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given')",
+				"LOWER((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1))",
+				"UPPER((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1))",
+				"LENGTH((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1))",
+				">= 1",
+				"= 'hopper'",
+				">= 4",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"(SELECT COUNT(*) FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given')",
+				"LOWER((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1))",
+				"UPPER((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1))",
+				"LENGTH((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1))",
+			},
+		},
+	} {
+		reqCnt, cErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(countCaseLenVD))
+		require.NoError(t, cErr)
+		reqCnt.Header.Set("Content-Type", "application/fhir+json")
+		respCnt, cErr := client.Do(reqCnt)
+		require.NoError(t, cErr)
+		cntBytes, _ := io.ReadAll(respCnt.Body)
+		respCnt.Body.Close()
+		require.Equal(t, http.StatusOK, respCnt.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(cntBytes), want)
 		}
 	}
 }

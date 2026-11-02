@@ -417,6 +417,13 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 
 		// Suite 5: Validation, Terminology, Subscriptions, CQM, CDS, IPS, Da Vinci, SDC, Public Health, AuditEvent
 		if strings.HasSuffix(path, "/$validate") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+				_, _ = w.Write([]byte{0x4a, 0x04, 0x12, 0x02, 0x08, 0x04})
+				return
+			}
 			if strings.HasSuffix(path, "/Observation/$validate") {
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"invariant","diagnostics":"Observation violated invariant obs-6"}]}`))
@@ -912,7 +919,7 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 		}
 		if strings.HasSuffix(path, "/ViewDefinition/$sql") {
 			w.Header().Set("Content-Type", "application/sql; charset=utf-8")
-			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val, ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens), ARRAY_JOIN(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), ' '), ARRAY_TO_STRING(ARRAY_AGG(s.sp_value), ' '), ARRAY_AGG(s.sp_value) FROM fhir_observation r LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok INNER JOIN spidx_token fe ON fe.tenant_id = r.tenant_id WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error') AND r.effective_start IS NOT NULL AND array_exists(x -> x LIKE 'family=Cert%', r.string_tokens) AND array_exists(x -> x LIKE 'family=%tify', r.string_tokens) AND array_exists(x -> x LIKE 'given=%lic%', r.string_tokens) UNION ALL SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r\n"))
+			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val, ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens), ARRAY_JOIN(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), ' '), ARRAY_SIZE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))), LOWER(r.res_id), UPPER(r.res_id), CHAR_LENGTH(r.res_id), LENGTH(r.res_id), (SELECT COUNT(*) FROM spidx_string s), ARRAY_TO_STRING(ARRAY_AGG(s.sp_value), ' '), ARRAY_AGG(s.sp_value) FROM fhir_observation r LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok INNER JOIN spidx_token fe ON fe.tenant_id = r.tenant_id WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error') AND r.effective_start IS NOT NULL AND array_exists(x -> x LIKE 'family=Cert%', r.string_tokens) AND array_exists(x -> x LIKE 'family=%tify', r.string_tokens) AND array_exists(x -> x LIKE 'given=%lic%', r.string_tokens) UNION ALL SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r\n"))
 			return
 		}
 		if strings.HasSuffix(path, "/$sync-analytics") {
@@ -974,8 +981,8 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 90 {
-		t.Fatalf("expected all 90 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 91 {
+		t.Fatalf("expected all 91 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()
