@@ -127,14 +127,11 @@ func (s *Server) syncTenantCustomSearchParams(ctx context.Context, tenant string
 		return
 	}
 	for _, match := range sr.Matches {
-		jb, err := s.protoToJSONWithMeta("SearchParameter", match.ResourceProto, match.ResVersion, match.LastUpdated)
+		m, err := s.protoToFHIRMapWithMeta("SearchParameter", match.ResourceProto, match.ResVersion, match.LastUpdated)
 		if err != nil {
 			continue
 		}
-		var m map[string]any
-		if json.Unmarshal(jb, &m) == nil {
-			registerSearchParameterMap(match.ResID, m)
-		}
+		registerSearchParameterMap(match.ResID, m)
 	}
 }
 
@@ -540,12 +537,8 @@ func (s *Server) resolvePlanDefinition(ctx context.Context, tenant, defID, canon
 	if s.store != nil && defID != "" {
 		rec, err := s.store.ReadResourceWithMeta(ctx, tenant, "PlanDefinition", defID)
 		if err == nil && rec != nil {
-			jb, err := s.protoToJSONWithMeta("PlanDefinition", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
-			if err == nil {
-				var m map[string]any
-				if json.Unmarshal(jb, &m) == nil {
-					return m, nil
-				}
+			if m, err := s.protoToFHIRMapWithMeta("PlanDefinition", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+				return m, nil
 			}
 		} else if errors.Is(err, postgres.ErrResourceDeleted) {
 			return nil, err
@@ -560,11 +553,8 @@ func (s *Server) resolvePlanDefinition(ctx context.Context, tenant, defID, canon
 		})
 		if err == nil && sr != nil && len(sr.Matches) > 0 {
 			m0 := sr.Matches[0]
-			if jb, err := s.protoToJSONWithMeta("PlanDefinition", m0.ResourceProto, m0.ResVersion, m0.LastUpdated); err == nil {
-				var m map[string]any
-				if json.Unmarshal(jb, &m) == nil {
-					return m, nil
-				}
+			if m, err := s.protoToFHIRMapWithMeta("PlanDefinition", m0.ResourceProto, m0.ResVersion, m0.LastUpdated); err == nil {
+				return m, nil
 			}
 		}
 	}
@@ -594,12 +584,8 @@ func (s *Server) resolveActivityDefinition(ctx context.Context, tenant, defID, c
 	if s.store != nil && defID != "" {
 		rec, err := s.store.ReadResourceWithMeta(ctx, tenant, "ActivityDefinition", defID)
 		if err == nil && rec != nil {
-			jb, err := s.protoToJSONWithMeta("ActivityDefinition", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
-			if err == nil {
-				var m map[string]any
-				if json.Unmarshal(jb, &m) == nil {
-					return m, nil
-				}
+			if m, err := s.protoToFHIRMapWithMeta("ActivityDefinition", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+				return m, nil
 			}
 		} else if errors.Is(err, postgres.ErrResourceDeleted) {
 			return nil, err
@@ -614,11 +600,8 @@ func (s *Server) resolveActivityDefinition(ctx context.Context, tenant, defID, c
 		})
 		if err == nil && sr != nil && len(sr.Matches) > 0 {
 			m0 := sr.Matches[0]
-			if jb, err := s.protoToJSONWithMeta("ActivityDefinition", m0.ResourceProto, m0.ResVersion, m0.LastUpdated); err == nil {
-				var m map[string]any
-				if json.Unmarshal(jb, &m) == nil {
-					return m, nil
-				}
+			if m, err := s.protoToFHIRMapWithMeta("ActivityDefinition", m0.ResourceProto, m0.ResVersion, m0.LastUpdated); err == nil {
+				return m, nil
 			}
 		}
 	}
@@ -1085,14 +1068,11 @@ func (s *Server) decodeCompartmentMaps(sr *postgres.SearchResults) []map[string]
 	all = append(all, sr.Includes...)
 	out := make([]map[string]any, 0, len(all))
 	for _, r := range all {
-		jb, err := s.protoToJSONWithMeta(r.ResType, r.ResourceProto, r.ResVersion, r.LastUpdated)
+		m, err := s.protoToFHIRMapWithMeta(r.ResType, r.ResourceProto, r.ResVersion, r.LastUpdated)
 		if err != nil {
 			continue
 		}
-		var m map[string]any
-		if json.Unmarshal(jb, &m) == nil {
-			out = append(out, m)
-		}
+		out = append(out, m)
 	}
 	return out
 }
@@ -1652,11 +1632,8 @@ func (s *Server) resolveDataRequirementsLibrary(
 				return nil, err
 			}
 			if err == nil && rec != nil {
-				if jb, jErr := s.protoToJSONWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); jErr == nil {
-					var m map[string]any
-					if json.Unmarshal(jb, &m) == nil {
-						return buildCustomArtifactDataRequirements(rt, defID, m, buildDateFilter("effective")), nil
-					}
+				if m, jErr := s.protoToFHIRMapWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); jErr == nil {
+					return buildCustomArtifactDataRequirements(rt, defID, m, buildDateFilter("effective")), nil
 				}
 			}
 		}
@@ -1673,11 +1650,8 @@ func (s *Server) resolveDataRequirementsLibrary(
 			})
 			if err == nil && sr != nil && len(sr.Matches) > 0 {
 				m0 := sr.Matches[0]
-				if jb, jErr := s.protoToJSONWithMeta(rt, m0.ResourceProto, m0.ResVersion, m0.LastUpdated); jErr == nil {
-					var m map[string]any
-					if json.Unmarshal(jb, &m) == nil {
-						return buildCustomArtifactDataRequirements(rt, m0.ResID, m, buildDateFilter("effective")), nil
-					}
+				if m, jErr := s.protoToFHIRMapWithMeta(rt, m0.ResourceProto, m0.ResVersion, m0.LastUpdated); jErr == nil {
+					return buildCustomArtifactDataRequirements(rt, m0.ResID, m, buildDateFilter("effective")), nil
 				}
 			}
 			// Fallback scan for artifacts whose canonical url is not indexed in spidx_uri
@@ -1687,12 +1661,8 @@ func (s *Server) resolveDataRequirementsLibrary(
 				Count:    50,
 			}); sErr == nil && srAll != nil {
 				for _, match := range srAll.Matches {
-					jb, jErr := s.protoToJSONWithMeta(rt, match.ResourceProto, match.ResVersion, match.LastUpdated)
+					m, jErr := s.protoToFHIRMapWithMeta(rt, match.ResourceProto, match.ResVersion, match.LastUpdated)
 					if jErr != nil {
-						continue
-					}
-					var m map[string]any
-					if json.Unmarshal(jb, &m) != nil {
 						continue
 					}
 					u, _ := m["url"].(string)
@@ -2008,13 +1978,10 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read resource for $fhirpath")
 			return
 		}
-		jb, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
-		if err != nil {
+		var errDec error
+		targetMap, errDec = s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		if errDec != nil {
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode resource for $fhirpath")
-			return
-		}
-		if err := json.Unmarshal(jb, &targetMap); err != nil {
-			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to unmarshal resource for $fhirpath")
 			return
 		}
 	}
@@ -2571,10 +2538,7 @@ func (s *Server) upsertResourceMap(ctx context.Context, tenant string, rm map[st
 		return "", "", 0, nil, err
 	}
 	s.dispatchSubscriptions(ctx, tenant, rt, rid, rec.ResourceProto, rec.ResVersion, rec.LastUpdated, idx)
-	var savedMap map[string]any
-	if jb, jErr := s.protoToJSONWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); jErr == nil {
-		_ = json.Unmarshal(jb, &savedMap)
-	}
+	savedMap, _ := s.protoToFHIRMapWithMeta(rt, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if savedMap == nil {
 		savedMap = rm
 	}
@@ -2691,14 +2655,9 @@ func (s *Server) handleGroupMemberMutate(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	jb, err := s.protoToJSONWithMeta("Group", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+	groupMap, err := s.protoToFHIRMapWithMeta("Group", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode Group")
-		return
-	}
-	var groupMap map[string]any
-	if err := json.Unmarshal(jb, &groupMap); err != nil {
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to unmarshal Group")
 		return
 	}
 
@@ -2895,12 +2854,8 @@ func (s *Server) handleObservationLastN(w http.ResponseWriter, r *http.Request) 
 	var groupOrder []string
 
 	for _, m := range sr.Matches {
-		jb, err := s.protoToJSONWithMeta("Observation", m.ResourceProto, m.ResVersion, m.LastUpdated)
+		rm, err := s.protoToFHIRMapWithMeta("Observation", m.ResourceProto, m.ResVersion, m.LastUpdated)
 		if err != nil {
-			continue
-		}
-		var rm map[string]any
-		if json.Unmarshal(jb, &rm) != nil {
 			continue
 		}
 		codeKey := extractObservationCodeKey(rm)
@@ -3108,11 +3063,8 @@ func (s *Server) handleObservationStats(w http.ResponseWriter, r *http.Request) 
 
 	obsMaps := make([]map[string]any, 0, len(sr.Matches))
 	for _, m := range sr.Matches {
-		if jb, jErr := s.protoToJSONWithMeta("Observation", m.ResourceProto, m.ResVersion, m.LastUpdated); jErr == nil {
-			var rm map[string]any
-			if json.Unmarshal(jb, &rm) == nil {
-				obsMaps = append(obsMaps, rm)
-			}
+		if rm, jErr := s.protoToFHIRMapWithMeta("Observation", m.ResourceProto, m.ResVersion, m.LastUpdated); jErr == nil {
+			obsMaps = append(obsMaps, rm)
 		}
 	}
 
@@ -3491,11 +3443,14 @@ func (s *Server) handlePatientMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	srcJSON, _ := s.protoToJSONWithMeta("Patient", srcRec.ResourceProto, srcRec.ResVersion, srcRec.LastUpdated)
-	tgtJSON, _ := s.protoToJSONWithMeta("Patient", tgtRec.ResourceProto, tgtRec.ResVersion, tgtRec.LastUpdated)
-	var srcMap, tgtMap map[string]any
-	_ = json.Unmarshal(srcJSON, &srcMap)
-	_ = json.Unmarshal(tgtJSON, &tgtMap)
+	srcMap, _ := s.protoToFHIRMapWithMeta("Patient", srcRec.ResourceProto, srcRec.ResVersion, srcRec.LastUpdated)
+	tgtMap, _ := s.protoToFHIRMapWithMeta("Patient", tgtRec.ResourceProto, tgtRec.ResVersion, tgtRec.LastUpdated)
+	if srcMap == nil {
+		srcMap = map[string]any{"resourceType": "Patient", "id": sourceID}
+	}
+	if tgtMap == nil {
+		tgtMap = map[string]any{"resourceType": "Patient", "id": targetID}
+	}
 	if resultPatientOverride != nil {
 		tgtMap = resultPatientOverride
 		tgtMap["resourceType"] = "Patient"
@@ -3734,12 +3689,8 @@ func (s *Server) handleAppointmentFind(w http.ResponseWriter, r *http.Request) {
 	matchCount := 0
 
 	for _, sr := range slotRes.Matches {
-		slotBytes, err := s.protoToJSONWithMeta("Slot", sr.ResourceProto, sr.ResVersion, sr.LastUpdated)
+		slotMap, err := s.protoToFHIRMapWithMeta("Slot", sr.ResourceProto, sr.ResVersion, sr.LastUpdated)
 		if err != nil {
-			continue
-		}
-		var slotMap map[string]any
-		if err := json.Unmarshal(slotBytes, &slotMap); err != nil {
 			continue
 		}
 		status, _ := slotMap["status"].(string)
@@ -3766,9 +3717,7 @@ func (s *Server) handleAppointmentFind(w http.ResponseWriter, r *http.Request) {
 			if schedRef, _ := schedObj["reference"].(string); schedRef != "" {
 				schedID := cleanID(schedRef)
 				if schedRec, getErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Schedule", schedID); getErr == nil {
-					if sb, convErr := s.protoToJSONWithMeta("Schedule", schedRec.ResourceProto, schedRec.ResVersion, schedRec.LastUpdated); convErr == nil {
-						_ = json.Unmarshal(sb, &schedMap)
-					}
+					schedMap, _ = s.protoToFHIRMapWithMeta("Schedule", schedRec.ResourceProto, schedRec.ResVersion, schedRec.LastUpdated)
 				}
 			}
 		}
@@ -4010,9 +3959,7 @@ func (s *Server) handleAppointmentHoldOrBook(w http.ResponseWriter, r *http.Requ
 		}
 		if lookupID != "" && !strings.HasPrefix(lookupID, "proposed-") {
 			if apptRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Appointment", lookupID); err == nil {
-				if jb, convErr := s.protoToJSONWithMeta("Appointment", apptRec.ResourceProto, apptRec.ResVersion, apptRec.LastUpdated); convErr == nil {
-					_ = json.Unmarshal(jb, &apptMap)
-				}
+				apptMap, _ = s.protoToFHIRMapWithMeta("Appointment", apptRec.ResourceProto, apptRec.ResVersion, apptRec.LastUpdated)
 			}
 		}
 		if apptMap == nil && strings.HasPrefix(lookupID, "proposed-") {
@@ -4061,14 +4008,9 @@ func (s *Server) handleAppointmentHoldOrBook(w http.ResponseWriter, r *http.Requ
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Slot/%s not found", sid))
 			return
 		}
-		slotBytes, err := s.protoToJSONWithMeta("Slot", slotRec.ResourceProto, slotRec.ResVersion, slotRec.LastUpdated)
+		slotMap, err := s.protoToFHIRMapWithMeta("Slot", slotRec.ResourceProto, slotRec.ResVersion, slotRec.LastUpdated)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "decode Slot/"+sid+": "+err.Error())
-			return
-		}
-		var slotMap map[string]any
-		if err := json.Unmarshal(slotBytes, &slotMap); err != nil {
-			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "unmarshal Slot/"+sid+": "+err.Error())
 			return
 		}
 		curStatus, _ := slotMap["status"].(string)
@@ -4329,13 +4271,10 @@ func (s *Server) handleCapabilityStatementImplements(w http.ResponseWriter, r *h
 		if s.store != nil {
 			if csRes, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "CapabilityStatement", Count: 20}); err == nil {
 				for _, sr := range csRes.Matches {
-					if jb, convErr := s.protoToJSONWithMeta("CapabilityStatement", sr.ResourceProto, sr.ResVersion, sr.LastUpdated); convErr == nil {
-						var cm map[string]any
-						if json.Unmarshal(jb, &cm) == nil {
-							if u, _ := cm["url"].(string); strings.EqualFold(u, canonicalParam) || strings.EqualFold(sr.ResID, cleanID(canonicalParam)) {
-								clientCap = cm
-								break
-							}
+					if cm, convErr := s.protoToFHIRMapWithMeta("CapabilityStatement", sr.ResourceProto, sr.ResVersion, sr.LastUpdated); convErr == nil {
+						if u, _ := cm["url"].(string); strings.EqualFold(u, canonicalParam) || strings.EqualFold(sr.ResID, cleanID(canonicalParam)) {
+							clientCap = cm
+							break
 						}
 					}
 				}
@@ -4540,22 +4479,17 @@ func (s *Server) handleStructureDefinitionSnapshot(w http.ResponseWriter, r *htt
 
 	if sdMap == nil && pathID != "" && s.store != nil {
 		if sdRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "StructureDefinition", pathID); err == nil {
-			if jb, convErr := s.protoToJSONWithMeta("StructureDefinition", sdRec.ResourceProto, sdRec.ResVersion, sdRec.LastUpdated); convErr == nil {
-				_ = json.Unmarshal(jb, &sdMap)
-			}
+			sdMap, _ = s.protoToFHIRMapWithMeta("StructureDefinition", sdRec.ResourceProto, sdRec.ResVersion, sdRec.LastUpdated)
 		}
 	}
 
 	if sdMap == nil && urlParam != "" && s.store != nil {
 		if sdRes, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "StructureDefinition", Count: 50}); err == nil {
 			for _, sr := range sdRes.Matches {
-				if jb, convErr := s.protoToJSONWithMeta("StructureDefinition", sr.ResourceProto, sr.ResVersion, sr.LastUpdated); convErr == nil {
-					var candidate map[string]any
-					if json.Unmarshal(jb, &candidate) == nil {
-						if u, _ := candidate["url"].(string); strings.EqualFold(u, urlParam) {
-							sdMap = candidate
-							break
-						}
+				if candidate, convErr := s.protoToFHIRMapWithMeta("StructureDefinition", sr.ResourceProto, sr.ResVersion, sr.LastUpdated); convErr == nil {
+					if u, _ := candidate["url"].(string); strings.EqualFold(u, urlParam) {
+						sdMap = candidate
+						break
 					}
 				}
 			}
@@ -5043,22 +4977,17 @@ func (s *Server) handleStructureMapTransform(w http.ResponseWriter, r *http.Requ
 
 	if smMap == nil && pathID != "" && s.store != nil {
 		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "StructureMap", pathID); err == nil {
-			if jb, convErr := s.protoToJSONWithMeta("StructureMap", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); convErr == nil {
-				_ = json.Unmarshal(jb, &smMap)
-			}
+			smMap, _ = s.protoToFHIRMapWithMeta("StructureMap", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		}
 	}
 
 	if smMap == nil && sourceURL != "" && s.store != nil {
 		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "StructureMap", Count: 50}); err == nil {
 			for _, m := range sr.Matches {
-				if jb, convErr := s.protoToJSONWithMeta("StructureMap", m.ResourceProto, m.ResVersion, m.LastUpdated); convErr == nil {
-					var cand map[string]any
-					if json.Unmarshal(jb, &cand) == nil {
-						if u, _ := cand["url"].(string); strings.EqualFold(u, sourceURL) || strings.EqualFold(m.ResID, cleanID(sourceURL)) {
-							smMap = cand
-							break
-						}
+				if cand, convErr := s.protoToFHIRMapWithMeta("StructureMap", m.ResourceProto, m.ResVersion, m.LastUpdated); convErr == nil {
+					if u, _ := cand["url"].(string); strings.EqualFold(u, sourceURL) || strings.EqualFold(m.ResID, cleanID(sourceURL)) {
+						smMap = cand
+						break
 					}
 				}
 			}
@@ -5270,12 +5199,8 @@ func (s *Server) handleNamingSystemPreferredID(w http.ResponseWriter, r *http.Re
 	if s.store != nil {
 		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "NamingSystem", Count: 50}); err == nil {
 			for _, m := range sr.Matches {
-				jb, convErr := s.protoToJSONWithMeta("NamingSystem", m.ResourceProto, m.ResVersion, m.LastUpdated)
+				nsMap, convErr := s.protoToFHIRMapWithMeta("NamingSystem", m.ResourceProto, m.ResVersion, m.LastUpdated)
 				if convErr != nil {
-					continue
-				}
-				var nsMap map[string]any
-				if json.Unmarshal(jb, &nsMap) != nil {
 					continue
 				}
 				uids, _ := nsMap["uniqueId"].([]any)
@@ -5478,12 +5403,8 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 	var matchedResponses []map[string]any
 	if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "ClaimResponse", Count: 100}); err == nil {
 		for _, m := range sr.Matches {
-			jb, convErr := s.protoToJSONWithMeta("ClaimResponse", m.ResourceProto, m.ResVersion, m.LastUpdated)
+			crMap, convErr := s.protoToFHIRMapWithMeta("ClaimResponse", m.ResourceProto, m.ResVersion, m.LastUpdated)
 			if convErr != nil {
-				continue
-			}
-			var crMap map[string]any
-			if json.Unmarshal(jb, &crMap) != nil {
 				continue
 			}
 			crID, _ := crMap["id"].(string)
@@ -5533,9 +5454,7 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 	var resolvedClaim map[string]any
 	if claimID != "" {
 		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Claim", claimID); err == nil {
-			if jb, cErr := s.protoToJSONWithMeta("Claim", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-				_ = json.Unmarshal(jb, &resolvedClaim)
-			}
+			resolvedClaim, _ = s.protoToFHIRMapWithMeta("Claim", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		}
 	}
 	if resolvedClaim == nil && inlineClaim != nil {
@@ -5694,26 +5613,21 @@ func (s *Server) handleQuestionnairePackage(w http.ResponseWriter, r *http.Reque
 	qMap := inlineQ
 	if qMap == nil && qID != "" {
 		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Questionnaire", qID); err == nil {
-			if jb, cErr := s.protoToJSONWithMeta("Questionnaire", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-				_ = json.Unmarshal(jb, &qMap)
-			}
+			qMap, _ = s.protoToFHIRMapWithMeta("Questionnaire", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		}
 	}
 	if qMap == nil && qCanonical != "" {
 		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "Questionnaire", Count: 50}); err == nil {
 			for _, m := range sr.Matches {
-				jb, cErr := s.protoToJSONWithMeta("Questionnaire", m.ResourceProto, m.ResVersion, m.LastUpdated)
+				candidate, cErr := s.protoToFHIRMapWithMeta("Questionnaire", m.ResourceProto, m.ResVersion, m.LastUpdated)
 				if cErr != nil {
 					continue
 				}
-				var candidate map[string]any
-				if json.Unmarshal(jb, &candidate) == nil {
-					u, _ := candidate["url"].(string)
-					cid, _ := candidate["id"].(string)
-					if strings.EqualFold(u, qCanonical) || strings.EqualFold(cid, qCanonical) {
-						qMap = candidate
-						break
-					}
+				u, _ := candidate["url"].(string)
+				cid, _ := candidate["id"].(string)
+				if strings.EqualFold(u, qCanonical) || strings.EqualFold(cid, qCanonical) {
+					qMap = candidate
+					break
 				}
 			}
 		}
@@ -5792,18 +5706,15 @@ func (s *Server) handleQuestionnairePackage(w http.ResponseWriter, r *http.Reque
 		var libMap map[string]any
 		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "Library", Count: 50}); err == nil {
 			for _, m := range sr.Matches {
-				jb, cErr := s.protoToJSONWithMeta("Library", m.ResourceProto, m.ResVersion, m.LastUpdated)
+				candidate, cErr := s.protoToFHIRMapWithMeta("Library", m.ResourceProto, m.ResVersion, m.LastUpdated)
 				if cErr != nil {
 					continue
 				}
-				var candidate map[string]any
-				if json.Unmarshal(jb, &candidate) == nil {
-					u, _ := candidate["url"].(string)
-					cid, _ := candidate["id"].(string)
-					if strings.EqualFold(u, libURL) || strings.EqualFold(cid, strings.TrimPrefix(libURL, "Library/")) {
-						libMap = candidate
-						break
-					}
+				u, _ := candidate["url"].(string)
+				cid, _ := candidate["id"].(string)
+				if strings.EqualFold(u, libURL) || strings.EqualFold(cid, strings.TrimPrefix(libURL, "Library/")) {
+					libMap = candidate
+					break
 				}
 			}
 		}
@@ -5840,18 +5751,15 @@ func (s *Server) handleQuestionnairePackage(w http.ResponseWriter, r *http.Reque
 		var vsMap map[string]any
 		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "ValueSet", Count: 50}); err == nil {
 			for _, m := range sr.Matches {
-				jb, cErr := s.protoToJSONWithMeta("ValueSet", m.ResourceProto, m.ResVersion, m.LastUpdated)
+				candidate, cErr := s.protoToFHIRMapWithMeta("ValueSet", m.ResourceProto, m.ResVersion, m.LastUpdated)
 				if cErr != nil {
 					continue
 				}
-				var candidate map[string]any
-				if json.Unmarshal(jb, &candidate) == nil {
-					u, _ := candidate["url"].(string)
-					cid, _ := candidate["id"].(string)
-					if strings.EqualFold(u, vsURL) || strings.EqualFold(cid, strings.TrimPrefix(vsURL, "ValueSet/")) {
-						vsMap = candidate
-						break
-					}
+				u, _ := candidate["url"].(string)
+				cid, _ := candidate["id"].(string)
+				if strings.EqualFold(u, vsURL) || strings.EqualFold(cid, strings.TrimPrefix(vsURL, "ValueSet/")) {
+					vsMap = candidate
+					break
 				}
 			}
 		}

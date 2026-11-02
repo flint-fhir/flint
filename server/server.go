@@ -3211,6 +3211,20 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if okProto, protoCT := wantsProtoResponse(r); okProto {
+		if protoBundleBytes, err := s.buildProtoHistoryBundle(resType, resID, records, total, links, summary); err == nil {
+			w.Header().Set("Content-Type", protoCT)
+			w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+			w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+			w.Header().Set("X-Flint-Execution-Mode", "zero-json-protoreflect")
+			w.WriteHeader(http.StatusOK)
+			if r == nil || r.Method != http.MethodHead {
+				_, _ = w.Write(protoBundleBytes)
+			}
+			return
+		}
+	}
+
 	bundle := map[string]any{
 		"resourceType": "Bundle",
 		"type":         "history",
@@ -3869,6 +3883,201 @@ func stampProtoResourceMeta(md protoreflect.MessageDescriptor, protoBytes []byte
 		return out
 	}
 	return protoBytes
+}
+
+func setProtoStringWrapper(msg protoreflect.Message, fieldName, val string) {
+	if msg == nil || val == "" {
+		return
+	}
+	fd := msg.Descriptor().Fields().ByName(protoreflect.Name(fieldName))
+	if fd == nil || fd.Kind() != protoreflect.MessageKind {
+		return
+	}
+	sub := msg.Mutable(fd).Message()
+	if valFD := sub.Descriptor().Fields().ByName("value"); valFD != nil && valFD.Kind() == protoreflect.StringKind {
+		sub.Set(valFD, protoreflect.ValueOfString(val))
+	}
+}
+
+func setProtoUint32Wrapper(msg protoreflect.Message, fieldName string, val uint32) {
+	if msg == nil {
+		return
+	}
+	fd := msg.Descriptor().Fields().ByName(protoreflect.Name(fieldName))
+	if fd == nil || fd.Kind() != protoreflect.MessageKind {
+		return
+	}
+	sub := msg.Mutable(fd).Message()
+	if valFD := sub.Descriptor().Fields().ByName("value"); valFD != nil && valFD.Kind() == protoreflect.Uint32Kind {
+		sub.Set(valFD, protoreflect.ValueOfUint32(val))
+	}
+}
+
+func setProtoEnumWrapper(msg protoreflect.Message, fieldName, enumName string) {
+	if msg == nil || enumName == "" {
+		return
+	}
+	fd := msg.Descriptor().Fields().ByName(protoreflect.Name(fieldName))
+	if fd == nil || fd.Kind() != protoreflect.MessageKind {
+		return
+	}
+	sub := msg.Mutable(fd).Message()
+	if valFD := sub.Descriptor().Fields().ByName("value"); valFD != nil && valFD.Kind() == protoreflect.EnumKind {
+		if ev := valFD.Enum().Values().ByName(protoreflect.Name(enumName)); ev != nil {
+			sub.Set(valFD, protoreflect.ValueOfEnum(ev.Number()))
+		}
+	}
+}
+
+func setProtoInstantField(msg protoreflect.Message, fieldName string, ts time.Time) {
+	if msg == nil || ts.IsZero() {
+		return
+	}
+	fd := msg.Descriptor().Fields().ByName(protoreflect.Name(fieldName))
+	if fd == nil || fd.Kind() != protoreflect.MessageKind {
+		return
+	}
+	luMsg := msg.Mutable(fd).Message()
+	if usField := luMsg.Descriptor().Fields().ByName("value_us"); usField != nil && usField.Kind() == protoreflect.Int64Kind {
+		luMsg.Set(usField, protoreflect.ValueOfInt64(ts.UTC().UnixMicro()))
+	}
+	if tzField := luMsg.Descriptor().Fields().ByName("timezone"); tzField != nil && tzField.Kind() == protoreflect.StringKind {
+		luMsg.Set(tzField, protoreflect.ValueOfString("Z"))
+	}
+	if precField := luMsg.Descriptor().Fields().ByName("precision"); precField != nil && precField.Kind() == protoreflect.EnumKind {
+		luMsg.Set(precField, protoreflect.ValueOfEnum(1))
+	}
+}
+
+func (s *Server) setBundleEntryProtoResource(entryMsg protoreflect.Message, resType, resID string, protoBytes []byte, version int, lastUpdated time.Time) bool {
+	if entryMsg == nil || len(protoBytes) == 0 {
+		return false
+	}
+	crField := fhirutil.ContainedResourceFieldByType(resType)
+	resFD := entryMsg.Descriptor().Fields().ByName("resource")
+	if crField == nil || resFD == nil || resFD.Kind() != protoreflect.MessageKind {
+		return false
+	}
+	stamped := stampProtoResourceMeta(s.protoRegistry[resType], protoBytes, resID, version, lastUpdated)
+	crMsg := entryMsg.Mutable(resFD).Message()
+	typedResMsg := crMsg.Mutable(crField).Message()
+	return proto.Unmarshal(stamped, typedResMsg.Interface()) == nil
+}
+
+func appendProtoBundleLinks(bundleMsg protoreflect.Message, links []map[string]string) {
+	if bundleMsg == nil || len(links) == 0 {
+		return
+	}
+	linkFD := bundleMsg.Descriptor().Fields().ByName("link")
+	if linkFD == nil || !linkFD.IsList() {
+		return
+	}
+	linkList := bundleMsg.Mutable(linkFD).List()
+	for _, lnk := range links {
+		lnkMsg := linkList.NewElement().Message()
+		setProtoStringWrapper(lnkMsg, "relation", lnk["relation"])
+		setProtoStringWrapper(lnkMsg, "url", lnk["url"])
+		linkList.Append(protoreflect.ValueOfMessage(lnkMsg))
+	}
+}
+
+// buildProtoSearchSetBundle constructs a binary google.fhir.r4.core.Bundle (searchset) directly
+// from stored ResourceProto wire bytes using protoreflect without any JSON or map[string]any conversion.
+func (s *Server) buildProtoSearchSetBundle(sr *postgres.SearchResults, params postgres.SearchParams, links []map[string]string) ([]byte, error) {
+	bundleDesc := fhirutil.BundleDescriptor()
+	if bundleDesc == nil {
+		return nil, fmt.Errorf("bundle descriptor not available")
+	}
+	bundleMsg := dynamicpb.NewMessage(bundleDesc)
+	setProtoEnumWrapper(bundleMsg, "type", "SEARCHSET")
+	if params.TotalMode != "none" || params.Summary == "count" {
+		setProtoUint32Wrapper(bundleMsg, "total", uint32(max(0, sr.Total)))
+	}
+	appendProtoBundleLinks(bundleMsg, links)
+
+	if params.Summary != "count" {
+		entryFD := bundleDesc.Fields().ByName("entry")
+		if entryFD != nil && entryFD.IsList() {
+			entryList := bundleMsg.Mutable(entryFD).List()
+			for _, res := range sr.Matches {
+				entryMsg := entryList.NewElement().Message()
+				setProtoStringWrapper(entryMsg, "full_url", fmt.Sprintf("%s/%s", res.ResType, res.ResID))
+				s.setBundleEntryProtoResource(entryMsg, res.ResType, res.ResID, res.ResourceProto, res.ResVersion, res.LastUpdated)
+				if searchFD := entryMsg.Descriptor().Fields().ByName("search"); searchFD != nil && searchFD.Kind() == protoreflect.MessageKind {
+					setProtoEnumWrapper(entryMsg.Mutable(searchFD).Message(), "mode", "MATCH")
+				}
+				entryList.Append(protoreflect.ValueOfMessage(entryMsg))
+			}
+			for _, inc := range sr.Includes {
+				entryMsg := entryList.NewElement().Message()
+				setProtoStringWrapper(entryMsg, "full_url", fmt.Sprintf("%s/%s", inc.ResType, inc.ResID))
+				s.setBundleEntryProtoResource(entryMsg, inc.ResType, inc.ResID, inc.ResourceProto, inc.ResVersion, inc.LastUpdated)
+				if searchFD := entryMsg.Descriptor().Fields().ByName("search"); searchFD != nil && searchFD.Kind() == protoreflect.MessageKind {
+					setProtoEnumWrapper(entryMsg.Mutable(searchFD).Message(), "mode", "INCLUDE")
+				}
+				entryList.Append(protoreflect.ValueOfMessage(entryMsg))
+			}
+		}
+	}
+	return proto.Marshal(bundleMsg)
+}
+
+// buildProtoHistoryBundle constructs a binary google.fhir.r4.core.Bundle (history) directly
+// from stored ResourceProto wire bytes using protoreflect without any JSON or map[string]any conversion.
+func (s *Server) buildProtoHistoryBundle(resType, resID string, records []postgres.ResourceRecord, total int, links []map[string]string, summary string) ([]byte, error) {
+	bundleDesc := fhirutil.BundleDescriptor()
+	if bundleDesc == nil {
+		return nil, fmt.Errorf("bundle descriptor not available")
+	}
+	bundleMsg := dynamicpb.NewMessage(bundleDesc)
+	setProtoEnumWrapper(bundleMsg, "type", "HISTORY")
+	setProtoUint32Wrapper(bundleMsg, "total", uint32(max(0, total)))
+	appendProtoBundleLinks(bundleMsg, links)
+
+	if summary != "count" {
+		entryFD := bundleDesc.Fields().ByName("entry")
+		if entryFD != nil && entryFD.IsList() {
+			entryList := bundleMsg.Mutable(entryFD).List()
+			for _, rec := range records {
+				rt := rec.ResType
+				if rt == "" {
+					rt = resType
+				}
+				rid := rec.ResID
+				if rid == "" {
+					rid = resID
+				}
+				method := "PUT"
+				status := "200 OK"
+				if rec.IsDeleted {
+					method = "DELETE"
+					status = "204 No Content"
+				} else if rec.ResVersion == 1 {
+					method = "POST"
+					status = "201 Created"
+				}
+				entryMsg := entryList.NewElement().Message()
+				setProtoStringWrapper(entryMsg, "full_url", fmt.Sprintf("%s/%s", rt, rid))
+				if reqFD := entryMsg.Descriptor().Fields().ByName("request"); reqFD != nil && reqFD.Kind() == protoreflect.MessageKind {
+					reqMsg := entryMsg.Mutable(reqFD).Message()
+					setProtoEnumWrapper(reqMsg, "method", method)
+					setProtoStringWrapper(reqMsg, "url", fmt.Sprintf("%s/%s", rt, rid))
+				}
+				if respFD := entryMsg.Descriptor().Fields().ByName("response"); respFD != nil && respFD.Kind() == protoreflect.MessageKind {
+					respMsg := entryMsg.Mutable(respFD).Message()
+					setProtoStringWrapper(respMsg, "status", status)
+					setProtoStringWrapper(respMsg, "location", fmt.Sprintf("%s/%s/_history/%d", rt, rid, rec.ResVersion))
+					setProtoStringWrapper(respMsg, "etag", postgres.FormatETag(rec.ResVersion))
+					setProtoInstantField(respMsg, "last_modified", rec.LastUpdated)
+				}
+				if !rec.IsDeleted && len(rec.ResourceProto) > 0 {
+					s.setBundleEntryProtoResource(entryMsg, rt, rid, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+				}
+				entryList.Append(protoreflect.ValueOfMessage(entryMsg))
+			}
+		}
+	}
+	return proto.Marshal(bundleMsg)
 }
 
 // handleValidate handles POST /{tenant}/{resourceType}/$validate, POST /{tenant}/$validate,
@@ -5222,6 +5431,24 @@ func (s *Server) filterAuthorizedIncludes(r *http.Request, tenant string, secCtx
 }
 
 func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Request, sr *postgres.SearchResults, params postgres.SearchParams, ignoredParams ...string) {
+	if okProto, protoCT := wantsProtoResponse(r); okProto {
+		var links []map[string]string
+		if r != nil {
+			links = s.buildSearchBundleLinks(r, sr, params)
+		}
+		if protoBundleBytes, err := s.buildProtoSearchSetBundle(sr, params, links); err == nil {
+			w.Header().Set("Content-Type", protoCT)
+			w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+			w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+			w.Header().Set("X-Flint-Execution-Mode", "zero-json-protoreflect")
+			w.WriteHeader(http.StatusOK)
+			if r == nil || r.Method != http.MethodHead {
+				_, _ = w.Write(protoBundleBytes)
+			}
+			return
+		}
+	}
+
 	bundle := map[string]any{
 		"resourceType": "Bundle",
 		"type":         "searchset",

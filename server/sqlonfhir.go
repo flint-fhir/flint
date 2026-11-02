@@ -189,16 +189,88 @@ func (s *Server) resolveViewDefinitionByID(ctx context.Context, tenant, id strin
 
 	if s.store != nil {
 		if rec, err := s.store.ReadResourceWithMeta(ctx, tenant, "Basic", id); err == nil && rec != nil {
-			if jsonBytes, err := s.protoToJSONWithMeta("Basic", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
-				var vd sqlOnFHIRViewDefinition
-				if json.Unmarshal(jsonBytes, &vd) == nil && vd.Resource != "" && len(vd.Select) > 0 {
-					vd.ResourceType = "ViewDefinition"
+			if m, err := s.protoToFHIRMapWithMeta("Basic", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+				if vd, ok := viewDefinitionFromMap(m); ok {
 					return vd, true
 				}
 			}
 		}
 	}
 	return sqlOnFHIRViewDefinition{}, false
+}
+
+func viewDefinitionFromMap(m map[string]any) (sqlOnFHIRViewDefinition, bool) {
+	if m == nil {
+		return sqlOnFHIRViewDefinition{}, false
+	}
+	res, _ := m["resource"].(string)
+	if res == "" {
+		return sqlOnFHIRViewDefinition{}, false
+	}
+	rawSelects, _ := m["select"].([]any)
+	selects := parseViewSelectsFromSlice(rawSelects)
+	if len(selects) == 0 {
+		return sqlOnFHIRViewDefinition{}, false
+	}
+	id, _ := m["id"].(string)
+	url, _ := m["url"].(string)
+	name, _ := m["name"].(string)
+	title, _ := m["title"].(string)
+	status, _ := m["status"].(string)
+	return sqlOnFHIRViewDefinition{
+		ResourceType: "ViewDefinition",
+		ID:           id,
+		URL:          url,
+		Name:         name,
+		Title:        title,
+		Status:       status,
+		Resource:     res,
+		Select:       selects,
+	}, true
+}
+
+func parseViewSelectsFromSlice(raw []any) []sqlOnFHIRSelect {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]sqlOnFHIRSelect, 0, len(raw))
+	for _, item := range raw {
+		sm, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		var sel sqlOnFHIRSelect
+		sel.ForEach, _ = sm["forEach"].(string)
+		sel.ForEachOrNull, _ = sm["forEachOrNull"].(string)
+		if rawCols, ok := sm["column"].([]any); ok {
+			for _, rc := range rawCols {
+				cm, ok := rc.(map[string]any)
+				if !ok {
+					continue
+				}
+				cName, _ := cm["name"].(string)
+				cPath, _ := cm["path"].(string)
+				cDesc, _ := cm["description"].(string)
+				cType, _ := cm["type"].(string)
+				cColl, _ := cm["collection"].(bool)
+				sel.Column = append(sel.Column, sqlOnFHIRColumn{
+					Name:        cName,
+					Path:        cPath,
+					Description: cDesc,
+					Type:        cType,
+					Collection:  cColl,
+				})
+			}
+		}
+		if rawSub, ok := sm["select"].([]any); ok {
+			sel.Select = parseViewSelectsFromSlice(rawSub)
+		}
+		if rawUnion, ok := sm["unionAll"].([]any); ok {
+			sel.UnionAll = parseViewSelectsFromSlice(rawUnion)
+		}
+		out = append(out, sel)
+	}
+	return out
 }
 
 // handleViewDefinitionCRUD handles RESTful CRUD operations on /fhir/r4/{tenant}/ViewDefinition
@@ -345,6 +417,99 @@ func collectViewDefinitionColumns(selects []sqlOnFHIRSelect) []sqlOnFHIRColumn {
 		}
 	}
 	walk(selects)
+	return out
+}
+
+func qualifyForEachColumnPath(forEachPrefix, colPath string) string {
+	p := strings.TrimSpace(colPath)
+	prefix := strings.TrimSpace(forEachPrefix)
+	if prefix == "" || p == "" {
+		return p
+	}
+	if strings.HasPrefix(p, "'") || strings.HasPrefix(p, "%") || strings.HasPrefix(p, prefix+".") || p == prefix {
+		return p
+	}
+	return prefix + "." + p
+}
+
+// extractViewUnionBranches expands top-level or nested select.unionAll clauses
+// into aligned per-branch column slices matching collectViewDefinitionColumns(selects).
+// If no unionAll is present, returns a single branch containing collectViewDefinitionColumns(selects).
+func extractViewUnionBranches(selects []sqlOnFHIRSelect) [][]sqlOnFHIRColumn {
+	allCols := collectViewDefinitionColumns(selects)
+	var baseCols []sqlOnFHIRColumn
+	var unionBranches []sqlOnFHIRSelect
+
+	var walk func(sels []sqlOnFHIRSelect, prefix string)
+	walk = func(sels []sqlOnFHIRSelect, prefix string) {
+		for _, sel := range sels {
+			curPrefix := prefix
+			fe := strings.TrimSpace(sel.ForEach)
+			if fe == "" {
+				fe = strings.TrimSpace(sel.ForEachOrNull)
+			}
+			if fe != "" {
+				curPrefix = qualifyForEachColumnPath(prefix, fe)
+			}
+			for _, col := range sel.Column {
+				c := col
+				c.Path = qualifyForEachColumnPath(curPrefix, c.Path)
+				baseCols = append(baseCols, c)
+			}
+			if len(sel.UnionAll) > 0 && len(unionBranches) == 0 {
+				for _, u := range sel.UnionAll {
+					uCopy := u
+					uFE := strings.TrimSpace(uCopy.ForEach)
+					if uFE == "" {
+						uFE = strings.TrimSpace(uCopy.ForEachOrNull)
+					}
+					branchPrefix := curPrefix
+					if uFE != "" {
+						branchPrefix = qualifyForEachColumnPath(curPrefix, uFE)
+					}
+					cols := make([]sqlOnFHIRColumn, len(uCopy.Column))
+					for i, col := range uCopy.Column {
+						c := col
+						c.Path = qualifyForEachColumnPath(branchPrefix, c.Path)
+						cols[i] = c
+					}
+					uCopy.Column = cols
+					unionBranches = append(unionBranches, uCopy)
+				}
+			}
+			walk(sel.Select, curPrefix)
+		}
+	}
+	walk(selects, "")
+
+	if len(unionBranches) == 0 {
+		return [][]sqlOnFHIRColumn{allCols}
+	}
+
+	baseMap := make(map[string]sqlOnFHIRColumn, len(baseCols))
+	for _, c := range baseCols {
+		baseMap[c.Name] = c
+	}
+
+	out := make([][]sqlOnFHIRColumn, 0, len(unionBranches))
+	for _, ub := range unionBranches {
+		branchCols := collectViewDefinitionColumns([]sqlOnFHIRSelect{ub})
+		bMap := make(map[string]sqlOnFHIRColumn, len(branchCols))
+		for _, c := range branchCols {
+			bMap[c.Name] = c
+		}
+		aligned := make([]sqlOnFHIRColumn, 0, len(allCols))
+		for _, schemaCol := range allCols {
+			if bc, ok := bMap[schemaCol.Name]; ok {
+				aligned = append(aligned, bc)
+			} else if baseC, ok := baseMap[schemaCol.Name]; ok {
+				aligned = append(aligned, baseC)
+			} else {
+				aligned = append(aligned, sqlOnFHIRColumn{Name: schemaCol.Name, Path: "''"})
+			}
+		}
+		out = append(out, aligned)
+	}
 	return out
 }
 
@@ -1161,6 +1326,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 
 	constMap := buildViewConstantReplacements(opts.viewDef.Constant)
 	columns := collectViewDefinitionColumns(opts.viewDef.Select)
+	branches := extractViewUnionBranches(opts.viewDef.Select)
 	resType := strings.TrimSpace(opts.viewDef.Resource)
 	escapedTenant := strings.ReplaceAll(tenant, "'", "''")
 
@@ -1171,12 +1337,10 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 			targetTable = coreTable
 		}
 
-		selectExprs := make([]string, 0, len(columns))
 		colMaps := make([]map[string]any, 0, len(columns))
 		for _, col := range columns {
 			exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
 			sqlExpr, sourceCol := dorisZeroJSONColumnExpr(exprPath, isCore)
-			selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
 			colMaps = append(colMaps, map[string]any{
 				"name": "column",
 				"part": []map[string]any{
@@ -1211,11 +1375,37 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 			}
 		}
 
-		sqlQuery := fmt.Sprintf("SELECT %s FROM %s r WHERE %s ORDER BY r.res_id ASC",
-			strings.Join(selectExprs, ", "),
-			targetTable,
-			strings.Join(whereConds, " AND "),
-		)
+		whereClause := strings.Join(whereConds, " AND ")
+		var sqlQuery string
+		if len(branches) > 1 {
+			branchQueries := make([]string, 0, len(branches))
+			for _, bCols := range branches {
+				selectExprs := make([]string, 0, len(bCols))
+				for _, col := range bCols {
+					exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
+					sqlExpr, _ := dorisZeroJSONColumnExpr(exprPath, isCore)
+					selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
+				}
+				branchQueries = append(branchQueries, fmt.Sprintf("SELECT %s FROM %s r WHERE %s",
+					strings.Join(selectExprs, ", "),
+					targetTable,
+					whereClause,
+				))
+			}
+			sqlQuery = strings.Join(branchQueries, " UNION ALL ")
+		} else {
+			selectExprs := make([]string, 0, len(columns))
+			for _, col := range columns {
+				exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
+				sqlExpr, _ := dorisZeroJSONColumnExpr(exprPath, isCore)
+				selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
+			}
+			sqlQuery = fmt.Sprintf("SELECT %s FROM %s r WHERE %s ORDER BY r.res_id ASC",
+				strings.Join(selectExprs, ", "),
+				targetTable,
+				whereClause,
+			)
+		}
 		if opts.limit > 0 {
 			sqlQuery += fmt.Sprintf(" LIMIT %d", opts.limit)
 		}
@@ -1230,12 +1420,10 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 	}
 
 	// PostgreSQL / SQLite Zero-JSONB spidx_* covering index transpilation
-	selectExprs := make([]string, 0, len(columns))
 	colMaps := make([]map[string]any, 0, len(columns))
 	for _, col := range columns {
 		exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
 		sqlExpr, sourceTbl := spidxZeroJSONColumnExpr(exprPath)
-		selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
 		colMaps = append(colMaps, map[string]any{
 			"name": "column",
 			"part": []map[string]any{
@@ -1274,10 +1462,35 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		}
 	}
 
-	sqlQuery := fmt.Sprintf("SELECT %s FROM fhir_resource r WHERE %s ORDER BY r.res_id ASC",
-		strings.Join(selectExprs, ", "),
-		strings.Join(whereConds, " AND "),
-	)
+	whereClause := strings.Join(whereConds, " AND ")
+	var sqlQuery string
+	if len(branches) > 1 {
+		branchQueries := make([]string, 0, len(branches))
+		for _, bCols := range branches {
+			selectExprs := make([]string, 0, len(bCols))
+			for _, col := range bCols {
+				exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
+				sqlExpr, _ := spidxZeroJSONColumnExpr(exprPath)
+				selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
+			}
+			branchQueries = append(branchQueries, fmt.Sprintf("SELECT %s FROM fhir_resource r WHERE %s",
+				strings.Join(selectExprs, ", "),
+				whereClause,
+			))
+		}
+		sqlQuery = strings.Join(branchQueries, " UNION ALL ")
+	} else {
+		selectExprs := make([]string, 0, len(columns))
+		for _, col := range columns {
+			exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
+			sqlExpr, _ := spidxZeroJSONColumnExpr(exprPath)
+			selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
+		}
+		sqlQuery = fmt.Sprintf("SELECT %s FROM fhir_resource r WHERE %s ORDER BY r.res_id ASC",
+			strings.Join(selectExprs, ", "),
+			whereClause,
+		)
+	}
 	if opts.limit > 0 {
 		sqlQuery += fmt.Sprintf(" LIMIT %d", opts.limit)
 	}
@@ -1293,6 +1506,9 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 
 func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 	p := strings.TrimSpace(fhirPath)
+	if strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") {
+		return p, "constant"
+	}
 	codeCol := "r.primary_code"
 	codeSysCol := "r.primary_code_sys"
 	qtyCol := "r.primary_quantity"
@@ -1356,6 +1572,18 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 	if p == "" {
 		return ""
 	}
+	if strings.HasPrefix(p, "not(") && strings.HasSuffix(p, ")") {
+		inner := strings.TrimSpace(p[4 : len(p)-1])
+		if sub := dorisZeroJSONWhereExpr(inner, isCore); sub != "" {
+			return "NOT (" + sub + ")"
+		}
+	}
+	if strings.HasSuffix(p, ".not()") {
+		inner := strings.TrimSpace(p[:len(p)-len(".not()")])
+		if sub := dorisZeroJSONWhereExpr(inner, isCore); sub != "" {
+			return "NOT (" + sub + ")"
+		}
+	}
 	if orParts := splitTopLevelBooleanWord(p, "or"); len(orParts) > 1 {
 		var compiled []string
 		for _, part := range orParts {
@@ -1386,6 +1614,53 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		codeCol = "r.code"
 		qtyCol = "r.value_quantity"
 		dateLowCol = "r.effective_start"
+	}
+	if strings.HasSuffix(p, ".exists()") {
+		fieldPath := strings.TrimSpace(p[:len(p)-len(".exists()")])
+		switch fieldPath {
+		case "valueQuantity", "valueQuantity.value":
+			return fmt.Sprintf("%s IS NOT NULL", qtyCol)
+		case "effectiveDateTime", "effectivePeriod.start", "onsetDateTime", "birthDate", "authoredOn", "issued":
+			return fmt.Sprintf("%s IS NOT NULL", dateLowCol)
+		case "subject", "patient":
+			return "(r.patient_id IS NOT NULL AND r.patient_id <> '')"
+		case "encounter", "context":
+			return "(r.encounter_id IS NOT NULL AND r.encounter_id <> '')"
+		case "code", "code.coding", "code.coding.code":
+			return fmt.Sprintf("(%s IS NOT NULL AND %s <> '')", codeCol, codeCol)
+		case "name", "name.family", "family", "name.given", "given", "address":
+			sp := normalizeFHIRPathToSearchParam(fieldPath)
+			return fmt.Sprintf("array_exists(x -> x LIKE '%s=%%', r.string_tokens)", sp)
+		default:
+			sp := normalizeFHIRPathToSearchParam(fieldPath)
+			return fmt.Sprintf("array_exists(x -> x LIKE '%s=|%%', r.code_tokens)", sp)
+		}
+	}
+	if strings.HasSuffix(p, ".empty()") {
+		fieldPath := strings.TrimSpace(p[:len(p)-len(".empty()")])
+		if sub := dorisZeroJSONWhereExpr(fieldPath+".exists()", isCore); sub != "" {
+			return "NOT (" + sub + ")"
+		}
+	}
+	if idx := strings.Index(p, ".startsWith("); idx != -1 && strings.HasSuffix(p, ")") {
+		fieldPath := strings.TrimSpace(p[:idx])
+		rawArg := strings.Trim(strings.TrimSpace(p[idx+len(".startsWith("):len(p)-1]), "'\"")
+		escapedArg := strings.ReplaceAll(rawArg, "'", "''")
+		if fieldPath == "code" || fieldPath == "code.coding.code" {
+			return fmt.Sprintf("%s LIKE '%s%%'", codeCol, escapedArg)
+		}
+		sp := normalizeFHIRPathToSearchParam(fieldPath)
+		return fmt.Sprintf("array_exists(x -> x LIKE '%s=%s%%', r.string_tokens)", sp, escapedArg)
+	}
+	if idx := strings.Index(p, ".contains("); idx != -1 && strings.HasSuffix(p, ")") {
+		fieldPath := strings.TrimSpace(p[:idx])
+		rawArg := strings.Trim(strings.TrimSpace(p[idx+len(".contains("):len(p)-1]), "'\"")
+		escapedArg := strings.ReplaceAll(rawArg, "'", "''")
+		if fieldPath == "code" || fieldPath == "code.coding.code" {
+			return fmt.Sprintf("%s LIKE '%%%s%%'", codeCol, escapedArg)
+		}
+		sp := normalizeFHIRPathToSearchParam(fieldPath)
+		return fmt.Sprintf("array_exists(x -> x LIKE '%s=%%%s%%', r.string_tokens)", sp, escapedArg)
 	}
 	if strings.HasPrefix(p, "code.coding.exists(") && strings.HasSuffix(p, ")") {
 		inner := strings.TrimSpace(p[len("code.coding.exists(") : len(p)-1])
@@ -1433,6 +1708,9 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 
 func spidxZeroJSONColumnExpr(fhirPath string) (string, string) {
 	p := strings.TrimSpace(fhirPath)
+	if strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") {
+		return p, "constant"
+	}
 	switch p {
 	case "id", "getResourceKey()":
 		return "r.res_id", "fhir_resource.res_id"
@@ -1477,6 +1755,18 @@ func spidxZeroJSONWhereExpr(fhirPath string) string {
 	if p == "" {
 		return ""
 	}
+	if strings.HasPrefix(p, "not(") && strings.HasSuffix(p, ")") {
+		inner := strings.TrimSpace(p[4 : len(p)-1])
+		if sub := spidxZeroJSONWhereExpr(inner); sub != "" {
+			return "NOT (" + sub + ")"
+		}
+	}
+	if strings.HasSuffix(p, ".not()") {
+		inner := strings.TrimSpace(p[:len(p)-len(".not()")])
+		if sub := spidxZeroJSONWhereExpr(inner); sub != "" {
+			return "NOT (" + sub + ")"
+		}
+	}
 	if orParts := splitTopLevelBooleanWord(p, "or"); len(orParts) > 1 {
 		var compiled []string
 		for _, part := range orParts {
@@ -1500,6 +1790,54 @@ func spidxZeroJSONWhereExpr(fhirPath string) string {
 		}
 	}
 
+	if strings.HasSuffix(p, ".exists()") {
+		fieldPath := strings.TrimSpace(p[:len(p)-len(".exists()")])
+		switch fieldPath {
+		case "valueQuantity", "valueQuantity.value":
+			return "EXISTS (SELECT 1 FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity')"
+		case "effectiveDateTime", "effectivePeriod.start", "onsetDateTime", "birthDate", "authoredOn", "issued":
+			sp := "date"
+			switch fieldPath {
+			case "birthDate":
+				sp = "birthdate"
+			case "onsetDateTime":
+				sp = "onset-date"
+			case "authoredOn":
+				sp = "authoredon"
+			}
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_date d WHERE d.tenant_id = r.tenant_id AND d.res_type = r.res_type AND d.res_id = r.res_id AND d.sp_name = '%s')", sp)
+		case "subject", "patient":
+			return "EXISTS (SELECT 1 FROM spidx_reference ref WHERE ref.tenant_id = r.tenant_id AND ref.res_type = r.res_type AND ref.res_id = r.res_id AND ref.sp_name IN ('patient', 'subject'))"
+		case "encounter", "context":
+			return "EXISTS (SELECT 1 FROM spidx_reference ref WHERE ref.tenant_id = r.tenant_id AND ref.res_type = r.res_type AND ref.res_id = r.res_id AND ref.sp_name = 'encounter')"
+		case "name", "name.family", "family", "name.given", "given", "address":
+			sp := normalizeFHIRPathToSearchParam(fieldPath)
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s')", sp)
+		default:
+			sp := normalizeFHIRPathToSearchParam(fieldPath)
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s')", sp)
+		}
+	}
+	if strings.HasSuffix(p, ".empty()") {
+		fieldPath := strings.TrimSpace(p[:len(p)-len(".empty()")])
+		if sub := spidxZeroJSONWhereExpr(fieldPath + ".exists()"); sub != "" {
+			return "NOT (" + sub + ")"
+		}
+	}
+	if idx := strings.Index(p, ".startsWith("); idx != -1 && strings.HasSuffix(p, ")") {
+		fieldPath := strings.TrimSpace(p[:idx])
+		rawArg := strings.Trim(strings.TrimSpace(p[idx+len(".startsWith("):len(p)-1]), "'\"")
+		escapedArg := strings.ReplaceAll(rawArg, "'", "''")
+		sp := normalizeFHIRPathToSearchParam(fieldPath)
+		return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' AND s.sp_value LIKE '%s%%')", sp, escapedArg)
+	}
+	if idx := strings.Index(p, ".contains("); idx != -1 && strings.HasSuffix(p, ")") {
+		fieldPath := strings.TrimSpace(p[:idx])
+		rawArg := strings.Trim(strings.TrimSpace(p[idx+len(".contains("):len(p)-1]), "'\"")
+		escapedArg := strings.ReplaceAll(rawArg, "'", "''")
+		sp := normalizeFHIRPathToSearchParam(fieldPath)
+		return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' AND s.sp_value LIKE '%%%s%%')", sp, escapedArg)
+	}
 	if strings.HasPrefix(p, "code.coding.exists(") && strings.HasSuffix(p, ")") {
 		inner := strings.TrimSpace(p[len("code.coding.exists(") : len(p)-1])
 		if idx := strings.Index(inner, "code"); idx != -1 {

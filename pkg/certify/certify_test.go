@@ -893,7 +893,7 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			_, _ = w.Write([]byte("id,patient_id,status,code,system,value,unit,effective\ncert-obs-1,cert-pat-1,final,8867-4,http://loinc.org,72,/min,2026-01-15T09:15:00Z\n"))
 			return
 		}
-		if strings.HasSuffix(path, "/Patient/cert-pat-1") && strings.Contains(q.Get("_format"), "protobuf") {
+		if strings.Contains(q.Get("_format"), "protobuf") {
 			w.Header().Set("Content-Type", "application/x-protobuf")
 			w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
 			w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
@@ -906,7 +906,7 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 		}
 		if strings.HasSuffix(path, "/ViewDefinition/$sql") {
 			w.Header().Set("Content-Type", "application/sql; charset=utf-8")
-			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error')\n"))
+			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error') AND r.effective_start IS NOT NULL AND array_exists(x -> x LIKE 'family=Cert%', r.string_tokens) UNION ALL SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r\n"))
 			return
 		}
 		if strings.HasSuffix(path, "/$sync-analytics") {
@@ -968,8 +968,8 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 86 {
-		t.Fatalf("expected all 86 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 87 {
+		t.Fatalf("expected all 87 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()

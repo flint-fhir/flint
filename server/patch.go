@@ -278,14 +278,9 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 	s.dispatchSubscriptions(r.Context(), tenant, resType, resID, protoBytes, rec.ResVersion, rec.LastUpdated, idx)
 	s.recordAutoProvenance(r, w, tenant, resType, resID, rec.ResVersion, idx, xProvTemplate)
 
-	outJSON, err := s.protoToJSONWithMeta(resType, protoBytes, rec.ResVersion, rec.LastUpdated)
-	if err != nil {
-		outJSON = patchedJSON
-	}
-
 	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
-	writePreferResourceResponse(w, r, http.StatusOK, resType, resID, rec.ResVersion, outJSON)
+	s.writeResourceWriteResponse(w, r, http.StatusOK, md, resType, resID, rec.ResVersion, rec.LastUpdated, protoBytes, patchedJSON)
 }
 
 // handleConditionalUpdate handles PUT /fhir/r4/{tenant}/{resourceType}?{searchParams}.
@@ -347,36 +342,48 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	resolvedBody, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, body, nil)
-	if refErr != nil {
-		writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
-		return
-	}
-	body = resolvedBody
-
-	if s.validator != nil {
-		outcome := s.validator.ValidateJSON(resType, body)
-		if !outcome.IsValid() {
-			outcome.WriteHTTP(w, http.StatusBadRequest)
+	msg := dynamicpb.NewMessage(md)
+	if isProtoContentType(r) {
+		if len(body) == 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "empty protobuf request body")
 			return
 		}
-	}
+		if err := proto.Unmarshal(body, msg); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure",
+				fmt.Sprintf("invalid FHIR Protobuf wire payload: %v", err))
+			return
+		}
+	} else {
+		resolvedBody, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, body, nil)
+		if refErr != nil {
+			writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
+			return
+		}
+		body = resolvedBody
 
-	body = normalizeSubscriptionOnWrite(resType, body)
+		if s.validator != nil {
+			outcome := s.validator.ValidateJSON(resType, body)
+			if !outcome.IsValid() {
+				outcome.WriteHTTP(w, http.StatusBadRequest)
+				return
+			}
+		}
 
-	normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, body)
-	if err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure",
-			fmt.Sprintf("invalid FHIR JSON: %v", err))
-		return
-	}
+		body = normalizeSubscriptionOnWrite(resType, body)
 
-	msg := dynamicpb.NewMessage(md)
-	unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
-	if err := unmarshaler.Unmarshal(normalizedBody, msg); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure",
-			fmt.Sprintf("invalid FHIR JSON: %v", err))
-		return
+		normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, body)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure",
+				fmt.Sprintf("invalid FHIR JSON: %v", err))
+			return
+		}
+
+		unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+		if err := unmarshaler.Unmarshal(normalizedBody, msg); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure",
+				fmt.Sprintf("invalid FHIR JSON: %v", err))
+			return
+		}
 	}
 	bodyID := extractProtoResourceID(msg)
 
@@ -466,11 +473,6 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 	s.dispatchSubscriptions(r.Context(), tenant, resType, rec.ResID, finalProtoBytes, rec.ResVersion, rec.LastUpdated, finalIdx)
 	s.recordAutoProvenance(r, w, tenant, resType, rec.ResID, rec.ResVersion, finalIdx, xProvTemplate)
 
-	jsonBytes, err := s.protoToJSONWithMeta(resType, finalProtoBytes, rec.ResVersion, rec.LastUpdated)
-	if err != nil {
-		jsonBytes = body
-	}
-
 	w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, rec.ResID))
 	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
@@ -478,7 +480,7 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 	if rec.Created {
 		status = http.StatusCreated
 	}
-	writePreferResourceResponse(w, r, status, resType, rec.ResID, rec.ResVersion, jsonBytes)
+	s.writeResourceWriteResponse(w, r, status, md, resType, rec.ResID, rec.ResVersion, rec.LastUpdated, finalProtoBytes, body)
 }
 
 // handleConditionalPatch handles PATCH /fhir/r4/{tenant}/{resourceType}?{searchParams}

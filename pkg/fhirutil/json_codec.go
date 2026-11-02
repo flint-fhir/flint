@@ -297,6 +297,18 @@ func normalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any, extMa
 
 	switch v := val.(type) {
 	case map[string]any:
+		// Handle google.fhir.r4.core.ContainedResource (used in Bundle.entry.resource and Parameters.parameter.resource)
+		if fullName == "google.fhir.r4.core.ContainedResource" {
+			if rt, ok := v["resourceType"].(string); ok && rt != "" {
+				if crFD := ContainedResourceFieldByType(rt); crFD != nil {
+					delete(v, "resourceType")
+					normalizeMessageMap(crFD.Message(), v)
+					return map[string]any{
+						crFD.JSONName(): v,
+					}
+				}
+			}
+		}
 		// Handle DomainResource.contained (repeated google.protobuf.Any) from standard FHIR JSON
 		if fullName == "google.protobuf.Any" {
 			if rt, ok := v["resourceType"].(string); ok && rt != "" && v["@type"] == nil {
@@ -602,6 +614,18 @@ func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any
 	}
 
 	fullName := string(msgDesc.FullName())
+	if fullName == "google.fhir.r4.core.ContainedResource" {
+		for subKey, subVal := range vMap {
+			subFD := findFieldDescriptor(msgDesc.Fields(), subKey)
+			if subFD != nil && subFD.Kind() == protoreflect.MessageKind {
+				if subMap, ok := subVal.(map[string]any); ok {
+					denormalizeMessageMap(subFD.Message(), subMap)
+					subMap["resourceType"] = string(subFD.Message().Name())
+					return subMap
+				}
+			}
+		}
+	}
 	if fullName == "google.protobuf.Any" {
 		if typeURL, ok := vMap["@type"].(string); ok && typeURL != "" {
 			delete(vMap, "@type")
@@ -639,6 +663,9 @@ func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any
 		if rawVal, hasVal := vMap["value"]; hasVal && len(vMap) == 1 {
 			if valFD.Kind() == protoreflect.EnumKind {
 				if s, ok := rawVal.(string); ok {
+					if strings.HasSuffix(fullName, ".MethodCode") {
+						return strings.ToUpper(s)
+					}
 					return strings.ToLower(strings.ReplaceAll(s, "_", "-"))
 				}
 			}

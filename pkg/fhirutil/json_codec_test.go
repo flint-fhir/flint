@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/dynamicpb"
 	"hegel.dev/go/hegel"
 
 	condpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/condition_go_proto"
@@ -431,4 +432,78 @@ func TestProtoBytesToFHIRMap_ZeroJSON(t *testing.T) {
 	meta := m["meta"].(map[string]any)
 	assert.Equal(t, "4", meta["versionId"])
 	assert.Equal(t, "2026-02-01T08:15:00Z", meta["lastUpdated"])
+}
+
+func TestBundleAndContainedResourceRegistry_And_RoundTrip(t *testing.T) {
+	reg := fhirutil.AllR4ResourceDescriptors()
+	assert.GreaterOrEqual(t, len(reg), 140)
+
+	crDesc := fhirutil.ContainedResourceDescriptor()
+	require.NotNil(t, crDesc)
+	bundleDesc := fhirutil.BundleDescriptor()
+	require.NotNil(t, bundleDesc)
+	patField := fhirutil.ContainedResourceFieldByType("Patient")
+	require.NotNil(t, patField)
+	assert.Equal(t, "patient", string(patField.Name()))
+
+	rawBundle := []byte(`{
+		"resourceType": "Bundle",
+		"id": "bundle-rt-1",
+		"type": "transaction",
+		"total": 1,
+		"entry": [
+			{
+				"fullUrl": "Patient/pat-b1",
+				"resource": {
+					"resourceType": "Patient",
+					"id": "pat-b1",
+					"active": true,
+					"gender": "female",
+					"name": [{"family": "BundleFamily", "given": ["Grace"]}]
+				},
+				"request": {
+					"method": "PUT",
+					"url": "Patient/pat-b1"
+				},
+				"response": {
+					"status": "200 OK",
+					"etag": "W/\"1\""
+				}
+			}
+		]
+	}`)
+
+	normBytes, err := fhirutil.NormalizeFHIRJSONToProtoJSON(bundleDesc, rawBundle)
+	require.NoError(t, err)
+	assert.NotEmpty(t, normBytes)
+
+	var normMap map[string]any
+	require.NoError(t, json.Unmarshal(normBytes, &normMap))
+	entries, ok := normMap["entry"].([]any)
+	require.True(t, ok)
+	require.Len(t, entries, 1)
+	entry0 := entries[0].(map[string]any)
+	resWrapper := entry0["resource"].(map[string]any)
+	assert.NotNil(t, resWrapper["patient"])
+
+	// Denormalize normalized map back to flat FHIR JSON via DenormalizeProtoJSONToFHIRJSON on dynamic Bundle
+	dynBundle := dynamicpb.NewMessage(bundleDesc)
+	require.NoError(t, (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(normBytes, dynBundle))
+	wireBytes, err := proto.Marshal(dynBundle)
+	require.NoError(t, err)
+
+	lastUpdated := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	denormJSON, err := fhirutil.DenormalizeProtoJSONToFHIRJSON(bundleDesc, "Bundle", wireBytes, 1, lastUpdated)
+	require.NoError(t, err)
+	assert.Contains(t, string(denormJSON), `"BundleFamily"`)
+	assert.Contains(t, string(denormJSON), `"method":"PUT"`)
+
+	bundleMap, err := fhirutil.ProtoBytesToFHIRMap(bundleDesc, "Bundle", wireBytes, 1, lastUpdated)
+	require.NoError(t, err)
+	assert.Equal(t, "Bundle", bundleMap["resourceType"])
+	bEntries := bundleMap["entry"].([]any)
+	require.Len(t, bEntries, 1)
+	bRes := bEntries[0].(map[string]any)["resource"].(map[string]any)
+	assert.Equal(t, "Patient", bRes["resourceType"])
+	assert.Equal(t, "pat-b1", bRes["id"])
 }
