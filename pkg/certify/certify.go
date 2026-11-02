@@ -2533,6 +2533,38 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-08", suite10, "Binary Proto3 $everything Compartment Bundle Transport & SQL-on-FHIR v2 String/Collection (.contains, .endsWith, .join) $sql Pushdown", t0, err, "Binary Proto3 Patient/$everything GET/POST wire transport & ARRAY_JOIN / ARRAY_TO_STRING / .endsWith() / .contains() $sql pushdown verified")
 
+	// AN-09: Zero-JSON Binary Proto3 $validate OperationOutcome Transport & SQL-on-FHIR v2 .count(), .lower(), .upper() & .length() $sql Pushdown
+	t0 = time.Now()
+	{
+		patValJSON := []byte(`{"resourceType":"Patient","id":"cert-val-pat-1","active":true,"gender":"female","birthDate":"1985-04-12","name":[{"family":"Certify","given":["Alice"]}]}`)
+		respValConv, bValPatProto, errValConv := doReq(http.MethodPost, basePath+"/Patient/$convert", "application/fhir+json", patValJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respValPost, bValPost, errValPost := doReq(http.MethodPost, basePath+"/Patient/$validate", "application/x-protobuf", bValPatProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respValGet, bValGet, errValGet := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$validate?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		countFnVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_count_case_len_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"given_count","path":"name.given.count()"},{"name":"family_lower","path":"name.family.lower()"},{"name":"family_upper","path":"name.family.upper()"},{"name":"family_len","path":"name.family.length()"}]}],"where":[{"path":"name.given.count() >= 1 and name.family.lower() = 'certify' and name.family.length() >= 4"}]}`)
+		respCntDoris, bCntDoris, errCntDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", countFnVD, nil)
+		respCntPg, bCntPg, errCntPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", countFnVD, nil)
+		if errValConv != nil || respValConv.StatusCode != http.StatusOK || len(bValPatProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$convert to return binary Proto3 Patient, got %d", respValConv.StatusCode)
+		} else if errValPost != nil || respValPost.StatusCode != http.StatusOK || !strings.Contains(respValPost.Header.Get("Content-Type"), "application/x-protobuf") || respValPost.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bValPost) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$validate with binary Proto3 Patient to return binary Proto3 OperationOutcome, got %d", respValPost.StatusCode)
+		} else if errValGet != nil || respValGet.StatusCode != http.StatusOK || !strings.Contains(respValGet.Header.Get("Content-Type"), "application/x-protobuf") || respValGet.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bValGet) == 0 {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$validate?_format=application/x-protobuf to return binary Proto3 OperationOutcome, got %d", respValGet.StatusCode)
+		} else if errCntDoris != nil || respCntDoris.StatusCode != http.StatusOK || !strings.Contains(string(bCntDoris), "ARRAY_SIZE(") || !strings.Contains(string(bCntDoris), "LOWER(") || !strings.Contains(string(bCntDoris), "UPPER(") || !strings.Contains(string(bCntDoris), "CHAR_LENGTH(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with .count()/.lower()/.upper()/.length() pushdown, got %d: %s", respCntDoris.StatusCode, string(bCntDoris))
+		} else if errCntPg != nil || respCntPg.StatusCode != http.StatusOK || !strings.Contains(string(bCntPg), "SELECT COUNT(*) FROM spidx_string") || !strings.Contains(string(bCntPg), "LOWER(") || !strings.Contains(string(bCntPg), "UPPER(") || !strings.Contains(string(bCntPg), "LENGTH(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with .count()/.lower()/.upper()/.length() pushdown, got %d: %s", respCntPg.StatusCode, string(bCntPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-09", suite10, "Zero-JSON Binary Proto3 $validate OperationOutcome Transport & SQL-on-FHIR v2 .count(), .lower(), .upper() & .length() $sql Pushdown", t0, err, "Binary Proto3 $validate OperationOutcome wire transport & ARRAY_SIZE / COUNT(*) / LOWER / UPPER / CHAR_LENGTH $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

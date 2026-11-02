@@ -4080,14 +4080,109 @@ func (s *Server) buildProtoHistoryBundle(resType, resID string, records []postgr
 	return proto.Marshal(bundleMsg)
 }
 
+// buildProtoOperationOutcome constructs a binary google.fhir.r4.core.OperationOutcome
+// directly from a validation.Outcome using protoreflect without any JSON serialization.
+func buildProtoOperationOutcome(outcome *validation.Outcome) ([]byte, error) {
+	ooDesc := fhirutil.AllR4ResourceDescriptors()["OperationOutcome"]
+	if ooDesc == nil {
+		return nil, fmt.Errorf("OperationOutcome descriptor not available")
+	}
+	ooMsg := dynamicpb.NewMessage(ooDesc)
+	issueFD := ooDesc.Fields().ByName("issue")
+	if issueFD != nil && issueFD.IsList() {
+		issueList := ooMsg.Mutable(issueFD).List()
+		var issues []validation.Issue
+		if outcome != nil {
+			issues = outcome.Issues
+		}
+		if len(issues) == 0 {
+			issues = []validation.Issue{
+				{
+					Severity:    validation.SeverityInformation,
+					Code:        validation.CodeInformational,
+					Diagnostics: "All validation checks passed with zero issues.",
+				},
+			}
+		}
+		for _, iss := range issues {
+			itemMsg := issueList.NewElement().Message()
+			sevEnum := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(string(iss.Severity)), "-", "_"))
+			if sevEnum == "" {
+				sevEnum = "INFORMATION"
+			}
+			setProtoEnumWrapper(itemMsg, "severity", sevEnum)
+			codeEnum := strings.ToUpper(strings.ReplaceAll(strings.TrimSpace(string(iss.Code)), "-", "_"))
+			if codeEnum == "" {
+				codeEnum = "INFORMATIONAL"
+			}
+			setProtoEnumWrapper(itemMsg, "code", codeEnum)
+			if codeFD := itemMsg.Descriptor().Fields().ByName("code"); codeFD != nil && !itemMsg.Has(codeFD) {
+				setProtoEnumWrapper(itemMsg, "code", "INVALID")
+			}
+			setProtoStringWrapper(itemMsg, "diagnostics", iss.Diagnostics)
+			if len(iss.Expression) > 0 {
+				if exprFD := itemMsg.Descriptor().Fields().ByName("expression"); exprFD != nil && exprFD.IsList() {
+					exprList := itemMsg.Mutable(exprFD).List()
+					for _, expr := range iss.Expression {
+						if strings.TrimSpace(expr) == "" {
+							continue
+						}
+						strMsg := exprList.NewElement().Message()
+						if valFD := strMsg.Descriptor().Fields().ByName("value"); valFD != nil && valFD.Kind() == protoreflect.StringKind {
+							strMsg.Set(valFD, protoreflect.ValueOfString(expr))
+						}
+						exprList.Append(protoreflect.ValueOfMessage(strMsg))
+					}
+				}
+			}
+			issueList.Append(protoreflect.ValueOfMessage(itemMsg))
+		}
+	}
+	return proto.Marshal(ooMsg)
+}
+
+func writeValidationOutcome(w http.ResponseWriter, r *http.Request, outcome *validation.Outcome, defaultStatus int) {
+	status := defaultStatus
+	if outcome != nil && !outcome.IsValid() && status == http.StatusOK {
+		status = http.StatusBadRequest
+	}
+	if okProto, protoCT := wantsProtoResponse(r); okProto {
+		if protoBytes, err := buildProtoOperationOutcome(outcome); err == nil {
+			w.Header().Set("Content-Type", protoCT)
+			w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+			w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+			w.Header().Set("X-Flint-Execution-Mode", "zero-json-protoreflect")
+			w.WriteHeader(status)
+			if r == nil || r.Method != http.MethodHead {
+				_, _ = w.Write(protoBytes)
+			}
+			return
+		}
+	}
+	outcome.WriteHTTP(w, defaultStatus)
+}
+
+func writeValidateErrorOutcome(w http.ResponseWriter, r *http.Request, status int, code validation.IssueCode, message string) {
+	if okProto, _ := wantsProtoResponse(r); okProto {
+		outcome := validation.NewOutcome()
+		outcome.AddError(code, message)
+		writeValidationOutcome(w, r, outcome, status)
+		return
+	}
+	writeOperationOutcome(w, status, string(code), message)
+}
+
 // handleValidate handles POST /{tenant}/{resourceType}/$validate, POST /{tenant}/$validate,
 // and GET/POST /{tenant}/{resourceType}/{id}/$validate.
 // Validates the target resource against FHIR R4 StructureDefinitions, ValueSets,
 // optional $validate mode (create/update/delete), and US Core v6.1.0/v7.0.0 profiles
-// without persisting to the database, returning an OperationOutcome.
+// without persisting to the database, returning an OperationOutcome (JSON or binary Proto3).
 func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	resType := strings.TrimSpace(r.PathValue("resourceType"))
+	if strings.HasPrefix(resType, "$") {
+		resType = ""
+	}
 	resID := strings.TrimSpace(r.PathValue("id"))
 	q := r.URL.Query()
 
@@ -4104,20 +4199,15 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 		var err error
 		body, err = io.ReadAll(io.LimitReader(r.Body, 10*1024*1024)) // 10MB max
 		if err != nil {
-			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read body")
+			writeValidateErrorOutcome(w, r, http.StatusBadRequest, validation.CodeInvalid, "failed to read body")
 			return
 		}
 	}
 
-	targetJSON := bytes.TrimSpace(body)
-	if len(targetJSON) > 0 {
-		var rootMap map[string]any
-		if err := json.Unmarshal(targetJSON, &rootMap); err != nil {
-			writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed JSON: %v", err))
-			return
-		}
+	var targetMap map[string]any
+	var targetJSON []byte
 
-		// Support FHIR Parameters resource wrapper (e.g. { resourceType: "Parameters", parameter: [{ name: "resource", resource: ... }, { name: "profile", valueUri: ... }, { name: "mode", valueCode: ... }] })
+	unwrapValidateParameters := func(rootMap map[string]any) {
 		if rootType, _ := rootMap["resourceType"].(string); rootType == "Parameters" {
 			foundResourceParam := false
 			if params, ok := rootMap["parameter"].([]any); ok {
@@ -4130,10 +4220,8 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 					switch pName {
 					case "resource":
 						if resObj, ok := pMap["resource"].(map[string]any); ok {
-							if marshaled, err := json.Marshal(resObj); err == nil {
-								targetJSON = marshaled
-								foundResourceParam = true
-							}
+							targetMap = resObj
+							foundResourceParam = true
 						}
 					case "profile":
 						for _, k := range []string{"valueUri", "valueCanonical", "valueString", "valueCode"} {
@@ -4154,85 +4242,144 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			if !foundResourceParam && resID != "" {
-				targetJSON = nil
+			if !foundResourceParam {
+				if strings.EqualFold(resType, "Parameters") {
+					targetMap = rootMap
+				} else if resID != "" {
+					targetMap = nil
+				} else {
+					targetMap = rootMap
+				}
 			}
+			return
+		}
+		targetMap = rootMap
+	}
+
+	if isProtoContentType(r) {
+		if len(body) > 0 {
+			protoType := resType
+			if protoType == "" {
+				protoType = strings.TrimSpace(q.Get("resourceType"))
+			}
+			if protoType == "" {
+				protoType = strings.TrimSpace(q.Get("type"))
+			}
+			if protoType == "" {
+				protoType = "Parameters"
+			}
+			md, ok := s.protoRegistry[protoType]
+			if !ok {
+				writeValidateErrorOutcome(w, r, http.StatusBadRequest, validation.CodeNotSupported,
+					fmt.Sprintf("unsupported FHIR resourceType %q for $validate", protoType))
+				return
+			}
+			msg := dynamicpb.NewMessage(md)
+			if err := proto.Unmarshal(body, msg); err != nil {
+				writeValidateErrorOutcome(w, r, http.StatusBadRequest, validation.CodeStructure,
+					fmt.Sprintf("invalid FHIR Protobuf wire payload: %v", err))
+				return
+			}
+			rootMap, err := fhirutil.ProtoBytesToFHIRMap(md, protoType, body, 0, time.Time{})
+			if err != nil {
+				writeValidateErrorOutcome(w, r, http.StatusBadRequest, validation.CodeStructure,
+					fmt.Sprintf("failed to decode FHIR Protobuf wire payload: %v", err))
+				return
+			}
+			if protoType != "Parameters" && len(rootMap) <= 1 {
+				if paramMD, ok := s.protoRegistry["Parameters"]; ok {
+					if pMap, pErr := fhirutil.ProtoBytesToFHIRMap(paramMD, "Parameters", body, 0, time.Time{}); pErr == nil {
+						if params, ok := pMap["parameter"].([]any); ok && len(params) > 0 {
+							rootMap = pMap
+						}
+					}
+				}
+			}
+			unwrapValidateParameters(rootMap)
+		}
+	} else {
+		targetJSON = bytes.TrimSpace(body)
+		if len(targetJSON) > 0 {
+			var rootMap map[string]any
+			if err := json.Unmarshal(targetJSON, &rootMap); err != nil {
+				writeValidateErrorOutcome(w, r, http.StatusBadRequest, validation.CodeStructure, fmt.Sprintf("malformed JSON: %v", err))
+				return
+			}
+			unwrapValidateParameters(rootMap)
 		}
 	}
 
 	// Instance-level $validate (GET/POST /{tenant}/{resourceType}/{id}/$validate without an inline resource body):
 	// load the stored resource from Postgres and validate it against the requested profile/mode.
-	if len(targetJSON) == 0 && resID != "" && resType != "" {
+	if len(targetMap) == 0 && resID != "" && resType != "" {
 		if s.store == nil {
-			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "operational store is not configured")
+			writeValidateErrorOutcome(w, r, http.StatusInternalServerError, "exception", "operational store is not configured")
 			return
 		}
 		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID)
 		if errors.Is(err, sql.ErrNoRows) {
-			writeOperationOutcome(w, http.StatusNotFound, "not-found",
+			writeValidateErrorOutcome(w, r, http.StatusNotFound, "not-found",
 				fmt.Sprintf("%s/%s not found", resType, resID))
 			return
 		}
 		if errors.Is(err, postgres.ErrResourceDeleted) {
-			writeOperationOutcome(w, http.StatusGone, "deleted",
+			writeValidateErrorOutcome(w, r, http.StatusGone, "deleted",
 				fmt.Sprintf("%s/%s has been deleted", resType, resID))
 			return
 		}
 		if err != nil {
-			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read resource for $validate")
+			writeValidateErrorOutcome(w, r, http.StatusInternalServerError, "exception", "failed to read resource for $validate")
 			return
 		}
-		jb, err := s.protoToJSONWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		rm, err := s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if err != nil {
-			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to serialize resource for $validate")
+			writeValidateErrorOutcome(w, r, http.StatusInternalServerError, "exception", "failed to decode resource for $validate")
 			return
 		}
-		targetJSON = jb
+		targetMap = rm
 	}
 
-	if len(targetJSON) == 0 {
-		writeOperationOutcome(w, http.StatusBadRequest, "required", "empty request body for $validate")
+	if len(targetMap) == 0 {
+		writeValidateErrorOutcome(w, r, http.StatusBadRequest, validation.CodeRequired, "empty request body for $validate")
 		return
 	}
 
 	if s.validator == nil {
 		outcome := validation.NewOutcome()
-		outcome.WriteHTTP(w, http.StatusOK)
+		writeValidationOutcome(w, r, outcome, http.StatusOK)
 		return
 	}
 
 	var outcome *validation.Outcome
 	if pv, ok := s.validator.(validation.ProfileValidator); ok {
-		outcome = pv.ValidateJSONWithProfiles(resType, targetJSON, profiles, mode)
+		outcome = pv.ValidateResourceWithProfiles(resType, targetMap, profiles, mode)
 	} else {
-		outcome = s.validator.ValidateJSON(resType, targetJSON)
+		outcome = s.validator.ValidateResource(resType, targetMap)
 	}
 
 	if resID != "" {
-		var resMap map[string]any
-		if json.Unmarshal(targetJSON, &resMap) == nil {
-			if bodyID, ok := resMap["id"].(string); ok && strings.TrimSpace(bodyID) != "" && bodyID != resID {
-				outcome.AddError(validation.CodeInvariant,
-					fmt.Sprintf("Resource id %q does not match instance endpoint id %q", bodyID, resID),
-					resType+".id")
-			}
+		if bodyID, ok := targetMap["id"].(string); ok && strings.TrimSpace(bodyID) != "" && bodyID != resID {
+			outcome.AddError(validation.CodeInvariant,
+				fmt.Sprintf("Resource id %q does not match instance endpoint id %q", bodyID, resID),
+				resType+".id")
 		}
 	}
 
 	effectiveType := resType
 	if effectiveType == "" {
-		var resMap map[string]any
-		if json.Unmarshal(targetJSON, &resMap) == nil {
-			effectiveType, _ = resMap["resourceType"].(string)
-		}
+		effectiveType, _ = targetMap["resourceType"].(string)
 	}
 	if effectiveType == "Subscription" {
-		if err := s.validateSubscriptionResourceJSON("Subscription", targetJSON); err != nil {
+		subBytes := targetJSON
+		if len(subBytes) == 0 {
+			subBytes, _ = json.Marshal(targetMap)
+		}
+		if err := s.validateSubscriptionResourceJSON("Subscription", subBytes); err != nil {
 			outcome.AddError(validation.CodeValue, err.Error(), "Subscription")
 		}
 	}
 
-	outcome.WriteHTTP(w, http.StatusOK)
+	writeValidationOutcome(w, r, outcome, http.StatusOK)
 }
 
 // generateID creates a collision-free unique ID for resources and audit events.
