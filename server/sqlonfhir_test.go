@@ -1242,4 +1242,137 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(slBytes), want)
 		}
 	}
+
+	// 22. Binary Proto3 $match, $meta / $meta-add & $graph Operations & SQL-on-FHIR v2 iif(), .replace(), .substring() & .trim() $sql pushdown
+	reqMatchProto, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/$match", bytes.NewReader(patchedWire))
+	require.NoError(t, err)
+	reqMatchProto.Header.Set("Content-Type", "application/x-protobuf")
+	reqMatchProto.Header.Set("Accept", "application/x-protobuf")
+	respMatchProto, err := client.Do(reqMatchProto)
+	require.NoError(t, err)
+	matchBundleProtoBytes, _ := io.ReadAll(respMatchProto.Body)
+	respMatchProto.Body.Close()
+	require.Equal(t, http.StatusOK, respMatchProto.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respMatchProto.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respMatchProto.Header.Get("X-Flint-Wire-Format"))
+	var matchBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(matchBundleProtoBytes, &matchBundle))
+	assert.GreaterOrEqual(t, len(matchBundle.GetEntry()), 1)
+
+	metaAddJSON := `{"resourceType":"Parameters","parameter":[{"name":"meta","valueMeta":{"tag":[{"system":"http://flint.fhir.org/tag","code":"proto-vip"}]}}]}`
+	reqMetaAddConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(metaAddJSON))
+	require.NoError(t, err)
+	reqMetaAddConv.Header.Set("Content-Type", "application/fhir+json")
+	reqMetaAddConv.Header.Set("Accept", "application/x-protobuf")
+	respMetaAddConv, err := client.Do(reqMetaAddConv)
+	require.NoError(t, err)
+	metaAddProtoBytes, _ := io.ReadAll(respMetaAddConv.Body)
+	respMetaAddConv.Body.Close()
+	require.Equal(t, http.StatusOK, respMetaAddConv.StatusCode)
+
+	reqMetaAddProto, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/"+patID+"/$meta-add", bytes.NewReader(metaAddProtoBytes))
+	require.NoError(t, err)
+	reqMetaAddProto.Header.Set("Content-Type", "application/x-protobuf")
+	reqMetaAddProto.Header.Set("Accept", "application/x-protobuf")
+	respMetaAddProto, err := client.Do(reqMetaAddProto)
+	require.NoError(t, err)
+	metaAddOutProtoBytes, _ := io.ReadAll(respMetaAddProto.Body)
+	respMetaAddProto.Body.Close()
+	require.Equal(t, http.StatusOK, respMetaAddProto.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respMetaAddProto.Header.Get("Content-Type"))
+	var metaAddOutParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(metaAddOutProtoBytes, &metaAddOutParams))
+	assert.Len(t, metaAddOutParams.GetParameter(), 1)
+
+	reqMetaGetProto, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Patient/"+patID+"/$meta?_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqMetaGetProto.Header.Set("Accept", "application/x-protobuf")
+	respMetaGetProto, err := client.Do(reqMetaGetProto)
+	require.NoError(t, err)
+	metaGetOutProtoBytes, _ := io.ReadAll(respMetaGetProto.Body)
+	respMetaGetProto.Body.Close()
+	require.Equal(t, http.StatusOK, respMetaGetProto.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respMetaGetProto.Header.Get("Content-Type"))
+	var metaGetOutParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(metaGetOutProtoBytes, &metaGetOutParams))
+	assert.Len(t, metaGetOutParams.GetParameter(), 1)
+
+	reqGraphProto, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Patient/"+patID+"/$graph?graph=us-core-patient-careteam&_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqGraphProto.Header.Set("Accept", "application/x-protobuf")
+	respGraphProto, err := client.Do(reqGraphProto)
+	require.NoError(t, err)
+	graphBundleProtoBytes, _ := io.ReadAll(respGraphProto.Body)
+	respGraphProto.Body.Close()
+	require.Equal(t, http.StatusOK, respGraphProto.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respGraphProto.Header.Get("Content-Type"))
+	var graphBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(graphBundleProtoBytes, &graphBundle))
+	assert.GreaterOrEqual(t, len(graphBundle.GetEntry()), 1)
+
+	iifStrVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "patient_iif_str",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "status_label", "path": "iif(active = 'true', 'Active', 'Inactive')"},
+					{"name": "family_mod", "path": "name.family.replace('Proto', 'Native')"},
+					{"name": "family_sub", "path": "name.family.substring(0, 5)"},
+					{"name": "family_trim", "path": "name.family.trim()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "name.family.trim() = 'ProtoUpdated'"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"CASE WHEN array_contains(r.code_tokens, 'active=|true') THEN 'Active' ELSE 'Inactive' END",
+				"REPLACE(element_at(array_map(x -> split_part(x, '=', 2), array_filter(x -> x LIKE 'family=%', r.string_tokens)), 1), 'Proto', 'Native')",
+				"SUBSTR(element_at(array_map(x -> split_part(x, '=', 2), array_filter(x -> x LIKE 'family=%', r.string_tokens)), 1), 1, 5)",
+				"TRIM(element_at(array_map(x -> split_part(x, '=', 2), array_filter(x -> x LIKE 'family=%', r.string_tokens)), 1))",
+				"TRIM(element_at(array_map(x -> split_part(x, '=', 2), array_filter(x -> x LIKE 'family=%', r.string_tokens)), 1)) = 'ProtoUpdated'",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"CASE WHEN EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'active' AND t.sp_value = 'true') THEN 'Active' ELSE 'Inactive' END",
+				"REPLACE((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1), 'Proto', 'Native')",
+				"SUBSTR((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1), 1, 5)",
+				"TRIM((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1))",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"CASE WHEN EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'active' AND t.sp_value = 'true') THEN 'Active' ELSE 'Inactive' END",
+				"REPLACE((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1), 'Proto', 'Native')",
+				"SUBSTR((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1), 1, 5)",
+				"TRIM((SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 1))",
+			},
+		},
+	} {
+		reqIif, iErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(iifStrVD))
+		require.NoError(t, iErr)
+		reqIif.Header.Set("Content-Type", "application/fhir+json")
+		respIif, iErr := client.Do(reqIif)
+		require.NoError(t, iErr)
+		iifBytes, _ := io.ReadAll(respIif.Body)
+		respIif.Body.Close()
+		require.Equal(t, http.StatusOK, respIif.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(iifBytes), want)
+		}
+	}
 }

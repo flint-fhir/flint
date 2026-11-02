@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/flint-fhir/flint/pkg/auth"
@@ -256,9 +258,31 @@ func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure", "invalid JSON in Patient/$match body")
-		return
+	if isProtoContentType(r) {
+		if m, pErr := s.protoToFHIRMapWithMeta("Parameters", body, 0, time.Time{}); pErr == nil && m != nil {
+			if rawParams, ok := m["parameter"].([]any); ok && len(rawParams) > 0 {
+				if firstMap, ok := rawParams[0].(map[string]any); ok {
+					if name, _ := firstMap["name"].(string); name != "" {
+						m["resourceType"] = "Parameters"
+						payload = m
+					}
+				}
+			}
+		}
+		if payload == nil {
+			m, pErr := s.protoToFHIRMapWithMeta("Patient", body, 0, time.Time{})
+			if pErr != nil || m == nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "structure", "invalid Protobuf in Patient/$match body")
+				return
+			}
+			m["resourceType"] = "Patient"
+			payload = m
+		}
+	} else {
+		if err := json.Unmarshal(body, &payload); err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure", "invalid JSON in Patient/$match body")
+			return
+		}
 	}
 
 	var templatePatient map[string]any
@@ -276,7 +300,12 @@ func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
 				switch pm["name"] {
 				case "resource":
 					if res, ok := pm["resource"].(map[string]any); ok {
-						templatePatient = res
+						if patSub, ok := res["patient"].(map[string]any); ok {
+							patSub["resourceType"] = "Patient"
+							templatePatient = patSub
+						} else {
+							templatePatient = res
+						}
 					}
 				case "onlyCertainMatches":
 					if b, ok := pm["valueBoolean"].(bool); ok {
@@ -285,6 +314,8 @@ func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
 				case "count":
 					if n, ok := pm["valueInteger"].(float64); ok && int(n) > 0 {
 						maxCount = int(n)
+					} else if n, ok := pm["valueInteger"].(int); ok && n > 0 {
+						maxCount = n
 					}
 				}
 			}
@@ -337,6 +368,7 @@ func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
 		score    float64
 		grade    string
 		resource map[string]any
+		rec      postgres.SearchResult
 	}
 	var matches []scoredCandidate
 
@@ -362,6 +394,7 @@ func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
 			score:    score,
 			grade:    matchGradeForScore(score),
 			resource: candMap,
+			rec:      rec,
 		})
 	}
 
@@ -374,6 +407,39 @@ func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
 
 	if len(matches) > maxCount {
 		matches = matches[:maxCount]
+	}
+
+	if okProto, protoCT := wantsProtoResponse(r); okProto {
+		if bundleDesc := fhirutil.BundleDescriptor(); bundleDesc != nil {
+			bundleMsg := dynamicpb.NewMessage(bundleDesc)
+			setProtoEnumWrapper(bundleMsg, "type", "SEARCHSET")
+			setProtoUint32Wrapper(bundleMsg, "total", uint32(len(matches)))
+			if entryFD := bundleDesc.Fields().ByName("entry"); entryFD != nil && entryFD.IsList() {
+				entryList := bundleMsg.Mutable(entryFD).List()
+				for _, m := range matches {
+					entryMsg := entryList.NewElement().Message()
+					setProtoStringWrapper(entryMsg, "full_url", "Patient/"+m.id)
+					s.setBundleEntryProtoResource(entryMsg, "Patient", m.id, m.rec.ResourceProto, m.rec.ResVersion, m.rec.LastUpdated)
+					if searchFD := entryMsg.Descriptor().Fields().ByName("search"); searchFD != nil && searchFD.Kind() == protoreflect.MessageKind {
+						searchMsg := entryMsg.Mutable(searchFD).Message()
+						setProtoEnumWrapper(searchMsg, "mode", "MATCH")
+						setProtoStringWrapper(searchMsg, "score", fmt.Sprintf("%.2f", m.score))
+					}
+					entryList.Append(protoreflect.ValueOfMessage(entryMsg))
+				}
+			}
+			if protoBundleBytes, err := proto.Marshal(bundleMsg); err == nil {
+				w.Header().Set("Content-Type", protoCT)
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+				w.Header().Set("X-Flint-Execution-Mode", "zero-json-protoreflect")
+				w.WriteHeader(http.StatusOK)
+				if r.Method != http.MethodHead {
+					_, _ = w.Write(protoBundleBytes)
+				}
+				return
+			}
+		}
 	}
 
 	entries := make([]map[string]any, 0, len(matches))
@@ -447,7 +513,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		if metaObj == nil {
 			metaObj = make(map[string]any)
 		}
-		writeMetaParametersResponse(w, metaObj)
+		s.writeMetaParametersResponse(w, r, metaObj)
 		return
 	}
 
@@ -597,7 +663,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	if len(tags) > 0 {
 		metaOut["tag"] = tags
 	}
-	writeMetaParametersResponse(w, metaOut)
+	s.writeMetaParametersResponse(w, r, metaOut)
 }
 
 // handleMetaAdd implements POST /fhir/r4/{tenant}/{resourceType}/{id}/$meta-add.
@@ -627,7 +693,7 @@ func (s *Server) mutateInstanceMeta(w http.ResponseWriter, r *http.Request, isDe
 		return
 	}
 
-	deltaMeta, err := extractInputValueMeta(body)
+	deltaMeta, err := s.extractInputValueMeta(r, body)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "required", err.Error())
 		return
@@ -739,13 +805,22 @@ func (s *Server) mutateInstanceMeta(w http.ResponseWriter, r *http.Request, isDe
 
 	w.Header().Set("ETag", postgres.FormatETag(newRec.ResVersion))
 	w.Header().Set("Last-Modified", newRec.LastUpdated.UTC().Format(http.TimeFormat))
-	writeMetaParametersResponse(w, finalMeta)
+	s.writeMetaParametersResponse(w, r, finalMeta)
 }
 
-func extractInputValueMeta(body []byte) (map[string]any, error) {
+func (s *Server) extractInputValueMeta(r *http.Request, body []byte) (map[string]any, error) {
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, fmt.Errorf("invalid JSON body: %w", err)
+	if isProtoContentType(r) {
+		m, err := s.protoToFHIRMapWithMeta("Parameters", body, 0, time.Time{})
+		if err != nil || m == nil {
+			return nil, fmt.Errorf("invalid Protobuf Parameters body: %v", err)
+		}
+		m["resourceType"] = "Parameters"
+		payload = m
+	} else {
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, fmt.Errorf("invalid JSON body: %w", err)
+		}
 	}
 	if payload["resourceType"] == "Parameters" {
 		if params, ok := payload["parameter"].([]any); ok {
@@ -897,7 +972,7 @@ func codingDedupeKey(m map[string]any) string {
 	return strings.TrimSpace(stringField(m, "system")) + "|" + strings.TrimSpace(stringField(m, "code"))
 }
 
-func writeMetaParametersResponse(w http.ResponseWriter, metaObj map[string]any) {
+func (s *Server) writeMetaParametersResponse(w http.ResponseWriter, r *http.Request, metaObj map[string]any) {
 	resp := map[string]any{
 		"resourceType": "Parameters",
 		"parameter": []map[string]any{
@@ -907,9 +982,7 @@ func writeMetaParametersResponse(w http.ResponseWriter, metaObj map[string]any) 
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(resp)
+	s.writeTerminologyResourceResponse(w, r, "Parameters", resp)
 }
 
 type parsedGraphDefinition struct {
@@ -961,21 +1034,40 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		trimmed := strings.TrimSpace(string(body))
-		if trimmed != "" {
+		if len(body) > 0 && (trimmed != "" || isProtoContentType(r)) {
 			var rootMap map[string]any
-			if err := json.Unmarshal([]byte(trimmed), &rootMap); err != nil {
-				writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid JSON body: %v", err))
-				return
+			if isProtoContentType(r) {
+				if m, pErr := s.protoToFHIRMapWithMeta("Parameters", body, 0, time.Time{}); pErr == nil && m != nil {
+					if rawParams, ok := m["parameter"].([]any); ok && len(rawParams) > 0 {
+						if firstMap, ok := rawParams[0].(map[string]any); ok {
+							if name, _ := firstMap["name"].(string); name != "" {
+								m["resourceType"] = "Parameters"
+								rootMap = m
+							}
+						}
+					}
+				}
+				if rootMap == nil {
+					m, pErr := s.protoToFHIRMapWithMeta("GraphDefinition", body, 0, time.Time{})
+					if pErr != nil || m == nil {
+						writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid Protobuf body: %v", pErr))
+						return
+					}
+					m["resourceType"] = "GraphDefinition"
+					rootMap = m
+				}
+			} else {
+				if err := json.Unmarshal([]byte(trimmed), &rootMap); err != nil {
+					writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid JSON body: %v", err))
+					return
+				}
 			}
 			rt, _ := rootMap["resourceType"].(string)
 			switch rt {
 			case "GraphDefinition":
-				var gd parsedGraphDefinition
-				if err := json.Unmarshal([]byte(trimmed), &gd); err != nil {
-					writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid GraphDefinition JSON: %v", err))
-					return
+				if gd := parseGraphDefinitionFromMap(rootMap); gd != nil {
+					inlineGraph = gd
 				}
-				inlineGraph = &gd
 			case "Parameters":
 				if params, ok := rootMap["parameter"].([]any); ok {
 					for _, p := range params {
@@ -987,11 +1079,12 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 						switch name {
 						case "graph", "url", "graphDefinition":
 							if resObj, ok := pMap["resource"].(map[string]any); ok {
-								if b, err := json.Marshal(resObj); err == nil {
-									var gd parsedGraphDefinition
-									if json.Unmarshal(b, &gd) == nil && gd.ResourceType == "GraphDefinition" {
-										inlineGraph = &gd
-									}
+								if gdSub, ok := resObj["graph_definition"].(map[string]any); ok {
+									gdSub["resourceType"] = "GraphDefinition"
+									resObj = gdSub
+								}
+								if gd := parseGraphDefinitionFromMap(resObj); gd != nil && gd.ResourceType == "GraphDefinition" {
+									inlineGraph = gd
 								}
 							}
 							for _, k := range []string{"valueUri", "valueCanonical", "valueString", "valueCode", "valueId"} {
@@ -1170,6 +1263,34 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 		sr.Matches = s.filterAuthorizedIncludes(r, tenant, secCtx, sr.Matches)
 	}
 
+	if okProto, protoCT := wantsProtoResponse(r); okProto {
+		if bundleDesc := fhirutil.BundleDescriptor(); bundleDesc != nil {
+			bundleMsg := dynamicpb.NewMessage(bundleDesc)
+			setProtoEnumWrapper(bundleMsg, "type", "COLLECTION")
+			setProtoUint32Wrapper(bundleMsg, "total", uint32(len(sr.Matches)))
+			if entryFD := bundleDesc.Fields().ByName("entry"); entryFD != nil && entryFD.IsList() {
+				entryList := bundleMsg.Mutable(entryFD).List()
+				for _, m := range sr.Matches {
+					entryMsg := entryList.NewElement().Message()
+					setProtoStringWrapper(entryMsg, "full_url", fmt.Sprintf("%s/%s", m.ResType, m.ResID))
+					s.setBundleEntryProtoResource(entryMsg, m.ResType, m.ResID, m.ResourceProto, m.ResVersion, m.LastUpdated)
+					entryList.Append(protoreflect.ValueOfMessage(entryMsg))
+				}
+			}
+			if protoBundleBytes, err := proto.Marshal(bundleMsg); err == nil {
+				w.Header().Set("Content-Type", protoCT)
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+				w.Header().Set("X-Flint-Execution-Mode", "zero-json-protoreflect")
+				w.WriteHeader(http.StatusOK)
+				if r.Method != http.MethodHead {
+					_, _ = w.Write(protoBundleBytes)
+				}
+				return
+			}
+		}
+	}
+
 	entries := make([]any, 0, len(sr.Matches))
 	for _, m := range sr.Matches {
 		resMap, err := s.protoToFHIRMapWithMeta(m.ResType, m.ResourceProto, m.ResVersion, m.LastUpdated)
@@ -1315,7 +1436,7 @@ func (s *Server) resolveStoredOrBuiltinGraphDefinition(r *http.Request, tenant, 
 			Start:        resType,
 			Link:         postgres.DefaultGraphLinksForResource(resType),
 		}, true, nil
-	case "us-core-patient-care-graph", "patient-care-graph", "patient-summary",
+	case "us-core-patient-care-graph", "us-core-patient-careteam", "patient-care-graph", "patient-summary",
 		"http://hl7.org/fhir/us/core/graphdefinition/us-core-patient-care-graph",
 		"http://flint-fhir.org/fhir/graphdefinition/patient-care-graph":
 		return &parsedGraphDefinition{
