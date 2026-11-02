@@ -1383,7 +1383,12 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		colMaps := make([]map[string]any, 0, len(columns))
 		for _, col := range columns {
 			exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
-			sqlExpr, sourceCol := dorisZeroJSONForEachColumnExpr(exprPath, forEachPath, isCore)
+			var sqlExpr, sourceCol string
+			if col.Collection {
+				sqlExpr, sourceCol = dorisZeroJSONCollectionColumnExpr(exprPath)
+			} else {
+				sqlExpr, sourceCol = dorisZeroJSONForEachColumnExpr(exprPath, forEachPath, isCore)
+			}
 			colMaps = append(colMaps, map[string]any{
 				"name": "column",
 				"part": []map[string]any{
@@ -1453,7 +1458,12 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 			selectExprs := make([]string, 0, len(columns))
 			for _, col := range columns {
 				exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
-				sqlExpr, _ := dorisZeroJSONForEachColumnExpr(exprPath, forEachPath, isCore)
+				var sqlExpr string
+				if col.Collection {
+					sqlExpr, _ = dorisZeroJSONCollectionColumnExpr(exprPath)
+				} else {
+					sqlExpr, _ = dorisZeroJSONForEachColumnExpr(exprPath, forEachPath, isCore)
+				}
 				selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
 			}
 			sqlQuery = fmt.Sprintf("SELECT %s FROM %s r%s WHERE %s ORDER BY r.res_id ASC",
@@ -1480,7 +1490,12 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 	colMaps := make([]map[string]any, 0, len(columns))
 	for _, col := range columns {
 		exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
-		sqlExpr, sourceTbl := spidxZeroJSONForEachColumnExpr(exprPath, forEachPath)
+		var sqlExpr, sourceTbl string
+		if col.Collection {
+			sqlExpr, sourceTbl = spidxZeroJSONCollectionColumnExpr(exprPath, dialect)
+		} else {
+			sqlExpr, sourceTbl = spidxZeroJSONForEachColumnExpr(exprPath, forEachPath)
+		}
 		colMaps = append(colMaps, map[string]any{
 			"name": "column",
 			"part": []map[string]any{
@@ -1558,7 +1573,12 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		selectExprs := make([]string, 0, len(columns))
 		for _, col := range columns {
 			exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
-			sqlExpr, _ := spidxZeroJSONForEachColumnExpr(exprPath, forEachPath)
+			var sqlExpr string
+			if col.Collection {
+				sqlExpr, _ = spidxZeroJSONCollectionColumnExpr(exprPath, dialect)
+			} else {
+				sqlExpr, _ = spidxZeroJSONForEachColumnExpr(exprPath, forEachPath)
+			}
 			selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
 		}
 		sqlQuery = fmt.Sprintf("SELECT %s FROM fhir_resource r%s WHERE %s ORDER BY r.res_id ASC",
@@ -1578,6 +1598,31 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		sql:          sqlQuery,
 		columnMaps:   colMaps,
 	}, nil
+}
+
+func dorisZeroJSONCollectionColumnExpr(fhirPath string) (string, string) {
+	p := strings.TrimSpace(fhirPath)
+	sp := normalizeFHIRPathToSearchParam(p)
+	if strings.HasPrefix(p, "name") || p == "given" || p == "family" || strings.HasPrefix(p, "address") || strings.HasPrefix(p, "telecom") {
+		return fmt.Sprintf("ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE '%s=%%', r.string_tokens))", sp), "string_tokens[" + sp + "][]"
+	}
+	return fmt.Sprintf("ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE '%s=|%%', r.code_tokens))", sp), "code_tokens[" + sp + "][]"
+}
+
+func spidxZeroJSONCollectionColumnExpr(fhirPath, dialect string) (string, string) {
+	p := strings.TrimSpace(fhirPath)
+	sp := normalizeFHIRPathToSearchParam(p)
+	isStringParam := strings.HasPrefix(p, "name") || p == "given" || p == "family" || strings.HasPrefix(p, "address") || strings.HasPrefix(p, "telecom")
+	if dialect == "sqlite" {
+		if isStringParam {
+			return fmt.Sprintf("(SELECT json_group_array(s.sp_value) FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s')", sp), "spidx_string[]"
+		}
+		return fmt.Sprintf("(SELECT json_group_array(t.sp_value) FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s')", sp), "spidx_token[]"
+	}
+	if isStringParam {
+		return fmt.Sprintf("(SELECT COALESCE(ARRAY_AGG(s.sp_value), ARRAY[]::text[]) FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s')", sp), "spidx_string[]"
+	}
+	return fmt.Sprintf("(SELECT COALESCE(ARRAY_AGG(t.sp_value), ARRAY[]::text[]) FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s')", sp), "spidx_token[]"
 }
 
 func dorisZeroJSONForEachColumnExpr(fhirPath, forEachPath string, isCore bool) (string, string) {
