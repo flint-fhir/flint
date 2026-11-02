@@ -15,6 +15,7 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/flint-fhir/flint/pkg/auth"
@@ -56,6 +57,15 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read body")
 		return
+	}
+	if isProtoContentType(r) {
+		decodedJSON, err := fhirutil.DenormalizeProtoJSONToFHIRJSON(fhirutil.BundleDescriptor(), "Bundle", body, 0, time.Time{})
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure",
+				fmt.Sprintf("invalid Bundle protobuf payload: %v", err))
+			return
+		}
+		body = decodedJSON
 	}
 
 	var bundle bundleRequest
@@ -1103,6 +1113,18 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if okProto, protoCT := wantsProtoResponse(r); okProto {
+		if protoWire, err := s.buildProtoBundleResponse(bundle.Type, finalEntries); err == nil {
+			w.Header().Set("Content-Type", protoCT)
+			w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+			w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+			w.Header().Set("X-Flint-Execution-Mode", "zero-json-protoreflect")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(protoWire)
+			return
+		}
+	}
+
 	// Build response Bundle
 	responseBundle := map[string]any{
 		"resourceType": "Bundle",
@@ -1113,6 +1135,84 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(responseBundle)
+}
+
+func (s *Server) buildProtoBundleResponse(bundleType string, entries []map[string]any) ([]byte, error) {
+	bundleDesc := fhirutil.BundleDescriptor()
+	if bundleDesc == nil {
+		return nil, fmt.Errorf("bundle descriptor not available")
+	}
+	bundleMsg := dynamicpb.NewMessage(bundleDesc)
+	enumVal := "TRANSACTION_RESPONSE"
+	if strings.EqualFold(bundleType, "batch") {
+		enumVal = "BATCH_RESPONSE"
+	}
+	setProtoEnumWrapper(bundleMsg, "type", enumVal)
+
+	entryFD := bundleDesc.Fields().ByName("entry")
+	if entryFD != nil && entryFD.IsList() {
+		entryList := bundleMsg.Mutable(entryFD).List()
+		for _, entry := range entries {
+			entryMsg := entryList.NewElement().Message()
+			if fullURL, ok := entry["fullUrl"].(string); ok && fullURL != "" {
+				setProtoStringWrapper(entryMsg, "full_url", fullURL)
+			}
+			if respMap, ok := entry["response"].(map[string]any); ok {
+				if respFD := entryMsg.Descriptor().Fields().ByName("response"); respFD != nil && respFD.Kind() == protoreflect.MessageKind {
+					respMsg := entryMsg.Mutable(respFD).Message()
+					if st, ok := respMap["status"].(string); ok && st != "" {
+						setProtoStringWrapper(respMsg, "status", st)
+					}
+					if loc, ok := respMap["location"].(string); ok && loc != "" {
+						setProtoStringWrapper(respMsg, "location", loc)
+					}
+					if etag, ok := respMap["etag"].(string); ok && etag != "" {
+						setProtoStringWrapper(respMsg, "etag", etag)
+					}
+					if lm, ok := respMap["lastModified"].(string); ok && lm != "" {
+						if ts, err := time.Parse(time.RFC3339, lm); err == nil {
+							setProtoInstantField(respMsg, "last_modified", ts)
+						}
+					}
+					if outcomeMap, ok := respMap["outcome"].(map[string]any); ok && outcomeMap != nil {
+						setContainedResourceFromFHIRMap(respMsg, "outcome", outcomeMap)
+					}
+				}
+			}
+			if resMap, ok := entry["resource"].(map[string]any); ok && resMap != nil {
+				setContainedResourceFromFHIRMap(entryMsg, "resource", resMap)
+			}
+			entryList.Append(protoreflect.ValueOfMessage(entryMsg))
+		}
+	}
+	return proto.Marshal(bundleMsg)
+}
+
+func setContainedResourceFromFHIRMap(parentMsg protoreflect.Message, fieldName string, resMap map[string]any) bool {
+	if parentMsg == nil || resMap == nil {
+		return false
+	}
+	rt, _ := resMap["resourceType"].(string)
+	if rt == "" {
+		return false
+	}
+	crField := fhirutil.ContainedResourceFieldByType(rt)
+	resFD := parentMsg.Descriptor().Fields().ByName(protoreflect.Name(fieldName))
+	if crField == nil || resFD == nil || resFD.Kind() != protoreflect.MessageKind {
+		return false
+	}
+	rawJSON, err := json.Marshal(resMap)
+	if err != nil {
+		return false
+	}
+	normJSON, err := fhirutil.NormalizeFHIRJSONToProtoJSON(crField.Message(), rawJSON)
+	if err != nil {
+		return false
+	}
+	crMsg := parentMsg.Mutable(resFD).Message()
+	typedMsg := crMsg.Mutable(crField).Message()
+	unmarshalOpts := protojson.UnmarshalOptions{DiscardUnknown: true}
+	return unmarshalOpts.Unmarshal(normJSON, typedMsg.Interface()) == nil
 }
 
 func conditionalRefOutcomeCode(status int) string {

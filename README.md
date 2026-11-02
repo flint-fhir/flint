@@ -344,7 +344,7 @@ Content-Type: application/fhir+json
   * Single-Patient Compartment: `GET /fhir/r4/{tenant}/Patient/{id}/$export`
   * Async Job Status Poll & Cancel (Postgres-persisted): `GET /fhir/r4/{tenant}/$export-poll/{jobId}` & `DELETE /fhir/r4/{tenant}/$export-poll/{jobId}`
   * NDJSON File Download: `GET /fhir/r4/{tenant}/$export-file/{jobId}/{ResourceType}.ndjson`
-* **Automated Conformance & Certification (`$certify`)**: `GET /fhir/r4/{tenant}/$certify` and `POST /fhir/r4/{tenant}/$certify` (executes 78 end-to-end conformance checks across 8 suites covering FHIR R4, US Core v6.1.0 & v7.0.0, SMART v2, Terminology, Subscriptions, SDC, ONC `(g)(10)`, Da Vinci, CARIN, CodeX, Genomics, SANER/NHSN, PACIO, Gravity SDOH, Vulcan, FAST, and `TestScript/$evaluate` in an isolated sandbox and returns an HL7 FHIR R4 `TestReport` resource)
+* **Automated Conformance & Certification (`$certify`)**: `GET /fhir/r4/{tenant}/$certify` and `POST /fhir/r4/{tenant}/$certify` (executes 88 end-to-end conformance checks across 10 suites covering FHIR R4, US Core v6.1.0 & v7.0.0, SMART v2, Terminology, Subscriptions, SDC, ONC `(g)(10)`, Da Vinci, CARIN, CodeX, Genomics, SANER/NHSN, PACIO, Gravity SDOH, Vulcan, FAST, `TestScript/$evaluate`, and SQL-on-FHIR v2 / Binary Proto3 Wire Transport in an isolated sandbox and returns an HL7 FHIR R4 `TestReport` resource)
 * **Validate**: `POST /fhir/r4/{tenant}/{resourceType}/$validate` and `POST /fhir/r4/{tenant}/$validate`
 * **Search**: `GET /fhir/r4/{tenant}/{resourceType}?{searchParams}&_count=20&_offset=0` and `POST /fhir/r4/{tenant}/{resourceType}/_search` (includes `Bundle.link` `self`/`next`/`previous` pagination)
 * **Security Audit Log (`AuditEvent`)**: `GET /fhir/r4/{tenant}/AuditEvent?entity=Patient/123&outcome=0&agent=Practitioner/dr-smith` and `GET /fhir/r4/{tenant}/AuditEvent/{id}`
@@ -495,7 +495,7 @@ flint/
 ├── cmd/
 │   ├── flintd/           # Core FHIR REST HTTP server entrypoint
 │   ├── seed/             # Deterministic US Core v6.1.0 & v7.0.0 cohort seeder (task seed)
-│   ├── certify/          # Automated 78-check US Core v6.1.0 & v7.0.0 / ONC (g)(10) / National IG / TestScript certification CLI (task certify)
+│   ├── certify/          # Automated 88-check US Core v6.1.0 & v7.0.0 / ONC (g)(10) / National IG / TestScript / SQL-on-FHIR v2 certification CLI (task certify)
 │   ├── loadtest/         # High-throughput HTTP & Postgres store load testing harness
 │   ├── worker/           # [Add-On] Temporal ingestion worker entrypoint (task build-worker)
 │   └── e2e/              # [Add-On] Lakehouse E2E & restart recovery verification
@@ -511,7 +511,7 @@ flint/
 │   ├── audit/            # HIPAA/ONC FHIR R4 AuditEvent classification, serialization & recorders
 │   ├── auth/             # TokenValidator, OIDC/Zitadel, and Hegel property tests
 │   ├── cdc/              # Generic, zero-dependency CDC Publisher interface & in-memory sink
-│   ├── certify/          # 78-check FHIR R4 / US Core v6.1.0 & v7.0.0 / ONC (g)(10) / National IG / TestScript conformance engine & TestReport builder
+│   ├── certify/          # 88-check FHIR R4 / US Core v6.1.0 & v7.0.0 / ONC (g)(10) / National IG / TestScript / SQL-on-FHIR v2 conformance engine & TestReport builder
 │   ├── fhirutil/         # Bidirectional flat FHIR R4 JSON <-> google/fhir protojson codec & helpers
 │   └── validation/       # FHIR StructureDefinition, ValueSet, and cardinality validator
 ├── proto/
