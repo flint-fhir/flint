@@ -6153,6 +6153,9 @@ func (s *Server) handleResourceConvert(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+			if inputMap == nil && strings.EqualFold(strings.TrimSpace(r.PathValue("resourceType")), "Parameters") {
+				inputMap = bodyMap
+			}
 		}
 
 		if inputMap == nil {
@@ -10740,12 +10743,9 @@ func (s *Server) handleRiskAssessmentEvaluate(w http.ResponseWriter, r *http.Req
 
 	if subjectParam == "" && raID != "" {
 		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "RiskAssessment", raID); err == nil {
-			if jb, cErr := s.protoToJSONWithMeta("RiskAssessment", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-				var rm map[string]any
-				if json.Unmarshal(jb, &rm) == nil {
-					if subj, ok := rm["subject"].(map[string]any); ok {
-						subjectParam, _ = subj["reference"].(string)
-					}
+			if rm, cErr := s.protoToFHIRMapWithMeta("RiskAssessment", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+				if subj, ok := rm["subject"].(map[string]any); ok {
+					subjectParam, _ = subj["reference"].(string)
 				}
 			}
 		}
@@ -10997,14 +10997,9 @@ func (s *Server) handleGroupATRMember(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Group/%s not found", groupID))
 		return
 	}
-	jb, cErr := s.protoToJSONWithMeta("Group", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+	groupMap, cErr := s.protoToFHIRMapWithMeta("Group", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if cErr != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", cErr.Error())
-		return
-	}
-	var groupMap map[string]any
-	if err := json.Unmarshal(jb, &groupMap); err != nil {
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", err.Error())
 		return
 	}
 
@@ -11248,14 +11243,11 @@ func (s *Server) handleMedicationKnowledgeAndInteractions(w http.ResponseWriter,
 	if strings.EqualFold(resType, "MedicationKnowledge") {
 		if resID != "" {
 			if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "MedicationKnowledge", resID); err == nil && rec != nil {
-				if jb, cErr := s.protoToJSONWithMeta("MedicationKnowledge", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-					var mkMap map[string]any
-					if json.Unmarshal(jb, &mkMap) == nil {
-						w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-						w.WriteHeader(http.StatusOK)
-						_ = json.NewEncoder(w).Encode(mkMap)
-						return
-					}
+				if mkMap, cErr := s.protoToFHIRMapWithMeta("MedicationKnowledge", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+					w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+					w.WriteHeader(http.StatusOK)
+					_ = json.NewEncoder(w).Encode(mkMap)
+					return
 				}
 			}
 		}
@@ -11323,8 +11315,8 @@ func (s *Server) handleMedicationKnowledgeAndInteractions(w http.ResponseWriter,
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("MedicationRequest/%s not found", resID))
 			return
 		}
-		if jb, cErr := s.protoToJSONWithMeta("MedicationRequest", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-			_ = json.Unmarshal(jb, &medReqMap)
+		if rm, cErr := s.protoToFHIRMapWithMeta("MedicationRequest", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+			medReqMap = rm
 		}
 	}
 
@@ -11369,12 +11361,8 @@ func (s *Server) handleMedicationKnowledgeAndInteractions(w http.ResponseWriter,
 		Count:      50,
 	}); sErr == nil {
 		for _, m := range sr.Matches {
-			jb, cErr := s.protoToJSONWithMeta("AllergyIntolerance", m.ResourceProto, m.ResVersion, m.LastUpdated)
+			ai, cErr := s.protoToFHIRMapWithMeta("AllergyIntolerance", m.ResourceProto, m.ResVersion, m.LastUpdated)
 			if cErr != nil {
-				continue
-			}
-			var ai map[string]any
-			if json.Unmarshal(jb, &ai) != nil {
 				continue
 			}
 			aiID, _ := ai["id"].(string)
@@ -11650,8 +11638,8 @@ func (s *Server) handlePatientIHEPix(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patID))
 			return
 		}
-		if jb, cErr := s.protoToJSONWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-			_ = json.Unmarshal(jb, &patMap)
+		if pm, cErr := s.protoToFHIRMapWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+			patMap = pm
 		}
 	} else if sourceIdent != "" {
 		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
@@ -11666,8 +11654,8 @@ func (s *Server) handlePatientIHEPix(w http.ResponseWriter, r *http.Request) {
 		}
 		m := sr.Matches[0]
 		patID = m.ResID
-		if jb, cErr := s.protoToJSONWithMeta("Patient", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
-			_ = json.Unmarshal(jb, &patMap)
+		if pm, cErr := s.protoToFHIRMapWithMeta("Patient", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+			patMap = pm
 		}
 	} else {
 		writeOperationOutcome(w, http.StatusBadRequest, "required", "Patient/$ihe-pix requires sourceIdentifier or Patient/{id}")
@@ -11775,8 +11763,8 @@ func (s *Server) handleServiceRequestCollectSpecimen(w http.ResponseWriter, r *h
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("ServiceRequest/%s not found", srID))
 			return
 		}
-		if jb, cErr := s.protoToJSONWithMeta("ServiceRequest", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-			_ = json.Unmarshal(jb, &srMap)
+		if rm, cErr := s.protoToFHIRMapWithMeta("ServiceRequest", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+			srMap = rm
 		}
 	}
 
@@ -11901,8 +11889,8 @@ func (s *Server) handleDiagnosticReportEvaluate(w http.ResponseWriter, r *http.R
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("DiagnosticReport/%s not found", drID))
 			return
 		}
-		if jb, cErr := s.protoToJSONWithMeta("DiagnosticReport", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-			_ = json.Unmarshal(jb, &drMap)
+		if rm, cErr := s.protoToFHIRMapWithMeta("DiagnosticReport", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+			drMap = rm
 		}
 	}
 
@@ -11914,8 +11902,8 @@ func (s *Server) handleDiagnosticReportEvaluate(w http.ResponseWriter, r *http.R
 		}); sErr == nil && len(sr.Matches) > 0 {
 			m := sr.Matches[0]
 			drID = m.ResID
-			if jb, cErr := s.protoToJSONWithMeta("DiagnosticReport", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
-				_ = json.Unmarshal(jb, &drMap)
+			if rm, cErr := s.protoToFHIRMapWithMeta("DiagnosticReport", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+				drMap = rm
 			}
 		}
 	}
@@ -11953,12 +11941,8 @@ func (s *Server) handleDiagnosticReportEvaluate(w http.ResponseWriter, r *http.R
 		if err != nil || rec == nil {
 			continue
 		}
-		jb, cErr := s.protoToJSONWithMeta("Observation", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		obsMap, cErr := s.protoToFHIRMapWithMeta("Observation", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if cErr != nil {
-			continue
-		}
-		var obsMap map[string]any
-		if json.Unmarshal(jb, &obsMap) != nil {
 			continue
 		}
 		evaluatedCount++
@@ -12267,13 +12251,11 @@ func (s *Server) handleDaVinciDataExport(w http.ResponseWriter, r *http.Request)
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Group/%s not found", groupID))
 		return
 	}
-	jb, cErr := s.protoToJSONWithMeta("Group", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+	groupMap, cErr := s.protoToFHIRMapWithMeta("Group", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if cErr != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", cErr.Error())
 		return
 	}
-	var groupMap map[string]any
-	_ = json.Unmarshal(jb, &groupMap)
 
 	var entries []map[string]any
 	rawMembers, _ := groupMap["member"].([]any)
@@ -12292,14 +12274,11 @@ func (s *Server) handleDaVinciDataExport(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 		if pRec, pErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID); pErr == nil && pRec != nil {
-			if pJB, cErr := s.protoToJSONWithMeta("Patient", pRec.ResourceProto, pRec.ResVersion, pRec.LastUpdated); cErr == nil {
-				var patMap map[string]any
-				if json.Unmarshal(pJB, &patMap) == nil {
-					entries = append(entries, map[string]any{
-						"fullUrl":  "Patient/" + patID,
-						"resource": patMap,
-					})
-				}
+			if patMap, cErr := s.protoToFHIRMapWithMeta("Patient", pRec.ResourceProto, pRec.ResVersion, pRec.LastUpdated); cErr == nil {
+				entries = append(entries, map[string]any{
+					"fullUrl":  "Patient/" + patID,
+					"resource": patMap,
+				})
 			}
 		}
 		for _, rt := range []string{"Condition", "Observation", "MedicationRequest", "AllergyIntolerance", "Immunization"} {
@@ -12310,14 +12289,11 @@ func (s *Server) handleDaVinciDataExport(w http.ResponseWriter, r *http.Request)
 				Count:      20,
 			}); sErr == nil {
 				for _, m := range sr.Matches {
-					if rJB, cErr := s.protoToJSONWithMeta(rt, m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
-						var resMap map[string]any
-						if json.Unmarshal(rJB, &resMap) == nil {
-							entries = append(entries, map[string]any{
-								"fullUrl":  rt + "/" + m.ResID,
-								"resource": resMap,
-							})
-						}
+					if resMap, cErr := s.protoToFHIRMapWithMeta(rt, m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+						entries = append(entries, map[string]any{
+							"fullUrl":  rt + "/" + m.ResID,
+							"resource": resMap,
+						})
 					}
 				}
 			}
@@ -12451,13 +12427,11 @@ func (s *Server) handleEncounterADTOps(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Encounter/%s not found", encID))
 		return
 	}
-	jb, cErr := s.protoToJSONWithMeta("Encounter", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+	encMap, cErr := s.protoToFHIRMapWithMeta("Encounter", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if cErr != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", cErr.Error())
 		return
 	}
-	var encMap map[string]any
-	_ = json.Unmarshal(jb, &encMap)
 
 	if op == "$transfer" {
 		if locRef == "" {
@@ -12612,8 +12586,8 @@ func (s *Server) handleMedicationRequestDispense(w http.ResponseWriter, r *http.
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("MedicationRequest/%s not found", mrID))
 			return
 		}
-		if jb, cErr := s.protoToJSONWithMeta("MedicationRequest", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-			_ = json.Unmarshal(jb, &mrMap)
+		if rm, cErr := s.protoToFHIRMapWithMeta("MedicationRequest", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+			mrMap = rm
 		}
 	}
 
@@ -12764,25 +12738,21 @@ func (s *Server) handlePlanNetDirectory(w http.ResponseWriter, r *http.Request) 
 		matchedCount := 0
 
 		for _, m := range sr.Matches {
-			jb, cErr := s.protoToJSONWithMeta("PractitionerRole", m.ResourceProto, m.ResVersion, m.LastUpdated)
+			prMap, cErr := s.protoToFHIRMapWithMeta("PractitionerRole", m.ResourceProto, m.ResVersion, m.LastUpdated)
 			if cErr != nil {
 				continue
 			}
-			var prMap map[string]any
-			if json.Unmarshal(jb, &prMap) != nil {
+			rawText := strings.ToLower(fmt.Sprint(prMap))
+			if specialty != "" && !strings.Contains(rawText, strings.ToLower(specialty)) {
 				continue
 			}
-			rawJSON := strings.ToLower(string(jb))
-			if specialty != "" && !strings.Contains(rawJSON, strings.ToLower(specialty)) {
+			if organization != "" && !strings.Contains(rawText, strings.ToLower(cleanID(organization))) {
 				continue
 			}
-			if organization != "" && !strings.Contains(rawJSON, strings.ToLower(cleanID(organization))) {
+			if location != "" && !strings.Contains(rawText, strings.ToLower(cleanID(location))) {
 				continue
 			}
-			if location != "" && !strings.Contains(rawJSON, strings.ToLower(cleanID(location))) {
-				continue
-			}
-			if practitioner != "" && !strings.Contains(rawJSON, strings.ToLower(cleanID(practitioner))) {
+			if practitioner != "" && !strings.Contains(rawText, strings.ToLower(cleanID(practitioner))) {
 				continue
 			}
 
@@ -12808,15 +12778,12 @@ func (s *Server) handlePlanNetDirectory(w http.ResponseWriter, r *http.Request) 
 				}
 				seenIncludes[key] = true
 				if rec, rErr := s.store.ReadResourceWithMeta(r.Context(), tenant, refType, id); rErr == nil && rec != nil {
-					if ijb, iErr := s.protoToJSONWithMeta(refType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); iErr == nil {
-						var incMap map[string]any
-						if json.Unmarshal(ijb, &incMap) == nil {
-							entries = append(entries, map[string]any{
-								"fullUrl":  key,
-								"resource": incMap,
-								"search":   map[string]any{"mode": "include"},
-							})
-						}
+					if incMap, iErr := s.protoToFHIRMapWithMeta(refType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); iErr == nil {
+						entries = append(entries, map[string]any{
+							"fullUrl":  key,
+							"resource": incMap,
+							"search":   map[string]any{"mode": "include"},
+						})
 					}
 				}
 			}
@@ -12867,31 +12834,28 @@ func (s *Server) handlePlanNetDirectory(w http.ResponseWriter, r *http.Request) 
 
 	var entries []map[string]any
 	for _, m := range sr.Matches {
-		jb, cErr := s.protoToJSONWithMeta("HealthcareService", m.ResourceProto, m.ResVersion, m.LastUpdated)
+		hcsMap, cErr := s.protoToFHIRMapWithMeta("HealthcareService", m.ResourceProto, m.ResVersion, m.LastUpdated)
 		if cErr != nil {
 			continue
 		}
-		rawJSON := strings.ToLower(string(jb))
-		if specialty != "" && !strings.Contains(rawJSON, strings.ToLower(specialty)) {
+		rawText := strings.ToLower(fmt.Sprint(hcsMap))
+		if specialty != "" && !strings.Contains(rawText, strings.ToLower(specialty)) {
 			continue
 		}
-		if category != "" && !strings.Contains(rawJSON, strings.ToLower(category)) {
+		if category != "" && !strings.Contains(rawText, strings.ToLower(category)) {
 			continue
 		}
-		if organization != "" && !strings.Contains(rawJSON, strings.ToLower(cleanID(organization))) {
+		if organization != "" && !strings.Contains(rawText, strings.ToLower(cleanID(organization))) {
 			continue
 		}
-		var hcsMap map[string]any
-		if json.Unmarshal(jb, &hcsMap) == nil {
-			hcsMap["meta"] = map[string]any{
-				"profile": []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-HealthcareService"},
-			}
-			entries = append(entries, map[string]any{
-				"fullUrl":  "HealthcareService/" + m.ResID,
-				"resource": hcsMap,
-				"search":   map[string]any{"mode": "match"},
-			})
+		hcsMap["meta"] = map[string]any{
+			"profile": []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-HealthcareService"},
 		}
+		entries = append(entries, map[string]any{
+			"fullUrl":  "HealthcareService/" + m.ResID,
+			"resource": hcsMap,
+			"search":   map[string]any{"mode": "match"},
+		})
 	}
 
 	if len(entries) == 0 {
@@ -13204,14 +13168,11 @@ func (s *Server) handlePatientSDOHSummary(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var entries []map[string]any
-	if jb, cErr := s.protoToJSONWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-		var patMap map[string]any
-		if json.Unmarshal(jb, &patMap) == nil {
-			entries = append(entries, map[string]any{
-				"fullUrl":  "Patient/" + patID,
-				"resource": patMap,
-			})
-		}
+	if patMap, cErr := s.protoToFHIRMapWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+		entries = append(entries, map[string]any{
+			"fullUrl":  "Patient/" + patID,
+			"resource": patMap,
+		})
 	}
 
 	for _, rt := range []string{"Condition", "Observation", "Goal", "ServiceRequest", "Task", "Consent"} {
@@ -13225,14 +13186,11 @@ func (s *Server) handlePatientSDOHSummary(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		for _, m := range sr.Matches {
-			if jb, cErr := s.protoToJSONWithMeta(rt, m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
-				var resMap map[string]any
-				if json.Unmarshal(jb, &resMap) == nil {
-					entries = append(entries, map[string]any{
-						"fullUrl":  rt + "/" + m.ResID,
-						"resource": resMap,
-					})
-				}
+			if resMap, cErr := s.protoToFHIRMapWithMeta(rt, m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+				entries = append(entries, map[string]any{
+					"fullUrl":  rt + "/" + m.ResID,
+					"resource": resMap,
+				})
 			}
 		}
 	}
@@ -13313,11 +13271,8 @@ func (s *Server) handleConsentEvaluate(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Consent/%s not found", consentID))
 			return
 		}
-		if jb, cErr := s.protoToJSONWithMeta("Consent", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-			var cm map[string]any
-			if json.Unmarshal(jb, &cm) == nil {
-				consents = append(consents, cm)
-			}
+		if cm, cErr := s.protoToFHIRMapWithMeta("Consent", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+			consents = append(consents, cm)
 		}
 	} else {
 		sp := postgres.SearchParams{
@@ -13331,11 +13286,8 @@ func (s *Server) handleConsentEvaluate(w http.ResponseWriter, r *http.Request) {
 		}
 		if sr, sErr := s.store.Search(r.Context(), sp); sErr == nil {
 			for _, m := range sr.Matches {
-				if jb, cErr := s.protoToJSONWithMeta("Consent", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
-					var cm map[string]any
-					if json.Unmarshal(jb, &cm) == nil {
-						consents = append(consents, cm)
-					}
+				if cm, cErr := s.protoToFHIRMapWithMeta("Consent", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+					consents = append(consents, cm)
 				}
 			}
 		}
@@ -13473,15 +13425,12 @@ func (s *Server) handleCarinBlueButton(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patID))
 			return
 		}
-		if jb, cErr := s.protoToJSONWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-			var patMap map[string]any
-			if json.Unmarshal(jb, &patMap) == nil {
-				entries = append(entries, map[string]any{
-					"fullUrl":  "Patient/" + patID,
-					"resource": patMap,
-					"search":   map[string]any{"mode": "match"},
-				})
-			}
+		if patMap, cErr := s.protoToFHIRMapWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+			entries = append(entries, map[string]any{
+				"fullUrl":  "Patient/" + patID,
+				"resource": patMap,
+				"search":   map[string]any{"mode": "match"},
+			})
 		}
 
 		if covSR, cErr := s.store.Search(r.Context(), postgres.SearchParams{
@@ -13491,18 +13440,15 @@ func (s *Server) handleCarinBlueButton(w http.ResponseWriter, r *http.Request) {
 			Count:            25,
 		}); cErr == nil {
 			for _, m := range covSR.Matches {
-				if jb, jErr := s.protoToJSONWithMeta("Coverage", m.ResourceProto, m.ResVersion, m.LastUpdated); jErr == nil {
-					var covMap map[string]any
-					if json.Unmarshal(jb, &covMap) == nil {
-						covMap["meta"] = map[string]any{
-							"profile": []string{"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-Coverage"},
-						}
-						entries = append(entries, map[string]any{
-							"fullUrl":  "Coverage/" + m.ResID,
-							"resource": covMap,
-							"search":   map[string]any{"mode": "include"},
-						})
+				if covMap, jErr := s.protoToFHIRMapWithMeta("Coverage", m.ResourceProto, m.ResVersion, m.LastUpdated); jErr == nil {
+					covMap["meta"] = map[string]any{
+						"profile": []string{"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-Coverage"},
 					}
+					entries = append(entries, map[string]any{
+						"fullUrl":  "Coverage/" + m.ResID,
+						"resource": covMap,
+						"search":   map[string]any{"mode": "include"},
+					})
 				}
 			}
 		}
@@ -13519,11 +13465,8 @@ func (s *Server) handleCarinBlueButton(w http.ResponseWriter, r *http.Request) {
 	var eobs []map[string]any
 	if eobSR, eErr := s.store.Search(r.Context(), eobSearch); eErr == nil {
 		for _, m := range eobSR.Matches {
-			if jb, jErr := s.protoToJSONWithMeta("ExplanationOfBenefit", m.ResourceProto, m.ResVersion, m.LastUpdated); jErr == nil {
-				var em map[string]any
-				if json.Unmarshal(jb, &em) == nil {
-					eobs = append(eobs, em)
-				}
+			if em, jErr := s.protoToFHIRMapWithMeta("ExplanationOfBenefit", m.ResourceProto, m.ResVersion, m.LastUpdated); jErr == nil {
+				eobs = append(eobs, em)
 			}
 		}
 	}
@@ -13750,8 +13693,8 @@ func (s *Server) handlePublicHealthECR(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Encounter/%s not found", encID))
 			return
 		}
-		if jb, cErr := s.protoToJSONWithMeta("Encounter", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-			_ = json.Unmarshal(jb, &encMap)
+		if em, cErr := s.protoToFHIRMapWithMeta("Encounter", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+			encMap = em
 		}
 		if patRef == "" && encMap != nil {
 			if subj, ok := encMap["subject"].(map[string]any); ok {
@@ -13771,14 +13714,11 @@ func (s *Server) handlePublicHealthECR(w http.ResponseWriter, r *http.Request) {
 	var clinicalEntries []map[string]any
 	if patID != "" {
 		if rec, rErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patID); rErr == nil && rec != nil {
-			if jb, cErr := s.protoToJSONWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-				var patMap map[string]any
-				if json.Unmarshal(jb, &patMap) == nil {
-					clinicalEntries = append(clinicalEntries, map[string]any{
-						"fullUrl":  "Patient/" + patID,
-						"resource": patMap,
-					})
-				}
+			if patMap, cErr := s.protoToFHIRMapWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+				clinicalEntries = append(clinicalEntries, map[string]any{
+					"fullUrl":  "Patient/" + patID,
+					"resource": patMap,
+				})
 			}
 		}
 		for _, rt := range []string{"Condition", "Observation"} {
@@ -13789,16 +13729,13 @@ func (s *Server) handlePublicHealthECR(w http.ResponseWriter, r *http.Request) {
 				Count:            20,
 			}); sErr == nil {
 				for _, m := range sr.Matches {
-					if jb, cErr := s.protoToJSONWithMeta(rt, m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
-						var rm map[string]any
-						if json.Unmarshal(jb, &rm) == nil {
-							refStr := rt + "/" + m.ResID
-							sectionRefs = append(sectionRefs, map[string]any{"reference": refStr})
-							clinicalEntries = append(clinicalEntries, map[string]any{
-								"fullUrl":  refStr,
-								"resource": rm,
-							})
-						}
+					if rm, cErr := s.protoToFHIRMapWithMeta(rt, m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
+						refStr := rt + "/" + m.ResID
+						sectionRefs = append(sectionRefs, map[string]any{"reference": refStr})
+						clinicalEntries = append(clinicalEntries, map[string]any{
+							"fullUrl":  refStr,
+							"resource": rm,
+						})
 					}
 				}
 			}
@@ -13976,13 +13913,11 @@ func (s *Server) handlePatientVRDRDecease(w http.ResponseWriter, r *http.Request
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patID))
 		return
 	}
-	jb, cErr := s.protoToJSONWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+	patMap, cErr := s.protoToFHIRMapWithMeta("Patient", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 	if cErr != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", cErr.Error())
 		return
 	}
-	var patMap map[string]any
-	_ = json.Unmarshal(jb, &patMap)
 
 	nowStr := time.Now().UTC().Format(time.RFC3339)
 	if deceasedDT == "" {

@@ -369,6 +369,12 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 
 		// Suite 4: $everything & $export
 		if strings.HasSuffix(path, "/$everything") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x0c, 0x0a, 0x0a, 0x63, 0x65, 0x72, 0x74, 0x2d, 0x70, 0x61, 0x74, 0x2d, 0x31})
+				return
+			}
 			if strings.Contains(path, "/Encounter") {
 				_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","total":2,"entry":[{"fullUrl":"Encounter/cert-enc-1","resource":{"resourceType":"Encounter","id":"cert-enc-1"}},{"fullUrl":"Location/cert-loc-1"}]}`))
 				return
@@ -906,7 +912,7 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 		}
 		if strings.HasSuffix(path, "/ViewDefinition/$sql") {
 			w.Header().Set("Content-Type", "application/sql; charset=utf-8")
-			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val, ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens), ARRAY_AGG(s.sp_value) FROM fhir_observation r LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok INNER JOIN spidx_token fe ON fe.tenant_id = r.tenant_id WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error') AND r.effective_start IS NOT NULL AND array_exists(x -> x LIKE 'family=Cert%', r.string_tokens) UNION ALL SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r\n"))
+			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val, ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens), ARRAY_JOIN(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), ' '), ARRAY_TO_STRING(ARRAY_AGG(s.sp_value), ' '), ARRAY_AGG(s.sp_value) FROM fhir_observation r LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok INNER JOIN spidx_token fe ON fe.tenant_id = r.tenant_id WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error') AND r.effective_start IS NOT NULL AND array_exists(x -> x LIKE 'family=Cert%', r.string_tokens) AND array_exists(x -> x LIKE 'family=%tify', r.string_tokens) AND array_exists(x -> x LIKE 'given=%lic%', r.string_tokens) UNION ALL SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r\n"))
 			return
 		}
 		if strings.HasSuffix(path, "/$sync-analytics") {
@@ -968,8 +974,8 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 89 {
-		t.Fatalf("expected all 89 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 90 {
+		t.Fatalf("expected all 90 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()
