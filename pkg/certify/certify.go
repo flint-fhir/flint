@@ -2565,6 +2565,48 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-09", suite10, "Zero-JSON Binary Proto3 $validate OperationOutcome Transport & SQL-on-FHIR v2 .count(), .lower(), .upper() & .length() $sql Pushdown", t0, err, "Binary Proto3 $validate OperationOutcome wire transport & ARRAY_SIZE / COUNT(*) / LOWER / UPPER / CHAR_LENGTH $sql pushdown verified")
 
+	// AN-10: Zero-JSON Binary Proto3 Terminology Operations ($expand, $validate-code, $lookup, $translate) & SQL-on-FHIR v2 .last(), .skip(N), .take(N) & coalesce() $sql Pushdown
+	t0 = time.Now()
+	{
+		respExpProto, bExpProto, errExpProto := doReq(http.MethodGet, basePath+"/ValueSet/$expand?url=http://hl7.org/fhir/ValueSet/administrative-gender&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		vcParamsJSON := []byte(`{"resourceType":"Parameters","parameter":[{"name":"url","valueUri":"http://hl7.org/fhir/ValueSet/administrative-gender"},{"name":"code","valueCode":"female"}]}`)
+		respVCConv, bVCProto, errVCConv := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", vcParamsJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respVCProto, bVCOutProto, errVCProto := doReq(http.MethodPost, basePath+"/ValueSet/$validate-code", "application/x-protobuf", bVCProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respLkpProto, bLkpProto, errLkpProto := doReq(http.MethodGet, basePath+"/CodeSystem/$lookup?system=http://loinc.org&code=8867-4&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respTrProto, bTrProto, errTrProto := doReq(http.MethodGet, basePath+"/ConceptMap/$translate?system=http://snomed.info/sct&code=38341003&targetsystem=http://hl7.org/fhir/sid/icd-10-cm&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		sliceCoalVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_slice_coalesce_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"last_given","path":"name.given.last()"},{"name":"second_given","path":"name.given.skip(1).first()"},{"name":"first_two_given","path":"name.given.take(2).join(' ')"},{"name":"family_or_unk","path":"coalesce(name.family, 'Unknown')"}]}]}`)
+		respSlDoris, bSlDoris, errSlDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", sliceCoalVD, nil)
+		respSlPg, bSlPg, errSlPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", sliceCoalVD, nil)
+		if errExpProto != nil || respExpProto.StatusCode != http.StatusOK || !strings.Contains(respExpProto.Header.Get("Content-Type"), "application/x-protobuf") || respExpProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bExpProto) == 0 {
+			err = fmt.Errorf("expected GET /ValueSet/$expand?_format=application/x-protobuf to return binary Proto3 ValueSet, got %d", respExpProto.StatusCode)
+		} else if errVCConv != nil || respVCConv.StatusCode != http.StatusOK || len(bVCProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert to return binary Proto3 Parameters, got %d", respVCConv.StatusCode)
+		} else if errVCProto != nil || respVCProto.StatusCode != http.StatusOK || !strings.Contains(respVCProto.Header.Get("Content-Type"), "application/x-protobuf") || respVCProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bVCOutProto) == 0 {
+			err = fmt.Errorf("expected POST /ValueSet/$validate-code with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respVCProto.StatusCode)
+		} else if errLkpProto != nil || respLkpProto.StatusCode != http.StatusOK || !strings.Contains(respLkpProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bLkpProto) == 0 {
+			err = fmt.Errorf("expected GET /CodeSystem/$lookup?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respLkpProto.StatusCode)
+		} else if errTrProto != nil || respTrProto.StatusCode != http.StatusOK || !strings.Contains(respTrProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bTrProto) == 0 {
+			err = fmt.Errorf("expected GET /ConceptMap/$translate?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respTrProto.StatusCode)
+		} else if errSlDoris != nil || respSlDoris.StatusCode != http.StatusOK || !strings.Contains(string(bSlDoris), "element_at(") || !strings.Contains(string(bSlDoris), ", -1)") || !strings.Contains(string(bSlDoris), "ARRAY_SLICE(") || !strings.Contains(string(bSlDoris), "COALESCE(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with .last()/.skip()/.take()/coalesce() pushdown, got %d: %s", respSlDoris.StatusCode, string(bSlDoris))
+		} else if errSlPg != nil || respSlPg.StatusCode != http.StatusOK || !strings.Contains(string(bSlPg), "ORDER BY s.sp_value DESC LIMIT 1") || !strings.Contains(string(bSlPg), "LIMIT 1 OFFSET 1") || !strings.Contains(string(bSlPg), "LIMIT 2) sub") || !strings.Contains(string(bSlPg), "COALESCE(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with .last()/.skip()/.take()/coalesce() pushdown, got %d: %s", respSlPg.StatusCode, string(bSlPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-10", suite10, "Zero-JSON Binary Proto3 Terminology Operations ($expand, $validate-code, $lookup, $translate) & SQL-on-FHIR v2 .last(), .skip(N), .take(N) & coalesce() $sql Pushdown", t0, err, "Binary Proto3 Terminology wire transport & ARRAY_SLICE / element_at(-1) / LIMIT OFFSET / COALESCE $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

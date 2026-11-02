@@ -13,7 +13,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/dynamicpb"
 
+	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -149,7 +153,7 @@ var builtInValueSetToCodeSystem = map[string]string{
 	"http://hl7.org/fhir/us/core/ValueSet/us-core-medication-codes": "http://www.nlm.nih.gov/research/umls/rxnorm",
 }
 
-func extractTerminologyParams(r *http.Request) (map[string]string, map[string]any) {
+func (s *Server) extractTerminologyParams(r *http.Request, defaultResType string) (map[string]string, map[string]any) {
 	out := make(map[string]string)
 	for k, vals := range r.URL.Query() {
 		if len(vals) > 0 {
@@ -161,7 +165,28 @@ func extractTerminologyParams(r *http.Request) (map[string]string, map[string]an
 		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 4*1024*1024))
 		if err == nil && len(bodyBytes) > 0 {
 			var root map[string]any
-			if json.Unmarshal(bodyBytes, &root) == nil {
+			if isProtoContentType(r) {
+				if pm, pErr := s.protoToFHIRMapWithMeta("Parameters", bodyBytes, 0, time.Time{}); pErr == nil {
+					if params, ok := pm["parameter"].([]any); ok && len(params) > 0 {
+						for _, p := range params {
+							if item, ok := p.(map[string]any); ok {
+								if n, _ := item["name"].(string); strings.TrimSpace(n) != "" {
+									root = pm
+									break
+								}
+							}
+						}
+					}
+				}
+				if root == nil && defaultResType != "" {
+					if rm, rErr := s.protoToFHIRMapWithMeta(defaultResType, bodyBytes, 0, time.Time{}); rErr == nil {
+						root = rm
+					}
+				}
+			} else {
+				_ = json.Unmarshal(bodyBytes, &root)
+			}
+			if root != nil {
 				rt, _ := root["resourceType"].(string)
 				switch rt {
 				case "Parameters":
@@ -176,11 +201,18 @@ func extractTerminologyParams(r *http.Request) (map[string]string, map[string]an
 								continue
 							}
 							for _, vk := range []string{"valueUri", "valueCanonical", "valueCode", "valueString", "valueId"} {
-								if s, ok := pm[vk].(string); ok && s != "" {
-									out[name] = strings.TrimSpace(s)
+								if sVal, ok := pm[vk].(string); ok && sVal != "" {
+									out[name] = strings.TrimSpace(sVal)
 								}
 							}
-							if iVal, ok := pm["valueInteger"].(float64); ok {
+							switch iVal := pm["valueInteger"].(type) {
+							case float64:
+								out[name] = strconv.Itoa(int(iVal))
+							case int:
+								out[name] = strconv.Itoa(iVal)
+							case int64:
+								out[name] = strconv.FormatInt(iVal, 10)
+							case int32:
 								out[name] = strconv.Itoa(int(iVal))
 							}
 							if name == "valueSet" || name == "conceptMap" || name == "codeSystem" {
@@ -248,6 +280,37 @@ func extractTerminologyParams(r *http.Request) (map[string]string, map[string]an
 		}
 	}
 	return out, inlineResource
+}
+
+func (s *Server) writeTerminologyResourceResponse(w http.ResponseWriter, r *http.Request, resType string, out map[string]any) {
+	if okProto, protoCT := wantsProtoResponse(r); okProto {
+		if md, ok := s.protoRegistry[resType]; ok && md != nil {
+			if rawJSON, err := json.Marshal(out); err == nil {
+				if normJSON, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, rawJSON); err == nil {
+					msg := dynamicpb.NewMessage(md)
+					unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+					if err := unmarshaler.Unmarshal(normJSON, msg); err == nil {
+						if protoBytes, err := proto.Marshal(msg); err == nil {
+							w.Header().Set("Content-Type", protoCT)
+							w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+							w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+							w.Header().Set("X-Flint-Execution-Mode", "zero-json-protoreflect")
+							w.WriteHeader(http.StatusOK)
+							if r == nil || r.Method != http.MethodHead {
+								_, _ = w.Write(protoBytes)
+							}
+							return
+						}
+					}
+				}
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r == nil || r.Method != http.MethodHead {
+		_ = json.NewEncoder(w).Encode(out)
+	}
 }
 
 func (s *Server) resolveValueSetConcepts(ctx context.Context, tenant, vsID, vsURL string, inlineVS map[string]any) (string, string, []terminologyConcept, error) {
@@ -726,7 +789,7 @@ func (s *Server) lookupCodeInSystem(ctx context.Context, tenant, csID, system, c
 func (s *Server) handleValueSetExpand(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	vsID := r.PathValue("id")
-	params, inlineVS := extractTerminologyParams(r)
+	params, inlineVS := s.extractTerminologyParams(r, "ValueSet")
 	vsURL := params["url"]
 
 	if vsID == "" && vsURL == "" && inlineVS == nil {
@@ -802,16 +865,14 @@ func (s *Server) handleValueSetExpand(w http.ResponseWriter, r *http.Request) {
 		out["name"] = resolvedName
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(out)
+	s.writeTerminologyResourceResponse(w, r, "ValueSet", out)
 }
 
 // handleValueSetValidateCode handles GET/POST /fhir/r4/{tenant}/ValueSet/$validate-code and /ValueSet/{id}/$validate-code.
 func (s *Server) handleValueSetValidateCode(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	vsID := r.PathValue("id")
-	params, inlineVS := extractTerminologyParams(r)
+	params, inlineVS := s.extractTerminologyParams(r, "ValueSet")
 	vsURL := params["url"]
 	code := params["code"]
 	system := params["system"]
@@ -866,9 +927,7 @@ func (s *Server) handleValueSetValidateCode(w http.ResponseWriter, r *http.Reque
 		outParams = append(outParams, map[string]any{"name": "message", "valueString": msg})
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeTerminologyResourceResponse(w, r, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    outParams,
 	})
@@ -878,7 +937,7 @@ func (s *Server) handleValueSetValidateCode(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleCodeSystemLookup(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	csID := r.PathValue("id")
-	params, _ := extractTerminologyParams(r)
+	params, _ := s.extractTerminologyParams(r, "CodeSystem")
 	system := params["system"]
 	code := params["code"]
 
@@ -907,9 +966,7 @@ func (s *Server) handleCodeSystemLookup(w http.ResponseWriter, r *http.Request) 
 		outParams = append(outParams, map[string]any{"name": "system", "valueUri": concept.System})
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeTerminologyResourceResponse(w, r, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    outParams,
 	})
@@ -920,7 +977,7 @@ func (s *Server) handleCodeSystemLookup(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleCodeSystemValidateCode(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	csID := r.PathValue("id")
-	params, inlineRes := extractTerminologyParams(r)
+	params, inlineRes := s.extractTerminologyParams(r, "CodeSystem")
 	systemURL := firstNonEmpty(params["url"], params["system"])
 	code := params["code"]
 	reqDisplay := params["display"]
@@ -975,9 +1032,7 @@ func (s *Server) handleCodeSystemValidateCode(w http.ResponseWriter, r *http.Req
 		outParams = append(outParams, map[string]any{"name": "message", "valueString": msg})
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeTerminologyResourceResponse(w, r, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    outParams,
 	})
@@ -988,7 +1043,7 @@ func (s *Server) handleCodeSystemValidateCode(w http.ResponseWriter, r *http.Req
 func (s *Server) handleCodeSystemSubsumes(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	csID := r.PathValue("id")
-	params, inlineRes := extractTerminologyParams(r)
+	params, inlineRes := s.extractTerminologyParams(r, "CodeSystem")
 	systemURL := firstNonEmpty(params["system"], params["url"])
 	codeA := params["codeA"]
 	codeB := params["codeB"]
@@ -1038,9 +1093,7 @@ func (s *Server) handleCodeSystemSubsumes(w http.ResponseWriter, r *http.Request
 		outcome = "subsumed-by"
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeTerminologyResourceResponse(w, r, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter": []map[string]any{
 			{"name": "outcome", "valueCode": outcome},
@@ -1205,7 +1258,7 @@ func extractEntriesFromConceptMapJSON(cmMap map[string]any) []conceptMapEntry {
 func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	cmID := r.PathValue("id")
-	params, inlineCM := extractTerminologyParams(r)
+	params, inlineCM := s.extractTerminologyParams(r, "ConceptMap")
 
 	cmURL := params["url"]
 	code := params["code"]
@@ -1360,9 +1413,7 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 	}
 	outParams = append(outParams, matchParts...)
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeTerminologyResourceResponse(w, r, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    outParams,
 	})
@@ -1664,7 +1715,14 @@ func (s *Server) handleClosure(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(strings.TrimSpace(string(body))) > 0 {
 			var raw map[string]any
-			if err := json.Unmarshal(body, &raw); err != nil {
+			if isProtoContentType(r) {
+				var pErr error
+				raw, pErr = s.protoToFHIRMapWithMeta("Parameters", body, 0, time.Time{})
+				if pErr != nil {
+					writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid Proto3 Parameters in $closure request: %v", pErr))
+					return
+				}
+			} else if err := json.Unmarshal(body, &raw); err != nil {
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid JSON in $closure request: %v", err))
 				return
 			}
@@ -1871,7 +1929,5 @@ func (s *Server) handleClosure(w http.ResponseWriter, r *http.Request) {
 		"group":        groups,
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(out)
+	s.writeTerminologyResourceResponse(w, r, "ConceptMap", out)
 }
