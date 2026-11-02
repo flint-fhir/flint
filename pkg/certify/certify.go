@@ -2501,6 +2501,38 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-07", suite10, "Binary Proto3 Bulk $export & $import (_outputFormat=application/x-protobuf) & SQL-on-FHIR v2 collection:true Array Aggregation $sql Pushdown", t0, err, "Binary Proto3 Bulk $export/$import round-trip & ARRAY_FILTER / ARRAY_AGG collection:true $sql pushdown verified")
 
+	// AN-08: Binary Proto3 $everything Compartment Bundle Transport & SQL-on-FHIR v2 String/Collection Function (.contains(), .endsWith(), .join()) $sql Pushdown
+	t0 = time.Now()
+	{
+		respEvGet, bEvGet, errEvGet := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$everything?_count=10&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		evParamsJSON := []byte(`{"resourceType":"Parameters","parameter":[{"name":"_count","valueInteger":10},{"name":"_type","valueString":"Patient,Observation"}]}`)
+		respEvParamsConv, bEvParamsProto, errEvParamsConv := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", evParamsJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respEvPost, bEvPost, errEvPost := doReq(http.MethodPost, basePath+"/Patient/cert-pat-1/$everything", "application/x-protobuf", bEvParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		strJoinVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_str_join_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"full_given","path":"name.given.join(' ')"}]}],"where":[{"path":"name.family.endsWith('tify') and name.given.contains('lic')"}]}`)
+		respJoinDoris, bJoinDoris, errJoinDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strJoinVD, nil)
+		respJoinPg, bJoinPg, errJoinPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strJoinVD, nil)
+		if errEvGet != nil || respEvGet.StatusCode != http.StatusOK || !strings.Contains(respEvGet.Header.Get("Content-Type"), "application/x-protobuf") || respEvGet.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bEvGet) == 0 {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$everything?_format=application/x-protobuf to return binary Proto3 Bundle, got %d", respEvGet.StatusCode)
+		} else if errEvParamsConv != nil || respEvParamsConv.StatusCode != http.StatusOK || len(bEvParamsProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert to return binary Proto3 Parameters, got %d", respEvParamsConv.StatusCode)
+		} else if errEvPost != nil || respEvPost.StatusCode != http.StatusOK || !strings.Contains(respEvPost.Header.Get("Content-Type"), "application/x-protobuf") || respEvPost.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bEvPost) == 0 {
+			err = fmt.Errorf("expected POST /Patient/cert-pat-1/$everything with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respEvPost.StatusCode)
+		} else if errJoinDoris != nil || respJoinDoris.StatusCode != http.StatusOK || !strings.Contains(string(bJoinDoris), "ARRAY_JOIN") || !strings.Contains(string(bJoinDoris), "LIKE 'family=%tify'") || !strings.Contains(string(bJoinDoris), "LIKE 'given=%lic%'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with .join()/.endsWith()/.contains() pushdown, got %d: %s", respJoinDoris.StatusCode, string(bJoinDoris))
+		} else if errJoinPg != nil || respJoinPg.StatusCode != http.StatusOK || !strings.Contains(string(bJoinPg), "ARRAY_TO_STRING(ARRAY_AGG") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with .join() to emit ARRAY_TO_STRING(ARRAY_AGG, got %d: %s", respJoinPg.StatusCode, string(bJoinPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-08", suite10, "Binary Proto3 $everything Compartment Bundle Transport & SQL-on-FHIR v2 String/Collection (.contains, .endsWith, .join) $sql Pushdown", t0, err, "Binary Proto3 Patient/$everything GET/POST wire transport & ARRAY_JOIN / ARRAY_TO_STRING / .endsWith() / .contains() $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}
