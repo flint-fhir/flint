@@ -4477,9 +4477,16 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read request body")
 				return
 			}
-			if strings.TrimSpace(string(body)) != "" {
+			if len(bytes.TrimSpace(body)) > 0 {
 				var raw map[string]any
-				if err := json.Unmarshal(body, &raw); err != nil {
+				if isProtoContentType(r) {
+					raw, err = s.protoToFHIRMapWithMeta("Parameters", body, 0, time.Time{})
+					if err != nil {
+						writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+							fmt.Sprintf("invalid Protobuf Parameters in $everything request: %v", err))
+						return
+					}
+				} else if err := json.Unmarshal(body, &raw); err != nil {
 					writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 						fmt.Sprintf("invalid JSON in $everything request: %v", err))
 					return
@@ -4505,8 +4512,15 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 						}
 						if val == "" {
 							for _, k := range []string{"valueInteger", "valuePositiveInt", "valueUnsignedInt"} {
-								if fVal, ok := pm[k].(float64); ok {
-									val = strconv.Itoa(int(fVal))
+								switch iv := pm[k].(type) {
+								case float64:
+									val = strconv.Itoa(int(iv))
+								case int:
+									val = strconv.Itoa(iv)
+								case int64:
+									val = strconv.FormatInt(iv, 10)
+								}
+								if val != "" {
 									break
 								}
 							}

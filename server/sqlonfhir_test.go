@@ -919,4 +919,106 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		require.Equal(t, http.StatusOK, respColl.StatusCode)
 		assert.Contains(t, string(collBytes), tc.wantContains)
 	}
+
+	// 19. Binary Proto3 Patient/{id}/$everything GET & POST and SQL-on-FHIR v2 .join() / .endsWith() / .contains() $sql pushdown
+	reqEvGet, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Patient/tx-proto-pat-1/$everything?_count=10&_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqEvGet.Header.Set("Accept", "application/x-protobuf")
+	respEvGet, err := client.Do(reqEvGet)
+	require.NoError(t, err)
+	evGetBytes, _ := io.ReadAll(respEvGet.Body)
+	respEvGet.Body.Close()
+	require.Equal(t, http.StatusOK, respEvGet.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respEvGet.Header.Get("Content-Type"))
+	var evGetBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(evGetBytes, &evGetBundle))
+	assert.GreaterOrEqual(t, len(evGetBundle.GetEntry()), 1)
+
+	evParamsJSON := `{"resourceType":"Parameters","parameter":[{"name":"_count","valueInteger":5},{"name":"_type","valueString":"Patient,Observation"}]}`
+	reqEvParamsConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(evParamsJSON))
+	require.NoError(t, err)
+	reqEvParamsConv.Header.Set("Content-Type", "application/fhir+json")
+	reqEvParamsConv.Header.Set("Accept", "application/x-protobuf")
+	respEvParamsConv, err := client.Do(reqEvParamsConv)
+	require.NoError(t, err)
+	evParamsProtoBytes, _ := io.ReadAll(respEvParamsConv.Body)
+	respEvParamsConv.Body.Close()
+	require.Equal(t, http.StatusOK, respEvParamsConv.StatusCode)
+
+	reqEvPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/tx-proto-pat-1/$everything", bytes.NewReader(evParamsProtoBytes))
+	require.NoError(t, err)
+	reqEvPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqEvPost.Header.Set("Accept", "application/x-protobuf")
+	respEvPost, err := client.Do(reqEvPost)
+	require.NoError(t, err)
+	evPostBytes, _ := io.ReadAll(respEvPost.Body)
+	respEvPost.Body.Close()
+	require.Equal(t, http.StatusOK, respEvPost.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respEvPost.Header.Get("Content-Type"))
+	var evPostBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(evPostBytes, &evPostBundle))
+	assert.GreaterOrEqual(t, len(evPostBundle.GetEntry()), 1)
+
+	joinAndStringVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "patient_join_and_strings",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "full_given", "path": "name.given.join(' ')"},
+					{"name": "id_joined", "path": "identifier.value.join(',')"}
+				]
+			}
+		],
+		"where": [
+			{"path": "name.family.endsWith('Hopper') and name.given.contains('rac')"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_JOIN(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), ' ')",
+				"ARRAY_JOIN(ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE 'identifier=|%', r.code_tokens)), ',')",
+				"LIKE 'family=%Hopper'",
+				"LIKE 'given=%rac%'",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"COALESCE(ARRAY_TO_STRING(ARRAY_AGG(s.sp_value), ' '), '')",
+				"COALESCE(ARRAY_TO_STRING(ARRAY_AGG(t.sp_value), ','), '')",
+				"s.sp_value LIKE '%Hopper'",
+				"s.sp_value LIKE '%rac%'",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"COALESCE(group_concat(s.sp_value, ' '), '')",
+				"COALESCE(group_concat(t.sp_value, ','), '')",
+				"s.sp_value LIKE '%Hopper'",
+				"s.sp_value LIKE '%rac%'",
+			},
+		},
+	} {
+		reqJoin, jErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(joinAndStringVD))
+		require.NoError(t, jErr)
+		reqJoin.Header.Set("Content-Type", "application/fhir+json")
+		respJoin, jErr := client.Do(reqJoin)
+		require.NoError(t, jErr)
+		joinBytes, _ := io.ReadAll(respJoin.Body)
+		respJoin.Body.Close()
+		require.Equal(t, http.StatusOK, respJoin.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(joinBytes), want)
+		}
+	}
 }
