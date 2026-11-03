@@ -2607,6 +2607,43 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-10", suite10, "Zero-JSON Binary Proto3 Terminology Operations ($expand, $validate-code, $lookup, $translate) & SQL-on-FHIR v2 .last(), .skip(N), .take(N) & coalesce() $sql Pushdown", t0, err, "Binary Proto3 Terminology wire transport & ARRAY_SLICE / element_at(-1) / LIMIT OFFSET / COALESCE $sql pushdown verified")
 
+	// AN-11: Zero-JSON Binary Proto3 $match, $meta / $meta-add & $graph Operations & SQL-on-FHIR v2 iif(), .replace(), .substring() & .trim() $sql Pushdown
+	t0 = time.Now()
+	{
+		matchPatJSON := []byte(`{"resourceType":"Patient","gender":"female","birthDate":"1985-04-12","name":[{"family":"Certify","given":["Alice"]}]}`)
+		respMatchConv, bMatchPatProto, errMatchConv := doReq(http.MethodPost, basePath+"/Patient/$convert", "application/fhir+json", matchPatJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respMatchProto, bMatchOutProto, errMatchProto := doReq(http.MethodPost, basePath+"/Patient/$match", "application/x-protobuf", bMatchPatProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respMetaProto, bMetaProto, errMetaProto := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$meta?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respGraphProto, bGraphProto, errGraphProto := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$graph?graph=us-core-patient-careteam&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		iifStrVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_iif_str_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"status_label","path":"iif(active = 'true', 'Active', 'Inactive')"},{"name":"family_mod","path":"name.family.replace('Cert', 'Mod')"},{"name":"family_sub","path":"name.family.substring(0, 4)"},{"name":"family_trim","path":"name.family.trim()"}]}]}`)
+		respIifDoris, bIifDoris, errIifDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", iifStrVD, nil)
+		respIifPg, bIifPg, errIifPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", iifStrVD, nil)
+		if errMatchConv != nil || respMatchConv.StatusCode != http.StatusOK || len(bMatchPatProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$convert to return binary Proto3 Patient, got %d", respMatchConv.StatusCode)
+		} else if errMatchProto != nil || respMatchProto.StatusCode != http.StatusOK || !strings.Contains(respMatchProto.Header.Get("Content-Type"), "application/x-protobuf") || respMatchProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bMatchOutProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$match with binary Proto3 Patient to return binary Proto3 Bundle, got %d", respMatchProto.StatusCode)
+		} else if errMetaProto != nil || respMetaProto.StatusCode != http.StatusOK || !strings.Contains(respMetaProto.Header.Get("Content-Type"), "application/x-protobuf") || respMetaProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bMetaProto) == 0 {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$meta?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respMetaProto.StatusCode)
+		} else if errGraphProto != nil || respGraphProto.StatusCode != http.StatusOK || !strings.Contains(respGraphProto.Header.Get("Content-Type"), "application/x-protobuf") || respGraphProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bGraphProto) == 0 {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$graph?_format=application/x-protobuf to return binary Proto3 Bundle, got %d", respGraphProto.StatusCode)
+		} else if errIifDoris != nil || respIifDoris.StatusCode != http.StatusOK || !strings.Contains(string(bIifDoris), "CASE WHEN") || !strings.Contains(string(bIifDoris), "REPLACE(") || !strings.Contains(string(bIifDoris), "SUBSTR(") || !strings.Contains(string(bIifDoris), "TRIM(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with iif()/.replace()/.substring()/.trim() pushdown, got %d: %s", respIifDoris.StatusCode, string(bIifDoris))
+		} else if errIifPg != nil || respIifPg.StatusCode != http.StatusOK || !strings.Contains(string(bIifPg), "CASE WHEN") || !strings.Contains(string(bIifPg), "REPLACE(") || !strings.Contains(string(bIifPg), "SUBSTR(") || !strings.Contains(string(bIifPg), "TRIM(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with iif()/.replace()/.substring()/.trim() pushdown, got %d: %s", respIifPg.StatusCode, string(bIifPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-11", suite10, "Zero-JSON Binary Proto3 $match, $meta / $meta-add & $graph Operations & SQL-on-FHIR v2 iif(), .replace(), .substring() & .trim() $sql Pushdown", t0, err, "Binary Proto3 $match/$meta/$graph wire transport & CASE WHEN / REPLACE / SUBSTR / TRIM $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

@@ -1710,6 +1710,21 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 	if strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") {
 		return p, "constant"
 	}
+	if strings.HasPrefix(strings.ToLower(p), "iif(") && strings.HasSuffix(p, ")") {
+		args := splitTopLevelCommaArgs(p[len("iif(") : len(p)-1])
+		if len(args) >= 2 {
+			condSQL := dorisZeroJSONWhereExpr(args[0], isCore)
+			if condSQL == "" {
+				condSQL, _ = dorisZeroJSONColumnExpr(args[0], isCore)
+			}
+			trueExpr, _ := dorisZeroJSONColumnExpr(args[1], isCore)
+			falseExpr := "NULL"
+			if len(args) >= 3 {
+				falseExpr, _ = dorisZeroJSONColumnExpr(args[2], isCore)
+			}
+			return fmt.Sprintf("CASE WHEN %s THEN %s ELSE %s END", condSQL, trueExpr, falseExpr), "iif"
+		}
+	}
 	if strings.HasPrefix(strings.ToLower(p), "coalesce(") && strings.HasSuffix(p, ")") {
 		args := splitTopLevelCommaArgs(p[len("coalesce(") : len(p)-1])
 		if len(args) > 0 {
@@ -1720,6 +1735,36 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 			}
 			return fmt.Sprintf("COALESCE(%s)", strings.Join(exprs, ", ")), "coalesce"
 		}
+	}
+	if idx := strings.LastIndex(p, ".replace("); idx != -1 && strings.HasSuffix(p, ")") {
+		basePath := strings.TrimSpace(p[:idx])
+		args := splitTopLevelCommaArgs(p[idx+len(".replace(") : len(p)-1])
+		if len(args) == 2 {
+			pat := strings.ReplaceAll(strings.Trim(strings.TrimSpace(args[0]), "'\""), "'", "''")
+			sub := strings.ReplaceAll(strings.Trim(strings.TrimSpace(args[1]), "'\""), "'", "''")
+			colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
+			return fmt.Sprintf("REPLACE(%s, '%s', '%s')", colExpr, pat, sub), colSrc + ".replace"
+		}
+	}
+	if idx := strings.LastIndex(p, ".substring("); idx != -1 && strings.HasSuffix(p, ")") {
+		basePath := strings.TrimSpace(p[:idx])
+		args := splitTopLevelCommaArgs(p[idx+len(".substring(") : len(p)-1])
+		if len(args) >= 1 {
+			if startIdx, err := strconv.Atoi(strings.TrimSpace(args[0])); err == nil && startIdx >= 0 {
+				colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
+				if len(args) >= 2 {
+					if length, err := strconv.Atoi(strings.TrimSpace(args[1])); err == nil && length >= 0 {
+						return fmt.Sprintf("SUBSTR(%s, %d, %d)", colExpr, startIdx+1, length), colSrc + ".substring"
+					}
+				}
+				return fmt.Sprintf("SUBSTR(%s, %d)", colExpr, startIdx+1), colSrc + ".substring"
+			}
+		}
+	}
+	if strings.HasSuffix(p, ".trim()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".trim()")])
+		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
+		return fmt.Sprintf("TRIM(%s)", colExpr), colSrc + ".trim"
 	}
 	if idx := strings.Index(p, ".join("); idx != -1 && strings.HasSuffix(p, ")") {
 		basePath := strings.TrimSpace(p[:idx])
@@ -1950,7 +1995,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 			return fmt.Sprintf("%s %s %s", lhsExpr, sqlOp, trimmedRHS)
 		}
 	}
-	if strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") {
+	if strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".substring(") {
 		lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
 		sqlOp := op
 		if sqlOp == "!=" {
@@ -1998,6 +2043,49 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 			}
 			return fmt.Sprintf("COALESCE(%s)", strings.Join(exprs, ", ")), "coalesce"
 		}
+	}
+	if strings.HasPrefix(strings.ToLower(p), "iif(") && strings.HasSuffix(p, ")") {
+		args := splitTopLevelCommaArgs(p[len("iif(") : len(p)-1])
+		if len(args) == 3 {
+			condSQL := spidxZeroJSONWhereExpr(args[0])
+			if condSQL == "" {
+				condSQL = "1 = 0"
+			}
+			trueExpr, _ := spidxZeroJSONColumnExpr(args[1], dialect)
+			falseExpr, _ := spidxZeroJSONColumnExpr(args[2], dialect)
+			return fmt.Sprintf("CASE WHEN %s THEN %s ELSE %s END", condSQL, trueExpr, falseExpr), "iif"
+		}
+	}
+	if idx := strings.Index(p, ".replace("); idx != -1 && strings.HasSuffix(p, ")") {
+		basePath := strings.TrimSpace(p[:idx])
+		args := splitTopLevelCommaArgs(p[idx+len(".replace(") : len(p)-1])
+		if len(args) == 2 {
+			colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+			pat := strings.ReplaceAll(strings.Trim(strings.TrimSpace(args[0]), "'\""), "'", "''")
+			sub := strings.ReplaceAll(strings.Trim(strings.TrimSpace(args[1]), "'\""), "'", "''")
+			return fmt.Sprintf("REPLACE(%s, '%s', '%s')", colExpr, pat, sub), colSrc + ".replace"
+		}
+	}
+	if idx := strings.Index(p, ".substring("); idx != -1 && strings.HasSuffix(p, ")") {
+		basePath := strings.TrimSpace(p[:idx])
+		args := splitTopLevelCommaArgs(p[idx+len(".substring(") : len(p)-1])
+		if len(args) >= 1 {
+			if startIdx, err := strconv.Atoi(strings.TrimSpace(args[0])); err == nil && startIdx >= 0 {
+				colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+				sqlStart := startIdx + 1
+				if len(args) == 2 {
+					if length, err := strconv.Atoi(strings.TrimSpace(args[1])); err == nil && length >= 0 {
+						return fmt.Sprintf("SUBSTR(%s, %d, %d)", colExpr, sqlStart, length), colSrc + ".substring"
+					}
+				}
+				return fmt.Sprintf("SUBSTR(%s, %d)", colExpr, sqlStart), colSrc + ".substring"
+			}
+		}
+	}
+	if strings.HasSuffix(p, ".trim()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".trim()")])
+		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+		return fmt.Sprintf("TRIM(%s)", colExpr), colSrc + ".trim"
 	}
 	if idx := strings.Index(p, ".join("); idx != -1 && strings.HasSuffix(p, ")") {
 		basePath := strings.TrimSpace(p[:idx])
@@ -2246,7 +2334,7 @@ func spidxZeroJSONWhereExpr(fhirPath string) string {
 			return fmt.Sprintf("%s %s %s", lhsExpr, sqlOp, trimmedRHS)
 		}
 	}
-	if strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") {
+	if strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".substring(") {
 		lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, "postgres")
 		sqlOp := op
 		if sqlOp == "!=" {
