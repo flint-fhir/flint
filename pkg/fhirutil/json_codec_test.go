@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 	"hegel.dev/go/hegel"
 
+	cspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/capability_statement_go_proto"
 	condpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/condition_go_proto"
 	encpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/encounter_go_proto"
 	obspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/observation_go_proto"
@@ -506,4 +507,43 @@ func TestBundleAndContainedResourceRegistry_And_RoundTrip(t *testing.T) {
 	bRes := bEntries[0].(map[string]any)["resource"].(map[string]any)
 	assert.Equal(t, "Patient", bRes["resourceType"])
 	assert.Equal(t, "pat-b1", bRes["id"])
+
+	// CapabilityStatement ResourceTypeCode PascalCase enum normalization & denormalization round-trip
+	rawCap := []byte(`{
+		"resourceType": "CapabilityStatement",
+		"id": "cap-rt-1",
+		"status": "active",
+		"date": "2026-03-01",
+		"kind": "instance",
+		"fhirVersion": "4.0.1",
+		"format": ["application/fhir+json", "application/x-protobuf"],
+		"rest": [
+			{
+				"mode": "server",
+				"resource": [
+					{"type": "Patient"},
+					{"type": "CarePlan"},
+					{"type": "ExplanationOfBenefit"},
+					{"type": "ViewDefinition"}
+				]
+			}
+		]
+	}`)
+	capDesc := (&cspb.CapabilityStatement{}).ProtoReflect().Descriptor()
+	normCap, err := fhirutil.NormalizeFHIRJSONToProtoJSON(capDesc, rawCap)
+	require.NoError(t, err)
+	capMsg := &cspb.CapabilityStatement{}
+	require.NoError(t, (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(normCap, capMsg))
+	capWire, err := proto.Marshal(capMsg)
+	require.NoError(t, err)
+
+	denormCapJSON, err := fhirutil.DenormalizeProtoJSONToFHIRJSON(capDesc, "CapabilityStatement", capWire, 1, lastUpdated)
+	require.NoError(t, err)
+	assert.Contains(t, string(denormCapJSON), `"Patient"`)
+	assert.Contains(t, string(denormCapJSON), `"CarePlan"`)
+	assert.Contains(t, string(denormCapJSON), `"ExplanationOfBenefit"`)
+
+	capMap, err := fhirutil.ProtoBytesToFHIRMap(capDesc, "CapabilityStatement", capWire, 1, lastUpdated)
+	require.NoError(t, err)
+	assert.Equal(t, "CapabilityStatement", capMap["resourceType"])
 }

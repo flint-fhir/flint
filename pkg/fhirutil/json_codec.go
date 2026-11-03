@@ -678,7 +678,7 @@ func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any
 					if strings.HasSuffix(fullName, ".MethodCode") {
 						return strings.ToUpper(s)
 					}
-					if strings.Contains(fullName, "ResourceTypeCode") {
+					if strings.Contains(string(valFD.Enum().FullName()), "ResourceTypeCode") {
 						comp := strings.ReplaceAll(s, "_", "")
 						for _, rt := range AllR4ResourceTypes() {
 							if strings.EqualFold(rt, comp) {
@@ -800,17 +800,12 @@ func findFieldDescriptor(fields protoreflect.FieldDescriptors, jsonKey string) p
 	return nil
 }
 
-func normalizeEnumString(s string) string {
-	trimmed := strings.TrimSpace(s)
-	return strings.ToUpper(strings.ReplaceAll(trimmed, "-", "_"))
-}
-
 func resolveEnumValueString(ed protoreflect.EnumDescriptor, s string) (string, bool) {
 	trimmed := strings.TrimSpace(s)
 	if trimmed == "" {
 		return "", false
 	}
-	cand := normalizeEnumString(trimmed)
+	cand := strings.ToUpper(strings.ReplaceAll(trimmed, "-", "_"))
 	if ed == nil {
 		return cand, true
 	}
