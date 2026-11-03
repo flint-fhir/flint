@@ -540,6 +540,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleDocumentReferenceDocref(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$summary" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientSummary(w, r)
+					return
+				}
 				if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$populate" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleQuestionnairePopulate(w, r)
@@ -6020,9 +6025,7 @@ func usCoreSupportedProfiles(rt string) []string {
 // handleMetadata returns the FHIR CapabilityStatement.
 func (s *Server) handleMetadata(w http.ResponseWriter, r *http.Request) {
 	cap := s.buildCapabilityStatement(r)
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(cap)
+	s.writeTerminologyResourceResponse(w, r, "CapabilityStatement", cap)
 }
 
 func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
@@ -7823,6 +7826,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 
 // protoToFHIRMapWithMeta decodes binary wire Protobuf bytes directly into an in-memory
 // FHIR R4 map[string]any using protoreflect without any intermediate JSON serialization.
+func (s *Server) protoToFHIRMap(resType string, protoBytes []byte) (map[string]any, error) {
+	return s.protoToFHIRMapWithMeta(resType, protoBytes, 0, time.Time{})
+}
+
 func (s *Server) protoToFHIRMapWithMeta(resType string, protoBytes []byte, version int, lastUpdated time.Time) (map[string]any, error) {
 	md, ok := s.protoRegistry[resType]
 	if !ok {

@@ -2766,7 +2766,12 @@ func (s *Server) handleObservationLastN(w http.ResponseWriter, r *http.Request) 
 	if r.Method == http.MethodPost && r.Body != nil && r.ContentLength != 0 {
 		if body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024)); err == nil && len(bytes.TrimSpace(body)) > 0 {
 			var raw map[string]any
-			if json.Unmarshal(body, &raw) == nil {
+			if isProtoContentType(r) {
+				raw, _ = s.protoToFHIRMap("Parameters", body)
+			} else {
+				_ = json.Unmarshal(body, &raw)
+			}
+			if raw != nil {
 				if params, ok := raw["parameter"].([]any); ok {
 					for _, p := range params {
 						pm, ok := p.(map[string]any)
@@ -2894,9 +2899,7 @@ func (s *Server) handleObservationLastN(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeTerminologyResourceResponse(w, r, "Bundle", map[string]any{
 		"resourceType": "Bundle",
 		"type":         "searchset",
 		"total":        len(entries),
@@ -2988,7 +2991,12 @@ func (s *Server) handleObservationStats(w http.ResponseWriter, r *http.Request) 
 	if r.Method == http.MethodPost && r.Body != nil && r.ContentLength != 0 {
 		if body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024)); err == nil && len(bytes.TrimSpace(body)) > 0 {
 			var raw map[string]any
-			if json.Unmarshal(body, &raw) == nil {
+			if isProtoContentType(r) {
+				raw, _ = s.protoToFHIRMap("Parameters", body)
+			} else {
+				_ = json.Unmarshal(body, &raw)
+			}
+			if raw != nil {
 				if params, ok := raw["parameter"].([]any); ok {
 					for _, p := range params {
 						pm, ok := p.(map[string]any)
@@ -3167,9 +3175,7 @@ func (s *Server) handleObservationStats(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeTerminologyResourceResponse(w, r, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    paramOut,
 	})
@@ -4166,9 +4172,14 @@ func (s *Server) handleCapabilityStatementSubset(w http.ResponseWriter, r *http.
 	}
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&bodyMap); err == nil {
-			if bodyMap["resourceType"] == "Parameters" {
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			var bodyMap map[string]any
+			if isProtoContentType(r) {
+				bodyMap, _ = s.protoToFHIRMap("Parameters", rawBody)
+			} else {
+				_ = json.Unmarshal(rawBody, &bodyMap)
+			}
+			if bodyMap != nil && bodyMap["resourceType"] == "Parameters" {
 				if params, ok := bodyMap["parameter"].([]any); ok {
 					for _, rawP := range params {
 						if pm, ok := rawP.(map[string]any); ok {
@@ -4213,9 +4224,7 @@ func (s *Server) handleCapabilityStatementSubset(w http.ResponseWriter, r *http.
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(cap)
+	s.writeTerminologyResourceResponse(w, r, "CapabilityStatement", cap)
 }
 
 func (s *Server) handleCapabilityStatementImplements(w http.ResponseWriter, r *http.Request) {
@@ -4412,9 +4421,7 @@ func (s *Server) handleCapabilityStatementImplements(w http.ResponseWriter, r *h
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeTerminologyResourceResponse(w, r, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter": []map[string]any{
 			{
@@ -10900,38 +10907,54 @@ func (s *Server) handleCompositionDocumentType(w http.ResponseWriter, r *http.Re
 	var compMap map[string]any
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&body); err == nil {
-			switch body["resourceType"] {
-			case "Composition":
-				compMap = body
-				if id, _ := body["id"].(string); id != "" && compID == "" {
-					compID = id
-				}
-			case "Parameters":
-				params, _ := body["parameter"].([]any)
-				for _, p := range params {
-					pm, ok := p.(map[string]any)
-					if !ok {
-						continue
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			var body map[string]any
+			if isProtoContentType(r) {
+				if pm, pErr := s.protoToFHIRMap("Parameters", rawBody); pErr == nil && len(pm) > 1 {
+					if _, hasParams := pm["parameter"]; hasParams {
+						body = pm
 					}
-					name, _ := pm["name"].(string)
-					switch name {
-					case "id":
-						if vs := extractParamString(pm); vs != "" && compID == "" {
-							compID = strings.TrimPrefix(strings.TrimSpace(vs), "Composition/")
+				}
+				if body == nil {
+					if cm, cErr := s.protoToFHIRMap("Composition", rawBody); cErr == nil && len(cm) > 1 {
+						body = cm
+					}
+				}
+			} else {
+				_ = json.Unmarshal(rawBody, &body)
+			}
+			if body != nil {
+				switch body["resourceType"] {
+				case "Composition":
+					compMap = body
+					if id, _ := body["id"].(string); id != "" && compID == "" {
+						compID = id
+					}
+				case "Parameters":
+					params, _ := body["parameter"].([]any)
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
 						}
-					case "persist":
-						if vb, ok := pm["valueBoolean"].(bool); ok {
-							persist = vb
-						} else if vs := extractParamString(pm); vs != "" {
-							persist = strings.EqualFold(vs, "true")
-						}
-					case "composition", "resource":
-						if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Composition" {
-							compMap = res
-							if id, _ := res["id"].(string); id != "" && compID == "" {
-								compID = id
+						name, _ := pm["name"].(string)
+						switch name {
+						case "id":
+							if vs := extractParamString(pm); vs != "" && compID == "" {
+								compID = strings.TrimPrefix(strings.TrimSpace(vs), "Composition/")
+							}
+						case "persist":
+							if vb, ok := pm["valueBoolean"].(bool); ok {
+								persist = vb
+							} else if vs := extractParamString(pm); vs != "" {
+								persist = strings.EqualFold(vs, "true")
+							}
+						case "composition", "resource":
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Composition" {
+								compMap = res
+								if id, _ := res["id"].(string); id != "" && compID == "" {
+									compID = id
+								}
 							}
 						}
 					}

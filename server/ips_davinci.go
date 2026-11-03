@@ -21,6 +21,7 @@ import (
 )
 
 // handlePatientSummary implements GET|POST /fhir/r4/{tenant}/Patient/{id}/$summary
+// and GET|POST /fhir/r4/{tenant}/Patient/$summary
 // per the HL7 FHIR R4 International Patient Summary (IPS) Implementation Guide.
 // It assembles a FHIR document Bundle whose first entry is a Composition resource
 // (LOINC 60591-5 "Patient summary Document") followed by the Patient and all
@@ -28,6 +29,42 @@ import (
 func (s *Server) handlePatientSummary(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	patientID := cleanID(r.PathValue("id"))
+	if patientID == "" {
+		q := r.URL.Query()
+		for _, k := range []string{"patient", "id", "subject"} {
+			if v := strings.TrimSpace(q.Get(k)); v != "" {
+				patientID = cleanID(strings.TrimPrefix(v, "Patient/"))
+				break
+			}
+		}
+	}
+	if r.Method == http.MethodPost && r.Body != nil {
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			var bodyMap map[string]any
+			if isProtoContentType(r) {
+				bodyMap, _ = s.protoToFHIRMap("Parameters", rawBody)
+			} else {
+				_ = json.Unmarshal(rawBody, &bodyMap)
+			}
+			if bodyMap != nil && patientID == "" {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						switch name {
+						case "patient", "id", "subject":
+							if v := extractParamString(pm); v != "" {
+								patientID = cleanID(strings.TrimPrefix(v, "Patient/"))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 	if patientID == "" {
 		writeOperationOutcome(w, http.StatusBadRequest, "required", "Patient ID is required for $summary")
 		return
@@ -38,9 +75,7 @@ func (s *Server) handlePatientSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeTerminologyResourceResponse(w, r, "Bundle", bundle)
 }
 
 func (s *Server) assembleIPSSummaryBundle(r *http.Request, tenant, patientID string) (map[string]any, int, string, string) {

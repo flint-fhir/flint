@@ -237,6 +237,12 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 		// Suite 1: Discovery
 		switch {
 		case strings.HasSuffix(path, "/metadata"):
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x6d, 0x65, 0x74, 0x61})
+				return
+			}
 			_, _ = w.Write([]byte(`{
 				"resourceType":"CapabilityStatement",
 				"fhirVersion":"4.0.1",
@@ -567,6 +573,12 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			return
 		}
 		if strings.HasSuffix(path, "/$summary") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x69, 0x70, 0x73, 0x31})
+				return
+			}
 			_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"document","entry":[{"resource":{"resourceType":"Composition","type":{"coding":[{"code":"60591-5"}]}}},{},{},{},{}]}`))
 			return
 		}
@@ -587,11 +599,23 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			return
 		}
 		if strings.HasSuffix(path, "/$document") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x64, 0x6f, 0x63, 0x31})
+				return
+			}
 			w.Header().Set("Location", "/fhir/r4/certify/Bundle/doc-1")
 			_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"document","entry":[{"resource":{"id":"cert-cond-1"}}]}`))
 			return
 		}
 		if strings.HasSuffix(path, "/$docref") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x64, 0x72, 0x65, 0x66})
+				return
+			}
 			_, _ = w.Write([]byte(`{"resourceType":"Bundle","entry":[{"resource":{"id":"cert-doc-1"}},{"resource":{"id":"docref-ips-cert-pat-1"}}]}`))
 			return
 		}
@@ -622,10 +646,22 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			return
 		}
 		if strings.HasSuffix(path, "/Observation/$lastn") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x6c, 0x73, 0x74, 0x6e})
+				return
+			}
 			_, _ = w.Write([]byte(`{"resourceType":"Bundle","entry":[{"resource":{"id":"cert-obs-prov-1"}}]}`))
 			return
 		}
 		if strings.HasSuffix(path, "/Observation/$stats") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x73, 0x74, 0x61, 0x74})
+				return
+			}
 			_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"statistic","resource":{"code":{"coding":[{"code":"average"}]}}}]}`))
 			return
 		}
@@ -946,7 +982,7 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 		}
 		if strings.HasSuffix(path, "/ViewDefinition/$sql") {
 			w.Header().Set("Content-Type", "application/sql; charset=utf-8")
-			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val, ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens), ARRAY_JOIN(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), ' '), ARRAY_SIZE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))), element_at(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), -1), ARRAY_SLICE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), 2), ORDER BY s.sp_value DESC LIMIT 1, LIMIT 1 OFFSET 1, LIMIT 2) sub, COALESCE(r.res_id, 'Unknown'), CASE WHEN 1=1 THEN 'Active' ELSE 'Inactive' END, REPLACE(r.res_id, 'Cert', 'Mod'), SUBSTR(r.res_id, 1, 4), TRIM(r.res_id), LOWER(r.res_id), UPPER(r.res_id), CHAR_LENGTH(r.res_id), LENGTH(r.res_id), (SELECT COUNT(*) FROM spidx_string s), ARRAY_TO_STRING(ARRAY_AGG(s.sp_value), ' '), ARRAY_AGG(s.sp_value) FROM fhir_observation r LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok INNER JOIN spidx_token fe ON fe.tenant_id = r.tenant_id WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error') AND r.effective_start IS NOT NULL AND array_exists(x -> x LIKE 'family=Cert%', r.string_tokens) AND array_exists(x -> x LIKE 'family=%tify', r.string_tokens) AND array_exists(x -> x LIKE 'given=%lic%', r.string_tokens) UNION ALL SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r\n"))
+			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val, CAST(r.value_quantity AS BIGINT), CAST(r.value_quantity AS DOUBLE), CAST(r.value_quantity AS DOUBLE PRECISION), CAST(r.value_quantity AS STRING), CAST(r.value_quantity AS TEXT), (LOCATE('88', r.code) - 1), (STRPOS(r.code, '88') - 1), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens), ARRAY_JOIN(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), ' '), ARRAY_SIZE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))), element_at(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), -1), ARRAY_SLICE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), 2), ORDER BY s.sp_value DESC LIMIT 1, LIMIT 1 OFFSET 1, LIMIT 2) sub, COALESCE(r.res_id, 'Unknown'), CASE WHEN 1=1 THEN 'Active' ELSE 'Inactive' END, REPLACE(r.res_id, 'Cert', 'Mod'), SUBSTR(r.res_id, 1, 4), TRIM(r.res_id), LOWER(r.res_id), UPPER(r.res_id), CHAR_LENGTH(r.res_id), LENGTH(r.res_id), (SELECT COUNT(*) FROM spidx_string s), ARRAY_TO_STRING(ARRAY_AGG(s.sp_value), ' '), ARRAY_AGG(s.sp_value) FROM fhir_observation r LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok INNER JOIN spidx_token fe ON fe.tenant_id = r.tenant_id WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error') AND r.effective_start IS NOT NULL AND array_exists(x -> x LIKE 'family=Cert%', r.string_tokens) AND array_exists(x -> x LIKE 'family=%tify', r.string_tokens) AND array_exists(x -> x LIKE 'given=%lic%', r.string_tokens) UNION ALL SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r\n"))
 			return
 		}
 		if strings.HasSuffix(path, "/$sync-analytics") {
@@ -1020,8 +1056,8 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 93 {
-		t.Fatalf("expected all 93 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 94 {
+		t.Fatalf("expected all 94 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()
