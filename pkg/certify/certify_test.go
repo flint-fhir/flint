@@ -680,19 +680,53 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			return
 		}
 		if strings.HasSuffix(path, "/$apply") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x61, 0x70, 0x6c, 0x79})
+				return
+			}
 			_, _ = w.Write([]byte(`{"resourceType":"CarePlan","id":"cp-1"}`))
 			return
 		}
 		if strings.HasSuffix(path, "/$reindex") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x72, 0x69, 0x64, 0x78})
+				return
+			}
 			_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome","issue":[{"diagnostics":"Reindexed 1 resource(s)"}]}`))
 			return
 		}
 		if strings.HasSuffix(path, "/$data-requirements") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x64, 0x72, 0x65, 0x71})
+				return
+			}
 			_, _ = w.Write([]byte(`{"resourceType":"Library","type":{"coding":[{"code":"module-definition"}]}}`))
 			return
 		}
 		if strings.HasSuffix(path, "/$fhirpath") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x66, 0x70, 0x74, 0x68})
+				return
+			}
 			_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"result","valueString":"Certify"}]}`))
+			return
+		}
+		if strings.HasSuffix(path, "/$add") || strings.HasSuffix(path, "/$remove") || strings.HasSuffix(path, "/$merge") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x67, 0x72, 0x70, 0x31})
+				return
+			}
+			_, _ = w.Write([]byte(`{"resourceType":"Group","id":"cert-grp-1"}`))
 			return
 		}
 		if strings.HasSuffix(path, "/Observation/$lastn") {
@@ -1032,7 +1066,7 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 		}
 		if strings.HasSuffix(path, "/ViewDefinition/$sql") {
 			w.Header().Set("Content-Type", "application/sql; charset=utf-8")
-			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val, ABS(r.value_quantity), CEIL(r.value_quantity), FLOOR(r.value_quantity), ROUND(r.value_quantity, 2), SQRT(r.value_quantity), REGEXP_REPLACE(r.code, '[^0-9]', ''), REGEXP(r.code, '^88.*'), r.code ~ '^88.*', CAST(r.value_quantity AS BIGINT), CAST(r.value_quantity AS DOUBLE), CAST(r.value_quantity AS DOUBLE PRECISION), CAST(r.value_quantity AS STRING), CAST(r.value_quantity AS TEXT), (LOCATE('88', r.code) - 1), (STRPOS(r.code, '88') - 1), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens), ARRAY_JOIN(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), ' '), ARRAY_SIZE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))), element_at(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), -1), ARRAY_SLICE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), 2), ORDER BY s.sp_value DESC LIMIT 1, LIMIT 1 OFFSET 1, LIMIT 2) sub, COALESCE(r.res_id, 'Unknown'), CASE WHEN 1=1 THEN 'Active' ELSE 'Inactive' END, REPLACE(r.res_id, 'Cert', 'Mod'), SUBSTR(r.res_id, 1, 4), TRIM(r.res_id), LOWER(r.res_id), UPPER(r.res_id), CHAR_LENGTH(r.res_id), LENGTH(r.res_id), (SELECT COUNT(*) FROM spidx_string s), ARRAY_TO_STRING(ARRAY_AGG(s.sp_value), ' '), ARRAY_AGG(s.sp_value) FROM fhir_observation r LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok INNER JOIN spidx_token fe ON fe.tenant_id = r.tenant_id WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error') AND r.effective_start IS NOT NULL AND array_exists(x -> x LIKE 'family=Cert%', r.string_tokens) AND array_exists(x -> x LIKE 'family=%tify', r.string_tokens) AND array_exists(x -> x LIKE 'given=%lic%', r.string_tokens) UNION ALL SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r\n"))
+			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val, CONCAT(r.code_system, '|', r.code), (COALESCE(r.code_system, '') || '|' || COALESCE(r.code, '')), ((r.value_quantity * 2) + 10), CAST((r.value_quantity / 10) AS BIGINT), CAST(TRUNC((r.value_quantity) / (10)) AS BIGINT), MOD(r.value_quantity, 5), MOD(CAST(r.value_quantity AS NUMERIC), CAST(5 AS NUMERIC)), CAST(r.effective_start AS DATE), CURRENT_DATE(), CURRENT_DATE, NOW(), CURRENT_TIMESTAMP, ABS(r.value_quantity), CEIL(r.value_quantity), FLOOR(r.value_quantity), ROUND(r.value_quantity, 2), SQRT(r.value_quantity), REGEXP_REPLACE(r.code, '[^0-9]', ''), REGEXP(r.code, '^88.*'), r.code ~ '^88.*', CAST(r.value_quantity AS BIGINT), CAST(r.value_quantity AS DOUBLE), CAST(r.value_quantity AS DOUBLE PRECISION), CAST(r.value_quantity AS STRING), CAST(r.value_quantity AS TEXT), (LOCATE('88', r.code) - 1), (STRPOS(r.code, '88') - 1), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens), ARRAY_JOIN(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), ' '), ARRAY_SIZE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))), element_at(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), -1), ARRAY_SLICE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), 2), ORDER BY s.sp_value DESC LIMIT 1, LIMIT 1 OFFSET 1, LIMIT 2) sub, COALESCE(r.res_id, 'Unknown'), CASE WHEN 1=1 THEN 'Active' ELSE 'Inactive' END, REPLACE(r.res_id, 'Cert', 'Mod'), SUBSTR(r.res_id, 1, 4), TRIM(r.res_id), LOWER(r.res_id), UPPER(r.res_id), CHAR_LENGTH(r.res_id), LENGTH(r.res_id), (SELECT COUNT(*) FROM spidx_string s), ARRAY_TO_STRING(ARRAY_AGG(s.sp_value), ' '), ARRAY_AGG(s.sp_value) FROM fhir_observation r LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok INNER JOIN spidx_token fe ON fe.tenant_id = r.tenant_id WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error') AND r.effective_start IS NOT NULL AND array_exists(x -> x LIKE 'family=Cert%', r.string_tokens) AND array_exists(x -> x LIKE 'family=%tify', r.string_tokens) AND array_exists(x -> x LIKE 'given=%lic%', r.string_tokens) UNION ALL SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r\n"))
 			return
 		}
 		if strings.HasSuffix(path, "/$sync-analytics") {
@@ -1106,8 +1140,8 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 95 {
-		t.Fatalf("expected all 95 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 96 {
+		t.Fatalf("expected all 96 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()

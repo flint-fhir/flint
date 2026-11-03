@@ -163,8 +163,8 @@ func (s *Server) handleReindex(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(bytes.TrimSpace(body)) > 0 {
-			var root map[string]any
-			if err := json.Unmarshal(body, &root); err != nil {
+			root, err := s.decodeOperationBodyMap(r, body, "Parameters")
+			if err != nil {
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid JSON in $reindex request: %v", err))
 				return
 			}
@@ -254,9 +254,7 @@ func (s *Server) handleReindex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "OperationOutcome", map[string]any{
 		"resourceType":       "OperationOutcome",
 		"reindexedResources": res.ReindexedResources,
 		"issue": []map[string]any{
@@ -279,7 +277,7 @@ type applyInputParams struct {
 	ReturnBundle bool
 }
 
-func parseApplyParams(w http.ResponseWriter, r *http.Request) (applyInputParams, bool) {
+func (s *Server) parseApplyParams(w http.ResponseWriter, r *http.Request) (applyInputParams, bool) {
 	q := mergedSearchQuery(r)
 	out := applyInputParams{
 		DefinitionID: strings.TrimSpace(r.PathValue("id")),
@@ -300,8 +298,8 @@ func parseApplyParams(w http.ResponseWriter, r *http.Request) (applyInputParams,
 				return out, false
 			}
 			if len(bytes.TrimSpace(body)) > 0 {
-				var root map[string]any
-				if err := json.Unmarshal(body, &root); err != nil {
+				root, err := s.decodeOperationBodyMap(r, body, "Parameters")
+				if err != nil {
 					writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid JSON in $apply request: %v", err))
 					return out, false
 				}
@@ -626,7 +624,7 @@ func (s *Server) handlePlanDefinitionApply(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	tenant := r.PathValue("tenant")
-	in, ok := parseApplyParams(w, r)
+	in, ok := s.parseApplyParams(w, r)
 	if !ok {
 		return
 	}
@@ -827,9 +825,6 @@ func (s *Server) handlePlanDefinitionApply(w http.ResponseWriter, r *http.Reques
 		carePlan["author"] = map[string]any{"reference": pracRef}
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-
 	if in.ReturnBundle {
 		entries := []any{
 			map[string]any{
@@ -849,7 +844,7 @@ func (s *Server) handlePlanDefinitionApply(w http.ResponseWriter, r *http.Reques
 				})
 			}
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", map[string]any{
 			"resourceType": "Bundle",
 			"type":         "collection",
 			"entry":        entries,
@@ -858,7 +853,7 @@ func (s *Server) handlePlanDefinitionApply(w http.ResponseWriter, r *http.Reques
 	}
 
 	carePlan["contained"] = append([]any{requestGroup}, contained...)
-	_ = json.NewEncoder(w).Encode(carePlan)
+	s.writeOperationResponse(w, r, http.StatusOK, "CarePlan", carePlan)
 }
 
 // handleActivityDefinitionApply handles GET/POST /fhir/r4/{tenant}/ActivityDefinition/$apply
@@ -869,7 +864,7 @@ func (s *Server) handleActivityDefinitionApply(w http.ResponseWriter, r *http.Re
 		return
 	}
 	tenant := r.PathValue("tenant")
-	in, ok := parseApplyParams(w, r)
+	in, ok := s.parseApplyParams(w, r)
 	if !ok {
 		return
 	}
@@ -938,10 +933,11 @@ func (s *Server) handleActivityDefinitionApply(w http.ResponseWriter, r *http.Re
 		actID = "activity"
 	}
 	res := synthesizeActivityResource(actDef, actID+"-"+patID, subjectRef, in.Encounter, in.Practitioner)
-
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(res)
+	resType, _ := res["resourceType"].(string)
+	if resType == "" {
+		resType = "ServiceRequest"
+	}
+	s.writeOperationResponse(w, r, http.StatusOK, resType, res)
 }
 
 func synthesizeActivityResource(actDef map[string]any, synthID, subjectRef, encounter, practitioner string) map[string]any {
@@ -1260,8 +1256,12 @@ func (s *Server) handleDataRequirements(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if len(bytes.TrimSpace(body)) > 0 {
-			var raw map[string]any
-			if err := json.Unmarshal(body, &raw); err != nil {
+			fallbackResType := resType
+			if fallbackResType == "" {
+				fallbackResType = "Parameters"
+			}
+			raw, err := s.decodeOperationBodyMap(r, body, fallbackResType)
+			if err != nil {
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for $data-requirements")
 				return
 			}
@@ -1357,9 +1357,7 @@ func (s *Server) handleDataRequirements(w http.ResponseWriter, r *http.Request) 
 			df = []any{map[string]any{"path": "effective", "valuePeriod": vp}}
 		}
 		lib := buildCustomArtifactDataRequirements(rt, aid, inlineArtifact, df)
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(lib)
+		s.writeOperationResponse(w, r, http.StatusOK, "Library", lib)
 		return
 	}
 
@@ -1383,9 +1381,7 @@ func (s *Server) handleDataRequirements(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(lib)
+	s.writeOperationResponse(w, r, http.StatusOK, "Library", lib)
 }
 
 func (s *Server) resolveDataRequirementsLibrary(
@@ -1900,8 +1896,12 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(bytes.TrimSpace(body)) > 0 {
-			var raw map[string]any
-			if err := json.Unmarshal(body, &raw); err != nil {
+			fallbackResType := resType
+			if fallbackResType == "" {
+				fallbackResType = "Parameters"
+			}
+			raw, err := s.decodeOperationBodyMap(r, body, fallbackResType)
+			if err != nil {
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for $fhirpath")
 				return
 			}
@@ -2051,9 +2051,7 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    paramEntries,
 	})
@@ -2591,8 +2589,8 @@ func (s *Server) handleGroupMemberMutate(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		if len(bytes.TrimSpace(body)) > 0 {
-			var raw map[string]any
-			if err := json.Unmarshal(body, &raw); err != nil {
+			raw, err := s.decodeOperationBodyMap(r, body, "Parameters")
+			if err != nil {
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for Group operation")
 				return
 			}
@@ -2726,10 +2724,8 @@ func (s *Server) handleGroupMemberMutate(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.Header().Set("ETag", postgres.FormatETag(vid))
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(savedMap)
+	s.writeOperationResponse(w, r, http.StatusOK, "Group", savedMap)
 }
 
 // handleObservationLastN handles GET/POST /fhir/r4/{tenant}/Observation/$lastn
@@ -3359,8 +3355,8 @@ func (s *Server) handlePatientMerge(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(bytes.TrimSpace(body)) > 0 {
-			var raw map[string]any
-			if err := json.Unmarshal(body, &raw); err != nil {
+			raw, err := s.decodeOperationBodyMap(r, body, "Parameters")
+			if err != nil {
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for Patient/$merge")
 				return
 			}
@@ -3541,9 +3537,7 @@ func (s *Server) handlePatientMerge(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    outParams,
 	})
@@ -7808,9 +7802,7 @@ func (s *Server) handleLibraryEvaluate(w http.ResponseWriter, r *http.Request) {
 		appendValueParam("Patient", patMap)
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    outParams,
 	})
@@ -10406,9 +10398,7 @@ func (s *Server) handlePatientImmDSForecast(w http.ResponseWriter, r *http.Reque
 		"resource": recRes,
 	})
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    outParams,
 	})
@@ -11713,9 +11703,7 @@ func (s *Server) handlePatientIHEPix(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    outParams,
 	})
@@ -12067,9 +12055,7 @@ func (s *Server) handleDiagnosticReportEvaluate(w http.ResponseWriter, r *http.R
 	}
 	outParams = append(outParams, issueParams...)
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    outParams,
 	})

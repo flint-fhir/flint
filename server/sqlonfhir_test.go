@@ -1740,4 +1740,279 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(mrBytes), want)
 		}
 	}
+
+	// 25. Binary Proto3 Clinical Reasoning ($apply, $data-requirements, $fhirpath), Cohort/Identity (Group/$add, Group/$remove, Patient/$merge, $reindex), ViewDefinition/$sql Wire Transport + SQL-on-FHIR v2 Arithmetic, Concat (&) & Temporal $sql Pushdown
+	applyParamsJSON := `{"resourceType":"Parameters","parameter":[{"name":"planDefinition","valueString":"plandef-hypertension-control"},{"name":"subject","valueString":"Patient/` + patID + `"}]}`
+	reqApplyConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(applyParamsJSON))
+	require.NoError(t, err)
+	reqApplyConv.Header.Set("Content-Type", "application/fhir+json")
+	reqApplyConv.Header.Set("Accept", "application/x-protobuf")
+	respApplyConv, err := client.Do(reqApplyConv)
+	require.NoError(t, err)
+	applyParamsProto, _ := io.ReadAll(respApplyConv.Body)
+	respApplyConv.Body.Close()
+	require.Equal(t, http.StatusOK, respApplyConv.StatusCode)
+
+	reqPlanApplyPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/PlanDefinition/$apply", bytes.NewReader(applyParamsProto))
+	require.NoError(t, err)
+	reqPlanApplyPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqPlanApplyPost.Header.Set("Accept", "application/x-protobuf")
+	respPlanApplyPost, err := client.Do(reqPlanApplyPost)
+	require.NoError(t, err)
+	planApplyBytes, _ := io.ReadAll(respPlanApplyPost.Body)
+	respPlanApplyPost.Body.Close()
+	require.Equal(t, http.StatusOK, respPlanApplyPost.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respPlanApplyPost.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respPlanApplyPost.Header.Get("X-Flint-Wire-Format"))
+	assert.NotEmpty(t, planApplyBytes)
+
+	reqActApplyPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ActivityDefinition/activitydef-bp-home-monitoring/$apply", bytes.NewReader(applyParamsProto))
+	require.NoError(t, err)
+	reqActApplyPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqActApplyPost.Header.Set("Accept", "application/x-protobuf")
+	respActApplyPost, err := client.Do(reqActApplyPost)
+	require.NoError(t, err)
+	actApplyBytes, _ := io.ReadAll(respActApplyPost.Body)
+	respActApplyPost.Body.Close()
+	require.Equal(t, http.StatusOK, respActApplyPost.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respActApplyPost.Header.Get("Content-Type"))
+	assert.NotEmpty(t, actApplyBytes)
+
+	drParamsJSON := `{"resourceType":"Parameters","parameter":[{"name":"periodStart","valueDate":"2026-01-01"},{"name":"periodEnd","valueDate":"2026-12-31"}]}`
+	reqDRConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(drParamsJSON))
+	require.NoError(t, err)
+	reqDRConv.Header.Set("Content-Type", "application/fhir+json")
+	reqDRConv.Header.Set("Accept", "application/x-protobuf")
+	respDRConv, err := client.Do(reqDRConv)
+	require.NoError(t, err)
+	drParamsProto, _ := io.ReadAll(respDRConv.Body)
+	respDRConv.Body.Close()
+	require.Equal(t, http.StatusOK, respDRConv.StatusCode)
+
+	reqDRPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Measure/cms165-bp-control/$data-requirements", bytes.NewReader(drParamsProto))
+	require.NoError(t, err)
+	reqDRPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqDRPost.Header.Set("Accept", "application/x-protobuf")
+	respDRPost, err := client.Do(reqDRPost)
+	require.NoError(t, err)
+	drPostBytes, _ := io.ReadAll(respDRPost.Body)
+	respDRPost.Body.Close()
+	require.Equal(t, http.StatusOK, respDRPost.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respDRPost.Header.Get("Content-Type"))
+	assert.NotEmpty(t, drPostBytes)
+
+	fpParamsJSON := `{"resourceType":"Parameters","parameter":[{"name":"expression","valueString":"Patient.name.family"}]}`
+	reqFPConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(fpParamsJSON))
+	require.NoError(t, err)
+	reqFPConv.Header.Set("Content-Type", "application/fhir+json")
+	reqFPConv.Header.Set("Accept", "application/x-protobuf")
+	respFPConv, err := client.Do(reqFPConv)
+	require.NoError(t, err)
+	fpParamsProto, _ := io.ReadAll(respFPConv.Body)
+	respFPConv.Body.Close()
+	require.Equal(t, http.StatusOK, respFPConv.StatusCode)
+
+	reqFPPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/"+patID+"/$fhirpath", bytes.NewReader(fpParamsProto))
+	require.NoError(t, err)
+	reqFPPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqFPPost.Header.Set("Accept", "application/x-protobuf")
+	respFPPost, err := client.Do(reqFPPost)
+	require.NoError(t, err)
+	fpPostBytes, _ := io.ReadAll(respFPPost.Body)
+	respFPPost.Body.Close()
+	require.Equal(t, http.StatusOK, respFPPost.StatusCode)
+	var fpOutParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(fpPostBytes, &fpOutParams))
+	assert.NotEmpty(t, fpOutParams.GetParameter())
+
+	grpSeedJSON := `{"resourceType":"Group","id":"grp-w80","type":"person","actual":true,"name":"Wave 80 Cohort"}`
+	reqGrpPut, err := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Group/grp-w80", strings.NewReader(grpSeedJSON))
+	require.NoError(t, err)
+	reqGrpPut.Header.Set("Content-Type", "application/fhir+json")
+	respGrpPut, err := client.Do(reqGrpPut)
+	require.NoError(t, err)
+	respGrpPut.Body.Close()
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, respGrpPut.StatusCode)
+
+	grpMutJSON := `{"resourceType":"Parameters","parameter":[{"name":"member","valueReference":{"reference":"Patient/` + patID + `"}}]}`
+	reqGrpConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(grpMutJSON))
+	require.NoError(t, err)
+	reqGrpConv.Header.Set("Content-Type", "application/fhir+json")
+	reqGrpConv.Header.Set("Accept", "application/x-protobuf")
+	respGrpConv, err := client.Do(reqGrpConv)
+	require.NoError(t, err)
+	grpMutProto, _ := io.ReadAll(respGrpConv.Body)
+	respGrpConv.Body.Close()
+	require.Equal(t, http.StatusOK, respGrpConv.StatusCode)
+
+	reqGrpAdd, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Group/grp-w80/$add", bytes.NewReader(grpMutProto))
+	require.NoError(t, err)
+	reqGrpAdd.Header.Set("Content-Type", "application/x-protobuf")
+	reqGrpAdd.Header.Set("Accept", "application/x-protobuf")
+	respGrpAdd, err := client.Do(reqGrpAdd)
+	require.NoError(t, err)
+	grpAddBytes, _ := io.ReadAll(respGrpAdd.Body)
+	respGrpAdd.Body.Close()
+	require.Equal(t, http.StatusOK, respGrpAdd.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respGrpAdd.Header.Get("Content-Type"))
+	assert.NotEmpty(t, grpAddBytes)
+
+	reqGrpRem, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Group/grp-w80/$remove", bytes.NewReader(grpMutProto))
+	require.NoError(t, err)
+	reqGrpRem.Header.Set("Content-Type", "application/x-protobuf")
+	reqGrpRem.Header.Set("Accept", "application/x-protobuf")
+	respGrpRem, err := client.Do(reqGrpRem)
+	require.NoError(t, err)
+	grpRemBytes, _ := io.ReadAll(respGrpRem.Body)
+	respGrpRem.Body.Close()
+	require.Equal(t, http.StatusOK, respGrpRem.StatusCode)
+	assert.NotEmpty(t, grpRemBytes)
+
+	patDupSeed := `{"resourceType":"Patient","id":"pat-dup-w80","active":true,"name":[{"family":"ProtoDuplicate","given":["Bob"]}]}`
+	reqPatDupPut, err := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Patient/pat-dup-w80", strings.NewReader(patDupSeed))
+	require.NoError(t, err)
+	reqPatDupPut.Header.Set("Content-Type", "application/fhir+json")
+	respPatDupPut, err := client.Do(reqPatDupPut)
+	require.NoError(t, err)
+	respPatDupPut.Body.Close()
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, respPatDupPut.StatusCode)
+
+	mergeParamsJSON := `{"resourceType":"Parameters","parameter":[{"name":"source-patient","valueReference":{"reference":"Patient/pat-dup-w80"}},{"name":"target-patient","valueReference":{"reference":"Patient/` + patID + `"}},{"name":"preview","valueBoolean":true}]}`
+	reqMergeConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(mergeParamsJSON))
+	require.NoError(t, err)
+	reqMergeConv.Header.Set("Content-Type", "application/fhir+json")
+	reqMergeConv.Header.Set("Accept", "application/x-protobuf")
+	respMergeConv, err := client.Do(reqMergeConv)
+	require.NoError(t, err)
+	mergeParamsProto, _ := io.ReadAll(respMergeConv.Body)
+	respMergeConv.Body.Close()
+	require.Equal(t, http.StatusOK, respMergeConv.StatusCode)
+
+	reqMergePost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/$merge", bytes.NewReader(mergeParamsProto))
+	require.NoError(t, err)
+	reqMergePost.Header.Set("Content-Type", "application/x-protobuf")
+	reqMergePost.Header.Set("Accept", "application/x-protobuf")
+	respMergePost, err := client.Do(reqMergePost)
+	require.NoError(t, err)
+	mergeOutBytes, _ := io.ReadAll(respMergePost.Body)
+	respMergePost.Body.Close()
+	require.Equal(t, http.StatusOK, respMergePost.StatusCode)
+	var mergeOutParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(mergeOutBytes, &mergeOutParams))
+	assert.NotEmpty(t, mergeOutParams.GetParameter())
+
+	reqReidxPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/"+patID+"/$reindex", nil)
+	require.NoError(t, err)
+	reqReidxPost.Header.Set("Accept", "application/x-protobuf")
+	respReidxPost, err := client.Do(reqReidxPost)
+	require.NoError(t, err)
+	reidxBytes, _ := io.ReadAll(respReidxPost.Body)
+	respReidxPost.Body.Close()
+	require.Equal(t, http.StatusOK, respReidxPost.StatusCode)
+	var reidxOO oopb.OperationOutcome
+	require.NoError(t, proto.Unmarshal(reidxBytes, &reidxOO))
+	assert.NotEmpty(t, reidxOO.GetIssue())
+
+	reqVDSQLProto, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/ViewDefinition/observation-vitals/$sql?dialect=doris&_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqVDSQLProto.Header.Set("Accept", "application/x-protobuf")
+	respVDSQLProto, err := client.Do(reqVDSQLProto)
+	require.NoError(t, err)
+	vdSQLProtoBytes, _ := io.ReadAll(respVDSQLProto.Body)
+	respVDSQLProto.Body.Close()
+	require.Equal(t, http.StatusOK, respVDSQLProto.StatusCode)
+	var vdSQLParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(vdSQLProtoBytes, &vdSQLParams))
+	assert.NotEmpty(t, vdSQLParams.GetParameter())
+
+	arithTemporalVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "obs_arith_concat_temporal",
+		"status": "active",
+		"resource": "Observation",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "code_label", "path": "code.coding.system & '|' & code.coding.code"},
+					{"name": "val_scaled", "path": "valueQuantity.value * 2 + 10"},
+					{"name": "val_sub", "path": "valueQuantity.value - 5"},
+					{"name": "val_div_float", "path": "valueQuantity.value / 2"},
+					{"name": "val_div_int", "path": "valueQuantity.value div 10"},
+					{"name": "val_mod", "path": "valueQuantity.value mod 5"},
+					{"name": "eff_date", "path": "effectiveDateTime.toDate()"},
+					{"name": "eff_dt", "path": "effectiveDateTime.toDateTime()"},
+					{"name": "cur_date", "path": "today()"},
+					{"name": "cur_ts", "path": "now()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "valueQuantity.value + 5 >= 65 and effectiveDateTime.toDate() <= today()"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"CONCAT(r.code_system, '|', r.code)",
+				"((r.value_quantity * 2) + 10)",
+				"(r.value_quantity - 5)",
+				"(r.value_quantity / 2)",
+				"CAST((r.value_quantity / 10) AS BIGINT)",
+				"MOD(r.value_quantity, 5)",
+				"CAST(r.effective_start AS DATE)",
+				"CAST(r.effective_start AS DATETIME)",
+				"CURRENT_DATE()",
+				"NOW()",
+				"(r.value_quantity + 5) >= 65",
+				"CAST(r.effective_start AS DATE) <= CURRENT_DATE()",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"|| '|' ||",
+				" * 2) + 10)",
+				" - 5)",
+				" / 2)",
+				"CAST(TRUNC((",
+				"MOD(CAST(",
+				"AS DATE)",
+				"AS TIMESTAMPTZ)",
+				"CURRENT_DATE",
+				"NOW()",
+				" + 5) >= 65",
+				" <= CURRENT_DATE",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"|| '|' ||",
+				" * 2) + 10)",
+				"CAST((",
+				" % CAST(5 AS INTEGER))",
+				"DATE((SELECT d.sp_low",
+				"DATETIME((SELECT d.sp_low",
+				"CURRENT_DATE",
+				"CURRENT_TIMESTAMP",
+			},
+		},
+	} {
+		reqAT, aErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(arithTemporalVD))
+		require.NoError(t, aErr)
+		reqAT.Header.Set("Content-Type", "application/fhir+json")
+		respAT, aErr := client.Do(reqAT)
+		require.NoError(t, aErr)
+		atBytes, _ := io.ReadAll(respAT.Body)
+		respAT.Body.Close()
+		require.Equal(t, http.StatusOK, respAT.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(atBytes), want)
+		}
+	}
 }
