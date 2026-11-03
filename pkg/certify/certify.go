@@ -2644,6 +2644,52 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-11", suite10, "Zero-JSON Binary Proto3 $match, $meta / $meta-add & $graph Operations & SQL-on-FHIR v2 iif(), .replace(), .substring() & .trim() $sql Pushdown", t0, err, "Binary Proto3 $match/$meta/$graph wire transport & CASE WHEN / REPLACE / SUBSTR / TRIM $sql pushdown verified")
 
+	// AN-12: Zero-JSON Binary Proto3 /metadata, $lastn, $stats, $summary (IPS), $document & $docref Wire Transport & SQL-on-FHIR v2 Type-Cast (.toInteger(), .toDecimal(), .toString()) & .indexOf() $sql Pushdown
+	t0 = time.Now()
+	{
+		respMetaCap, bMetaCap, errMetaCap := doReq(http.MethodGet, basePath+"/metadata?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSumProto, bSumProto, errSumProto := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$summary?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respDocProto, bDocProto, errDocProto := doReq(http.MethodGet, basePath+"/Composition/cert-comp-1/$document?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respDocrefProto, bDocrefProto, errDocrefProto := doReq(http.MethodGet, basePath+"/DocumentReference/$docref?patient=cert-pat-1&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respLastnProto, bLastnProto, errLastnProto := doReq(http.MethodGet, basePath+"/Observation/$lastn?patient=Patient/cert-pat-1&max=1&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respStatsProto, bStatsProto, errStatsProto := doReq(http.MethodGet, basePath+"/Observation/$stats?subject=Patient/cert-pat-1&code=8867-4&statistic=average&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		castIdxVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_cast_indexof_view","status":"active","resource":"Observation","select":[{"column":[{"name":"id","path":"id"},{"name":"val_int","path":"valueQuantity.value.toInteger()"},{"name":"val_dec","path":"valueQuantity.value.toDecimal()"},{"name":"val_str","path":"valueQuantity.value.toString()"},{"name":"code_idx","path":"code.coding.code.indexOf('88')"}]}],"where":[{"path":"valueQuantity.value.toInteger() >= 60 and code.coding.code.indexOf('88') >= 0"}]}`)
+		respCastDoris, bCastDoris, errCastDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", castIdxVD, nil)
+		respCastPg, bCastPg, errCastPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", castIdxVD, nil)
+		if errMetaCap != nil || respMetaCap.StatusCode != http.StatusOK || !strings.Contains(respMetaCap.Header.Get("Content-Type"), "application/x-protobuf") || respMetaCap.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bMetaCap) == 0 {
+			err = fmt.Errorf("expected GET /metadata?_format=application/x-protobuf to return binary Proto3 CapabilityStatement, got %d", respMetaCap.StatusCode)
+		} else if errSumProto != nil || respSumProto.StatusCode != http.StatusOK || !strings.Contains(respSumProto.Header.Get("Content-Type"), "application/x-protobuf") || respSumProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bSumProto) == 0 {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$summary?_format=application/x-protobuf to return binary Proto3 Bundle, got %d", respSumProto.StatusCode)
+		} else if errDocProto != nil || respDocProto.StatusCode != http.StatusOK || !strings.Contains(respDocProto.Header.Get("Content-Type"), "application/x-protobuf") || respDocProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bDocProto) == 0 {
+			err = fmt.Errorf("expected GET /Composition/cert-comp-1/$document?_format=application/x-protobuf to return binary Proto3 Bundle, got %d", respDocProto.StatusCode)
+		} else if errDocrefProto != nil || respDocrefProto.StatusCode != http.StatusOK || !strings.Contains(respDocrefProto.Header.Get("Content-Type"), "application/x-protobuf") || respDocrefProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bDocrefProto) == 0 {
+			err = fmt.Errorf("expected GET /DocumentReference/$docref?_format=application/x-protobuf to return binary Proto3 Bundle, got %d", respDocrefProto.StatusCode)
+		} else if errLastnProto != nil || respLastnProto.StatusCode != http.StatusOK || !strings.Contains(respLastnProto.Header.Get("Content-Type"), "application/x-protobuf") || respLastnProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bLastnProto) == 0 {
+			err = fmt.Errorf("expected GET /Observation/$lastn?_format=application/x-protobuf to return binary Proto3 Bundle, got %d", respLastnProto.StatusCode)
+		} else if errStatsProto != nil || respStatsProto.StatusCode != http.StatusOK || !strings.Contains(respStatsProto.Header.Get("Content-Type"), "application/x-protobuf") || respStatsProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bStatsProto) == 0 {
+			err = fmt.Errorf("expected GET /Observation/$stats?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respStatsProto.StatusCode)
+		} else if errCastDoris != nil || respCastDoris.StatusCode != http.StatusOK || !strings.Contains(string(bCastDoris), "CAST(") || !strings.Contains(string(bCastDoris), "AS BIGINT)") || !strings.Contains(string(bCastDoris), "AS DOUBLE)") || !strings.Contains(string(bCastDoris), "AS STRING)") || !strings.Contains(string(bCastDoris), "LOCATE(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with .toInteger()/.toDecimal()/.toString()/.indexOf() pushdown, got %d: %s", respCastDoris.StatusCode, string(bCastDoris))
+		} else if errCastPg != nil || respCastPg.StatusCode != http.StatusOK || !strings.Contains(string(bCastPg), "CAST(") || !strings.Contains(string(bCastPg), "AS BIGINT)") || !strings.Contains(string(bCastPg), "AS DOUBLE PRECISION)") || !strings.Contains(string(bCastPg), "AS TEXT)") || !strings.Contains(string(bCastPg), "STRPOS(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with .toInteger()/.toDecimal()/.toString()/.indexOf() pushdown, got %d: %s", respCastPg.StatusCode, string(bCastPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-12", suite10, "Zero-JSON Binary Proto3 /metadata, $lastn, $stats, $summary, $document & $docref Transport & SQL-on-FHIR v2 Type-Cast & .indexOf() $sql Pushdown", t0, err, "Binary Proto3 /metadata, $summary, $document, $docref, $lastn & $stats wire transport & CAST / LOCATE / STRPOS $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

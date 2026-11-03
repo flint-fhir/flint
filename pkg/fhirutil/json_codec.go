@@ -262,7 +262,9 @@ func normalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) {
 			}
 			normalized := normalizeSingleValue(msgDesc, val, extMap)
 			delete(m, key)
-			m[targetKey] = normalized
+			if normalized != nil {
+				m[targetKey] = normalized
+			}
 			if extMap != nil {
 				delete(m, "_"+key)
 			}
@@ -320,10 +322,14 @@ func normalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any, extMa
 				}
 			}
 		}
-		// Already a map: if it wraps an enum in "value", normalize enum casing (e.g. "in-progress" -> "IN_PROGRESS")
+		// Already a map: if it wraps an enum in "value", normalize enum casing (e.g. "in-progress" -> "IN_PROGRESS", "CarePlan" -> "CARE_PLAN")
 		if valFD != nil && valFD.Kind() == protoreflect.EnumKind {
 			if s, ok := v["value"].(string); ok {
-				v["value"] = normalizeEnumString(s)
+				if resolved, okEnum := resolveEnumValueString(valFD.Enum(), s); okEnum {
+					v["value"] = resolved
+				} else {
+					delete(v, "value")
+				}
 			}
 		}
 		// If it wraps a Decimal where value is a string in google/fhir Decimal proto
@@ -338,12 +344,18 @@ func normalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any, extMa
 
 	case string:
 		if valFD != nil {
-			wrappedVal := any(v)
+			out := make(map[string]any)
 			if valFD.Kind() == protoreflect.EnumKind {
-				wrappedVal = normalizeEnumString(v)
+				if resolved, okEnum := resolveEnumValueString(valFD.Enum(), v); okEnum {
+					out["value"] = resolved
+				}
+			} else {
+				out["value"] = v
 			}
-			out := map[string]any{"value": wrappedVal}
 			mergeExtensions(out, extMap)
+			if len(out) == 0 {
+				return nil
+			}
 			return out
 		}
 
@@ -666,6 +678,14 @@ func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any
 					if strings.HasSuffix(fullName, ".MethodCode") {
 						return strings.ToUpper(s)
 					}
+					if strings.Contains(fullName, "ResourceTypeCode") {
+						comp := strings.ReplaceAll(s, "_", "")
+						for _, rt := range AllR4ResourceTypes() {
+							if strings.EqualFold(rt, comp) {
+								return rt
+							}
+						}
+					}
 					return strings.ToLower(strings.ReplaceAll(s, "_", "-"))
 				}
 			}
@@ -783,6 +803,30 @@ func findFieldDescriptor(fields protoreflect.FieldDescriptors, jsonKey string) p
 func normalizeEnumString(s string) string {
 	trimmed := strings.TrimSpace(s)
 	return strings.ToUpper(strings.ReplaceAll(trimmed, "-", "_"))
+}
+
+func resolveEnumValueString(ed protoreflect.EnumDescriptor, s string) (string, bool) {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return "", false
+	}
+	cand := normalizeEnumString(trimmed)
+	if ed == nil {
+		return cand, true
+	}
+	vals := ed.Values()
+	if vals.ByName(protoreflect.Name(cand)) != nil {
+		return cand, true
+	}
+	compactTarget := strings.ReplaceAll(strings.ReplaceAll(trimmed, "-", ""), "_", "")
+	for i := 0; i < vals.Len(); i++ {
+		ev := vals.Get(i)
+		evName := string(ev.Name())
+		if strings.EqualFold(strings.ReplaceAll(evName, "_", ""), compactTarget) {
+			return evName, true
+		}
+	}
+	return "", false
 }
 
 func isTemporalMessage(fullName string) bool {

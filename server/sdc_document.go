@@ -934,7 +934,12 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1024*1024))
 		if err == nil && len(bodyBytes) > 0 {
 			var root map[string]any
-			if json.Unmarshal(bodyBytes, &root) == nil && root["resourceType"] == "Parameters" {
+			if isProtoContentType(r) {
+				root, _ = s.protoToFHIRMap("Parameters", bodyBytes)
+			} else {
+				_ = json.Unmarshal(bodyBytes, &root)
+			}
+			if root != nil && root["resourceType"] == "Parameters" {
 				if params, ok := root["parameter"].([]any); ok {
 					for _, rawP := range params {
 						if pm, ok := rawP.(map[string]any); ok && pm["name"] == "persist" {
@@ -1165,9 +1170,7 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(docBundle)
+	s.writeTerminologyResourceResponse(w, r, "Bundle", docBundle)
 }
 
 func collectNestedReferenceStrings(node any, addRef func(any)) {
@@ -1207,7 +1210,14 @@ func (s *Server) handleDocumentReferenceDocref(w http.ResponseWriter, r *http.Re
 		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 2*1024*1024))
 		if err == nil && len(bodyBytes) > 0 {
 			var root map[string]any
-			if err := json.Unmarshal(bodyBytes, &root); err != nil {
+			if isProtoContentType(r) {
+				var pErr error
+				root, pErr = s.protoToFHIRMap("Parameters", bodyBytes)
+				if pErr != nil {
+					writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed Proto3 Parameters in DocumentReference/$docref: %v", pErr))
+					return
+				}
+			} else if err := json.Unmarshal(bodyBytes, &root); err != nil {
 				writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed JSON in DocumentReference/$docref: %v", err))
 				return
 			}
@@ -1505,9 +1515,7 @@ func (s *Server) handleDocumentReferenceDocref(w http.ResponseWriter, r *http.Re
 		"entry": entries,
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(outBundle)
+	s.writeTerminologyResourceResponse(w, r, "Bundle", outBundle)
 }
 
 func docrefTypeMatchesSummary(typeParam string) bool {

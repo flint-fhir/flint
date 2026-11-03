@@ -18,6 +18,7 @@ import (
 
 	dtpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/datatypes_go_proto"
 	bcrpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/bundle_and_contained_resource_go_proto"
+	cspb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/capability_statement_go_proto"
 	oopb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/operation_outcome_go_proto"
 	parampb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/parameters_go_proto"
 	patpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"
@@ -1373,6 +1374,182 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		require.Equal(t, http.StatusOK, respIif.StatusCode)
 		for _, want := range tc.wantContains {
 			assert.Contains(t, string(iifBytes), want)
+		}
+	}
+
+	// 23. Binary Proto3 /metadata, $summary, $document, $docref, $lastn & $stats Wire Transport & SQL-on-FHIR v2 Type-Cast (.toInteger(), .toDecimal(), .toString()) & .indexOf() $sql Pushdown
+	reqMetaCap, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/metadata?_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqMetaCap.Header.Set("Accept", "application/x-protobuf")
+	respMetaCap, err := client.Do(reqMetaCap)
+	require.NoError(t, err)
+	metaCapBytes, _ := io.ReadAll(respMetaCap.Body)
+	respMetaCap.Body.Close()
+	require.Equal(t, http.StatusOK, respMetaCap.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respMetaCap.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respMetaCap.Header.Get("X-Flint-Wire-Format"))
+	var capStmt cspb.CapabilityStatement
+	require.NoError(t, proto.Unmarshal(metaCapBytes, &capStmt))
+	assert.NotEmpty(t, capStmt.GetRest())
+
+	reqCapSub, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/CapabilityStatement/$subset?resource=Patient&_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqCapSub.Header.Set("Accept", "application/x-protobuf")
+	respCapSub, err := client.Do(reqCapSub)
+	require.NoError(t, err)
+	capSubBytes, _ := io.ReadAll(respCapSub.Body)
+	respCapSub.Body.Close()
+	require.Equal(t, http.StatusOK, respCapSub.StatusCode)
+	var capSub cspb.CapabilityStatement
+	require.NoError(t, proto.Unmarshal(capSubBytes, &capSub))
+	assert.Len(t, capSub.GetRest()[0].GetResource(), 1)
+
+	reqIPSProto, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Patient/"+patID+"/$summary?_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqIPSProto.Header.Set("Accept", "application/x-protobuf")
+	respIPSProto, err := client.Do(reqIPSProto)
+	require.NoError(t, err)
+	ipsBytes, _ := io.ReadAll(respIPSProto.Body)
+	respIPSProto.Body.Close()
+	require.Equal(t, http.StatusOK, respIPSProto.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respIPSProto.Header.Get("Content-Type"))
+	var ipsBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(ipsBytes, &ipsBundle))
+	assert.GreaterOrEqual(t, len(ipsBundle.GetEntry()), 2)
+
+	ipsPostParamsJSON := `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"` + patID + `"}]}`
+	reqIPSConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(ipsPostParamsJSON))
+	require.NoError(t, err)
+	reqIPSConv.Header.Set("Content-Type", "application/fhir+json")
+	reqIPSConv.Header.Set("Accept", "application/x-protobuf")
+	respIPSConv, err := client.Do(reqIPSConv)
+	require.NoError(t, err)
+	ipsParamsProto, _ := io.ReadAll(respIPSConv.Body)
+	respIPSConv.Body.Close()
+	require.Equal(t, http.StatusOK, respIPSConv.StatusCode)
+
+	reqIPSTypePost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/$summary", bytes.NewReader(ipsParamsProto))
+	require.NoError(t, err)
+	reqIPSTypePost.Header.Set("Content-Type", "application/x-protobuf")
+	reqIPSTypePost.Header.Set("Accept", "application/x-protobuf")
+	respIPSTypePost, err := client.Do(reqIPSTypePost)
+	require.NoError(t, err)
+	ipsTypeBytes, _ := io.ReadAll(respIPSTypePost.Body)
+	respIPSTypePost.Body.Close()
+	require.Equal(t, http.StatusOK, respIPSTypePost.StatusCode)
+	var ipsTypeBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(ipsTypeBytes, &ipsTypeBundle))
+	assert.GreaterOrEqual(t, len(ipsTypeBundle.GetEntry()), 2)
+
+	reqDocrefProto, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/DocumentReference/$docref?patient="+patID+"&_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqDocrefProto.Header.Set("Accept", "application/x-protobuf")
+	respDocrefProto, err := client.Do(reqDocrefProto)
+	require.NoError(t, err)
+	docrefBytes, _ := io.ReadAll(respDocrefProto.Body)
+	respDocrefProto.Body.Close()
+	require.Equal(t, http.StatusOK, respDocrefProto.StatusCode)
+	var docrefBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(docrefBytes, &docrefBundle))
+	assert.GreaterOrEqual(t, len(docrefBundle.GetEntry()), 1)
+
+	obsSeedJSON := `{"resourceType":"Observation","id":"obs-proto-w78","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/` + patID + `"},"effectiveDateTime":"2026-01-15T10:00:00Z","valueQuantity":{"value":76.0,"unit":"/min","system":"http://unitsofmeasure.org","code":"/min"}}`
+	reqObsPut, err := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Observation/obs-proto-w78", strings.NewReader(obsSeedJSON))
+	require.NoError(t, err)
+	reqObsPut.Header.Set("Content-Type", "application/fhir+json")
+	respObsPut, err := client.Do(reqObsPut)
+	require.NoError(t, err)
+	respObsPut.Body.Close()
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, respObsPut.StatusCode)
+
+	reqLastnProto, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Observation/$lastn?patient=Patient/"+patID+"&max=1&_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqLastnProto.Header.Set("Accept", "application/x-protobuf")
+	respLastnProto, err := client.Do(reqLastnProto)
+	require.NoError(t, err)
+	lastnBytes, _ := io.ReadAll(respLastnProto.Body)
+	respLastnProto.Body.Close()
+	require.Equal(t, http.StatusOK, respLastnProto.StatusCode)
+	var lastnBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(lastnBytes, &lastnBundle))
+	assert.GreaterOrEqual(t, len(lastnBundle.GetEntry()), 1)
+
+	reqStatsProto, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Observation/$stats?subject=Patient/"+patID+"&code=8867-4&statistic=average&_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqStatsProto.Header.Set("Accept", "application/x-protobuf")
+	respStatsProto, err := client.Do(reqStatsProto)
+	require.NoError(t, err)
+	statsBytes, _ := io.ReadAll(respStatsProto.Body)
+	respStatsProto.Body.Close()
+	require.Equal(t, http.StatusOK, respStatsProto.StatusCode)
+	var statsParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(statsBytes, &statsParams))
+	assert.NotEmpty(t, statsParams.GetParameter())
+
+	castIdxVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "obs_cast_indexof",
+		"status": "active",
+		"resource": "Observation",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "val_int", "path": "valueQuantity.value.toInteger()"},
+					{"name": "val_dec", "path": "valueQuantity.value.toDecimal()"},
+					{"name": "val_str", "path": "valueQuantity.value.toString()"},
+					{"name": "code_idx", "path": "code.coding.code.indexOf('88')"}
+				]
+			}
+		],
+		"where": [
+			{"path": "valueQuantity.value.toInteger() >= 60 and code.coding.code.indexOf('88') >= 0"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"CAST(r.value_quantity AS BIGINT)",
+				"CAST(r.value_quantity AS DOUBLE)",
+				"CAST(r.value_quantity AS STRING)",
+				"(LOCATE('88', r.code) - 1)",
+				"CAST(r.value_quantity AS BIGINT) >= 60",
+				"(LOCATE('88', r.code) - 1) >= 0",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"CAST((SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1) AS BIGINT)",
+				"CAST((SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1) AS DOUBLE PRECISION)",
+				"CAST((SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1) AS TEXT)",
+				"(STRPOS((SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'code' LIMIT 1), '88') - 1)",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"CAST((SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1) AS INTEGER)",
+				"CAST((SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1) AS REAL)",
+				"CAST((SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1) AS TEXT)",
+				"(INSTR((SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'code' LIMIT 1), '88') - 1)",
+			},
+		},
+	} {
+		reqCast, cErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(castIdxVD))
+		require.NoError(t, cErr)
+		reqCast.Header.Set("Content-Type", "application/fhir+json")
+		respCast, cErr := client.Do(reqCast)
+		require.NoError(t, cErr)
+		castBytes, _ := io.ReadAll(respCast.Body)
+		respCast.Body.Close()
+		require.Equal(t, http.StatusOK, respCast.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(castBytes), want)
 		}
 	}
 }
