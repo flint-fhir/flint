@@ -2015,4 +2015,171 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(atBytes), want)
 		}
 	}
+
+	// 25. Binary Proto3 Da Vinci Payer (Claim/$submit, CoverageEligibilityRequest/$submit) & Conformance (StructureDefinition/$snapshot, NamingSystem/$preferred-id)
+	clmJSON := `{"resourceType":"Claim","id":"proto-claim-1","status":"active","type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"professional"}]},"use":"preauthorization","patient":{"reference":"Patient/proto-pat-1"}}`
+	reqClmConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Claim/$convert", strings.NewReader(clmJSON))
+	require.NoError(t, err)
+	reqClmConv.Header.Set("Content-Type", "application/fhir+json")
+	reqClmConv.Header.Set("Accept", "application/x-protobuf")
+	respClmConv, err := client.Do(reqClmConv)
+	require.NoError(t, err)
+	clmProtoBytes, _ := io.ReadAll(respClmConv.Body)
+	respClmConv.Body.Close()
+	require.Equal(t, http.StatusOK, respClmConv.StatusCode)
+
+	reqClmSub, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Claim/$submit", bytes.NewReader(clmProtoBytes))
+	require.NoError(t, err)
+	reqClmSub.Header.Set("Content-Type", "application/x-protobuf")
+	reqClmSub.Header.Set("Accept", "application/x-protobuf")
+	respClmSub, err := client.Do(reqClmSub)
+	require.NoError(t, err)
+	clmRespProto, _ := io.ReadAll(respClmSub.Body)
+	respClmSub.Body.Close()
+	require.Equal(t, http.StatusOK, respClmSub.StatusCode)
+	assert.Contains(t, respClmSub.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.Equal(t, "google.fhir.r4.proto3", respClmSub.Header.Get("X-Flint-Wire-Format"))
+	assert.NotEmpty(t, clmRespProto)
+
+	cerJSON := `{"resourceType":"CoverageEligibilityRequest","id":"proto-cer-1","status":"active","purpose":["benefits"],"patient":{"reference":"Patient/proto-pat-1"}}`
+	reqCERConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/CoverageEligibilityRequest/$convert", strings.NewReader(cerJSON))
+	require.NoError(t, err)
+	reqCERConv.Header.Set("Content-Type", "application/fhir+json")
+	reqCERConv.Header.Set("Accept", "application/x-protobuf")
+	respCERConv, err := client.Do(reqCERConv)
+	require.NoError(t, err)
+	cerProtoBytes, _ := io.ReadAll(respCERConv.Body)
+	respCERConv.Body.Close()
+	require.Equal(t, http.StatusOK, respCERConv.StatusCode)
+
+	reqCERSub, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/CoverageEligibilityRequest/$submit", bytes.NewReader(cerProtoBytes))
+	require.NoError(t, err)
+	reqCERSub.Header.Set("Content-Type", "application/x-protobuf")
+	reqCERSub.Header.Set("Accept", "application/x-protobuf")
+	respCERSub, err := client.Do(reqCERSub)
+	require.NoError(t, err)
+	cerRespProto, _ := io.ReadAll(respCERSub.Body)
+	respCERSub.Body.Close()
+	require.Equal(t, http.StatusOK, respCERSub.StatusCode)
+	assert.Contains(t, respCERSub.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.Equal(t, "google.fhir.r4.proto3", respCERSub.Header.Get("X-Flint-Wire-Format"))
+	assert.NotEmpty(t, cerRespProto)
+
+	reqSnap, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/StructureDefinition/$snapshot?url=http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient&_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqSnap.Header.Set("Accept", "application/x-protobuf")
+	respSnap, err := client.Do(reqSnap)
+	require.NoError(t, err)
+	snapProtoBytes, _ := io.ReadAll(respSnap.Body)
+	respSnap.Body.Close()
+	require.Equal(t, http.StatusOK, respSnap.StatusCode)
+	assert.Contains(t, respSnap.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.Equal(t, "google.fhir.r4.proto3", respSnap.Header.Get("X-Flint-Wire-Format"))
+	assert.NotEmpty(t, snapProtoBytes)
+
+	reqPref, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/NamingSystem/$preferred-id?id=2.16.840.1.113883.6.1&type=uri&_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqPref.Header.Set("Accept", "application/x-protobuf")
+	respPref, err := client.Do(reqPref)
+	require.NoError(t, err)
+	prefProtoBytes, _ := io.ReadAll(respPref.Body)
+	respPref.Body.Close()
+	require.Equal(t, http.StatusOK, respPref.StatusCode)
+	assert.Contains(t, respPref.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.Equal(t, "google.fhir.r4.proto3", respPref.Header.Get("X-Flint-Wire-Format"))
+	var prefParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(prefProtoBytes, &prefParams))
+	assert.NotEmpty(t, prefParams.GetParameter())
+
+	// 26. SQL-on-FHIR v2 Collection Set/Deduplication & Transcendental Math $sql Pushdown
+	setMathVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "obs_set_math",
+		"status": "active",
+		"resource": "Observation",
+		"select": [{
+			"column": [
+				{"name": "id", "path": "id"},
+				{"name": "distinct_given", "path": "name.given.distinct()", "collection": true},
+				{"name": "distinct_joined", "path": "name.given.distinct().join(', ')"},
+				{"name": "distinct_cnt", "path": "name.given.distinct().count()"},
+				{"name": "is_dist_col", "path": "name.given.isDistinct()"},
+				{"name": "union_names", "path": "name.given.union(name.family)", "collection": true},
+				{"name": "intersect_names", "path": "name.given.intersect(name.family)", "collection": true},
+				{"name": "exclude_names", "path": "name.given.exclude(name.family)", "collection": true},
+				{"name": "val_exp", "path": "valueQuantity.value.exp()"},
+				{"name": "val_ln", "path": "valueQuantity.value.ln()"},
+				{"name": "val_log10", "path": "valueQuantity.value.log(10)"},
+				{"name": "val_pow2", "path": "valueQuantity.value.power(2)"},
+				{"name": "val_trunc", "path": "valueQuantity.value.truncate()"}
+			]
+		}],
+		"where": [
+			{"path": "name.given.isDistinct() and valueQuantity.value.truncate() >= 60"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_DISTINCT(",
+				"ARRAY_JOIN(ARRAY_DISTINCT(",
+				"ARRAY_SIZE(ARRAY_DISTINCT(",
+				"ARRAY_UNION(",
+				"ARRAY_INTERSECT(",
+				"ARRAY_EXCEPT(",
+				"EXP(r.value_quantity)",
+				"LN(r.value_quantity)",
+				"LOG(10, r.value_quantity)",
+				"POW(r.value_quantity, 2)",
+				"TRUNCATE(r.value_quantity, 0)",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"ARRAY_AGG(DISTINCT s.sp_value)",
+				"ARRAY_TO_STRING(ARRAY_AGG(DISTINCT s.sp_value), ', ')",
+				"COUNT(DISTINCT s.sp_value)",
+				" UNION SELECT ",
+				" INTERSECT SELECT ",
+				" EXCEPT SELECT ",
+				"EXP(",
+				"LN(",
+				"LOG(10, ",
+				"POWER(",
+				"TRUNC(",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"SELECT DISTINCT s.sp_value",
+				" UNION SELECT ",
+				" INTERSECT SELECT ",
+				" EXCEPT SELECT ",
+				"COUNT(DISTINCT s.sp_value)",
+				"EXP(",
+				"LN(",
+				"LOG(10, ",
+				"POW(",
+				"CAST(",
+			},
+		},
+	} {
+		reqSM, smErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(setMathVD))
+		require.NoError(t, smErr)
+		reqSM.Header.Set("Content-Type", "application/fhir+json")
+		respSM, smErr := client.Do(reqSM)
+		require.NoError(t, smErr)
+		smBytes, _ := io.ReadAll(respSM.Body)
+		respSM.Body.Close()
+		require.Equal(t, http.StatusOK, respSM.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(smBytes), want)
+		}
+	}
 }

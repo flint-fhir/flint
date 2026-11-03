@@ -2805,6 +2805,54 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-14", suite10, "Zero-JSON Binary Proto3 Clinical Reasoning & Cohort Operations ($apply, $data-requirements, $fhirpath, Group/$add, $reindex) & SQL-on-FHIR v2 Arithmetic, Concat (&) & Temporal $sql Pushdown", t0, err, "Binary Proto3 clinical reasoning & cohort wire transport & arithmetic / CONCAT / temporal $sql pushdown verified")
 
+	// AN-15: Zero-JSON Binary Proto3 Da Vinci Payer (Claim/$submit, CoverageEligibilityRequest/$submit) & Conformance (StructureDefinition/$snapshot, NamingSystem/$preferred-id) & SQL-on-FHIR v2 Collection Set/Deduplication & Transcendental Math $sql Pushdown
+	t0 = time.Now()
+	{
+		clmJSON := []byte(`{"resourceType":"Claim","id":"cert-claim-proto-1","status":"active","type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"professional"}]},"use":"preauthorization","patient":{"reference":"Patient/cert-pat-1"},"created":"2026-01-15","provider":{"reference":"Practitioner/cert-prac-1"},"priority":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/processpriority","code":"normal"}]},"insurance":[{"sequence":1,"focal":true,"coverage":{"reference":"Coverage/cert-cov-1"}}]}`)
+		respClmConv, bClmInProto, errClmConv := doReq(http.MethodPost, basePath+"/Claim/$convert", "application/fhir+json", clmJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respClmSubProto, bClmSubProto, errClmSubProto := doReq(http.MethodPost, basePath+"/Claim/$submit", "application/x-protobuf", bClmInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		cerJSON := []byte(`{"resourceType":"CoverageEligibilityRequest","id":"cert-cer-proto-1","status":"active","purpose":["benefits","validation"],"patient":{"reference":"Patient/cert-pat-1"},"insurer":{"reference":"Organization/cert-org-1"},"insurance":[{"coverage":{"reference":"Coverage/cert-cov-1"}}]}`)
+		respCERConv, bCERInProto, errCERConv := doReq(http.MethodPost, basePath+"/CoverageEligibilityRequest/$convert", "application/fhir+json", cerJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCERSubProto, bCERSubProto, errCERSubProto := doReq(http.MethodPost, basePath+"/CoverageEligibilityRequest/$submit", "application/x-protobuf", bCERInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSnapProto, bSnapProto, errSnapProto := doReq(http.MethodGet, basePath+"/StructureDefinition/$snapshot?url=http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPrefProto, bPrefProto, errPrefProto := doReq(http.MethodGet, basePath+"/NamingSystem/$preferred-id?id=2.16.840.1.113883.6.1&type=uri&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		setMathVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_set_math_view","status":"active","resource":"Observation","select":[{"column":[{"name":"id","path":"id"},{"name":"distinct_given","path":"name.given.distinct()","collection":true},{"name":"union_names","path":"name.given.union(name.family)","collection":true},{"name":"intersect_names","path":"name.given.intersect(name.family)","collection":true},{"name":"exclude_names","path":"name.given.exclude(name.family)","collection":true},{"name":"val_exp","path":"valueQuantity.value.exp()"},{"name":"val_ln","path":"valueQuantity.value.ln()"},{"name":"val_log10","path":"valueQuantity.value.log(10)"},{"name":"val_pow2","path":"valueQuantity.value.power(2)"},{"name":"val_trunc","path":"valueQuantity.value.truncate()"}]}],"where":[{"path":"name.given.isDistinct() and valueQuantity.value.truncate() >= 60"}]}`)
+		respSMDoris, bSMDoris, errSMDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", setMathVD, nil)
+		respSMPg, bSMPg, errSMPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", setMathVD, nil)
+		if errClmConv != nil || respClmConv.StatusCode != http.StatusOK || len(bClmInProto) == 0 {
+			err = fmt.Errorf("expected POST /Claim/$convert to return binary Proto3 Claim, got %d", respClmConv.StatusCode)
+		} else if errClmSubProto != nil || respClmSubProto.StatusCode != http.StatusOK || !strings.Contains(respClmSubProto.Header.Get("Content-Type"), "application/x-protobuf") || respClmSubProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bClmSubProto) == 0 {
+			err = fmt.Errorf("expected POST /Claim/$submit with binary Proto3 Claim to return binary Proto3 ClaimResponse, got %d", respClmSubProto.StatusCode)
+		} else if errCERConv != nil || respCERConv.StatusCode != http.StatusOK || len(bCERInProto) == 0 {
+			err = fmt.Errorf("expected POST /CoverageEligibilityRequest/$convert to return binary Proto3 CoverageEligibilityRequest, got %d", respCERConv.StatusCode)
+		} else if errCERSubProto != nil || respCERSubProto.StatusCode != http.StatusOK || !strings.Contains(respCERSubProto.Header.Get("Content-Type"), "application/x-protobuf") || respCERSubProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bCERSubProto) == 0 {
+			err = fmt.Errorf("expected POST /CoverageEligibilityRequest/$submit with binary Proto3 CoverageEligibilityRequest to return binary Proto3 CoverageEligibilityResponse, got %d", respCERSubProto.StatusCode)
+		} else if errSnapProto != nil || respSnapProto.StatusCode != http.StatusOK || !strings.Contains(respSnapProto.Header.Get("Content-Type"), "application/x-protobuf") || respSnapProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bSnapProto) == 0 {
+			err = fmt.Errorf("expected GET /StructureDefinition/$snapshot?_format=application/x-protobuf to return binary Proto3 StructureDefinition, got %d", respSnapProto.StatusCode)
+		} else if errPrefProto != nil || respPrefProto.StatusCode != http.StatusOK || !strings.Contains(respPrefProto.Header.Get("Content-Type"), "application/x-protobuf") || respPrefProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bPrefProto) == 0 {
+			err = fmt.Errorf("expected GET /NamingSystem/$preferred-id?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respPrefProto.StatusCode)
+		} else if errSMDoris != nil || respSMDoris.StatusCode != http.StatusOK || !strings.Contains(string(bSMDoris), "ARRAY_DISTINCT(") || !strings.Contains(string(bSMDoris), "ARRAY_UNION(") || !strings.Contains(string(bSMDoris), "ARRAY_INTERSECT(") || !strings.Contains(string(bSMDoris), "ARRAY_EXCEPT(") || !strings.Contains(string(bSMDoris), "EXP(") || !strings.Contains(string(bSMDoris), "LN(") || !strings.Contains(string(bSMDoris), "LOG(10, ") || !strings.Contains(string(bSMDoris), "POW(") || !strings.Contains(string(bSMDoris), "TRUNCATE(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with set/transcendental math pushdown, got %d: %s", respSMDoris.StatusCode, string(bSMDoris))
+		} else if errSMPg != nil || respSMPg.StatusCode != http.StatusOK || !strings.Contains(string(bSMPg), "ARRAY_AGG(DISTINCT ") || !strings.Contains(string(bSMPg), " UNION SELECT ") || !strings.Contains(string(bSMPg), " INTERSECT SELECT ") || !strings.Contains(string(bSMPg), " EXCEPT SELECT ") || !strings.Contains(string(bSMPg), "COUNT(DISTINCT ") || !strings.Contains(string(bSMPg), "EXP(") || !strings.Contains(string(bSMPg), "LN(") || !strings.Contains(string(bSMPg), "LOG(10, ") || !strings.Contains(string(bSMPg), "POWER(") || !strings.Contains(string(bSMPg), "TRUNC(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with set/transcendental math pushdown, got %d: %s", respSMPg.StatusCode, string(bSMPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-15", suite10, "Zero-JSON Binary Proto3 Da Vinci Payer & Conformance Operations (Claim/$submit, CoverageEligibilityRequest/$submit, StructureDefinition/$snapshot, NamingSystem/$preferred-id) & SQL-on-FHIR v2 Set/Deduplication & Transcendental Math $sql Pushdown", t0, err, "Binary Proto3 Da Vinci Payer & Conformance wire transport & distinct / union / intersect / exclude / exp / ln / log / power / truncate $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}
