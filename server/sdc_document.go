@@ -44,8 +44,7 @@ func (s *Server) handleQuestionnairePopulate(w http.ResponseWriter, r *http.Requ
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 4*1024*1024))
 		if err == nil && len(bodyBytes) > 0 {
-			var root map[string]any
-			if json.Unmarshal(bodyBytes, &root) == nil {
+			if root, err := s.decodeOperationBodyMap(r, bodyBytes, "Questionnaire"); err == nil && root != nil {
 				switch root["resourceType"] {
 				case "Questionnaire":
 					questionnaireMap = root
@@ -233,9 +232,7 @@ func (s *Server) handleQuestionnairePopulate(w http.ResponseWriter, r *http.Requ
 		qr["item"] = qrItems
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(qr)
+	s.writeTerminologyResourceResponse(w, r, "QuestionnaireResponse", qr)
 }
 
 func defaultClinicalIntakeQuestionnaire(urlStr string) map[string]any {
@@ -539,8 +536,7 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 	if r.Body != nil {
 		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 4*1024*1024))
 		if err == nil && len(bodyBytes) > 0 {
-			var root map[string]any
-			if json.Unmarshal(bodyBytes, &root) == nil {
+			if root, err := s.decodeOperationBodyMap(r, bodyBytes, "QuestionnaireResponse"); err == nil && root != nil {
 				switch root["resourceType"] {
 				case "QuestionnaireResponse":
 					qrMap = root
@@ -888,9 +884,7 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 		"entry":        entries,
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeTerminologyResourceResponse(w, r, "Bundle", bundle)
 }
 
 func inferObservationLOINCCode(lowerKey, linkID string) string {

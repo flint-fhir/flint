@@ -1552,4 +1552,192 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(castBytes), want)
 		}
 	}
+
+	// 24. Binary Proto3 eCQM ($evaluate-measure, $care-gaps, $collect-data, $submit-data) & SDC ($populate, $package, $extract) Wire Transport + SQL-on-FHIR v2 Math & Regex $sql Pushdown
+	evalParamsJSON := `{"resourceType":"Parameters","parameter":[{"name":"measure","valueString":"CMS165"},{"name":"subject","valueString":"Patient/` + patID + `"}]}`
+	reqEvalConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(evalParamsJSON))
+	require.NoError(t, err)
+	reqEvalConv.Header.Set("Content-Type", "application/fhir+json")
+	reqEvalConv.Header.Set("Accept", "application/x-protobuf")
+	respEvalConv, err := client.Do(reqEvalConv)
+	require.NoError(t, err)
+	evalParamsProto, _ := io.ReadAll(respEvalConv.Body)
+	respEvalConv.Body.Close()
+	require.Equal(t, http.StatusOK, respEvalConv.StatusCode)
+
+	reqEvalPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Measure/$evaluate-measure", bytes.NewReader(evalParamsProto))
+	require.NoError(t, err)
+	reqEvalPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqEvalPost.Header.Set("Accept", "application/x-protobuf")
+	respEvalPost, err := client.Do(reqEvalPost)
+	require.NoError(t, err)
+	evalPostBytes, _ := io.ReadAll(respEvalPost.Body)
+	respEvalPost.Body.Close()
+	require.Equal(t, http.StatusOK, respEvalPost.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respEvalPost.Header.Get("Content-Type"))
+	assert.Equal(t, "google.fhir.r4.proto3", respEvalPost.Header.Get("X-Flint-Wire-Format"))
+	assert.NotEmpty(t, evalPostBytes)
+
+	reqCGPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Measure/$care-gaps", bytes.NewReader(evalParamsProto))
+	require.NoError(t, err)
+	reqCGPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqCGPost.Header.Set("Accept", "application/x-protobuf")
+	respCGPost, err := client.Do(reqCGPost)
+	require.NoError(t, err)
+	cgPostBytes, _ := io.ReadAll(respCGPost.Body)
+	respCGPost.Body.Close()
+	require.Equal(t, http.StatusOK, respCGPost.StatusCode)
+	var cgBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(cgPostBytes, &cgBundle))
+	assert.NotEmpty(t, cgBundle.GetEntry())
+
+	reqCollPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Measure/$collect-data", bytes.NewReader(evalParamsProto))
+	require.NoError(t, err)
+	reqCollPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqCollPost.Header.Set("Accept", "application/x-protobuf")
+	respCollPost, err := client.Do(reqCollPost)
+	require.NoError(t, err)
+	collPostBytes, _ := io.ReadAll(respCollPost.Body)
+	respCollPost.Body.Close()
+	require.Equal(t, http.StatusOK, respCollPost.StatusCode)
+	var collParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(collPostBytes, &collParams))
+	assert.NotEmpty(t, collParams.GetParameter())
+
+	reqSubPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Measure/$submit-data", bytes.NewReader(collPostBytes))
+	require.NoError(t, err)
+	reqSubPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqSubPost.Header.Set("Accept", "application/x-protobuf")
+	respSubPost, err := client.Do(reqSubPost)
+	require.NoError(t, err)
+	subPostBytes, _ := io.ReadAll(respSubPost.Body)
+	respSubPost.Body.Close()
+	require.Equal(t, http.StatusOK, respSubPost.StatusCode)
+	var subBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(subPostBytes, &subBundle))
+	assert.NotEmpty(t, subBundle.GetEntry())
+
+	reqPopGet, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Questionnaire/phq-9/$populate?subject=Patient/"+patID+"&_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqPopGet.Header.Set("Accept", "application/x-protobuf")
+	respPopGet, err := client.Do(reqPopGet)
+	require.NoError(t, err)
+	popGetBytes, _ := io.ReadAll(respPopGet.Body)
+	respPopGet.Body.Close()
+	require.Equal(t, http.StatusOK, respPopGet.StatusCode)
+	assert.Equal(t, "application/x-protobuf", respPopGet.Header.Get("Content-Type"))
+	assert.NotEmpty(t, popGetBytes)
+
+	qPkgJSON := `{"resourceType":"Questionnaire","id":"q-pkg-w79","url":"http://flint.fhir.org/Questionnaire/q-pkg-w79","status":"active"}`
+	reqQPkgConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Questionnaire/$convert", strings.NewReader(qPkgJSON))
+	require.NoError(t, err)
+	reqQPkgConv.Header.Set("Content-Type", "application/fhir+json")
+	reqQPkgConv.Header.Set("Accept", "application/x-protobuf")
+	respQPkgConv, err := client.Do(reqQPkgConv)
+	require.NoError(t, err)
+	qPkgInProto, _ := io.ReadAll(respQPkgConv.Body)
+	respQPkgConv.Body.Close()
+	require.Equal(t, http.StatusOK, respQPkgConv.StatusCode)
+
+	reqQPkgPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Questionnaire/$package", bytes.NewReader(qPkgInProto))
+	require.NoError(t, err)
+	reqQPkgPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqQPkgPost.Header.Set("Accept", "application/x-protobuf")
+	respQPkgPost, err := client.Do(reqQPkgPost)
+	require.NoError(t, err)
+	qPkgOutBytes, _ := io.ReadAll(respQPkgPost.Body)
+	respQPkgPost.Body.Close()
+	require.Equal(t, http.StatusOK, respQPkgPost.StatusCode)
+	var qPkgBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(qPkgOutBytes, &qPkgBundle))
+	assert.NotEmpty(t, qPkgBundle.GetEntry())
+
+	reqExtPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/QuestionnaireResponse/$extract", bytes.NewReader(popGetBytes))
+	require.NoError(t, err)
+	reqExtPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqExtPost.Header.Set("Accept", "application/x-protobuf")
+	respExtPost, err := client.Do(reqExtPost)
+	require.NoError(t, err)
+	extPostBytes, _ := io.ReadAll(respExtPost.Body)
+	respExtPost.Body.Close()
+	require.Equal(t, http.StatusOK, respExtPost.StatusCode)
+	var extBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(extPostBytes, &extBundle))
+	assert.NotEmpty(t, extBundle.GetId().GetValue())
+
+	mathRegexVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "obs_math_regex",
+		"status": "active",
+		"resource": "Observation",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "val_abs", "path": "valueQuantity.value.abs()"},
+					{"name": "val_ceil", "path": "valueQuantity.value.ceiling()"},
+					{"name": "val_floor", "path": "valueQuantity.value.floor()"},
+					{"name": "val_round0", "path": "valueQuantity.value.round()"},
+					{"name": "val_round2", "path": "valueQuantity.value.round(2)"},
+					{"name": "val_sqrt", "path": "valueQuantity.value.sqrt()"},
+					{"name": "code_clean", "path": "code.coding.code.replaceMatches('[^0-9]', '')"}
+				]
+			}
+		],
+		"where": [
+			{"path": "valueQuantity.value.abs() >= 60 and code.coding.code.matches('^88.*')"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ABS(r.value_quantity)",
+				"CEIL(r.value_quantity)",
+				"FLOOR(r.value_quantity)",
+				"ROUND(r.value_quantity)",
+				"ROUND(r.value_quantity, 2)",
+				"SQRT(r.value_quantity)",
+				"REGEXP_REPLACE(r.code, '[^0-9]', '')",
+				"ABS(r.value_quantity) >= 60",
+				"REGEXP(r.code, '^88.*')",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"ABS((SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1))",
+				"CEIL((SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1))",
+				"FLOOR((SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1))",
+				"ROUND((SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1))",
+				"ROUND((SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1), 2)",
+				"SQRT((SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1))",
+				"REGEXP_REPLACE((SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'code' LIMIT 1), '[^0-9]', '', 'g')",
+				"(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'code' LIMIT 1) ~ '^88.*'",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"ABS((SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1))",
+				"REGEXP_REPLACE((SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'code' LIMIT 1), '[^0-9]', '')",
+				"(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'code' LIMIT 1) REGEXP '^88.*'",
+			},
+		},
+	} {
+		reqMR, mErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(mathRegexVD))
+		require.NoError(t, mErr)
+		reqMR.Header.Set("Content-Type", "application/fhir+json")
+		respMR, mErr := client.Do(reqMR)
+		require.NoError(t, mErr)
+		mrBytes, _ := io.ReadAll(respMR.Body)
+		respMR.Body.Close()
+		require.Equal(t, http.StatusOK, respMR.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(mrBytes), want)
+		}
+	}
 }

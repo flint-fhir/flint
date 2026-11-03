@@ -180,8 +180,8 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && r.Body != nil {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if err == nil && len(strings.TrimSpace(string(body))) > 0 {
-			var payload map[string]any
-			if err := json.Unmarshal(body, &payload); err != nil {
+			payload, err := s.decodeOperationBodyMap(r, body, "Parameters")
+			if err != nil {
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for Measure/$evaluate-measure")
 				return
 			}
@@ -416,9 +416,7 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 		_, _ = s.analyticalStore.EvaluateCohortCounts(r.Context(), tenant, []string{"Patient", "Condition", "Observation", "Encounter", "MedicationRequest"})
 		w.Header().Set("X-Flint-Analytical-Backend", s.analyticalStore.BackendName())
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(report)
+	s.writeTerminologyResourceResponse(w, r, "MeasureReport", report)
 }
 
 func buildMeasurePopulation(code, display string, count int, withSubjectList bool) map[string]any {
@@ -503,8 +501,8 @@ func (s *Server) handleCareGaps(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && r.Body != nil {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if err == nil && len(strings.TrimSpace(string(body))) > 0 {
-			var payload map[string]any
-			if err := json.Unmarshal(body, &payload); err != nil {
+			payload, err := s.decodeOperationBodyMap(r, body, "Parameters")
+			if err != nil {
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for Measure/$care-gaps")
 				return
 			}
@@ -848,9 +846,7 @@ func (s *Server) handleCareGaps(w http.ResponseWriter, r *http.Request) {
 		_, _ = s.analyticalStore.EvaluateCohortCounts(r.Context(), tenant, []string{"Patient", "Condition", "Observation", "Encounter", "MedicationRequest"})
 		w.Header().Set("X-Flint-Analytical-Backend", s.analyticalStore.BackendName())
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeTerminologyResourceResponse(w, r, "Bundle", bundle)
 }
 
 type patientClinicalSnapshot struct {
