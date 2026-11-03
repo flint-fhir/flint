@@ -2170,8 +2170,8 @@ func (s *Server) handleMeasureCollectData(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if len(bytes.TrimSpace(body)) > 0 {
-			var raw map[string]any
-			if err := json.Unmarshal(body, &raw); err != nil {
+			raw, err := s.decodeOperationBodyMap(r, body, "Parameters")
+			if err != nil {
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for Measure/$collect-data")
 				return
 			}
@@ -2376,9 +2376,7 @@ func (s *Server) handleMeasureCollectData(w http.ResponseWriter, r *http.Request
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeTerminologyResourceResponse(w, r, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    paramsOut,
 	})
@@ -2414,8 +2412,8 @@ func (s *Server) handleMeasureSubmitData(w http.ResponseWriter, r *http.Request)
 		writeOperationOutcome(w, http.StatusBadRequest, "required", "Measure/$submit-data requires a non-empty Parameters request body")
 		return
 	}
-	var raw map[string]any
-	if err := json.Unmarshal(body, &raw); err != nil {
+	raw, err := s.decodeOperationBodyMap(r, body, "Parameters")
+	if err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for Measure/$submit-data")
 		return
 	}
@@ -2476,9 +2474,7 @@ func (s *Server) handleMeasureSubmitData(w http.ResponseWriter, r *http.Request)
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeTerminologyResourceResponse(w, r, "Bundle", map[string]any{
 		"resourceType": "Bundle",
 		"type":         "transaction-response",
 		"entry":        entries,
@@ -5573,25 +5569,27 @@ func (s *Server) handleQuestionnairePackage(w http.ResponseWriter, r *http.Reque
 
 	var inlineQ map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "Questionnaire":
-				inlineQ = bodyMap
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "questionnaire", "url":
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Questionnaire" {
-								inlineQ = res
-							} else if sVal := extractParamString(pm); sVal != "" && qCanonical == "" {
-								qCanonical = sVal
+		bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+		if err == nil && len(bodyBytes) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Questionnaire"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "Questionnaire":
+					inlineQ = bodyMap
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch name {
+							case "questionnaire", "url":
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Questionnaire" {
+									inlineQ = res
+								} else if sVal := extractParamString(pm); sVal != "" && qCanonical == "" {
+									qCanonical = sVal
+								}
 							}
 						}
 					}
@@ -5810,9 +5808,7 @@ func (s *Server) handleQuestionnairePackage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeTerminologyResourceResponse(w, r, "Bundle", map[string]any{
 		"resourceType": "Bundle",
 		"id":           "dtr-package-" + resolvedQID,
 		"type":         "collection",

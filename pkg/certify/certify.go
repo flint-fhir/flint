@@ -2690,6 +2690,69 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-12", suite10, "Zero-JSON Binary Proto3 /metadata, $lastn, $stats, $summary, $document & $docref Transport & SQL-on-FHIR v2 Type-Cast & .indexOf() $sql Pushdown", t0, err, "Binary Proto3 /metadata, $summary, $document, $docref, $lastn & $stats wire transport & CAST / LOCATE / STRPOS $sql pushdown verified")
 
+	// AN-13: Zero-JSON Binary Proto3 eCQM ($evaluate-measure, $care-gaps, $collect-data, $submit-data) & SDC ($populate, $package, $extract) Transport & SQL-on-FHIR v2 Math & Regex $sql Pushdown
+	t0 = time.Now()
+	{
+		respEvalProto, bEvalProto, errEvalProto := doReq(http.MethodGet, basePath+"/Measure/$evaluate-measure?measure=CMS165&subject=Patient/cert-pat-1&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		cgParamsJSON := []byte(`{"resourceType":"Parameters","parameter":[{"name":"measureId","valueString":"CMS165"},{"name":"subject","valueString":"Patient/cert-pat-1"}]}`)
+		respCGConv, bCGProto, errCGConv := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", cgParamsJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCGProto, bCGOutProto, errCGProto := doReq(http.MethodPost, basePath+"/Measure/$care-gaps", "application/x-protobuf", bCGProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCollProto, bCollProto, errCollProto := doReq(http.MethodGet, basePath+"/Measure/$collect-data?measure=CMS165&subject=Patient/cert-pat-1&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSubProto, bSubProto, errSubProto := doReq(http.MethodPost, basePath+"/Measure/$submit-data", "application/x-protobuf", bCollProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPopProto, bPopProto, errPopProto := doReq(http.MethodGet, basePath+"/Questionnaire/phq-9/$populate?subject=Patient/cert-pat-1&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		qPkgJSON := []byte(`{"resourceType":"Questionnaire","id":"cert-q-pkg-1","url":"http://flint.fhir.org/Questionnaire/cert-q-pkg-1","status":"active"}`)
+		respQPkgConv, bQPkgInProto, errQPkgConv := doReq(http.MethodPost, basePath+"/Questionnaire/$convert", "application/fhir+json", qPkgJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respQPkgProto, bQPkgOutProto, errQPkgProto := doReq(http.MethodPost, basePath+"/Questionnaire/$package", "application/x-protobuf", bQPkgInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respExtProto, bExtProto, errExtProto := doReq(http.MethodPost, basePath+"/QuestionnaireResponse/$extract", "application/x-protobuf", bPopProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		mathRegexVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_math_regex_view","status":"active","resource":"Observation","select":[{"column":[{"name":"id","path":"id"},{"name":"val_abs","path":"valueQuantity.value.abs()"},{"name":"val_ceil","path":"valueQuantity.value.ceiling()"},{"name":"val_floor","path":"valueQuantity.value.floor()"},{"name":"val_round","path":"valueQuantity.value.round(2)"},{"name":"val_sqrt","path":"valueQuantity.value.sqrt()"},{"name":"code_clean","path":"code.coding.code.replaceMatches('[^0-9]', '')"}]}],"where":[{"path":"valueQuantity.value.abs() >= 60 and code.coding.code.matches('^88.*')"}]}`)
+		respMRDoris, bMRDoris, errMRDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", mathRegexVD, nil)
+		respMRPg, bMRPg, errMRPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", mathRegexVD, nil)
+		if errEvalProto != nil || respEvalProto.StatusCode != http.StatusOK || !strings.Contains(respEvalProto.Header.Get("Content-Type"), "application/x-protobuf") || respEvalProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bEvalProto) == 0 {
+			err = fmt.Errorf("expected GET /Measure/$evaluate-measure?_format=application/x-protobuf to return binary Proto3 MeasureReport, got %d", respEvalProto.StatusCode)
+		} else if errCGConv != nil || respCGConv.StatusCode != http.StatusOK || len(bCGProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert for $care-gaps to return binary Proto3 Parameters, got %d", respCGConv.StatusCode)
+		} else if errCGProto != nil || respCGProto.StatusCode != http.StatusOK || !strings.Contains(respCGProto.Header.Get("Content-Type"), "application/x-protobuf") || respCGProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bCGOutProto) == 0 {
+			err = fmt.Errorf("expected POST /Measure/$care-gaps with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respCGProto.StatusCode)
+		} else if errCollProto != nil || respCollProto.StatusCode != http.StatusOK || !strings.Contains(respCollProto.Header.Get("Content-Type"), "application/x-protobuf") || respCollProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bCollProto) == 0 {
+			err = fmt.Errorf("expected GET /Measure/$collect-data?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respCollProto.StatusCode)
+		} else if errSubProto != nil || respSubProto.StatusCode != http.StatusOK || !strings.Contains(respSubProto.Header.Get("Content-Type"), "application/x-protobuf") || respSubProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bSubProto) == 0 {
+			err = fmt.Errorf("expected POST /Measure/$submit-data with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respSubProto.StatusCode)
+		} else if errPopProto != nil || respPopProto.StatusCode != http.StatusOK || !strings.Contains(respPopProto.Header.Get("Content-Type"), "application/x-protobuf") || respPopProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bPopProto) == 0 {
+			err = fmt.Errorf("expected GET /Questionnaire/phq-9/$populate?_format=application/x-protobuf to return binary Proto3 QuestionnaireResponse, got %d", respPopProto.StatusCode)
+		} else if errQPkgConv != nil || respQPkgConv.StatusCode != http.StatusOK || len(bQPkgInProto) == 0 {
+			err = fmt.Errorf("expected POST /Questionnaire/$convert to return binary Proto3 Questionnaire, got %d", respQPkgConv.StatusCode)
+		} else if errQPkgProto != nil || respQPkgProto.StatusCode != http.StatusOK || !strings.Contains(respQPkgProto.Header.Get("Content-Type"), "application/x-protobuf") || respQPkgProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bQPkgOutProto) == 0 {
+			err = fmt.Errorf("expected POST /Questionnaire/$package with binary Proto3 Questionnaire to return binary Proto3 Bundle, got %d", respQPkgProto.StatusCode)
+		} else if errExtProto != nil || respExtProto.StatusCode != http.StatusOK || !strings.Contains(respExtProto.Header.Get("Content-Type"), "application/x-protobuf") || respExtProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bExtProto) == 0 {
+			err = fmt.Errorf("expected POST /QuestionnaireResponse/$extract with binary Proto3 QuestionnaireResponse to return binary Proto3 Bundle, got %d", respExtProto.StatusCode)
+		} else if errMRDoris != nil || respMRDoris.StatusCode != http.StatusOK || !strings.Contains(string(bMRDoris), "ABS(") || !strings.Contains(string(bMRDoris), "CEIL(") || !strings.Contains(string(bMRDoris), "FLOOR(") || !strings.Contains(string(bMRDoris), "ROUND(") || !strings.Contains(string(bMRDoris), "SQRT(") || !strings.Contains(string(bMRDoris), "REGEXP_REPLACE(") || !strings.Contains(string(bMRDoris), "REGEXP(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with math/regex pushdown, got %d: %s", respMRDoris.StatusCode, string(bMRDoris))
+		} else if errMRPg != nil || respMRPg.StatusCode != http.StatusOK || !strings.Contains(string(bMRPg), "ABS(") || !strings.Contains(string(bMRPg), "CEIL(") || !strings.Contains(string(bMRPg), "FLOOR(") || !strings.Contains(string(bMRPg), "ROUND(") || !strings.Contains(string(bMRPg), "SQRT(") || !strings.Contains(string(bMRPg), "REGEXP_REPLACE(") || !strings.Contains(string(bMRPg), " ~ '^88.*'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with math/regex pushdown, got %d: %s", respMRPg.StatusCode, string(bMRPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-13", suite10, "Zero-JSON Binary Proto3 eCQM & SDC Operations ($evaluate-measure, $care-gaps, $collect-data, $submit-data, $populate, $package, $extract) & SQL-on-FHIR v2 Math & Regex $sql Pushdown", t0, err, "Binary Proto3 eCQM & SDC wire transport & ABS / CEIL / FLOOR / ROUND / SQRT / REGEXP_REPLACE / REGEXP $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

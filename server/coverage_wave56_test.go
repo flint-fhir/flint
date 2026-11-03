@@ -68,6 +68,8 @@ func TestWave56ServerCoverageHardening(t *testing.T) {
 	server.RegisterDefaultResourceTypes(srv)
 	handler := srv.Handler()
 	tenant := "t-wave56"
+	_ = postgres.PurgeTenant(t.Context(), db, tenant)
+	defer func() { _ = postgres.PurgeTenant(context.Background(), db, tenant) }()
 
 	// Mint a full-privilege system token via OAuth2 client_credentials so authMiddleware & isPlanApplyOp execute.
 	tokRec, tokMap := doReq(t, handler, http.MethodPost, "/oauth2/token",

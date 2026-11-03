@@ -7830,6 +7830,35 @@ func (s *Server) protoToFHIRMap(resType string, protoBytes []byte) (map[string]a
 	return s.protoToFHIRMapWithMeta(resType, protoBytes, 0, time.Time{})
 }
 
+// decodeOperationBodyMap decodes a POST operation request body from either binary Proto3
+// (Parameters or fallbackResType) when Content-Type is protobuf, or FHIR JSON.
+func (s *Server) decodeOperationBodyMap(r *http.Request, body []byte, fallbackResType string) (map[string]any, error) {
+	if isProtoContentType(r) {
+		if pm, err := s.protoToFHIRMap("Parameters", body); err == nil {
+			if params, ok := pm["parameter"].([]any); ok && len(params) > 0 {
+				for _, p := range params {
+					if item, ok := p.(map[string]any); ok {
+						if n, _ := item["name"].(string); strings.TrimSpace(n) != "" && len(item) >= 2 {
+							return pm, nil
+						}
+					}
+				}
+			}
+		}
+		if fallbackResType != "" && fallbackResType != "Parameters" {
+			if rm, err := s.protoToFHIRMap(fallbackResType, body); err == nil {
+				return rm, nil
+			}
+		}
+		return s.protoToFHIRMap("Parameters", body)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	return payload, nil
+}
+
 func (s *Server) protoToFHIRMapWithMeta(resType string, protoBytes []byte, version int, lastUpdated time.Time) (map[string]any, error) {
 	md, ok := s.protoRegistry[resType]
 	if !ok {
