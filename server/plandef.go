@@ -2757,12 +2757,7 @@ func (s *Server) handleObservationLastN(w http.ResponseWriter, r *http.Request) 
 
 	if r.Method == http.MethodPost && r.Body != nil && r.ContentLength != 0 {
 		if body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024)); err == nil && len(bytes.TrimSpace(body)) > 0 {
-			var raw map[string]any
-			if isProtoContentType(r) {
-				raw, _ = s.protoToFHIRMap("Parameters", body)
-			} else {
-				_ = json.Unmarshal(body, &raw)
-			}
+			raw, _ := s.decodeOperationBodyMap(r, body, "Parameters")
 			if raw != nil {
 				if params, ok := raw["parameter"].([]any); ok {
 					for _, p := range params {
@@ -2982,12 +2977,7 @@ func (s *Server) handleObservationStats(w http.ResponseWriter, r *http.Request) 
 
 	if r.Method == http.MethodPost && r.Body != nil && r.ContentLength != 0 {
 		if body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024)); err == nil && len(bytes.TrimSpace(body)) > 0 {
-			var raw map[string]any
-			if isProtoContentType(r) {
-				raw, _ = s.protoToFHIRMap("Parameters", body)
-			} else {
-				_ = json.Unmarshal(body, &raw)
-			}
+			raw, _ := s.decodeOperationBodyMap(r, body, "Parameters")
 			if raw != nil {
 				if params, ok := raw["parameter"].([]any); ok {
 					for _, p := range params {
@@ -3603,45 +3593,46 @@ func (s *Server) handleAppointmentFind(w http.ResponseWriter, r *http.Request) {
 	locationParam := strings.TrimSpace(q.Get("location"))
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&bodyMap); err == nil {
-			if bodyMap["resourceType"] == "Parameters" {
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						val := extractParamString(pm)
-						switch name {
-						case "start":
-							if startParam == "" {
-								startParam = val
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && bodyMap != nil {
+				if bodyMap["resourceType"] == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "end":
-							if endParam == "" {
-								endParam = val
-							}
-						case "specialty":
-							if specialtyParam == "" {
-								specialtyParam = val
-							}
-						case "visit-type", "service-type":
-							if visitTypeParam == "" {
-								visitTypeParam = val
-							}
-						case "practitioner":
-							if practitionerParam == "" {
-								practitionerParam = val
-							}
-						case "organization":
-							if organizationParam == "" {
-								organizationParam = val
-							}
-						case "location":
-							if locationParam == "" {
-								locationParam = val
+							name, _ := pm["name"].(string)
+							val := extractParamString(pm)
+							switch name {
+							case "start":
+								if startParam == "" {
+									startParam = val
+								}
+							case "end":
+								if endParam == "" {
+									endParam = val
+								}
+							case "specialty":
+								if specialtyParam == "" {
+									specialtyParam = val
+								}
+							case "visit-type", "service-type":
+								if visitTypeParam == "" {
+									visitTypeParam = val
+								}
+							case "practitioner":
+								if practitionerParam == "" {
+									practitionerParam = val
+								}
+							case "organization":
+								if organizationParam == "" {
+									organizationParam = val
+								}
+							case "location":
+								if locationParam == "" {
+									locationParam = val
+								}
 							}
 						}
 					}
@@ -3796,9 +3787,7 @@ func (s *Server) handleAppointmentFind(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entries := append(proposedEntries, includeEntries...)
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", map[string]any{
 		"resourceType": "Bundle",
 		"id":           fmt.Sprintf("appointment-find-%d", time.Now().UTC().UnixNano()),
 		"type":         "searchset",
@@ -3911,36 +3900,37 @@ func (s *Server) handleAppointmentHoldOrBook(w http.ResponseWriter, r *http.Requ
 	var apptIDParam string
 
 	if r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "Appointment":
-				apptMap = bodyMap
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "appt-resource", "appointment", "resource":
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Appointment" {
-								apptMap = res
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Appointment"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "Appointment":
+					apptMap = bodyMap
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "appt-id", "appointment-id":
-							apptIDParam = extractParamString(pm)
-						case "slot-id", "slot":
-							if v := extractParamString(pm); v != "" {
-								slotRefs = append(slotRefs, v)
+							name, _ := pm["name"].(string)
+							switch name {
+							case "appt-resource", "appointment", "resource":
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Appointment" {
+									apptMap = res
+								}
+							case "appt-id", "appointment-id":
+								apptIDParam = extractParamString(pm)
+							case "slot-id", "slot":
+								if v := extractParamString(pm); v != "" {
+									slotRefs = append(slotRefs, v)
+								}
+							case "patient-id", "patient":
+								if v := extractParamString(pm); v != "" {
+									patientRefs = append(patientRefs, v)
+								}
+							case "comment":
+								comment = extractParamString(pm)
 							}
-						case "patient-id", "patient":
-							if v := extractParamString(pm); v != "" {
-								patientRefs = append(patientRefs, v)
-							}
-						case "comment":
-							comment = extractParamString(pm)
 						}
 					}
 				}
@@ -4130,9 +4120,7 @@ func (s *Server) handleAppointmentHoldOrBook(w http.ResponseWriter, r *http.Requ
 		"search": map[string]any{"mode": "outcome"},
 	})
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", map[string]any{
 		"resourceType": "Bundle",
 		"id":           "appointment-" + strings.TrimPrefix(opName, "$") + "-" + apptID,
 		"type":         "searchset",
@@ -4163,12 +4151,7 @@ func (s *Server) handleCapabilityStatementSubset(w http.ResponseWriter, r *http.
 
 	if r.Method == http.MethodPost && r.Body != nil {
 		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
-			var bodyMap map[string]any
-			if isProtoContentType(r) {
-				bodyMap, _ = s.protoToFHIRMap("Parameters", rawBody)
-			} else {
-				_ = json.Unmarshal(rawBody, &bodyMap)
-			}
+			bodyMap, _ := s.decodeOperationBodyMap(r, rawBody, "Parameters")
 			if bodyMap != nil && bodyMap["resourceType"] == "Parameters" {
 				if params, ok := bodyMap["parameter"].([]any); ok {
 					for _, rawP := range params {
@@ -4231,30 +4214,31 @@ func (s *Server) handleCapabilityStatementImplements(w http.ResponseWriter, r *h
 	var clientCap map[string]any
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "CapabilityStatement":
-				clientCap = bodyMap
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "canonical", "url", "client":
-							if canonicalParam == "" {
-								canonicalParam = extractParamString(pm)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "CapabilityStatement"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "CapabilityStatement":
+					clientCap = bodyMap
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "CapabilityStatement" {
-								clientCap = res
-							}
-						case "resource":
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "CapabilityStatement" {
-								clientCap = res
+							name, _ := pm["name"].(string)
+							switch name {
+							case "canonical", "url", "client":
+								if canonicalParam == "" {
+									canonicalParam = extractParamString(pm)
+								}
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "CapabilityStatement" {
+									clientCap = res
+								}
+							case "resource":
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "CapabilityStatement" {
+									clientCap = res
+								}
 							}
 						}
 					}
@@ -4445,27 +4429,28 @@ func (s *Server) handleStructureDefinitionSnapshot(w http.ResponseWriter, r *htt
 
 	var sdMap map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "StructureDefinition":
-				sdMap = bodyMap
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "definition", "resource":
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "StructureDefinition" {
-								sdMap = res
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "StructureDefinition"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "StructureDefinition":
+					sdMap = bodyMap
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "url":
-							if urlParam == "" {
-								urlParam = extractParamString(pm)
+							name, _ := pm["name"].(string)
+							switch name {
+							case "definition", "resource":
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "StructureDefinition" {
+									sdMap = res
+								}
+							case "url":
+								if urlParam == "" {
+									urlParam = extractParamString(pm)
+								}
 							}
 						}
 					}
@@ -4551,9 +4536,7 @@ func (s *Server) handleStructureDefinitionSnapshot(w http.ResponseWriter, r *htt
 		"element": elements,
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(sdMap)
+	s.writeOperationResponse(w, r, http.StatusOK, "StructureDefinition", sdMap)
 }
 
 func resolveStructureDefinitionResourceType(lookup string, registry map[string]protoreflect.MessageDescriptor) string {
@@ -4759,9 +4742,14 @@ func (s *Server) handleProcessMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var bodyMap map[string]any
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&bodyMap); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON payload for $process-message: "+err.Error())
+	rawBody, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read $process-message payload: "+err.Error())
+		return
+	}
+	bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Bundle")
+	if err != nil || bodyMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid payload for $process-message: %v", err))
 		return
 	}
 
@@ -4849,9 +4837,7 @@ func (s *Server) handleProcessMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if asyncMode {
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		s.writeOperationResponse(w, r, http.StatusAccepted, "OperationOutcome", map[string]any{
 			"resourceType": "OperationOutcome",
 			"issue": []map[string]any{
 				{
@@ -4887,9 +4873,7 @@ func (s *Server) handleProcessMessage(w http.ResponseWriter, r *http.Request) {
 		ackHeader["focus"] = focusList
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", map[string]any{
 		"resourceType": "Bundle",
 		"id":           "ack-bundle-" + inMsgID,
 		"type":         "message",
@@ -4936,9 +4920,14 @@ func (s *Server) handleStructureMapTransform(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var bodyMap map[string]any
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for StructureMap/$transform: "+err.Error())
+	rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read body for StructureMap/$transform: "+err.Error())
+		return
+	}
+	bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Parameters")
+	if err != nil || bodyMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid body for StructureMap/$transform: %v", err))
 		return
 	}
 
@@ -5001,9 +4990,11 @@ func (s *Server) handleStructureMapTransform(w http.ResponseWriter, r *http.Requ
 	}
 
 	transformed := executeStructureMapRules(smMap, contentMap)
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(transformed)
+	targetRT, _ := transformed["resourceType"].(string)
+	if targetRT == "" {
+		targetRT = "Basic"
+	}
+	s.writeOperationResponse(w, r, http.StatusOK, targetRT, transformed)
 }
 
 func executeStructureMapRules(smMap, contentMap map[string]any) map[string]any {
@@ -5158,24 +5149,25 @@ func (s *Server) handleNamingSystemPreferredID(w http.ResponseWriter, r *http.Re
 	typeParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("type")))
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&bodyMap); err == nil {
-			if bodyMap["resourceType"] == "Parameters" {
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "id":
-							if idParam == "" {
-								idParam = extractParamString(pm)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && bodyMap != nil {
+				if bodyMap["resourceType"] == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "type":
-							if typeParam == "" {
-								typeParam = strings.ToLower(extractParamString(pm))
+							name, _ := pm["name"].(string)
+							switch name {
+							case "id":
+								if idParam == "" {
+									idParam = extractParamString(pm)
+								}
+							case "type":
+								if typeParam == "" {
+									typeParam = strings.ToLower(extractParamString(pm))
+								}
 							}
 						}
 					}
@@ -5255,9 +5247,7 @@ func (s *Server) handleNamingSystemPreferredID(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter": []map[string]any{
 			{
@@ -5299,61 +5289,62 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 
 	var inlineClaim map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "Claim":
-				inlineClaim = bodyMap
-			case "Bundle":
-				if entries, ok := bodyMap["entry"].([]any); ok {
-					for _, rawE := range entries {
-						if em, ok := rawE.(map[string]any); ok {
-							if res, ok := em["resource"].(map[string]any); ok && res["resourceType"] == "Claim" {
-								inlineClaim = res
-								break
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Claim"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "Claim":
+					inlineClaim = bodyMap
+				case "Bundle":
+					if entries, ok := bodyMap["entry"].([]any); ok {
+						for _, rawE := range entries {
+							if em, ok := rawE.(map[string]any); ok {
+								if res, ok := em["resource"].(map[string]any); ok && res["resourceType"] == "Claim" {
+									inlineClaim = res
+									break
+								}
 							}
 						}
 					}
-				}
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "resource", "claim":
-							if res, ok := pm["resource"].(map[string]any); ok {
-								if res["resourceType"] == "Claim" {
-									inlineClaim = res
-								} else if res["resourceType"] == "Bundle" {
-									if entries, ok := res["entry"].([]any); ok {
-										for _, rawE := range entries {
-											if em, ok := rawE.(map[string]any); ok {
-												if er, ok := em["resource"].(map[string]any); ok && er["resourceType"] == "Claim" {
-													inlineClaim = er
-													break
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch name {
+							case "resource", "claim":
+								if res, ok := pm["resource"].(map[string]any); ok {
+									if res["resourceType"] == "Claim" {
+										inlineClaim = res
+									} else if res["resourceType"] == "Bundle" {
+										if entries, ok := res["entry"].([]any); ok {
+											for _, rawE := range entries {
+												if em, ok := rawE.(map[string]any); ok {
+													if er, ok := em["resource"].(map[string]any); ok && er["resourceType"] == "Claim" {
+														inlineClaim = er
+														break
+													}
 												}
 											}
 										}
 									}
+								} else if sVal := extractParamString(pm); sVal != "" && claimID == "" {
+									claimID = strings.TrimPrefix(sVal, "Claim/")
 								}
-							} else if sVal := extractParamString(pm); sVal != "" && claimID == "" {
-								claimID = strings.TrimPrefix(sVal, "Claim/")
-							}
-						case "patient":
-							if patientParam == "" {
-								patientParam = strings.TrimPrefix(extractParamString(pm), "Patient/")
-							}
-						case "preAuthRef":
-							if preAuthRef == "" {
-								preAuthRef = extractParamString(pm)
-							}
-						case "identifier":
-							if identifierParam == "" {
-								identifierParam = extractParamString(pm)
+							case "patient":
+								if patientParam == "" {
+									patientParam = strings.TrimPrefix(extractParamString(pm), "Patient/")
+								}
+							case "preAuthRef":
+								if preAuthRef == "" {
+									preAuthRef = extractParamString(pm)
+								}
+							case "identifier":
+								if identifierParam == "" {
+									identifierParam = extractParamString(pm)
+								}
 							}
 						}
 					}
@@ -5530,9 +5521,7 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", map[string]any{
 		"resourceType": "Bundle",
 		"id":           "pas-inquiry-response-" + firstNonEmptyStr(claimID, preAuthRef, "bundle"),
 		"type":         "collection",
@@ -5857,65 +5846,66 @@ func (s *Server) handleCodeSystemFindMatches(w http.ResponseWriter, r *http.Requ
 
 	var inlineCS map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "CodeSystem":
-				inlineCS = bodyMap
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "system", "url":
-							if sVal := extractParamString(pm); sVal != "" && systemURL == "" {
-								systemURL = sVal
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "CodeSystem"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "CodeSystem":
+					inlineCS = bodyMap
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "exact":
-							if b, ok := pm["valueBoolean"].(bool); ok {
-								exact = b
-							}
-						case "codeSystem":
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "CodeSystem" {
-								inlineCS = res
-							}
-						case "property":
-							if parts, ok := pm["part"].([]any); ok {
-								var pCode, pVal string
-								for _, rawPart := range parts {
-									partMap, ok := rawPart.(map[string]any)
-									if !ok {
-										continue
-									}
-									pName, _ := partMap["name"].(string)
-									switch pName {
-									case "code":
-										pCode = extractParamString(partMap)
-									case "value", "description":
-										pVal = extractParamString(partMap)
-										if pVal == "" {
-											if cm, ok := partMap["valueCoding"].(map[string]any); ok {
-												pVal, _ = cm["code"].(string)
-											} else if bVal, ok := partMap["valueBoolean"].(bool); ok {
-												pVal = strconv.FormatBool(bVal)
-											} else if iVal, ok := partMap["valueInteger"].(float64); ok {
-												pVal = strconv.Itoa(int(iVal))
+							name, _ := pm["name"].(string)
+							switch name {
+							case "system", "url":
+								if sVal := extractParamString(pm); sVal != "" && systemURL == "" {
+									systemURL = sVal
+								}
+							case "exact":
+								if b, ok := pm["valueBoolean"].(bool); ok {
+									exact = b
+								}
+							case "codeSystem":
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "CodeSystem" {
+									inlineCS = res
+								}
+							case "property":
+								if parts, ok := pm["part"].([]any); ok {
+									var pCode, pVal string
+									for _, rawPart := range parts {
+										partMap, ok := rawPart.(map[string]any)
+										if !ok {
+											continue
+										}
+										pName, _ := partMap["name"].(string)
+										switch pName {
+										case "code":
+											pCode = extractParamString(partMap)
+										case "value", "description":
+											pVal = extractParamString(partMap)
+											if pVal == "" {
+												if cm, ok := partMap["valueCoding"].(map[string]any); ok {
+													pVal, _ = cm["code"].(string)
+												} else if bVal, ok := partMap["valueBoolean"].(bool); ok {
+													pVal = strconv.FormatBool(bVal)
+												} else if iVal, ok := partMap["valueInteger"].(float64); ok {
+													pVal = strconv.Itoa(int(iVal))
+												}
 											}
 										}
 									}
-								}
-								if pCode != "" && pVal != "" {
-									propFilters = append(propFilters, findMatchPropertyFilter{Code: pCode, Value: pVal})
-								}
-							} else if sVal := extractParamString(pm); sVal != "" {
-								if k, v, ok := strings.Cut(sVal, "|"); ok {
-									propFilters = append(propFilters, findMatchPropertyFilter{Code: strings.TrimSpace(k), Value: strings.TrimSpace(v)})
-								} else {
-									propFilters = append(propFilters, findMatchPropertyFilter{Code: "display", Value: sVal})
+									if pCode != "" && pVal != "" {
+										propFilters = append(propFilters, findMatchPropertyFilter{Code: pCode, Value: pVal})
+									}
+								} else if sVal := extractParamString(pm); sVal != "" {
+									if k, v, ok := strings.Cut(sVal, "|"); ok {
+										propFilters = append(propFilters, findMatchPropertyFilter{Code: strings.TrimSpace(k), Value: strings.TrimSpace(v)})
+									} else {
+										propFilters = append(propFilters, findMatchPropertyFilter{Code: "display", Value: sVal})
+									}
 								}
 							}
 						}
@@ -6027,9 +6017,7 @@ func (s *Server) handleCodeSystemFindMatches(w http.ResponseWriter, r *http.Requ
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    matches,
 	})
@@ -6114,12 +6102,16 @@ func (s *Server) handleResourceConvert(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		if len(bytes.TrimSpace(rawBody)) == 0 {
-			writeOperationOutcome(w, http.StatusBadRequest, "required", "$convert requires a non-empty JSON payload")
+			writeOperationOutcome(w, http.StatusBadRequest, "required", "$convert requires a non-empty payload")
 			return
 		}
-		var bodyMap map[string]any
-		if err := json.Unmarshal(rawBody, &bodyMap); err != nil {
-			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON in $convert payload: "+err.Error())
+		defaultConvertType := strings.TrimSpace(r.PathValue("resourceType"))
+		if defaultConvertType == "" || strings.HasPrefix(defaultConvertType, "$") {
+			defaultConvertType = "Parameters"
+		}
+		bodyMap, err := s.decodeOperationBodyMap(r, rawBody, defaultConvertType)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid payload in $convert: "+err.Error())
 			return
 		}
 
@@ -6289,24 +6281,25 @@ func (s *Server) handleListFind(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&bodyMap); err == nil {
-			if bodyMap["resourceType"] == "Parameters" {
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						pName, _ := pm["name"].(string)
-						switch pName {
-						case "patient", "subject":
-							if patientParam == "" {
-								patientParam = strings.TrimPrefix(extractParamString(pm), "Patient/")
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && bodyMap != nil {
+				if bodyMap["resourceType"] == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "name", "code":
-							if nameParam == "" {
-								nameParam = extractParamString(pm)
+							pName, _ := pm["name"].(string)
+							switch pName {
+							case "patient", "subject":
+								if patientParam == "" {
+									patientParam = strings.TrimPrefix(extractParamString(pm), "Patient/")
+								}
+							case "name", "code":
+								if nameParam == "" {
+									nameParam = extractParamString(pm)
+								}
 							}
 						}
 					}
@@ -6364,9 +6357,7 @@ func (s *Server) handleListFind(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if codeMatch {
-				w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-				w.WriteHeader(http.StatusOK)
-				_ = json.NewEncoder(w).Encode(lMap)
+				s.writeOperationResponse(w, r, http.StatusOK, "List", lMap)
 				return
 			}
 		}
@@ -6464,9 +6455,7 @@ func (s *Server) handleListFind(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(synthList)
+	s.writeOperationResponse(w, r, http.StatusOK, "List", synthList)
 }
 
 func extractClinicalDisplay(rMap map[string]any) string {
@@ -6511,37 +6500,38 @@ func (s *Server) handleChargeItemApply(w http.ResponseWriter, r *http.Request) {
 	var accountRef string
 
 	if r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "ChargeItem":
-				inlineCI = bodyMap
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "chargeItem", "resource", "content":
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "ChargeItem" {
-								inlineCI = res
-							} else if sVal := extractParamString(pm); sVal != "" && ciID == "" {
-								ciID = strings.TrimPrefix(sVal, "ChargeItem/")
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "ChargeItem"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "ChargeItem":
+					inlineCI = bodyMap
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "chargeItemDefinition", "definition":
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "ChargeItemDefinition" {
-								inlineCIDef = res
-							} else if sVal := extractParamString(pm); sVal != "" && defCanonical == "" {
-								defCanonical = sVal
-							}
-						case "account":
-							if refMap, ok := pm["valueReference"].(map[string]any); ok {
-								accountRef, _ = refMap["reference"].(string)
-							} else if sVal := extractParamString(pm); sVal != "" {
-								accountRef = sVal
+							name, _ := pm["name"].(string)
+							switch name {
+							case "chargeItem", "resource", "content":
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "ChargeItem" {
+									inlineCI = res
+								} else if sVal := extractParamString(pm); sVal != "" && ciID == "" {
+									ciID = strings.TrimPrefix(sVal, "ChargeItem/")
+								}
+							case "chargeItemDefinition", "definition":
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "ChargeItemDefinition" {
+									inlineCIDef = res
+								} else if sVal := extractParamString(pm); sVal != "" && defCanonical == "" {
+									defCanonical = sVal
+								}
+							case "account":
+								if refMap, ok := pm["valueReference"].(map[string]any); ok {
+									accountRef, _ = refMap["reference"].(string)
+								} else if sVal := extractParamString(pm); sVal != "" {
+									accountRef = sVal
+								}
 							}
 						}
 					}
@@ -6709,9 +6699,7 @@ func (s *Server) handleChargeItemApply(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(ciMap)
+	s.writeOperationResponse(w, r, http.StatusOK, "ChargeItem", ciMap)
 }
 
 // =============================================================================
@@ -6741,61 +6729,62 @@ func (s *Server) handleCoverageEligibilitySubmit(w http.ResponseWriter, r *http.
 	var bundleEntries []map[string]any
 
 	if r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "CoverageEligibilityRequest":
-				cerMap = bodyMap
-			case "Bundle":
-				if entries, ok := bodyMap["entry"].([]any); ok {
-					for _, rawE := range entries {
-						em, ok := rawE.(map[string]any)
-						if !ok {
-							continue
-						}
-						res, ok := em["resource"].(map[string]any)
-						if !ok {
-							continue
-						}
-						rt, _ := res["resourceType"].(string)
-						if rt == "CoverageEligibilityRequest" && cerMap == nil {
-							cerMap = res
-						} else if rt != "" {
-							bundleEntries = append(bundleEntries, res)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "CoverageEligibilityRequest"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "CoverageEligibilityRequest":
+					cerMap = bodyMap
+				case "Bundle":
+					if entries, ok := bodyMap["entry"].([]any); ok {
+						for _, rawE := range entries {
+							em, ok := rawE.(map[string]any)
+							if !ok {
+								continue
+							}
+							res, ok := em["resource"].(map[string]any)
+							if !ok {
+								continue
+							}
+							rt, _ := res["resourceType"].(string)
+							if rt == "CoverageEligibilityRequest" && cerMap == nil {
+								cerMap = res
+							} else if rt != "" {
+								bundleEntries = append(bundleEntries, res)
+							}
 						}
 					}
-				}
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "resource", "coverageEligibilityRequest", "request":
-							if res, ok := pm["resource"].(map[string]any); ok {
-								switch res["resourceType"] {
-								case "CoverageEligibilityRequest":
-									cerMap = res
-								case "Bundle":
-									if entries, ok := res["entry"].([]any); ok {
-										for _, rawE := range entries {
-											if em, ok := rawE.(map[string]any); ok {
-												if er, ok := em["resource"].(map[string]any); ok {
-													if er["resourceType"] == "CoverageEligibilityRequest" && cerMap == nil {
-														cerMap = er
-													} else {
-														bundleEntries = append(bundleEntries, er)
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch name {
+							case "resource", "coverageEligibilityRequest", "request":
+								if res, ok := pm["resource"].(map[string]any); ok {
+									switch res["resourceType"] {
+									case "CoverageEligibilityRequest":
+										cerMap = res
+									case "Bundle":
+										if entries, ok := res["entry"].([]any); ok {
+											for _, rawE := range entries {
+												if em, ok := rawE.(map[string]any); ok {
+													if er, ok := em["resource"].(map[string]any); ok {
+														if er["resourceType"] == "CoverageEligibilityRequest" && cerMap == nil {
+															cerMap = er
+														} else {
+															bundleEntries = append(bundleEntries, er)
+														}
 													}
 												}
 											}
 										}
 									}
+								} else if sVal := extractParamString(pm); sVal != "" && reqID == "" {
+									reqID = strings.TrimPrefix(sVal, "CoverageEligibilityRequest/")
 								}
-							} else if sVal := extractParamString(pm); sVal != "" && reqID == "" {
-								reqID = strings.TrimPrefix(sVal, "CoverageEligibilityRequest/")
 							}
 						}
 					}
@@ -7111,9 +7100,7 @@ func (s *Server) handleCoverageEligibilitySubmit(w http.ResponseWriter, r *http.
 		respMap = savedResp
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(respMap)
+	s.writeOperationResponse(w, r, http.StatusOK, "CoverageEligibilityResponse", respMap)
 }
 
 // =============================================================================
@@ -7149,9 +7136,14 @@ func (s *Server) handleCDexSubmitAttachment(w http.ResponseWriter, r *http.Reque
 	tenant := r.PathValue("tenant")
 	taskID := strings.TrimPrefix(strings.TrimSpace(r.PathValue("id")), "Task/")
 
-	var bodyMap map[string]any
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&bodyMap); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid JSON body for $submit-attachment: %v", err))
+	rawBody, err := io.ReadAll(io.LimitReader(r.Body, 8<<20))
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("failed to read body for $submit-attachment: %v", err))
+		return
+	}
+	bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Parameters")
+	if err != nil || bodyMap == nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid body for $submit-attachment: %v", err))
 		return
 	}
 
@@ -7411,9 +7403,7 @@ func (s *Server) handleCDexSubmitAttachment(w http.ResponseWriter, r *http.Reque
 		_, _, _, _, _ = s.upsertResourceMap(r.Context(), tenant, matchedTask)
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "OperationOutcome", map[string]any{
 		"resourceType": "OperationOutcome",
 		"issue": []map[string]any{
 			{
@@ -7462,35 +7452,36 @@ func (s *Server) handleLibraryEvaluate(w http.ResponseWriter, r *http.Request) {
 
 	var inlineLib map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "Library":
-				inlineLib = bodyMap
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch strings.ToLower(strings.TrimSpace(name)) {
-						case "library", "url", "target":
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Library" {
-								inlineLib = res
-							} else if sVal := extractParamString(pm); sVal != "" && libCanonical == "" {
-								libCanonical = sVal
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Library"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "Library":
+					inlineLib = bodyMap
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "subject", "patient":
-							if sVal := extractParamString(pm); sVal != "" && subject == "" {
-								subject = sVal
-							} else if refMap, ok := pm["valueReference"].(map[string]any); ok && subject == "" {
-								subject, _ = refMap["reference"].(string)
-							}
-						case "expression":
-							if sVal := extractParamString(pm); sVal != "" {
-								requestedExprs = append(requestedExprs, sVal)
+							name, _ := pm["name"].(string)
+							switch strings.ToLower(strings.TrimSpace(name)) {
+							case "library", "url", "target":
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Library" {
+									inlineLib = res
+								} else if sVal := extractParamString(pm); sVal != "" && libCanonical == "" {
+									libCanonical = sVal
+								}
+							case "subject", "patient":
+								if sVal := extractParamString(pm); sVal != "" && subject == "" {
+									subject = sVal
+								} else if refMap, ok := pm["valueReference"].(map[string]any); ok && subject == "" {
+									subject, _ = refMap["reference"].(string)
+								}
+							case "expression":
+								if sVal := extractParamString(pm); sVal != "" {
+									requestedExprs = append(requestedExprs, sVal)
+								}
 							}
 						}
 					}
@@ -7848,27 +7839,28 @@ func (s *Server) handlePatientHealthCardsIssue(w http.ResponseWriter, r *http.Re
 	}
 
 	if r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			if bodyMap["resourceType"] == "Parameters" {
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch strings.ToLower(strings.TrimSpace(name)) {
-						case "credentialtype", "credential-type":
-							if sVal := extractParamString(pm); sVal != "" {
-								credTypes = append(credTypes, sVal)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && bodyMap != nil {
+				if bodyMap["resourceType"] == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "patient", "subject", "id":
-							if sVal := extractParamString(pm); sVal != "" && patID == "" {
-								patID = strings.TrimPrefix(sVal, "Patient/")
-							} else if refMap, ok := pm["valueReference"].(map[string]any); ok && patID == "" {
-								if refStr, _ := refMap["reference"].(string); refStr != "" {
-									patID = strings.TrimPrefix(refStr, "Patient/")
+							name, _ := pm["name"].(string)
+							switch strings.ToLower(strings.TrimSpace(name)) {
+							case "credentialtype", "credential-type":
+								if sVal := extractParamString(pm); sVal != "" {
+									credTypes = append(credTypes, sVal)
+								}
+							case "patient", "subject", "id":
+								if sVal := extractParamString(pm); sVal != "" && patID == "" {
+									patID = strings.TrimPrefix(sVal, "Patient/")
+								} else if refMap, ok := pm["valueReference"].(map[string]any); ok && patID == "" {
+									if refStr, _ := refMap["reference"].(string); refStr != "" {
+										patID = strings.TrimPrefix(refStr, "Patient/")
+									}
 								}
 							}
 						}
@@ -8050,9 +8042,7 @@ func (s *Server) handlePatientHealthCardsIssue(w http.ResponseWriter, r *http.Re
 	_, _ = mac.Write([]byte(signingInput))
 	jwsToken := signingInput + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter": []map[string]any{
 			{
@@ -8092,23 +8082,24 @@ func (s *Server) handlePatientPCDE(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			if bodyMap["resourceType"] == "Parameters" {
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch strings.ToLower(strings.TrimSpace(name)) {
-						case "patient", "subject", "memberid", "id":
-							if sVal := extractParamString(pm); sVal != "" && patID == "" {
-								patID = strings.TrimPrefix(sVal, "Patient/")
-							} else if refMap, ok := pm["valueReference"].(map[string]any); ok && patID == "" {
-								if refStr, _ := refMap["reference"].(string); refStr != "" {
-									patID = strings.TrimPrefix(refStr, "Patient/")
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && bodyMap != nil {
+				if bodyMap["resourceType"] == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch strings.ToLower(strings.TrimSpace(name)) {
+							case "patient", "subject", "memberid", "id":
+								if sVal := extractParamString(pm); sVal != "" && patID == "" {
+									patID = strings.TrimPrefix(sVal, "Patient/")
+								} else if refMap, ok := pm["valueReference"].(map[string]any); ok && patID == "" {
+									if refStr, _ := refMap["reference"].(string); refStr != "" {
+										patID = strings.TrimPrefix(refStr, "Patient/")
+									}
 								}
 							}
 						}
@@ -8273,9 +8264,7 @@ func (s *Server) handlePatientPCDE(w http.ResponseWriter, r *http.Request) {
 	)
 	allEntries = append(allEntries, supportingEntries...)
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", map[string]any{
 		"resourceType": "Bundle",
 		"id":           "pcde-bundle-" + patID,
 		"meta": map[string]any{
@@ -8322,35 +8311,36 @@ func (s *Server) handleResearchStudyEvaluateEligibility(w http.ResponseWriter, r
 	var inlineStudy map[string]any
 	var inlineGroup map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "ResearchStudy":
-				inlineStudy = bodyMap
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch strings.ToLower(strings.TrimSpace(name)) {
-						case "study", "researchstudy", "research-study":
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "ResearchStudy" {
-								inlineStudy = res
-							} else if sVal := extractParamString(pm); sVal != "" && studyID == "" {
-								studyID = strings.TrimPrefix(sVal, "ResearchStudy/")
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "ResearchStudy"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "ResearchStudy":
+					inlineStudy = bodyMap
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "enrollment", "group":
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Group" {
-								inlineGroup = res
-							}
-						case "subject", "patient":
-							if sVal := extractParamString(pm); sVal != "" && subject == "" {
-								subject = sVal
-							} else if refMap, ok := pm["valueReference"].(map[string]any); ok && subject == "" {
-								subject, _ = refMap["reference"].(string)
+							name, _ := pm["name"].(string)
+							switch strings.ToLower(strings.TrimSpace(name)) {
+							case "study", "researchstudy", "research-study":
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "ResearchStudy" {
+									inlineStudy = res
+								} else if sVal := extractParamString(pm); sVal != "" && studyID == "" {
+									studyID = strings.TrimPrefix(sVal, "ResearchStudy/")
+								}
+							case "enrollment", "group":
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Group" {
+									inlineGroup = res
+								}
+							case "subject", "patient":
+								if sVal := extractParamString(pm); sVal != "" && subject == "" {
+									subject = sVal
+								} else if refMap, ok := pm["valueReference"].(map[string]any); ok && subject == "" {
+									subject, _ = refMap["reference"].(string)
+								}
 							}
 						}
 					}
@@ -8558,9 +8548,7 @@ func (s *Server) handleResearchStudyEvaluateEligibility(w http.ResponseWriter, r
 		"individual":   map[string]any{"reference": "Patient/" + patID},
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter": []map[string]any{
 			{
@@ -8610,42 +8598,43 @@ func (s *Server) handleClaimPredetermine(w http.ResponseWriter, r *http.Request)
 	var bundleEntries []map[string]any
 
 	if r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "Claim":
-				claimMap = bodyMap
-			case "Bundle":
-				if entries, ok := bodyMap["entry"].([]any); ok {
-					for _, rawE := range entries {
-						if em, ok := rawE.(map[string]any); ok {
-							if res, ok := em["resource"].(map[string]any); ok {
-								if res["resourceType"] == "Claim" && claimMap == nil {
-									claimMap = res
-								} else {
-									bundleEntries = append(bundleEntries, res)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Claim"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "Claim":
+					claimMap = bodyMap
+				case "Bundle":
+					if entries, ok := bodyMap["entry"].([]any); ok {
+						for _, rawE := range entries {
+							if em, ok := rawE.(map[string]any); ok {
+								if res, ok := em["resource"].(map[string]any); ok {
+									if res["resourceType"] == "Claim" && claimMap == nil {
+										claimMap = res
+									} else {
+										bundleEntries = append(bundleEntries, res)
+									}
 								}
 							}
 						}
 					}
-				}
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						if pm, ok := rawP.(map[string]any); ok {
-							if res, ok := pm["resource"].(map[string]any); ok {
-								switch res["resourceType"] {
-								case "Claim":
-									claimMap = res
-								case "Bundle":
-									if entries, ok := res["entry"].([]any); ok {
-										for _, rawE := range entries {
-											if em, ok := rawE.(map[string]any); ok {
-												if er, ok := em["resource"].(map[string]any); ok {
-													if er["resourceType"] == "Claim" && claimMap == nil {
-														claimMap = er
-													} else {
-														bundleEntries = append(bundleEntries, er)
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							if pm, ok := rawP.(map[string]any); ok {
+								if res, ok := pm["resource"].(map[string]any); ok {
+									switch res["resourceType"] {
+									case "Claim":
+										claimMap = res
+									case "Bundle":
+										if entries, ok := res["entry"].([]any); ok {
+											for _, rawE := range entries {
+												if em, ok := rawE.(map[string]any); ok {
+													if er, ok := em["resource"].(map[string]any); ok {
+														if er["resourceType"] == "Claim" && claimMap == nil {
+															claimMap = er
+														} else {
+															bundleEntries = append(bundleEntries, er)
+														}
 													}
 												}
 											}
@@ -8882,9 +8871,7 @@ func (s *Server) handleClaimPredetermine(w http.ResponseWriter, r *http.Request)
 		respMap = savedResp
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(respMap)
+	s.writeOperationResponse(w, r, http.StatusOK, "ClaimResponse", respMap)
 }
 
 func (s *Server) handleMeasureEvaluateRiskConditionCategory(w http.ResponseWriter, r *http.Request) {
@@ -8905,29 +8892,30 @@ func (s *Server) handleMeasureEvaluateRiskConditionCategory(w http.ResponseWrite
 	periodEnd := strings.TrimSpace(q.Get("periodEnd"))
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&bodyMap); err == nil {
-			if bodyMap["resourceType"] == "Parameters" {
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						val := extractParamString(pm)
-						switch strings.ToLower(strings.TrimSpace(name)) {
-						case "subject", "patient":
-							if subjectParam == "" {
-								subjectParam = val
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && bodyMap != nil {
+				if bodyMap["resourceType"] == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "periodstart":
-							if periodStart == "" {
-								periodStart = val
-							}
-						case "periodend":
-							if periodEnd == "" {
-								periodEnd = val
+							name, _ := pm["name"].(string)
+							val := extractParamString(pm)
+							switch strings.ToLower(strings.TrimSpace(name)) {
+							case "subject", "patient":
+								if subjectParam == "" {
+									subjectParam = val
+								}
+							case "periodstart":
+								if periodStart == "" {
+									periodStart = val
+								}
+							case "periodend":
+								if periodEnd == "" {
+									periodEnd = val
+								}
 							}
 						}
 					}
@@ -9166,9 +9154,7 @@ func (s *Server) handleMeasureEvaluateRiskConditionCategory(w http.ResponseWrite
 	)
 	entries = append(entries, evidenceEntries...)
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", map[string]any{
 		"resourceType": "Bundle",
 		"id":           "ra-bundle-" + cleanID(patID),
 		"type":         "collection",
@@ -9197,37 +9183,38 @@ func (s *Server) handleScheduleFind(w http.ResponseWriter, r *http.Request) {
 	specialtyParam := strings.TrimSpace(q.Get("specialty"))
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&bodyMap); err == nil {
-			if bodyMap["resourceType"] == "Parameters" {
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						val := extractParamString(pm)
-						switch strings.ToLower(strings.TrimSpace(name)) {
-						case "start":
-							if startParam == "" {
-								startParam = val
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && bodyMap != nil {
+				if bodyMap["resourceType"] == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "end":
-							if endParam == "" {
-								endParam = val
-							}
-						case "actor", "practitioner", "location":
-							if actorParam == "" {
-								actorParam = val
-							}
-						case "service-type", "visit-type":
-							if serviceTypeParam == "" {
-								serviceTypeParam = val
-							}
-						case "specialty":
-							if specialtyParam == "" {
-								specialtyParam = val
+							name, _ := pm["name"].(string)
+							val := extractParamString(pm)
+							switch strings.ToLower(strings.TrimSpace(name)) {
+							case "start":
+								if startParam == "" {
+									startParam = val
+								}
+							case "end":
+								if endParam == "" {
+									endParam = val
+								}
+							case "actor", "practitioner", "location":
+								if actorParam == "" {
+									actorParam = val
+								}
+							case "service-type", "visit-type":
+								if serviceTypeParam == "" {
+									serviceTypeParam = val
+								}
+							case "specialty":
+								if specialtyParam == "" {
+									specialtyParam = val
+								}
 							}
 						}
 					}
@@ -9391,9 +9378,7 @@ func (s *Server) handleScheduleFind(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", map[string]any{
 		"resourceType": "Bundle",
 		"type":         "searchset",
 		"total":        matchCount,
@@ -9437,54 +9422,55 @@ func (s *Server) handleOrderCRD(w http.ResponseWriter, r *http.Request) {
 	var covRef string
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "ServiceRequest", "MedicationRequest":
-				orderMap = bodyMap
-				if rt, _ := bodyMap["resourceType"].(string); rt != "" {
-					resType = rt
-				}
-			case "Bundle":
-				if entries, ok := bodyMap["entry"].([]any); ok {
-					for _, rawE := range entries {
-						if em, ok := rawE.(map[string]any); ok {
-							if res, ok := em["resource"].(map[string]any); ok {
-								switch res["resourceType"] {
-								case "ServiceRequest", "MedicationRequest":
-									if orderMap == nil {
-										orderMap = res
-										resType, _ = res["resourceType"].(string)
-									}
-								case "Coverage":
-									if cid, _ := res["id"].(string); cid != "" && covRef == "" {
-										covRef = "Coverage/" + cid
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, resType); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "ServiceRequest", "MedicationRequest":
+					orderMap = bodyMap
+					if rt, _ := bodyMap["resourceType"].(string); rt != "" {
+						resType = rt
+					}
+				case "Bundle":
+					if entries, ok := bodyMap["entry"].([]any); ok {
+						for _, rawE := range entries {
+							if em, ok := rawE.(map[string]any); ok {
+								if res, ok := em["resource"].(map[string]any); ok {
+									switch res["resourceType"] {
+									case "ServiceRequest", "MedicationRequest":
+										if orderMap == nil {
+											orderMap = res
+											resType, _ = res["resourceType"].(string)
+										}
+									case "Coverage":
+										if cid, _ := res["id"].(string); cid != "" && covRef == "" {
+											covRef = "Coverage/" + cid
+										}
 									}
 								}
 							}
 						}
 					}
-				}
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						if res, ok := pm["resource"].(map[string]any); ok {
-							switch res["resourceType"] {
-							case "ServiceRequest", "MedicationRequest":
-								orderMap = res
-								resType, _ = res["resourceType"].(string)
-							case "Coverage":
-								if cid, _ := res["id"].(string); cid != "" {
-									covRef = "Coverage/" + cid
-								}
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						} else if strings.EqualFold(name, "coverage") {
-							covRef = extractParamString(pm)
+							name, _ := pm["name"].(string)
+							if res, ok := pm["resource"].(map[string]any); ok {
+								switch res["resourceType"] {
+								case "ServiceRequest", "MedicationRequest":
+									orderMap = res
+									resType, _ = res["resourceType"].(string)
+								case "Coverage":
+									if cid, _ := res["id"].(string); cid != "" {
+										covRef = "Coverage/" + cid
+									}
+								}
+							} else if strings.EqualFold(name, "coverage") {
+								covRef = extractParamString(pm)
+							}
 						}
 					}
 				}
@@ -9617,9 +9603,7 @@ func (s *Server) handleOrderCRD(w http.ResponseWriter, r *http.Request) {
 	exts = append(exts, covInfoExt)
 	orderMap["extension"] = exts
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter": []map[string]any{
 			{
@@ -9666,23 +9650,24 @@ func (s *Server) handleAdverseEventEvaluate(w http.ResponseWriter, r *http.Reque
 
 	var aeMap map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "AdverseEvent":
-				aeMap = bodyMap
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "AdverseEvent" {
-							aeMap = res
-						} else if name, _ := pm["name"].(string); strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
-							if subjectParam == "" {
-								subjectParam = extractParamString(pm)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "AdverseEvent"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "AdverseEvent":
+					aeMap = bodyMap
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
+							}
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "AdverseEvent" {
+								aeMap = res
+							} else if name, _ := pm["name"].(string); strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
+								if subjectParam == "" {
+									subjectParam = extractParamString(pm)
+								}
 							}
 						}
 					}
@@ -9838,9 +9823,7 @@ func (s *Server) handleAdverseEventEvaluate(w http.ResponseWriter, r *http.Reque
 		detectedIssue["patient"] = map[string]any{"reference": "Patient/" + patID}
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter": []map[string]any{
 			{
@@ -9887,23 +9870,24 @@ func (s *Server) handleCarePlanEvaluate(w http.ResponseWriter, r *http.Request) 
 
 	var cpMap map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "CarePlan":
-				cpMap = bodyMap
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "CarePlan" {
-							cpMap = res
-						} else if name, _ := pm["name"].(string); strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
-							if subjectParam == "" {
-								subjectParam = extractParamString(pm)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "CarePlan"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "CarePlan":
+					cpMap = bodyMap
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
+							}
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "CarePlan" {
+								cpMap = res
+							} else if name, _ := pm["name"].(string); strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
+								if subjectParam == "" {
+									subjectParam = extractParamString(pm)
+								}
 							}
 						}
 					}
@@ -10110,9 +10094,7 @@ func (s *Server) handleCarePlanEvaluate(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter": []map[string]any{
 			{
@@ -10170,34 +10152,35 @@ func (s *Server) handlePatientImmDSForecast(w http.ResponseWriter, r *http.Reque
 
 	var inlineImms []map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			if bodyMap["resourceType"] == "Parameters" {
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						if res, ok := pm["resource"].(map[string]any); ok {
-							switch res["resourceType"] {
-							case "Patient":
-								if pid, _ := res["id"].(string); pid != "" && patID == "" {
-									patID = cleanID(pid)
-								}
-							case "Immunization":
-								inlineImms = append(inlineImms, res)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && bodyMap != nil {
+				if bodyMap["resourceType"] == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
 							}
-						} else {
-							switch strings.ToLower(strings.TrimSpace(name)) {
-							case "patient", "subject":
-								if patID == "" {
-									patID = cleanID(extractParamString(pm))
+							name, _ := pm["name"].(string)
+							if res, ok := pm["resource"].(map[string]any); ok {
+								switch res["resourceType"] {
+								case "Patient":
+									if pid, _ := res["id"].(string); pid != "" && patID == "" {
+										patID = cleanID(pid)
+									}
+								case "Immunization":
+									inlineImms = append(inlineImms, res)
 								}
-							case "assessmentdate":
-								if assessmentDate == "" {
-									assessmentDate = extractParamString(pm)
+							} else {
+								switch strings.ToLower(strings.TrimSpace(name)) {
+								case "patient", "subject":
+									if patID == "" {
+										patID = cleanID(extractParamString(pm))
+									}
+								case "assessmentdate":
+									if assessmentDate == "" {
+										assessmentDate = extractParamString(pm)
+									}
 								}
 							}
 						}
@@ -10426,62 +10409,63 @@ func (s *Server) handleGFESubmit(w http.ResponseWriter, r *http.Request) {
 	var patMap map[string]any
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "Claim":
-				claimMap = bodyMap
-			case "Bundle":
-				if entries, ok := bodyMap["entry"].([]any); ok {
-					for _, rawE := range entries {
-						if em, ok := rawE.(map[string]any); ok {
-							if res, ok := em["resource"].(map[string]any); ok {
-								switch res["resourceType"] {
-								case "Claim":
-									if claimMap == nil {
-										claimMap = res
-									}
-								case "Coverage":
-									if covMap == nil {
-										covMap = res
-									}
-								case "Patient":
-									if patMap == nil {
-										patMap = res
-										if pid, _ := res["id"].(string); pid != "" && patID == "" {
-											patID = cleanID(pid)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Claim"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "Claim":
+					claimMap = bodyMap
+				case "Bundle":
+					if entries, ok := bodyMap["entry"].([]any); ok {
+						for _, rawE := range entries {
+							if em, ok := rawE.(map[string]any); ok {
+								if res, ok := em["resource"].(map[string]any); ok {
+									switch res["resourceType"] {
+									case "Claim":
+										if claimMap == nil {
+											claimMap = res
+										}
+									case "Coverage":
+										if covMap == nil {
+											covMap = res
+										}
+									case "Patient":
+										if patMap == nil {
+											patMap = res
+											if pid, _ := res["id"].(string); pid != "" && patID == "" {
+												patID = cleanID(pid)
+											}
 										}
 									}
 								}
 							}
 						}
 					}
-				}
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						if res, ok := pm["resource"].(map[string]any); ok {
-							switch res["resourceType"] {
-							case "Claim":
-								claimMap = res
-							case "Bundle":
-								if entries, ok := res["entry"].([]any); ok {
-									for _, rawE := range entries {
-										if em, ok := rawE.(map[string]any); ok {
-											if er, ok := em["resource"].(map[string]any); ok && er["resourceType"] == "Claim" && claimMap == nil {
-												claimMap = er
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
+							}
+							if res, ok := pm["resource"].(map[string]any); ok {
+								switch res["resourceType"] {
+								case "Claim":
+									claimMap = res
+								case "Bundle":
+									if entries, ok := res["entry"].([]any); ok {
+										for _, rawE := range entries {
+											if em, ok := rawE.(map[string]any); ok {
+												if er, ok := em["resource"].(map[string]any); ok && er["resourceType"] == "Claim" && claimMap == nil {
+													claimMap = er
+												}
 											}
 										}
 									}
 								}
-							}
-						} else if name, _ := pm["name"].(string); strings.EqualFold(name, "patient") || strings.EqualFold(name, "subject") {
-							if patID == "" {
-								patID = cleanID(extractParamString(pm))
+							} else if name, _ := pm["name"].(string); strings.EqualFold(name, "patient") || strings.EqualFold(name, "subject") {
+								if patID == "" {
+									patID = cleanID(extractParamString(pm))
+								}
 							}
 						}
 					}
@@ -10679,9 +10663,7 @@ func (s *Server) handleGFESubmit(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", map[string]any{
 		"resourceType": "Bundle",
 		"id":           "pct-aeob-bundle-" + cleanID(claimID),
 		"meta": map[string]any{
@@ -10709,23 +10691,24 @@ func (s *Server) handleRiskAssessmentEvaluate(w http.ResponseWriter, r *http.Req
 	subjectParam := firstNonEmptyStr(strings.TrimSpace(q.Get("subject")), strings.TrimSpace(q.Get("patient")))
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&bodyMap); err == nil {
-			switch bodyMap["resourceType"] {
-			case "RiskAssessment":
-				if subj, ok := bodyMap["subject"].(map[string]any); ok && subjectParam == "" {
-					subjectParam, _ = subj["reference"].(string)
-				}
-			case "Parameters":
-				if params, ok := bodyMap["parameter"].([]any); ok {
-					for _, rawP := range params {
-						pm, ok := rawP.(map[string]any)
-						if !ok {
-							continue
-						}
-						if name, _ := pm["name"].(string); strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
-							if subjectParam == "" {
-								subjectParam = extractParamString(pm)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "RiskAssessment"); err == nil && bodyMap != nil {
+				switch bodyMap["resourceType"] {
+				case "RiskAssessment":
+					if subj, ok := bodyMap["subject"].(map[string]any); ok && subjectParam == "" {
+						subjectParam, _ = subj["reference"].(string)
+					}
+				case "Parameters":
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, rawP := range params {
+							pm, ok := rawP.(map[string]any)
+							if !ok {
+								continue
+							}
+							if name, _ := pm["name"].(string); strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
+								if subjectParam == "" {
+									subjectParam = extractParamString(pm)
+								}
 							}
 						}
 					}
@@ -10862,9 +10845,7 @@ func (s *Server) handleRiskAssessmentEvaluate(w http.ResponseWriter, r *http.Req
 		raMap = savedRA
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(raMap)
+	s.writeOperationResponse(w, r, http.StatusOK, "RiskAssessment", raMap)
 }
 
 // =============================================================================
@@ -10906,8 +10887,8 @@ func (s *Server) handleCompositionDocumentType(w http.ResponseWriter, r *http.Re
 						body = cm
 					}
 				}
-			} else {
-				_ = json.Unmarshal(rawBody, &body)
+			} else if bm, dErr := s.decodeOperationBodyMap(r, rawBody, "Composition"); dErr == nil {
+				body = bm
 			}
 			if body != nil {
 				switch body["resourceType"] {
@@ -11016,29 +10997,30 @@ func (s *Server) handleGroupATRMember(w http.ResponseWriter, r *http.Request) {
 	var periodMap map[string]any
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			if body["resourceType"] == "Parameters" {
-				params, _ := body["parameter"].([]any)
-				for _, p := range params {
-					pm, ok := p.(map[string]any)
-					if !ok {
-						continue
-					}
-					name, _ := pm["name"].(string)
-					switch name {
-					case "memberId", "patient", "member":
-						if vs := extractParamString(pm); vs != "" {
-							memberRef = strings.TrimSpace(vs)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
+				if body["resourceType"] == "Parameters" {
+					params, _ := body["parameter"].([]any)
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
 						}
-						if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Patient" {
-							if id, _ := res["id"].(string); id != "" {
-								memberRef = "Patient/" + id
+						name, _ := pm["name"].(string)
+						switch name {
+						case "memberId", "patient", "member":
+							if vs := extractParamString(pm); vs != "" {
+								memberRef = strings.TrimSpace(vs)
 							}
-						}
-					case "attributionPeriod", "period":
-						if vp, ok := pm["valuePeriod"].(map[string]any); ok {
-							periodMap = vp
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Patient" {
+								if id, _ := res["id"].(string); id != "" {
+									memberRef = "Patient/" + id
+								}
+							}
+						case "attributionPeriod", "period":
+							if vp, ok := pm["valuePeriod"].(map[string]any); ok {
+								periodMap = vp
+							}
 						}
 					}
 				}
@@ -11145,9 +11127,7 @@ func (s *Server) handleGroupATRMember(w http.ResponseWriter, r *http.Request) {
 		if _, _, _, savedGroup, uErr := s.upsertResourceMap(r.Context(), tenant, groupMap); uErr == nil && savedGroup != nil {
 			groupMap = savedGroup
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(groupMap)
+		s.writeOperationResponse(w, r, http.StatusOK, "Group", groupMap)
 		return
 	}
 
@@ -11178,9 +11158,7 @@ func (s *Server) handleGroupATRMember(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handleMedicationKnowledgeAndInteractions implements:
@@ -11206,41 +11184,42 @@ func (s *Server) handleMedicationKnowledgeAndInteractions(w http.ResponseWriter,
 
 	var medReqMap map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			switch body["resourceType"] {
-			case "MedicationRequest":
-				medReqMap = body
-				if id, _ := body["id"].(string); id != "" && resID == "" {
-					resID = id
-				}
-			case "Parameters":
-				params, _ := body["parameter"].([]any)
-				for _, p := range params {
-					pm, ok := p.(map[string]any)
-					if !ok {
-						continue
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "MedicationRequest"); err == nil && body != nil {
+				switch body["resourceType"] {
+				case "MedicationRequest":
+					medReqMap = body
+					if id, _ := body["id"].(string); id != "" && resID == "" {
+						resID = id
 					}
-					name, _ := pm["name"].(string)
-					switch name {
-					case "code", "rxnorm":
-						if vs := extractParamString(pm); vs != "" && codeParam == "" {
-							codeParam = strings.TrimSpace(vs)
+				case "Parameters":
+					params, _ := body["parameter"].([]any)
+					for _, p := range params {
+						pm, ok := p.(map[string]any)
+						if !ok {
+							continue
 						}
-						if vCoding, ok := pm["valueCoding"].(map[string]any); ok {
-							if c, _ := vCoding["code"].(string); c != "" && codeParam == "" {
-								codeParam = strings.TrimSpace(c)
+						name, _ := pm["name"].(string)
+						switch name {
+						case "code", "rxnorm":
+							if vs := extractParamString(pm); vs != "" && codeParam == "" {
+								codeParam = strings.TrimSpace(vs)
 							}
-						}
-					case "patient", "subject":
-						if vs := extractParamString(pm); vs != "" && patID == "" {
-							patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
-						}
-					case "medicationRequest", "resource":
-						if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "MedicationRequest" {
-							medReqMap = res
-							if id, _ := res["id"].(string); id != "" && resID == "" {
-								resID = id
+							if vCoding, ok := pm["valueCoding"].(map[string]any); ok {
+								if c, _ := vCoding["code"].(string); c != "" && codeParam == "" {
+									codeParam = strings.TrimSpace(c)
+								}
+							}
+						case "patient", "subject":
+							if vs := extractParamString(pm); vs != "" && patID == "" {
+								patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+							}
+						case "medicationRequest", "resource":
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "MedicationRequest" {
+								medReqMap = res
+								if id, _ := res["id"].(string); id != "" && resID == "" {
+									resID = id
+								}
 							}
 						}
 					}
@@ -11253,9 +11232,7 @@ func (s *Server) handleMedicationKnowledgeAndInteractions(w http.ResponseWriter,
 		if resID != "" {
 			if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "MedicationKnowledge", resID); err == nil && rec != nil {
 				if mkMap, cErr := s.protoToFHIRMapWithMeta("MedicationKnowledge", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-					w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-					w.WriteHeader(http.StatusOK)
-					_ = json.NewEncoder(w).Encode(mkMap)
+					s.writeOperationResponse(w, r, http.StatusOK, "MedicationKnowledge", mkMap)
 					return
 				}
 			}
@@ -11311,9 +11288,7 @@ func (s *Server) handleMedicationKnowledgeAndInteractions(w http.ResponseWriter,
 		if _, _, _, savedMK, uErr := s.upsertResourceMap(r.Context(), tenant, mkMap); uErr == nil && savedMK != nil {
 			mkMap = savedMK
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(mkMap)
+		s.writeOperationResponse(w, r, http.StatusOK, "MedicationKnowledge", mkMap)
 		return
 	}
 
@@ -11436,9 +11411,7 @@ func (s *Server) handleMedicationKnowledgeAndInteractions(w http.ResponseWriter,
 		"parameter":    allParams,
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // =============================================================================
@@ -11465,21 +11438,22 @@ func (s *Server) handleProcessNotification(w http.ResponseWriter, r *http.Reques
 	var bundleMap map[string]any
 
 	if r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&body); err == nil {
-			switch body["resourceType"] {
-			case "Bundle":
-				bundleMap = body
-			case "Parameters":
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						pm, ok := p.(map[string]any)
-						if !ok {
-							continue
-						}
-						if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Bundle" {
-							bundleMap = res
-							break
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Bundle"); err == nil && body != nil {
+				switch body["resourceType"] {
+				case "Bundle":
+					bundleMap = body
+				case "Parameters":
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							pm, ok := p.(map[string]any)
+							if !ok {
+								continue
+							}
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Bundle" {
+								bundleMap = res
+								break
+							}
 						}
 					}
 				}
@@ -11578,9 +11552,7 @@ func (s *Server) handleProcessNotification(w http.ResponseWriter, r *http.Reques
 		"entry":     outEntries,
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(ackBundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", ackBundle)
 }
 
 // handlePatientIHEPix implements GET/POST /fhir/r4/{tenant}/Patient/$ihe-pix
@@ -11605,33 +11577,34 @@ func (s *Server) handlePatientIHEPix(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			if body["resourceType"] == "Parameters" {
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						pm, ok := p.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "sourceIdentifier":
-							if vs := extractParamString(pm); vs != "" && sourceIdent == "" {
-								sourceIdent = strings.TrimSpace(vs)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
+				if body["resourceType"] == "Parameters" {
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							pm, ok := p.(map[string]any)
+							if !ok {
+								continue
 							}
-							if vi, ok := pm["valueIdentifier"].(map[string]any); ok && sourceIdent == "" {
-								sys, _ := vi["system"].(string)
-								val, _ := vi["value"].(string)
-								if sys != "" && val != "" {
-									sourceIdent = sys + "|" + val
-								} else if val != "" {
-									sourceIdent = val
+							name, _ := pm["name"].(string)
+							switch name {
+							case "sourceIdentifier":
+								if vs := extractParamString(pm); vs != "" && sourceIdent == "" {
+									sourceIdent = strings.TrimSpace(vs)
 								}
-							}
-						case "targetSystem":
-							if vs := extractParamString(pm); vs != "" {
-								targetSystems = append(targetSystems, strings.TrimSpace(vs))
+								if vi, ok := pm["valueIdentifier"].(map[string]any); ok && sourceIdent == "" {
+									sys, _ := vi["system"].(string)
+									val, _ := vi["value"].(string)
+									if sys != "" && val != "" {
+										sourceIdent = sys + "|" + val
+									} else if val != "" {
+										sourceIdent = val
+									}
+								}
+							case "targetSystem":
+								if vs := extractParamString(pm); vs != "" {
+									targetSystems = append(targetSystems, strings.TrimSpace(vs))
+								}
 							}
 						}
 					}
@@ -11726,36 +11699,37 @@ func (s *Server) handleServiceRequestCollectSpecimen(w http.ResponseWriter, r *h
 
 	var srMap map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			switch body["resourceType"] {
-			case "ServiceRequest":
-				srMap = body
-				if id, _ := body["id"].(string); id != "" && srID == "" {
-					srID = cleanID(id)
-				}
-			case "Parameters":
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						pm, ok := p.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "id", "serviceRequest":
-							if vs := extractParamString(pm); vs != "" && srID == "" {
-								srID = cleanID(strings.TrimPrefix(vs, "ServiceRequest/"))
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "ServiceRequest"); err == nil && body != nil {
+				switch body["resourceType"] {
+				case "ServiceRequest":
+					srMap = body
+					if id, _ := body["id"].(string); id != "" && srID == "" {
+						srID = cleanID(id)
+					}
+				case "Parameters":
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							pm, ok := p.(map[string]any)
+							if !ok {
+								continue
 							}
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "ServiceRequest" {
-								srMap = res
-								if id, _ := res["id"].(string); id != "" && srID == "" {
-									srID = cleanID(id)
+							name, _ := pm["name"].(string)
+							switch name {
+							case "id", "serviceRequest":
+								if vs := extractParamString(pm); vs != "" && srID == "" {
+									srID = cleanID(strings.TrimPrefix(vs, "ServiceRequest/"))
 								}
-							}
-						case "collector":
-							if vs := extractParamString(pm); vs != "" && collectorRef == "" {
-								collectorRef = strings.TrimSpace(vs)
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "ServiceRequest" {
+									srMap = res
+									if id, _ := res["id"].(string); id != "" && srID == "" {
+										srID = cleanID(id)
+									}
+								}
+							case "collector":
+								if vs := extractParamString(pm); vs != "" && collectorRef == "" {
+									collectorRef = strings.TrimSpace(vs)
+								}
 							}
 						}
 					}
@@ -11836,9 +11810,7 @@ func (s *Server) handleServiceRequestCollectSpecimen(w http.ResponseWriter, r *h
 		specMap = savedSpec
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(specMap)
+	s.writeOperationResponse(w, r, http.StatusOK, "Specimen", specMap)
 }
 
 // handleDiagnosticReportEvaluate implements GET/POST /fhir/r4/{tenant}/DiagnosticReport/$evaluate
@@ -11857,30 +11829,31 @@ func (s *Server) handleDiagnosticReportEvaluate(w http.ResponseWriter, r *http.R
 
 	var drMap map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			switch body["resourceType"] {
-			case "DiagnosticReport":
-				drMap = body
-				if id, _ := body["id"].(string); id != "" && drID == "" {
-					drID = cleanID(id)
-				}
-			case "Parameters":
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						pm, ok := p.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						if name == "id" || name == "diagnosticReport" || name == "resource" {
-							if vs := extractParamString(pm); vs != "" && drID == "" {
-								drID = cleanID(strings.TrimPrefix(vs, "DiagnosticReport/"))
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "DiagnosticReport"); err == nil && body != nil {
+				switch body["resourceType"] {
+				case "DiagnosticReport":
+					drMap = body
+					if id, _ := body["id"].(string); id != "" && drID == "" {
+						drID = cleanID(id)
+					}
+				case "Parameters":
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							pm, ok := p.(map[string]any)
+							if !ok {
+								continue
 							}
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "DiagnosticReport" {
-								drMap = res
-								if id, _ := res["id"].(string); id != "" && drID == "" {
-									drID = cleanID(id)
+							name, _ := pm["name"].(string)
+							if name == "id" || name == "diagnosticReport" || name == "resource" {
+								if vs := extractParamString(pm); vs != "" && drID == "" {
+									drID = cleanID(strings.TrimPrefix(vs, "DiagnosticReport/"))
+								}
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "DiagnosticReport" {
+									drMap = res
+									if id, _ := res["id"].(string); id != "" && drID == "" {
+										drID = cleanID(id)
+									}
 								}
 							}
 						}
@@ -12086,34 +12059,35 @@ func (s *Server) handlePatientBulkMemberMatch(w http.ResponseWriter, r *http.Req
 	var memberPatients []map[string]any
 
 	if r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&body); err == nil {
-			if body["resourceType"] == "Parameters" {
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						pm, ok := p.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						if strings.EqualFold(name, "MemberBundle") {
-							if parts, ok := pm["part"].([]any); ok {
-								for _, rawPt := range parts {
-									ptm, ok := rawPt.(map[string]any)
-									if !ok {
-										continue
-									}
-									pName, _ := ptm["name"].(string)
-									if strings.EqualFold(pName, "MemberPatient") {
-										if res, ok := ptm["resource"].(map[string]any); ok && res["resourceType"] == "Patient" {
-											memberPatients = append(memberPatients, res)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
+				if body["resourceType"] == "Parameters" {
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							pm, ok := p.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							if strings.EqualFold(name, "MemberBundle") {
+								if parts, ok := pm["part"].([]any); ok {
+									for _, rawPt := range parts {
+										ptm, ok := rawPt.(map[string]any)
+										if !ok {
+											continue
+										}
+										pName, _ := ptm["name"].(string)
+										if strings.EqualFold(pName, "MemberPatient") {
+											if res, ok := ptm["resource"].(map[string]any); ok && res["resourceType"] == "Patient" {
+												memberPatients = append(memberPatients, res)
+											}
 										}
 									}
 								}
-							}
-						} else if strings.EqualFold(name, "MemberPatient") {
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Patient" {
-								memberPatients = append(memberPatients, res)
+							} else if strings.EqualFold(name, "MemberPatient") {
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Patient" {
+									memberPatients = append(memberPatients, res)
+								}
 							}
 						}
 					}
@@ -12229,9 +12203,7 @@ func (s *Server) handlePatientBulkMemberMatch(w http.ResponseWriter, r *http.Req
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handleDaVinciDataExport implements GET/POST /fhir/r4/{tenant}/Group/{id}/$davinci-data-export
@@ -12314,9 +12286,7 @@ func (s *Server) handleDaVinciDataExport(w http.ResponseWriter, r *http.Request)
 		"entry":        entries,
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleEncounterADTOps implements:
@@ -12338,32 +12308,33 @@ func (s *Server) handleEncounterADTOps(w http.ResponseWriter, r *http.Request) {
 	classCode := strings.TrimSpace(q.Get("class"))
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			if body["resourceType"] == "Parameters" {
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						pm, ok := p.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "patient", "subject":
-							if vs := extractParamString(pm); vs != "" && patRef == "" {
-								patRef = strings.TrimSpace(vs)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
+				if body["resourceType"] == "Parameters" {
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							pm, ok := p.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "location", "destination":
-							if vs := extractParamString(pm); vs != "" && locRef == "" {
-								locRef = strings.TrimSpace(vs)
-							}
-						case "class":
-							if vs := extractParamString(pm); vs != "" && classCode == "" {
-								classCode = strings.TrimSpace(vs)
-							}
-						case "id", "encounter":
-							if vs := extractParamString(pm); vs != "" && encID == "" {
-								encID = cleanID(strings.TrimPrefix(vs, "Encounter/"))
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if vs := extractParamString(pm); vs != "" && patRef == "" {
+									patRef = strings.TrimSpace(vs)
+								}
+							case "location", "destination":
+								if vs := extractParamString(pm); vs != "" && locRef == "" {
+									locRef = strings.TrimSpace(vs)
+								}
+							case "class":
+								if vs := extractParamString(pm); vs != "" && classCode == "" {
+									classCode = strings.TrimSpace(vs)
+								}
+							case "id", "encounter":
+								if vs := extractParamString(pm); vs != "" && encID == "" {
+									encID = cleanID(strings.TrimPrefix(vs, "Encounter/"))
+								}
 							}
 						}
 					}
@@ -12417,9 +12388,7 @@ func (s *Server) handleEncounterADTOps(w http.ResponseWriter, r *http.Request) {
 		if _, _, _, savedEnc, uErr := s.upsertResourceMap(r.Context(), tenant, encMap); uErr == nil && savedEnc != nil {
 			encMap = savedEnc
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(encMap)
+		s.writeOperationResponse(w, r, http.StatusOK, "Encounter", encMap)
 		return
 	}
 
@@ -12460,9 +12429,7 @@ func (s *Server) handleEncounterADTOps(w http.ResponseWriter, r *http.Request) {
 		if _, _, _, savedEnc, uErr := s.upsertResourceMap(r.Context(), tenant, encMap); uErr == nil && savedEnc != nil {
 			encMap = savedEnc
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(encMap)
+		s.writeOperationResponse(w, r, http.StatusOK, "Encounter", encMap)
 		return
 	}
 
@@ -12531,9 +12498,7 @@ func (s *Server) handleEncounterADTOps(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handleMedicationRequestDispense implements GET/POST /fhir/r4/{tenant}/MedicationRequest/{id}/$dispense
@@ -12552,30 +12517,31 @@ func (s *Server) handleMedicationRequestDispense(w http.ResponseWriter, r *http.
 
 	var mrMap map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			switch body["resourceType"] {
-			case "MedicationRequest":
-				mrMap = body
-				if id, _ := body["id"].(string); id != "" && mrID == "" {
-					mrID = cleanID(id)
-				}
-			case "Parameters":
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						pm, ok := p.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						if name == "id" || name == "medicationRequest" || name == "resource" {
-							if vs := extractParamString(pm); vs != "" && mrID == "" {
-								mrID = cleanID(strings.TrimPrefix(vs, "MedicationRequest/"))
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "MedicationRequest"); err == nil && body != nil {
+				switch body["resourceType"] {
+				case "MedicationRequest":
+					mrMap = body
+					if id, _ := body["id"].(string); id != "" && mrID == "" {
+						mrID = cleanID(id)
+					}
+				case "Parameters":
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							pm, ok := p.(map[string]any)
+							if !ok {
+								continue
 							}
-							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "MedicationRequest" {
-								mrMap = res
-								if id, _ := res["id"].(string); id != "" && mrID == "" {
-									mrID = cleanID(id)
+							name, _ := pm["name"].(string)
+							if name == "id" || name == "medicationRequest" || name == "resource" {
+								if vs := extractParamString(pm); vs != "" && mrID == "" {
+									mrID = cleanID(strings.TrimPrefix(vs, "MedicationRequest/"))
+								}
+								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "MedicationRequest" {
+									mrMap = res
+									if id, _ := res["id"].(string); id != "" && mrID == "" {
+										mrID = cleanID(id)
+									}
 								}
 							}
 						}
@@ -12660,9 +12626,7 @@ func (s *Server) handleMedicationRequestDispense(w http.ResponseWriter, r *http.
 		mdMap = savedMD
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(mdMap)
+	s.writeOperationResponse(w, r, http.StatusOK, "MedicationDispense", mdMap)
 }
 
 // =============================================================================
@@ -12689,36 +12653,37 @@ func (s *Server) handlePlanNetDirectory(w http.ResponseWriter, r *http.Request) 
 	practitioner := strings.TrimSpace(q.Get("practitioner"))
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			if body["resourceType"] == "Parameters" {
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						pm, ok := p.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "specialty":
-							if vs := extractParamString(pm); vs != "" && specialty == "" {
-								specialty = strings.TrimSpace(vs)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
+				if body["resourceType"] == "Parameters" {
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							pm, ok := p.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "category":
-							if vs := extractParamString(pm); vs != "" && category == "" {
-								category = strings.TrimSpace(vs)
-							}
-						case "organization":
-							if vs := extractParamString(pm); vs != "" && organization == "" {
-								organization = strings.TrimSpace(vs)
-							}
-						case "location":
-							if vs := extractParamString(pm); vs != "" && location == "" {
-								location = strings.TrimSpace(vs)
-							}
-						case "practitioner":
-							if vs := extractParamString(pm); vs != "" && practitioner == "" {
-								practitioner = strings.TrimSpace(vs)
+							name, _ := pm["name"].(string)
+							switch name {
+							case "specialty":
+								if vs := extractParamString(pm); vs != "" && specialty == "" {
+									specialty = strings.TrimSpace(vs)
+								}
+							case "category":
+								if vs := extractParamString(pm); vs != "" && category == "" {
+									category = strings.TrimSpace(vs)
+								}
+							case "organization":
+								if vs := extractParamString(pm); vs != "" && organization == "" {
+									organization = strings.TrimSpace(vs)
+								}
+							case "location":
+								if vs := extractParamString(pm); vs != "" && location == "" {
+									location = strings.TrimSpace(vs)
+								}
+							case "practitioner":
+								if vs := extractParamString(pm); vs != "" && practitioner == "" {
+									practitioner = strings.TrimSpace(vs)
+								}
 							}
 						}
 					}
@@ -12820,9 +12785,7 @@ func (s *Server) handlePlanNetDirectory(w http.ResponseWriter, r *http.Request) 
 			"total":        matchedCount,
 			"entry":        entries,
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(bundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 		return
 	}
 
@@ -12911,9 +12874,7 @@ func (s *Server) handlePlanNetDirectory(w http.ResponseWriter, r *http.Request) 
 		"total":        len(entries),
 		"entry":        entries,
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleGravitySDOHReferral implements POST /fhir/r4/{tenant}/ServiceRequest/$sdoh-referral
@@ -12936,50 +12897,51 @@ func (s *Server) handleGravitySDOHReferral(w http.ResponseWriter, r *http.Reques
 	performerRef := strings.TrimSpace(q.Get("performer"))
 
 	if r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			if body["resourceType"] == "Parameters" {
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						pm, ok := p.(map[string]any)
-						if !ok {
-							continue
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
+				if body["resourceType"] == "Parameters" {
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							pm, ok := p.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							switch name {
+							case "patient", "subject":
+								if vs := extractParamString(pm); vs != "" && patRef == "" {
+									patRef = strings.TrimSpace(vs)
+								}
+							case "domain", "category", "code":
+								if vs := extractParamString(pm); vs != "" && domain == "" {
+									domain = strings.TrimSpace(vs)
+								}
+							case "performer":
+								if vs := extractParamString(pm); vs != "" && performerRef == "" {
+									performerRef = strings.TrimSpace(vs)
+								}
+							}
 						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "patient", "subject":
-							if vs := extractParamString(pm); vs != "" && patRef == "" {
-								patRef = strings.TrimSpace(vs)
-							}
-						case "domain", "category", "code":
-							if vs := extractParamString(pm); vs != "" && domain == "" {
-								domain = strings.TrimSpace(vs)
-							}
-						case "performer":
-							if vs := extractParamString(pm); vs != "" && performerRef == "" {
-								performerRef = strings.TrimSpace(vs)
-							}
+					}
+				} else {
+					if patRef == "" {
+						if v, ok := body["patient"].(string); ok && strings.TrimSpace(v) != "" {
+							patRef = strings.TrimSpace(v)
+						} else if v, ok := body["subject"].(string); ok && strings.TrimSpace(v) != "" {
+							patRef = strings.TrimSpace(v)
 						}
 					}
-				}
-			} else {
-				if patRef == "" {
-					if v, ok := body["patient"].(string); ok && strings.TrimSpace(v) != "" {
-						patRef = strings.TrimSpace(v)
-					} else if v, ok := body["subject"].(string); ok && strings.TrimSpace(v) != "" {
-						patRef = strings.TrimSpace(v)
+					if domain == "" {
+						if v, ok := body["domain"].(string); ok && strings.TrimSpace(v) != "" {
+							domain = strings.TrimSpace(v)
+						} else if v, ok := body["category"].(string); ok && strings.TrimSpace(v) != "" {
+							domain = strings.TrimSpace(v)
+						}
 					}
-				}
-				if domain == "" {
-					if v, ok := body["domain"].(string); ok && strings.TrimSpace(v) != "" {
-						domain = strings.TrimSpace(v)
-					} else if v, ok := body["category"].(string); ok && strings.TrimSpace(v) != "" {
-						domain = strings.TrimSpace(v)
-					}
-				}
-				if performerRef == "" {
-					if v, ok := body["performer"].(string); ok && strings.TrimSpace(v) != "" {
-						performerRef = strings.TrimSpace(v)
+					if performerRef == "" {
+						if v, ok := body["performer"].(string); ok && strings.TrimSpace(v) != "" {
+							performerRef = strings.TrimSpace(v)
+						}
 					}
 				}
 			}
@@ -13123,9 +13085,7 @@ func (s *Server) handleGravitySDOHReferral(w http.ResponseWriter, r *http.Reques
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handlePatientSDOHSummary implements GET/POST /fhir/r4/{tenant}/Patient/{id}/$sdoh-summary
@@ -13143,16 +13103,17 @@ func (s *Server) handlePatientSDOHSummary(w http.ResponseWriter, r *http.Request
 		patID = cleanID(strings.TrimPrefix(firstNonEmptyStr(q.Get("patient"), q.Get("subject"), q.Get("id")), "Patient/"))
 	}
 	if r.Method == http.MethodPost && r.Body != nil && patID == "" {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			if body["resourceType"] == "Parameters" {
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						if pm, ok := p.(map[string]any); ok {
-							name, _ := pm["name"].(string)
-							if name == "patient" || name == "subject" || name == "id" {
-								if vs := extractParamString(pm); vs != "" {
-									patID = cleanID(strings.TrimPrefix(vs, "Patient/"))
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
+				if body["resourceType"] == "Parameters" {
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							if pm, ok := p.(map[string]any); ok {
+								name, _ := pm["name"].(string)
+								if name == "patient" || name == "subject" || name == "id" {
+									if vs := extractParamString(pm); vs != "" {
+										patID = cleanID(strings.TrimPrefix(vs, "Patient/"))
+									}
 								}
 							}
 						}
@@ -13211,9 +13172,7 @@ func (s *Server) handlePatientSDOHSummary(w http.ResponseWriter, r *http.Request
 		"total":     len(entries),
 		"entry":     entries,
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleConsentEvaluate implements GET/POST /fhir/r4/{tenant}/Consent/$evaluate
@@ -13235,32 +13194,33 @@ func (s *Server) handleConsentEvaluate(w http.ResponseWriter, r *http.Request) {
 	purpose := strings.TrimSpace(q.Get("purpose"))
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			if body["resourceType"] == "Parameters" {
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						pm, ok := p.(map[string]any)
-						if !ok {
-							continue
-						}
-						name, _ := pm["name"].(string)
-						switch name {
-						case "id", "consent":
-							if vs := extractParamString(pm); vs != "" && consentID == "" {
-								consentID = cleanID(strings.TrimPrefix(vs, "Consent/"))
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
+				if body["resourceType"] == "Parameters" {
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							pm, ok := p.(map[string]any)
+							if !ok {
+								continue
 							}
-						case "patient", "subject":
-							if vs := extractParamString(pm); vs != "" && patRef == "" {
-								patRef = strings.TrimSpace(vs)
-							}
-						case "actor":
-							if vs := extractParamString(pm); vs != "" && actorRef == "" {
-								actorRef = strings.TrimSpace(vs)
-							}
-						case "purpose":
-							if vs := extractParamString(pm); vs != "" && purpose == "" {
-								purpose = strings.TrimSpace(vs)
+							name, _ := pm["name"].(string)
+							switch name {
+							case "id", "consent":
+								if vs := extractParamString(pm); vs != "" && consentID == "" {
+									consentID = cleanID(strings.TrimPrefix(vs, "Consent/"))
+								}
+							case "patient", "subject":
+								if vs := extractParamString(pm); vs != "" && patRef == "" {
+									patRef = strings.TrimSpace(vs)
+								}
+							case "actor":
+								if vs := extractParamString(pm); vs != "" && actorRef == "" {
+									actorRef = strings.TrimSpace(vs)
+								}
+							case "purpose":
+								if vs := extractParamString(pm); vs != "" && purpose == "" {
+									purpose = strings.TrimSpace(vs)
+								}
 							}
 						}
 					}
@@ -13371,9 +13331,7 @@ func (s *Server) handleConsentEvaluate(w http.ResponseWriter, r *http.Request) {
 		"resourceType": "Parameters",
 		"parameter":    outParams,
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // =============================================================================
@@ -13399,16 +13357,17 @@ func (s *Server) handleCarinBlueButton(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if r.Method == http.MethodPost && r.Body != nil && patID == "" {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			if body["resourceType"] == "Parameters" {
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						if pm, ok := p.(map[string]any); ok {
-							name, _ := pm["name"].(string)
-							if name == "patient" || name == "subject" || name == "id" {
-								if vs := extractParamString(pm); vs != "" {
-									patID = cleanID(strings.TrimPrefix(vs, "Patient/"))
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
+				if body["resourceType"] == "Parameters" {
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							if pm, ok := p.(map[string]any); ok {
+								name, _ := pm["name"].(string)
+								if name == "patient" || name == "subject" || name == "id" {
+									if vs := extractParamString(pm); vs != "" {
+										patID = cleanID(strings.TrimPrefix(vs, "Patient/"))
+									}
 								}
 							}
 						}
@@ -13597,9 +13556,7 @@ func (s *Server) handleCarinBlueButton(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(summaryResp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", summaryResp)
 		return
 	}
 
@@ -13613,9 +13570,7 @@ func (s *Server) handleCarinBlueButton(w http.ResponseWriter, r *http.Request) {
 		"total": len(entries),
 		"entry": entries,
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePublicHealthECR implements POST /fhir/r4/{tenant}/Encounter/{id}/$ecr-report,
@@ -13653,9 +13608,7 @@ func (s *Server) handlePublicHealthECR(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(planDef)
+		s.writeOperationResponse(w, r, http.StatusOK, "PlanDefinition", planDef)
 		return
 	}
 
@@ -13667,21 +13620,22 @@ func (s *Server) handlePublicHealthECR(w http.ResponseWriter, r *http.Request) {
 	patRef := firstNonEmptyStr(strings.TrimSpace(q.Get("patient")), strings.TrimSpace(q.Get("subject")))
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			if body["resourceType"] == "Parameters" {
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						if pm, ok := p.(map[string]any); ok {
-							name, _ := pm["name"].(string)
-							switch name {
-							case "encounter", "id":
-								if vs := extractParamString(pm); vs != "" && encID == "" {
-									encID = cleanID(strings.TrimPrefix(vs, "Encounter/"))
-								}
-							case "patient", "subject":
-								if vs := extractParamString(pm); vs != "" && patRef == "" {
-									patRef = strings.TrimSpace(vs)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
+				if body["resourceType"] == "Parameters" {
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							if pm, ok := p.(map[string]any); ok {
+								name, _ := pm["name"].(string)
+								switch name {
+								case "encounter", "id":
+									if vs := extractParamString(pm); vs != "" && encID == "" {
+										encID = cleanID(strings.TrimPrefix(vs, "Encounter/"))
+									}
+								case "patient", "subject":
+									if vs := extractParamString(pm); vs != "" && patRef == "" {
+										patRef = strings.TrimSpace(vs)
+									}
 								}
 							}
 						}
@@ -13857,9 +13811,7 @@ func (s *Server) handlePublicHealthECR(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handlePatientVRDRDecease implements POST /fhir/r4/{tenant}/Patient/{id}/$decease
@@ -13881,25 +13833,26 @@ func (s *Server) handlePatientVRDRDecease(w http.ResponseWriter, r *http.Request
 	causeDisplay := strings.TrimSpace(q.Get("causeDisplay"))
 
 	if r.Method == http.MethodPost && r.Body != nil {
-		var body map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&body); err == nil {
-			if body["resourceType"] == "Parameters" {
-				if params, ok := body["parameter"].([]any); ok {
-					for _, p := range params {
-						if pm, ok := p.(map[string]any); ok {
-							name, _ := pm["name"].(string)
-							switch name {
-							case "patient", "subject", "id":
-								if vs := extractParamString(pm); vs != "" && patID == "" {
-									patID = cleanID(strings.TrimPrefix(vs, "Patient/"))
-								}
-							case "deceasedDateTime":
-								if vs := extractParamString(pm); vs != "" && deceasedDT == "" {
-									deceasedDT = strings.TrimSpace(vs)
-								}
-							case "causeCode", "causeOfDeath":
-								if vs := extractParamString(pm); vs != "" && causeCode == "" {
-									causeCode = strings.TrimSpace(vs)
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
+				if body["resourceType"] == "Parameters" {
+					if params, ok := body["parameter"].([]any); ok {
+						for _, p := range params {
+							if pm, ok := p.(map[string]any); ok {
+								name, _ := pm["name"].(string)
+								switch name {
+								case "patient", "subject", "id":
+									if vs := extractParamString(pm); vs != "" && patID == "" {
+										patID = cleanID(strings.TrimPrefix(vs, "Patient/"))
+									}
+								case "deceasedDateTime":
+									if vs := extractParamString(pm); vs != "" && deceasedDT == "" {
+										deceasedDT = strings.TrimSpace(vs)
+									}
+								case "causeCode", "causeOfDeath":
+									if vs := extractParamString(pm); vs != "" && causeCode == "" {
+										causeCode = strings.TrimSpace(vs)
+									}
 								}
 							}
 						}
@@ -14025,9 +13978,7 @@ func (s *Server) handlePatientVRDRDecease(w http.ResponseWriter, r *http.Request
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handleMCODEOncology implements HL7 minimal Common Oncology Data Elements (mCODE v3.0.0)
@@ -14059,8 +14010,7 @@ func (s *Server) handleMCODEOncology(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
 		if len(bytes.TrimSpace(bodyBytes)) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil && bodyMap != nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -14245,9 +14195,7 @@ func (s *Server) handleMCODEOncology(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -14406,9 +14354,7 @@ func (s *Server) handleMCODEOncology(w http.ResponseWriter, r *http.Request) {
 		"total":     len(entries),
 		"entry":     entries,
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleDaVinciDrugFormulary implements HL7 Da Vinci PDex US Drug Formulary (v2.0.1)
@@ -14434,8 +14380,7 @@ func (s *Server) handleDaVinciDrugFormulary(w http.ResponseWriter, r *http.Reque
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
 		if len(bytes.TrimSpace(bodyBytes)) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil && bodyMap != nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -14587,9 +14532,7 @@ func (s *Server) handleDaVinciDrugFormulary(w http.ResponseWriter, r *http.Reque
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handleIHEMHDExchange implements IHE Mobile Access to Health Documents (IHE MHD v4.2.1)
@@ -14612,9 +14555,9 @@ func (s *Server) handleIHEMHDExchange(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		bodyBytes, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 8<<20))
-		var bundleMap map[string]any
-		if err := json.Unmarshal(bodyBytes, &bundleMap); err != nil {
-			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON Bundle body")
+		bundleMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Bundle")
+		if err != nil || bundleMap == nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid Bundle body")
 			return
 		}
 		if rt, _ := bundleMap["resourceType"].(string); rt != "Bundle" {
@@ -14678,9 +14621,7 @@ func (s *Server) handleIHEMHDExchange(w http.ResponseWriter, r *http.Request) {
 			"timestamp": nowStr,
 			"entry":     respEntries,
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(respBundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", respBundle)
 		return
 	}
 
@@ -14694,8 +14635,7 @@ func (s *Server) handleIHEMHDExchange(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
 		if len(bytes.TrimSpace(bodyBytes)) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil && bodyMap != nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -14765,9 +14705,7 @@ func (s *Server) handleIHEMHDExchange(w http.ResponseWriter, r *http.Request) {
 		"total":     len(entries),
 		"entry":     entries,
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(outBundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", outBundle)
 }
 
 // handleClinicalGenomics implements HL7 Clinical Genomics Reporting (v3.0.0)
@@ -14795,8 +14733,7 @@ func (s *Server) handleClinicalGenomics(w http.ResponseWriter, r *http.Request) 
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
 		if len(bytes.TrimSpace(bodyBytes)) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil && bodyMap != nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -14926,9 +14863,7 @@ func (s *Server) handleClinicalGenomics(w http.ResponseWriter, r *http.Request) 
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -15045,9 +14980,7 @@ func (s *Server) handleClinicalGenomics(w http.ResponseWriter, r *http.Request) 
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handlePACIOPostAcute implements HL7 PACIO Functional Status & Cognitive Status (v2.0.0)
@@ -15075,8 +15008,7 @@ func (s *Server) handlePACIOPostAcute(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
 		if len(bytes.TrimSpace(bodyBytes)) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -15221,9 +15153,7 @@ func (s *Server) handlePACIOPostAcute(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -15358,9 +15288,7 @@ func (s *Server) handlePACIOPostAcute(w http.ResponseWriter, r *http.Request) {
 		"total":     len(entries),
 		"entry":     entries,
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleNHSNHAISurveillance implements CDC National Healthcare Safety Network (NHSN HAI / dQM v1.1.0)
@@ -15385,9 +15313,7 @@ func (s *Server) handleNHSNHAISurveillance(w http.ResponseWriter, r *http.Reques
 			"title":   "CDC NHSN Acute Care Hospital Healthcare-Associated Infection (CLABSI/CAUTI) & Antimicrobial Use and Resistance (AUR) dQM",
 			"status":  "active",
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(measure)
+		s.writeOperationResponse(w, r, http.StatusOK, "Measure", measure)
 		return
 	}
 
@@ -15397,8 +15323,8 @@ func (s *Server) handleNHSNHAISurveillance(w http.ResponseWriter, r *http.Reques
 		encID = cleanID(strings.TrimPrefix(firstNonEmptyStr(q.Get("encounter"), q.Get("id")), "Encounter/"))
 	}
 	if r.Method == http.MethodPost && r.Body != nil && encID == "" {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 2<<20)).Decode(&bodyMap); err == nil {
+		rawBody, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil {
 			if bodyMap["resourceType"] == "Parameters" {
 				if params, ok := bodyMap["parameter"].([]any); ok {
 					for _, raw := range params {
@@ -15469,9 +15395,7 @@ func (s *Server) handleNHSNHAISurveillance(w http.ResponseWriter, r *http.Reques
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handleVulcanClinicalResearch implements HL7 Vulcan Real-World Data & Schedule of Activities (v1.0.0)
@@ -15496,8 +15420,7 @@ func (s *Server) handleVulcanClinicalResearch(w http.ResponseWriter, r *http.Req
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
 		if len(bytes.TrimSpace(bodyBytes)) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -15597,9 +15520,7 @@ func (s *Server) handleVulcanClinicalResearch(w http.ResponseWriter, r *http.Req
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -15668,9 +15589,7 @@ func (s *Server) handleVulcanClinicalResearch(w http.ResponseWriter, r *http.Req
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handleVitalRecordsBFDR implements HL7 Vital Records Birth and Fetal Death Reporting (BFDR v1.1.0)
@@ -15697,8 +15616,7 @@ func (s *Server) handleVitalRecordsBFDR(w http.ResponseWriter, r *http.Request) 
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
 		if len(bytes.TrimSpace(bodyBytes)) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -15863,9 +15781,7 @@ func (s *Server) handleVitalRecordsBFDR(w http.ResponseWriter, r *http.Request) 
 				{"fullUrl": "Observation/" + apgarID, "resource": apgarObs},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(bundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 		return
 	}
 
@@ -15890,9 +15806,7 @@ func (s *Server) handleVitalRecordsBFDR(w http.ResponseWriter, r *http.Request) 
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handleIHEPDQmAndITI68 implements IHE Patient Demographics Query for Mobile (PDQm v3.0.0 — Patient/$ihe-pdqm)
@@ -15921,8 +15835,7 @@ func (s *Server) handleIHEPDQmAndITI68(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 2<<20))
 		if len(bytes.TrimSpace(bodyBytes)) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -16015,9 +15928,7 @@ func (s *Server) handleIHEPDQmAndITI68(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -16066,9 +15977,7 @@ func (s *Server) handleIHEPDQmAndITI68(w http.ResponseWriter, r *http.Request) {
 		"total":     len(entries),
 		"entry":     entries,
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleFASTNationalDirectory implements HL7 FAST National Healthcare Directory (NDH v1.0.0)
@@ -16085,8 +15994,7 @@ func (s *Server) handleFASTNationalDirectory(w http.ResponseWriter, r *http.Requ
 
 	if r.Method == http.MethodPost && r.Body != nil {
 		if body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(body)) > 0 {
-			var m map[string]any
-			if json.Unmarshal(body, &m) == nil {
+			if m, err := s.decodeOperationBodyMap(r, body, "Parameters"); err == nil {
 				if m["resourceType"] == "Parameters" {
 					if plist, ok := m["parameter"].([]any); ok {
 						for _, p := range plist {
@@ -16199,9 +16107,7 @@ func (s *Server) handleFASTNationalDirectory(w http.ResponseWriter, r *http.Requ
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -16278,9 +16184,7 @@ func (s *Server) handleFASTNationalDirectory(w http.ResponseWriter, r *http.Requ
 		"total":        len(entries),
 		"entry":        entries,
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePhysicalActivityIG implements HL7 Physical Activity Implementation Guide (v1.0.0)
@@ -16301,8 +16205,7 @@ func (s *Server) handlePhysicalActivityIG(w http.ResponseWriter, r *http.Request
 
 	if r.Method == http.MethodPost && r.Body != nil {
 		if body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(body)) > 0 {
-			var m map[string]any
-			if json.Unmarshal(body, &m) == nil {
+			if m, err := s.decodeOperationBodyMap(r, body, "Parameters"); err == nil {
 				if m["resourceType"] == "Parameters" {
 					if plist, ok := m["parameter"].([]any); ok {
 						for _, p := range plist {
@@ -16422,9 +16325,7 @@ func (s *Server) handlePhysicalActivityIG(w http.ResponseWriter, r *http.Request
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -16607,9 +16508,7 @@ func (s *Server) handlePhysicalActivityIG(w http.ResponseWriter, r *http.Request
 			{"fullUrl": "Goal/pa-goal-" + patID, "resource": paGoal},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleVulcanEPIAndRegulatory implements HL7 Vulcan Electronic Medicinal Product Information (ePI v1.0.0) & BR&R
@@ -16627,8 +16526,7 @@ func (s *Server) handleVulcanEPIAndRegulatory(w http.ResponseWriter, r *http.Req
 
 	if r.Method == http.MethodPost && r.Body != nil {
 		if body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(body)) > 0 {
-			var m map[string]any
-			if json.Unmarshal(body, &m) == nil {
+			if m, err := s.decodeOperationBodyMap(r, body, "Parameters"); err == nil {
 				if m["resourceType"] == "Parameters" {
 					if plist, ok := m["parameter"].([]any); ok {
 						for _, p := range plist {
@@ -16759,9 +16657,7 @@ func (s *Server) handleVulcanEPIAndRegulatory(w http.ResponseWriter, r *http.Req
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -16838,9 +16734,7 @@ func (s *Server) handleVulcanEPIAndRegulatory(w http.ResponseWriter, r *http.Req
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(docBundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", docBundle)
 }
 
 // handlePublicHealthELR implements HL7 Public Health Electronic Laboratory Reporting (ELR v1.0.0)
@@ -16857,8 +16751,7 @@ func (s *Server) handlePublicHealthELR(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPost && r.Body != nil {
 		if body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(body)) > 0 {
-			var m map[string]any
-			if json.Unmarshal(body, &m) == nil {
+			if m, err := s.decodeOperationBodyMap(r, body, "Parameters"); err == nil {
 				if m["resourceType"] == "Parameters" {
 					if plist, ok := m["parameter"].([]any); ok {
 						for _, p := range plist {
@@ -16947,9 +16840,7 @@ func (s *Server) handlePublicHealthELR(w http.ResponseWriter, r *http.Request) {
 			"total":        len(entries),
 			"entry":        entries,
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(bundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 		return
 	}
 
@@ -17066,9 +16957,7 @@ func (s *Server) handlePublicHealthELR(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handlePACIOAdvanceDirectives implements HL7 PACIO Advance Directives Interoperability (ADI v1.0.0)
@@ -17088,8 +16977,7 @@ func (s *Server) handlePACIOAdvanceDirectives(w http.ResponseWriter, r *http.Req
 
 	if r.Method == http.MethodPost && r.Body != nil {
 		if body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(body)) > 0 {
-			var m map[string]any
-			if json.Unmarshal(body, &m) == nil {
+			if m, err := s.decodeOperationBodyMap(r, body, "Parameters"); err == nil {
 				if m["resourceType"] == "Parameters" {
 					if plist, ok := m["parameter"].([]any); ok {
 						for _, p := range plist {
@@ -17257,9 +17145,7 @@ func (s *Server) handlePACIOAdvanceDirectives(w http.ResponseWriter, r *http.Req
 				{"fullUrl": "Observation/" + prefObsID, "resource": prefObs},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(docBundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", docBundle)
 		return
 	}
 
@@ -17280,9 +17166,7 @@ func (s *Server) handlePACIOAdvanceDirectives(w http.ResponseWriter, r *http.Req
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handleDaVinciRiskAdjustmentWave37 implements HL7 Da Vinci Risk Adjustment (RA v2.0.0)
@@ -17300,8 +17184,7 @@ func (s *Server) handleDaVinciRiskAdjustmentWave37(w http.ResponseWriter, r *htt
 
 	if r.Method == http.MethodPost && r.Body != nil {
 		if body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(body)) > 0 {
-			var m map[string]any
-			if json.Unmarshal(body, &m) == nil {
+			if m, err := s.decodeOperationBodyMap(r, body, "Parameters"); err == nil {
 				if m["resourceType"] == "Parameters" {
 					if plist, ok := m["parameter"].([]any); ok {
 						for _, p := range plist {
@@ -17443,9 +17326,7 @@ func (s *Server) handleDaVinciRiskAdjustmentWave37(w http.ResponseWriter, r *htt
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -17531,9 +17412,7 @@ func (s *Server) handleDaVinciRiskAdjustmentWave37(w http.ResponseWriter, r *htt
 			{"fullUrl": "DetectedIssue/" + diID, "resource": diRes},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePublicHealthEICRAndRR implements HL7 Public Health Electronic Initial Case Reporting
@@ -17556,8 +17435,7 @@ func (s *Server) handlePublicHealthEICRAndRR(w http.ResponseWriter, r *http.Requ
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -17661,9 +17539,7 @@ func (s *Server) handlePublicHealthEICRAndRR(w http.ResponseWriter, r *http.Requ
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -17771,9 +17647,7 @@ func (s *Server) handlePublicHealthEICRAndRR(w http.ResponseWriter, r *http.Requ
 			{"fullUrl": "Condition/" + condID, "resource": condRes},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleDaVinciPDexAndFormularyWave38 implements HL7 Da Vinci Payer Data Exchange (PDex v2.0.0)
@@ -17796,8 +17670,7 @@ func (s *Server) handleDaVinciPDexAndFormularyWave38(w http.ResponseWriter, r *h
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -17895,9 +17768,7 @@ func (s *Server) handleDaVinciPDexAndFormularyWave38(w http.ResponseWriter, r *h
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -17941,9 +17812,7 @@ func (s *Server) handleDaVinciPDexAndFormularyWave38(w http.ResponseWriter, r *h
 			},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleODHOccupationalHealth implements HL7 Military Service History & Occupational Data
@@ -17965,8 +17834,7 @@ func (s *Server) handleODHOccupationalHealth(w http.ResponseWriter, r *http.Requ
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -18116,9 +17984,7 @@ func (s *Server) handleODHOccupationalHealth(w http.ResponseWriter, r *http.Requ
 				{"name": "militaryService", "resource": milObs},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -18134,9 +18000,7 @@ func (s *Server) handleODHOccupationalHealth(w http.ResponseWriter, r *http.Requ
 			{"fullUrl": "Observation/" + milID, "resource": milObs, "search": map[string]any{"mode": "match"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePublicHealthCCRRAndMedMorph implements HL7 Public Health Central Cancer Registry
@@ -18159,8 +18023,7 @@ func (s *Server) handlePublicHealthCCRRAndMedMorph(w http.ResponseWriter, r *htt
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -18244,9 +18107,7 @@ func (s *Server) handlePublicHealthCCRRAndMedMorph(w http.ResponseWriter, r *htt
 				{"fullUrl": "ValueSet/" + vsID, "resource": vsRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(bundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 		return
 	}
 
@@ -18367,9 +18228,7 @@ func (s *Server) handlePublicHealthCCRRAndMedMorph(w http.ResponseWriter, r *htt
 			{"fullUrl": "Condition/" + condID, "resource": condRes},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleDaVinciVBPR implements HL7 Da Vinci Value-Based Performance Reporting (VBPR v1.0.0):
@@ -18391,8 +18250,7 @@ func (s *Server) handleDaVinciVBPR(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -18517,15 +18375,11 @@ func (s *Server) handleDaVinciVBPR(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(mrRes)
+	s.writeOperationResponse(w, r, http.StatusOK, "MeasureReport", mrRes)
 }
 
 // handlePACIOCognitiveStatus implements HL7 PACIO Cognitive Status (PACIO CS v1.0.0):
@@ -18546,8 +18400,7 @@ func (s *Server) handlePACIOCognitiveStatus(w http.ResponseWriter, r *http.Reque
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -18642,9 +18495,7 @@ func (s *Server) handlePACIOCognitiveStatus(w http.ResponseWriter, r *http.Reque
 				{"name": "bimsObservation", "resource": obsRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -18659,9 +18510,7 @@ func (s *Server) handlePACIOCognitiveStatus(w http.ResponseWriter, r *http.Reque
 			{"fullUrl": "QuestionnaireResponse/" + qrID, "resource": qrRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleCarinRTPBC implements HL7 CARIN Real-Time Pharmacy Benefit Check (CARIN RTPBC v2.0.0):
@@ -18684,8 +18533,7 @@ func (s *Server) handleCarinRTPBC(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -18786,9 +18634,7 @@ func (s *Server) handleCarinRTPBC(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -18802,9 +18648,7 @@ func (s *Server) handleCarinRTPBC(w http.ResponseWriter, r *http.Request) {
 			{"fullUrl": "ClaimResponse/" + crID, "resource": crRes, "search": map[string]any{"mode": "match"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleFASTDigitalIdentity implements HL7 FAST Interoperable Digital Identity & Patient Matching (FAST Identity v2.0.0):
@@ -18865,9 +18709,7 @@ func (s *Server) handleFASTDigitalIdentity(w http.ResponseWriter, r *http.Reques
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(bundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 		return
 	}
 
@@ -18917,9 +18759,7 @@ func (s *Server) handleFASTDigitalIdentity(w http.ResponseWriter, r *http.Reques
 			{"name": "verificationResult", "resource": vrRes},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(resp)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 }
 
 // handlePACIOReassessmentTimepoints implements HL7 PACIO Re-Assessment Timepoints (PACIO RT v1.0.0):
@@ -18940,8 +18780,7 @@ func (s *Server) handlePACIOReassessmentTimepoints(w http.ResponseWriter, r *htt
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -19028,9 +18867,7 @@ func (s *Server) handlePACIOReassessmentTimepoints(w http.ResponseWriter, r *htt
 				{"name": "clinicalImpression", "resource": ciRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -19045,9 +18882,7 @@ func (s *Server) handlePACIOReassessmentTimepoints(w http.ResponseWriter, r *htt
 			{"fullUrl": "ClinicalImpression/" + ciID, "resource": ciRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePublicHealthVRDRWave41 implements HL7 Vital Records Death Reporting (VRDR v2.2.0):
@@ -19068,8 +18903,7 @@ func (s *Server) handlePublicHealthVRDRWave41(w http.ResponseWriter, r *http.Req
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -19156,9 +18990,7 @@ func (s *Server) handlePublicHealthVRDRWave41(w http.ResponseWriter, r *http.Req
 				{"fullUrl": "Condition/" + codID, "resource": codRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(bundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 		return
 	}
 
@@ -19262,9 +19094,7 @@ func (s *Server) handlePublicHealthVRDRWave41(w http.ResponseWriter, r *http.Req
 			{"fullUrl": "Observation/" + mannerID, "resource": mannerRes},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleDaVinciCDexTaskRequestAndPoll implements HL7 Da Vinci CDex v2.0.0 & HRex v1.0.0 Task-Based Data Request:
@@ -19286,8 +19116,7 @@ func (s *Server) handleDaVinciCDexTaskRequestAndPoll(w http.ResponseWriter, r *h
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -19394,9 +19223,7 @@ func (s *Server) handleDaVinciCDexTaskRequestAndPoll(w http.ResponseWriter, r *h
 	}
 
 	if op == "$cdex-request" {
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(taskRes)
+		s.writeOperationResponse(w, r, http.StatusOK, "Task", taskRes)
 		return
 	}
 
@@ -19411,9 +19238,7 @@ func (s *Server) handleDaVinciCDexTaskRequestAndPoll(w http.ResponseWriter, r *h
 			{"fullUrl": "Provenance/" + provID, "resource": provRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePACIOPFE implements HL7 PACIO Personal Functioning and Engagement (PACIO PFE v1.0.0):
@@ -19435,8 +19260,7 @@ func (s *Server) handlePACIOPFE(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && r.Body != nil {
 		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
 		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
-			var bodyMap map[string]any
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
 				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
 					if params, ok := bodyMap["parameter"].([]any); ok {
 						for _, raw := range params {
@@ -19536,9 +19360,7 @@ func (s *Server) handlePACIOPFE(w http.ResponseWriter, r *http.Request) {
 				{"name": "pfeGoal", "resource": goalRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -19553,9 +19375,7 @@ func (s *Server) handlePACIOPFE(w http.ResponseWriter, r *http.Request) {
 			{"fullUrl": "Goal/" + goalID, "resource": goalRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePublicHealthBFDRWave42 implements HL7 Public Health Vital Records Birth and Fetal Death Reporting (BFDR v1.1.0):
@@ -19574,8 +19394,7 @@ func (s *Server) handlePublicHealthBFDRWave42(w http.ResponseWriter, r *http.Req
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if err := json.Unmarshal(raw, &body); err == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				rt, _ := body["resourceType"].(string)
 				switch rt {
 				case "Parameters":
@@ -19764,9 +19583,7 @@ func (s *Server) handlePublicHealthBFDRWave42(w http.ResponseWriter, r *http.Req
 				{"fullUrl": "Observation/" + gaID, "resource": gaObs},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(ackBundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", ackBundle)
 		return
 	}
 
@@ -19817,9 +19634,7 @@ func (s *Server) handlePublicHealthBFDRWave42(w http.ResponseWriter, r *http.Req
 			{"fullUrl": "Observation/" + gaID, "resource": gaObs},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(docBundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", docBundle)
 }
 
 // handleDaVinciCDexWave42 implements HL7 Da Vinci Clinical Data Exchange (CDex v2.0.0) Attachment Communication & Questionnaire Request:
@@ -19837,8 +19652,7 @@ func (s *Server) handleDaVinciCDexWave42(w http.ResponseWriter, r *http.Request)
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if err := json.Unmarshal(raw, &body); err == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				rt, _ := body["resourceType"].(string)
 				switch rt {
 				case "Parameters":
@@ -19930,9 +19744,7 @@ func (s *Server) handleDaVinciCDexWave42(w http.ResponseWriter, r *http.Request)
 				{"name": "communication", "resource": commRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -20007,9 +19819,7 @@ func (s *Server) handleDaVinciCDexWave42(w http.ResponseWriter, r *http.Request)
 		taskRes = savedTask
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(taskRes)
+	s.writeOperationResponse(w, r, http.StatusOK, "Task", taskRes)
 }
 
 // handleMCODERadiotherapyWave42 implements HL7 CodeX / mCODE Radiation Therapy Treatment Data (CodeX RTTD v1.0.0 / mCODE v3.0.0):
@@ -20027,8 +19837,7 @@ func (s *Server) handleMCODERadiotherapyWave42(w http.ResponseWriter, r *http.Re
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if err := json.Unmarshal(raw, &body); err == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				rt, _ := body["resourceType"].(string)
 				switch rt {
 				case "Parameters":
@@ -20167,9 +19976,7 @@ func (s *Server) handleMCODERadiotherapyWave42(w http.ResponseWriter, r *http.Re
 	}
 
 	if op == "$mcode-radiotherapy-record" {
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(procRes)
+		s.writeOperationResponse(w, r, http.StatusOK, "Procedure", procRes)
 		return
 	}
 
@@ -20184,9 +19991,7 @@ func (s *Server) handleMCODERadiotherapyWave42(w http.ResponseWriter, r *http.Re
 			{"fullUrl": "Condition/" + condID, "resource": condRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePublicHealthIISWave43 implements HL7 Public Health Immunization Information System (IIS / AIRA) & ImmDS v2.0.0:
@@ -20206,8 +20011,7 @@ func (s *Server) handlePublicHealthIISWave43(w http.ResponseWriter, r *http.Requ
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if err := json.Unmarshal(raw, &body); err == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				rt, _ := body["resourceType"].(string)
 				switch rt {
 				case "Parameters":
@@ -20354,9 +20158,7 @@ func (s *Server) handlePublicHealthIISWave43(w http.ResponseWriter, r *http.Requ
 				{"name": "immunizationRecommendation", "resource": recRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -20372,9 +20174,7 @@ func (s *Server) handlePublicHealthIISWave43(w http.ResponseWriter, r *http.Requ
 			{"fullUrl": "ImmunizationRecommendation/" + recID, "resource": recRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleDaVinciCDexSignatureWave43 implements HL7 Da Vinci Clinical Data Exchange Digital Signatures (CDex v2.0.0):
@@ -20391,8 +20191,7 @@ func (s *Server) handleDaVinciCDexSignatureWave43(w http.ResponseWriter, r *http
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if err := json.Unmarshal(raw, &body); err == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				rt, _ := body["resourceType"].(string)
 				switch rt {
 				case "Parameters":
@@ -20450,9 +20249,7 @@ func (s *Server) handleDaVinciCDexSignatureWave43(w http.ResponseWriter, r *http
 				{"name": "outcome", "resource": outcome},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -20529,9 +20326,7 @@ func (s *Server) handleDaVinciCDexSignatureWave43(w http.ResponseWriter, r *http
 		signedBundle = savedBundle
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(signedBundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", signedBundle)
 }
 
 // handleMCODEGenomicsWave43 implements HL7 CodeX / mCODE Cancer Genomics & Tumor Marker Reporting (mCODE v3.0.0):
@@ -20551,8 +20346,7 @@ func (s *Server) handleMCODEGenomicsWave43(w http.ResponseWriter, r *http.Reques
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if err := json.Unmarshal(raw, &body); err == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				rt, _ := body["resourceType"].(string)
 				switch rt {
 				case "Parameters":
@@ -20716,9 +20510,7 @@ func (s *Server) handleMCODEGenomicsWave43(w http.ResponseWriter, r *http.Reques
 	}
 
 	if op == "$mcode-genomics-report" {
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(drRes)
+		s.writeOperationResponse(w, r, http.StatusOK, "DiagnosticReport", drRes)
 		return
 	}
 
@@ -20734,9 +20526,7 @@ func (s *Server) handleMCODEGenomicsWave43(w http.ResponseWriter, r *http.Reques
 			{"fullUrl": "Observation/" + tmObsID, "resource": tmObs, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePublicHealthNBSWave44 implements HL7 Public Health Newborn Screening & Early Hearing Detection (HL7 NBS / EHDI v1.0.0):
@@ -20760,8 +20550,7 @@ func (s *Server) handlePublicHealthNBSWave44(w http.ResponseWriter, r *http.Requ
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if err := json.Unmarshal(raw, &body); err == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				rt, _ := body["resourceType"].(string)
 				switch rt {
 				case "Parameters":
@@ -20906,9 +20695,7 @@ func (s *Server) handlePublicHealthNBSWave44(w http.ResponseWriter, r *http.Requ
 				{"name": "observation", "resource": obsRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(resp)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", resp)
 		return
 	}
 
@@ -20924,9 +20711,7 @@ func (s *Server) handlePublicHealthNBSWave44(w http.ResponseWriter, r *http.Requ
 			{"fullUrl": "Observation/" + obsID, "resource": obsRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleDaVinciPCTWave44 implements HL7 Da Vinci Patient Cost Transparency (PCT v2.0.0) AEOB Packet & GFE Coordination:
@@ -20948,8 +20733,7 @@ func (s *Server) handleDaVinciPCTWave44(w http.ResponseWriter, r *http.Request) 
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if err := json.Unmarshal(raw, &body); err == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				rt, _ := body["resourceType"].(string)
 				switch rt {
 				case "Parameters":
@@ -21013,9 +20797,7 @@ func (s *Server) handleDaVinciPCTWave44(w http.ResponseWriter, r *http.Request) 
 		if len(savedTask) > 0 {
 			taskRes = savedTask
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(taskRes)
+		s.writeOperationResponse(w, r, http.StatusOK, "Task", taskRes)
 		return
 	}
 
@@ -21083,9 +20865,7 @@ func (s *Server) handleDaVinciPCTWave44(w http.ResponseWriter, r *http.Request) 
 			{"fullUrl": "ExplanationOfBenefit/" + eobID, "resource": eobRes, "search": map[string]any{"mode": "match"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(packetBundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", packetBundle)
 }
 
 // handleVulcanICSRAndSOAWave44 implements HL7 Vulcan Clinical Research Adverse Event ICH E2B(R3) ICSR & Schedule of Activities (SOA):
@@ -21106,8 +20886,7 @@ func (s *Server) handleVulcanICSRAndSOAWave44(w http.ResponseWriter, r *http.Req
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if err := json.Unmarshal(raw, &body); err == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				rt, _ := body["resourceType"].(string)
 				switch rt {
 				case "Parameters":
@@ -21214,9 +20993,7 @@ func (s *Server) handleVulcanICSRAndSOAWave44(w http.ResponseWriter, r *http.Req
 				{"fullUrl": "AdverseEvent/" + aeID, "resource": aeRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(icsrBundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", icsrBundle)
 		return
 	}
 
@@ -21276,9 +21053,7 @@ func (s *Server) handleVulcanICSRAndSOAWave44(w http.ResponseWriter, r *http.Req
 			{"fullUrl": "Encounter/" + encID, "resource": encRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePublicHealthECRWave45 implements HL7 Public Health Electronic Case Reporting (eCR v2.1.2)
@@ -21302,8 +21077,7 @@ func (s *Server) handlePublicHealthECRWave45(w http.ResponseWriter, r *http.Requ
 	if r.Body != nil && r.Method == http.MethodPost {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -21440,9 +21214,7 @@ func (s *Server) handlePublicHealthECRWave45(w http.ResponseWriter, r *http.Requ
 				{"name": "communication", "resource": commRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(out)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", out)
 		return
 	}
 
@@ -21460,9 +21232,7 @@ func (s *Server) handlePublicHealthECRWave45(w http.ResponseWriter, r *http.Requ
 		"timestamp":    nowStr,
 		"entry":        entries,
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleGravitySDOHWave45 implements HL7 Gravity Project SDOH Clinical Care v2.2.0:
@@ -21484,8 +21254,7 @@ func (s *Server) handleGravitySDOHWave45(w http.ResponseWriter, r *http.Request,
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -21641,9 +21410,7 @@ func (s *Server) handleGravitySDOHWave45(w http.ResponseWriter, r *http.Request,
 				{"name": "goal", "resource": goalRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(out)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", out)
 		return
 	}
 
@@ -21729,9 +21496,7 @@ func (s *Server) handleGravitySDOHWave45(w http.ResponseWriter, r *http.Request,
 			{"name": "procedure", "resource": procRes},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(out)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", out)
 }
 
 // handleVulcanESourceWave45 implements HL7 Vulcan eSource & RWD v1.0.0:
@@ -21754,8 +21519,7 @@ func (s *Server) handleVulcanESourceWave45(w http.ResponseWriter, r *http.Reques
 	if r.Body != nil && r.Method == http.MethodPost {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -21857,9 +21621,7 @@ func (s *Server) handleVulcanESourceWave45(w http.ResponseWriter, r *http.Reques
 				{"name": "provenance", "resource": provRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(out)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", out)
 		return
 	}
 
@@ -21889,9 +21651,7 @@ func (s *Server) handleVulcanESourceWave45(w http.ResponseWriter, r *http.Reques
 		"timestamp":    nowStr,
 		"entry":        entries,
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePublicHealthELRAndCCRRWave46 implements HL7 Public Health Electronic Laboratory Reporting (ELR v1.0.0)
@@ -21911,8 +21671,7 @@ func (s *Server) handlePublicHealthELRAndCCRRWave46(w http.ResponseWriter, r *ht
 	if r.Body != nil && r.Method == http.MethodPost {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -22050,9 +21809,7 @@ func (s *Server) handlePublicHealthELRAndCCRRWave46(w http.ResponseWriter, r *ht
 				{"name": "communication", "resource": commRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(out)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", out)
 		return
 	}
 
@@ -22169,9 +21926,7 @@ func (s *Server) handlePublicHealthELRAndCCRRWave46(w http.ResponseWriter, r *ht
 			{"fullUrl": "Specimen/" + specID, "resource": specRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleCARINBBAndRTPBCWave46 implements HL7 CARIN Blue Button v2.0.0 (Oral & Vision EOBs)
@@ -22191,8 +21946,7 @@ func (s *Server) handleCARINBBAndRTPBCWave46(w http.ResponseWriter, r *http.Requ
 	if r.Body != nil && r.Method == http.MethodPost {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -22288,9 +22042,7 @@ func (s *Server) handleCARINBBAndRTPBCWave46(w http.ResponseWriter, r *http.Requ
 				{"fullUrl": "ExplanationOfBenefit/" + visionID, "resource": visionEOB, "search": map[string]any{"mode": "match"}},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(bundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 		return
 	}
 
@@ -22369,9 +22121,7 @@ func (s *Server) handleCARINBBAndRTPBCWave46(w http.ResponseWriter, r *http.Requ
 			{"fullUrl": "Claim/" + claimID, "resource": claimRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePACIOTOCAndADIWave46 implements HL7 PACIO Post-Acute Care Transitions of Care (TOC v1.0.0)
@@ -22394,8 +22144,7 @@ func (s *Server) handlePACIOTOCAndADIWave46(w http.ResponseWriter, r *http.Reque
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -22461,9 +22210,7 @@ func (s *Server) handlePACIOTOCAndADIWave46(w http.ResponseWriter, r *http.Reque
 				{"fullUrl": "Composition/" + compID, "resource": compRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(tocBundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", tocBundle)
 		return
 	}
 
@@ -22542,9 +22289,7 @@ func (s *Server) handlePACIOTOCAndADIWave46(w http.ResponseWriter, r *http.Reque
 			{"name": "provenance", "resource": provRes},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(out)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", out)
 }
 
 // handleNHSNHAIAURWave47 implements CDC NHSN Healthcare-Associated Infections (HAI)
@@ -22564,8 +22309,7 @@ func (s *Server) handleNHSNHAIAURWave47(w http.ResponseWriter, r *http.Request, 
 	if r.Body != nil && r.Method == http.MethodPost {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -22676,9 +22420,7 @@ func (s *Server) handleNHSNHAIAURWave47(w http.ResponseWriter, r *http.Request, 
 				{"name": "medicationAdministration", "resource": maRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(out)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", out)
 		return
 	}
 
@@ -22694,9 +22436,7 @@ func (s *Server) handleNHSNHAIAURWave47(w http.ResponseWriter, r *http.Request, 
 			{"fullUrl": "MedicationAdministration/" + maID, "resource": maRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleCodeXMCODEWave47 implements HL7 CodeX Clinical Trial Matching v1.0.0
@@ -22721,8 +22461,7 @@ func (s *Server) handleCodeXMCODEWave47(w http.ResponseWriter, r *http.Request, 
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -22917,9 +22656,7 @@ func (s *Server) handleCodeXMCODEWave47(w http.ResponseWriter, r *http.Request, 
 					{"fullUrl": "ResearchSubject/" + subjID, "resource": subjRes},
 				},
 			}
-			w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(summaryBundle)
+			s.writeOperationResponse(w, r, http.StatusOK, "Bundle", summaryBundle)
 			return
 		}
 
@@ -22950,9 +22687,7 @@ func (s *Server) handleCodeXMCODEWave47(w http.ResponseWriter, r *http.Request, 
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(bundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 		return
 	}
 
@@ -22997,9 +22732,7 @@ func (s *Server) handleCodeXMCODEWave47(w http.ResponseWriter, r *http.Request, 
 			{"name": "observation", "resource": obsRes},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(out)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", out)
 }
 
 // handleFASTNDHNetworkWave47 implements ONC FAST National Healthcare Directory (NDH v1.0.0)
@@ -23065,9 +22798,7 @@ func (s *Server) handleFASTNDHNetworkWave47(w http.ResponseWriter, r *http.Reque
 				{"name": "verificationResult", "resource": vrRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(out)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", out)
 		return
 	}
 
@@ -23138,9 +22869,7 @@ func (s *Server) handleFASTNDHNetworkWave47(w http.ResponseWriter, r *http.Reque
 			{"fullUrl": "Endpoint/" + epID, "resource": epRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleDaVinciRAAndCDexWave49 implements HL7 Da Vinci Risk Adjustment (RA v2.0.0) & CDex Task Attachments:
@@ -23167,7 +22896,9 @@ func (s *Server) handleDaVinciRAAndCDexWave49(w http.ResponseWriter, r *http.Req
 
 	var body map[string]any
 	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if raw, err := io.ReadAll(r.Body); err == nil && len(bytes.TrimSpace(raw)) > 0 {
+			body, _ = s.decodeOperationBodyMap(r, raw, "Parameters")
+		}
 	}
 
 	extractStr := func(keys ...string) string {
@@ -23392,9 +23123,7 @@ func (s *Server) handleDaVinciRAAndCDexWave49(w http.ResponseWriter, r *http.Req
 			}
 		}
 		_, _, _, mrRes := ensureRAPatientAndGapResources(mrID, gapType, hccCode, icd10Code, riskScore)
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(mrRes)
+		s.writeOperationResponse(w, r, http.StatusOK, "MeasureReport", mrRes)
 		return
 
 	case "ra-coding-gap-report":
@@ -23418,9 +23147,7 @@ func (s *Server) handleDaVinciRAAndCDexWave49(w http.ResponseWriter, r *http.Req
 				{"fullUrl": "Patient/" + patID, "resource": patRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(bundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 		return
 
 	case "cdex-submit-attachment":
@@ -23515,9 +23242,7 @@ func (s *Server) handleDaVinciRAAndCDexWave49(w http.ResponseWriter, r *http.Req
 		if len(savedTask) > 0 {
 			taskRes = savedTask
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(taskRes)
+		s.writeOperationResponse(w, r, http.StatusOK, "Task", taskRes)
 		return
 	}
 }
@@ -23545,7 +23270,9 @@ func (s *Server) handleNHSNDQMWave49(w http.ResponseWriter, r *http.Request, op 
 
 	var body map[string]any
 	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if raw, err := io.ReadAll(r.Body); err == nil && len(bytes.TrimSpace(raw)) > 0 {
+			body, _ = s.decodeOperationBodyMap(r, raw, "Parameters")
+		}
 	}
 
 	extractStr := func(keys ...string) string {
@@ -23796,9 +23523,7 @@ func (s *Server) handleNHSNDQMWave49(w http.ResponseWriter, r *http.Request, op 
 	patRes, _, encRes, hypoRes, cdiRes, medAdminRes, mrRes := ensureACHResources()
 
 	if op == "nhsn-dqm-evaluate" {
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(mrRes)
+		s.writeOperationResponse(w, r, http.StatusOK, "MeasureReport", mrRes)
 		return
 	}
 
@@ -23825,9 +23550,7 @@ func (s *Server) handleNHSNDQMWave49(w http.ResponseWriter, r *http.Request, op 
 			{"fullUrl": "MedicationAdministration/" + medAdminID, "resource": medAdminRes},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleDaVinciBurdenReductionWave50 implements HL7 Da Vinci Burden Reduction Suite
@@ -23851,8 +23574,7 @@ func (s *Server) handleDaVinciBurdenReductionWave50(w http.ResponseWriter, r *ht
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -24022,9 +23744,7 @@ func (s *Server) handleDaVinciBurdenReductionWave50(w http.ResponseWriter, r *ht
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(out)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", out)
 		return
 	}
 
@@ -24155,9 +23875,7 @@ func (s *Server) handleDaVinciBurdenReductionWave50(w http.ResponseWriter, r *ht
 				{"fullUrl": "Claim/" + claimID, "resource": claimRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(inqBundle)
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", inqBundle)
 		return
 	}
 
@@ -24212,9 +23930,7 @@ func (s *Server) handleDaVinciBurdenReductionWave50(w http.ResponseWriter, r *ht
 			{"fullUrl": "ClaimResponse/" + crID, "resource": crRes},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(summaryBundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", summaryBundle)
 }
 
 // handleFASTNDHVerifyAndDirectoryWave50 implements HL7 FAST National Healthcare Directory
@@ -24243,8 +23959,7 @@ func (s *Server) handleFASTNDHVerifyAndDirectoryWave50(w http.ResponseWriter, r 
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -24399,9 +24114,7 @@ func (s *Server) handleFASTNDHVerifyAndDirectoryWave50(w http.ResponseWriter, r 
 	}
 
 	if op == "ndh-verify" {
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(vrRes)
+		s.writeOperationResponse(w, r, http.StatusOK, "VerificationResult", vrRes)
 		return
 	}
 
@@ -24421,9 +24134,7 @@ func (s *Server) handleFASTNDHVerifyAndDirectoryWave50(w http.ResponseWriter, r 
 			{"fullUrl": "VerificationResult/" + vrID, "resource": vrRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // =============================================================================
@@ -24460,8 +24171,7 @@ func (s *Server) handleDaVinciATRWave51(w http.ResponseWriter, r *http.Request, 
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -24642,9 +24352,7 @@ func (s *Server) handleDaVinciATRWave51(w http.ResponseWriter, r *http.Request, 
 				},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(outParams)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", outParams)
 		return
 	}
 
@@ -24663,9 +24371,7 @@ func (s *Server) handleDaVinciATRWave51(w http.ResponseWriter, r *http.Request, 
 			{"fullUrl": "Coverage/" + covID, "resource": covRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePACIOSPLASCHWave51 implements HL7 PACIO SPLASCH v1.0.0 (Speech, Language, Swallowing,
@@ -24689,8 +24395,7 @@ func (s *Server) handlePACIOSPLASCHWave51(w http.ResponseWriter, r *http.Request
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -24869,9 +24574,7 @@ func (s *Server) handlePACIOSPLASCHWave51(w http.ResponseWriter, r *http.Request
 	}
 
 	if op == "pacio-splasch-record" {
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(drRes)
+		s.writeOperationResponse(w, r, http.StatusOK, "DiagnosticReport", drRes)
 		return
 	}
 
@@ -24890,9 +24593,7 @@ func (s *Server) handlePACIOSPLASCHWave51(w http.ResponseWriter, r *http.Request
 			{"fullUrl": "Observation/" + swallowObsID, "resource": swallowObs, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleVulcanRWDWave51 implements HL7 Vulcan Real World Data (RWD v1.0.0) Cohort & Summary:
@@ -24919,8 +24620,7 @@ func (s *Server) handleVulcanRWDWave51(w http.ResponseWriter, r *http.Request, o
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -25083,9 +24783,7 @@ func (s *Server) handleVulcanRWDWave51(w http.ResponseWriter, r *http.Request, o
 				{"name": "eligibleCount", "valueInteger": 1},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(outParams)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", outParams)
 		return
 	}
 
@@ -25105,9 +24803,7 @@ func (s *Server) handleVulcanRWDWave51(w http.ResponseWriter, r *http.Request, o
 			{"fullUrl": "MedicationAdministration/" + maID, "resource": maRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handlePublicHealthSANERWave52 implements HL7 Situational Awareness for Novel Epidemic Response (SANER v1.0.1):
@@ -25140,8 +24836,7 @@ func (s *Server) handlePublicHealthSANERWave52(w http.ResponseWriter, r *http.Re
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -25310,9 +25005,7 @@ func (s *Server) handlePublicHealthSANERWave52(w http.ResponseWriter, r *http.Re
 	}
 
 	if op == "saner-report-capacity" {
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(mrRes)
+		s.writeOperationResponse(w, r, http.StatusOK, "MeasureReport", mrRes)
 		return
 	}
 
@@ -25331,9 +25024,7 @@ func (s *Server) handlePublicHealthSANERWave52(w http.ResponseWriter, r *http.Re
 			{"fullUrl": "MeasureReport/" + mrID, "resource": mrRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleCodeXRTTDWave52 implements HL7 CodeX Radiation Therapy Treatment Data (CodeX RTTD v1.0.0):
@@ -25360,8 +25051,7 @@ func (s *Server) handleCodeXRTTDWave52(w http.ResponseWriter, r *http.Request, o
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -25497,9 +25187,7 @@ func (s *Server) handleCodeXRTTDWave52(w http.ResponseWriter, r *http.Request, o
 	}
 
 	if op == "codex-rttd-plan" {
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(srRes)
+		s.writeOperationResponse(w, r, http.StatusOK, "ServiceRequest", srRes)
 		return
 	}
 
@@ -25518,9 +25206,7 @@ func (s *Server) handleCodeXRTTDWave52(w http.ResponseWriter, r *http.Request, o
 			{"fullUrl": "Procedure/" + phaseID, "resource": phaseRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleGravitySDOHConsentAndCareWave52 implements HL7 Gravity SDOH Clinical Care (v2.2.0) Consent & Care Bundle:
@@ -25547,8 +25233,7 @@ func (s *Server) handleGravitySDOHConsentAndCareWave52(w http.ResponseWriter, r 
 	if r.Body != nil {
 		raw, _ := io.ReadAll(r.Body)
 		if len(bytes.TrimSpace(raw)) > 0 {
-			var body map[string]any
-			if json.Unmarshal(raw, &body) == nil {
+			if body, err := s.decodeOperationBodyMap(r, raw, "Parameters"); err == nil {
 				if params, ok := body["parameter"].([]any); ok {
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
@@ -25726,9 +25411,7 @@ func (s *Server) handleGravitySDOHConsentAndCareWave52(w http.ResponseWriter, r 
 	}
 
 	if op == "sdoh-consent-record" {
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(consentRes)
+		s.writeOperationResponse(w, r, http.StatusOK, "Consent", consentRes)
 		return
 	}
 
@@ -25747,9 +25430,7 @@ func (s *Server) handleGravitySDOHConsentAndCareWave52(w http.ResponseWriter, r 
 			{"fullUrl": "Goal/" + goalID, "resource": goalRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // =============================================================================
@@ -25852,21 +25533,22 @@ func (s *Server) handleUDAPSecurityWave54(w http.ResponseWriter, r *http.Request
 	sanURI := strings.TrimSpace(q.Get("san"))
 
 	if r.Body != nil && r.Method == http.MethodPost {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			for _, k := range []string{"organization", "organizationId", "id"} {
-				if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && orgID == "" {
-					orgID = cleanID(v)
+		if raw, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(raw)) > 0 {
+			if bodyMap, decErr := s.decodeOperationBodyMap(r, raw, "Parameters"); decErr == nil {
+				for _, k := range []string{"organization", "organizationId", "id"} {
+					if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && orgID == "" {
+						orgID = cleanID(v)
+					}
 				}
-			}
-			if v, ok := bodyMap["client_name"].(string); ok && strings.TrimSpace(v) != "" && clientName == "" {
-				clientName = strings.TrimSpace(v)
-			}
-			if v, ok := bodyMap["purpose_of_use"].(string); ok && strings.TrimSpace(v) != "" && purposeOfUse == "" {
-				purposeOfUse = strings.TrimSpace(v)
-			}
-			if v, ok := bodyMap["san"].(string); ok && strings.TrimSpace(v) != "" && sanURI == "" {
-				sanURI = strings.TrimSpace(v)
+				if v, ok := bodyMap["client_name"].(string); ok && strings.TrimSpace(v) != "" && clientName == "" {
+					clientName = strings.TrimSpace(v)
+				}
+				if v, ok := bodyMap["purpose_of_use"].(string); ok && strings.TrimSpace(v) != "" && purposeOfUse == "" {
+					purposeOfUse = strings.TrimSpace(v)
+				}
+				if v, ok := bodyMap["san"].(string); ok && strings.TrimSpace(v) != "" && sanURI == "" {
+					sanURI = strings.TrimSpace(v)
+				}
 			}
 		}
 	}
@@ -26003,9 +25685,7 @@ func (s *Server) handleUDAPSecurityWave54(w http.ResponseWriter, r *http.Request
 				{"name": "provenance", "resource": provRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(paramsOut)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", paramsOut)
 		return
 	}
 
@@ -26024,9 +25704,7 @@ func (s *Server) handleUDAPSecurityWave54(w http.ResponseWriter, r *http.Request
 			{"fullUrl": "Provenance/" + provID, "resource": provRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleDaVinciPDexProviderAccessWave54 implements CMS-0057-F & HL7 Da Vinci PDex v2.1.0 Provider Access API:
@@ -26067,16 +25745,17 @@ func (s *Server) handleDaVinciPDexProviderAccessWave54(w http.ResponseWriter, r 
 	}
 
 	if r.Body != nil && r.Method == http.MethodPost {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			for _, k := range []string{"group", "groupId"} {
-				if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && groupID == "" {
-					groupID = cleanID(v)
+		if raw, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(raw)) > 0 {
+			if bodyMap, decErr := s.decodeOperationBodyMap(r, raw, "Parameters"); decErr == nil {
+				for _, k := range []string{"group", "groupId"} {
+					if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && groupID == "" {
+						groupID = cleanID(v)
+					}
 				}
-			}
-			for _, k := range []string{"patient", "member", "subject"} {
-				if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && patID == "" {
-					patID = cleanID(v)
+				for _, k := range []string{"patient", "member", "subject"} {
+					if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && patID == "" {
+						patID = cleanID(v)
+					}
 				}
 			}
 		}
@@ -26208,9 +25887,7 @@ func (s *Server) handleDaVinciPDexProviderAccessWave54(w http.ResponseWriter, r 
 			grpRes = savedGrp
 		}
 
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(grpRes)
+		s.writeOperationResponse(w, r, http.StatusOK, "Group", grpRes)
 		return
 	}
 
@@ -26368,9 +26045,7 @@ func (s *Server) handleDaVinciPDexProviderAccessWave54(w http.ResponseWriter, r 
 			{"fullUrl": "Provenance/" + provID, "resource": provRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleDaVinciPDexPayerExchangeWave54 implements CMS-0057-F & HL7 Da Vinci PDex v2.1.0 Payer-to-Payer Exchange:
@@ -26395,11 +26070,12 @@ func (s *Server) handleDaVinciPDexPayerExchangeWave54(w http.ResponseWriter, r *
 		}
 	}
 	if r.Body != nil && r.Method == http.MethodPost {
-		var bodyMap map[string]any
-		if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&bodyMap); err == nil {
-			for _, k := range []string{"patient", "subject", "id"} {
-				if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && patID == "" {
-					patID = cleanID(v)
+		if raw, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(raw)) > 0 {
+			if bodyMap, decErr := s.decodeOperationBodyMap(r, raw, "Parameters"); decErr == nil {
+				for _, k := range []string{"patient", "subject", "id"} {
+					if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && patID == "" {
+						patID = cleanID(v)
+					}
 				}
 			}
 		}
@@ -26631,9 +26307,7 @@ func (s *Server) handleDaVinciPDexPayerExchangeWave54(w http.ResponseWriter, r *
 				{"name": "provenance", "resource": provRes},
 			},
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(paramsOut)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", paramsOut)
 		return
 	}
 
@@ -26655,7 +26329,5 @@ func (s *Server) handleDaVinciPDexPayerExchangeWave54(w http.ResponseWriter, r *
 			{"fullUrl": "Provenance/" + provID, "resource": provRes, "search": map[string]any{"mode": "include"}},
 		},
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }

@@ -354,9 +354,9 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed JSON in Patient/$member-match: %v", err))
+	payload, err := s.decodeOperationBodyMap(r, body, "Parameters")
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed payload in Patient/$member-match: %v", err))
 		return
 	}
 	if rt, _ := payload["resourceType"].(string); rt != "Parameters" {
@@ -656,9 +656,7 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(respParams)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", respParams)
 }
 
 func extractCoverageBeneficiaryPatientID(cov map[string]any) string {
@@ -683,9 +681,9 @@ func (s *Server) handleClaimSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed JSON in Claim/$submit: %v", err))
+	payload, err := s.decodeOperationBodyMap(r, body, "Claim")
+	if err != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed payload in Claim/$submit: %v", err))
 		return
 	}
 
@@ -905,9 +903,7 @@ func (s *Server) handleClaimSubmit(w http.ResponseWriter, r *http.Request) {
 
 	_, _ = s.persistFHIRMapResource(r, tenant, "ClaimResponse", claimResp)
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(claimResp)
+	s.writeOperationResponse(w, r, http.StatusOK, "ClaimResponse", claimResp)
 }
 
 func extractClaimFromBundle(bundle map[string]any) (map[string]any, []map[string]any) {
