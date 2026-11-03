@@ -1,6 +1,6 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, and 35+ National HL7 Implementation Guide
-// conformance & certification runner. It executes 8 structured test suites (78 checks) against
+// conformance & certification runner. It executes 10 structured test suites (96 checks) against
 // a target Flint server and produces both a standard FHIR R4 TestReport resource
 // and a human-readable scorecard.
 package certify
@@ -2752,6 +2752,58 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("AN-13", suite10, "Zero-JSON Binary Proto3 eCQM & SDC Operations ($evaluate-measure, $care-gaps, $collect-data, $submit-data, $populate, $package, $extract) & SQL-on-FHIR v2 Math & Regex $sql Pushdown", t0, err, "Binary Proto3 eCQM & SDC wire transport & ABS / CEIL / FLOOR / ROUND / SQRT / REGEXP_REPLACE / REGEXP $sql pushdown verified")
+
+	// AN-14: Zero-JSON Binary Proto3 Clinical Reasoning ($apply, $data-requirements, $fhirpath), Cohort/Identity (Group/$add, $reindex) & SQL-on-FHIR v2 Arithmetic, Concatenation (&) & Temporal $sql Pushdown
+	t0 = time.Now()
+	{
+		respPlanProto, bPlanProto, errPlanProto := doReq(http.MethodGet, basePath+"/PlanDefinition/plandef-hypertension-control/$apply?subject=Patient/cert-pat-1&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respActProto, bActProto, errActProto := doReq(http.MethodGet, basePath+"/ActivityDefinition/activitydef-bp-home-monitoring/$apply?subject=Patient/cert-pat-1&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respDRProto, bDRProto, errDRProto := doReq(http.MethodGet, basePath+"/Measure/cms165-bp-control/$data-requirements?periodStart=2026-01-01&periodEnd=2026-12-31&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respFPProto, bFPProto, errFPProto := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$fhirpath?expression=Patient.name.family&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		grpAddJSON := []byte(`{"resourceType":"Parameters","parameter":[{"name":"member","valueReference":{"reference":"Patient/cert-pat-1"}}]}`)
+		respGrpConv, bGrpInProto, errGrpConv := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", grpAddJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respGrpAddProto, bGrpAddProto, errGrpAddProto := doReq(http.MethodPost, basePath+"/Group/cert-grp-1/$add", "application/x-protobuf", bGrpInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respReidxProto, bReidxProto, errReidxProto := doReq(http.MethodPost, basePath+"/Patient/cert-pat-1/$reindex?_format=application/x-protobuf", "application/fhir+json", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		arithTempVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_arith_temp_view","status":"active","resource":"Observation","select":[{"column":[{"name":"id","path":"id"},{"name":"code_label","path":"code.coding.system & '|' & code.coding.code"},{"name":"val_scaled","path":"valueQuantity.value * 2 + 10"},{"name":"val_div","path":"valueQuantity.value div 10"},{"name":"val_mod","path":"valueQuantity.value mod 5"},{"name":"eff_date","path":"effectiveDateTime.toDate()"},{"name":"run_date","path":"today()"},{"name":"run_ts","path":"now()"}]}],"where":[{"path":"valueQuantity.value + 5 >= 65 and effectiveDateTime.toDate() <= today()"}]}`)
+		respATDoris, bATDoris, errATDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", arithTempVD, nil)
+		respATPg, bATPg, errATPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", arithTempVD, nil)
+		if errPlanProto != nil || respPlanProto.StatusCode != http.StatusOK || !strings.Contains(respPlanProto.Header.Get("Content-Type"), "application/x-protobuf") || respPlanProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bPlanProto) == 0 {
+			err = fmt.Errorf("expected GET /PlanDefinition/.../$apply?_format=application/x-protobuf to return binary Proto3 CarePlan, got %d", respPlanProto.StatusCode)
+		} else if errActProto != nil || respActProto.StatusCode != http.StatusOK || !strings.Contains(respActProto.Header.Get("Content-Type"), "application/x-protobuf") || respActProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bActProto) == 0 {
+			err = fmt.Errorf("expected GET /ActivityDefinition/.../$apply?_format=application/x-protobuf to return binary Proto3 ServiceRequest, got %d", respActProto.StatusCode)
+		} else if errDRProto != nil || respDRProto.StatusCode != http.StatusOK || !strings.Contains(respDRProto.Header.Get("Content-Type"), "application/x-protobuf") || respDRProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bDRProto) == 0 {
+			err = fmt.Errorf("expected GET /Measure/.../$data-requirements?_format=application/x-protobuf to return binary Proto3 Library, got %d", respDRProto.StatusCode)
+		} else if errFPProto != nil || respFPProto.StatusCode != http.StatusOK || !strings.Contains(respFPProto.Header.Get("Content-Type"), "application/x-protobuf") || respFPProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bFPProto) == 0 {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$fhirpath?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respFPProto.StatusCode)
+		} else if errGrpConv != nil || respGrpConv.StatusCode != http.StatusOK || len(bGrpInProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert for Group/$add to return binary Proto3 Parameters, got %d", respGrpConv.StatusCode)
+		} else if errGrpAddProto != nil || respGrpAddProto.StatusCode != http.StatusOK || !strings.Contains(respGrpAddProto.Header.Get("Content-Type"), "application/x-protobuf") || respGrpAddProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bGrpAddProto) == 0 {
+			err = fmt.Errorf("expected POST /Group/cert-grp-1/$add with binary Proto3 Parameters to return binary Proto3 Group, got %d", respGrpAddProto.StatusCode)
+		} else if errReidxProto != nil || respReidxProto.StatusCode != http.StatusOK || !strings.Contains(respReidxProto.Header.Get("Content-Type"), "application/x-protobuf") || respReidxProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bReidxProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/cert-pat-1/$reindex?_format=application/x-protobuf to return binary Proto3 OperationOutcome, got %d", respReidxProto.StatusCode)
+		} else if errATDoris != nil || respATDoris.StatusCode != http.StatusOK || !strings.Contains(string(bATDoris), "CONCAT(") || !strings.Contains(string(bATDoris), " * 2) + 10)") || !strings.Contains(string(bATDoris), "CAST((r.value_quantity / 10) AS BIGINT)") || !strings.Contains(string(bATDoris), "MOD(") || !strings.Contains(string(bATDoris), "CAST(r.effective_start AS DATE)") || !strings.Contains(string(bATDoris), "CURRENT_DATE()") || !strings.Contains(string(bATDoris), "NOW()") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with arithmetic/concat/temporal pushdown, got %d: %s", respATDoris.StatusCode, string(bATDoris))
+		} else if errATPg != nil || respATPg.StatusCode != http.StatusOK || !strings.Contains(string(bATPg), " || ") || !strings.Contains(string(bATPg), " * 2) + 10)") || !strings.Contains(string(bATPg), "CAST(TRUNC(") || !strings.Contains(string(bATPg), "MOD(CAST(") || !strings.Contains(string(bATPg), "AS DATE)") || !strings.Contains(string(bATPg), "CURRENT_DATE") || !strings.Contains(string(bATPg), "NOW()") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with arithmetic/concat/temporal pushdown, got %d: %s", respATPg.StatusCode, string(bATPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-14", suite10, "Zero-JSON Binary Proto3 Clinical Reasoning & Cohort Operations ($apply, $data-requirements, $fhirpath, Group/$add, $reindex) & SQL-on-FHIR v2 Arithmetic, Concat (&) & Temporal $sql Pushdown", t0, err, "Binary Proto3 clinical reasoning & cohort wire transport & arithmetic / CONCAT / temporal $sql pushdown verified")
 
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)

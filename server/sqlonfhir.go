@@ -604,6 +604,13 @@ func (s *Server) parseViewRunRequest(r *http.Request, defaultFormat string) (vie
 		}
 		trimmed := bytes.TrimSpace(body)
 		if len(trimmed) > 0 {
+			if isProtoContentType(r) {
+				if pm, pErr := s.protoToFHIRMap("Parameters", trimmed); pErr == nil && pm != nil {
+					if jb, jErr := json.Marshal(pm); jErr == nil {
+						trimmed = jb
+					}
+				}
+			}
 			var probe struct {
 				ResourceType string `json:"resourceType"`
 			}
@@ -1332,9 +1339,7 @@ func (s *Server) handleViewDefinitionSQL(w http.ResponseWriter, r *http.Request)
 	}
 	params = append(params, res.columnMaps...)
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    params,
 	})
@@ -1706,9 +1711,48 @@ func spidxZeroJSONForEachColumnExpr(fhirPath, forEachPath, dialect string) (stri
 }
 
 func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
-	p := strings.TrimSpace(fhirPath)
+	p := stripOuterParens(strings.TrimSpace(fhirPath))
 	if strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") {
 		return p, "constant"
+	}
+	if _, err := strconv.ParseFloat(p, 64); err == nil {
+		return p, "constant"
+	}
+	if strings.EqualFold(p, "today()") {
+		return "CURRENT_DATE()", "today"
+	}
+	if strings.EqualFold(p, "now()") {
+		return "NOW()", "now"
+	}
+	if concatParts := splitTopLevelConcatOp(p); len(concatParts) > 1 {
+		exprs := make([]string, 0, len(concatParts))
+		for _, cp := range concatParts {
+			ce, _ := dorisZeroJSONColumnExpr(cp, isCore)
+			exprs = append(exprs, ce)
+		}
+		return fmt.Sprintf("CONCAT(%s)", strings.Join(exprs, ", ")), "concat"
+	}
+	if lhsArith, opArith, rhsArith, ok := splitTopLevelArithmeticOp(p); ok {
+		lSQL, lSrc := dorisZeroJSONColumnExpr(lhsArith, isCore)
+		rSQL, _ := dorisZeroJSONColumnExpr(rhsArith, isCore)
+		switch opArith {
+		case "div":
+			return fmt.Sprintf("CAST((%s / %s) AS BIGINT)", lSQL, rSQL), lSrc + ".div"
+		case "mod":
+			return fmt.Sprintf("MOD(%s, %s)", lSQL, rSQL), lSrc + ".mod"
+		default:
+			return fmt.Sprintf("(%s %s %s)", lSQL, opArith, rSQL), lSrc + ".arith"
+		}
+	}
+	if strings.HasSuffix(p, ".toDate()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".toDate()")])
+		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
+		return fmt.Sprintf("CAST(%s AS DATE)", colExpr), colSrc + ".toDate"
+	}
+	if strings.HasSuffix(p, ".toDateTime()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".toDateTime()")])
+		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
+		return fmt.Sprintf("CAST(%s AS DATETIME)", colExpr), colSrc + ".toDateTime"
 	}
 	if strings.HasPrefix(strings.ToLower(p), "iif(") && strings.HasSuffix(p, ")") {
 		args := splitTopLevelCommaArgs(p[len("iif(") : len(p)-1])
@@ -2054,8 +2098,9 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 	}
 	trimmedRHS := strings.Trim(strings.TrimSpace(rhs), "'\"")
 	escapedRHS := strings.ReplaceAll(trimmedRHS, "'", "''")
+	_, _, _, isArithLHS := splitTopLevelArithmeticOp(lhs)
 
-	if strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") {
+	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") {
 		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
 			lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
 			sqlOp := op
@@ -2065,13 +2110,27 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 			return fmt.Sprintf("%s %s %s", lhsExpr, sqlOp, trimmedRHS)
 		}
 	}
-	if strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") {
+	if len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") {
 		lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
 		sqlOp := op
 		if sqlOp == "!=" {
 			sqlOp = "<>"
 		}
 		return fmt.Sprintf("%s %s '%s'", lhsExpr, sqlOp, escapedRHS)
+	}
+	if strings.HasSuffix(lhs, ".toDate()") || strings.HasSuffix(lhs, ".toDateTime()") || strings.EqualFold(trimmedRHS, "today()") || strings.EqualFold(trimmedRHS, "now()") {
+		lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
+		rhsExpr := fmt.Sprintf("'%s'", escapedRHS)
+		if strings.EqualFold(trimmedRHS, "today()") {
+			rhsExpr = "CURRENT_DATE()"
+		} else if strings.EqualFold(trimmedRHS, "now()") {
+			rhsExpr = "NOW()"
+		}
+		sqlOp := op
+		if sqlOp == "!=" {
+			sqlOp = "<>"
+		}
+		return fmt.Sprintf("%s %s %s", lhsExpr, sqlOp, rhsExpr)
 	}
 	if lhs == "valueQuantity.value" {
 		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
@@ -2099,9 +2158,67 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 }
 
 func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
-	p := strings.TrimSpace(fhirPath)
+	p := stripOuterParens(strings.TrimSpace(fhirPath))
 	if strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") {
 		return p, "constant"
+	}
+	if _, err := strconv.ParseFloat(p, 64); err == nil {
+		return p, "constant"
+	}
+	if strings.EqualFold(p, "today()") {
+		return "CURRENT_DATE", "today"
+	}
+	if strings.EqualFold(p, "now()") {
+		if dialect == "sqlite" {
+			return "CURRENT_TIMESTAMP", "now"
+		}
+		return "NOW()", "now"
+	}
+	if concatParts := splitTopLevelConcatOp(p); len(concatParts) > 1 {
+		exprs := make([]string, 0, len(concatParts))
+		for _, cp := range concatParts {
+			ce, _ := spidxZeroJSONColumnExpr(cp, dialect)
+			if strings.HasPrefix(ce, "'") && strings.HasSuffix(ce, "'") {
+				exprs = append(exprs, ce)
+			} else {
+				exprs = append(exprs, fmt.Sprintf("COALESCE(%s, '')", ce))
+			}
+		}
+		return fmt.Sprintf("(%s)", strings.Join(exprs, " || ")), "concat"
+	}
+	if lhsArith, opArith, rhsArith, ok := splitTopLevelArithmeticOp(p); ok {
+		lSQL, lSrc := spidxZeroJSONColumnExpr(lhsArith, dialect)
+		rSQL, _ := spidxZeroJSONColumnExpr(rhsArith, dialect)
+		switch opArith {
+		case "div":
+			if dialect == "sqlite" {
+				return fmt.Sprintf("CAST((%s / %s) AS INTEGER)", lSQL, rSQL), lSrc + ".div"
+			}
+			return fmt.Sprintf("CAST(TRUNC(%s / %s) AS BIGINT)", lSQL, rSQL), lSrc + ".div"
+		case "mod":
+			if dialect == "sqlite" {
+				return fmt.Sprintf("(CAST(%s AS INTEGER) %% CAST(%s AS INTEGER))", lSQL, rSQL), lSrc + ".mod"
+			}
+			return fmt.Sprintf("MOD(CAST(%s AS NUMERIC), CAST(%s AS NUMERIC))", lSQL, rSQL), lSrc + ".mod"
+		default:
+			return fmt.Sprintf("(%s %s %s)", lSQL, opArith, rSQL), lSrc + ".arith"
+		}
+	}
+	if strings.HasSuffix(p, ".toDate()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".toDate()")])
+		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+		if dialect == "sqlite" {
+			return fmt.Sprintf("DATE(%s)", colExpr), colSrc + ".toDate"
+		}
+		return fmt.Sprintf("CAST(%s AS DATE)", colExpr), colSrc + ".toDate"
+	}
+	if strings.HasSuffix(p, ".toDateTime()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".toDateTime()")])
+		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+		if dialect == "sqlite" {
+			return fmt.Sprintf("DATETIME(%s)", colExpr), colSrc + ".toDateTime"
+		}
+		return fmt.Sprintf("CAST(%s AS TIMESTAMPTZ)", colExpr), colSrc + ".toDateTime"
 	}
 	if strings.HasPrefix(strings.ToLower(p), "coalesce(") && strings.HasSuffix(p, ")") {
 		args := splitTopLevelCommaArgs(p[len("coalesce(") : len(p)-1])
@@ -2478,8 +2595,9 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 	}
 	trimmedRHS := strings.Trim(strings.TrimSpace(rhs), "'\"")
 	escapedRHS := strings.ReplaceAll(trimmedRHS, "'", "''")
+	_, _, _, isArithLHS := splitTopLevelArithmeticOp(lhs)
 
-	if strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") {
+	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") {
 		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
 			lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, dialect)
 			sqlOp := op
@@ -2489,13 +2607,31 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 			return fmt.Sprintf("%s %s %s", lhsExpr, sqlOp, trimmedRHS)
 		}
 	}
-	if strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") {
+	if len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") {
 		lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, dialect)
 		sqlOp := op
 		if sqlOp == "!=" {
 			sqlOp = "<>"
 		}
 		return fmt.Sprintf("%s %s '%s'", lhsExpr, sqlOp, escapedRHS)
+	}
+	if strings.HasSuffix(lhs, ".toDate()") || strings.HasSuffix(lhs, ".toDateTime()") || strings.EqualFold(trimmedRHS, "today()") || strings.EqualFold(trimmedRHS, "now()") {
+		lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, dialect)
+		rhsExpr := fmt.Sprintf("'%s'", escapedRHS)
+		if strings.EqualFold(trimmedRHS, "today()") {
+			rhsExpr = "CURRENT_DATE"
+		} else if strings.EqualFold(trimmedRHS, "now()") {
+			if dialect == "sqlite" {
+				rhsExpr = "CURRENT_TIMESTAMP"
+			} else {
+				rhsExpr = "NOW()"
+			}
+		}
+		sqlOp := op
+		if sqlOp == "!=" {
+			sqlOp = "<>"
+		}
+		return fmt.Sprintf("%s %s %s", lhsExpr, sqlOp, rhsExpr)
 	}
 	if lhs == "valueQuantity.value" {
 		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
@@ -2626,4 +2762,122 @@ func normalizeFHIRPathToSearchParam(path string) string {
 		}
 		return strings.ToLower(strings.ReplaceAll(p, "'", ""))
 	}
+}
+
+func stripOuterParens(s string) string {
+	s = strings.TrimSpace(s)
+	for len(s) >= 2 && s[0] == '(' && s[len(s)-1] == ')' {
+		inQuote := false
+		depth := 0
+		matchesOuter := true
+		for i := 0; i < len(s); i++ {
+			ch := s[i]
+			if ch == '\'' {
+				inQuote = !inQuote
+				continue
+			}
+			if inQuote {
+				continue
+			}
+			if ch == '(' {
+				depth++
+			} else if ch == ')' {
+				depth--
+				if depth == 0 && i < len(s)-1 {
+					matchesOuter = false
+					break
+				}
+			}
+		}
+		if !matchesOuter || depth != 0 {
+			break
+		}
+		s = strings.TrimSpace(s[1 : len(s)-1])
+	}
+	return s
+}
+
+func splitTopLevelConcatOp(expr string) []string {
+	s := stripOuterParens(expr)
+	var out []string
+	inQuote := false
+	parenDepth := 0
+	start := 0
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch == '\'' {
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			continue
+		}
+		if ch == '(' {
+			parenDepth++
+			continue
+		}
+		if ch == ')' && parenDepth > 0 {
+			parenDepth--
+			continue
+		}
+		if parenDepth == 0 && ch == '&' {
+			part := strings.TrimSpace(s[start:i])
+			if part != "" {
+				out = append(out, part)
+			}
+			start = i + 1
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	if tail := strings.TrimSpace(s[start:]); tail != "" {
+		out = append(out, tail)
+	}
+	return out
+}
+
+func splitTopLevelArithmeticOp(expr string) (lhs, op, rhs string, ok bool) {
+	s := stripOuterParens(expr)
+	lower := strings.ToLower(s)
+	for _, passOps := range [][]string{{" + ", " - "}, {" * ", " / ", " div ", " mod "}} {
+		inQuote := false
+		parenDepth := 0
+		lastIdx := -1
+		lastOp := ""
+		for i := 0; i < len(s); i++ {
+			ch := s[i]
+			if ch == '\'' {
+				inQuote = !inQuote
+				continue
+			}
+			if inQuote {
+				continue
+			}
+			if ch == '(' {
+				parenDepth++
+				continue
+			}
+			if ch == ')' && parenDepth > 0 {
+				parenDepth--
+				continue
+			}
+			if parenDepth == 0 {
+				for _, tok := range passOps {
+					if i+len(tok) <= len(s) && lower[i:i+len(tok)] == tok {
+						lastIdx = i
+						lastOp = tok
+					}
+				}
+			}
+		}
+		if lastIdx != -1 {
+			l := strings.TrimSpace(s[:lastIdx])
+			r := strings.TrimSpace(s[lastIdx+len(lastOp):])
+			if l != "" && r != "" {
+				return l, strings.TrimSpace(lastOp), r, true
+			}
+		}
+	}
+	return "", "", "", false
 }

@@ -7830,6 +7830,40 @@ func (s *Server) protoToFHIRMap(resType string, protoBytes []byte) (map[string]a
 	return s.protoToFHIRMapWithMeta(resType, protoBytes, 0, time.Time{})
 }
 
+// writeOperationResponse writes an operation response honoring binary Proto3 wire negotiation
+// (Accept: application/x-protobuf / application/fhir+protobuf or _format=application/x-protobuf)
+// and falling back to application/fhir+json.
+func (s *Server) writeOperationResponse(w http.ResponseWriter, r *http.Request, status int, resType string, out map[string]any) {
+	if okProto, protoCT := wantsProtoResponse(r); okProto {
+		if md, ok := s.protoRegistry[resType]; ok && md != nil {
+			if rawJSON, err := json.Marshal(out); err == nil {
+				if normJSON, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, rawJSON); err == nil {
+					msg := dynamicpb.NewMessage(md)
+					unmarshaler := protojson.UnmarshalOptions{DiscardUnknown: true}
+					if err := unmarshaler.Unmarshal(normJSON, msg); err == nil {
+						if protoBytes, err := proto.Marshal(msg); err == nil {
+							w.Header().Set("Content-Type", protoCT)
+							w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+							w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+							w.Header().Set("X-Flint-Execution-Mode", "zero-json-protoreflect")
+							w.WriteHeader(status)
+							if r == nil || r.Method != http.MethodHead {
+								_, _ = w.Write(protoBytes)
+							}
+							return
+						}
+					}
+				}
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+	w.WriteHeader(status)
+	if r == nil || r.Method != http.MethodHead {
+		_ = json.NewEncoder(w).Encode(out)
+	}
+}
+
 // decodeOperationBodyMap decodes a POST operation request body from either binary Proto3
 // (Parameters or fallbackResType) when Content-Type is protobuf, or FHIR JSON.
 func (s *Server) decodeOperationBodyMap(r *http.Request, body []byte, fallbackResType string) (map[string]any, error) {
