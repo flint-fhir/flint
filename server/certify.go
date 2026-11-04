@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 
@@ -46,9 +45,7 @@ func (s *Server) handleCertify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(rep.ToFHIRTestReport())
+	s.writeOperationResponse(w, r, http.StatusOK, "TestReport", rep.ToFHIRTestReport())
 }
 
 func extractBearerHeader(r *http.Request) string {

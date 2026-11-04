@@ -75,9 +75,9 @@ func (s *Server) handleTestScriptEvaluate(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if len(bytes.TrimSpace(body)) > 0 {
-			var raw map[string]any
-			if err := json.Unmarshal(body, &raw); err != nil {
-				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for TestScript/$evaluate")
+			raw, err := s.decodeOperationBodyMap(r, body, "TestScript")
+			if err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid body for TestScript/$evaluate")
 				return
 			}
 			switch rt, _ := raw["resourceType"].(string); rt {
@@ -165,9 +165,7 @@ func (s *Server) handleTestScriptEvaluate(w http.ResponseWriter, r *http.Request
 
 	report := s.executeTestScript(r, tenant, scriptMap, externalFixtures)
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(report)
+	s.writeOperationResponse(w, r, http.StatusOK, "TestReport", report)
 }
 
 func (s *Server) executeTestScript(

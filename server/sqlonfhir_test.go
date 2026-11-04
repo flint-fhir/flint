@@ -339,6 +339,41 @@ func TestSQLOnFHIRv2_ViewDefinitionCRUD_Run_Export_And_SyncAnalytics(t *testing.
 	tsvStr := string(tsvBytes)
 	assert.Contains(t, tsvStr, "id\tfamily\tgiven\tgender\tbirth_date")
 	assert.Contains(t, tsvStr, "sof-pat-2\tVance\tMarcus\tmale\t1978-11-22\ttrue")
+
+	// 11. Execute POST /ViewDefinition/$run verifying in-memory FHIRPath evaluation of .tail(), .single(), .combine(), .subsetOf(), .supersetOf(), and .split()
+	evalSliceSplitVD := `{
+		"resourceType": "ViewDefinition",
+		"resource": "Patient",
+		"where": [
+			{"path": "id = 'sof-pat-2' and name.family.subsetOf(name.family) and name.given.supersetOf(name.where(use = 'nickname').given)"}
+		],
+		"select": [{
+			"column": [
+				{"name": "id", "path": "id"},
+				{"name": "tail_given", "path": "name.given.tail()", "collection": true},
+				{"name": "single_gender", "path": "gender.single()"},
+				{"name": "combined_names", "path": "name.given.combine(name.family)", "collection": true},
+				{"name": "is_subset", "path": "name.where(use = 'nickname').given.subsetOf(name.given)"},
+				{"name": "is_superset", "path": "name.given.supersetOf(name.where(use = 'nickname').given)"},
+				{"name": "birth_parts", "path": "birthDate.split('-')", "collection": true}
+			]
+		}]
+	}`
+	respEvalSS, err := client.Post(ts.URL+"/fhir/r4/sof/ViewDefinition/$run", "application/fhir+json", bytes.NewBufferString(evalSliceSplitVD))
+	require.NoError(t, err)
+	evalSSBytes, _ := io.ReadAll(respEvalSS.Body)
+	respEvalSS.Body.Close()
+	require.Equal(t, http.StatusOK, respEvalSS.StatusCode)
+	var evalSSRows []map[string]any
+	require.NoError(t, json.Unmarshal(evalSSBytes, &evalSSRows))
+	require.Len(t, evalSSRows, 1)
+	assert.Equal(t, "sof-pat-2", evalSSRows[0]["id"])
+	assert.Equal(t, []any{"Lee", "Marc"}, evalSSRows[0]["tail_given"])
+	assert.Equal(t, "male", evalSSRows[0]["single_gender"])
+	assert.Equal(t, []any{"Marcus", "Lee", "Marc", "Vance", "Vance"}, evalSSRows[0]["combined_names"])
+	assert.Equal(t, true, evalSSRows[0]["is_subset"])
+	assert.Equal(t, true, evalSSRows[0]["is_superset"])
+	assert.Equal(t, []any{"1978", "11", "22"}, evalSSRows[0]["birth_parts"])
 }
 
 func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
@@ -2180,6 +2215,349 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		require.Equal(t, http.StatusOK, respSM.StatusCode)
 		for _, want := range tc.wantContains {
 			assert.Contains(t, string(smBytes), want)
+		}
+	}
+
+	// 27. Binary Proto3 Subscription/$status (GET & POST), Subscription/$events (GET & POST),
+	// AuditEvent (GET search & $verify-integrity), /$diff (GET & POST), /$import, /$import-poll DELETE,
+	// Patient/$expunge, Patient/$purge, and TestScript/$evaluate
+	subSeed := `{"resourceType":"Subscription","id":"proto-sub-1","status":"requested","reason":"Proto test","criteria":"Observation?code=8867-4","channel":{"type":"rest-hook","endpoint":"` + ts.URL + `/fhir/r4/proto/$validate","payload":"application/x-protobuf"}}`
+	reqSubPut, err := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Subscription/proto-sub-1", strings.NewReader(subSeed))
+	require.NoError(t, err)
+	reqSubPut.Header.Set("Content-Type", "application/fhir+json")
+	respSubPut, err := client.Do(reqSubPut)
+	require.NoError(t, err)
+	respSubPut.Body.Close()
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, respSubPut.StatusCode)
+
+	reqSubSt, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Subscription/proto-sub-1/$status?_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqSubSt.Header.Set("Accept", "application/x-protobuf")
+	respSubSt, err := client.Do(reqSubSt)
+	require.NoError(t, err)
+	subStBytes, _ := io.ReadAll(respSubSt.Body)
+	respSubSt.Body.Close()
+	require.Equal(t, http.StatusOK, respSubSt.StatusCode)
+	assert.Contains(t, respSubSt.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.Equal(t, "google.fhir.r4.proto3", respSubSt.Header.Get("X-Flint-Wire-Format"))
+	var subStParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(subStBytes, &subStParams))
+	assert.NotEmpty(t, subStParams.GetParameter())
+
+	// POST /Subscription/$status with binary Proto3 Parameters body
+	subStInJSON := `{"resourceType":"Parameters","parameter":[{"name":"id","valueString":"proto-sub-1"}]}`
+	reqSubStConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(subStInJSON))
+	require.NoError(t, err)
+	reqSubStConv.Header.Set("Content-Type", "application/fhir+json")
+	reqSubStConv.Header.Set("Accept", "application/x-protobuf")
+	respSubStConv, err := client.Do(reqSubStConv)
+	require.NoError(t, err)
+	subStInProto, _ := io.ReadAll(respSubStConv.Body)
+	respSubStConv.Body.Close()
+	require.Equal(t, http.StatusOK, respSubStConv.StatusCode)
+
+	reqSubStPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Subscription/$status", bytes.NewReader(subStInProto))
+	require.NoError(t, err)
+	reqSubStPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqSubStPost.Header.Set("Accept", "application/x-protobuf")
+	respSubStPost, err := client.Do(reqSubStPost)
+	require.NoError(t, err)
+	subStPostBytes, _ := io.ReadAll(respSubStPost.Body)
+	respSubStPost.Body.Close()
+	require.Equal(t, http.StatusOK, respSubStPost.StatusCode)
+	var subStPostParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(subStPostBytes, &subStPostParams))
+	assert.NotEmpty(t, subStPostParams.GetParameter())
+
+	reqSubEv, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Subscription/proto-sub-1/$events?_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqSubEv.Header.Set("Accept", "application/x-protobuf")
+	respSubEv, err := client.Do(reqSubEv)
+	require.NoError(t, err)
+	subEvBytes, _ := io.ReadAll(respSubEv.Body)
+	respSubEv.Body.Close()
+	require.Equal(t, http.StatusOK, respSubEv.StatusCode)
+	assert.Contains(t, respSubEv.Header.Get("Content-Type"), "application/x-protobuf")
+	var subEvBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(subEvBytes, &subEvBundle))
+	assert.NotEmpty(t, subEvBundle.GetEntry())
+
+	// POST /Subscription/proto-sub-1/$events with binary Proto3 Parameters body
+	subEvInJSON := `{"resourceType":"Parameters","parameter":[{"name":"eventsSinceNumber","valueString":"0"},{"name":"content","valueCode":"full-resource"}]}`
+	reqSubEvConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(subEvInJSON))
+	require.NoError(t, err)
+	reqSubEvConv.Header.Set("Content-Type", "application/fhir+json")
+	reqSubEvConv.Header.Set("Accept", "application/x-protobuf")
+	respSubEvConv, err := client.Do(reqSubEvConv)
+	require.NoError(t, err)
+	subEvInProto, _ := io.ReadAll(respSubEvConv.Body)
+	respSubEvConv.Body.Close()
+	require.Equal(t, http.StatusOK, respSubEvConv.StatusCode)
+
+	reqSubEvPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Subscription/proto-sub-1/$events", bytes.NewReader(subEvInProto))
+	require.NoError(t, err)
+	reqSubEvPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqSubEvPost.Header.Set("Accept", "application/x-protobuf")
+	respSubEvPost, err := client.Do(reqSubEvPost)
+	require.NoError(t, err)
+	subEvPostBytes, _ := io.ReadAll(respSubEvPost.Body)
+	respSubEvPost.Body.Close()
+	require.Equal(t, http.StatusOK, respSubEvPost.StatusCode)
+	var subEvPostBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(subEvPostBytes, &subEvPostBundle))
+	assert.NotEmpty(t, subEvPostBundle.GetEntry())
+
+	// GET /AuditEvent search & GET /AuditEvent/$verify-integrity in binary Proto3
+	reqAudSearch, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/AuditEvent?_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqAudSearch.Header.Set("Accept", "application/x-protobuf")
+	respAudSearch, err := client.Do(reqAudSearch)
+	require.NoError(t, err)
+	audSearchBytes, _ := io.ReadAll(respAudSearch.Body)
+	respAudSearch.Body.Close()
+	require.Equal(t, http.StatusOK, respAudSearch.StatusCode)
+	assert.Contains(t, respAudSearch.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.Equal(t, "google.fhir.r4.proto3", respAudSearch.Header.Get("X-Flint-Wire-Format"))
+	var audSearchBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(audSearchBytes, &audSearchBundle))
+
+	reqAudVer, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/AuditEvent/$verify-integrity?_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqAudVer.Header.Set("Accept", "application/x-protobuf")
+	respAudVer, err := client.Do(reqAudVer)
+	require.NoError(t, err)
+	audVerBytes, _ := io.ReadAll(respAudVer.Body)
+	respAudVer.Body.Close()
+	require.Equal(t, http.StatusOK, respAudVer.StatusCode)
+	assert.Contains(t, respAudVer.Header.Get("Content-Type"), "application/x-protobuf")
+	var audVerParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(audVerBytes, &audVerParams))
+	assert.NotEmpty(t, audVerParams.GetParameter())
+
+	// POST & GET /$diff in binary Proto3
+	diffInJSON := `{"resourceType":"Parameters","parameter":[{"name":"from","resource":{"resourceType":"Patient","id":"diff-p1","active":true,"gender":"female"}},{"name":"to","resource":{"resourceType":"Patient","id":"diff-p1","active":true,"gender":"other"}}]}`
+	reqDiffConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(diffInJSON))
+	require.NoError(t, err)
+	reqDiffConv.Header.Set("Content-Type", "application/fhir+json")
+	reqDiffConv.Header.Set("Accept", "application/x-protobuf")
+	respDiffConv, err := client.Do(reqDiffConv)
+	require.NoError(t, err)
+	diffInProto, _ := io.ReadAll(respDiffConv.Body)
+	respDiffConv.Body.Close()
+	require.Equal(t, http.StatusOK, respDiffConv.StatusCode)
+
+	reqDiff, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/$diff", bytes.NewReader(diffInProto))
+	require.NoError(t, err)
+	reqDiff.Header.Set("Content-Type", "application/x-protobuf")
+	reqDiff.Header.Set("Accept", "application/x-protobuf")
+	respDiff, err := client.Do(reqDiff)
+	require.NoError(t, err)
+	diffOutBytes, _ := io.ReadAll(respDiff.Body)
+	respDiff.Body.Close()
+	require.Equal(t, http.StatusOK, respDiff.StatusCode)
+	assert.Contains(t, respDiff.Header.Get("Content-Type"), "application/x-protobuf")
+	var diffOutParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(diffOutBytes, &diffOutParams))
+	assert.NotEmpty(t, diffOutParams.GetParameter())
+
+	reqInstDiff, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Patient/"+patID+"/$diff?fromVersion=1&toVersion=2&_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqInstDiff.Header.Set("Accept", "application/x-protobuf")
+	respInstDiff, err := client.Do(reqInstDiff)
+	require.NoError(t, err)
+	instDiffBytes, _ := io.ReadAll(respInstDiff.Body)
+	respInstDiff.Body.Close()
+	require.Equal(t, http.StatusOK, respInstDiff.StatusCode)
+	var instDiffParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(instDiffBytes, &instDiffParams))
+	assert.NotEmpty(t, instDiffParams.GetParameter())
+
+	// POST /$import (synchronous & asynchronous cancel) in binary Proto3
+	impParamsJSON := `{"resourceType":"Parameters","parameter":[{"name":"inputFormat","valueCode":"application/fhir+ndjson"},{"name":"input","part":[{"name":"type","valueCode":"Patient"},{"name":"content","valueString":"{\"resourceType\":\"Patient\",\"id\":\"imp-proto-p1\",\"active\":true,\"gender\":\"female\",\"birthDate\":\"1990-01-01\",\"identifier\":[{\"system\":\"http://hospital.smarthealthit.org\",\"value\":\"imp-proto-p1\"}],\"name\":[{\"family\":\"ImportedProto\",\"given\":[\"Alice\"]}]}"}]}]}`
+	reqImpConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(impParamsJSON))
+	require.NoError(t, err)
+	reqImpConv.Header.Set("Content-Type", "application/fhir+json")
+	reqImpConv.Header.Set("Accept", "application/x-protobuf")
+	respImpConv, err := client.Do(reqImpConv)
+	require.NoError(t, err)
+	impParamsProto, _ := io.ReadAll(respImpConv.Body)
+	respImpConv.Body.Close()
+	require.Equal(t, http.StatusOK, respImpConv.StatusCode)
+
+	reqImpSync, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/$import", bytes.NewReader(impParamsProto))
+	require.NoError(t, err)
+	reqImpSync.Header.Set("Content-Type", "application/x-protobuf")
+	reqImpSync.Header.Set("Accept", "application/x-protobuf")
+	respImpSync, err := client.Do(reqImpSync)
+	require.NoError(t, err)
+	impSyncBytes, _ := io.ReadAll(respImpSync.Body)
+	respImpSync.Body.Close()
+	require.Equal(t, http.StatusOK, respImpSync.StatusCode)
+	assert.Contains(t, respImpSync.Header.Get("Content-Type"), "application/x-protobuf")
+	var impSyncOO oopb.OperationOutcome
+	require.NoError(t, proto.Unmarshal(impSyncBytes, &impSyncOO))
+	require.NotEmpty(t, impSyncOO.GetIssue())
+	assert.Contains(t, impSyncOO.GetIssue()[0].GetDiagnostics().GetValue(), "Successfully imported 1 FHIR resource(s) via $import")
+
+	reqImpAsync, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/$import", bytes.NewReader(impParamsProto))
+	require.NoError(t, err)
+	reqImpAsync.Header.Set("Content-Type", "application/x-protobuf")
+	reqImpAsync.Header.Set("Prefer", "respond-async")
+	respImpAsync, err := client.Do(reqImpAsync)
+	require.NoError(t, err)
+	respImpAsync.Body.Close()
+	require.Equal(t, http.StatusAccepted, respImpAsync.StatusCode)
+	impPollLoc := respImpAsync.Header.Get("Content-Location")
+	require.NotEmpty(t, impPollLoc)
+
+	reqImpCancel, err := http.NewRequest(http.MethodDelete, impPollLoc, nil)
+	require.NoError(t, err)
+	reqImpCancel.Header.Set("Accept", "application/x-protobuf")
+	respImpCancel, err := client.Do(reqImpCancel)
+	require.NoError(t, err)
+	impCancelBytes, _ := io.ReadAll(respImpCancel.Body)
+	respImpCancel.Body.Close()
+	require.Equal(t, http.StatusAccepted, respImpCancel.StatusCode)
+	var impCancelOO oopb.OperationOutcome
+	require.NoError(t, proto.Unmarshal(impCancelBytes, &impCancelOO))
+	assert.NotEmpty(t, impCancelOO.GetIssue())
+
+	// POST /Patient/{id}/$expunge in binary Proto3
+	expInJSON := `{"resourceType":"Parameters","parameter":[{"name":"expungePreviousVersions","valueBoolean":true},{"name":"limit","valueInteger":10}]}`
+	reqExpConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(expInJSON))
+	require.NoError(t, err)
+	reqExpConv.Header.Set("Content-Type", "application/fhir+json")
+	reqExpConv.Header.Set("Accept", "application/x-protobuf")
+	respExpConv, err := client.Do(reqExpConv)
+	require.NoError(t, err)
+	expInProto, _ := io.ReadAll(respExpConv.Body)
+	respExpConv.Body.Close()
+	require.Equal(t, http.StatusOK, respExpConv.StatusCode)
+
+	reqExpPost, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/imp-proto-p1/$expunge", bytes.NewReader(expInProto))
+	require.NoError(t, err)
+	reqExpPost.Header.Set("Content-Type", "application/x-protobuf")
+	reqExpPost.Header.Set("Accept", "application/x-protobuf")
+	respExpPost, err := client.Do(reqExpPost)
+	require.NoError(t, err)
+	expOutBytes, _ := io.ReadAll(respExpPost.Body)
+	respExpPost.Body.Close()
+	require.Equal(t, http.StatusOK, respExpPost.StatusCode)
+	var expOutOO oopb.OperationOutcome
+	require.NoError(t, proto.Unmarshal(expOutBytes, &expOutOO))
+	assert.NotEmpty(t, expOutOO.GetIssue())
+
+	// POST /TestScript/$evaluate in binary Proto3
+	tsEvalJSON := `{"resourceType":"TestScript","id":"ts-proto-eval","url":"http://flint.fhir/TestScript/proto-eval","name":"ProtoEval","status":"active","test":[{"name":"ReadPatient","action":[{"operation":{"type":{"code":"read"},"resource":"Patient","params":"/` + patID + `"}},{"assert":{"response":"okay"}}]}]}`
+	reqTSConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/TestScript/$convert", strings.NewReader(tsEvalJSON))
+	require.NoError(t, err)
+	reqTSConv.Header.Set("Content-Type", "application/fhir+json")
+	reqTSConv.Header.Set("Accept", "application/x-protobuf")
+	respTSConv, err := client.Do(reqTSConv)
+	require.NoError(t, err)
+	tsEvalProto, _ := io.ReadAll(respTSConv.Body)
+	respTSConv.Body.Close()
+	require.Equal(t, http.StatusOK, respTSConv.StatusCode)
+
+	reqTSEval, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/TestScript/$evaluate", bytes.NewReader(tsEvalProto))
+	require.NoError(t, err)
+	reqTSEval.Header.Set("Content-Type", "application/x-protobuf")
+	reqTSEval.Header.Set("Accept", "application/x-protobuf")
+	respTSEval, err := client.Do(reqTSEval)
+	require.NoError(t, err)
+	tsEvalOutBytes, _ := io.ReadAll(respTSEval.Body)
+	respTSEval.Body.Close()
+	require.Equal(t, http.StatusOK, respTSEval.StatusCode)
+	assert.Contains(t, respTSEval.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.Equal(t, "google.fhir.r4.proto3", respTSEval.Header.Get("X-Flint-Wire-Format"))
+	assert.NotEmpty(t, tsEvalOutBytes)
+
+	// 28. SQL-on-FHIR v2 Collection Slicing (.tail, .single, .combine), Set Predicates (.subsetOf, .supersetOf) & .split() $sql Pushdown
+	sliceSplitVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "obs_slice_split",
+		"status": "active",
+		"resource": "Observation",
+		"select": [{
+			"column": [
+				{"name": "id", "path": "id"},
+				{"name": "tail_given", "path": "name.given.tail()", "collection": true},
+				{"name": "tail_joined", "path": "name.given.tail().join(', ')"},
+				{"name": "tail_first", "path": "name.given.tail().first()"},
+				{"name": "tail_cnt", "path": "name.given.tail().count()"},
+				{"name": "tail_exists", "path": "name.given.tail().exists()"},
+				{"name": "tail_empty", "path": "name.given.tail().empty()"},
+				{"name": "single_family", "path": "name.family.single()"},
+				{"name": "combine_names", "path": "name.given.combine(name.family)", "collection": true},
+				{"name": "combine_joined", "path": "name.given.combine(name.family).join(' ')"},
+				{"name": "combine_cnt", "path": "name.given.combine(name.family).count()"},
+				{"name": "subset_col", "path": "name.family.subsetOf(name.given)"},
+				{"name": "superset_col", "path": "name.given.supersetOf(name.family)"},
+				{"name": "split_code", "path": "code.coding.code.split('-')", "collection": true},
+				{"name": "split_scalar", "path": "code.coding.code.split('-')"}
+			]
+		}],
+		"where": [
+			{"path": "name.family.subsetOf(name.given) and name.given.supersetOf(name.family) and name.given.tail().exists() and name.given.tail().empty()"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_SLICE(",
+				"ARRAY_JOIN(ARRAY_SLICE(",
+				"GREATEST(ARRAY_SIZE(",
+				"ARRAY_SIZE(",
+				" > 1)",
+				" <= 1)",
+				"element_at(",
+				"ARRAY_CONCAT(",
+				"ARRAY_JOIN(ARRAY_CONCAT(",
+				"ARRAY_SIZE(ARRAY_EXCEPT(",
+				"SPLIT_BY_STRING(",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"OFFSET 1) sub)",
+				"LIMIT 1 OFFSET 1)",
+				"GREATEST((SELECT COUNT(*) FROM (",
+				" UNION ALL SELECT ",
+				"ARRAY_TO_STRING(ARRAY(",
+				"NOT EXISTS (",
+				" EXCEPT SELECT ",
+				"STRING_TO_ARRAY(",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"LIMIT -1 OFFSET 1) sub)",
+				"LIMIT 1 OFFSET 1)",
+				"MAX((SELECT COUNT(*) FROM (",
+				" UNION ALL SELECT ",
+				"group_concat(u.sp_value, ' ')",
+				"NOT EXISTS (",
+				" EXCEPT SELECT ",
+				"json_array(",
+			},
+		},
+	} {
+		reqSS, ssErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(sliceSplitVD))
+		require.NoError(t, ssErr)
+		reqSS.Header.Set("Content-Type", "application/fhir+json")
+		respSS, ssErr := client.Do(reqSS)
+		require.NoError(t, ssErr)
+		ssBytes, _ := io.ReadAll(respSS.Body)
+		respSS.Body.Close()
+		require.Equal(t, http.StatusOK, respSS.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(ssBytes), want)
 		}
 	}
 }

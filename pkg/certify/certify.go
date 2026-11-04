@@ -2853,6 +2853,79 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-15", suite10, "Zero-JSON Binary Proto3 Da Vinci Payer & Conformance Operations (Claim/$submit, CoverageEligibilityRequest/$submit, StructureDefinition/$snapshot, NamingSystem/$preferred-id) & SQL-on-FHIR v2 Set/Deduplication & Transcendental Math $sql Pushdown", t0, err, "Binary Proto3 Da Vinci Payer & Conformance wire transport & distinct / union / intersect / exclude / exp / ln / log / power / truncate $sql pushdown verified")
 
+	// AN-16: Zero-JSON Binary Proto3 Subscriptions (Subscription/$status, Subscription/$events), Audit (AuditEvent/$verify-integrity), Lifecycle ($diff), Terminology ($closure) & Conformance (TestScript/$evaluate) + SQL-on-FHIR v2 Collection Slicing (.tail, .single, .combine), Set Predicates (.subsetOf, .supersetOf) & String .split() $sql Pushdown
+	t0 = time.Now()
+	{
+		subProtoSeed := []byte(fmt.Sprintf(`{"resourceType":"Subscription","id":"cert-sub-proto-1","status":"requested","reason":"Proto status/events check","criteria":"Observation?code=8867-4","channel":{"type":"rest-hook","endpoint":"%s%s/$validate","payload":"application/x-protobuf"}}`, baseURL, basePath))
+		_, _, _ = doReq(http.MethodPut, basePath+"/Subscription/cert-sub-proto-1", "application/fhir+json", subProtoSeed, nil)
+		respSubStProto, bSubStProto, errSubStProto := doReq(http.MethodGet, basePath+"/Subscription/cert-sub-proto-1/$status?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSubEvProto, bSubEvProto, errSubEvProto := doReq(http.MethodGet, basePath+"/Subscription/cert-sub-proto-1/$events?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		_, _, _ = doReq(http.MethodDelete, basePath+"/Subscription/cert-sub-proto-1", "", nil, nil)
+
+		respAudVerProto, bAudVerProto, errAudVerProto := doReq(http.MethodGet, basePath+"/AuditEvent/$verify-integrity?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		diffParamsJSON := []byte(`{"resourceType":"Parameters","parameter":[{"name":"from","resource":{"resourceType":"Patient","id":"diff-p1","active":true,"gender":"female"}},{"name":"to","resource":{"resourceType":"Patient","id":"diff-p1","active":true,"gender":"other"}}]}`)
+		respDiffConv, bDiffInProto, errDiffConv := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", diffParamsJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respDiffProto, bDiffProto, errDiffProto := doReq(http.MethodPost, basePath+"/Patient/$diff", "application/x-protobuf", bDiffInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		closureParamsJSON := []byte(`{"resourceType":"Parameters","parameter":[{"name":"name","valueString":"cert-proto-closure-1"},{"name":"concept","valueCoding":{"system":"http://snomed.info/sct","code":"38341003"}},{"name":"concept","valueCoding":{"system":"http://snomed.info/sct","code":"59621000"}}]}`)
+		respClosConv, bClosInProto, errClosConv := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", closureParamsJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respClosProto, bClosProto, errClosProto := doReq(http.MethodPost, basePath+"/$closure", "application/x-protobuf", bClosInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		tsJSON := []byte(`{"resourceType":"TestScript","id":"cert-proto-ts-1","url":"http://flint.fhir.org/TestScript/cert-proto-ts-1","name":"CertProtoTS","status":"active","test":[{"name":"ReadPatient","action":[{"operation":{"type":{"system":"http://terminology.hl7.org/CodeSystem/testscript-operation-codes","code":"read"},"resource":"Patient","params":"/cert-pat-1"}},{"assert":{"response":"okay"}}]}]}`)
+		respTSConv, bTSInProto, errTSConv := doReq(http.MethodPost, basePath+"/TestScript/$convert", "application/fhir+json", tsJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respTSEvalProto, bTSEvalProto, errTSEvalProto := doReq(http.MethodPost, basePath+"/TestScript/$evaluate", "application/x-protobuf", bTSInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		sliceSplitVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_slice_split_view","status":"active","resource":"Observation","select":[{"column":[{"name":"id","path":"id"},{"name":"tail_given","path":"name.given.tail()","collection":true},{"name":"single_family","path":"name.family.single()"},{"name":"combine_names","path":"name.given.combine(name.family)","collection":true},{"name":"subset_col","path":"name.family.subsetOf(name.given)"},{"name":"superset_col","path":"name.given.supersetOf(name.family)"},{"name":"split_code","path":"code.coding.code.split('-')","collection":true}]}],"where":[{"path":"name.family.subsetOf(name.given) and name.given.supersetOf(name.family)"}]}`)
+		respSSDoris, bSSDoris, errSSDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", sliceSplitVD, nil)
+		respSSPg, bSSPg, errSSPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", sliceSplitVD, nil)
+
+		if errSubStProto != nil || respSubStProto.StatusCode != http.StatusOK || !strings.Contains(respSubStProto.Header.Get("Content-Type"), "application/x-protobuf") || respSubStProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bSubStProto) == 0 {
+			err = fmt.Errorf("expected GET /Subscription/.../$status?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respSubStProto.StatusCode)
+		} else if errSubEvProto != nil || respSubEvProto.StatusCode != http.StatusOK || !strings.Contains(respSubEvProto.Header.Get("Content-Type"), "application/x-protobuf") || respSubEvProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bSubEvProto) == 0 {
+			err = fmt.Errorf("expected GET /Subscription/.../$events?_format=application/x-protobuf to return binary Proto3 Bundle, got %d", respSubEvProto.StatusCode)
+		} else if errAudVerProto != nil || respAudVerProto.StatusCode != http.StatusOK || !strings.Contains(respAudVerProto.Header.Get("Content-Type"), "application/x-protobuf") || respAudVerProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bAudVerProto) == 0 {
+			err = fmt.Errorf("expected GET /AuditEvent/$verify-integrity?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respAudVerProto.StatusCode)
+		} else if errDiffConv != nil || respDiffConv.StatusCode != http.StatusOK || len(bDiffInProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert for $diff to return binary Proto3 Parameters, got %d", respDiffConv.StatusCode)
+		} else if errDiffProto != nil || respDiffProto.StatusCode != http.StatusOK || !strings.Contains(respDiffProto.Header.Get("Content-Type"), "application/x-protobuf") || respDiffProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bDiffProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$diff with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respDiffProto.StatusCode)
+		} else if errClosConv != nil || respClosConv.StatusCode != http.StatusOK || len(bClosInProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert for $closure to return binary Proto3 Parameters, got %d", respClosConv.StatusCode)
+		} else if errClosProto != nil || respClosProto.StatusCode != http.StatusOK || !strings.Contains(respClosProto.Header.Get("Content-Type"), "application/x-protobuf") || respClosProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bClosProto) == 0 {
+			err = fmt.Errorf("expected POST /$closure with binary Proto3 Parameters to return binary Proto3 ConceptMap, got %d", respClosProto.StatusCode)
+		} else if errTSConv != nil || respTSConv.StatusCode != http.StatusOK || len(bTSInProto) == 0 {
+			err = fmt.Errorf("expected POST /TestScript/$convert to return binary Proto3 TestScript, got %d", respTSConv.StatusCode)
+		} else if errTSEvalProto != nil || respTSEvalProto.StatusCode != http.StatusOK || !strings.Contains(respTSEvalProto.Header.Get("Content-Type"), "application/x-protobuf") || respTSEvalProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bTSEvalProto) == 0 {
+			err = fmt.Errorf("expected POST /TestScript/$evaluate with binary Proto3 TestScript to return binary Proto3 TestReport, got %d", respTSEvalProto.StatusCode)
+		} else if errSSDoris != nil || respSSDoris.StatusCode != http.StatusOK || !strings.Contains(string(bSSDoris), "ARRAY_SLICE(") || !strings.Contains(string(bSSDoris), "element_at(") || !strings.Contains(string(bSSDoris), "ARRAY_CONCAT(") || !strings.Contains(string(bSSDoris), "ARRAY_SIZE(ARRAY_EXCEPT(") || !strings.Contains(string(bSSDoris), "SPLIT_BY_STRING(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with tail/single/combine/subsetOf/supersetOf/split pushdown, got %d: %s", respSSDoris.StatusCode, string(bSSDoris))
+		} else if errSSPg != nil || respSSPg.StatusCode != http.StatusOK || !strings.Contains(string(bSSPg), "OFFSET 1) sub)") || !strings.Contains(string(bSSPg), " UNION ALL SELECT ") || !strings.Contains(string(bSSPg), "NOT EXISTS (") || !strings.Contains(string(bSSPg), " EXCEPT SELECT ") || !strings.Contains(string(bSSPg), "STRING_TO_ARRAY(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with tail/single/combine/subsetOf/supersetOf/split pushdown, got %d: %s", respSSPg.StatusCode, string(bSSPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-16", suite10, "Zero-JSON Binary Proto3 Subscriptions ($status, $events), Audit ($verify-integrity), Lifecycle ($diff), Terminology ($closure) & TestScript/$evaluate + SQL-on-FHIR v2 Collection Slicing (.tail, .single, .combine), Set Predicates (.subsetOf, .supersetOf) & .split() $sql Pushdown", t0, err, "Binary Proto3 Subscription, Audit, $diff, $closure & TestScript/$evaluate wire transport & tail / single / combine / subsetOf / supersetOf / split $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}
