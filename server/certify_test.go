@@ -63,7 +63,39 @@ func TestServer_CertifyEndpointAndRunner(t *testing.T) {
 		t.Errorf("unexpected scorecard output:\n%s", scorecard)
 	}
 
-	// 2. Verify POST /fhir/r4/{tenant}/$certify returns a valid FHIR R4 TestReport
+	// 1b. Verify AuditEvent search & read over binary Proto3 wire transport while audit events are populated
+	respAudListJSON, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/AuditEvent?_count=1")
+	if err != nil {
+		t.Fatalf("GET /AuditEvent JSON: %v", err)
+	}
+	var audBundleMap map[string]any
+	_ = json.NewDecoder(respAudListJSON.Body).Decode(&audBundleMap)
+	respAudListJSON.Body.Close()
+	if entries, ok := audBundleMap["entry"].([]any); ok && len(entries) > 0 {
+		if em, ok := entries[0].(map[string]any); ok {
+			if rm, ok := em["resource"].(map[string]any); ok {
+				if audID, _ := rm["id"].(string); audID != "" {
+					respAudReadProto, err := http.Get(ts.URL + "/fhir/r4/" + tenant + "/AuditEvent/" + audID + "?_format=application/x-protobuf")
+					if err != nil {
+						t.Fatalf("GET /AuditEvent/%s proto: %v", audID, err)
+					}
+					audProtoBytes, _ := io.ReadAll(respAudReadProto.Body)
+					respAudReadProto.Body.Close()
+					if respAudReadProto.StatusCode != http.StatusOK {
+						t.Fatalf("GET /AuditEvent/%s proto status=%d", audID, respAudReadProto.StatusCode)
+					}
+					if !strings.Contains(respAudReadProto.Header.Get("Content-Type"), "application/x-protobuf") {
+						t.Errorf("expected application/x-protobuf Content-Type, got %q", respAudReadProto.Header.Get("Content-Type"))
+					}
+					if len(audProtoBytes) == 0 {
+						t.Errorf("expected non-empty binary Proto3 AuditEvent payload")
+					}
+				}
+			}
+		}
+	}
+
+	// 2. Verify POST /fhir/r4/{tenant}/$certify returns a valid FHIR R4 TestReport (JSON & Binary Proto3)
 	cleanup()
 	resp, err := http.Post(ts.URL+"/fhir/r4/"+tenant+"/$certify", "application/fhir+json", nil)
 	if err != nil {
@@ -86,6 +118,66 @@ func TestServer_CertifyEndpointAndRunner(t *testing.T) {
 	}
 	if testReport["score"] != 100.0 {
 		t.Errorf("expected TestReport.score=100.0, got %v", testReport["score"])
+	}
+
+	cleanup()
+	reqCertProto, _ := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/"+tenant+"/$certify?_format=application/x-protobuf", nil)
+	reqCertProto.Header.Set("Accept", "application/x-protobuf")
+	respCertProto, err := http.DefaultClient.Do(reqCertProto)
+	if err != nil {
+		t.Fatalf("POST /$certify proto: %v", err)
+	}
+	certProtoBytes, _ := io.ReadAll(respCertProto.Body)
+	respCertProto.Body.Close()
+	if respCertProto.StatusCode != http.StatusOK {
+		t.Fatalf("POST /$certify proto status=%d", respCertProto.StatusCode)
+	}
+	if !strings.Contains(respCertProto.Header.Get("Content-Type"), "application/x-protobuf") {
+		t.Errorf("expected application/x-protobuf Content-Type from /$certify, got %q", respCertProto.Header.Get("Content-Type"))
+	}
+	if len(certProtoBytes) == 0 {
+		t.Errorf("expected non-empty binary Proto3 TestReport from /$certify")
+	}
+
+	// 2b. Verify POST /Patient/{id}/$purge with binary Proto3 Parameters request and OperationOutcome response
+	respSeedPat, err := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/"+tenant+"/Patient/purge-proto-p1", strings.NewReader(`{"resourceType":"Patient","id":"purge-proto-p1","active":true,"name":[{"family":"PurgeProto"}]}`))
+	if err != nil {
+		t.Fatalf("new PUT Patient request: %v", err)
+	}
+	respSeedPat.Header.Set("Content-Type", "application/fhir+json")
+	seedRes, err := http.DefaultClient.Do(respSeedPat)
+	if err != nil {
+		t.Fatalf("PUT Patient/purge-proto-p1: %v", err)
+	}
+	seedRes.Body.Close()
+
+	reqPurgeConv, _ := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/"+tenant+"/Parameters/$convert", strings.NewReader(`{"resourceType":"Parameters","parameter":[{"name":"expunge","valueBoolean":true}]}`))
+	reqPurgeConv.Header.Set("Content-Type", "application/fhir+json")
+	reqPurgeConv.Header.Set("Accept", "application/x-protobuf")
+	respPurgeConv, err := http.DefaultClient.Do(reqPurgeConv)
+	if err != nil {
+		t.Fatalf("POST /Parameters/$convert: %v", err)
+	}
+	purgeInProto, _ := io.ReadAll(respPurgeConv.Body)
+	respPurgeConv.Body.Close()
+
+	reqPurgeProto, _ := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/"+tenant+"/Patient/purge-proto-p1/$purge", strings.NewReader(string(purgeInProto)))
+	reqPurgeProto.Header.Set("Content-Type", "application/x-protobuf")
+	reqPurgeProto.Header.Set("Accept", "application/x-protobuf")
+	respPurgeProto, err := http.DefaultClient.Do(reqPurgeProto)
+	if err != nil {
+		t.Fatalf("POST /Patient/purge-proto-p1/$purge proto: %v", err)
+	}
+	purgeOutProto, _ := io.ReadAll(respPurgeProto.Body)
+	respPurgeProto.Body.Close()
+	if respPurgeProto.StatusCode != http.StatusOK {
+		t.Fatalf("POST /Patient/purge-proto-p1/$purge proto status=%d: %s", respPurgeProto.StatusCode, purgeOutProto)
+	}
+	if !strings.Contains(respPurgeProto.Header.Get("Content-Type"), "application/x-protobuf") {
+		t.Errorf("expected application/x-protobuf Content-Type from /$purge, got %q", respPurgeProto.Header.Get("Content-Type"))
+	}
+	if len(purgeOutProto) == 0 {
+		t.Errorf("expected non-empty binary Proto3 OperationOutcome from /$purge")
 	}
 }
 
