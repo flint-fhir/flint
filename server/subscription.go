@@ -1045,8 +1045,7 @@ func (s *Server) handleSubscriptionStatus(w http.ResponseWriter, r *http.Request
 	}
 	if subID == "" && r.Method == http.MethodPost && r.Body != nil && r.ContentLength != 0 {
 		if body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024)); err == nil && len(bytes.TrimSpace(body)) > 0 {
-			var raw map[string]any
-			if json.Unmarshal(body, &raw) == nil {
+			if raw, err := s.decodeOperationBodyMap(r, body, "Parameters"); err == nil {
 				if paramsArr, ok := raw["parameter"].([]any); ok {
 					for _, p := range paramsArr {
 						pm, _ := p.(map[string]any)
@@ -1101,9 +1100,7 @@ func (s *Server) handleSubscriptionStatus(w http.ResponseWriter, r *http.Request
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to format Subscription status")
 			return
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(statusParams)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", statusParams)
 		return
 	}
 
@@ -1138,9 +1135,7 @@ func (s *Server) handleSubscriptionStatus(w http.ResponseWriter, r *http.Request
 		"total":        len(entries),
 		"entry":        entries,
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 func (s *Server) buildSubscriptionStatusParameters(
@@ -1270,8 +1265,7 @@ func (s *Server) handleSubscriptionEvents(w http.ResponseWriter, r *http.Request
 
 	if r.Method == http.MethodPost && r.Body != nil && r.ContentLength != 0 {
 		if body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024)); err == nil && len(bytes.TrimSpace(body)) > 0 {
-			var raw map[string]any
-			if json.Unmarshal(body, &raw) == nil {
+			if raw, err := s.decodeOperationBodyMap(r, body, "Parameters"); err == nil {
 				if paramsArr, ok := raw["parameter"].([]any); ok {
 					for _, p := range paramsArr {
 						pm, _ := p.(map[string]any)
@@ -1517,7 +1511,5 @@ func (s *Server) handleSubscriptionEvents(w http.ResponseWriter, r *http.Request
 		"total":        len(matched),
 		"entry":        entries,
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(bundle)
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }

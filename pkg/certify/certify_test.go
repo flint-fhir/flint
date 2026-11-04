@@ -523,6 +523,16 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			return
 		}
 		if strings.Contains(path, "/Subscription") {
+			if strings.HasSuffix(path, "/$status") || strings.HasSuffix(path, "/$events") {
+				if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+					w.Header().Set("Content-Type", "application/x-protobuf")
+					w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+					_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x73, 0x75, 0x62, 0x31})
+					return
+				}
+				_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"status","valueCode":"active"}],"type":"query-status"}`))
+				return
+			}
 			if r.Method == http.MethodPost {
 				b, _ := io.ReadAll(r.Body)
 				if strings.Contains(string(b), "169.254.169.254") {
@@ -533,8 +543,9 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 				_, _ = w.Write([]byte(`{"resourceType":"Subscription","id":"sub-1","status":"active"}`))
 				return
 			}
-			if strings.HasSuffix(path, "/$status") {
-				_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"status","valueCode":"active"}],"type":"query-status"}`))
+			if r.Method == http.MethodPut {
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"resourceType":"Subscription","id":"cert-sub-proto-1","status":"active"}`))
 				return
 			}
 			w.WriteHeader(http.StatusNoContent)
@@ -1030,7 +1041,33 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			return
 		}
 		if strings.HasSuffix(path, "/TestScript/$evaluate") || strings.HasSuffix(path, "/TestScript/cert-stored-ts-1/$evaluate") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x74, 0x73, 0x65, 0x76})
+				return
+			}
 			_, _ = w.Write([]byte(`{"resourceType":"TestReport","status":"completed","result":"pass","score":100}`))
+			return
+		}
+		if strings.HasSuffix(path, "/$diff") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x64, 0x69, 0x66, 0x66})
+				return
+			}
+			_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"operation"}]}`))
+			return
+		}
+		if strings.HasSuffix(path, "/$closure") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x63, 0x6c, 0x6f, 0x73})
+				return
+			}
+			_, _ = w.Write([]byte(`{"resourceType":"ConceptMap","status":"active"}`))
 			return
 		}
 		if r.Method == http.MethodPut && strings.HasSuffix(path, "/TestScript/cert-stored-ts-1") {
@@ -1060,6 +1097,12 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			return
 		}
 		if strings.HasSuffix(path, "/AuditEvent/$verify-integrity") {
+			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
+				w.Header().Set("Content-Type", "application/x-protobuf")
+				w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
+				_, _ = w.Write([]byte{0x0a, 0x06, 0x0a, 0x04, 0x61, 0x75, 0x64, 0x31})
+				return
+			}
 			_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"verified","valueBoolean":true},{"name":"algorithm","valueString":"SHA-256-HASH-CHAIN"}]}`))
 			return
 		}
@@ -1090,7 +1133,7 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 		}
 		if strings.HasSuffix(path, "/ViewDefinition/$sql") {
 			w.Header().Set("Content-Type", "application/sql; charset=utf-8")
-			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val, CONCAT(r.code_system, '|', r.code), (COALESCE(r.code_system, '') || '|' || COALESCE(r.code, '')), ((r.value_quantity * 2) + 10), CAST((r.value_quantity / 10) AS BIGINT), CAST(TRUNC((r.value_quantity) / (10)) AS BIGINT), MOD(r.value_quantity, 5), MOD(CAST(r.value_quantity AS NUMERIC), CAST(5 AS NUMERIC)), CAST(r.effective_start AS DATE), CURRENT_DATE(), CURRENT_DATE, NOW(), CURRENT_TIMESTAMP, ABS(r.value_quantity), CEIL(r.value_quantity), FLOOR(r.value_quantity), ROUND(r.value_quantity, 2), SQRT(r.value_quantity), EXP(r.value_quantity), LN(r.value_quantity), LOG(10, r.value_quantity), POW(r.value_quantity, 2), POWER(r.value_quantity, 2), TRUNCATE(r.value_quantity, 0), TRUNC(r.value_quantity), ARRAY_DISTINCT(r.string_tokens), ARRAY_UNION(r.string_tokens, r.string_tokens), ARRAY_INTERSECT(r.string_tokens, r.string_tokens), ARRAY_EXCEPT(r.string_tokens, r.string_tokens), ARRAY_AGG(DISTINCT s.sp_value), COUNT(DISTINCT s.sp_value), SELECT s.sp_value FROM spidx_string s UNION SELECT s.sp_value FROM spidx_string s INTERSECT SELECT s.sp_value FROM spidx_string s EXCEPT SELECT s.sp_value FROM spidx_string s, REGEXP_REPLACE(r.code, '[^0-9]', ''), REGEXP(r.code, '^88.*'), r.code ~ '^88.*', CAST(r.value_quantity AS BIGINT), CAST(r.value_quantity AS DOUBLE), CAST(r.value_quantity AS DOUBLE PRECISION), CAST(r.value_quantity AS STRING), CAST(r.value_quantity AS TEXT), (LOCATE('88', r.code) - 1), (STRPOS(r.code, '88') - 1), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens), ARRAY_JOIN(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), ' '), ARRAY_SIZE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))), element_at(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), -1), ARRAY_SLICE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), 2), ORDER BY s.sp_value DESC LIMIT 1, LIMIT 1 OFFSET 1, LIMIT 2) sub, COALESCE(r.res_id, 'Unknown'), CASE WHEN 1=1 THEN 'Active' ELSE 'Inactive' END, REPLACE(r.res_id, 'Cert', 'Mod'), SUBSTR(r.res_id, 1, 4), TRIM(r.res_id), LOWER(r.res_id), UPPER(r.res_id), CHAR_LENGTH(r.res_id), LENGTH(r.res_id), (SELECT COUNT(*) FROM spidx_string s), ARRAY_TO_STRING(ARRAY_AGG(s.sp_value), ' '), ARRAY_AGG(s.sp_value) FROM fhir_observation r LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok INNER JOIN spidx_token fe ON fe.tenant_id = r.tenant_id WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error') AND r.effective_start IS NOT NULL AND array_exists(x -> x LIKE 'family=Cert%', r.string_tokens) AND array_exists(x -> x LIKE 'family=%tify', r.string_tokens) AND array_exists(x -> x LIKE 'given=%lic%', r.string_tokens) UNION ALL SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r\n"))
+			_, _ = w.Write([]byte("SELECT r.res_id AS id, r.value_quantity AS val, CONCAT(r.code_system, '|', r.code), (COALESCE(r.code_system, '') || '|' || COALESCE(r.code, '')), ((r.value_quantity * 2) + 10), CAST((r.value_quantity / 10) AS BIGINT), CAST(TRUNC((r.value_quantity) / (10)) AS BIGINT), MOD(r.value_quantity, 5), MOD(CAST(r.value_quantity AS NUMERIC), CAST(5 AS NUMERIC)), CAST(r.effective_start AS DATE), CURRENT_DATE(), CURRENT_DATE, NOW(), CURRENT_TIMESTAMP, ABS(r.value_quantity), CEIL(r.value_quantity), FLOOR(r.value_quantity), ROUND(r.value_quantity, 2), SQRT(r.value_quantity), EXP(r.value_quantity), LN(r.value_quantity), LOG(10, r.value_quantity), POW(r.value_quantity, 2), POWER(r.value_quantity, 2), TRUNCATE(r.value_quantity, 0), TRUNC(r.value_quantity), ARRAY_DISTINCT(r.string_tokens), ARRAY_UNION(r.string_tokens, r.string_tokens), ARRAY_CONCAT(r.string_tokens, r.string_tokens), ARRAY_INTERSECT(r.string_tokens, r.string_tokens), ARRAY_EXCEPT(r.string_tokens, r.string_tokens), ARRAY_SIZE(ARRAY_EXCEPT(r.string_tokens, r.string_tokens)), SPLIT_BY_STRING(r.code, '-'), STRING_TO_ARRAY(r.code, '-'), ARRAY_AGG(DISTINCT s.sp_value), COUNT(DISTINCT s.sp_value), SELECT s.sp_value FROM spidx_string s UNION SELECT s.sp_value FROM spidx_string s UNION ALL SELECT s.sp_value FROM spidx_string s INTERSECT SELECT s.sp_value FROM spidx_string s EXCEPT SELECT s.sp_value FROM spidx_string s, NOT EXISTS (SELECT s.sp_value FROM spidx_string s EXCEPT SELECT s.sp_value FROM spidx_string s), OFFSET 1) sub), REGEXP_REPLACE(r.code, '[^0-9]', ''), REGEXP(r.code, '^88.*'), r.code ~ '^88.*', CAST(r.value_quantity AS BIGINT), CAST(r.value_quantity AS DOUBLE), CAST(r.value_quantity AS DOUBLE PRECISION), CAST(r.value_quantity AS STRING), CAST(r.value_quantity AS TEXT), (LOCATE('88', r.code) - 1), (STRPOS(r.code, '88') - 1), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens), ARRAY_JOIN(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), ' '), ARRAY_SIZE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))), element_at(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), -1), ARRAY_SLICE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), 2), ORDER BY s.sp_value DESC LIMIT 1, LIMIT 1 OFFSET 1, LIMIT 2) sub, COALESCE(r.res_id, 'Unknown'), CASE WHEN 1=1 THEN 'Active' ELSE 'Inactive' END, REPLACE(r.res_id, 'Cert', 'Mod'), SUBSTR(r.res_id, 1, 4), TRIM(r.res_id), LOWER(r.res_id), UPPER(r.res_id), CHAR_LENGTH(r.res_id), LENGTH(r.res_id), (SELECT COUNT(*) FROM spidx_string s), ARRAY_TO_STRING(ARRAY_AGG(s.sp_value), ' '), ARRAY_AGG(s.sp_value) FROM fhir_observation r LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok INNER JOIN spidx_token fe ON fe.tenant_id = r.tenant_id WHERE r.value_quantity >= 120 AND NOT array_contains(r.code_tokens, 'status=|entered-in-error') AND r.effective_start IS NOT NULL AND array_exists(x -> x LIKE 'family=Cert%', r.string_tokens) AND array_exists(x -> x LIKE 'family=%tify', r.string_tokens) AND array_exists(x -> x LIKE 'given=%lic%', r.string_tokens) UNION ALL SELECT r.res_id AS id, r.value_quantity AS val FROM fhir_observation r\n"))
 			return
 		}
 		if strings.HasSuffix(path, "/$sync-analytics") {
@@ -1164,8 +1207,8 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 97 {
-		t.Fatalf("expected all 97 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 98 {
+		t.Fatalf("expected all 98 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()

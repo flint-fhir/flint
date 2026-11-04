@@ -2182,4 +2182,153 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(smBytes), want)
 		}
 	}
+
+	// 27. Binary Proto3 Subscription/$status, Subscription/$events, AuditEvent/$verify-integrity, /$diff, /$closure, TestScript/$evaluate
+	subSeed := `{"resourceType":"Subscription","id":"proto-sub-1","status":"requested","reason":"Proto test","criteria":"Observation?code=8867-4","channel":{"type":"rest-hook","endpoint":"` + ts.URL + `/fhir/r4/proto/$validate","payload":"application/x-protobuf"}}`
+	reqSubPut, err := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Subscription/proto-sub-1", strings.NewReader(subSeed))
+	require.NoError(t, err)
+	reqSubPut.Header.Set("Content-Type", "application/fhir+json")
+	respSubPut, err := client.Do(reqSubPut)
+	require.NoError(t, err)
+	respSubPut.Body.Close()
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, respSubPut.StatusCode)
+
+	reqSubSt, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Subscription/proto-sub-1/$status?_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqSubSt.Header.Set("Accept", "application/x-protobuf")
+	respSubSt, err := client.Do(reqSubSt)
+	require.NoError(t, err)
+	subStBytes, _ := io.ReadAll(respSubSt.Body)
+	respSubSt.Body.Close()
+	require.Equal(t, http.StatusOK, respSubSt.StatusCode)
+	assert.Contains(t, respSubSt.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.Equal(t, "google.fhir.r4.proto3", respSubSt.Header.Get("X-Flint-Wire-Format"))
+	var subStParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(subStBytes, &subStParams))
+	assert.NotEmpty(t, subStParams.GetParameter())
+
+	reqSubEv, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Subscription/proto-sub-1/$events?_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqSubEv.Header.Set("Accept", "application/x-protobuf")
+	respSubEv, err := client.Do(reqSubEv)
+	require.NoError(t, err)
+	subEvBytes, _ := io.ReadAll(respSubEv.Body)
+	respSubEv.Body.Close()
+	require.Equal(t, http.StatusOK, respSubEv.StatusCode)
+	assert.Contains(t, respSubEv.Header.Get("Content-Type"), "application/x-protobuf")
+	var subEvBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(subEvBytes, &subEvBundle))
+	assert.NotEmpty(t, subEvBundle.GetEntry())
+
+	reqAudVer, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/AuditEvent/$verify-integrity?_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqAudVer.Header.Set("Accept", "application/x-protobuf")
+	respAudVer, err := client.Do(reqAudVer)
+	require.NoError(t, err)
+	audVerBytes, _ := io.ReadAll(respAudVer.Body)
+	respAudVer.Body.Close()
+	require.Equal(t, http.StatusOK, respAudVer.StatusCode)
+	assert.Contains(t, respAudVer.Header.Get("Content-Type"), "application/x-protobuf")
+	var audVerParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(audVerBytes, &audVerParams))
+	assert.NotEmpty(t, audVerParams.GetParameter())
+
+	diffInJSON := `{"resourceType":"Parameters","parameter":[{"name":"from","resource":{"resourceType":"Patient","id":"diff-p1","active":true,"gender":"female"}},{"name":"to","resource":{"resourceType":"Patient","id":"diff-p1","active":true,"gender":"other"}}]}`
+	reqDiffConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(diffInJSON))
+	require.NoError(t, err)
+	reqDiffConv.Header.Set("Content-Type", "application/fhir+json")
+	reqDiffConv.Header.Set("Accept", "application/x-protobuf")
+	respDiffConv, err := client.Do(reqDiffConv)
+	require.NoError(t, err)
+	diffInProto, _ := io.ReadAll(respDiffConv.Body)
+	respDiffConv.Body.Close()
+	require.Equal(t, http.StatusOK, respDiffConv.StatusCode)
+
+	reqDiff, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/$diff", bytes.NewReader(diffInProto))
+	require.NoError(t, err)
+	reqDiff.Header.Set("Content-Type", "application/x-protobuf")
+	reqDiff.Header.Set("Accept", "application/x-protobuf")
+	respDiff, err := client.Do(reqDiff)
+	require.NoError(t, err)
+	diffOutBytes, _ := io.ReadAll(respDiff.Body)
+	respDiff.Body.Close()
+	require.Equal(t, http.StatusOK, respDiff.StatusCode)
+	assert.Contains(t, respDiff.Header.Get("Content-Type"), "application/x-protobuf")
+	var diffOutParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(diffOutBytes, &diffOutParams))
+	assert.NotEmpty(t, diffOutParams.GetParameter())
+
+	// 28. SQL-on-FHIR v2 Collection Slicing (.tail, .single, .combine), Set Predicates (.subsetOf, .supersetOf) & .split() $sql Pushdown
+	sliceSplitVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "obs_slice_split",
+		"status": "active",
+		"resource": "Observation",
+		"select": [{
+			"column": [
+				{"name": "id", "path": "id"},
+				{"name": "tail_given", "path": "name.given.tail()", "collection": true},
+				{"name": "tail_joined", "path": "name.given.tail().join(', ')"},
+				{"name": "tail_first", "path": "name.given.tail().first()"},
+				{"name": "single_family", "path": "name.family.single()"},
+				{"name": "combine_names", "path": "name.given.combine(name.family)", "collection": true},
+				{"name": "subset_col", "path": "name.family.subsetOf(name.given)"},
+				{"name": "superset_col", "path": "name.given.supersetOf(name.family)"},
+				{"name": "split_code", "path": "code.coding.code.split('-')", "collection": true}
+			]
+		}],
+		"where": [
+			{"path": "name.family.subsetOf(name.given) and name.given.supersetOf(name.family)"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_SLICE(",
+				"ARRAY_JOIN(ARRAY_SLICE(",
+				"element_at(",
+				"ARRAY_CONCAT(",
+				"ARRAY_SIZE(ARRAY_EXCEPT(",
+				"SPLIT_BY_STRING(",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"OFFSET 1) sub)",
+				"LIMIT 1 OFFSET 1)",
+				" UNION ALL SELECT ",
+				"NOT EXISTS (",
+				" EXCEPT SELECT ",
+				"STRING_TO_ARRAY(",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"LIMIT -1 OFFSET 1) sub)",
+				"LIMIT 1 OFFSET 1)",
+				" UNION ALL SELECT ",
+				"NOT EXISTS (",
+				" EXCEPT SELECT ",
+				"json_array(",
+			},
+		},
+	} {
+		reqSS, ssErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(sliceSplitVD))
+		require.NoError(t, ssErr)
+		reqSS.Header.Set("Content-Type", "application/fhir+json")
+		respSS, ssErr := client.Do(reqSS)
+		require.NoError(t, ssErr)
+		ssBytes, _ := io.ReadAll(respSS.Body)
+		respSS.Body.Close()
+		require.Equal(t, http.StatusOK, respSS.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(ssBytes), want)
+		}
+	}
 }

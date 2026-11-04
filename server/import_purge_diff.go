@@ -169,9 +169,7 @@ func (s *Server) handleBulkImport(w http.ResponseWriter, r *http.Request) {
 			"diagnostics": msg,
 		})
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "OperationOutcome", map[string]any{
 		"resourceType": "OperationOutcome",
 		"issue":        issues,
 	})
@@ -179,45 +177,61 @@ func (s *Server) handleBulkImport(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) parseBulkImportBlocks(ctx context.Context, contentType string, body []byte) ([]importSourceBlock, error) {
 	ct := strings.ToLower(strings.TrimSpace(contentType))
+	var root map[string]any
 	if strings.Contains(ct, "protobuf") || strings.Contains(ct, "fhir+proto") {
-		bundleMap, err := fhirutil.ProtoBytesToFHIRMap(fhirutil.BundleDescriptor(), "Bundle", body, 0, time.Time{})
-		if err != nil {
-			return nil, fmt.Errorf("invalid Bundle protobuf in $import request: %v", err)
+		if pm, err := s.protoToFHIRMap("Parameters", body); err == nil {
+			if params, ok := pm["parameter"].([]any); ok && len(params) > 0 {
+				for _, p := range params {
+					if item, ok := p.(map[string]any); ok {
+						if n, _ := item["name"].(string); (n == "input" || n == "inputFormat") && len(item) >= 2 {
+							root = pm
+							break
+						}
+					}
+				}
+			}
 		}
-		entries, _ := bundleMap["entry"].([]any)
-		var blocks []importSourceBlock
-		for _, rawE := range entries {
-			em, ok := rawE.(map[string]any)
-			if !ok {
-				continue
-			}
-			resMap, ok := em["resource"].(map[string]any)
-			if !ok || resMap == nil {
-				continue
-			}
-			rt, _ := resMap["resourceType"].(string)
-			lineBytes, err := json.Marshal(resMap)
+		if root == nil {
+			bundleMap, err := fhirutil.ProtoBytesToFHIRMap(fhirutil.BundleDescriptor(), "Bundle", body, 0, time.Time{})
 			if err != nil {
-				continue
+				return nil, fmt.Errorf("invalid Bundle protobuf in $import request: %v", err)
 			}
-			blocks = append(blocks, importSourceBlock{
-				ResourceType: rt,
-				NDJSON:       string(lineBytes),
-			})
+			entries, _ := bundleMap["entry"].([]any)
+			var blocks []importSourceBlock
+			for _, rawE := range entries {
+				em, ok := rawE.(map[string]any)
+				if !ok {
+					continue
+				}
+				resMap, ok := em["resource"].(map[string]any)
+				if !ok || resMap == nil {
+					continue
+				}
+				rt, _ := resMap["resourceType"].(string)
+				lineBytes, err := json.Marshal(resMap)
+				if err != nil {
+					continue
+				}
+				blocks = append(blocks, importSourceBlock{
+					ResourceType: rt,
+					NDJSON:       string(lineBytes),
+				})
+			}
+			return blocks, nil
 		}
-		return blocks, nil
 	}
 	if strings.Contains(ct, "ndjson") {
 		return []importSourceBlock{{NDJSON: string(body)}}, nil
 	}
 
-	var root map[string]any
-	if err := json.Unmarshal(body, &root); err != nil {
-		// Fallback: treat multi-line JSON objects as raw NDJSON stream
-		if bytes.Contains(body, []byte("\n")) {
-			return []importSourceBlock{{NDJSON: string(body)}}, nil
+	if root == nil {
+		if err := json.Unmarshal(body, &root); err != nil {
+			// Fallback: treat multi-line JSON objects as raw NDJSON stream
+			if bytes.Contains(body, []byte("\n")) {
+				return []importSourceBlock{{NDJSON: string(body)}}, nil
+			}
+			return nil, fmt.Errorf("invalid JSON in $import request: %v", err)
 		}
-		return nil, fmt.Errorf("invalid JSON in $import request: %v", err)
 	}
 
 	rt, _ := root["resourceType"].(string)
@@ -508,9 +522,7 @@ func (s *Server) handleImportCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusAccepted)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusAccepted, "OperationOutcome", map[string]any{
 		"resourceType": "OperationOutcome",
 		"issue": []map[string]any{
 			{
@@ -541,8 +553,7 @@ func (s *Server) handlePatientPurge(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil && r.ContentLength != 0 {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 1*1024*1024))
 		if err == nil && len(bytes.TrimSpace(body)) > 0 {
-			var root map[string]any
-			if json.Unmarshal(body, &root) == nil {
+			if root, err := s.decodeOperationBodyMap(r, body, "Parameters"); err == nil {
 				if params, ok := root["parameter"].([]any); ok {
 					for _, p := range params {
 						pm, ok := p.(map[string]any)
@@ -591,9 +602,7 @@ func (s *Server) handlePatientPurge(w http.ResponseWriter, r *http.Request) {
 	if hardExpunge {
 		modeLabel = "physically expunged"
 	}
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "OperationOutcome", map[string]any{
 		"resourceType": "OperationOutcome",
 		"issue": []map[string]any{
 			{
@@ -646,9 +655,9 @@ func (s *Server) handleExpunge(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(bytes.TrimSpace(body)) > 0 {
-			var root map[string]any
-			if err := json.Unmarshal(body, &root); err != nil {
-				writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid JSON in $expunge request: %v", err))
+			root, err := s.decodeOperationBodyMap(r, body, "Parameters")
+			if err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid body in $expunge request: %v", err))
 				return
 			}
 			if rt, _ := root["resourceType"].(string); rt != "" && rt != "Parameters" {
@@ -693,9 +702,7 @@ func (s *Server) handleExpunge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "OperationOutcome", map[string]any{
 		"resourceType": "OperationOutcome",
 		"issue": []map[string]any{
 			{
@@ -732,9 +739,9 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(bytes.TrimSpace(body)) > 0 {
-			var root map[string]any
-			if err := json.Unmarshal(body, &root); err != nil {
-				writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid JSON in $diff request: %v", err))
+			root, err := s.decodeOperationBodyMap(r, body, "Parameters")
+			if err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid body in $diff request: %v", err))
 				return
 			}
 			if rt, _ := root["resourceType"].(string); rt != "" && rt != "Parameters" {
@@ -794,9 +801,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		diffParams := computeFHIRParametersDiff(fromType, fromMap, toMap, includeMeta)
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(diffParams)
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", diffParams)
 		return
 	}
 
@@ -887,9 +892,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 	}
 
 	diffParams := computeFHIRParametersDiff(resType, fromMap, toMap, includeMeta)
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(diffParams)
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", diffParams)
 }
 
 func computeFHIRParametersDiff(resType string, fromMap, toMap map[string]any, includeMeta bool) map[string]any {

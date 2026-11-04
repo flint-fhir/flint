@@ -4417,9 +4417,7 @@ func (s *Server) handleReadAuditEvent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(audit.ToFHIRResource(*rec))
+	s.writeOperationResponse(w, r, http.StatusOK, "AuditEvent", audit.ToFHIRResource(*rec))
 }
 
 // handleSearchAuditEvents handles GET /{tenant}/AuditEvent?{params}.
@@ -4504,11 +4502,7 @@ func (s *Server) handleSearchAuditEvents(w http.ResponseWriter, r *http.Request)
 		"entry":        entries,
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	if r == nil || r.Method != http.MethodHead {
-		json.NewEncoder(w).Encode(bundle)
-	}
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleAuditVerifyIntegrity handles GET/POST /fhir/r4/{tenant}/AuditEvent/$verify-integrity
@@ -4566,9 +4560,7 @@ func (s *Server) handleAuditVerifyIntegrity(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    params,
 	})
