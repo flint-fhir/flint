@@ -1842,8 +1842,43 @@ func spidxZeroJSONForEachColumnExpr(fhirPath, forEachPath, dialect string) (stri
 	return spidxZeroJSONColumnExpr(fhirPath, dialect)
 }
 
+func normalizePolymorphicFHIRPath(expr string) string {
+	s := expr
+	for _, spec := range []struct {
+		call   string
+		isPred bool
+	}{
+		{".ofType(", false},
+		{".as(", false},
+		{".is(", true},
+	} {
+		for {
+			idx := strings.Index(s, spec.call)
+			if idx == -1 {
+				break
+			}
+			rest := s[idx+len(spec.call):]
+			closeIdx := strings.IndexByte(rest, ')')
+			if closeIdx == -1 {
+				break
+			}
+			typeArg := strings.Trim(strings.TrimSpace(rest[:closeIdx]), "'\"")
+			if typeArg == "" {
+				break
+			}
+			capType := strings.ToUpper(typeArg[:1]) + typeArg[1:]
+			replacement := capType
+			if spec.isPred {
+				replacement = capType + ".exists()"
+			}
+			s = s[:idx] + replacement + rest[closeIdx+1:]
+		}
+	}
+	return s
+}
+
 func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
-	p := stripOuterParens(strings.TrimSpace(fhirPath))
+	p := normalizePolymorphicFHIRPath(stripOuterParens(strings.TrimSpace(fhirPath)))
 	if strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") {
 		return p, "constant"
 	}
@@ -2060,6 +2095,25 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
 		return fmt.Sprintf("element_at(%s, 1)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".first"
 	}
+	for _, aggSpec := range []struct {
+		suffix  string
+		dorisFn string
+		tag     string
+	}{
+		{".sum()", "ARRAY_SUM", ".sum"},
+		{".avg()", "ARRAY_AVG", ".avg"},
+		{".min()", "ARRAY_MIN", ".min"},
+		{".max()", "ARRAY_MAX", ".max"},
+	} {
+		if strings.HasSuffix(p, aggSpec.suffix) {
+			basePath := strings.TrimSpace(p[:len(p)-len(aggSpec.suffix)])
+			if strings.Contains(basePath, "Quantity") {
+				return fmt.Sprintf("%s(ARRAY_MAP(x -> CAST(SPLIT_PART(x, '|', 2) AS DOUBLE), ARRAY_FILTER(x -> x LIKE 'value-quantity=|%%', r.code_tokens)))", aggSpec.dorisFn), "code_tokens[value-quantity]" + aggSpec.tag
+			}
+			collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+			return fmt.Sprintf("%s(ARRAY_MAP(x -> CAST(x AS DOUBLE), %s))", aggSpec.dorisFn, collExpr), strings.TrimSuffix(collSrc, "[]") + aggSpec.tag
+		}
+	}
 	if strings.HasSuffix(p, ".count()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".count()")])
 		if strings.HasSuffix(basePath, ".tail()") {
@@ -2093,6 +2147,9 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 	}
 	if _, _, ok := parseCollectionCriteriaCall(p, ".exists("); ok {
 		return dorisZeroJSONWhereExpr(p, isCore), "exists"
+	}
+	if (strings.Contains(p, ".startsWith(") || strings.Contains(p, ".endsWith(") || strings.Contains(p, ".contains(") || strings.Contains(p, ".matches(")) && strings.HasSuffix(p, ")") {
+		return dorisZeroJSONWhereExpr(p, isCore), "predicate"
 	}
 	if extURL, extTail, ok := parseExtensionFilterPath(p); ok {
 		if extTail == ".exists()" || extTail == ".empty()" {
@@ -2169,12 +2226,14 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		return codeCol, strings.TrimPrefix(codeCol, "r.")
 	case "code.coding.system.first()", "code.coding.system", "code.coding.first().system":
 		return codeSysCol, strings.TrimPrefix(codeSysCol, "r.")
-	case "valueQuantity.value":
+	case "valueQuantity.value", "component.valueQuantity.value":
 		return qtyCol, strings.TrimPrefix(qtyCol, "r.")
-	case "valueQuantity.code", "valueQuantity.unit":
+	case "valueQuantity.code", "valueQuantity.unit", "component.valueQuantity.code", "component.valueQuantity.unit":
 		return unitCodeCol, strings.TrimPrefix(unitCodeCol, "r.")
-	case "valueQuantity.system":
+	case "valueQuantity.system", "component.valueQuantity.system":
 		return unitSysCol, strings.TrimPrefix(unitSysCol, "r.")
+	case "valueCodeableConcept.coding.code.first()", "valueCodeableConcept.coding.code":
+		return "element_at(array_map(x -> split_part(x, '|', 2), array_filter(x -> x LIKE 'value-concept=|%', r.code_tokens)), 1)", "code_tokens[value-concept]"
 	case "effectiveDateTime", "effectivePeriod.start", "onsetDateTime", "birthDate", "authoredOn", "issued":
 		return dateLowCol, strings.TrimPrefix(dateLowCol, "r.")
 	case "effectivePeriod.end", "abatementDateTime":
@@ -2200,7 +2259,7 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 }
 
 func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
-	p := strings.TrimSpace(fhirPath)
+	p := normalizePolymorphicFHIRPath(strings.TrimSpace(fhirPath))
 	if p == "" {
 		return ""
 	}
@@ -2460,7 +2519,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 	}
 	_, _, _, isArithLHS := splitTopLevelArithmeticOp(lhs)
 
-	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") {
+	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") {
 		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
 			lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
 			sqlOp := op
@@ -2518,7 +2577,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 }
 
 func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
-	p := stripOuterParens(strings.TrimSpace(fhirPath))
+	p := normalizePolymorphicFHIRPath(stripOuterParens(strings.TrimSpace(fhirPath)))
 	if strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") {
 		return p, "constant"
 	}
@@ -2876,6 +2935,29 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 			}
 		}
 	}
+	for _, aggSpec := range []struct {
+		suffix string
+		sqlFn  string
+		tag    string
+	}{
+		{".sum()", "SUM", ".sum"},
+		{".avg()", "AVG", ".avg"},
+		{".min()", "MIN", ".min"},
+		{".max()", "MAX", ".max"},
+	} {
+		if strings.HasSuffix(p, aggSpec.suffix) {
+			basePath := strings.TrimSpace(p[:len(p)-len(aggSpec.suffix)])
+			if strings.Contains(basePath, "Quantity") {
+				return fmt.Sprintf("(SELECT %s(q.sp_value) FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity')", aggSpec.sqlFn), "spidx_quantity" + aggSpec.tag
+			}
+			sp := normalizeFHIRPathToSearchParam(basePath)
+			castType := "DOUBLE PRECISION"
+			if dialect == "sqlite" {
+				castType = "REAL"
+			}
+			return fmt.Sprintf("(SELECT %s(CAST(t.sp_value AS %s)) FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s')", aggSpec.sqlFn, castType, sp), "spidx_token" + aggSpec.tag
+		}
+	}
 	if strings.HasSuffix(p, ".count()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".count()")])
 		if strings.HasSuffix(basePath, ".tail()") {
@@ -2946,6 +3028,9 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 	if _, _, ok := parseCollectionCriteriaCall(p, ".exists("); ok {
 		return spidxZeroJSONWhereExprForDialect(p, dialect), "spidx.exists"
 	}
+	if (strings.Contains(p, ".startsWith(") || strings.Contains(p, ".endsWith(") || strings.Contains(p, ".contains(") || strings.Contains(p, ".matches(")) && strings.HasSuffix(p, ")") {
+		return spidxZeroJSONWhereExprForDialect(p, dialect), "spidx.predicate"
+	}
 	if extURL, extTail, ok := parseExtensionFilterPath(p); ok {
 		if extTail == ".exists()" || extTail == ".empty()" {
 			return spidxZeroJSONWhereExprForDialect(p, dialect), "spidx_token[extension]"
@@ -3013,10 +3098,12 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		return "(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'code' LIMIT 1)", "spidx_token"
 	case "code.coding.system.first()", "code.coding.system", "code.coding.first().system":
 		return "(SELECT t.sp_system FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'code' LIMIT 1)", "spidx_token"
-	case "valueQuantity.value":
+	case "valueQuantity.value", "component.valueQuantity.value":
 		return "(SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1)", "spidx_quantity"
-	case "valueQuantity.code", "valueQuantity.unit":
+	case "valueQuantity.code", "valueQuantity.unit", "component.valueQuantity.code", "component.valueQuantity.unit":
 		return "(SELECT q.sp_code FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1)", "spidx_quantity"
+	case "valueCodeableConcept.coding.code.first()", "valueCodeableConcept.coding.code":
+		return "(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'value-concept' LIMIT 1)", "spidx_token"
 	case "effectiveDateTime", "effectivePeriod.start", "onsetDateTime", "birthDate", "authoredOn":
 		sp := "date"
 		switch p {
@@ -3042,7 +3129,7 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 }
 
 func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
-	p := strings.TrimSpace(fhirPath)
+	p := normalizePolymorphicFHIRPath(strings.TrimSpace(fhirPath))
 	if p == "" {
 		return ""
 	}
@@ -3292,7 +3379,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 	}
 	_, _, _, isArithLHS := splitTopLevelArithmeticOp(lhs)
 
-	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") {
+	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") {
 		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
 			lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, dialect)
 			sqlOp := op
@@ -3441,12 +3528,20 @@ func parseViewWhereComparison(expr string) (lhs, op, rhs string, ok bool) {
 }
 
 func normalizeFHIRPathToSearchParam(path string) string {
-	p := strings.TrimSpace(path)
+	p := normalizePolymorphicFHIRPath(strings.TrimSpace(path))
 	switch {
 	case strings.HasPrefix(p, "clinicalStatus"):
 		return "clinical-status"
 	case strings.HasPrefix(p, "verificationStatus"):
 		return "verification-status"
+	case strings.HasPrefix(p, "valueCodeableConcept"):
+		return "value-concept"
+	case strings.HasPrefix(p, "valueQuantity") || strings.HasPrefix(p, "component.valueQuantity"):
+		return "value-quantity"
+	case strings.HasPrefix(p, "valueString"):
+		return "value-string"
+	case strings.HasPrefix(p, "deceased"):
+		return "deceased"
 	case strings.HasPrefix(p, "name.family"):
 		return "family"
 	case strings.HasPrefix(p, "name.given"):

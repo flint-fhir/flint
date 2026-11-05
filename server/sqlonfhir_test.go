@@ -2764,4 +2764,153 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(qeBytes), want)
 		}
 	}
+
+	// 31. Binary Proto3 PATCH (Parameters FHIRPath Patch & Merge Patch), DELETE (Prefer: return=OperationOutcome),
+	// Terminology ($validate-code, $subsumes), Conformance ($subset, $implements), & Polymorphic/Aggregate $sql Pushdown
+	patchParamsJSON := `{"resourceType":"Parameters","parameter":[{"name":"operation","part":[{"name":"type","valueCode":"replace"},{"name":"path","valueString":"Patient.name[0].family"},{"name":"value","valueString":"WireProtoFHIRPatched"}]}]}`
+	reqPatchConv, pConvErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(patchParamsJSON))
+	require.NoError(t, pConvErr)
+	reqPatchConv.Header.Set("Content-Type", "application/fhir+json")
+	reqPatchConv.Header.Set("Accept", "application/x-protobuf")
+	respPatchConv, pConvErr := client.Do(reqPatchConv)
+	require.NoError(t, pConvErr)
+	patchProtoBytes, _ := io.ReadAll(respPatchConv.Body)
+	respPatchConv.Body.Close()
+	require.Equal(t, http.StatusOK, respPatchConv.StatusCode)
+
+	reqPatchP, patchPErr := http.NewRequest(http.MethodPatch, ts.URL+"/fhir/r4/proto/Patient/"+patID, bytes.NewReader(patchProtoBytes))
+	require.NoError(t, patchPErr)
+	reqPatchP.Header.Set("Content-Type", "application/x-protobuf")
+	reqPatchP.Header.Set("Accept", "application/x-protobuf")
+	respPatchP, patchPErr := client.Do(reqPatchP)
+	require.NoError(t, patchPErr)
+	patchedPBytes, _ := io.ReadAll(respPatchP.Body)
+	respPatchP.Body.Close()
+	require.Equal(t, http.StatusOK, respPatchP.StatusCode)
+	var patchedPatProto84 patpb.Patient
+	require.NoError(t, proto.Unmarshal(patchedPBytes, &patchedPatProto84))
+	assert.Equal(t, "WireProtoFHIRPatched", patchedPatProto84.GetName()[0].GetFamily().GetValue())
+
+	// Binary Proto3 Merge Patch (Patient proto directly)
+	mergePatProto := &patpb.Patient{
+		Active: &dtpb.Boolean{Value: true},
+	}
+	mergePatBytes, mErr := proto.Marshal(mergePatProto)
+	require.NoError(t, mErr)
+	reqMergeP, mergePErr := http.NewRequest(http.MethodPatch, ts.URL+"/fhir/r4/proto/Patient/"+patID, bytes.NewReader(mergePatBytes))
+	require.NoError(t, mergePErr)
+	reqMergeP.Header.Set("Content-Type", "application/x-protobuf")
+	reqMergeP.Header.Set("Accept", "application/x-protobuf")
+	respMergeP, mergePErr := client.Do(reqMergeP)
+	require.NoError(t, mergePErr)
+	mergedPBytes, _ := io.ReadAll(respMergeP.Body)
+	respMergeP.Body.Close()
+	require.Equal(t, http.StatusOK, respMergeP.StatusCode)
+	var mergedPat patpb.Patient
+	require.NoError(t, proto.Unmarshal(mergedPBytes, &mergedPat))
+	assert.True(t, mergedPat.GetActive().GetValue())
+
+	// Binary Proto3 DELETE with Prefer: return=OperationOutcome
+	delPatProto := &patpb.Patient{
+		Id:     &dtpb.Id{Value: "proto-del-oo-1"},
+		Active: &dtpb.Boolean{Value: true},
+	}
+	delPatBytes, _ := proto.Marshal(delPatProto)
+	reqPutDelP, _ := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Patient/proto-del-oo-1", bytes.NewReader(delPatBytes))
+	reqPutDelP.Header.Set("Content-Type", "application/x-protobuf")
+	respPutDelP, errPutDelP := client.Do(reqPutDelP)
+	require.NoError(t, errPutDelP)
+	respPutDelP.Body.Close()
+
+	reqDelOOP, delOOPErr := http.NewRequest(http.MethodDelete, ts.URL+"/fhir/r4/proto/Patient/proto-del-oo-1", nil)
+	require.NoError(t, delOOPErr)
+	reqDelOOP.Header.Set("Accept", "application/x-protobuf")
+	reqDelOOP.Header.Set("Prefer", "return=OperationOutcome")
+	respDelOOP, delOOPErr := client.Do(reqDelOOP)
+	require.NoError(t, delOOPErr)
+	delOOPBytes, _ := io.ReadAll(respDelOOP.Body)
+	respDelOOP.Body.Close()
+	require.Equal(t, http.StatusOK, respDelOOP.StatusCode)
+	var delOO oopb.OperationOutcome
+	require.NoError(t, proto.Unmarshal(delOOPBytes, &delOO))
+	assert.NotEmpty(t, delOO.GetIssue())
+
+	// Polymorphic .ofType(Type), .as(Type), .is(Type), collection numeric aggregations (.sum, .avg, .min, .max),
+	// and scalar boolean string predicates in select column projections
+	polyAggVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "obs_poly_agg",
+		"status": "active",
+		"resource": "Observation",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "val_qty", "path": "value.ofType(Quantity).value"},
+					{"name": "val_unit", "path": "value.as(Quantity).unit"},
+					{"name": "eff_dt", "path": "effective.ofType(DateTime)"},
+					{"name": "is_qty", "path": "value.is(Quantity)"},
+					{"name": "sum_val", "path": "component.value.ofType(Quantity).value.sum()"},
+					{"name": "avg_val", "path": "component.value.ofType(Quantity).value.avg()"},
+					{"name": "min_val", "path": "component.value.ofType(Quantity).value.min()"},
+					{"name": "max_val", "path": "component.value.ofType(Quantity).value.max()"},
+					{"name": "starts_hr", "path": "code.coding.code.startsWith('88')"}
+				]
+			}
+		],
+		"where": [
+			{"path": "value.is(Quantity) and value.ofType(Quantity).value >= 60 and component.value.ofType(Quantity).value.max() >= 60"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"r.value_quantity AS val_qty",
+				"r.value_unit_code AS val_unit",
+				"r.effective_start AS eff_dt",
+				"r.value_quantity IS NOT NULL AS is_qty",
+				"ARRAY_SUM(",
+				"ARRAY_AVG(",
+				"ARRAY_MIN(",
+				"ARRAY_MAX(",
+				"r.code LIKE '88%' AS starts_hr",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"SELECT SUM(q.sp_value) FROM spidx_quantity q",
+				"SELECT AVG(q.sp_value) FROM spidx_quantity q",
+				"SELECT MIN(q.sp_value) FROM spidx_quantity q",
+				"SELECT MAX(q.sp_value) FROM spidx_quantity q",
+				"LIKE '88%'",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"SELECT SUM(q.sp_value) FROM spidx_quantity q",
+				"SELECT AVG(q.sp_value) FROM spidx_quantity q",
+				"SELECT MIN(q.sp_value) FROM spidx_quantity q",
+				"SELECT MAX(q.sp_value) FROM spidx_quantity q",
+				"LIKE '88%'",
+			},
+		},
+	} {
+		reqPA, paErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(polyAggVD))
+		require.NoError(t, paErr)
+		reqPA.Header.Set("Content-Type", "application/fhir+json")
+		respPA, paErr := client.Do(reqPA)
+		require.NoError(t, paErr)
+		paBytes, _ := io.ReadAll(respPA.Body)
+		respPA.Body.Close()
+		require.Equal(t, http.StatusOK, respPA.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(paBytes), want)
+		}
+	}
 }

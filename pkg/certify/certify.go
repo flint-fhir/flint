@@ -2999,6 +2999,99 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-17", suite10, "Zero-JSON Binary Proto3 Analytics Sync ($sync-analytics), Messaging ($process-message), Scheduling (Appointment/$find), Terminology ($find-matches), PDex ($member-match), Proto3 Projection/Prefer Conformance & SQL-on-FHIR v2 Quantifiers (.all, .anyTrue, .allTrue) + extension() $sql Pushdown", t0, err, "Binary Proto3 $sync-analytics, $process-message, Appointment/$find, $find-matches, $member-match, _elements/Prefer & quantifier/extension $sql pushdown verified")
 
+	// AN-18 (Milestone Check 100): Zero-JSON Binary Proto3 PATCH (FHIRPath Patch & Conditional PATCH), DELETE (Prefer: return=OperationOutcome), Terminology ($validate-code, $subsumes), Conformance ($subset, $implements), Clinical/Da Vinci Operations ($provenance, $populate, Claim/$inquire, $evaluate-risk-condition-category, $davinci-data-export) & SQL-on-FHIR v2 Polymorphic (.ofType, .as, .is), Collection Numeric Aggregations (.sum, .avg, .min, .max) & Scalar String Predicates $sql Pushdown
+	t0 = time.Now()
+	{
+		patchParamsJSON := []byte(`{"resourceType":"Parameters","parameter":[{"name":"operation","part":[{"name":"type","valueCode":"replace"},{"name":"path","valueString":"Patient.gender"},{"name":"value","valueCode":"other"}]}]}`)
+		respPatchConv, bPatchInProto, errPatchConv := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", patchParamsJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPatchProto, bPatchOutProto, errPatchProto := doReq(http.MethodPatch, basePath+"/Patient/cert-pat-1", "application/x-protobuf", bPatchInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		patchRestoreJSON := []byte(`{"resourceType":"Parameters","parameter":[{"name":"operation","part":[{"name":"type","valueCode":"replace"},{"name":"path","valueString":"Patient.gender"},{"name":"value","valueCode":"female"}]}]}`)
+		_, bPatchRestoreProto, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", patchRestoreJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCondPatchProto, bCondPatchOutProto, errCondPatchProto := doReq(http.MethodPatch, basePath+"/Patient?identifier=CERT-MRN-1", "application/x-protobuf", bPatchRestoreProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		_, _, _ = doReq(http.MethodPut, basePath+"/Patient/cert-del-proto-1", "application/fhir+json", []byte(`{"resourceType":"Patient","id":"cert-del-proto-1","active":true,"name":[{"family":"DeleteProto"}]}`), nil)
+		respDelOOProto, bDelOOProto, errDelOOProto := doReq(http.MethodDelete, basePath+"/Patient/cert-del-proto-1", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+			"Prefer": "return=OperationOutcome",
+		})
+
+		respCSValProto, bCSValProto, errCSValProto := doReq(http.MethodGet, basePath+"/CodeSystem/$validate-code?url=http://loinc.org&code=8867-4&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCSSubProto, bCSSubProto, errCSSubProto := doReq(http.MethodGet, basePath+"/CodeSystem/$subsumes?system=http://snomed.info/sct&codeA=38341003&codeB=59621000&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCapSubProto, bCapSubProto, errCapSubProto := doReq(http.MethodGet, basePath+"/CapabilityStatement/$subset?resource=Patient,Observation&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCapImpProto, bCapImpProto, errCapImpProto := doReq(http.MethodGet, basePath+"/CapabilityStatement/$implements?server=http://hl7.org/fhir/us/core/CapabilityStatement/us-core-server&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respProvProto, bProvProto, errProvProto := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$provenance?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPopProto, bPopProto, errPopProto := doReq(http.MethodGet, basePath+"/Questionnaire/phq-9/$populate?subject=Patient/cert-pat-1&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respInqProto, bInqProto, errInqProto := doReq(http.MethodGet, basePath+"/Claim/$inquire?patient=Patient/cert-pat-1&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRiskProto, bRiskProto, errRiskProto := doReq(http.MethodGet, basePath+"/Measure/$evaluate-risk-condition-category?subject=Patient/cert-pat-1&periodStart=2026-01-01&periodEnd=2026-12-31&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		_, _, _ = doReq(http.MethodPut, basePath+"/Group/cert-grp-proto-1", "application/fhir+json", []byte(`{"resourceType":"Group","id":"cert-grp-proto-1","type":"person","actual":true,"member":[{"entity":{"reference":"Patient/cert-pat-1"}}]}`), nil)
+		respDVExpProto, bDVExpProto, errDVExpProto := doReq(http.MethodGet, basePath+"/Group/cert-grp-proto-1/$davinci-data-export?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		polyAggVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_poly_agg_view","status":"active","resource":"Observation","select":[{"column":[{"name":"id","path":"id"},{"name":"val_qty","path":"value.ofType(Quantity).value"},{"name":"val_unit","path":"value.as(Quantity).unit"},{"name":"eff_dt","path":"effective.ofType(DateTime)"},{"name":"is_qty","path":"value.is(Quantity)"},{"name":"sum_val","path":"component.value.ofType(Quantity).value.sum()"},{"name":"avg_val","path":"component.value.ofType(Quantity).value.avg()"},{"name":"min_val","path":"component.value.ofType(Quantity).value.min()"},{"name":"max_val","path":"component.value.ofType(Quantity).value.max()"},{"name":"is_hr_prefix","path":"code.coding.code.startsWith('88')"}]}],"where":[{"path":"value.is(Quantity) and value.ofType(Quantity).value >= 60 and component.value.ofType(Quantity).value.max() >= 60"}]}`)
+		respPADoris, bPADoris, errPADoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", polyAggVD, nil)
+		respPAPg, bPAPg, errPAPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", polyAggVD, nil)
+
+		if errPatchConv != nil || respPatchConv.StatusCode != http.StatusOK || len(bPatchInProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert for PATCH to return binary Proto3 Parameters, got %d", respPatchConv.StatusCode)
+		} else if errPatchProto != nil || respPatchProto.StatusCode != http.StatusOK || !strings.Contains(respPatchProto.Header.Get("Content-Type"), "application/x-protobuf") || respPatchProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bPatchOutProto) == 0 {
+			err = fmt.Errorf("expected PATCH /Patient/cert-pat-1 with binary Proto3 Parameters to return binary Proto3 Patient, got %d: %s", respPatchProto.StatusCode, string(bPatchOutProto))
+		} else if errCondPatchProto != nil || respCondPatchProto.StatusCode != http.StatusOK || !strings.Contains(respCondPatchProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCondPatchOutProto) == 0 {
+			err = fmt.Errorf("expected conditional PATCH /Patient?identifier=CERT-MRN-1 with binary Proto3 Parameters to return binary Proto3 Patient, got %d", respCondPatchProto.StatusCode)
+		} else if errDelOOProto != nil || respDelOOProto.StatusCode != http.StatusOK || !strings.Contains(respDelOOProto.Header.Get("Content-Type"), "application/x-protobuf") || respDelOOProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bDelOOProto) == 0 {
+			err = fmt.Errorf("expected DELETE /Patient/cert-del-proto-1 with Prefer: return=OperationOutcome and Accept: application/x-protobuf to return binary Proto3 OperationOutcome, got %d", respDelOOProto.StatusCode)
+		} else if errCSValProto != nil || respCSValProto.StatusCode != http.StatusOK || !strings.Contains(respCSValProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCSValProto) == 0 {
+			err = fmt.Errorf("expected GET /CodeSystem/$validate-code?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respCSValProto.StatusCode)
+		} else if errCSSubProto != nil || respCSSubProto.StatusCode != http.StatusOK || !strings.Contains(respCSSubProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCSSubProto) == 0 {
+			err = fmt.Errorf("expected GET /CodeSystem/$subsumes?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respCSSubProto.StatusCode)
+		} else if errCapSubProto != nil || respCapSubProto.StatusCode != http.StatusOK || !strings.Contains(respCapSubProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCapSubProto) == 0 {
+			err = fmt.Errorf("expected GET /CapabilityStatement/$subset?_format=application/x-protobuf to return binary Proto3 CapabilityStatement, got %d", respCapSubProto.StatusCode)
+		} else if errCapImpProto != nil || respCapImpProto.StatusCode != http.StatusOK || !strings.Contains(respCapImpProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCapImpProto) == 0 {
+			err = fmt.Errorf("expected GET /CapabilityStatement/$implements?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respCapImpProto.StatusCode)
+		} else if errProvProto != nil || respProvProto.StatusCode != http.StatusOK || !strings.Contains(respProvProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bProvProto) == 0 {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1/$provenance?_format=application/x-protobuf to return binary Proto3 Bundle, got %d", respProvProto.StatusCode)
+		} else if errPopProto != nil || respPopProto.StatusCode != http.StatusOK || !strings.Contains(respPopProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPopProto) == 0 {
+			err = fmt.Errorf("expected GET /Questionnaire/phq-9/$populate?_format=application/x-protobuf to return binary Proto3 QuestionnaireResponse, got %d", respPopProto.StatusCode)
+		} else if errInqProto != nil || respInqProto.StatusCode != http.StatusOK || !strings.Contains(respInqProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bInqProto) == 0 {
+			err = fmt.Errorf("expected GET /Claim/$inquire?_format=application/x-protobuf to return binary Proto3 ClaimResponse, got %d", respInqProto.StatusCode)
+		} else if errRiskProto != nil || respRiskProto.StatusCode != http.StatusOK || !strings.Contains(respRiskProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bRiskProto) == 0 {
+			err = fmt.Errorf("expected GET /Measure/$evaluate-risk-condition-category?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respRiskProto.StatusCode)
+		} else if errDVExpProto != nil || respDVExpProto.StatusCode != http.StatusOK || !strings.Contains(respDVExpProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bDVExpProto) == 0 {
+			err = fmt.Errorf("expected GET /Group/cert-grp-proto-1/$davinci-data-export?_format=application/x-protobuf to return binary Proto3 Bundle, got %d", respDVExpProto.StatusCode)
+		} else if errPADoris != nil || respPADoris.StatusCode != http.StatusOK || !strings.Contains(string(bPADoris), "ARRAY_SUM(") || !strings.Contains(string(bPADoris), "ARRAY_AVG(") || !strings.Contains(string(bPADoris), "ARRAY_MIN(") || !strings.Contains(string(bPADoris), "ARRAY_MAX(") || !strings.Contains(string(bPADoris), "LIKE '88%'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with polymorphic/aggregate/predicate pushdown, got %d: %s", respPADoris.StatusCode, string(bPADoris))
+		} else if errPAPg != nil || respPAPg.StatusCode != http.StatusOK || !strings.Contains(string(bPAPg), "SELECT SUM(q.sp_value) FROM spidx_quantity") || !strings.Contains(string(bPAPg), "SELECT AVG(q.sp_value) FROM spidx_quantity") || !strings.Contains(string(bPAPg), "SELECT MIN(q.sp_value) FROM spidx_quantity") || !strings.Contains(string(bPAPg), "SELECT MAX(q.sp_value) FROM spidx_quantity") || !strings.Contains(string(bPAPg), "LIKE '88%'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with polymorphic/aggregate/predicate pushdown, got %d: %s", respPAPg.StatusCode, string(bPAPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-18", suite10, "Zero-JSON Binary Proto3 PATCH (FHIRPath & Conditional), DELETE (OperationOutcome), Terminology ($validate-code, $subsumes), Conformance ($subset, $implements), Da Vinci/Clinical Operations & SQL-on-FHIR v2 Polymorphic (.ofType, .as, .is) & Collection Aggregations (.sum, .avg, .min, .max) $sql Pushdown", t0, err, "Binary Proto3 PATCH/DELETE/Terminology/Conformance/Da Vinci wire transport & polymorphic .ofType/.as/.is + .sum/.avg/.min/.max $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}
