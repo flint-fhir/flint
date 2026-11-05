@@ -1,6 +1,6 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, and 35+ National HL7 Implementation Guide
-// conformance & certification runner. It executes 10 structured test suites (104 checks) against
+// conformance & certification runner. It executes 10 structured test suites (105 checks) against
 // a target Flint server and produces both a standard FHIR R4 TestReport resource
 // and a human-readable scorecard.
 package certify
@@ -3507,6 +3507,140 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("AN-22", suite10, "Zero-JSON Binary Proto3 IHE MHD ($iti-65, $iti-67), Clinical Genomics ($find-subject-variants, $find-subject-tx-implications), PACIO Post-Acute Care ($pacio-summary, $pacio-assess), CDC NHSN HAI ($nhsn-hai-report, $nhsn-acute-care), HL7 Vulcan Clinical Research ($rwd-cohort, $enroll), Vital Records BFDR ($birth-report, $bfdr-summary), IHE PDQm/ITI-68 ($ihe-pdqm, $ihe-iti-68), HL7 FAST National Directory ($fast-endpoint-query, $fast-verify) & SQL-on-FHIR v2 Collection Union (|), Boolean .not()/not(...) & String .encode/.decode $sql Pushdown", t0, err, "Binary Proto3 IHE MHD, Clinical Genomics, PACIO, CDC NHSN HAI, Vulcan Research, Vital Records BFDR, IHE PDQm/ITI-68, FAST NDH & |/.not()/.encode/.decode $sql pushdown verified")
+
+	// AN-23: Zero-JSON Binary Proto3 Physical Activity ($physical-activity-summary, $physical-activity-referral), Vulcan ePI ($epi-document, $evaluate-authorization), Public Health ELR ($elr-submit, $reportable-labs), PACIO ADI ($adi-record, $adi-document), Da Vinci Risk Adjustment ($ra-coding-gaps, $ra-remediate), Public Health eICR/RR ($eicr-document, $rr-process), Da Vinci PDex/Formulary ($pdex-WriteData, $formulary-alternatives), HL7 ODH ($record-occupation, $odh-summary), Public Health CCRR/MedMorph ($cancer-registry-report, $medmorph-kar), Da Vinci VBPR ($vbpr-performance, $vbpr-attest), PACIO Cognitive Status ($pacio-cognitive-assess, $pacio-cognitive-summary) & SQL-on-FHIR v2 .hasValue(), .aggregate(), .repeat()/.children()/.descendants() & .lowBoundary()/.highBoundary() $sql Pushdown
+	t0 = time.Now()
+	{
+		w89ParamsRaw := []byte(`{"resourceType":"Parameters","parameter":[{"name":"patient","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"subject","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"encounter","valueReference":{"reference":"Encounter/cert-enc-1"}},{"name":"measureReport","valueReference":{"reference":"MeasureReport/cert-mr-w89-1"}},{"name":"organization","valueReference":{"reference":"Organization/cert-org-1"}},{"name":"medicinalProduct","valueString":"mp-w89-1"},{"name":"authorization","valueString":"mpa-w89-1"},{"name":"diagnosticReport","valueString":"dr-w89-1"},{"name":"medicationKnowledge","valueString":"mk-w89-1"},{"name":"planDefinition","valueString":"pd-w89-1"},{"name":"code","valueString":"94500-6"},{"name":"conditionCode","valueString":"840539006"},{"name":"occupationCode","valueString":"29-1141"},{"name":"primarySiteCode","valueString":"C50.9"},{"name":"treatmentGoalPref","valueString":"Full Code"}]}`)
+		respW89ParamsConv, bW89ParamsProto, errW89ParamsConv := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", w89ParamsRaw, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPASumProto, bPASumProto, errPASumProto := doReq(http.MethodPost, basePath+"/Patient/$physical-activity-summary", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPARefProto, bPARefProto, errPARefProto := doReq(http.MethodPost, basePath+"/ServiceRequest/$physical-activity-referral", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respEPIDocProto, bEPIDocProto, errEPIDocProto := doReq(http.MethodPost, basePath+"/MedicinalProduct/$epi-document", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respEPIAuthProto, bEPIAuthProto, errEPIAuthProto := doReq(http.MethodPost, basePath+"/MedicinalProductAuthorization/$evaluate-authorization", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respELRSubProto, bELRSubProto, errELRSubProto := doReq(http.MethodPost, basePath+"/DiagnosticReport/$elr-submit", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respELRLabsProto, bELRLabsProto, errELRLabsProto := doReq(http.MethodPost, basePath+"/Observation/$reportable-labs", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respADIRecProto, bADIRecProto, errADIRecProto := doReq(http.MethodPost, basePath+"/Patient/$adi-record", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respADIDocProto, bADIDocProto, errADIDocProto := doReq(http.MethodPost, basePath+"/Composition/$adi-document", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRAGapsProto, bRAGapsProto, errRAGapsProto := doReq(http.MethodPost, basePath+"/Patient/$ra-coding-gaps", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRARemProto, bRARemProto, errRARemProto := doReq(http.MethodPost, basePath+"/MeasureReport/$ra-remediate", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respEICRDocProto, bEICRDocProto, errEICRDocProto := doReq(http.MethodPost, basePath+"/Composition/$eicr-document", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRRProcProto, bRRProcProto, errRRProcProto := doReq(http.MethodPost, basePath+"/Communication/$rr-process", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPDexWriteProto, bPDexWriteProto, errPDexWriteProto := doReq(http.MethodPost, basePath+"/Patient/$pdex-WriteData", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respFormAltProto, bFormAltProto, errFormAltProto := doReq(http.MethodPost, basePath+"/MedicationKnowledge/$formulary-alternatives", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respODHRecProto, bODHRecProto, errODHRecProto := doReq(http.MethodPost, basePath+"/Patient/$record-occupation", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respODHSumProto, bODHSumProto, errODHSumProto := doReq(http.MethodPost, basePath+"/Patient/$odh-summary", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCCRRRepProto, bCCRRRepProto, errCCRRRepProto := doReq(http.MethodPost, basePath+"/Patient/$cancer-registry-report", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respMedMorphProto, bMedMorphProto, errMedMorphProto := doReq(http.MethodPost, basePath+"/PlanDefinition/$medmorph-kar", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respVBPRPerfProto, bVBPRPerfProto, errVBPRPerfProto := doReq(http.MethodPost, basePath+"/MeasureReport/$vbpr-performance", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respVBPRAttProto, bVBPRAttProto, errVBPRAttProto := doReq(http.MethodPost, basePath+"/MeasureReport/$vbpr-attest", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPACIOCogAssProto, bPACIOCogAssProto, errPACIOCogAssProto := doReq(http.MethodPost, basePath+"/Patient/$pacio-cognitive-assess", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPACIOCogSumProto, bPACIOCogSumProto, errPACIOCogSumProto := doReq(http.MethodPost, basePath+"/Patient/$pacio-cognitive-summary", "application/x-protobuf", bW89ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		hasValueAggBoundaryVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_hasvalue_agg_boundary_view","status":"active","resource":"Patient","select":[{"column":[{"name":"has_family","path":"name.family.first().hasValue()"},{"name":"given_len_sum","path":"name.given.aggregate($total + $this.length(), 0)"},{"name":"given_agg_cnt","path":"name.given.aggregate($total + 1, 0)"},{"name":"repeat_given_cnt","path":"name.repeat(given).count()"},{"name":"child_id_has_val","path":"children().id.hasValue()"},{"name":"birth_low","path":"birthDate.lowBoundary()"},{"name":"birth_high","path":"birthDate.highBoundary()"}]}],"where":[{"path":"name.family.first().hasValue() and birthDate.lowBoundary() >= '1900-01-01' and name.given.aggregate($total + 1, 0) >= 1"}]}`)
+		respHABDoris, bHABDoris, errHABDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", hasValueAggBoundaryVD, nil)
+		respHABPg, bHABPg, errHABPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", hasValueAggBoundaryVD, nil)
+
+		if errW89ParamsConv != nil || respW89ParamsConv.StatusCode != http.StatusOK || len(bW89ParamsProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert to return binary Proto3 Parameters, got %d", respW89ParamsConv.StatusCode)
+		} else if errPASumProto != nil || respPASumProto.StatusCode != http.StatusOK || !strings.Contains(respPASumProto.Header.Get("Content-Type"), "application/x-protobuf") || respPASumProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bPASumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$physical-activity-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respPASumProto.StatusCode)
+		} else if errPARefProto != nil || respPARefProto.StatusCode != http.StatusOK || !strings.Contains(respPARefProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPARefProto) == 0 {
+			err = fmt.Errorf("expected POST /ServiceRequest/$physical-activity-referral with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respPARefProto.StatusCode)
+		} else if errEPIDocProto != nil || respEPIDocProto.StatusCode != http.StatusOK || !strings.Contains(respEPIDocProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bEPIDocProto) == 0 {
+			err = fmt.Errorf("expected POST /MedicinalProduct/$epi-document with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respEPIDocProto.StatusCode)
+		} else if errEPIAuthProto != nil || respEPIAuthProto.StatusCode != http.StatusOK || !strings.Contains(respEPIAuthProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bEPIAuthProto) == 0 {
+			err = fmt.Errorf("expected POST /MedicinalProductAuthorization/$evaluate-authorization with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respEPIAuthProto.StatusCode)
+		} else if errELRSubProto != nil || respELRSubProto.StatusCode != http.StatusOK || !strings.Contains(respELRSubProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bELRSubProto) == 0 {
+			err = fmt.Errorf("expected POST /DiagnosticReport/$elr-submit with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respELRSubProto.StatusCode)
+		} else if errELRLabsProto != nil || respELRLabsProto.StatusCode != http.StatusOK || !strings.Contains(respELRLabsProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bELRLabsProto) == 0 {
+			err = fmt.Errorf("expected POST /Observation/$reportable-labs with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respELRLabsProto.StatusCode)
+		} else if errADIRecProto != nil || respADIRecProto.StatusCode != http.StatusOK || !strings.Contains(respADIRecProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bADIRecProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$adi-record with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respADIRecProto.StatusCode)
+		} else if errADIDocProto != nil || respADIDocProto.StatusCode != http.StatusOK || !strings.Contains(respADIDocProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bADIDocProto) == 0 {
+			err = fmt.Errorf("expected POST /Composition/$adi-document with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respADIDocProto.StatusCode)
+		} else if errRAGapsProto != nil || respRAGapsProto.StatusCode != http.StatusOK || !strings.Contains(respRAGapsProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bRAGapsProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$ra-coding-gaps with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respRAGapsProto.StatusCode)
+		} else if errRARemProto != nil || respRARemProto.StatusCode != http.StatusOK || !strings.Contains(respRARemProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bRARemProto) == 0 {
+			err = fmt.Errorf("expected POST /MeasureReport/$ra-remediate with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respRARemProto.StatusCode)
+		} else if errEICRDocProto != nil || respEICRDocProto.StatusCode != http.StatusOK || !strings.Contains(respEICRDocProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bEICRDocProto) == 0 {
+			err = fmt.Errorf("expected POST /Composition/$eicr-document with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respEICRDocProto.StatusCode)
+		} else if errRRProcProto != nil || respRRProcProto.StatusCode != http.StatusOK || !strings.Contains(respRRProcProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bRRProcProto) == 0 {
+			err = fmt.Errorf("expected POST /Communication/$rr-process with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respRRProcProto.StatusCode)
+		} else if errPDexWriteProto != nil || respPDexWriteProto.StatusCode != http.StatusOK || !strings.Contains(respPDexWriteProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPDexWriteProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$pdex-WriteData with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respPDexWriteProto.StatusCode)
+		} else if errFormAltProto != nil || respFormAltProto.StatusCode != http.StatusOK || !strings.Contains(respFormAltProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bFormAltProto) == 0 {
+			err = fmt.Errorf("expected POST /MedicationKnowledge/$formulary-alternatives with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respFormAltProto.StatusCode)
+		} else if errODHRecProto != nil || respODHRecProto.StatusCode != http.StatusOK || !strings.Contains(respODHRecProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bODHRecProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$record-occupation with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respODHRecProto.StatusCode)
+		} else if errODHSumProto != nil || respODHSumProto.StatusCode != http.StatusOK || !strings.Contains(respODHSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bODHSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$odh-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respODHSumProto.StatusCode)
+		} else if errCCRRRepProto != nil || respCCRRRepProto.StatusCode != http.StatusOK || !strings.Contains(respCCRRRepProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCCRRRepProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$cancer-registry-report with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respCCRRRepProto.StatusCode)
+		} else if errMedMorphProto != nil || respMedMorphProto.StatusCode != http.StatusOK || !strings.Contains(respMedMorphProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bMedMorphProto) == 0 {
+			err = fmt.Errorf("expected POST /PlanDefinition/$medmorph-kar with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respMedMorphProto.StatusCode)
+		} else if errVBPRPerfProto != nil || respVBPRPerfProto.StatusCode != http.StatusOK || !strings.Contains(respVBPRPerfProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bVBPRPerfProto) == 0 {
+			err = fmt.Errorf("expected POST /MeasureReport/$vbpr-performance with binary Proto3 Parameters to return binary Proto3 MeasureReport, got %d", respVBPRPerfProto.StatusCode)
+		} else if errVBPRAttProto != nil || respVBPRAttProto.StatusCode != http.StatusOK || !strings.Contains(respVBPRAttProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bVBPRAttProto) == 0 {
+			err = fmt.Errorf("expected POST /MeasureReport/$vbpr-attest with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respVBPRAttProto.StatusCode)
+		} else if errPACIOCogAssProto != nil || respPACIOCogAssProto.StatusCode != http.StatusOK || !strings.Contains(respPACIOCogAssProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPACIOCogAssProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$pacio-cognitive-assess with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respPACIOCogAssProto.StatusCode)
+		} else if errPACIOCogSumProto != nil || respPACIOCogSumProto.StatusCode != http.StatusOK || !strings.Contains(respPACIOCogSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPACIOCogSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$pacio-cognitive-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respPACIOCogSumProto.StatusCode)
+		} else if errHABDoris != nil || respHABDoris.StatusCode != http.StatusOK || !strings.Contains(string(bHABDoris), "IS NOT NULL AND CAST(") || !strings.Contains(string(bHABDoris), "ARRAY_SUM(ARRAY_MAP(x -> CHAR_LENGTH(x),") || !strings.Contains(string(bHABDoris), "LAST_DAY(CAST(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with .hasValue/.aggregate/.lowBoundary/.highBoundary pushdown, got %d: %s", respHABDoris.StatusCode, string(bHABDoris))
+		} else if errHABPg != nil || respHABPg.StatusCode != http.StatusOK || !strings.Contains(string(bHABPg), "IS NOT NULL AND CAST(") || !strings.Contains(string(bHABPg), "SUM(CHAR_LENGTH(sub.sp_value))") || !strings.Contains(string(bHABPg), "DATE_TRUNC('month'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with .hasValue/.aggregate/.lowBoundary/.highBoundary pushdown, got %d: %s", respHABPg.StatusCode, string(bHABPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-23", suite10, "Zero-JSON Binary Proto3 Physical Activity ($physical-activity-summary, $physical-activity-referral), Vulcan ePI ($epi-document, $evaluate-authorization), Public Health ELR ($elr-submit, $reportable-labs), PACIO ADI ($adi-record, $adi-document), Da Vinci Risk Adjustment ($ra-coding-gaps, $ra-remediate), Public Health eICR/RR ($eicr-document, $rr-process), Da Vinci PDex/Formulary ($pdex-WriteData, $formulary-alternatives), HL7 ODH ($record-occupation, $odh-summary), Public Health CCRR/MedMorph ($cancer-registry-report, $medmorph-kar), Da Vinci VBPR ($vbpr-performance, $vbpr-attest), PACIO Cognitive Status ($pacio-cognitive-assess, $pacio-cognitive-summary) & SQL-on-FHIR v2 .hasValue(), .aggregate(), .repeat()/.children()/.descendants() & .lowBoundary()/.highBoundary() $sql Pushdown", t0, err, "Binary Proto3 Physical Activity, Vulcan ePI, Public Health ELR, PACIO ADI, Da Vinci RA, eICR/RR, PDex/Formulary, HL7 ODH, CCRR/MedMorph, Da Vinci VBPR, PACIO Cognitive Status & .hasValue/.aggregate/.repeat/.lowBoundary/.highBoundary $sql pushdown verified")
 
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)

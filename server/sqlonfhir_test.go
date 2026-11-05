@@ -3464,4 +3464,222 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(uneBytes), want)
 		}
 	}
+
+	// 34. Wave 89: Binary Proto3 Physical Activity ($physical-activity-summary, $physical-activity-referral), Vulcan ePI ($epi-document, $evaluate-authorization), Public Health ELR ($elr-submit, $reportable-labs), PACIO ADI ($adi-record, $adi-document), Da Vinci Risk Adjustment ($ra-coding-gaps, $ra-remediate), Public Health eICR/RR ($eicr-document, $rr-process), Da Vinci PDex/Formulary ($pdex-WriteData, $formulary-alternatives), HL7 ODH ($record-occupation, $odh-summary), Public Health CCRR/MedMorph ($cancer-registry-report, $medmorph-kar), Da Vinci VBPR ($vbpr-performance, $vbpr-attest), PACIO Cognitive Status ($pacio-cognitive-assess, $pacio-cognitive-summary) & SQL-on-FHIR v2 .hasValue() / .aggregate() / .repeat() / .children() / .descendants() / .lowBoundary() / .highBoundary() $sql Pushdown
+	w89ParamsPb := &parampb.Parameters{
+		Parameter: []*parampb.Parameters_Parameter{
+			{
+				Name: &dtpb.String{Value: "patient"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{Uri: &dtpb.String{Value: "Patient/" + patID}},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "subject"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{Uri: &dtpb.String{Value: "Patient/" + patID}},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "encounter"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{Uri: &dtpb.String{Value: "Encounter/enc-w87-1"}},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "measureReport"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{Uri: &dtpb.String{Value: "MeasureReport/mr-w89-1"}},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "organization"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{Uri: &dtpb.String{Value: "Organization/w88-org-1"}},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "medicinalProduct"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "mp-w89-1"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "authorization"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "mpa-w89-1"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "diagnosticReport"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "dr-w89-1"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "medicationKnowledge"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "mk-w89-1"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "planDefinition"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "pd-w89-1"},
+					},
+				},
+			},
+		},
+	}
+	w89ParamsBytes, err := proto.Marshal(w89ParamsPb)
+	require.NoError(t, err)
+
+	for _, ep := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/fhir/r4/proto/Patient/$physical-activity-summary"},
+		{http.MethodPost, "/fhir/r4/proto/ServiceRequest/$physical-activity-referral"},
+		{http.MethodPost, "/fhir/r4/proto/MedicinalProduct/$epi-document"},
+		{http.MethodPost, "/fhir/r4/proto/MedicinalProductAuthorization/$evaluate-authorization"},
+		{http.MethodPost, "/fhir/r4/proto/DiagnosticReport/$elr-submit"},
+		{http.MethodPost, "/fhir/r4/proto/Observation/$reportable-labs"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$adi-record"},
+		{http.MethodPost, "/fhir/r4/proto/Composition/$adi-document"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$ra-coding-gaps"},
+		{http.MethodPost, "/fhir/r4/proto/MeasureReport/$ra-remediate"},
+		{http.MethodPost, "/fhir/r4/proto/Composition/$eicr-document"},
+		{http.MethodPost, "/fhir/r4/proto/Communication/$rr-process"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$pdex-WriteData"},
+		{http.MethodPost, "/fhir/r4/proto/MedicationKnowledge/$formulary-alternatives"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$record-occupation"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$odh-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$cancer-registry-report"},
+		{http.MethodPost, "/fhir/r4/proto/PlanDefinition/$medmorph-kar"},
+		{http.MethodPost, "/fhir/r4/proto/MeasureReport/$vbpr-performance"},
+		{http.MethodPost, "/fhir/r4/proto/MeasureReport/$vbpr-attest"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$pacio-cognitive-assess"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$pacio-cognitive-summary"},
+	} {
+		reqOp, opErr := http.NewRequest(ep.method, ts.URL+ep.path, bytes.NewReader(w89ParamsBytes))
+		require.NoError(t, opErr)
+		reqOp.Header.Set("Content-Type", "application/x-protobuf")
+		reqOp.Header.Set("Accept", "application/x-protobuf")
+		respOp, opErr := client.Do(reqOp)
+		require.NoError(t, opErr)
+		opBytes, _ := io.ReadAll(respOp.Body)
+		respOp.Body.Close()
+		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s failed: %s", ep.path, string(opBytes))
+		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s Content-Type", ep.path)
+		assert.Equal(t, "google.fhir.r4.proto3", respOp.Header.Get("X-Flint-Wire-Format"), "endpoint %s X-Flint-Wire-Format", ep.path)
+		require.NotEmpty(t, opBytes, "endpoint %s empty body", ep.path)
+	}
+
+	hasValueAggBoundaryVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "patient_hasvalue_agg_boundary_v1",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "has_family", "path": "name.family.first().hasValue()"},
+					{"name": "given_len_sum", "path": "name.given.aggregate($total + $this.length(), 0)"},
+					{"name": "given_agg_cnt", "path": "name.given.aggregate($total + 1, 0)"},
+					{"name": "repeat_given_cnt", "path": "name.repeat(given).count()"},
+					{"name": "child_id_has_val", "path": "children().id.hasValue()"},
+					{"name": "desc_family", "path": "descendants().name.family.first()"},
+					{"name": "birth_low", "path": "birthDate.lowBoundary()"},
+					{"name": "birth_high", "path": "birthDate.highBoundary()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "name.family.first().hasValue() and birthDate.lowBoundary() >= '1900-01-01' and name.given.aggregate($total + 1, 0) >= 1"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"IS NOT NULL AND CAST(",
+				"AS STRING) != '') AS has_family",
+				"COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CHAR_LENGTH(x),",
+				"AS given_len_sum",
+				"ARRAY_SIZE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))) AS given_agg_cnt",
+				"ARRAY_SIZE(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))) AS repeat_given_cnt",
+				"(r.res_id IS NOT NULL AND CAST(r.res_id AS STRING) != '') AS child_id_has_val",
+				"CAST(r.effective_start AS DATE) AS birth_low",
+				"LAST_DAY(CAST(r.effective_start AS DATE)) AS birth_high",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"IS NOT NULL AND CAST(",
+				"AS TEXT) != '') AS has_family",
+				"COALESCE((SELECT SUM(CHAR_LENGTH(sub.sp_value)) FROM (",
+				"(SELECT COUNT(*) FROM spidx_string s",
+				"(r.res_id IS NOT NULL AND CAST(r.res_id AS TEXT) != '') AS child_id_has_val",
+				"CAST((SELECT d.sp_low FROM spidx_date d",
+				"DATE_TRUNC('month'",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"IS NOT NULL AND CAST(",
+				"AS TEXT) != '') AS has_family",
+				"COALESCE((SELECT SUM(LENGTH(sub.sp_value)) FROM (",
+				"(SELECT COUNT(*) FROM spidx_string s",
+				"(r.res_id IS NOT NULL AND CAST(r.res_id AS TEXT) != '') AS child_id_has_val",
+				"DATE((SELECT d.sp_low FROM spidx_date d",
+				"'start of month', '+1 month', '-1 day') AS birth_high",
+			},
+		},
+	} {
+		reqHAB, habErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(hasValueAggBoundaryVD))
+		require.NoError(t, habErr)
+		reqHAB.Header.Set("Content-Type", "application/fhir+json")
+		respHAB, habErr := client.Do(reqHAB)
+		require.NoError(t, habErr)
+		habBytes, _ := io.ReadAll(respHAB.Body)
+		respHAB.Body.Close()
+		require.Equal(t, http.StatusOK, respHAB.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(habBytes), want)
+		}
+	}
 }
