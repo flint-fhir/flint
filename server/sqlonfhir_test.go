@@ -2984,4 +2984,75 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(wscBytes), want)
 		}
 	}
+
+	// Equivalence (~, !~), boolean logic (xor, implies), membership (in) & .toChars() in ViewDefinition/$sql
+	equivInXorVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "obs_equiv_in_xor",
+		"status": "active",
+		"resource": "Observation",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "code_chars", "path": "code.coding.code.first().toChars()", "collection": true},
+					{"name": "is_final_or_amended", "path": "status in ('final' | 'amended')"},
+					{"name": "code_equiv", "path": "code.coding.code.first() ~ '8867-4'"},
+					{"name": "code_not_equiv", "path": "code.coding.code.first() !~ '9999-9'"},
+					{"name": "exclusive_flag", "path": "(status = 'final') xor (status = 'cancelled')"},
+					{"name": "implies_flag", "path": "(status = 'final') implies valueQuantity.exists()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "status in ('final' | 'amended') and code.coding.code.first() ~ '8867-4' and ((status = 'final') implies valueQuantity.exists()) and ((status = 'final') xor (status = 'cancelled'))"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"SPLIT_BY_STRING(r.code, '') AS code_chars",
+				"IN ('final', 'amended')",
+				"LOWER(TRIM(r.code)) = LOWER(TRIM('8867-4'))",
+				"LOWER(TRIM(r.code)) <> LOWER(TRIM('9999-9'))",
+				"<>",
+				"(NOT (",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"REGEXP_SPLIT_TO_ARRAY(",
+				"IN ('final', 'amended')",
+				"LOWER(TRIM(",
+				"<> LOWER(TRIM('9999-9'))",
+				"(NOT (",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"json_array(",
+				"IN ('final', 'amended')",
+				"LOWER(TRIM(",
+				"(NOT (",
+			},
+		},
+	} {
+		reqEX, exErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(equivInXorVD))
+		require.NoError(t, exErr)
+		reqEX.Header.Set("Content-Type", "application/fhir+json")
+		respEX, exErr := client.Do(reqEX)
+		require.NoError(t, exErr)
+		exBytes, _ := io.ReadAll(respEX.Body)
+		respEX.Body.Close()
+		require.Equal(t, http.StatusOK, respEX.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(exBytes), want)
+		}
+	}
 }
