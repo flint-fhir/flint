@@ -1920,6 +1920,23 @@ func findMatchingCloseParen(s string, openIdx int) int {
 
 func normalizePolymorphicFHIRPath(expr string) string {
 	s := expr
+	s = strings.ReplaceAll(s, ".children()", "")
+	s = strings.ReplaceAll(s, ".descendants()", "")
+	s = strings.TrimPrefix(s, "children().")
+	s = strings.TrimPrefix(s, "descendants().")
+	for strings.HasPrefix(s, "repeat(") {
+		closeIdx := findMatchingCloseParen(s, len("repeat(")-1)
+		if closeIdx == -1 {
+			break
+		}
+		inner := strings.TrimPrefix(strings.TrimSpace(s[len("repeat("):closeIdx]), "$this.")
+		tail := s[closeIdx+1:]
+		if inner == "" || inner == "$this" {
+			s = strings.TrimPrefix(tail, ".")
+		} else {
+			s = inner + tail
+		}
+	}
 	for {
 		idx := strings.Index(s, ".trace(")
 		if idx == -1 {
@@ -1932,28 +1949,30 @@ func normalizePolymorphicFHIRPath(expr string) string {
 		}
 		s = s[:idx] + s[closeIdx+1:]
 	}
-	selectFrom := 0
-	for selectFrom < len(s) {
-		relIdx := strings.Index(s[selectFrom:], ".select(")
-		if relIdx == -1 {
-			break
-		}
-		idx := selectFrom + relIdx
-		openIdx := idx + len(".select(") - 1
-		closeIdx := findMatchingCloseParen(s, openIdx)
-		if closeIdx == -1 {
-			break
-		}
-		inner := strings.TrimSpace(s[openIdx+1 : closeIdx])
-		if _, _, _, hasComp := parseViewWhereComparison(inner); hasComp {
-			selectFrom = closeIdx + 1
-			continue
-		}
-		inner = strings.TrimPrefix(inner, "$this.")
-		if inner == "" || inner == "$this" {
-			s = s[:idx] + s[closeIdx+1:]
-		} else {
-			s = s[:idx] + "." + inner + s[closeIdx+1:]
+	for _, unwrapCall := range []string{".select(", ".repeat("} {
+		selectFrom := 0
+		for selectFrom < len(s) {
+			relIdx := strings.Index(s[selectFrom:], unwrapCall)
+			if relIdx == -1 {
+				break
+			}
+			idx := selectFrom + relIdx
+			openIdx := idx + len(unwrapCall) - 1
+			closeIdx := findMatchingCloseParen(s, openIdx)
+			if closeIdx == -1 {
+				break
+			}
+			inner := strings.TrimSpace(s[openIdx+1 : closeIdx])
+			if _, _, _, hasComp := parseViewWhereComparison(inner); hasComp {
+				selectFrom = closeIdx + 1
+				continue
+			}
+			inner = strings.TrimPrefix(inner, "$this.")
+			if inner == "" || inner == "$this" {
+				s = s[:idx] + s[closeIdx+1:]
+			} else {
+				s = s[:idx] + "." + inner + s[closeIdx+1:]
+			}
 		}
 	}
 	for _, spec := range []struct {
@@ -2114,6 +2133,53 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		basePath := strings.TrimSpace(p[:len(p)-len(".toTime()")])
 		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
 		return fmt.Sprintf("CAST(%s AS TIME)", colExpr), colSrc + ".toTime"
+	}
+	if strings.HasSuffix(p, ".hasValue()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".hasValue()")])
+		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
+		return fmt.Sprintf("(%s IS NOT NULL AND CAST(%s AS STRING) != '')", colExpr, colExpr), colSrc + ".hasValue"
+	}
+	if idx := strings.LastIndex(p, ".aggregate("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".aggregate(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		args := splitTopLevelCommaArgs(p[idx+len(".aggregate(") : len(p)-1])
+		if len(args) >= 1 {
+			aggNoSpace := strings.ReplaceAll(strings.TrimSpace(args[0]), " ", "")
+			initVal := "0"
+			if len(args) >= 2 {
+				initVal = strings.TrimSpace(args[1])
+			}
+			switch {
+			case aggNoSpace == "$total+1" || aggNoSpace == "1+$total":
+				cntExpr, cntSrc := dorisZeroJSONColumnExpr(basePath+".count()", isCore)
+				if initVal != "0" && initVal != "0.0" {
+					return fmt.Sprintf("(%s + %s)", cntExpr, initVal), cntSrc + ".aggregate"
+				}
+				return cntExpr, cntSrc + ".aggregate"
+			case aggNoSpace == "$total+$this" || aggNoSpace == "$this+$total":
+				sumExpr, sumSrc := dorisZeroJSONColumnExpr(basePath+".sum()", isCore)
+				return fmt.Sprintf("COALESCE(%s, %s)", sumExpr, initVal), sumSrc + ".aggregate"
+			case strings.Contains(aggNoSpace, "$this.length()"):
+				collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+				return fmt.Sprintf("COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CHAR_LENGTH(x), %s)), %s)", collExpr, initVal), strings.TrimSuffix(collSrc, "[]") + ".aggregate"
+			default:
+				collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+				return fmt.Sprintf("COALESCE(ARRAY_SIZE(%s), %s)", collExpr, initVal), strings.TrimSuffix(collSrc, "[]") + ".aggregate"
+			}
+		}
+	}
+	if basePath, isHigh, precArg, okBound := parseBoundaryCall(p); okBound {
+		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
+		if isTemporalFHIRPath(basePath) {
+			if isHigh {
+				return fmt.Sprintf("LAST_DAY(CAST(%s AS DATE))", colExpr), colSrc + ".highBoundary"
+			}
+			return fmt.Sprintf("CAST(%s AS DATE)", colExpr), colSrc + ".lowBoundary"
+		}
+		halfStep := decimalBoundaryHalfStep(precArg)
+		if isHigh {
+			return fmt.Sprintf("(%s + %s)", colExpr, halfStep), colSrc + ".highBoundary"
+		}
+		return fmt.Sprintf("(%s - %s)", colExpr, halfStep), colSrc + ".lowBoundary"
 	}
 	if strings.HasPrefix(strings.ToLower(p), "iif(") && strings.HasSuffix(p, ")") {
 		args := splitTopLevelCommaArgs(p[len("iif(") : len(p)-1])
@@ -2713,7 +2779,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 			return fmt.Sprintf("NOT (array_exists(x -> x LIKE '%s=%s|%%', r.code_tokens))", spSys, escapedSys)
 		}
 	}
-	if strings.HasSuffix(p, ".toBoolean()") || (strings.Contains(p, ".convertsTo") && strings.HasSuffix(p, "()")) {
+	if strings.HasSuffix(p, ".toBoolean()") || strings.HasSuffix(p, ".hasValue()") || (strings.Contains(p, ".convertsTo") && strings.HasSuffix(p, "()")) {
 		colExpr, _ := dorisZeroJSONColumnExpr(p, isCore)
 		return colExpr
 	}
@@ -2861,7 +2927,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 	}
 	_, _, _, isArithLHS := splitTopLevelArithmeticOp(lhs)
 
-	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") {
+	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") || strings.Contains(lhs, ".aggregate(") || strings.Contains(lhs, ".lowBoundary(") || strings.Contains(lhs, ".highBoundary(") {
 		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
 			lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
 			sqlOp := op
@@ -2880,7 +2946,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		}
 		return fmt.Sprintf("%s %s '%s'", lhsExpr, sqlOp, escapedRHS)
 	}
-	if strings.HasSuffix(lhs, ".toDate()") || strings.HasSuffix(lhs, ".toDateTime()") || strings.HasSuffix(lhs, ".toTime()") || strings.EqualFold(trimmedRHS, "today()") || strings.EqualFold(trimmedRHS, "now()") {
+	if strings.HasSuffix(lhs, ".toDate()") || strings.HasSuffix(lhs, ".toDateTime()") || strings.HasSuffix(lhs, ".toTime()") || strings.Contains(lhs, ".lowBoundary(") || strings.Contains(lhs, ".highBoundary(") || strings.EqualFold(trimmedRHS, "today()") || strings.EqualFold(trimmedRHS, "now()") {
 		lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
 		rhsExpr := fmt.Sprintf("'%s'", escapedRHS)
 		if strings.EqualFold(trimmedRHS, "today()") {
@@ -2989,6 +3055,62 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 			return fmt.Sprintf("TIME(%s)", colExpr), colSrc + ".toTime"
 		}
 		return fmt.Sprintf("CAST(%s AS TIME)", colExpr), colSrc + ".toTime"
+	}
+	if strings.HasSuffix(p, ".hasValue()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".hasValue()")])
+		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+		return fmt.Sprintf("(%s IS NOT NULL AND CAST(%s AS TEXT) != '')", colExpr, colExpr), colSrc + ".hasValue"
+	}
+	if idx := strings.LastIndex(p, ".aggregate("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".aggregate(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		args := splitTopLevelCommaArgs(p[idx+len(".aggregate(") : len(p)-1])
+		if len(args) >= 1 {
+			aggNoSpace := strings.ReplaceAll(strings.TrimSpace(args[0]), " ", "")
+			initVal := "0"
+			if len(args) >= 2 {
+				initVal = strings.TrimSpace(args[1])
+			}
+			switch {
+			case aggNoSpace == "$total+1" || aggNoSpace == "1+$total":
+				cntExpr, cntSrc := spidxZeroJSONColumnExpr(basePath+".count()", dialect)
+				if initVal != "0" && initVal != "0.0" {
+					return fmt.Sprintf("(%s + %s)", cntExpr, initVal), cntSrc + ".aggregate"
+				}
+				return cntExpr, cntSrc + ".aggregate"
+			case aggNoSpace == "$total+$this" || aggNoSpace == "$this+$total":
+				sumExpr, sumSrc := spidxZeroJSONColumnExpr(basePath+".sum()", dialect)
+				return fmt.Sprintf("COALESCE(%s, %s)", sumExpr, initVal), sumSrc + ".aggregate"
+			case strings.Contains(aggNoSpace, "$this.length()"):
+				subQ, subSrc := spidxSubqueryForPath(basePath)
+				if dialect == "sqlite" {
+					return fmt.Sprintf("COALESCE((SELECT SUM(LENGTH(sub.sp_value)) FROM (%s) sub), %s)", subQ, initVal), subSrc + ".aggregate"
+				}
+				return fmt.Sprintf("COALESCE((SELECT SUM(CHAR_LENGTH(sub.sp_value)) FROM (%s) sub), %s)", subQ, initVal), subSrc + ".aggregate"
+			default:
+				subQ, subSrc := spidxSubqueryForPath(basePath)
+				return fmt.Sprintf("COALESCE((SELECT COUNT(*) FROM (%s) sub), %s)", subQ, initVal), subSrc + ".aggregate"
+			}
+		}
+	}
+	if basePath, isHigh, precArg, okBound := parseBoundaryCall(p); okBound {
+		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+		if isTemporalFHIRPath(basePath) {
+			if isHigh {
+				if dialect == "sqlite" {
+					return fmt.Sprintf("DATE(%s, 'start of month', '+1 month', '-1 day')", colExpr), colSrc + ".highBoundary"
+				}
+				return fmt.Sprintf("CAST((DATE_TRUNC('month', CAST(%s AS DATE)) + INTERVAL '1 month - 1 day') AS DATE)", colExpr), colSrc + ".highBoundary"
+			}
+			if dialect == "sqlite" {
+				return fmt.Sprintf("DATE(%s)", colExpr), colSrc + ".lowBoundary"
+			}
+			return fmt.Sprintf("CAST(%s AS DATE)", colExpr), colSrc + ".lowBoundary"
+		}
+		halfStep := decimalBoundaryHalfStep(precArg)
+		if isHigh {
+			return fmt.Sprintf("(%s + %s)", colExpr, halfStep), colSrc + ".highBoundary"
+		}
+		return fmt.Sprintf("(%s - %s)", colExpr, halfStep), colSrc + ".lowBoundary"
 	}
 	if strings.HasPrefix(strings.ToLower(p), "coalesce(") && strings.HasSuffix(p, ")") {
 		args := splitTopLevelCommaArgs(p[len("coalesce(") : len(p)-1])
@@ -3787,7 +3909,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 			return fmt.Sprintf("NOT (EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_system = '%s'))", spSys, escapedSys)
 		}
 	}
-	if strings.HasSuffix(p, ".toBoolean()") || (strings.Contains(p, ".convertsTo") && strings.HasSuffix(p, "()")) {
+	if strings.HasSuffix(p, ".toBoolean()") || strings.HasSuffix(p, ".hasValue()") || (strings.Contains(p, ".convertsTo") && strings.HasSuffix(p, "()")) {
 		colExpr, _ := spidxZeroJSONColumnExpr(p, dialect)
 		return colExpr
 	}
@@ -3929,7 +4051,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 	}
 	_, _, _, isArithLHS := splitTopLevelArithmeticOp(lhs)
 
-	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") {
+	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") || strings.Contains(lhs, ".aggregate(") || strings.Contains(lhs, ".lowBoundary(") || strings.Contains(lhs, ".highBoundary(") {
 		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
 			lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, dialect)
 			sqlOp := op
@@ -3948,7 +4070,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 		}
 		return fmt.Sprintf("%s %s '%s'", lhsExpr, sqlOp, escapedRHS)
 	}
-	if strings.HasSuffix(lhs, ".toDate()") || strings.HasSuffix(lhs, ".toDateTime()") || strings.HasSuffix(lhs, ".toTime()") || strings.EqualFold(trimmedRHS, "today()") || strings.EqualFold(trimmedRHS, "now()") {
+	if strings.HasSuffix(lhs, ".toDate()") || strings.HasSuffix(lhs, ".toDateTime()") || strings.HasSuffix(lhs, ".toTime()") || strings.Contains(lhs, ".lowBoundary(") || strings.Contains(lhs, ".highBoundary(") || strings.EqualFold(trimmedRHS, "today()") || strings.EqualFold(trimmedRHS, "now()") {
 		lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, dialect)
 		rhsExpr := fmt.Sprintf("'%s'", escapedRHS)
 		if strings.EqualFold(trimmedRHS, "today()") {
@@ -4400,4 +4522,37 @@ func normalizeExtensionKey(extURL string) string {
 		u = u[slash+1:]
 	}
 	return strings.ToLower(strings.ReplaceAll(u, "'", "''"))
+}
+
+func parseBoundaryCall(p string) (basePath string, isHigh bool, precArg string, ok bool) {
+	for _, spec := range []struct {
+		call   string
+		isHigh bool
+	}{
+		{".lowBoundary(", false},
+		{".highBoundary(", true},
+	} {
+		if idx := strings.LastIndex(p, spec.call); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(spec.call)-1) == len(p)-1 {
+			return strings.TrimSpace(p[:idx]), spec.isHigh, strings.TrimSpace(p[idx+len(spec.call) : len(p)-1]), true
+		}
+	}
+	return "", false, "", false
+}
+
+func isTemporalFHIRPath(basePath string) bool {
+	lower := strings.ToLower(basePath)
+	return strings.Contains(lower, "date") || strings.Contains(lower, "time") || strings.Contains(lower, "effective") || strings.Contains(lower, "issued") || strings.Contains(lower, "authored")
+}
+
+func decimalBoundaryHalfStep(precArg string) string {
+	prec := 2
+	if precArg != "" {
+		if n, err := strconv.Atoi(precArg); err == nil && n >= 0 && n <= 8 {
+			prec = n
+		}
+	}
+	if prec == 0 {
+		return "0.5"
+	}
+	return "0." + strings.Repeat("0", prec) + "5"
 }
