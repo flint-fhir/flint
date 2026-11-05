@@ -2926,6 +2926,79 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-16", suite10, "Zero-JSON Binary Proto3 Subscriptions ($status, $events), Audit ($verify-integrity), Lifecycle ($diff), Terminology ($closure) & TestScript/$evaluate + SQL-on-FHIR v2 Collection Slicing (.tail, .single, .combine), Set Predicates (.subsetOf, .supersetOf) & .split() $sql Pushdown", t0, err, "Binary Proto3 Subscription, Audit, $diff, $closure & TestScript/$evaluate wire transport & tail / single / combine / subsetOf / supersetOf / split $sql pushdown verified")
 
+	// AN-17: Zero-JSON Binary Proto3 Analytics Sync ($sync-analytics), Messaging ($process-message), Scheduling (Appointment/$find), Terminology (CodeSystem/$find-matches), Da Vinci PDex (Patient/$member-match), Proto3 Projection/Prefer Conformance (_elements SUBSETTED & Prefer: handling=strict) & SQL-on-FHIR v2 Quantifiers (.all, .anyTrue, .allTrue, .anyFalse, .allFalse) + extension('url') $sql Pushdown
+	t0 = time.Now()
+	{
+		respSyncProto, bSyncProto, errSyncProto := doReq(http.MethodGet, basePath+"/$sync-analytics?_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		msgBundleJSON := []byte(`{"resourceType":"Bundle","type":"message","entry":[{"resource":{"resourceType":"MessageHeader","id":"cert-msg-proto-1","eventUri":"urn:flint:event","source":{"endpoint":"http://sender.example.org"}}}]}`)
+		respMsgConv, bMsgInProto, errMsgConv := doReq(http.MethodPost, basePath+"/Bundle/$convert", "application/fhir+json", msgBundleJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respMsgProto, bMsgProto, errMsgProto := doReq(http.MethodPost, basePath+"/$process-message", "application/x-protobuf", bMsgInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		respApptFindProto, bApptFindProto, errApptFindProto := doReq(http.MethodGet, basePath+"/Appointment/$find?start=2026-06-01T09:00:00Z&end=2026-06-01T17:00:00Z&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		respFMProto, bFMProto, errFMProto := doReq(http.MethodGet, basePath+"/CodeSystem/$find-matches?system=http://snomed.info/sct&property=parent|38341003&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		_, _, _ = doReq(http.MethodPut, basePath+"/Patient/cert-pat-1", "application/fhir+json", []byte(`{"resourceType":"Patient","id":"cert-pat-1","active":true,"gender":"female","birthDate":"1985-04-12","name":[{"use":"official","family":"Certify","given":["Alice"]}],"identifier":[{"system":"http://hospital.example.org/mrn","value":"CERT-MRN-1"}]}`), nil)
+		mmProtoReqJSON := []byte(`{"resourceType":"Parameters","parameter":[{"name":"MemberPatient","resource":{"resourceType":"Patient","identifier":[{"system":"http://hospital.example.org/mrn","value":"CERT-MRN-1"}],"name":[{"family":"Certify","given":["Alice"]}],"birthDate":"1985-04-12","gender":"female"}},{"name":"CoverageToMatch","resource":{"resourceType":"Coverage","status":"active","subscriberId":"SUB-CERT-1","beneficiary":{"reference":"Patient/cert-pat-1"},"payor":[{"reference":"Organization/cert-org-1"}]}}]}`)
+		respMMConv, bMMInProto, errMMConv := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", mmProtoReqJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respMMProto, bMMProto, errMMProto := doReq(http.MethodPost, basePath+"/Patient/$member-match", "application/x-protobuf", bMMInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		respElemProto, bElemProto, errElemProto := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1?_elements=id,gender&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		respStrictProto, bStrictProto, errStrictProto := doReq(http.MethodGet, basePath+"/Patient?unknown_proto_param=1&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+			"Prefer": "handling=strict",
+		})
+
+		quantExtVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_quant_ext_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"all_certify","path":"name.all(family = 'Certify')"},{"name":"any_alice","path":"name.select(given = 'Alice').anyTrue()"},{"name":"all_active","path":"active.allTrue()"},{"name":"birthsex","path":"extension('http://hl7.org/fhir/us/core/StructureDefinition/us-core-birthsex').valueCode"}]}],"where":[{"path":"name.all(family = 'Certify') and name.select(given = 'Alice').anyTrue() and active.allTrue() and extension('http://hl7.org/fhir/us/core/StructureDefinition/us-core-birthsex').exists()"}]}`)
+		respQEDoris, bQEDoris, errQEDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", quantExtVD, nil)
+		respQEPg, bQEPg, errQEPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", quantExtVD, nil)
+
+		if errSyncProto != nil || respSyncProto.StatusCode != http.StatusOK || !strings.Contains(respSyncProto.Header.Get("Content-Type"), "application/x-protobuf") || respSyncProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bSyncProto) == 0 {
+			err = fmt.Errorf("expected GET /$sync-analytics?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respSyncProto.StatusCode)
+		} else if errMsgConv != nil || respMsgConv.StatusCode != http.StatusOK || len(bMsgInProto) == 0 {
+			err = fmt.Errorf("expected POST /Bundle/$convert for $process-message to return binary Proto3 Bundle, got %d", respMsgConv.StatusCode)
+		} else if errMsgProto != nil || respMsgProto.StatusCode != http.StatusOK || !strings.Contains(respMsgProto.Header.Get("Content-Type"), "application/x-protobuf") || respMsgProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bMsgProto) == 0 {
+			err = fmt.Errorf("expected POST /$process-message with binary Proto3 Bundle to return binary Proto3 Bundle, got %d", respMsgProto.StatusCode)
+		} else if errApptFindProto != nil || respApptFindProto.StatusCode != http.StatusOK || !strings.Contains(respApptFindProto.Header.Get("Content-Type"), "application/x-protobuf") || respApptFindProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bApptFindProto) == 0 {
+			err = fmt.Errorf("expected GET /Appointment/$find?_format=application/x-protobuf to return binary Proto3 Bundle, got %d", respApptFindProto.StatusCode)
+		} else if errFMProto != nil || respFMProto.StatusCode != http.StatusOK || !strings.Contains(respFMProto.Header.Get("Content-Type"), "application/x-protobuf") || respFMProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bFMProto) == 0 {
+			err = fmt.Errorf("expected GET /CodeSystem/$find-matches?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respFMProto.StatusCode)
+		} else if errMMConv != nil || respMMConv.StatusCode != http.StatusOK || len(bMMInProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert for $member-match to return binary Proto3 Parameters, got %d", respMMConv.StatusCode)
+		} else if errMMProto != nil || respMMProto.StatusCode != http.StatusOK || !strings.Contains(respMMProto.Header.Get("Content-Type"), "application/x-protobuf") || respMMProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bMMProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$member-match with binary Proto3 Parameters to return binary Proto3 Parameters, got %d: %s", respMMProto.StatusCode, string(bMMProto))
+		} else if errElemProto != nil || respElemProto.StatusCode != http.StatusOK || !strings.Contains(respElemProto.Header.Get("Content-Type"), "application/x-protobuf") || respElemProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bElemProto) == 0 {
+			err = fmt.Errorf("expected GET /Patient/cert-pat-1?_elements=id,gender&_format=application/x-protobuf to return binary Proto3 Patient, got %d", respElemProto.StatusCode)
+		} else if errStrictProto != nil || respStrictProto.StatusCode != http.StatusBadRequest || !strings.Contains(respStrictProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bStrictProto) == 0 {
+			err = fmt.Errorf("expected GET /Patient?unknown_proto_param=1 with Prefer: handling=strict and Accept: application/x-protobuf to return 400 Proto3 OperationOutcome, got %d", respStrictProto.StatusCode)
+		} else if errQEDoris != nil || respQEDoris.StatusCode != http.StatusOK || !strings.Contains(string(bQEDoris), "NOT array_exists(") || !strings.Contains(string(bQEDoris), "array_exists(x -> x = 'given=Alice'") || !strings.Contains(string(bQEDoris), "NOT array_contains(r.code_tokens, 'active=|false')") || !strings.Contains(string(bQEDoris), "ext:us-core-birthsex=|%") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with .all/.anyTrue/.allTrue/extension() pushdown, got %d: %s", respQEDoris.StatusCode, string(bQEDoris))
+		} else if errQEPg != nil || respQEPg.StatusCode != http.StatusOK || !strings.Contains(string(bQEPg), "NOT EXISTS (SELECT 1 FROM spidx_string") || !strings.Contains(string(bQEPg), "EXISTS (SELECT 1 FROM spidx_string") || !strings.Contains(string(bQEPg), "NOT EXISTS (SELECT 1 FROM spidx_token") || !strings.Contains(string(bQEPg), "t.sp_system = 'http://hl7.org/fhir/us/core/StructureDefinition/us-core-birthsex'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with .all/.anyTrue/.allTrue/extension() pushdown, got %d: %s", respQEPg.StatusCode, string(bQEPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-17", suite10, "Zero-JSON Binary Proto3 Analytics Sync ($sync-analytics), Messaging ($process-message), Scheduling (Appointment/$find), Terminology ($find-matches), PDex ($member-match), Proto3 Projection/Prefer Conformance & SQL-on-FHIR v2 Quantifiers (.all, .anyTrue, .allTrue) + extension() $sql Pushdown", t0, err, "Binary Proto3 $sync-analytics, $process-message, Appointment/$find, $find-matches, $member-match, _elements/Prefer & quantifier/extension $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

@@ -767,17 +767,17 @@ func (s *Server) executeViewDefinition(w http.ResponseWriter, r *http.Request, d
 	tenant := r.PathValue("tenant")
 	opts, status, err := s.parseViewRunRequest(r, defaultFormat)
 	if err != nil {
-		code := "invalid"
 		if status == http.StatusNotFound {
-			code = "not-found"
+			writeValidateErrorOutcome(w, r, status, "not-found", err.Error())
+		} else {
+			writeValidateErrorOutcome(w, r, status, "invalid", err.Error())
 		}
-		writeOperationOutcome(w, status, code, err.Error())
 		return
 	}
 
 	targetType := strings.TrimSpace(opts.viewDef.Resource)
 	if _, ok := s.protoRegistry[targetType]; !ok {
-		writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-supported", fmt.Sprintf("unsupported ViewDefinition target resource type %q", targetType))
+		writeValidateErrorOutcome(w, r, http.StatusUnprocessableEntity, "not-supported", fmt.Sprintf("unsupported ViewDefinition target resource type %q", targetType))
 		return
 	}
 
@@ -1208,6 +1208,31 @@ func formatCSVCellValue(v any) string {
 // synchronization between the primary transactional store and the analytical replica store.
 func (s *Server) handleSyncAnalytics(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
+	if r.Method == http.MethodPost && r.Body != nil {
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			writeValidateErrorOutcome(w, r, http.StatusBadRequest, "invalid", "failed to read request body")
+			return
+		}
+		trimmed := bytes.TrimSpace(body)
+		if len(trimmed) > 0 {
+			if isProtoContentType(r) {
+				if _, err := s.protoToFHIRMap("Parameters", trimmed); err != nil {
+					writeValidateErrorOutcome(w, r, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid Protobuf Parameters payload: %v", err))
+					return
+				}
+			} else {
+				var probe struct {
+					ResourceType string `json:"resourceType"`
+				}
+				if err := json.Unmarshal(trimmed, &probe); err != nil || (probe.ResourceType != "" && probe.ResourceType != "Parameters") {
+					writeValidateErrorOutcome(w, r, http.StatusBadRequest, "invalid", "invalid Parameters payload")
+					return
+				}
+			}
+		}
+	}
+
 	storageBackend := string(store.BackendPostgres)
 	analyticalBackend := "none"
 
@@ -1230,7 +1255,7 @@ func (s *Server) handleSyncAnalytics(w http.ResponseWriter, r *http.Request) {
 	if hyb, ok := s.store.(*store.HybridStore); ok && hyb != nil {
 		n, err := hyb.SyncTenant(r.Context(), tenant)
 		if err != nil {
-			writeOperationOutcome(w, http.StatusInternalServerError, "exception", fmt.Sprintf("analytical sync failed: %v", err))
+			writeValidateErrorOutcome(w, r, http.StatusInternalServerError, "exception", fmt.Sprintf("analytical sync failed: %v", err))
 			return
 		}
 		synced = n
@@ -1254,18 +1279,16 @@ func (s *Server) handleSyncAnalytics(w http.ResponseWriter, r *http.Request) {
 		{"name": "storageBackend", "valueCode": storageBackend},
 		{"name": "analyticalBackend", "valueCode": analyticalBackend},
 		{"name": "syncedResources", "valueInteger": synced},
-		{"name": "totalSyncedResources", "valueInteger": totalSynced},
-		{"name": "replicatedWrites", "valueInteger": repWrites},
-		{"name": "replicatedDeletes", "valueInteger": repDeletes},
-		{"name": "replicationErrors", "valueInteger": repErrors},
+		{"name": "totalSyncedResources", "valueInteger": int(totalSynced)},
+		{"name": "replicatedWrites", "valueInteger": int(repWrites)},
+		{"name": "replicatedDeletes", "valueInteger": int(repDeletes)},
+		{"name": "replicationErrors", "valueInteger": int(repErrors)},
 	}
 	if lastSyncTime != "" {
 		params = append(params, map[string]any{"name": "lastSyncTime", "valueDateTime": lastSyncTime})
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
 		"resourceType": "Parameters",
 		"parameter":    params,
 	})
@@ -1289,23 +1312,23 @@ func (s *Server) handleViewDefinitionSQL(w http.ResponseWriter, r *http.Request)
 	tenant := r.PathValue("tenant")
 	opts, status, err := s.parseViewRunRequest(r, "application/fhir+json")
 	if err != nil {
-		code := "invalid"
 		if status == http.StatusNotFound {
-			code = "not-found"
+			writeValidateErrorOutcome(w, r, status, "not-found", err.Error())
+		} else {
+			writeValidateErrorOutcome(w, r, status, "invalid", err.Error())
 		}
-		writeOperationOutcome(w, status, code, err.Error())
 		return
 	}
 
 	targetType := strings.TrimSpace(opts.viewDef.Resource)
 	if _, ok := s.protoRegistry[targetType]; !ok {
-		writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-supported", fmt.Sprintf("unsupported ViewDefinition target resource type %q", targetType))
+		writeValidateErrorOutcome(w, r, http.StatusUnprocessableEntity, "not-supported", fmt.Sprintf("unsupported ViewDefinition target resource type %q", targetType))
 		return
 	}
 
 	res, err := s.transpileViewDefinitionToZeroJSONSQL(tenant, opts)
 	if err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
+		writeValidateErrorOutcome(w, r, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
 
@@ -2053,6 +2076,31 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 	if strings.HasSuffix(p, ".empty()") {
 		return dorisZeroJSONWhereExpr(p, isCore), "empty"
 	}
+	if strings.HasSuffix(p, ".anyTrue()") {
+		return dorisZeroJSONWhereExpr(p, isCore), "anyTrue"
+	}
+	if strings.HasSuffix(p, ".allTrue()") {
+		return dorisZeroJSONWhereExpr(p, isCore), "allTrue"
+	}
+	if strings.HasSuffix(p, ".anyFalse()") {
+		return dorisZeroJSONWhereExpr(p, isCore), "anyFalse"
+	}
+	if strings.HasSuffix(p, ".allFalse()") {
+		return dorisZeroJSONWhereExpr(p, isCore), "allFalse"
+	}
+	if _, _, ok := parseCollectionCriteriaCall(p, ".all("); ok {
+		return dorisZeroJSONWhereExpr(p, isCore), "all"
+	}
+	if _, _, ok := parseCollectionCriteriaCall(p, ".exists("); ok {
+		return dorisZeroJSONWhereExpr(p, isCore), "exists"
+	}
+	if extURL, extTail, ok := parseExtensionFilterPath(p); ok {
+		if extTail == ".exists()" || extTail == ".empty()" {
+			return dorisZeroJSONWhereExpr(p, isCore), "extension"
+		}
+		extKey := normalizeExtensionKey(extURL)
+		return fmt.Sprintf("element_at(array_map(x -> split_part(x, '|', 2), array_filter(x -> x LIKE 'ext:%s=|%%', r.code_tokens)), 1)", extKey), "code_tokens[ext:" + extKey + "]"
+	}
 	if strings.HasSuffix(p, ".distinct()") || strings.HasSuffix(p, ".tail()") || (strings.Contains(p, ".union(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".combine(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".intersect(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".exclude(") && strings.HasSuffix(p, ")")) {
 		return dorisZeroJSONCollectionColumnExpr(p)
 	}
@@ -2208,6 +2256,88 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		expr, _ := dorisZeroJSONColumnExpr(p, isCore)
 		return expr
 	}
+	if strings.HasSuffix(p, ".anyTrue()") || strings.HasSuffix(p, ".allTrue()") || strings.HasSuffix(p, ".anyFalse()") || strings.HasSuffix(p, ".allFalse()") {
+		fn := ""
+		switch {
+		case strings.HasSuffix(p, ".anyTrue()"):
+			fn = "anyTrue"
+		case strings.HasSuffix(p, ".allTrue()"):
+			fn = "allTrue"
+		case strings.HasSuffix(p, ".anyFalse()"):
+			fn = "anyFalse"
+		case strings.HasSuffix(p, ".allFalse()"):
+			fn = "allFalse"
+		}
+		basePath := strings.TrimSpace(p[:len(p)-len("."+fn+"()")])
+		if selBase, selCrit, ok := parseCollectionCriteriaCall(basePath, ".select("); ok {
+			switch fn {
+			case "anyTrue":
+				return dorisZeroJSONWhereExpr(fmt.Sprintf("%s.exists(%s)", selBase, selCrit), isCore)
+			case "allTrue":
+				return dorisZeroJSONWhereExpr(fmt.Sprintf("%s.all(%s)", selBase, selCrit), isCore)
+			case "anyFalse":
+				if sub := dorisZeroJSONWhereExpr(fmt.Sprintf("%s.all(%s)", selBase, selCrit), isCore); sub != "" {
+					return "NOT (" + sub + ")"
+				}
+			case "allFalse":
+				if sub := dorisZeroJSONWhereExpr(fmt.Sprintf("%s.exists(%s)", selBase, selCrit), isCore); sub != "" {
+					return "NOT (" + sub + ")"
+				}
+			}
+		}
+		sp := normalizeFHIRPathToSearchParam(basePath)
+		switch fn {
+		case "anyTrue":
+			return fmt.Sprintf("array_contains(r.code_tokens, '%s=|true')", sp)
+		case "allTrue":
+			return fmt.Sprintf("NOT array_contains(r.code_tokens, '%s=|false')", sp)
+		case "anyFalse":
+			return fmt.Sprintf("array_contains(r.code_tokens, '%s=|false')", sp)
+		case "allFalse":
+			return fmt.Sprintf("NOT array_contains(r.code_tokens, '%s=|true')", sp)
+		}
+	}
+	if basePath, criteria, ok := parseCollectionCriteriaCall(p, ".all("); ok {
+		if strings.HasSuffix(criteria, ".exists()") {
+			subField := strings.TrimSpace(criteria[:len(criteria)-len(".exists()")])
+			fullPath := basePath
+			if subField != "" && subField != "$this" {
+				fullPath = basePath + "." + subField
+			}
+			sp := normalizeFHIRPathToSearchParam(fullPath)
+			isStringParam := strings.HasPrefix(fullPath, "name") || fullPath == "given" || fullPath == "family" || strings.HasPrefix(fullPath, "address") || strings.HasPrefix(fullPath, "telecom")
+			if isStringParam {
+				return fmt.Sprintf("NOT array_exists(x -> x LIKE '%s=%%' AND SPLIT_PART(x, '=', 2) = '', r.string_tokens)", sp)
+			}
+			return fmt.Sprintf("NOT array_exists(x -> x LIKE '%s=|%%' AND SPLIT_PART(x, '|', 2) = '', r.code_tokens)", sp)
+		}
+		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+			fullPath := basePath
+			if cLHS != "" && cLHS != "$this" {
+				fullPath = basePath + "." + cLHS
+			}
+			sp := normalizeFHIRPathToSearchParam(fullPath)
+			escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
+			negOp := "<>"
+			if cOp == "!=" || cOp == "<>" {
+				negOp = "="
+			}
+			isStringParam := strings.HasPrefix(fullPath, "name") || fullPath == "given" || fullPath == "family" || strings.HasPrefix(fullPath, "address") || strings.HasPrefix(fullPath, "telecom")
+			if isStringParam {
+				return fmt.Sprintf("NOT array_exists(x -> x LIKE '%s=%%' AND SPLIT_PART(x, '=', 2) %s '%s', r.string_tokens)", sp, negOp, escapedVal)
+			}
+			return fmt.Sprintf("NOT array_exists(x -> x LIKE '%s=|%%' AND SPLIT_PART(x, '|', 2) %s '%s', r.code_tokens)", sp, negOp, escapedVal)
+		}
+	}
+	if extURL, extTail, ok := parseExtensionFilterPath(p); ok {
+		extKey := normalizeExtensionKey(extURL)
+		if extTail == ".exists()" || extTail == "" {
+			return fmt.Sprintf("array_exists(x -> x LIKE 'ext:%s=|%%', r.code_tokens)", extKey)
+		}
+		if extTail == ".empty()" {
+			return fmt.Sprintf("NOT (array_exists(x -> x LIKE 'ext:%s=|%%', r.code_tokens))", extKey)
+		}
+	}
 	if strings.HasSuffix(p, ".exists()") {
 		fieldPath := strings.TrimSpace(p[:len(p)-len(".exists()")])
 		if strings.HasSuffix(fieldPath, ".tail()") {
@@ -2294,12 +2424,40 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 			}
 		}
 	}
+	if basePath, criteria, ok := parseCollectionCriteriaCall(p, ".exists("); ok {
+		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+			fullPath := basePath
+			if cLHS != "" && cLHS != "$this" {
+				fullPath = basePath + "." + cLHS
+			}
+			sp := normalizeFHIRPathToSearchParam(fullPath)
+			escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
+			isStringParam := strings.HasPrefix(fullPath, "name") || fullPath == "given" || fullPath == "family" || strings.HasPrefix(fullPath, "address") || strings.HasPrefix(fullPath, "telecom")
+			if isStringParam {
+				if cOp == "!=" || cOp == "<>" {
+					return fmt.Sprintf("array_exists(x -> x LIKE '%s=%%' AND SPLIT_PART(x, '=', 2) <> '%s', r.string_tokens)", sp, escapedVal)
+				}
+				return fmt.Sprintf("array_exists(x -> x = '%s=%s', r.string_tokens)", sp, escapedVal)
+			}
+			if cOp == "!=" || cOp == "<>" {
+				return fmt.Sprintf("array_exists(x -> x LIKE '%s=|%%' AND SPLIT_PART(x, '|', 2) <> '%s', r.code_tokens)", sp, escapedVal)
+			}
+			return fmt.Sprintf("array_contains(r.code_tokens, '%s=|%s')", sp, escapedVal)
+		}
+	}
 	lhs, op, rhs, ok := parseViewWhereComparison(p)
 	if !ok {
 		return ""
 	}
 	trimmedRHS := strings.Trim(strings.TrimSpace(rhs), "'\"")
 	escapedRHS := strings.ReplaceAll(trimmedRHS, "'", "''")
+	if extURL, _, okExt := parseExtensionFilterPath(lhs); okExt {
+		extKey := normalizeExtensionKey(extURL)
+		if op == "!=" || op == "<>" {
+			return fmt.Sprintf("NOT array_contains(r.code_tokens, 'ext:%s=|%s')", extKey, escapedRHS)
+		}
+		return fmt.Sprintf("array_contains(r.code_tokens, 'ext:%s=|%s')", extKey, escapedRHS)
+	}
 	_, _, _, isArithLHS := splitTopLevelArithmeticOp(lhs)
 
 	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") {
@@ -2770,6 +2928,31 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 	if strings.HasSuffix(p, ".empty()") {
 		return spidxZeroJSONWhereExprForDialect(p, dialect), "spidx.empty"
 	}
+	if strings.HasSuffix(p, ".anyTrue()") {
+		return spidxZeroJSONWhereExprForDialect(p, dialect), "spidx.anyTrue"
+	}
+	if strings.HasSuffix(p, ".allTrue()") {
+		return spidxZeroJSONWhereExprForDialect(p, dialect), "spidx.allTrue"
+	}
+	if strings.HasSuffix(p, ".anyFalse()") {
+		return spidxZeroJSONWhereExprForDialect(p, dialect), "spidx.anyFalse"
+	}
+	if strings.HasSuffix(p, ".allFalse()") {
+		return spidxZeroJSONWhereExprForDialect(p, dialect), "spidx.allFalse"
+	}
+	if _, _, ok := parseCollectionCriteriaCall(p, ".all("); ok {
+		return spidxZeroJSONWhereExprForDialect(p, dialect), "spidx.all"
+	}
+	if _, _, ok := parseCollectionCriteriaCall(p, ".exists("); ok {
+		return spidxZeroJSONWhereExprForDialect(p, dialect), "spidx.exists"
+	}
+	if extURL, extTail, ok := parseExtensionFilterPath(p); ok {
+		if extTail == ".exists()" || extTail == ".empty()" {
+			return spidxZeroJSONWhereExprForDialect(p, dialect), "spidx_token[extension]"
+		}
+		escapedURL := strings.ReplaceAll(extURL, "'", "''")
+		return fmt.Sprintf("(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_system = '%s' LIMIT 1)", escapedURL), "spidx_token[extension]"
+	}
 	if strings.HasSuffix(p, ".distinct()") || strings.HasSuffix(p, ".tail()") || (strings.Contains(p, ".union(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".combine(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".intersect(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".exclude(") && strings.HasSuffix(p, ")")) {
 		return spidxZeroJSONCollectionColumnExpr(p, dialect)
 	}
@@ -2911,6 +3094,88 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 		expr, _ := spidxZeroJSONColumnExpr(p, dialect)
 		return expr
 	}
+	if strings.HasSuffix(p, ".anyTrue()") || strings.HasSuffix(p, ".allTrue()") || strings.HasSuffix(p, ".anyFalse()") || strings.HasSuffix(p, ".allFalse()") {
+		fn := ""
+		switch {
+		case strings.HasSuffix(p, ".anyTrue()"):
+			fn = "anyTrue"
+		case strings.HasSuffix(p, ".allTrue()"):
+			fn = "allTrue"
+		case strings.HasSuffix(p, ".anyFalse()"):
+			fn = "anyFalse"
+		case strings.HasSuffix(p, ".allFalse()"):
+			fn = "allFalse"
+		}
+		basePath := strings.TrimSpace(p[:len(p)-len("."+fn+"()")])
+		if selBase, selCrit, ok := parseCollectionCriteriaCall(basePath, ".select("); ok {
+			switch fn {
+			case "anyTrue":
+				return spidxZeroJSONWhereExprForDialect(fmt.Sprintf("%s.exists(%s)", selBase, selCrit), dialect)
+			case "allTrue":
+				return spidxZeroJSONWhereExprForDialect(fmt.Sprintf("%s.all(%s)", selBase, selCrit), dialect)
+			case "anyFalse":
+				if sub := spidxZeroJSONWhereExprForDialect(fmt.Sprintf("%s.all(%s)", selBase, selCrit), dialect); sub != "" {
+					return "NOT (" + sub + ")"
+				}
+			case "allFalse":
+				if sub := spidxZeroJSONWhereExprForDialect(fmt.Sprintf("%s.exists(%s)", selBase, selCrit), dialect); sub != "" {
+					return "NOT (" + sub + ")"
+				}
+			}
+		}
+		sp := normalizeFHIRPathToSearchParam(basePath)
+		switch fn {
+		case "anyTrue":
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_value = 'true')", sp)
+		case "allTrue":
+			return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_value = 'false')", sp)
+		case "anyFalse":
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_value = 'false')", sp)
+		case "allFalse":
+			return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_value = 'true')", sp)
+		}
+	}
+	if basePath, criteria, ok := parseCollectionCriteriaCall(p, ".all("); ok {
+		if strings.HasSuffix(criteria, ".exists()") {
+			subField := strings.TrimSpace(criteria[:len(criteria)-len(".exists()")])
+			fullPath := basePath
+			if subField != "" && subField != "$this" {
+				fullPath = basePath + "." + subField
+			}
+			sp := normalizeFHIRPathToSearchParam(fullPath)
+			isStringParam := strings.HasPrefix(fullPath, "name") || fullPath == "given" || fullPath == "family" || strings.HasPrefix(fullPath, "address") || strings.HasPrefix(fullPath, "telecom")
+			if isStringParam {
+				return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' AND (s.sp_value IS NULL OR s.sp_value = ''))", sp)
+			}
+			return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND (t.sp_value IS NULL OR t.sp_value = ''))", sp)
+		}
+		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+			fullPath := basePath
+			if cLHS != "" && cLHS != "$this" {
+				fullPath = basePath + "." + cLHS
+			}
+			sp := normalizeFHIRPathToSearchParam(fullPath)
+			escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
+			negOp := "<>"
+			if cOp == "!=" || cOp == "<>" {
+				negOp = "="
+			}
+			isStringParam := strings.HasPrefix(fullPath, "name") || fullPath == "given" || fullPath == "family" || strings.HasPrefix(fullPath, "address") || strings.HasPrefix(fullPath, "telecom")
+			if isStringParam {
+				return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' AND s.sp_value %s '%s')", sp, negOp, escapedVal)
+			}
+			return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_value %s '%s')", sp, negOp, escapedVal)
+		}
+	}
+	if extURL, extTail, ok := parseExtensionFilterPath(p); ok {
+		escapedURL := strings.ReplaceAll(extURL, "'", "''")
+		if extTail == ".exists()" || extTail == "" {
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_system = '%s')", escapedURL)
+		}
+		if extTail == ".empty()" {
+			return fmt.Sprintf("NOT (EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_system = '%s'))", escapedURL)
+		}
+	}
 	if strings.HasSuffix(p, ".exists()") {
 		fieldPath := strings.TrimSpace(p[:len(p)-len(".exists()")])
 		if strings.HasSuffix(fieldPath, ".tail()") {
@@ -2993,12 +3258,38 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 			}
 		}
 	}
+	if basePath, criteria, ok := parseCollectionCriteriaCall(p, ".exists("); ok {
+		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+			fullPath := basePath
+			if cLHS != "" && cLHS != "$this" {
+				fullPath = basePath + "." + cLHS
+			}
+			sp := normalizeFHIRPathToSearchParam(fullPath)
+			escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
+			sqlOp := cOp
+			if sqlOp == "!=" {
+				sqlOp = "<>"
+			}
+			isStringParam := strings.HasPrefix(fullPath, "name") || fullPath == "given" || fullPath == "family" || strings.HasPrefix(fullPath, "address") || strings.HasPrefix(fullPath, "telecom")
+			if isStringParam {
+				return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' AND s.sp_value %s '%s')", sp, sqlOp, escapedVal)
+			}
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_value %s '%s')", sp, sqlOp, escapedVal)
+		}
+	}
 	lhs, op, rhs, ok := parseViewWhereComparison(p)
 	if !ok {
 		return ""
 	}
 	trimmedRHS := strings.Trim(strings.TrimSpace(rhs), "'\"")
 	escapedRHS := strings.ReplaceAll(trimmedRHS, "'", "''")
+	if extURL, _, okExt := parseExtensionFilterPath(lhs); okExt {
+		escapedURL := strings.ReplaceAll(extURL, "'", "''")
+		if op == "!=" || op == "<>" {
+			return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_system = '%s' AND t.sp_value = '%s')", escapedURL, escapedRHS)
+		}
+		return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_system = '%s' AND t.sp_value = '%s')", escapedURL, escapedRHS)
+	}
 	_, _, _, isArithLHS := splitTopLevelArithmeticOp(lhs)
 
 	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") {
@@ -3284,4 +3575,55 @@ func splitTopLevelArithmeticOp(expr string) (lhs, op, rhs string, ok bool) {
 		}
 	}
 	return "", "", "", false
+}
+
+func parseCollectionCriteriaCall(expr, callPrefix string) (basePath, criteria string, ok bool) {
+	s := strings.TrimSpace(expr)
+	if !strings.HasSuffix(s, ")") {
+		return "", "", false
+	}
+	idx := strings.LastIndex(s, callPrefix)
+	if idx <= 0 {
+		return "", "", false
+	}
+	base := strings.TrimSpace(s[:idx])
+	crit := strings.TrimSpace(s[idx+len(callPrefix) : len(s)-1])
+	if base == "" || crit == "" {
+		return "", "", false
+	}
+	return base, crit, true
+}
+
+func parseExtensionFilterPath(expr string) (extURL, tail string, ok bool) {
+	s := strings.TrimSpace(expr)
+	if strings.HasPrefix(s, "extension(") {
+		closeIdx := strings.IndexByte(s, ')')
+		if closeIdx > len("extension(") {
+			u := strings.Trim(strings.TrimSpace(s[len("extension("):closeIdx]), "'\"")
+			if u != "" {
+				return u, strings.TrimSpace(s[closeIdx+1:]), true
+			}
+		}
+	}
+	if strings.HasPrefix(s, "extension.where(") {
+		closeIdx := strings.IndexByte(s, ')')
+		if closeIdx > len("extension.where(") {
+			inner := strings.TrimSpace(s[len("extension.where("):closeIdx])
+			if lhs, op, rhs, okComp := parseViewWhereComparison(inner); okComp && lhs == "url" && op == "=" {
+				u := strings.Trim(strings.TrimSpace(rhs), "'\"")
+				if u != "" {
+					return u, strings.TrimSpace(s[closeIdx+1:]), true
+				}
+			}
+		}
+	}
+	return "", "", false
+}
+
+func normalizeExtensionKey(extURL string) string {
+	u := strings.TrimSpace(extURL)
+	if slash := strings.LastIndexByte(u, '/'); slash != -1 && slash+1 < len(u) {
+		u = u[slash+1:]
+	}
+	return strings.ToLower(strings.ReplaceAll(u, "'", "''"))
 }

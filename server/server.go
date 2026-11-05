@@ -2725,7 +2725,18 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if okProto, protoCT := wantsProtoResponse(r); okProto {
+	summary := strings.TrimSpace(r.URL.Query().Get("_summary"))
+	var elements []string
+	for _, rawEl := range r.URL.Query()["_elements"] {
+		for el := range strings.SplitSeq(rawEl, ",") {
+			if trimmed := strings.TrimSpace(el); trimmed != "" {
+				elements = append(elements, trimmed)
+			}
+		}
+	}
+	needsProjection := (summary != "" && summary != "false") || len(elements) > 0
+
+	if okProto, protoCT := wantsProtoResponse(r); okProto && !needsProjection {
 		stamped := stampProtoResourceMeta(s.protoRegistry[resType], rec.ResourceProto, resID, rec.ResVersion, rec.LastUpdated)
 		w.Header().Set("Content-Type", protoCT)
 		w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
@@ -2742,24 +2753,24 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	summary := strings.TrimSpace(r.URL.Query().Get("_summary"))
-	var elements []string
-	for _, rawEl := range r.URL.Query()["_elements"] {
-		for el := range strings.SplitSeq(rawEl, ",") {
-			if trimmed := strings.TrimSpace(el); trimmed != "" {
-				elements = append(elements, trimmed)
-			}
-		}
-	}
 	var jsonBytes []byte
-	if (summary != "" && summary != "false") || len(elements) > 0 {
+	if needsProjection {
 		resourceMap, mErr := s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if mErr != nil {
 			s.logger.Error("proto to map", "error", mErr, "type", resType, "id", resID)
-			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
+			writeValidateErrorOutcome(w, r, http.StatusInternalServerError, "exception", "serialization error")
 			return
 		}
 		projected := applySummaryOrElements(resourceMap, summary, elements)
+		if okProto, _ := wantsProtoResponse(r); okProto {
+			w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+			w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+			if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
+				return
+			}
+			s.writeOperationResponse(w, r, http.StatusOK, resType, projected)
+			return
+		}
 		b, mErr := json.Marshal(projected)
 		if mErr != nil {
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
@@ -2925,7 +2936,18 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if okProto, protoCT := wantsProtoResponse(r); okProto {
+	summary := strings.TrimSpace(r.URL.Query().Get("_summary"))
+	var elements []string
+	for _, rawEl := range r.URL.Query()["_elements"] {
+		for el := range strings.SplitSeq(rawEl, ",") {
+			if trimmed := strings.TrimSpace(el); trimmed != "" {
+				elements = append(elements, trimmed)
+			}
+		}
+	}
+	needsProjection := (summary != "" && summary != "false") || len(elements) > 0
+
+	if okProto, protoCT := wantsProtoResponse(r); okProto && !needsProjection {
 		stamped := stampProtoResourceMeta(s.protoRegistry[resType], rec.ResourceProto, resID, rec.ResVersion, rec.LastUpdated)
 		w.Header().Set("Content-Type", protoCT)
 		w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
@@ -2942,24 +2964,24 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	summary := strings.TrimSpace(r.URL.Query().Get("_summary"))
-	var elements []string
-	for _, rawEl := range r.URL.Query()["_elements"] {
-		for el := range strings.SplitSeq(rawEl, ",") {
-			if trimmed := strings.TrimSpace(el); trimmed != "" {
-				elements = append(elements, trimmed)
-			}
-		}
-	}
 	var jsonBytes []byte
-	if (summary != "" && summary != "false") || len(elements) > 0 {
+	if needsProjection {
 		resourceMap, mErr := s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if mErr != nil {
 			s.logger.Error("proto to map in vread", "error", mErr, "type", resType, "id", resID, "version", version)
-			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
+			writeValidateErrorOutcome(w, r, http.StatusInternalServerError, "exception", "serialization error")
 			return
 		}
 		projected := applySummaryOrElements(resourceMap, summary, elements)
+		if okProto, _ := wantsProtoResponse(r); okProto {
+			w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+			w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
+			if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
+				return
+			}
+			s.writeOperationResponse(w, r, http.StatusOK, resType, projected)
+			return
+		}
 		b, mErr := json.Marshal(projected)
 		if mErr != nil {
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "serialization error")
@@ -3216,7 +3238,8 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if okProto, protoCT := wantsProtoResponse(r); okProto {
+	needsProjection := (summary != "" && summary != "false" && summary != "count") || len(elements) > 0
+	if okProto, protoCT := wantsProtoResponse(r); okProto && !needsProjection {
 		if protoBundleBytes, err := s.buildProtoHistoryBundle(resType, resID, records, total, links, summary); err == nil {
 			w.Header().Set("Content-Type", protoCT)
 			w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
@@ -3238,7 +3261,6 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if summary != "count" {
-		needsProjection := (summary != "" && summary != "false") || len(elements) > 0
 		entries := make([]any, 0, len(records))
 		for _, rec := range records {
 			rt := rec.ResType
@@ -3287,11 +3309,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		bundle["entry"] = entries
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	if r == nil || r.Method != http.MethodHead {
-		json.NewEncoder(w).Encode(bundle)
-	}
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 // handleCreate handles POST /{resourceType} — create a FHIR resource.
@@ -5513,7 +5531,7 @@ func evaluateSearchPreferHandling(w http.ResponseWriter, r *http.Request, q url.
 	if handling == "strict" {
 		w.Header().Set("Preference-Applied", "handling=strict")
 		if len(unknownKeys) > 0 {
-			writeOperationOutcome(w, http.StatusBadRequest, "not-supported",
+			writeValidateErrorOutcome(w, r, http.StatusBadRequest, "not-supported",
 				fmt.Sprintf("unknown or unsupported search parameter(s): %s", strings.Join(unknownKeys, ", ")))
 			return nil, false
 		}
@@ -5589,7 +5607,8 @@ func (s *Server) filterAuthorizedIncludes(r *http.Request, tenant string, secCtx
 }
 
 func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Request, sr *postgres.SearchResults, params postgres.SearchParams, ignoredParams ...string) {
-	if okProto, protoCT := wantsProtoResponse(r); okProto {
+	needsProjection := (params.Summary != "" && params.Summary != "false" && params.Summary != "count") || len(params.Elements) > 0
+	if okProto, protoCT := wantsProtoResponse(r); okProto && !needsProjection && len(ignoredParams) == 0 {
 		var links []map[string]string
 		if r != nil {
 			links = s.buildSearchBundleLinks(r, sr, params)
@@ -5622,7 +5641,6 @@ func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Req
 
 	if params.Summary != "count" {
 		entries := make([]any, 0, len(sr.Matches)+len(sr.Includes)+1)
-		needsProjection := (params.Summary != "" && params.Summary != "false") || len(params.Elements) > 0
 
 		// 1. Primary search matches
 		for _, res := range sr.Matches {
@@ -5686,11 +5704,7 @@ func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Req
 		bundle["entry"] = entries
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	if r == nil || r.Method != http.MethodHead {
-		json.NewEncoder(w).Encode(bundle)
-	}
+	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
 func (s *Server) buildSearchBundleLinks(r *http.Request, sr *postgres.SearchResults, params postgres.SearchParams) []map[string]string {
@@ -7977,9 +7991,7 @@ func (s *Server) writeResourceWriteResponse(
 		w.WriteHeader(status)
 		return
 	case "OperationOutcome":
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		s.writeOperationResponse(w, r, status, "OperationOutcome", map[string]any{
 			"resourceType": "OperationOutcome",
 			"issue": []map[string]any{
 				{
