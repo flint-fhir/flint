@@ -2913,4 +2913,75 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(paBytes), want)
 		}
 	}
+
+	// Collection .where(system = '...')/.select(...) and type conversion (.toBoolean, .convertsTo*) in ViewDefinition/$sql
+	whereSelectConvVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_where_select_conv",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "mrn", "path": "identifier.where(system = 'http://hospital.example.org/mrn').value.first()"},
+					{"name": "all_mrns", "path": "identifier.where(system = 'http://hospital.example.org/mrn').value", "collection": true},
+					{"name": "mrn_count", "path": "identifier.where(system = 'http://hospital.example.org/mrn').count()"},
+					{"name": "official_family", "path": "name.where(use = 'official').select(family).first()"},
+					{"name": "given_csv", "path": "name.select(given).join(',')"},
+					{"name": "is_active", "path": "active.toBoolean()"},
+					{"name": "has_dob", "path": "birthDate.convertsToDate()"},
+					{"name": "has_int", "path": "gender.convertsToInteger()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "identifier.where(system = 'http://hospital.example.org/mrn').value = 'MRN-100' and identifier.where(system = 'http://hospital.example.org/mrn').exists() and birthDate.convertsToDate()"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"identifier=http://hospital.example.org/mrn|%",
+				"identifier=http://hospital.example.org/mrn|MRN-100",
+				"AS BOOLEAN) AS is_active",
+				"AS DATE) IS NOT NULL) AS has_dob",
+				"AS BIGINT) IS NOT NULL) AS has_int",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"t.sp_name = 'identifier' AND t.sp_system = 'http://hospital.example.org/mrn'",
+				"t.sp_value = 'MRN-100'",
+				"AS BOOLEAN) AS is_active",
+				"IS NOT NULL) AS has_dob",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"t.sp_name = 'identifier' AND t.sp_system = 'http://hospital.example.org/mrn'",
+				"t.sp_value = 'MRN-100'",
+				"IN ('true', '1')) AS is_active",
+				"IS NOT NULL) AS has_dob",
+			},
+		},
+	} {
+		reqWSC, wscErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(whereSelectConvVD))
+		require.NoError(t, wscErr)
+		reqWSC.Header.Set("Content-Type", "application/fhir+json")
+		respWSC, wscErr := client.Do(reqWSC)
+		require.NoError(t, wscErr)
+		wscBytes, _ := io.ReadAll(respWSC.Body)
+		respWSC.Body.Close()
+		require.Equal(t, http.StatusOK, respWSC.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(wscBytes), want)
+		}
+	}
 }

@@ -4922,7 +4922,7 @@ func (s *Server) handleStructureMapTransform(w http.ResponseWriter, r *http.Requ
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read body for StructureMap/$transform: "+err.Error())
 		return
 	}
-	bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Parameters")
+	bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Patient")
 	if err != nil || bodyMap == nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid body for StructureMap/$transform: %v", err))
 		return
@@ -4941,7 +4941,7 @@ func (s *Server) handleStructureMapTransform(w http.ResponseWriter, r *http.Requ
 				name, _ := pm["name"].(string)
 				switch name {
 				case "source", "structureMap":
-					if v := extractParamString(pm); v != "" && sourceURL == "" {
+					if v := extractParamStringOrRef(pm); v != "" && sourceURL == "" {
 						sourceURL = v
 					}
 					if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "StructureMap" {
@@ -4950,6 +4950,14 @@ func (s *Server) handleStructureMapTransform(w http.ResponseWriter, r *http.Requ
 				case "content", "resource", "input":
 					if res, ok := pm["resource"].(map[string]any); ok {
 						contentMap = res
+					} else if ref := extractParamStringOrRef(pm); ref != "" && s.store != nil {
+						refType, refID := "Patient", cleanID(ref)
+						if parts := strings.SplitN(strings.TrimSpace(ref), "/", 2); len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+							refType, refID = parts[0], parts[1]
+						}
+						if rec, rErr := s.store.ReadResourceWithMeta(r.Context(), tenant, refType, refID); rErr == nil {
+							contentMap, _ = s.protoToFHIRMapWithMeta(refType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+						}
 					}
 				}
 			}
@@ -4980,6 +4988,12 @@ func (s *Server) handleStructureMapTransform(w http.ResponseWriter, r *http.Requ
 	if contentMap == nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "required", "StructureMap/$transform requires a 'content' source resource")
 		return
+	}
+	if smMap == nil && pathID == "" && sourceURL == "" {
+		smMap = map[string]any{
+			"resourceType": "StructureMap",
+			"id":           "default-transform",
+		}
 	}
 	if smMap == nil {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", "StructureMap not found; provide an inline StructureMap, stored StructureMap/{id}, or ?source= canonical URL")
@@ -9661,7 +9675,11 @@ func (s *Server) handleAdverseEventEvaluate(w http.ResponseWriter, r *http.Reque
 							}
 							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "AdverseEvent" {
 								aeMap = res
-							} else if name, _ := pm["name"].(string); strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
+							} else if name, _ := pm["name"].(string); strings.EqualFold(name, "id") || strings.EqualFold(name, "adverseEvent") {
+								if aeID == "" {
+									aeID = cleanID(strings.TrimPrefix(extractParamString(pm), "AdverseEvent/"))
+								}
+							} else if strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
 								if subjectParam == "" {
 									subjectParam = extractParamString(pm)
 								}
@@ -9881,7 +9899,11 @@ func (s *Server) handleCarePlanEvaluate(w http.ResponseWriter, r *http.Request) 
 							}
 							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "CarePlan" {
 								cpMap = res
-							} else if name, _ := pm["name"].(string); strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
+							} else if name, _ := pm["name"].(string); strings.EqualFold(name, "id") || strings.EqualFold(name, "carePlan") {
+								if cpID == "" {
+									cpID = cleanID(strings.TrimPrefix(extractParamString(pm), "CarePlan/"))
+								}
+							} else if strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
 								if subjectParam == "" {
 									subjectParam = extractParamString(pm)
 								}
@@ -10702,7 +10724,15 @@ func (s *Server) handleRiskAssessmentEvaluate(w http.ResponseWriter, r *http.Req
 							if !ok {
 								continue
 							}
-							if name, _ := pm["name"].(string); strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "RiskAssessment" {
+								if subj, ok := res["subject"].(map[string]any); ok && subjectParam == "" {
+									subjectParam, _ = subj["reference"].(string)
+								}
+							} else if name, _ := pm["name"].(string); strings.EqualFold(name, "id") || strings.EqualFold(name, "riskAssessment") {
+								if raID == "" {
+									raID = cleanID(strings.TrimPrefix(extractParamString(pm), "RiskAssessment/"))
+								}
+							} else if strings.EqualFold(name, "subject") || strings.EqualFold(name, "patient") {
 								if subjectParam == "" {
 									subjectParam = extractParamString(pm)
 								}
@@ -13214,14 +13244,28 @@ func (s *Server) handleConsentEvaluate(w http.ResponseWriter, r *http.Request) {
 	actorRef := strings.TrimSpace(q.Get("actor"))
 	purpose := strings.TrimSpace(q.Get("purpose"))
 
+	var consents []map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
 		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
-			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
-				if body["resourceType"] == "Parameters" {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Consent"); err == nil && body != nil {
+				switch body["resourceType"] {
+				case "Consent":
+					consents = append(consents, body)
+					if patMap, ok := body["patient"].(map[string]any); ok && patRef == "" {
+						patRef, _ = patMap["reference"].(string)
+					}
+				case "Parameters":
 					if params, ok := body["parameter"].([]any); ok {
 						for _, p := range params {
 							pm, ok := p.(map[string]any)
 							if !ok {
+								continue
+							}
+							if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Consent" {
+								consents = append(consents, res)
+								if patMap, ok := res["patient"].(map[string]any); ok && patRef == "" {
+									patRef, _ = patMap["reference"].(string)
+								}
 								continue
 							}
 							name, _ := pm["name"].(string)
@@ -13250,8 +13294,7 @@ func (s *Server) handleConsentEvaluate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var consents []map[string]any
-	if consentID != "" {
+	if len(consents) == 0 && consentID != "" {
 		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Consent", consentID)
 		if err != nil || rec == nil {
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Consent/%s not found", consentID))
@@ -13260,7 +13303,7 @@ func (s *Server) handleConsentEvaluate(w http.ResponseWriter, r *http.Request) {
 		if cm, cErr := s.protoToFHIRMapWithMeta("Consent", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
 			consents = append(consents, cm)
 		}
-	} else {
+	} else if len(consents) == 0 {
 		sp := postgres.SearchParams{
 			TenantID: tenant,
 			ResType:  "Consent",
