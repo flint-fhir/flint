@@ -3092,6 +3092,107 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-18", suite10, "Zero-JSON Binary Proto3 PATCH (FHIRPath & Conditional), DELETE (OperationOutcome), Terminology ($validate-code, $subsumes), Conformance ($subset, $implements), Da Vinci/Clinical Operations & SQL-on-FHIR v2 Polymorphic (.ofType, .as, .is) & Collection Aggregations (.sum, .avg, .min, .max) $sql Pushdown", t0, err, "Binary Proto3 PATCH/DELETE/Terminology/Conformance/Da Vinci wire transport & polymorphic .ofType/.as/.is + .sum/.avg/.min/.max $sql pushdown verified")
 
+	// AN-19: Zero-JSON Binary Proto3 Functional Lists (List/$find), Financial Billing (ChargeItem/$apply), Mapping (StructureMap/$transform), Scheduling (Schedule/$find), Clinical Risk/Privacy/Care Evaluation (RiskAssessment/$evaluate, Consent/$evaluate, CarePlan/$evaluate, AdverseEvent/$evaluate) & SQL-on-FHIR v2 Collection .where(system = '...')/.select(...) & Type Conversion (.toBoolean, .convertsTo*) $sql Pushdown
+	t0 = time.Now()
+	{
+		respListFindProto, bListFindProto, errListFindProto := doReq(http.MethodGet, basePath+"/List/$find?patient=Patient/cert-pat-1&code=problems&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		ciJSON := []byte(`{"resourceType":"ChargeItem","id":"cert-ci-proto-1","status":"billable","code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"99213","display":"Office consultation"}]},"subject":{"reference":"Patient/cert-pat-1"},"quantity":{"value":1}}`)
+		respCIConv, bCIInProto, errCIConv := doReq(http.MethodPost, basePath+"/ChargeItem/$convert", "application/fhir+json", ciJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCIApplyProto, bCIApplyProto, errCIApplyProto := doReq(http.MethodPost, basePath+"/ChargeItem/$apply", "application/x-protobuf", bCIInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		smPatJSON := []byte(`{"resourceType":"Patient","id":"cert-sm-pat-1","gender":"female","birthDate":"1985-04-12","name":[{"family":"Certify","given":["Alice"]}]}`)
+		respSMConv, bSMInProto, errSMConv := doReq(http.MethodPost, basePath+"/Patient/$convert", "application/fhir+json", smPatJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSMProto, bSMProto, errSMProto := doReq(http.MethodPost, basePath+"/StructureMap/$transform", "application/x-protobuf", bSMInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		respSchedFindProto, bSchedFindProto, errSchedFindProto := doReq(http.MethodGet, basePath+"/Schedule/$find?start=2026-06-01T09:00:00Z&end=2026-06-01T17:00:00Z&_format=application/x-protobuf", "", nil, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		raJSON := []byte(`{"resourceType":"RiskAssessment","id":"cert-ra-proto-1","status":"final","subject":{"reference":"Patient/cert-pat-1"}}`)
+		respRAConv, bRAInProto, errRAConv := doReq(http.MethodPost, basePath+"/RiskAssessment/$convert", "application/fhir+json", raJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRAEvalProto, bRAEvalProto, errRAEvalProto := doReq(http.MethodPost, basePath+"/RiskAssessment/$evaluate", "application/x-protobuf", bRAInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		consentJSON := []byte(`{"resourceType":"Consent","id":"cert-consent-proto-1","status":"active","scope":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/consentscope","code":"patient-privacy"}]},"category":[{"coding":[{"system":"http://loinc.org","code":"59284-0"}]}],"patient":{"reference":"Patient/cert-pat-1"},"provision":{"type":"permit"}}`)
+		respConConv, bConInProto, errConConv := doReq(http.MethodPost, basePath+"/Consent/$convert", "application/fhir+json", consentJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respConEvalProto, bConEvalProto, errConEvalProto := doReq(http.MethodPost, basePath+"/Consent/$evaluate", "application/x-protobuf", bConInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		cpJSON := []byte(`{"resourceType":"CarePlan","id":"cert-cp-proto-1","status":"active","intent":"plan","subject":{"reference":"Patient/cert-pat-1"},"activity":[{"detail":{"status":"completed"}},{"detail":{"status":"in-progress"}}]}`)
+		respCPConv, bCPInProto, errCPConv := doReq(http.MethodPost, basePath+"/CarePlan/$convert", "application/fhir+json", cpJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCPEvalProto, bCPEvalProto, errCPEvalProto := doReq(http.MethodPost, basePath+"/CarePlan/$evaluate", "application/x-protobuf", bCPInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		aeJSON := []byte(`{"resourceType":"AdverseEvent","id":"cert-ae-proto-1","actuality":"actual","subject":{"reference":"Patient/cert-pat-1"}}`)
+		respAEConv, bAEInProto, errAEConv := doReq(http.MethodPost, basePath+"/AdverseEvent/$convert", "application/fhir+json", aeJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respAEEvalProto, bAEEvalProto, errAEEvalProto := doReq(http.MethodPost, basePath+"/AdverseEvent/$evaluate", "application/x-protobuf", bAEInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		whereSelectVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_where_select_conv_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"mrn","path":"identifier.where(system = 'http://hospital.example.org/mrn').value.first()"},{"name":"official_family","path":"name.where(use = 'official').select(family).first()"},{"name":"given_csv","path":"name.select(given).join(',')"},{"name":"is_active","path":"active.toBoolean()"},{"name":"has_valid_dob","path":"birthDate.convertsToDate()"}]}],"where":[{"path":"identifier.where(system = 'http://hospital.example.org/mrn').value = 'CERT-MRN-1' and birthDate.convertsToDate()"}]}`)
+		respWSDoris, bWSDoris, errWSDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", whereSelectVD, nil)
+		respWSPg, bWSPg, errWSPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", whereSelectVD, nil)
+
+		if errListFindProto != nil || respListFindProto.StatusCode != http.StatusOK || !strings.Contains(respListFindProto.Header.Get("Content-Type"), "application/x-protobuf") || respListFindProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bListFindProto) == 0 {
+			err = fmt.Errorf("expected GET /List/$find?_format=application/x-protobuf to return binary Proto3 List, got %d", respListFindProto.StatusCode)
+		} else if errCIConv != nil || respCIConv.StatusCode != http.StatusOK || len(bCIInProto) == 0 {
+			err = fmt.Errorf("expected POST /ChargeItem/$convert to return binary Proto3 ChargeItem, got %d", respCIConv.StatusCode)
+		} else if errCIApplyProto != nil || respCIApplyProto.StatusCode != http.StatusOK || !strings.Contains(respCIApplyProto.Header.Get("Content-Type"), "application/x-protobuf") || respCIApplyProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bCIApplyProto) == 0 {
+			err = fmt.Errorf("expected POST /ChargeItem/$apply with binary Proto3 ChargeItem to return binary Proto3 Invoice, got %d", respCIApplyProto.StatusCode)
+		} else if errSMConv != nil || respSMConv.StatusCode != http.StatusOK || len(bSMInProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert for StructureMap/$transform to return binary Proto3 Parameters, got %d", respSMConv.StatusCode)
+		} else if errSMProto != nil || respSMProto.StatusCode != http.StatusOK || !strings.Contains(respSMProto.Header.Get("Content-Type"), "application/x-protobuf") || respSMProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bSMProto) == 0 {
+			err = fmt.Errorf("expected POST /StructureMap/$transform with binary Proto3 Parameters to return binary Proto3 Patient, got %d", respSMProto.StatusCode)
+		} else if errSchedFindProto != nil || respSchedFindProto.StatusCode != http.StatusOK || !strings.Contains(respSchedFindProto.Header.Get("Content-Type"), "application/x-protobuf") || respSchedFindProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bSchedFindProto) == 0 {
+			err = fmt.Errorf("expected GET /Schedule/$find?_format=application/x-protobuf to return binary Proto3 Bundle, got %d", respSchedFindProto.StatusCode)
+		} else if errRAConv != nil || respRAConv.StatusCode != http.StatusOK || len(bRAInProto) == 0 {
+			err = fmt.Errorf("expected POST /RiskAssessment/$convert to return binary Proto3 RiskAssessment, got %d", respRAConv.StatusCode)
+		} else if errRAEvalProto != nil || respRAEvalProto.StatusCode != http.StatusOK || !strings.Contains(respRAEvalProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bRAEvalProto) == 0 {
+			err = fmt.Errorf("expected POST /RiskAssessment/$evaluate with binary Proto3 RiskAssessment to return binary Proto3 RiskAssessment, got %d", respRAEvalProto.StatusCode)
+		} else if errConConv != nil || respConConv.StatusCode != http.StatusOK || len(bConInProto) == 0 {
+			err = fmt.Errorf("expected POST /Consent/$convert to return binary Proto3 Consent, got %d", respConConv.StatusCode)
+		} else if errConEvalProto != nil || respConEvalProto.StatusCode != http.StatusOK || !strings.Contains(respConEvalProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bConEvalProto) == 0 {
+			err = fmt.Errorf("expected POST /Consent/$evaluate with binary Proto3 Consent to return binary Proto3 Parameters, got %d: %s", respConEvalProto.StatusCode, string(bConEvalProto))
+		} else if errCPConv != nil || respCPConv.StatusCode != http.StatusOK || len(bCPInProto) == 0 {
+			err = fmt.Errorf("expected POST /CarePlan/$convert to return binary Proto3 CarePlan, got %d", respCPConv.StatusCode)
+		} else if errCPEvalProto != nil || respCPEvalProto.StatusCode != http.StatusOK || !strings.Contains(respCPEvalProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCPEvalProto) == 0 {
+			err = fmt.Errorf("expected POST /CarePlan/$evaluate with binary Proto3 CarePlan to return binary Proto3 Parameters, got %d", respCPEvalProto.StatusCode)
+		} else if errAEConv != nil || respAEConv.StatusCode != http.StatusOK || len(bAEInProto) == 0 {
+			err = fmt.Errorf("expected POST /AdverseEvent/$convert to return binary Proto3 AdverseEvent, got %d", respAEConv.StatusCode)
+		} else if errAEEvalProto != nil || respAEEvalProto.StatusCode != http.StatusOK || !strings.Contains(respAEEvalProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bAEEvalProto) == 0 {
+			err = fmt.Errorf("expected POST /AdverseEvent/$evaluate with binary Proto3 AdverseEvent to return binary Proto3 Parameters, got %d", respAEEvalProto.StatusCode)
+		} else if errWSDoris != nil || respWSDoris.StatusCode != http.StatusOK || !strings.Contains(string(bWSDoris), "identifier=http://hospital.example.org/mrn|%") || !strings.Contains(string(bWSDoris), "identifier=http://hospital.example.org/mrn|CERT-MRN-1") || !strings.Contains(string(bWSDoris), "AS BOOLEAN)") || !strings.Contains(string(bWSDoris), "AS DATE) IS NOT NULL") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with .where(system=)/.select/.toBoolean/.convertsToDate pushdown, got %d: %s", respWSDoris.StatusCode, string(bWSDoris))
+		} else if errWSPg != nil || respWSPg.StatusCode != http.StatusOK || !strings.Contains(string(bWSPg), "t.sp_name = 'identifier' AND t.sp_system = 'http://hospital.example.org/mrn'") || !strings.Contains(string(bWSPg), "t.sp_value = 'CERT-MRN-1'") || !strings.Contains(string(bWSPg), "AS BOOLEAN)") || !strings.Contains(string(bWSPg), "IS NOT NULL)") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with .where(system=)/.select/.toBoolean/.convertsToDate pushdown, got %d: %s", respWSPg.StatusCode, string(bWSPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-19", suite10, "Zero-JSON Binary Proto3 Functional Lists (List/$find), Billing (ChargeItem/$apply), Mapping (StructureMap/$transform), Scheduling (Schedule/$find), Clinical Evaluation (RiskAssessment/Consent/CarePlan/AdverseEvent/$evaluate) & SQL-on-FHIR v2 Collection .where/.select & Type Conversion (.toBoolean, .convertsTo*) $sql Pushdown", t0, err, "Binary Proto3 List/$find, ChargeItem/$apply, StructureMap/$transform, Schedule/$find, clinical $evaluate & .where(system=)/.select/.toBoolean/.convertsTo* $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}
