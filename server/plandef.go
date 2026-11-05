@@ -4207,10 +4207,7 @@ func (s *Server) handleCapabilityStatementImplements(w http.ResponseWriter, r *h
 	}
 
 	tenant := r.PathValue("tenant")
-	canonicalParam := strings.TrimSpace(r.URL.Query().Get("canonical"))
-	if canonicalParam == "" {
-		canonicalParam = strings.TrimSpace(r.URL.Query().Get("url"))
-	}
+	canonicalParam := strings.TrimSpace(firstNonEmptyStr(r.URL.Query().Get("canonical"), r.URL.Query().Get("url"), r.URL.Query().Get("server"), r.URL.Query().Get("client")))
 	var clientCap map[string]any
 
 	if r.Method == http.MethodPost && r.Body != nil {
@@ -12218,6 +12215,30 @@ func (s *Server) handleDaVinciDataExport(w http.ResponseWriter, r *http.Request)
 	groupID := cleanID(r.PathValue("id"))
 	if groupID == "" {
 		groupID = cleanID(firstNonEmptyStr(r.URL.Query().Get("group"), r.URL.Query().Get("id")))
+	}
+	if groupID == "" && r.Body != nil {
+		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4*1024*1024)); err == nil && len(rawBody) > 0 {
+			if bodyMap, bErr := s.decodeOperationBodyMap(r, rawBody, "Parameters"); bErr == nil && len(bodyMap) > 0 {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, rawP := range params {
+						pm, ok := rawP.(map[string]any)
+						if !ok {
+							continue
+						}
+						name, _ := pm["name"].(string)
+						if name == "group" || name == "id" {
+							if v, _ := pm["valueString"].(string); v != "" {
+								groupID = cleanID(strings.TrimPrefix(v, "Group/"))
+							} else if ref, ok := pm["valueReference"].(map[string]any); ok {
+								if rStr, _ := ref["reference"].(string); rStr != "" {
+									groupID = cleanID(strings.TrimPrefix(rStr, "Group/"))
+								}
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 	if groupID == "" {
 		groupID = "pdex-matched-group-1"

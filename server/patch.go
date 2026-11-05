@@ -73,10 +73,32 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read patch body")
 		return
 	}
-	trimmedBody := bytes.TrimSpace(body)
-	if len(trimmedBody) == 0 {
-		writeOperationOutcome(w, http.StatusBadRequest, "required", "empty PATCH request body")
-		return
+	var trimmedBody []byte
+	if isProtoContentType(r) {
+		if len(body) == 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "required", "empty PATCH request body")
+			return
+		}
+		decodedMap, err := s.decodeOperationBodyMap(r, body, "Parameters")
+		if err != nil || len(decodedMap) == 0 || decodedMap["parameter"] == nil {
+			if mergeMap, mErr := s.decodeOperationBodyMap(r, body, resType); mErr == nil && len(mergeMap) > 0 {
+				decodedMap = mergeMap
+			} else if err != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid Protobuf PATCH body: %v", err))
+				return
+			}
+		}
+		trimmedBody, err = json.Marshal(decodedMap)
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("failed to encode PATCH body: %v", err))
+			return
+		}
+	} else {
+		trimmedBody = bytes.TrimSpace(body)
+		if len(trimmedBody) == 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "required", "empty PATCH request body")
+			return
+		}
 	}
 
 	var (
@@ -673,9 +695,7 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if parsePreferReturn(r) == "OperationOutcome" {
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		s.writeOperationResponse(w, r, http.StatusOK, "OperationOutcome", map[string]any{
 			"resourceType": "OperationOutcome",
 			"issue": []map[string]any{
 				{

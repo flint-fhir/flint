@@ -3778,6 +3778,19 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 			Op:       "D",
 		})
 	}
+	if parsePreferReturn(r) == "OperationOutcome" {
+		s.writeOperationResponse(w, r, http.StatusOK, "OperationOutcome", map[string]any{
+			"resourceType": "OperationOutcome",
+			"issue": []map[string]any{
+				{
+					"severity":    "information",
+					"code":        "informational",
+					"diagnostics": fmt.Sprintf("Successfully deleted %s/%s", resType, resID),
+				},
+			},
+		})
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -7306,7 +7319,7 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			"http://hl7.org/fhir/uv/bulkdata/CapabilityStatement/bulk-data",
 		},
 		"format":      []string{"json", "application/fhir+json", "application/fhir+ndjson", "application/x-protobuf", "application/fhir+protobuf"},
-		"patchFormat": []string{"application/json-patch+json", "application/merge-patch+json", "application/fhir+json"},
+		"patchFormat": []string{"application/json-patch+json", "application/merge-patch+json", "application/fhir+json", "application/x-protobuf", "application/fhir+protobuf"},
 		"software": map[string]any{
 			"name":    "Flint FHIR Server",
 			"version": "0.1.0",
