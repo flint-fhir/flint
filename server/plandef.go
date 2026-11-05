@@ -14784,7 +14784,7 @@ func (s *Server) handleIHEMHDExchange(w http.ResponseWriter, r *http.Request) {
 								continue
 							}
 							name, _ := pm["name"].(string)
-							val := extractParamString(pm)
+							val := firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm))
 							switch name {
 							case "patient", "subject":
 								if patFilter == "" {
@@ -14882,7 +14882,7 @@ func (s *Server) handleClinicalGenomics(w http.ResponseWriter, r *http.Request) 
 								continue
 							}
 							name, _ := pm["name"].(string)
-							val := extractParamString(pm)
+							val := firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm))
 							switch name {
 							case "subject", "patient", "id":
 								if patID == "" {
@@ -15157,9 +15157,17 @@ func (s *Server) handlePACIOPostAcute(w http.ResponseWriter, r *http.Request) {
 								continue
 							}
 							name, _ := pm["name"].(string)
-							val := extractParamString(pm)
+							val := firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm))
 							switch name {
-							case "patient", "subject", "questionnaireResponse", "id":
+							case "questionnaireResponse":
+								if op == "$pacio-assess" || targetID == "" {
+									targetID = cleanID(strings.TrimPrefix(strings.TrimPrefix(val, "Patient/"), "QuestionnaireResponse/"))
+								}
+							case "patient", "subject":
+								if op == "$pacio-summary" || targetID == "" {
+									targetID = cleanID(strings.TrimPrefix(strings.TrimPrefix(val, "Patient/"), "QuestionnaireResponse/"))
+								}
+							case "id":
 								if targetID == "" {
 									targetID = cleanID(strings.TrimPrefix(strings.TrimPrefix(val, "Patient/"), "QuestionnaireResponse/"))
 								}
@@ -15471,7 +15479,9 @@ func (s *Server) handleNHSNHAISurveillance(w http.ResponseWriter, r *http.Reques
 						if pm, ok := raw.(map[string]any); ok {
 							name, _ := pm["name"].(string)
 							if name == "encounter" || name == "id" {
-								encID = cleanID(strings.TrimPrefix(extractParamString(pm), "Encounter/"))
+								if vs := firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)); vs != "" && encID == "" {
+									encID = cleanID(strings.TrimPrefix(vs, "Encounter/"))
+								}
 							}
 						}
 					}
@@ -15569,7 +15579,7 @@ func (s *Server) handleVulcanClinicalResearch(w http.ResponseWriter, r *http.Req
 								continue
 							}
 							name, _ := pm["name"].(string)
-							val := extractParamString(pm)
+							val := firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm))
 							switch name {
 							case "study", "researchStudy":
 								if studyID == "" {
@@ -15765,7 +15775,7 @@ func (s *Server) handleVitalRecordsBFDR(w http.ResponseWriter, r *http.Request) 
 								continue
 							}
 							name, _ := pm["name"].(string)
-							val := extractParamString(pm)
+							val := firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm))
 							switch name {
 							case "patient", "subject", "newborn", "id":
 								if patID == "" {
@@ -15984,7 +15994,7 @@ func (s *Server) handleIHEPDQmAndITI68(w http.ResponseWriter, r *http.Request) {
 								continue
 							}
 							name, _ := pm["name"].(string)
-							val := extractParamString(pm)
+							val := firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm))
 							switch name {
 							case "documentReference", "id":
 								if docID == "" {
@@ -16140,7 +16150,7 @@ func (s *Server) handleFASTNationalDirectory(w http.ResponseWriter, r *http.Requ
 						for _, p := range plist {
 							pm, _ := p.(map[string]any)
 							name, _ := pm["name"].(string)
-							val := strings.TrimSpace(extractParamString(pm))
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
 							switch name {
 							case "organization", "id":
 								if orgID == "" {

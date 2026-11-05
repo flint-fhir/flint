@@ -3243,4 +3243,225 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(sctBytes), want)
 		}
 	}
+
+	// 33. Wave 88: Binary Proto3 IHE MHD ($iti-65, $iti-67), Clinical Genomics ($find-subject-variants, $find-subject-tx-implications), PACIO ($pacio-summary, $pacio-assess), CDC NHSN HAI ($nhsn-hai-report, $nhsn-acute-care), Vulcan Research ($rwd-cohort, $enroll), Vital Records BFDR ($birth-report, $bfdr-summary), IHE PDQm/ITI-68 ($ihe-pdqm, $ihe-iti-68), FAST NDH ($fast-endpoint-query, $fast-verify) & SQL-on-FHIR v2 | / .not() / .encode / .decode $sql Pushdown
+	mhdBundleJSON := `{"resourceType":"Bundle","type":"transaction","entry":[{"resource":{"resourceType":"DocumentReference","id":"w88-mhd-doc-1","status":"current","subject":{"reference":"Patient/` + patID + `"}}}]}`
+	reqMHDConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Bundle/$convert", strings.NewReader(mhdBundleJSON))
+	require.NoError(t, err)
+	reqMHDConv.Header.Set("Content-Type", "application/fhir+json")
+	reqMHDConv.Header.Set("Accept", "application/x-protobuf")
+	respMHDConv, err := client.Do(reqMHDConv)
+	require.NoError(t, err)
+	mhdBundleProtoBytes, _ := io.ReadAll(respMHDConv.Body)
+	respMHDConv.Body.Close()
+	require.Equal(t, http.StatusOK, respMHDConv.StatusCode)
+	require.NotEmpty(t, mhdBundleProtoBytes)
+
+	reqITI65, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/$iti-65", bytes.NewReader(mhdBundleProtoBytes))
+	require.NoError(t, err)
+	reqITI65.Header.Set("Content-Type", "application/x-protobuf")
+	reqITI65.Header.Set("Accept", "application/x-protobuf")
+	respITI65, err := client.Do(reqITI65)
+	require.NoError(t, err)
+	iti65OutBytes, _ := io.ReadAll(respITI65.Body)
+	respITI65.Body.Close()
+	require.Equal(t, http.StatusOK, respITI65.StatusCode)
+	assert.Contains(t, respITI65.Header.Get("Content-Type"), "application/x-protobuf")
+	require.NotEmpty(t, iti65OutBytes)
+
+	w88ParamsPb := &parampb.Parameters{
+		Parameter: []*parampb.Parameters_Parameter{
+			{
+				Name: &dtpb.String{Value: "patient"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{Uri: &dtpb.String{Value: "Patient/" + patID}},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "encounter"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{Uri: &dtpb.String{Value: "Encounter/enc-w87-1"}},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "documentReference"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{Uri: &dtpb.String{Value: "DocumentReference/w88-mhd-doc-1"}},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "organization"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{Uri: &dtpb.String{Value: "Organization/w88-org-1"}},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "study"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{Uri: &dtpb.String{Value: "ResearchStudy/w88-study-1"}},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "genes"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "BRCA1"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "treatments"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "Olaparib"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "family"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "Proto"},
+					},
+				},
+			},
+		},
+	}
+	w88ParamsBytes, err := proto.Marshal(w88ParamsPb)
+	require.NoError(t, err)
+
+	for _, ep := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/fhir/r4/proto/DocumentReference/$iti-67"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$find-subject-variants"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$find-subject-tx-implications"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$pacio-summary"},
+		{http.MethodPost, "/fhir/r4/proto/QuestionnaireResponse/$pacio-assess"},
+		{http.MethodPost, "/fhir/r4/proto/Encounter/$nhsn-hai-report"},
+		{http.MethodGet, "/fhir/r4/proto/Measure/$nhsn-acute-care?_format=application/x-protobuf"},
+		{http.MethodPost, "/fhir/r4/proto/ResearchStudy/$rwd-cohort"},
+		{http.MethodPost, "/fhir/r4/proto/ResearchSubject/$enroll"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$birth-report"},
+		{http.MethodPost, "/fhir/r4/proto/Composition/$bfdr-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$ihe-pdqm"},
+		{http.MethodPost, "/fhir/r4/proto/DocumentReference/$ihe-iti-68"},
+		{http.MethodPost, "/fhir/r4/proto/Endpoint/$fast-endpoint-query"},
+		{http.MethodPost, "/fhir/r4/proto/Organization/$fast-verify"},
+	} {
+		var bodyReader io.Reader
+		if ep.method == http.MethodPost {
+			bodyReader = bytes.NewReader(w88ParamsBytes)
+		}
+		reqOp, opErr := http.NewRequest(ep.method, ts.URL+ep.path, bodyReader)
+		require.NoError(t, opErr)
+		if ep.method == http.MethodPost {
+			reqOp.Header.Set("Content-Type", "application/x-protobuf")
+		}
+		reqOp.Header.Set("Accept", "application/x-protobuf")
+		respOp, opErr := client.Do(reqOp)
+		require.NoError(t, opErr)
+		opBytes, _ := io.ReadAll(respOp.Body)
+		respOp.Body.Close()
+		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s failed: %s", ep.path, string(opBytes))
+		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s Content-Type", ep.path)
+		assert.Equal(t, "google.fhir.r4.proto3", respOp.Header.Get("X-Flint-Wire-Format"), "endpoint %s X-Flint-Wire-Format", ep.path)
+		require.NotEmpty(t, opBytes, "endpoint %s empty body", ep.path)
+	}
+
+	unionNotEncodeVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "patient_union_not_encode_v1",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id_b64", "path": "id.encode('base64')"},
+					{"name": "id_roundtrip", "path": "id.encode('base64').decode('base64')"},
+					{"name": "id_hex", "path": "id.encode('hex')"},
+					{"name": "id_hex_rt", "path": "id.encode('hex').decode('hex')"},
+					{"name": "all_names", "path": "name.family | name.given", "collection": true},
+					{"name": "all_names_cnt", "path": "(name.family | name.given).count()"},
+					{"name": "all_names_csv", "path": "(name.family | name.given).join(',')"},
+					{"name": "is_inactive", "path": "active.not()"},
+					{"name": "not_other_gender", "path": "not(gender = 'other')"}
+				]
+			}
+		],
+		"where": [
+			{"path": "active.not().not() and id.encode('hex') != ''"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"TO_BASE64(r.res_id) AS id_b64",
+				"FROM_BASE64(TO_BASE64(r.res_id)) AS id_roundtrip",
+				"HEX(r.res_id) AS id_hex",
+				"UNHEX(HEX(r.res_id)) AS id_hex_rt",
+				"ARRAY_UNION(",
+				"ARRAY_SIZE(ARRAY_UNION(",
+				"ARRAY_JOIN(ARRAY_UNION(",
+				"NOT (array_contains(r.code_tokens, 'active=|true')) AS is_inactive",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"ENCODE(CAST(r.res_id AS BYTEA), 'base64') AS id_b64",
+				"CONVERT_FROM(DECODE(ENCODE(CAST(r.res_id AS BYTEA), 'base64'), 'base64'), 'UTF8') AS id_roundtrip",
+				"ENCODE(CAST(r.res_id AS BYTEA), 'hex') AS id_hex",
+				"CONVERT_FROM(DECODE(ENCODE(CAST(r.res_id AS BYTEA), 'hex'), 'hex'), 'UTF8') AS id_hex_rt",
+				"UNION SELECT s.sp_value FROM spidx_string",
+				"NOT (EXISTS (SELECT 1 FROM spidx_token t",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"HEX(r.res_id) AS id_b64",
+				"CAST(UNHEX(HEX(r.res_id)) AS TEXT) AS id_roundtrip",
+				"UNION SELECT s.sp_value FROM spidx_string",
+				"NOT (EXISTS (SELECT 1 FROM spidx_token t",
+			},
+		},
+	} {
+		reqUNE, uneErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(unionNotEncodeVD))
+		require.NoError(t, uneErr)
+		reqUNE.Header.Set("Content-Type", "application/fhir+json")
+		respUNE, uneErr := client.Do(reqUNE)
+		require.NoError(t, uneErr)
+		uneBytes, _ := io.ReadAll(respUNE.Body)
+		respUNE.Body.Close()
+		require.Equal(t, http.StatusOK, respUNE.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(uneBytes), want)
+		}
+	}
 }
