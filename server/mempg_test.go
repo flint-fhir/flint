@@ -1092,6 +1092,8 @@ func (s *memPGStore) filterResources(q string, args []driver.NamedValue, applyPa
 	var wantType string
 	if strings.Contains(q, "r.res_type = $2") {
 		wantType = nvStr(args, 1)
+	} else if strings.Contains(q, "WHERE r.tenant_id = $1 AND r.res_type = 'Patient'") {
+		wantType = "Patient"
 	}
 	var wantTypes []string
 	if m := reResTypeAny.FindStringSubmatch(q); len(m) == 2 {

@@ -2560,4 +2560,208 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(ssBytes), want)
 		}
 	}
+
+	// 29. Binary Proto3 /$sync-analytics, /$process-message, Appointment/$find,
+	// CodeSystem/$find-matches, Patient/$member-match, _elements projection & Prefer headers
+	reqSyncP, syncPErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/$sync-analytics", nil)
+	require.NoError(t, syncPErr)
+	reqSyncP.Header.Set("Accept", "application/x-protobuf")
+	respSyncP, syncPErr := client.Do(reqSyncP)
+	require.NoError(t, syncPErr)
+	syncPBytes, _ := io.ReadAll(respSyncP.Body)
+	respSyncP.Body.Close()
+	require.Equal(t, http.StatusOK, respSyncP.StatusCode)
+	var syncPOut parampb.Parameters
+	require.NoError(t, proto.Unmarshal(syncPBytes, &syncPOut))
+	assert.NotEmpty(t, syncPOut.GetParameter())
+
+	msgInJSON := `{"resourceType":"Bundle","type":"message","entry":[{"resource":{"resourceType":"MessageHeader","id":"mh-proto-83","eventCoding":{"system":"http://example.org/events","code":"admin-notify"},"source":{"endpoint":"http://example.org/src"}}}]}`
+	reqMsgConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Bundle/$convert", strings.NewReader(msgInJSON))
+	require.NoError(t, err)
+	reqMsgConv.Header.Set("Content-Type", "application/fhir+json")
+	reqMsgConv.Header.Set("Accept", "application/x-protobuf")
+	respMsgConv, err := client.Do(reqMsgConv)
+	require.NoError(t, err)
+	msgInProto, _ := io.ReadAll(respMsgConv.Body)
+	respMsgConv.Body.Close()
+	require.Equal(t, http.StatusOK, respMsgConv.StatusCode)
+
+	reqMsgP, msgPErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/$process-message", bytes.NewReader(msgInProto))
+	require.NoError(t, msgPErr)
+	reqMsgP.Header.Set("Content-Type", "application/x-protobuf")
+	reqMsgP.Header.Set("Accept", "application/x-protobuf")
+	respMsgP, msgPErr := client.Do(reqMsgP)
+	require.NoError(t, msgPErr)
+	msgOutBytes, _ := io.ReadAll(respMsgP.Body)
+	respMsgP.Body.Close()
+	require.Equal(t, http.StatusOK, respMsgP.StatusCode)
+	var msgOutBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(msgOutBytes, &msgOutBundle))
+	assert.NotEmpty(t, msgOutBundle.GetEntry())
+
+	reqFindP, findPErr := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Appointment/$find?start=2025-01-01T00:00:00Z&end=2026-12-31T23:59:59Z", nil)
+	require.NoError(t, findPErr)
+	reqFindP.Header.Set("Accept", "application/x-protobuf")
+	respFindP, findPErr := client.Do(reqFindP)
+	require.NoError(t, findPErr)
+	findPBytes, _ := io.ReadAll(respFindP.Body)
+	respFindP.Body.Close()
+	require.Equal(t, http.StatusOK, respFindP.StatusCode)
+	var findOutBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(findPBytes, &findOutBundle))
+	assert.NotNil(t, findOutBundle.GetType())
+
+	fmInJSON := `{"resourceType":"Parameters","parameter":[{"name":"system","valueUri":"http://loinc.org"}]}`
+	reqFmConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(fmInJSON))
+	require.NoError(t, err)
+	reqFmConv.Header.Set("Content-Type", "application/fhir+json")
+	reqFmConv.Header.Set("Accept", "application/x-protobuf")
+	respFmConv, err := client.Do(reqFmConv)
+	require.NoError(t, err)
+	fmInProto, _ := io.ReadAll(respFmConv.Body)
+	respFmConv.Body.Close()
+	require.Equal(t, http.StatusOK, respFmConv.StatusCode)
+
+	reqFmP, fmPErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/CodeSystem/$find-matches", bytes.NewReader(fmInProto))
+	require.NoError(t, fmPErr)
+	reqFmP.Header.Set("Content-Type", "application/x-protobuf")
+	reqFmP.Header.Set("Accept", "application/x-protobuf")
+	respFmP, fmPErr := client.Do(reqFmP)
+	require.NoError(t, fmPErr)
+	fmOutBytes, _ := io.ReadAll(respFmP.Body)
+	respFmP.Body.Close()
+	require.Equal(t, http.StatusOK, respFmP.StatusCode)
+	var fmOutParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(fmOutBytes, &fmOutParams))
+	assert.NotEmpty(t, fmOutBytes)
+
+	mmInJSON := `{"resourceType":"Parameters","parameter":[{"name":"MemberPatient","resource":{"resourceType":"Patient","identifier":[{"system":"http://hospital.example.org/mrn","value":"MRN-PROTO-TX-1"}],"name":[{"family":"ProtoBundleTx","given":["Grace"]}],"gender":"female","birthDate":"1975-08-20"}},{"name":"CoverageToMatch","resource":{"resourceType":"Coverage","status":"active","subscriberId":"MRN-PROTO-TX-1","beneficiary":{"reference":"Patient/tx-proto-pat-1"},"payor":[{"display":"Example Payor"}]}}]}`
+	reqMmConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(mmInJSON))
+	require.NoError(t, err)
+	reqMmConv.Header.Set("Content-Type", "application/fhir+json")
+	reqMmConv.Header.Set("Accept", "application/x-protobuf")
+	respMmConv, err := client.Do(reqMmConv)
+	require.NoError(t, err)
+	mmInProto, _ := io.ReadAll(respMmConv.Body)
+	respMmConv.Body.Close()
+	require.Equal(t, http.StatusOK, respMmConv.StatusCode)
+
+	reqMmP, mmPErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Patient/$member-match", bytes.NewReader(mmInProto))
+	require.NoError(t, mmPErr)
+	reqMmP.Header.Set("Content-Type", "application/x-protobuf")
+	reqMmP.Header.Set("Accept", "application/x-protobuf")
+	respMmP, mmPErr := client.Do(reqMmP)
+	require.NoError(t, mmPErr)
+	mmOutBytes, _ := io.ReadAll(respMmP.Body)
+	respMmP.Body.Close()
+	require.Equal(t, http.StatusOK, respMmP.StatusCode)
+	var mmOutParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(mmOutBytes, &mmOutParams))
+	assert.NotEmpty(t, mmOutParams.GetParameter())
+
+	// _elements projection with SUBSETTED tag in binary Proto3
+	reqElP, elPErr := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Patient/"+patID+"?_elements=id,gender", nil)
+	require.NoError(t, elPErr)
+	reqElP.Header.Set("Accept", "application/x-protobuf")
+	respElP, elPErr := client.Do(reqElP)
+	require.NoError(t, elPErr)
+	elPBytes, _ := io.ReadAll(respElP.Body)
+	respElP.Body.Close()
+	require.Equal(t, http.StatusOK, respElP.StatusCode)
+	var elPat patpb.Patient
+	require.NoError(t, proto.Unmarshal(elPBytes, &elPat))
+	assert.Empty(t, elPat.GetName())
+	require.NotNil(t, elPat.GetMeta())
+	require.NotEmpty(t, elPat.GetMeta().GetTag())
+
+	// Prefer: handling=strict on unknown search parameter in binary Proto3
+	reqPrefP, prefPErr := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/Patient?unknown_proto_search_param=1", nil)
+	require.NoError(t, prefPErr)
+	reqPrefP.Header.Set("Accept", "application/x-protobuf")
+	reqPrefP.Header.Set("Prefer", "handling=strict")
+	respPrefP, prefPErr := client.Do(reqPrefP)
+	require.NoError(t, prefPErr)
+	prefPBytes, _ := io.ReadAll(respPrefP.Body)
+	respPrefP.Body.Close()
+	require.Equal(t, http.StatusBadRequest, respPrefP.StatusCode)
+	var prefOO oopb.OperationOutcome
+	require.NoError(t, proto.Unmarshal(prefPBytes, &prefOO))
+	assert.NotEmpty(t, prefOO.GetIssue())
+
+	// 30. Zero-JSON SQL transpiler pushdown for .all(), .exists(criteria),
+	// .anyTrue(), .allTrue(), .anyFalse(), .allFalse(), and extension('url')
+	quantExtVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "patient_quantifiers_ext",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "all_proto_fam", "path": "name.all(family = 'ProtoUpdated')"},
+					{"name": "ex_proto_fam", "path": "name.exists(family = 'ProtoUpdated')"},
+					{"name": "any_active", "path": "active.anyTrue()"},
+					{"name": "all_active", "path": "active.allTrue()"},
+					{"name": "any_inactive", "path": "active.anyFalse()"},
+					{"name": "all_inactive", "path": "active.allFalse()"},
+					{"name": "birthsex_ext", "path": "extension('http://hl7.org/fhir/us/core/StructureDefinition/us-core-birthsex').valueCode"}
+				]
+			}
+		],
+		"where": [
+			{"path": "active.anyTrue()"},
+			{"path": "name.all(family = 'ProtoUpdated')"},
+			{"path": "extension('http://hl7.org/fhir/us/core/StructureDefinition/us-core-birthsex').exists()"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"NOT array_exists(x -> x LIKE 'family=%' AND SPLIT_PART(x, '=', 2) <> 'ProtoUpdated', r.string_tokens)",
+				"array_exists(x -> x = 'family=ProtoUpdated', r.string_tokens)",
+				"array_contains(r.code_tokens, 'active=|true')",
+				"NOT array_contains(r.code_tokens, 'active=|false')",
+				"array_contains(r.code_tokens, 'active=|false')",
+				"NOT array_contains(r.code_tokens, 'active=|true')",
+				"ext:us-core-birthsex=|%",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"NOT EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' AND s.sp_value <> 'ProtoUpdated')",
+				"EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' AND s.sp_value = 'ProtoUpdated')",
+				"EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'active' AND t.sp_value = 'true')",
+				"NOT EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'active' AND t.sp_value = 'false')",
+				"t.sp_system = 'http://hl7.org/fhir/us/core/StructureDefinition/us-core-birthsex'",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"NOT EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' AND s.sp_value <> 'ProtoUpdated')",
+				"EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' AND s.sp_value = 'ProtoUpdated')",
+				"EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'active' AND t.sp_value = 'true')",
+				"NOT EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'active' AND t.sp_value = 'false')",
+				"t.sp_system = 'http://hl7.org/fhir/us/core/StructureDefinition/us-core-birthsex'",
+			},
+		},
+	} {
+		reqQE, qeErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(quantExtVD))
+		require.NoError(t, qeErr)
+		reqQE.Header.Set("Content-Type", "application/fhir+json")
+		respQE, qeErr := client.Do(reqQE)
+		require.NoError(t, qeErr)
+		qeBytes, _ := io.ReadAll(respQE.Body)
+		respQE.Body.Close()
+		require.Equal(t, http.StatusOK, respQE.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(qeBytes), want)
+		}
+	}
 }
