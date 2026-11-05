@@ -11229,7 +11229,7 @@ func (s *Server) handleMedicationKnowledgeAndInteractions(w http.ResponseWriter,
 						name, _ := pm["name"].(string)
 						switch name {
 						case "code", "rxnorm":
-							if vs := extractParamString(pm); vs != "" && codeParam == "" {
+							if vs := extractParamStringOrRef(pm); vs != "" && codeParam == "" {
 								codeParam = strings.TrimSpace(vs)
 							}
 							if vCoding, ok := pm["valueCoding"].(map[string]any); ok {
@@ -11238,7 +11238,7 @@ func (s *Server) handleMedicationKnowledgeAndInteractions(w http.ResponseWriter,
 								}
 							}
 						case "patient", "subject":
-							if vs := extractParamString(pm); vs != "" && patID == "" {
+							if vs := extractParamStringOrRef(pm); vs != "" && patID == "" {
 								patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
 							}
 						case "medicationRequest", "resource":
@@ -11616,7 +11616,7 @@ func (s *Server) handlePatientIHEPix(w http.ResponseWriter, r *http.Request) {
 							name, _ := pm["name"].(string)
 							switch name {
 							case "sourceIdentifier":
-								if vs := extractParamString(pm); vs != "" && sourceIdent == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && sourceIdent == "" {
 									sourceIdent = strings.TrimSpace(vs)
 								}
 								if vi, ok := pm["valueIdentifier"].(map[string]any); ok && sourceIdent == "" {
@@ -11629,7 +11629,7 @@ func (s *Server) handlePatientIHEPix(w http.ResponseWriter, r *http.Request) {
 									}
 								}
 							case "targetSystem":
-								if vs := extractParamString(pm); vs != "" {
+								if vs := extractParamStringOrRef(pm); vs != "" {
 									targetSystems = append(targetSystems, strings.TrimSpace(vs))
 								}
 							}
@@ -11744,7 +11744,7 @@ func (s *Server) handleServiceRequestCollectSpecimen(w http.ResponseWriter, r *h
 							name, _ := pm["name"].(string)
 							switch name {
 							case "id", "serviceRequest":
-								if vs := extractParamString(pm); vs != "" && srID == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && srID == "" {
 									srID = cleanID(strings.TrimPrefix(vs, "ServiceRequest/"))
 								}
 								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "ServiceRequest" {
@@ -11754,7 +11754,7 @@ func (s *Server) handleServiceRequestCollectSpecimen(w http.ResponseWriter, r *h
 									}
 								}
 							case "collector":
-								if vs := extractParamString(pm); vs != "" && collectorRef == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && collectorRef == "" {
 									collectorRef = strings.TrimSpace(vs)
 								}
 							}
@@ -11873,7 +11873,7 @@ func (s *Server) handleDiagnosticReportEvaluate(w http.ResponseWriter, r *http.R
 							}
 							name, _ := pm["name"].(string)
 							if name == "id" || name == "diagnosticReport" || name == "resource" {
-								if vs := extractParamString(pm); vs != "" && drID == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && drID == "" {
 									drID = cleanID(strings.TrimPrefix(vs, "DiagnosticReport/"))
 								}
 								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "DiagnosticReport" {
@@ -12360,8 +12360,32 @@ func (s *Server) handleEncounterADTOps(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPost && r.Body != nil {
 		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
-			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
-				if body["resourceType"] == "Parameters" {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Encounter"); err == nil && body != nil {
+				switch body["resourceType"] {
+				case "Encounter":
+					if id, _ := body["id"].(string); id != "" && encID == "" {
+						encID = cleanID(id)
+					}
+					if subj, ok := body["subject"].(map[string]any); ok && patRef == "" {
+						if ref, _ := subj["reference"].(string); ref != "" {
+							patRef = strings.TrimSpace(ref)
+						}
+					}
+					if cls, ok := body["class"].(map[string]any); ok && classCode == "" {
+						if c, _ := cls["code"].(string); c != "" {
+							classCode = strings.TrimSpace(c)
+						}
+					}
+					if locs, ok := body["location"].([]any); ok && locRef == "" && len(locs) > 0 {
+						if lm, ok := locs[0].(map[string]any); ok {
+							if lObj, ok := lm["location"].(map[string]any); ok {
+								if ref, _ := lObj["reference"].(string); ref != "" {
+									locRef = strings.TrimSpace(ref)
+								}
+							}
+						}
+					}
+				case "Parameters":
 					if params, ok := body["parameter"].([]any); ok {
 						for _, p := range params {
 							pm, ok := p.(map[string]any)
@@ -12371,19 +12395,19 @@ func (s *Server) handleEncounterADTOps(w http.ResponseWriter, r *http.Request) {
 							name, _ := pm["name"].(string)
 							switch name {
 							case "patient", "subject":
-								if vs := extractParamString(pm); vs != "" && patRef == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && patRef == "" {
 									patRef = strings.TrimSpace(vs)
 								}
 							case "location", "destination":
-								if vs := extractParamString(pm); vs != "" && locRef == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && locRef == "" {
 									locRef = strings.TrimSpace(vs)
 								}
 							case "class":
-								if vs := extractParamString(pm); vs != "" && classCode == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && classCode == "" {
 									classCode = strings.TrimSpace(vs)
 								}
 							case "id", "encounter":
-								if vs := extractParamString(pm); vs != "" && encID == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && encID == "" {
 									encID = cleanID(strings.TrimPrefix(vs, "Encounter/"))
 								}
 							}
@@ -12585,7 +12609,7 @@ func (s *Server) handleMedicationRequestDispense(w http.ResponseWriter, r *http.
 							}
 							name, _ := pm["name"].(string)
 							if name == "id" || name == "medicationRequest" || name == "resource" {
-								if vs := extractParamString(pm); vs != "" && mrID == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && mrID == "" {
 									mrID = cleanID(strings.TrimPrefix(vs, "MedicationRequest/"))
 								}
 								if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "MedicationRequest" {
@@ -12716,23 +12740,23 @@ func (s *Server) handlePlanNetDirectory(w http.ResponseWriter, r *http.Request) 
 							name, _ := pm["name"].(string)
 							switch name {
 							case "specialty":
-								if vs := extractParamString(pm); vs != "" && specialty == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && specialty == "" {
 									specialty = strings.TrimSpace(vs)
 								}
 							case "category":
-								if vs := extractParamString(pm); vs != "" && category == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && category == "" {
 									category = strings.TrimSpace(vs)
 								}
 							case "organization":
-								if vs := extractParamString(pm); vs != "" && organization == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && organization == "" {
 									organization = strings.TrimSpace(vs)
 								}
 							case "location":
-								if vs := extractParamString(pm); vs != "" && location == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && location == "" {
 									location = strings.TrimSpace(vs)
 								}
 							case "practitioner":
-								if vs := extractParamString(pm); vs != "" && practitioner == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && practitioner == "" {
 									practitioner = strings.TrimSpace(vs)
 								}
 							}

@@ -1675,6 +1675,11 @@ func dorisZeroJSONCollectionColumnExpr(fhirPath string) (string, string) {
 		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, false)
 		return fmt.Sprintf("SPLIT_BY_STRING(%s, '%s')", colExpr, escapedSep), colSrc + ".split[]"
 	}
+	if strings.HasSuffix(p, ".toChars()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".toChars()")])
+		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, true)
+		return fmt.Sprintf("SPLIT_BY_STRING(%s, '')", colExpr), colSrc + ".toChars[]"
+	}
 	if idx := strings.Index(p, ".skip("); idx != -1 && strings.HasSuffix(p, ")") {
 		basePath := strings.TrimSpace(p[:idx])
 		if n, err := strconv.Atoi(strings.TrimSpace(p[idx+len(".skip(") : len(p)-1])); err == nil && n >= 0 {
@@ -1783,6 +1788,14 @@ func spidxZeroJSONCollectionColumnExpr(fhirPath, dialect string) (string, string
 			return fmt.Sprintf("json_array(%s)", colExpr), colSrc + ".split[]"
 		}
 		return fmt.Sprintf("STRING_TO_ARRAY(%s, '%s')", colExpr, escapedSep), colSrc + ".split[]"
+	}
+	if strings.HasSuffix(p, ".toChars()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".toChars()")])
+		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+		if dialect == "sqlite" {
+			return fmt.Sprintf("json_array(%s)", colExpr), colSrc + ".toChars[]"
+		}
+		return fmt.Sprintf("REGEXP_SPLIT_TO_ARRAY(%s, '')", colExpr), colSrc + ".toChars[]"
 	}
 	for _, setSpec := range []struct {
 		call   string
@@ -2150,6 +2163,11 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
 		return fmt.Sprintf("SPLIT_BY_STRING(%s, '%s')", colExpr, escapedSep), colSrc + ".split[]"
 	}
+	if strings.HasSuffix(p, ".toChars()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".toChars()")])
+		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
+		return fmt.Sprintf("SPLIT_BY_STRING(%s, '')", colExpr), colSrc + ".toChars[]"
+	}
 	if idx := strings.LastIndex(p, ".substring("); idx != -1 && strings.HasSuffix(p, ")") {
 		basePath := strings.TrimSpace(p[:idx])
 		args := splitTopLevelCommaArgs(p[idx+len(".substring(") : len(p)-1])
@@ -2325,6 +2343,21 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
 		return fmt.Sprintf("(LOCATE('%s', %s) - 1)", escapedSub, colExpr), colSrc + ".indexOf"
 	}
+	if len(splitTopLevelBooleanWord(p, "implies")) == 2 || len(splitTopLevelBooleanWord(p, "xor")) == 2 || len(splitTopLevelBooleanWord(p, "or")) > 1 || len(splitTopLevelBooleanWord(p, "and")) > 1 {
+		if wExpr := dorisZeroJSONWhereExpr(p, isCore); wExpr != "" {
+			return wExpr, "boolean"
+		}
+	}
+	if _, _, okIn := parseTopLevelInOp(p); okIn {
+		if wExpr := dorisZeroJSONWhereExpr(p, isCore); wExpr != "" {
+			return wExpr, "in"
+		}
+	}
+	if _, opComp, _, okComp := parseViewWhereComparison(p); okComp {
+		if wExpr := dorisZeroJSONWhereExpr(p, isCore); wExpr != "" {
+			return wExpr, "comparison(" + opComp + ")"
+		}
+	}
 	codeCol := "r.primary_code"
 	codeSysCol := "r.primary_code_sys"
 	qtyCol := "r.primary_quantity"
@@ -2386,7 +2419,7 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 }
 
 func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
-	p := normalizePolymorphicFHIRPath(strings.TrimSpace(fhirPath))
+	p := normalizePolymorphicFHIRPath(stripOuterParens(strings.TrimSpace(fhirPath)))
 	if p == "" {
 		return ""
 	}
@@ -2402,6 +2435,13 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 			return "NOT (" + sub + ")"
 		}
 	}
+	if impParts := splitTopLevelBooleanWord(p, "implies"); len(impParts) == 2 {
+		lhsSub := dorisZeroJSONWhereExpr(impParts[0], isCore)
+		rhsSub := dorisZeroJSONWhereExpr(impParts[1], isCore)
+		if lhsSub != "" && rhsSub != "" {
+			return fmt.Sprintf("(NOT (%s) OR (%s))", lhsSub, rhsSub)
+		}
+	}
 	if orParts := splitTopLevelBooleanWord(p, "or"); len(orParts) > 1 {
 		var compiled []string
 		for _, part := range orParts {
@@ -2411,6 +2451,13 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		}
 		if len(compiled) > 0 {
 			return "(" + strings.Join(compiled, " OR ") + ")"
+		}
+	}
+	if xorParts := splitTopLevelBooleanWord(p, "xor"); len(xorParts) == 2 {
+		lhsSub := dorisZeroJSONWhereExpr(xorParts[0], isCore)
+		rhsSub := dorisZeroJSONWhereExpr(xorParts[1], isCore)
+		if lhsSub != "" && rhsSub != "" {
+			return fmt.Sprintf("((%s) <> (%s))", lhsSub, rhsSub)
 		}
 	}
 	if andParts := splitTopLevelBooleanWord(p, "and"); len(andParts) > 1 {
@@ -2423,6 +2470,14 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		if len(compiled) > 0 {
 			return strings.Join(compiled, " AND ")
 		}
+	}
+	if inLHS, inVals, okIn := parseTopLevelInOp(p); okIn {
+		colExpr, _ := dorisZeroJSONColumnExpr(inLHS, isCore)
+		quotedVals := make([]string, 0, len(inVals))
+		for _, v := range inVals {
+			quotedVals = append(quotedVals, fmt.Sprintf("'%s'", strings.ReplaceAll(v, "'", "''")))
+		}
+		return fmt.Sprintf("%s IN (%s)", colExpr, strings.Join(quotedVals, ", "))
 	}
 
 	codeCol := "r.primary_code"
@@ -2650,6 +2705,17 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 	}
 	trimmedRHS := strings.Trim(strings.TrimSpace(rhs), "'\"")
 	escapedRHS := strings.ReplaceAll(trimmedRHS, "'", "''")
+	if op == "~" || op == "!~" {
+		lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
+		cmpOp := "="
+		if op == "!~" {
+			cmpOp = "<>"
+		}
+		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
+			return fmt.Sprintf("ROUND(%s, 4) %s ROUND(%s, 4)", lhsExpr, cmpOp, trimmedRHS)
+		}
+		return fmt.Sprintf("LOWER(TRIM(%s)) %s LOWER(TRIM('%s'))", lhsExpr, cmpOp, escapedRHS)
+	}
 	if extURL, _, okExt := parseExtensionFilterPath(lhs); okExt {
 		extKey := normalizeExtensionKey(extURL)
 		if op == "!=" || op == "<>" {
@@ -2930,6 +2996,14 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 			return fmt.Sprintf("json_array(%s)", colExpr), colSrc + ".split[]"
 		}
 		return fmt.Sprintf("STRING_TO_ARRAY(%s, '%s')", colExpr, escapedSep), colSrc + ".split[]"
+	}
+	if strings.HasSuffix(p, ".toChars()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".toChars()")])
+		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+		if dialect == "sqlite" {
+			return fmt.Sprintf("json_array(%s)", colExpr), colSrc + ".toChars[]"
+		}
+		return fmt.Sprintf("REGEXP_SPLIT_TO_ARRAY(%s, '')", colExpr), colSrc + ".toChars[]"
 	}
 	if idx := strings.Index(p, ".substring("); idx != -1 && strings.HasSuffix(p, ")") {
 		basePath := strings.TrimSpace(p[:idx])
@@ -3277,6 +3351,21 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		}
 		return fmt.Sprintf("(STRPOS(%s, '%s') - 1)", colExpr, escapedSub), colSrc + ".indexOf"
 	}
+	if len(splitTopLevelBooleanWord(p, "implies")) == 2 || len(splitTopLevelBooleanWord(p, "xor")) == 2 || len(splitTopLevelBooleanWord(p, "or")) > 1 || len(splitTopLevelBooleanWord(p, "and")) > 1 {
+		if wExpr := spidxZeroJSONWhereExprForDialect(p, dialect); wExpr != "" {
+			return wExpr, "spidx.boolean"
+		}
+	}
+	if _, _, okIn := parseTopLevelInOp(p); okIn {
+		if wExpr := spidxZeroJSONWhereExprForDialect(p, dialect); wExpr != "" {
+			return wExpr, "spidx.in"
+		}
+	}
+	if _, opComp, _, okComp := parseViewWhereComparison(p); okComp {
+		if wExpr := spidxZeroJSONWhereExprForDialect(p, dialect); wExpr != "" {
+			return wExpr, "spidx.comparison(" + opComp + ")"
+		}
+	}
 	switch p {
 	case "id", "getResourceKey()":
 		return "r.res_id", "fhir_resource.res_id"
@@ -3319,7 +3408,7 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 }
 
 func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
-	p := normalizePolymorphicFHIRPath(strings.TrimSpace(fhirPath))
+	p := normalizePolymorphicFHIRPath(stripOuterParens(strings.TrimSpace(fhirPath)))
 	if p == "" {
 		return ""
 	}
@@ -3335,6 +3424,13 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 			return "NOT (" + sub + ")"
 		}
 	}
+	if impParts := splitTopLevelBooleanWord(p, "implies"); len(impParts) == 2 {
+		lhsSub := spidxZeroJSONWhereExprForDialect(impParts[0], dialect)
+		rhsSub := spidxZeroJSONWhereExprForDialect(impParts[1], dialect)
+		if lhsSub != "" && rhsSub != "" {
+			return fmt.Sprintf("(NOT (%s) OR (%s))", lhsSub, rhsSub)
+		}
+	}
 	if orParts := splitTopLevelBooleanWord(p, "or"); len(orParts) > 1 {
 		var compiled []string
 		for _, part := range orParts {
@@ -3344,6 +3440,13 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 		}
 		if len(compiled) > 0 {
 			return "(" + strings.Join(compiled, " OR ") + ")"
+		}
+	}
+	if xorParts := splitTopLevelBooleanWord(p, "xor"); len(xorParts) == 2 {
+		lhsSub := spidxZeroJSONWhereExprForDialect(xorParts[0], dialect)
+		rhsSub := spidxZeroJSONWhereExprForDialect(xorParts[1], dialect)
+		if lhsSub != "" && rhsSub != "" {
+			return fmt.Sprintf("((%s) <> (%s))", lhsSub, rhsSub)
 		}
 	}
 	if andParts := splitTopLevelBooleanWord(p, "and"); len(andParts) > 1 {
@@ -3356,6 +3459,14 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 		if len(compiled) > 0 {
 			return strings.Join(compiled, " AND ")
 		}
+	}
+	if inLHS, inVals, okIn := parseTopLevelInOp(p); okIn {
+		colExpr, _ := spidxZeroJSONColumnExpr(inLHS, dialect)
+		quotedVals := make([]string, 0, len(inVals))
+		for _, v := range inVals {
+			quotedVals = append(quotedVals, fmt.Sprintf("'%s'", strings.ReplaceAll(v, "'", "''")))
+		}
+		return fmt.Sprintf("%s IN (%s)", colExpr, strings.Join(quotedVals, ", "))
 	}
 
 	if strings.HasSuffix(p, ".isDistinct()") {
@@ -3573,6 +3684,17 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 	}
 	trimmedRHS := strings.Trim(strings.TrimSpace(rhs), "'\"")
 	escapedRHS := strings.ReplaceAll(trimmedRHS, "'", "''")
+	if op == "~" || op == "!~" {
+		lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, dialect)
+		cmpOp := "="
+		if op == "!~" {
+			cmpOp = "<>"
+		}
+		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
+			return fmt.Sprintf("ROUND(%s, 4) %s ROUND(%s, 4)", lhsExpr, cmpOp, trimmedRHS)
+		}
+		return fmt.Sprintf("LOWER(TRIM(%s)) %s LOWER(TRIM('%s'))", lhsExpr, cmpOp, escapedRHS)
+	}
 	if extURL, _, okExt := parseExtensionFilterPath(lhs); okExt {
 		escapedURL := strings.ReplaceAll(extURL, "'", "''")
 		if op == "!=" || op == "<>" {
@@ -3726,15 +3848,51 @@ func parseViewWhereComparison(expr string) (lhs, op, rhs string, ok bool) {
 		}
 		if i+2 <= len(expr) {
 			two := expr[i : i+2]
-			if two == ">=" || two == "<=" || two == "!=" || two == "<>" {
+			if two == ">=" || two == "<=" || two == "!=" || two == "<>" || two == "!~" {
 				return strings.TrimSpace(expr[:i]), two, strings.TrimSpace(expr[i+2:]), true
 			}
 		}
-		if ch == '=' || ch == '>' || ch == '<' {
+		if ch == '=' || ch == '>' || ch == '<' || ch == '~' {
 			return strings.TrimSpace(expr[:i]), string(ch), strings.TrimSpace(expr[i+1:]), true
 		}
 	}
 	return "", "", "", false
+}
+
+func parseTopLevelInOp(expr string) (lhs string, values []string, ok bool) {
+	s := stripOuterParens(strings.TrimSpace(expr))
+	parts := splitTopLevelBooleanWord(s, "in")
+	if len(parts) != 2 {
+		return "", nil, false
+	}
+	lhs = strings.TrimSpace(parts[0])
+	rhs := stripOuterParens(strings.TrimSpace(parts[1]))
+	if lhs == "" || rhs == "" {
+		return "", nil, false
+	}
+	inQuote := false
+	start := 0
+	for i := 0; i < len(rhs); i++ {
+		ch := rhs[i]
+		if ch == '\'' {
+			inQuote = !inQuote
+			continue
+		}
+		if !inQuote && (ch == '|' || ch == ',') {
+			tok := strings.Trim(strings.TrimSpace(rhs[start:i]), "'\"")
+			if tok != "" {
+				values = append(values, tok)
+			}
+			start = i + 1
+		}
+	}
+	if tail := strings.Trim(strings.TrimSpace(rhs[start:]), "'\""); tail != "" {
+		values = append(values, tail)
+	}
+	if len(values) == 0 {
+		return "", nil, false
+	}
+	return lhs, values, true
 }
 
 func normalizeFHIRPathToSearchParam(path string) string {
