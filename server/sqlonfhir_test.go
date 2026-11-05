@@ -3055,4 +3055,192 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(exBytes), want)
 		}
 	}
+
+	// 32. Wave 87: Binary Proto3 SDOH ($sdoh-referral, $sdoh-summary), Consent/$evaluate, CARIN-BB ($carin-bb, $carin-bb-summary),
+	// Public Health eCR ($ecr-report, $ersd-lookup), VRDR ($decease), mCODE Oncology ($stage-cancer, $mcode-summary),
+	// Da Vinci Drug Formulary ($formulary-lookup, $formulary-coverage) & SQL-on-FHIR v2 [n] subscript, .skip/.take, contains, .toTime/.convertsToTime & .trace
+	sdohSRRaw := `{"resourceType":"ServiceRequest","id":"sr-sdoh-proto-1","status":"active","intent":"order","category":[{"coding":[{"system":"http://hl7.org/fhir/us/sdoh-clinicalcare/CodeSystem/SDOHCC-CodeSystemTemporaryCodes","code":"food-insecurity"}]}],"code":{"coding":[{"system":"http://snomed.info/sct","code":"467691000124102"}]},"subject":{"reference":"Patient/` + patID + `"}}`
+	reqSDOHConv, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ServiceRequest/$convert", strings.NewReader(sdohSRRaw))
+	require.NoError(t, err)
+	reqSDOHConv.Header.Set("Content-Type", "application/fhir+json")
+	reqSDOHConv.Header.Set("Accept", "application/x-protobuf")
+	respSDOHConv, err := client.Do(reqSDOHConv)
+	require.NoError(t, err)
+	bSDOHInProto, _ := io.ReadAll(respSDOHConv.Body)
+	respSDOHConv.Body.Close()
+	require.Equal(t, http.StatusOK, respSDOHConv.StatusCode)
+
+	reqSDOHRef, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ServiceRequest/$sdoh-referral", bytes.NewReader(bSDOHInProto))
+	require.NoError(t, err)
+	reqSDOHRef.Header.Set("Content-Type", "application/x-protobuf")
+	reqSDOHRef.Header.Set("Accept", "application/x-protobuf")
+	respSDOHRef, err := client.Do(reqSDOHRef)
+	require.NoError(t, err)
+	bSDOHRef, _ := io.ReadAll(respSDOHRef.Body)
+	respSDOHRef.Body.Close()
+	require.Equal(t, http.StatusOK, respSDOHRef.StatusCode)
+	var sdohParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(bSDOHRef, &sdohParams))
+	assert.NotEmpty(t, sdohParams.GetParameter())
+
+	// Seed an Encounter and Condition for eCR and mCODE
+	reqSeedEnc, _ := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Encounter/enc-w87-1", strings.NewReader(`{"resourceType":"Encounter","id":"enc-w87-1","status":"finished","class":{"system":"http://terminology.hl7.org/CodeSystem/v3-ActCode","code":"AMB"},"subject":{"reference":"Patient/`+patID+`"}}`))
+	reqSeedEnc.Header.Set("Content-Type", "application/fhir+json")
+	respSeedEnc, err := client.Do(reqSeedEnc)
+	require.NoError(t, err)
+	respSeedEnc.Body.Close()
+
+	reqSeedCond, _ := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Condition/cond-w87-1", strings.NewReader(`{"resourceType":"Condition","id":"cond-w87-1","clinicalStatus":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/condition-clinical","code":"active"}]},"code":{"coding":[{"system":"http://snomed.info/sct","code":"363346000","display":"Malignant neoplastic disease"}]},"subject":{"reference":"Patient/`+patID+`"}}`))
+	reqSeedCond.Header.Set("Content-Type", "application/fhir+json")
+	respSeedCond, err := client.Do(reqSeedCond)
+	require.NoError(t, err)
+	respSeedCond.Body.Close()
+
+	w87ParamsProto := &parampb.Parameters{
+		Parameter: []*parampb.Parameters_Parameter{
+			{
+				Name:  &dtpb.String{Value: "patient"},
+				Value: &parampb.Parameters_Parameter_ValueX{Choice: &parampb.Parameters_Parameter_ValueX_Reference{Reference: &dtpb.Reference{Reference: &dtpb.Reference_Uri{Uri: &dtpb.String{Value: "Patient/" + patID}}}}},
+			},
+			{
+				Name:  &dtpb.String{Value: "encounter"},
+				Value: &parampb.Parameters_Parameter_ValueX{Choice: &parampb.Parameters_Parameter_ValueX_Reference{Reference: &dtpb.Reference{Reference: &dtpb.Reference_Uri{Uri: &dtpb.String{Value: "Encounter/enc-w87-1"}}}}},
+			},
+			{
+				Name:  &dtpb.String{Value: "condition"},
+				Value: &parampb.Parameters_Parameter_ValueX{Choice: &parampb.Parameters_Parameter_ValueX_Reference{Reference: &dtpb.Reference{Reference: &dtpb.Reference_Uri{Uri: &dtpb.String{Value: "Condition/cond-w87-1"}}}}},
+			},
+			{
+				Name:  &dtpb.String{Value: "purpose"},
+				Value: &parampb.Parameters_Parameter_ValueX{Choice: &parampb.Parameters_Parameter_ValueX_StringValue{StringValue: &dtpb.String{Value: "TREAT"}}},
+			},
+			{
+				Name:  &dtpb.String{Value: "tStage"},
+				Value: &parampb.Parameters_Parameter_ValueX{Choice: &parampb.Parameters_Parameter_ValueX_StringValue{StringValue: &dtpb.String{Value: "T2"}}},
+			},
+			{
+				Name:  &dtpb.String{Value: "nStage"},
+				Value: &parampb.Parameters_Parameter_ValueX{Choice: &parampb.Parameters_Parameter_ValueX_StringValue{StringValue: &dtpb.String{Value: "N1"}}},
+			},
+			{
+				Name:  &dtpb.String{Value: "mStage"},
+				Value: &parampb.Parameters_Parameter_ValueX{Choice: &parampb.Parameters_Parameter_ValueX_StringValue{StringValue: &dtpb.String{Value: "M0"}}},
+			},
+			{
+				Name:  &dtpb.String{Value: "stageGroup"},
+				Value: &parampb.Parameters_Parameter_ValueX{Choice: &parampb.Parameters_Parameter_ValueX_StringValue{StringValue: &dtpb.String{Value: "Stage IIB"}}},
+			},
+			{
+				Name:  &dtpb.String{Value: "code"},
+				Value: &parampb.Parameters_Parameter_ValueX{Choice: &parampb.Parameters_Parameter_ValueX_StringValue{StringValue: &dtpb.String{Value: "1049502"}}},
+			},
+			{
+				Name:  &dtpb.String{Value: "planId"},
+				Value: &parampb.Parameters_Parameter_ValueX{Choice: &parampb.Parameters_Parameter_ValueX_StringValue{StringValue: &dtpb.String{Value: "plan-gold-1"}}},
+			},
+		},
+	}
+	w87ParamsBytes, err := proto.Marshal(w87ParamsProto)
+	require.NoError(t, err)
+
+	for _, ep := range []string{
+		"/fhir/r4/proto/Patient/$sdoh-summary",
+		"/fhir/r4/proto/Consent/$evaluate",
+		"/fhir/r4/proto/Patient/$carin-bb",
+		"/fhir/r4/proto/ExplanationOfBenefit/$carin-bb-summary",
+		"/fhir/r4/proto/Encounter/$ecr-report",
+		"/fhir/r4/proto/Condition/$stage-cancer",
+		"/fhir/r4/proto/Patient/$mcode-summary",
+		"/fhir/r4/proto/MedicationKnowledge/$formulary-lookup",
+		"/fhir/r4/proto/Coverage/$formulary-coverage",
+		"/fhir/r4/proto/Patient/$decease",
+	} {
+		reqOp, opErr := http.NewRequest(http.MethodPost, ts.URL+ep, bytes.NewReader(w87ParamsBytes))
+		require.NoError(t, opErr)
+		reqOp.Header.Set("Content-Type", "application/x-protobuf")
+		reqOp.Header.Set("Accept", "application/x-protobuf")
+		respOp, opErr := client.Do(reqOp)
+		require.NoError(t, opErr)
+		opBytes, _ := io.ReadAll(respOp.Body)
+		respOp.Body.Close()
+		require.Equalf(t, http.StatusOK, respOp.StatusCode, "POST %s failed", ep)
+		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf")
+		assert.Equal(t, "google.fhir.r4.proto3", respOp.Header.Get("X-Flint-Wire-Format"))
+		assert.NotEmpty(t, opBytes)
+	}
+
+	subContainsTimeVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_sub_contains_time",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id.trace('id-dbg')"},
+					{"name": "first_given", "path": "name.given[0]"},
+					{"name": "second_given", "path": "name.given[1]"},
+					{"name": "tail_given_csv", "path": "name.given.skip(1).join(',')"},
+					{"name": "tail_given_arr", "path": "name.given.skip(1)", "collection": true},
+					{"name": "top2_given_arr", "path": "name.given.take(2)", "collection": true},
+					{"name": "is_target_gender", "path": "('female' | 'other') contains gender"},
+					{"name": "birth_time", "path": "birthDate.toTime()"},
+					{"name": "has_birth_time", "path": "birthDate.convertsToTime()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "('female' | 'other') contains gender.trace('gender-dbg') and name.given[1] = 'Marie' and birthDate.convertsToTime()"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"element_at(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)), 2) AS second_given",
+				"IN ('female', 'other')",
+				"AS TIME)",
+				"= 'Marie'",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"LIMIT 1 OFFSET 1) AS second_given",
+				"OFFSET 1) sub) AS tail_given_csv",
+				"OFFSET 1) sub) AS tail_given_arr",
+				"LIMIT 2) sub) AS top2_given_arr",
+				"IN ('female', 'other')",
+				"AS TIME)",
+				"= 'Marie'",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"LIMIT 1 OFFSET 1) AS second_given",
+				"LIMIT -1 OFFSET 1) sub) AS tail_given_csv",
+				"LIMIT -1 OFFSET 1) sub) AS tail_given_arr",
+				"LIMIT 2) sub) AS top2_given_arr",
+				"IN ('female', 'other')",
+				"TIME(",
+				"= 'Marie'",
+			},
+		},
+	} {
+		reqSCT, sctErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(subContainsTimeVD))
+		require.NoError(t, sctErr)
+		reqSCT.Header.Set("Content-Type", "application/fhir+json")
+		respSCT, sctErr := client.Do(reqSCT)
+		require.NoError(t, sctErr)
+		sctBytes, _ := io.ReadAll(respSCT.Body)
+		respSCT.Body.Close()
+		require.Equal(t, http.StatusOK, respSCT.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(sctBytes), want)
+		}
+	}
 }
