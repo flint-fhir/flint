@@ -1,6 +1,6 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, and 35+ National HL7 Implementation Guide
-// conformance & certification runner. It executes 10 structured test suites (96 checks) against
+// conformance & certification runner. It executes 10 structured test suites (103 checks) against
 // a target Flint server and produces both a standard FHIR R4 TestReport resource
 // and a human-readable scorecard.
 package certify
@@ -3307,6 +3307,96 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("AN-20", suite10, "Zero-JSON Binary Proto3 Specimen (ServiceRequest/$collect-specimen), Lab Alert (DiagnosticReport/$evaluate), Inpatient ADT (Encounter/$admit, $transfer, $discharge), Pharmacy (MedicationRequest/$dispense, $check-interactions, MedicationKnowledge/$lookup), Plan-Net ($find-providers, $find-services), Notifications ($process-notification), IHE PIXm (Patient/$ihe-pix) & SQL-on-FHIR v2 Equivalence (~, !~), Boolean Logic (xor, implies), Membership (in) & .toChars() $sql Pushdown", t0, err, "Binary Proto3 ServiceRequest/$collect-specimen, DiagnosticReport/$evaluate, Encounter/$admit/$transfer/$discharge, MedicationRequest/$dispense/$check-interactions, MedicationKnowledge/$lookup, Plan-Net directory, $process-notification, Patient/$ihe-pix & ~/!~/in/xor/implies/.toChars $sql pushdown verified")
+
+	// AN-21: Zero-JSON Binary Proto3 Gravity SDOH ($sdoh-referral, $sdoh-summary), Consent ($evaluate), CARIN Blue Button ($carin-bb, $carin-bb-summary), Public Health eCR ($ecr-report, $ersd-lookup), VRDR ($decease), mCODE Oncology ($stage-cancer, $mcode-summary), Da Vinci Drug Formulary ($formulary-lookup, $formulary-coverage) & SQL-on-FHIR v2 Collection Subscript ([n]), Slicing (.skip/.take), Membership (contains), Time (.toTime/.convertsToTime) & .trace() $sql Pushdown
+	t0 = time.Now()
+	{
+		sdohSRRaw := []byte(`{"resourceType":"ServiceRequest","id":"cert-sr-sdoh-proto-1","status":"active","intent":"order","category":[{"coding":[{"system":"http://hl7.org/fhir/us/sdoh-clinicalcare/CodeSystem/SDOHCC-CodeSystemTemporaryCodes","code":"food-insecurity"}]}],"code":{"coding":[{"system":"http://snomed.info/sct","code":"467691000124102"}]},"subject":{"reference":"Patient/cert-pat-1"}}`)
+		respSDOHConv, bSDOHInProto, errSDOHConv := doReq(http.MethodPost, basePath+"/ServiceRequest/$convert", "application/fhir+json", sdohSRRaw, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSDOHRefProto, bSDOHRefProto, errSDOHRefProto := doReq(http.MethodPost, basePath+"/ServiceRequest/$sdoh-referral", "application/x-protobuf", bSDOHInProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		patParamsRaw := []byte(`{"resourceType":"Parameters","parameter":[{"name":"patient","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"encounter","valueReference":{"reference":"Encounter/cert-enc-1"}},{"name":"condition","valueReference":{"reference":"Condition/cert-cond-1"}},{"name":"actor","valueReference":{"reference":"Practitioner/cert-prac-1"}},{"name":"purpose","valueString":"TREAT"},{"name":"tStage","valueString":"T2"},{"name":"nStage","valueString":"N1"},{"name":"mStage","valueString":"M0"},{"name":"stageGroup","valueString":"Stage IIB"},{"name":"code","valueString":"1049502"},{"name":"planId","valueString":"plan-gold-1"}]}`)
+		respPatParamsConv, bPatParamsProto, errPatParamsConv := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", patParamsRaw, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		respSDOHSumProto, bSDOHSumProto, errSDOHSumProto := doReq(http.MethodPost, basePath+"/Patient/$sdoh-summary", "application/x-protobuf", bPatParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respConsentEvalProto, bConsentEvalProto, errConsentEvalProto := doReq(http.MethodPost, basePath+"/Consent/$evaluate", "application/x-protobuf", bPatParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCarinBBProto, bCarinBBProto, errCarinBBProto := doReq(http.MethodPost, basePath+"/Patient/$carin-bb", "application/x-protobuf", bPatParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCarinSumProto, bCarinSumProto, errCarinSumProto := doReq(http.MethodPost, basePath+"/ExplanationOfBenefit/$carin-bb-summary", "application/x-protobuf", bPatParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respECRProto, bECRProto, errECRProto := doReq(http.MethodPost, basePath+"/Encounter/$ecr-report", "application/x-protobuf", bPatParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respERSDProto, bERSDProto, errERSDProto := doReq(http.MethodGet, basePath+"/PlanDefinition/$ersd-lookup?code=840539006&_format=application/x-protobuf", "", nil, nil)
+		respStageCancerProto, bStageCancerProto, errStageCancerProto := doReq(http.MethodPost, basePath+"/Condition/$stage-cancer", "application/x-protobuf", bPatParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respMCODESumProto, bMCODESumProto, errMCODESumProto := doReq(http.MethodPost, basePath+"/Patient/$mcode-summary", "application/x-protobuf", bPatParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respFormLookupProto, bFormLookupProto, errFormLookupProto := doReq(http.MethodPost, basePath+"/MedicationKnowledge/$formulary-lookup", "application/x-protobuf", bPatParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respFormCovProto, bFormCovProto, errFormCovProto := doReq(http.MethodPost, basePath+"/Coverage/$formulary-coverage", "application/x-protobuf", bPatParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respDeceaseProto, bDeceaseProto, errDeceaseProto := doReq(http.MethodPost, basePath+"/Patient/$decease", "application/x-protobuf", bPatParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		subContainsTimeVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_sub_contains_time_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id.trace('id-dbg')"},{"name":"second_given","path":"name.given[1]"},{"name":"tail_given_csv","path":"name.given.skip(1).join(',')"},{"name":"tail_given_arr","path":"name.given.skip(1)","collection":true},{"name":"top2_given_arr","path":"name.given.take(2)","collection":true},{"name":"is_target_gender","path":"('female' | 'other') contains gender"},{"name":"birth_time","path":"birthDate.toTime()"},{"name":"has_birth_time","path":"birthDate.convertsToTime()"}]}],"where":[{"path":"('female' | 'other') contains gender.trace('gender-dbg') and name.given[0].exists() and birthDate.convertsToTime()"}]}`)
+		respSCTDoris, bSCTDoris, errSCTDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", subContainsTimeVD, nil)
+		respSCTPg, bSCTPg, errSCTPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", subContainsTimeVD, nil)
+
+		if errSDOHConv != nil || respSDOHConv.StatusCode != http.StatusOK || len(bSDOHInProto) == 0 {
+			err = fmt.Errorf("expected POST /ServiceRequest/$convert to return binary Proto3 ServiceRequest, got %d", respSDOHConv.StatusCode)
+		} else if errSDOHRefProto != nil || respSDOHRefProto.StatusCode != http.StatusOK || !strings.Contains(respSDOHRefProto.Header.Get("Content-Type"), "application/x-protobuf") || respSDOHRefProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bSDOHRefProto) == 0 {
+			err = fmt.Errorf("expected POST /ServiceRequest/$sdoh-referral with binary Proto3 ServiceRequest to return binary Proto3 Bundle, got %d", respSDOHRefProto.StatusCode)
+		} else if errPatParamsConv != nil || respPatParamsConv.StatusCode != http.StatusOK || len(bPatParamsProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert to return binary Proto3 Parameters, got %d", respPatParamsConv.StatusCode)
+		} else if errSDOHSumProto != nil || respSDOHSumProto.StatusCode != http.StatusOK || !strings.Contains(respSDOHSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bSDOHSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$sdoh-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respSDOHSumProto.StatusCode)
+		} else if errConsentEvalProto != nil || respConsentEvalProto.StatusCode != http.StatusOK || !strings.Contains(respConsentEvalProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bConsentEvalProto) == 0 {
+			err = fmt.Errorf("expected POST /Consent/$evaluate with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respConsentEvalProto.StatusCode)
+		} else if errCarinBBProto != nil || respCarinBBProto.StatusCode != http.StatusOK || !strings.Contains(respCarinBBProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCarinBBProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$carin-bb with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respCarinBBProto.StatusCode)
+		} else if errCarinSumProto != nil || respCarinSumProto.StatusCode != http.StatusOK || !strings.Contains(respCarinSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCarinSumProto) == 0 {
+			err = fmt.Errorf("expected POST /ExplanationOfBenefit/$carin-bb-summary with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respCarinSumProto.StatusCode)
+		} else if errECRProto != nil || respECRProto.StatusCode != http.StatusOK || !strings.Contains(respECRProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bECRProto) == 0 {
+			err = fmt.Errorf("expected POST /Encounter/$ecr-report with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respECRProto.StatusCode)
+		} else if errERSDProto != nil || respERSDProto.StatusCode != http.StatusOK || !strings.Contains(respERSDProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bERSDProto) == 0 {
+			err = fmt.Errorf("expected GET /PlanDefinition/$ersd-lookup?_format=application/x-protobuf to return binary Proto3 Parameters, got %d", respERSDProto.StatusCode)
+		} else if errStageCancerProto != nil || respStageCancerProto.StatusCode != http.StatusOK || !strings.Contains(respStageCancerProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bStageCancerProto) == 0 {
+			err = fmt.Errorf("expected POST /Condition/$stage-cancer with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respStageCancerProto.StatusCode)
+		} else if errMCODESumProto != nil || respMCODESumProto.StatusCode != http.StatusOK || !strings.Contains(respMCODESumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bMCODESumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$mcode-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respMCODESumProto.StatusCode)
+		} else if errFormLookupProto != nil || respFormLookupProto.StatusCode != http.StatusOK || !strings.Contains(respFormLookupProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bFormLookupProto) == 0 {
+			err = fmt.Errorf("expected POST /MedicationKnowledge/$formulary-lookup with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respFormLookupProto.StatusCode)
+		} else if errFormCovProto != nil || respFormCovProto.StatusCode != http.StatusOK || !strings.Contains(respFormCovProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bFormCovProto) == 0 {
+			err = fmt.Errorf("expected POST /Coverage/$formulary-coverage with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respFormCovProto.StatusCode)
+		} else if errDeceaseProto != nil || respDeceaseProto.StatusCode != http.StatusOK || !strings.Contains(respDeceaseProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bDeceaseProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$decease with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respDeceaseProto.StatusCode)
+		} else if errSCTDoris != nil || respSCTDoris.StatusCode != http.StatusOK || !strings.Contains(string(bSCTDoris), "element_at(") || !strings.Contains(string(bSCTDoris), " IN ('female', 'other')") || !strings.Contains(string(bSCTDoris), "AS TIME)") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with [n]/contains/.toTime/.convertsToTime/.trace pushdown, got %d: %s", respSCTDoris.StatusCode, string(bSCTDoris))
+		} else if errSCTPg != nil || respSCTPg.StatusCode != http.StatusOK || !strings.Contains(string(bSCTPg), "LIMIT 1 OFFSET 1") || !strings.Contains(string(bSCTPg), " IN ('female', 'other')") || !strings.Contains(string(bSCTPg), "AS TIME)") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with [n]/.skip/.take/contains/.toTime/.convertsToTime/.trace pushdown, got %d: %s", respSCTPg.StatusCode, string(bSCTPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-21", suite10, "Zero-JSON Binary Proto3 Gravity SDOH ($sdoh-referral, $sdoh-summary), Consent ($evaluate), CARIN Blue Button ($carin-bb, $carin-bb-summary), Public Health eCR ($ecr-report, $ersd-lookup), VRDR ($decease), mCODE Oncology ($stage-cancer, $mcode-summary), Da Vinci Drug Formulary ($formulary-lookup, $formulary-coverage) & SQL-on-FHIR v2 Collection Subscript ([n]), Slicing (.skip/.take), Membership (contains), Time (.toTime/.convertsToTime) & .trace() $sql Pushdown", t0, err, "Binary Proto3 SDOH, Consent/$evaluate, CARIN-BB, Public Health eCR/eRSD, VRDR Patient/$decease, mCODE Oncology, Da Vinci Drug Formulary & [n]/.skip/.take/contains/.toTime/.convertsToTime/.trace $sql pushdown verified")
 
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)

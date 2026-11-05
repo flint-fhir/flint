@@ -12973,8 +12973,36 @@ func (s *Server) handleGravitySDOHReferral(w http.ResponseWriter, r *http.Reques
 
 	if r.Body != nil {
 		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
-			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
-				if body["resourceType"] == "Parameters" {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "ServiceRequest"); err == nil && body != nil {
+				switch body["resourceType"] {
+				case "ServiceRequest":
+					if id, _ := body["id"].(string); id != "" && resID == "" {
+						resID = cleanID(id)
+					}
+					if subj, ok := body["subject"].(map[string]any); ok && patRef == "" {
+						if ref, _ := subj["reference"].(string); ref != "" {
+							patRef = strings.TrimSpace(ref)
+						}
+					}
+					if cats, ok := body["category"].([]any); ok && domain == "" && len(cats) > 0 {
+						if cm, ok := cats[0].(map[string]any); ok {
+							if cods, ok := cm["coding"].([]any); ok && len(cods) > 0 {
+								if cd, ok := cods[0].(map[string]any); ok {
+									if c, _ := cd["code"].(string); c != "" {
+										domain = strings.TrimSpace(c)
+									}
+								}
+							}
+						}
+					}
+					if perfs, ok := body["performer"].([]any); ok && performerRef == "" && len(perfs) > 0 {
+						if pf, ok := perfs[0].(map[string]any); ok {
+							if ref, _ := pf["reference"].(string); ref != "" {
+								performerRef = strings.TrimSpace(ref)
+							}
+						}
+					}
+				case "Parameters":
 					if params, ok := body["parameter"].([]any); ok {
 						for _, p := range params {
 							pm, ok := p.(map[string]any)
@@ -12984,21 +13012,21 @@ func (s *Server) handleGravitySDOHReferral(w http.ResponseWriter, r *http.Reques
 							name, _ := pm["name"].(string)
 							switch name {
 							case "patient", "subject":
-								if vs := extractParamString(pm); vs != "" && patRef == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && patRef == "" {
 									patRef = strings.TrimSpace(vs)
 								}
 							case "domain", "category", "code":
-								if vs := extractParamString(pm); vs != "" && domain == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && domain == "" {
 									domain = strings.TrimSpace(vs)
 								}
 							case "performer":
-								if vs := extractParamString(pm); vs != "" && performerRef == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && performerRef == "" {
 									performerRef = strings.TrimSpace(vs)
 								}
 							}
 						}
 					}
-				} else {
+				default:
 					if patRef == "" {
 						if v, ok := body["patient"].(string); ok && strings.TrimSpace(v) != "" {
 							patRef = strings.TrimSpace(v)
@@ -13186,7 +13214,7 @@ func (s *Server) handlePatientSDOHSummary(w http.ResponseWriter, r *http.Request
 							if pm, ok := p.(map[string]any); ok {
 								name, _ := pm["name"].(string)
 								if name == "patient" || name == "subject" || name == "id" {
-									if vs := extractParamString(pm); vs != "" {
+									if vs := extractParamStringOrRef(pm); vs != "" {
 										patID = cleanID(strings.TrimPrefix(vs, "Patient/"))
 									}
 								}
@@ -13295,19 +13323,19 @@ func (s *Server) handleConsentEvaluate(w http.ResponseWriter, r *http.Request) {
 							name, _ := pm["name"].(string)
 							switch name {
 							case "id", "consent":
-								if vs := extractParamString(pm); vs != "" && consentID == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && consentID == "" {
 									consentID = cleanID(strings.TrimPrefix(vs, "Consent/"))
 								}
 							case "patient", "subject":
-								if vs := extractParamString(pm); vs != "" && patRef == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && patRef == "" {
 									patRef = strings.TrimSpace(vs)
 								}
 							case "actor":
-								if vs := extractParamString(pm); vs != "" && actorRef == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && actorRef == "" {
 									actorRef = strings.TrimSpace(vs)
 								}
 							case "purpose":
-								if vs := extractParamString(pm); vs != "" && purpose == "" {
+								if vs := extractParamStringOrRef(pm); vs != "" && purpose == "" {
 									purpose = strings.TrimSpace(vs)
 								}
 							}
@@ -13453,7 +13481,7 @@ func (s *Server) handleCarinBlueButton(w http.ResponseWriter, r *http.Request) {
 							if pm, ok := p.(map[string]any); ok {
 								name, _ := pm["name"].(string)
 								if name == "patient" || name == "subject" || name == "id" {
-									if vs := extractParamString(pm); vs != "" {
+									if vs := extractParamStringOrRef(pm); vs != "" {
 										patID = cleanID(strings.TrimPrefix(vs, "Patient/"))
 									}
 								}
@@ -13709,19 +13737,31 @@ func (s *Server) handlePublicHealthECR(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPost && r.Body != nil {
 		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 2<<20)); err == nil && len(rawBody) > 0 {
-			if body, err := s.decodeOperationBodyMap(r, rawBody, "Parameters"); err == nil && body != nil {
-				if body["resourceType"] == "Parameters" {
+			if body, err := s.decodeOperationBodyMap(r, rawBody, "Encounter"); err == nil && body != nil {
+				switch body["resourceType"] {
+				case "Encounter":
+					if idVal, _ := body["id"].(string); idVal != "" && encID == "" {
+						encID = cleanID(idVal)
+					}
+					if patRef == "" {
+						if subj, ok := body["subject"].(map[string]any); ok {
+							if ref, _ := subj["reference"].(string); ref != "" {
+								patRef = strings.TrimSpace(ref)
+							}
+						}
+					}
+				case "Parameters":
 					if params, ok := body["parameter"].([]any); ok {
 						for _, p := range params {
 							if pm, ok := p.(map[string]any); ok {
 								name, _ := pm["name"].(string)
 								switch name {
 								case "encounter", "id":
-									if vs := extractParamString(pm); vs != "" && encID == "" {
+									if vs := extractParamStringOrRef(pm); vs != "" && encID == "" {
 										encID = cleanID(strings.TrimPrefix(vs, "Encounter/"))
 									}
 								case "patient", "subject":
-									if vs := extractParamString(pm); vs != "" && patRef == "" {
+									if vs := extractParamStringOrRef(pm); vs != "" && patRef == "" {
 										patRef = strings.TrimSpace(vs)
 									}
 								}
@@ -13930,16 +13970,20 @@ func (s *Server) handlePatientVRDRDecease(w http.ResponseWriter, r *http.Request
 								name, _ := pm["name"].(string)
 								switch name {
 								case "patient", "subject", "id":
-									if vs := extractParamString(pm); vs != "" && patID == "" {
+									if vs := firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)); vs != "" && patID == "" {
 										patID = cleanID(strings.TrimPrefix(vs, "Patient/"))
 									}
 								case "deceasedDateTime":
-									if vs := extractParamString(pm); vs != "" && deceasedDT == "" {
+									if vs := firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)); vs != "" && deceasedDT == "" {
 										deceasedDT = strings.TrimSpace(vs)
 									}
 								case "causeCode", "causeOfDeath":
-									if vs := extractParamString(pm); vs != "" && causeCode == "" {
+									if vs := firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)); vs != "" && causeCode == "" {
 										causeCode = strings.TrimSpace(vs)
+									}
+								case "causeDisplay":
+									if vs := firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)); vs != "" && causeDisplay == "" {
+										causeDisplay = strings.TrimSpace(vs)
 									}
 								}
 							}
@@ -14107,21 +14151,29 @@ func (s *Server) handleMCODEOncology(w http.ResponseWriter, r *http.Request) {
 								continue
 							}
 							name, _ := pm["name"].(string)
-							val := extractParamString(pm)
+							val := extractParamStringOrRef(pm)
 							switch name {
-							case "patient", "subject", "condition", "id", "_id":
+							case "condition":
+								if op == "$stage-cancer" {
+									targetID = cleanID(strings.TrimPrefix(val, "Condition/"))
+								}
+							case "patient", "subject":
+								if targetID == "" || op == "$mcode-summary" {
+									targetID = cleanID(strings.TrimPrefix(strings.TrimPrefix(val, "Patient/"), "Condition/"))
+								}
+							case "id", "_id":
 								if targetID == "" {
 									targetID = cleanID(strings.TrimPrefix(strings.TrimPrefix(val, "Patient/"), "Condition/"))
 								}
-							case "tCategory", "t":
+							case "tCategory", "t", "tStage":
 								if tCategory == "" {
 									tCategory = val
 								}
-							case "nCategory", "n":
+							case "nCategory", "n", "nStage":
 								if nCategory == "" {
 									nCategory = val
 								}
-							case "mCategory", "m":
+							case "mCategory", "m", "mStage":
 								if mCategory == "" {
 									mCategory = val
 								}
@@ -14477,7 +14529,7 @@ func (s *Server) handleDaVinciDrugFormulary(w http.ResponseWriter, r *http.Reque
 								continue
 							}
 							name, _ := pm["name"].(string)
-							val := extractParamString(pm)
+							val := extractParamStringOrRef(pm)
 							switch name {
 							case "code", "rxnorm":
 								if code == "" {
