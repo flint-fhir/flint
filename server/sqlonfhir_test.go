@@ -4157,4 +4157,244 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(tqmBytes), want)
 		}
 	}
+
+	// 37. Wave 92: Binary Proto3 Da Vinci RA/CDex, CDC NHSN dQM/ACH, Da Vinci DTR/PAS/Burden Reduction, CodeX mCODE/RTTD, FAST NDH/UDAP, Da Vinci ATR, PACIO SPLASCH, Vulcan RWD, Public Health SANER, Gravity SDOH, Da Vinci PDex & .sort()/.sortDesc() + Chained String Predicates $sql Pushdown
+	w92ParamsPb := &parampb.Parameters{
+		Parameter: []*parampb.Parameters_Parameter{
+			{
+				Name: &dtpb.String{Value: "patient"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Patient/" + patID},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "subject"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Patient/" + patID},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "group"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Group/atr-group-1"},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "organization"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Organization/ndh-org-1"},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "location"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Location/saner-loc-1"},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "study"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "ResearchStudy/vulcan-rwd-study-1"},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "measure"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Measure/nhsn-ach-hypoglycemia-cdi"},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "codingGapType"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Code{
+						Code: &dtpb.Code{Value: "suspected"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "purpose_of_use"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Code{
+						Code: &dtpb.Code{Value: "TREAT"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "client_name"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "Flint Proto3 UDAP Client"},
+					},
+				},
+			},
+		},
+	}
+	w92ParamsBytes, err := proto.Marshal(w92ParamsPb)
+	require.NoError(t, err)
+
+	for _, ep := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/fhir/r4/proto/MeasureReport/$ra-evaluate-risk"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$ra-coding-gap-report"},
+		{http.MethodPost, "/fhir/r4/proto/Task/$cdex-submit-attachment"},
+		{http.MethodPost, "/fhir/r4/proto/Measure/$nhsn-dqm-evaluate"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$nhsn-ach-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Questionnaire/$dtr-questionnaire-package"},
+		{http.MethodPost, "/fhir/r4/proto/Claim/$pas-inquire"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$burden-reduction-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$mcode-trial-summary"},
+		{http.MethodPost, "/fhir/r4/proto/VerificationResult/$ndh-verify"},
+		{http.MethodPost, "/fhir/r4/proto/Organization/$ndh-directory-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Group/$confirm-attribution-list"},
+		{http.MethodPost, "/fhir/r4/proto/Group/$atr-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Observation/$pacio-splasch-record"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$pacio-splasch-summary"},
+		{http.MethodPost, "/fhir/r4/proto/ResearchStudy/$vulcan-rwd-cohort"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$vulcan-rwd-summary"},
+		{http.MethodPost, "/fhir/r4/proto/MeasureReport/$saner-report-capacity"},
+		{http.MethodPost, "/fhir/r4/proto/Location/$saner-capacity-summary"},
+		{http.MethodPost, "/fhir/r4/proto/ServiceRequest/$codex-rttd-plan"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$codex-rttd-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Consent/$sdoh-consent-record"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$sdoh-care-bundle"},
+		{http.MethodPost, "/fhir/r4/proto/Organization/$udap-register"},
+		{http.MethodPost, "/fhir/r4/proto/Organization/$udap-trust-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Group/$pdex-provider-member-match"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$pdex-provider-everything"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$pdex-payer-exchange"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$pdex-payer-summary"},
+	} {
+		reqOp, opErr := http.NewRequest(ep.method, ts.URL+ep.path, bytes.NewReader(w92ParamsBytes))
+		require.NoError(t, opErr)
+		reqOp.Header.Set("Content-Type", "application/x-protobuf")
+		reqOp.Header.Set("Accept", "application/x-protobuf")
+		respOp, opErr := client.Do(reqOp)
+		require.NoError(t, opErr)
+		opBytes, _ := io.ReadAll(respOp.Body)
+		respOp.Body.Close()
+		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s failed: %s", ep.path, string(opBytes))
+		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s Content-Type", ep.path)
+		assert.Equal(t, "google.fhir.r4.proto3", respOp.Header.Get("X-Flint-Wire-Format"), "endpoint %s X-Flint-Wire-Format", ep.path)
+		require.NotEmpty(t, opBytes, "endpoint %s empty body", ep.path)
+	}
+
+	sortChainVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_sort_sortdesc_chained_predicates_v1",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "sorted_given", "path": "name.given.sort().join(',')"},
+					{"name": "reverse_given", "path": "name.given.sortDesc().join(',')"},
+					{"name": "first_sorted", "path": "name.given.sort().first()"},
+					{"name": "first_rev", "path": "name.given.sortDesc().first()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "name.family.first().lower().startsWith('cert') and name.family.first().upper().endsWith('TIFY') and coalesce(name.family.first(), 'none').contains('ti') and name.given.sort().first() = 'Alice'"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_JOIN(ARRAY_SORT(",
+				"ARRAY_JOIN(ARRAY_REVERSE_SORT(",
+				"element_at(ARRAY_SORT(",
+				"element_at(ARRAY_REVERSE_SORT(",
+				"LIKE 'cert%'",
+				"LIKE '%TIFY'",
+				"LIKE '%ti%'",
+				"= 'Alice'",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"ORDER BY sp_value ASC) sub) AS sorted_given",
+				"ORDER BY sp_value DESC) sub) AS reverse_given",
+				"ORDER BY s.sp_value ASC LIMIT 1) AS first_sorted",
+				"ORDER BY s.sp_value DESC LIMIT 1) AS first_rev",
+				"LIKE 'cert%'",
+				"LIKE '%TIFY'",
+				"LIKE '%ti%'",
+				"= 'Alice'",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"ORDER BY sp_value ASC) sub) AS sorted_given",
+				"ORDER BY sp_value DESC) sub) AS reverse_given",
+				"ORDER BY s.sp_value ASC LIMIT 1) AS first_sorted",
+				"ORDER BY s.sp_value DESC LIMIT 1) AS first_rev",
+				"LIKE 'cert%'",
+				"LIKE '%TIFY'",
+				"LIKE '%ti%'",
+				"= 'Alice'",
+			},
+		},
+	} {
+		reqSC, scErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(sortChainVD))
+		require.NoError(t, scErr)
+		reqSC.Header.Set("Content-Type", "application/fhir+json")
+		respSC, scErr := client.Do(reqSC)
+		require.NoError(t, scErr)
+		scBytes, _ := io.ReadAll(respSC.Body)
+		respSC.Body.Close()
+		require.Equal(t, http.StatusOK, respSC.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(scBytes), want)
+		}
+	}
 }

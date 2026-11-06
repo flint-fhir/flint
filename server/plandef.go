@@ -23056,16 +23056,8 @@ func (s *Server) handleDaVinciRAAndCDexWave49(w http.ResponseWriter, r *http.Req
 					name, _ := pm["name"].(string)
 					for _, k := range keys {
 						if strings.EqualFold(name, k) {
-							if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-								return strings.TrimSpace(vs)
-							}
-							if vc, ok := pm["valueCode"].(string); ok && strings.TrimSpace(vc) != "" {
-								return strings.TrimSpace(vc)
-							}
-							if vr, ok := pm["valueReference"].(map[string]any); ok {
-								if ref, ok := vr["reference"].(string); ok && strings.TrimSpace(ref) != "" {
-									return strings.TrimSpace(ref)
-								}
+							if val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm))); val != "" {
+								return val
 							}
 						}
 					}
@@ -23423,6 +23415,21 @@ func (s *Server) handleNHSNDQMWave49(w http.ResponseWriter, r *http.Request, op 
 				}
 			}
 		}
+		if body != nil {
+			if params, ok := body["parameter"].([]any); ok {
+				for _, p := range params {
+					pm, _ := p.(map[string]any)
+					name, _ := pm["name"].(string)
+					for _, k := range keys {
+						if strings.EqualFold(name, k) {
+							if val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm))); val != "" {
+								return val
+							}
+						}
+					}
+				}
+			}
+		}
 		return ""
 	}
 
@@ -23716,15 +23723,9 @@ func (s *Server) handleDaVinciBurdenReductionWave50(w http.ResponseWriter, r *ht
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
 							name, _ := pm["name"].(string)
-							if name == "patient" || name == "subject" || name == "coverage" {
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" && (name == "patient" || name == "subject") {
-									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
-								}
-								if vr, ok := pm["valueReference"].(map[string]any); ok {
-									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" && (name == "patient" || name == "subject") {
-										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
-									}
-								}
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
+							if (name == "patient" || name == "subject") && val != "" {
+								patID = strings.TrimPrefix(val, "Patient/")
 							}
 							if resMap, ok := pm["resource"].(map[string]any); ok {
 								if rt, _ := resMap["resourceType"].(string); rt == "Patient" {
@@ -24101,15 +24102,9 @@ func (s *Server) handleFASTNDHVerifyAndDirectoryWave50(w http.ResponseWriter, r 
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
 							name, _ := pm["name"].(string)
-							if name == "organization" || name == "target" {
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-									orgID = strings.TrimPrefix(strings.TrimSpace(vs), "Organization/")
-								}
-								if vr, ok := pm["valueReference"].(map[string]any); ok {
-									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-										orgID = strings.TrimPrefix(strings.TrimSpace(ref), "Organization/")
-									}
-								}
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
+							if (name == "organization" || name == "target") && val != "" {
+								orgID = strings.TrimPrefix(val, "Organization/")
 							}
 						}
 					}
@@ -24313,34 +24308,17 @@ func (s *Server) handleDaVinciATRWave51(w http.ResponseWriter, r *http.Request, 
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
 							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
+							if val == "" {
+								continue
+							}
 							switch name {
 							case "group", "id":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-									groupID = strings.TrimPrefix(strings.TrimSpace(vs), "Group/")
-								}
-								if vr, ok := pm["valueReference"].(map[string]any); ok {
-									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-										groupID = strings.TrimPrefix(strings.TrimSpace(ref), "Group/")
-									}
-								}
+								groupID = strings.TrimPrefix(val, "Group/")
 							case "patient", "member", "memberId", "subject":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
-								}
-								if vr, ok := pm["valueReference"].(map[string]any); ok {
-									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
-									}
-								}
+								patID = strings.TrimPrefix(val, "Patient/")
 							case "coverage":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-									covID = strings.TrimPrefix(strings.TrimSpace(vs), "Coverage/")
-								}
-								if vr, ok := pm["valueReference"].(map[string]any); ok {
-									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-										covID = strings.TrimPrefix(strings.TrimSpace(ref), "Coverage/")
-									}
-								}
+								covID = strings.TrimPrefix(val, "Coverage/")
 							}
 						}
 					}
@@ -24756,25 +24734,15 @@ func (s *Server) handleVulcanRWDWave51(w http.ResponseWriter, r *http.Request, o
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
 							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
+							if val == "" {
+								continue
+							}
 							switch name {
 							case "patient", "subject":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
-								}
-								if vr, ok := pm["valueReference"].(map[string]any); ok {
-									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
-									}
-								}
+								patID = strings.TrimPrefix(val, "Patient/")
 							case "study", "researchStudy":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-									studyID = strings.TrimPrefix(strings.TrimSpace(vs), "ResearchStudy/")
-								}
-								if vr, ok := pm["valueReference"].(map[string]any); ok {
-									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-										studyID = strings.TrimPrefix(strings.TrimSpace(ref), "ResearchStudy/")
-									}
-								}
+								studyID = strings.TrimPrefix(val, "ResearchStudy/")
 							}
 						}
 					}
@@ -24972,15 +24940,15 @@ func (s *Server) handlePublicHealthSANERWave52(w http.ResponseWriter, r *http.Re
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
 							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
 							switch name {
 							case "location", "subject":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-									locID = strings.TrimPrefix(strings.TrimSpace(vs), "Location/")
+								if val != "" {
+									locID = strings.TrimPrefix(val, "Location/")
 								}
-								if vr, ok := pm["valueReference"].(map[string]any); ok {
-									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-										locID = strings.TrimPrefix(strings.TrimSpace(ref), "Location/")
-									}
+							case "measureReport", "id":
+								if val != "" {
+									mrID = strings.TrimPrefix(val, "MeasureReport/")
 								}
 							}
 						}
@@ -25187,15 +25155,15 @@ func (s *Server) handleCodeXRTTDWave52(w http.ResponseWriter, r *http.Request, o
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
 							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
 							switch name {
 							case "patient", "subject":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								if val != "" {
+									patID = strings.TrimPrefix(val, "Patient/")
 								}
-								if vr, ok := pm["valueReference"].(map[string]any); ok {
-									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
-									}
+							case "serviceRequest", "id":
+								if val != "" {
+									srID = strings.TrimPrefix(val, "ServiceRequest/")
 								}
 							}
 						}
@@ -25369,15 +25337,15 @@ func (s *Server) handleGravitySDOHConsentAndCareWave52(w http.ResponseWriter, r 
 					for _, p := range params {
 						if pm, ok := p.(map[string]any); ok {
 							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
 							switch name {
 							case "patient", "subject":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-									patID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								if val != "" {
+									patID = strings.TrimPrefix(val, "Patient/")
 								}
-								if vr, ok := pm["valueReference"].(map[string]any); ok {
-									if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-										patID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
-									}
+							case "consent", "id":
+								if val != "" {
+									consentID = strings.TrimPrefix(val, "Consent/")
 								}
 							}
 						}
@@ -25666,6 +25634,35 @@ func (s *Server) handleUDAPSecurityWave54(w http.ResponseWriter, r *http.Request
 	if r.Body != nil && r.Method == http.MethodPost {
 		if raw, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(raw)) > 0 {
 			if bodyMap, decErr := s.decodeOperationBodyMap(r, raw, "Parameters"); decErr == nil {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
+							if val == "" {
+								continue
+							}
+							switch name {
+							case "organization", "organizationId", "id", "target":
+								if orgID == "" {
+									orgID = cleanID(val)
+								}
+							case "client_name", "clientName":
+								if clientName == "" {
+									clientName = val
+								}
+							case "purpose_of_use", "purposeOfUse":
+								if purposeOfUse == "" {
+									purposeOfUse = val
+								}
+							case "san", "sanUri":
+								if sanURI == "" {
+									sanURI = val
+								}
+							}
+						}
+					}
+				}
 				for _, k := range []string{"organization", "organizationId", "id"} {
 					if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && orgID == "" {
 						orgID = cleanID(v)
@@ -25878,6 +25875,27 @@ func (s *Server) handleDaVinciPDexProviderAccessWave54(w http.ResponseWriter, r 
 	if r.Body != nil && r.Method == http.MethodPost {
 		if raw, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(raw)) > 0 {
 			if bodyMap, decErr := s.decodeOperationBodyMap(r, raw, "Parameters"); decErr == nil {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
+							if val == "" {
+								continue
+							}
+							switch name {
+							case "group", "groupId", "id":
+								if groupID == "" {
+									groupID = cleanID(val)
+								}
+							case "patient", "member", "subject":
+								if patID == "" {
+									patID = cleanID(val)
+								}
+							}
+						}
+					}
+				}
 				for _, k := range []string{"group", "groupId"} {
 					if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && groupID == "" {
 						groupID = cleanID(v)
@@ -26203,6 +26221,17 @@ func (s *Server) handleDaVinciPDexPayerExchangeWave54(w http.ResponseWriter, r *
 	if r.Body != nil && r.Method == http.MethodPost {
 		if raw, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(bytes.TrimSpace(raw)) > 0 {
 			if bodyMap, decErr := s.decodeOperationBodyMap(r, raw, "Parameters"); decErr == nil {
+				if params, ok := bodyMap["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
+							if (name == "patient" || name == "subject" || name == "id") && cleanID(val) != "" && patID == "" {
+								patID = cleanID(val)
+							}
+						}
+					}
+				}
 				for _, k := range []string{"patient", "subject", "id"} {
 					if v, ok := bodyMap[k].(string); ok && cleanID(v) != "" && patID == "" {
 						patID = cleanID(v)

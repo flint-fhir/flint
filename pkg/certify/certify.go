@@ -1,6 +1,6 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, and 35+ National HL7 Implementation Guide
-// conformance & certification runner. It executes 10 structured test suites (107 checks) against
+// conformance & certification runner. It executes 10 structured test suites (108 checks) against
 // a target Flint server and produces both a standard FHIR R4 TestReport resource
 // and a human-readable scorecard.
 package certify
@@ -3929,6 +3929,175 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("AN-25", suite10, "Zero-JSON Binary Proto3 CodeX/mCODE Genomics & Trial Matching ($mcode-genomics-report, $mcode-genomics-summary, $mcode-trial-match, $mcode-disease-status), Public Health NBS ($nbs-submit, $nbs-summary), Da Vinci PCT ($pct-aeob-summary, $pct-gfe-coordination), Vulcan ICSR/SOA/eSource ($vulcan-icsr-report, $vulcan-soa-timeline, $vulcan-esource-extract, $vulcan-summary), Public Health eCR/ELR/CCRR ($ecr-submit, $ecr-summary, $elr-summary, $cancer-registry-submit), Gravity SDOH ($sdoh-assess, $sdoh-fulfill), CARIN BB/RTPBC ($carin-bb-claims, $rtpbc-summary), PACIO TOC/ADI ($pacio-toc-bundle, $adi-verify), CDC NHSN HAI/AUR ($nhsn-aur-submit, $nhsn-hai-summary), FAST NDH ($fast-network-query, $fast-attest) & SQL-on-FHIR v2 .toQuantity()/.convertsToQuantity(), .matchesFull(), timeOfDay(), .trace()/.check()/.defineVariable() $sql Pushdown", t0, err, "Binary Proto3 CodeX/mCODE Genomics/Trial Matching, Public Health NBS/eCR/ELR/CCRR, Da Vinci PCT, Vulcan ICSR/SOA/eSource, Gravity SDOH, CARIN BB/RTPBC, PACIO TOC/ADI, CDC NHSN HAI/AUR, FAST NDH & .toQuantity/.convertsToQuantity/.matchesFull/timeOfDay $sql pushdown verified")
+
+	// AN-26: Zero-JSON Binary Proto3 Da Vinci RA/CDex ($ra-evaluate-risk, $ra-coding-gap-report, Task/$cdex-submit-attachment), CDC NHSN dQM/ACH ($nhsn-dqm-evaluate, $nhsn-ach-summary), Da Vinci DTR/PAS/Burden Reduction ($dtr-questionnaire-package, $pas-inquire, $burden-reduction-summary), CodeX mCODE ($mcode-trial-summary), FAST NDH ($ndh-verify, $ndh-directory-summary), Da Vinci ATR ($confirm-attribution-list, $atr-summary), PACIO SPLASCH ($pacio-splasch-record, $pacio-splasch-summary), Vulcan RWD ($vulcan-rwd-cohort, $vulcan-rwd-summary), Public Health SANER ($saner-report-capacity, $saner-capacity-summary), CodeX RTTD ($codex-rttd-plan, $codex-rttd-summary), Gravity SDOH ($sdoh-consent-record, $sdoh-care-bundle), FAST UDAP ($udap-register, $udap-trust-summary), Da Vinci PDex ($pdex-provider-member-match, $pdex-provider-everything, $pdex-payer-exchange, $pdex-payer-summary) & SQL-on-FHIR v2 .sort()/.sortDesc() + Chained String Predicates $sql Pushdown
+	t0 = time.Now()
+	{
+		w92ParamsRaw := []byte(`{"resourceType":"Parameters","parameter":[{"name":"patient","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"subject","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"group","valueReference":{"reference":"Group/atr-group-1"}},{"name":"organization","valueReference":{"reference":"Organization/ndh-org-1"}},{"name":"location","valueReference":{"reference":"Location/saner-loc-1"}},{"name":"study","valueReference":{"reference":"ResearchStudy/vulcan-rwd-study-1"}},{"name":"measure","valueReference":{"reference":"Measure/nhsn-ach-hypoglycemia-cdi"}},{"name":"codingGapType","valueCode":"suspected"},{"name":"purpose_of_use","valueCode":"TREAT"},{"name":"client_name","valueString":"Flint Certify UDAP Client"}]}`)
+		respW92ParamsConv, bW92ParamsProto, errW92ParamsConv := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", w92ParamsRaw, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRAEvalProto, bRAEvalProto, errRAEvalProto := doReq(http.MethodPost, basePath+"/MeasureReport/$ra-evaluate-risk", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRAGapProto, bRAGapProto, errRAGapProto := doReq(http.MethodPost, basePath+"/Patient/$ra-coding-gap-report", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCDexTaskAttProto, bCDexTaskAttProto, errCDexTaskAttProto := doReq(http.MethodPost, basePath+"/Task/$cdex-submit-attachment", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respNHSNDQMProto, bNHSNDQMProto, errNHSNDQMProto := doReq(http.MethodPost, basePath+"/Measure/$nhsn-dqm-evaluate", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respNHSNACHProto, bNHSNACHProto, errNHSNACHProto := doReq(http.MethodPost, basePath+"/Patient/$nhsn-ach-summary", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respDTRPkgProto, bDTRPkgProto, errDTRPkgProto := doReq(http.MethodPost, basePath+"/Questionnaire/$dtr-questionnaire-package", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPASInqProto, bPASInqProto, errPASInqProto := doReq(http.MethodPost, basePath+"/Claim/$pas-inquire", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respBRSumProto, bBRSumProto, errBRSumProto := doReq(http.MethodPost, basePath+"/Patient/$burden-reduction-summary", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respMCODETSProto, bMCODETSProto, errMCODETSProto := doReq(http.MethodPost, basePath+"/Patient/$mcode-trial-summary", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respNDHVerProto, bNDHVerProto, errNDHVerProto := doReq(http.MethodPost, basePath+"/VerificationResult/$ndh-verify", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respNDHDirProto, bNDHDirProto, errNDHDirProto := doReq(http.MethodPost, basePath+"/Organization/$ndh-directory-summary", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respATRConfProto, bATRConfProto, errATRConfProto := doReq(http.MethodPost, basePath+"/Group/$confirm-attribution-list", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respATRSumProto, bATRSumProto, errATRSumProto := doReq(http.MethodPost, basePath+"/Group/$atr-summary", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSPLRecProto, bSPLRecProto, errSPLRecProto := doReq(http.MethodPost, basePath+"/Observation/$pacio-splasch-record", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSPLSumProto, bSPLSumProto, errSPLSumProto := doReq(http.MethodPost, basePath+"/Patient/$pacio-splasch-summary", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRWDCohProto, bRWDCohProto, errRWDCohProto := doReq(http.MethodPost, basePath+"/ResearchStudy/$vulcan-rwd-cohort", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRWDSumProto, bRWDSumProto, errRWDSumProto := doReq(http.MethodPost, basePath+"/Patient/$vulcan-rwd-summary", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSANERRepProto, bSANERRepProto, errSANERRepProto := doReq(http.MethodPost, basePath+"/MeasureReport/$saner-report-capacity", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSANERSumProto, bSANERSumProto, errSANERSumProto := doReq(http.MethodPost, basePath+"/Location/$saner-capacity-summary", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRTTDPlanProto, bRTTDPlanProto, errRTTDPlanProto := doReq(http.MethodPost, basePath+"/ServiceRequest/$codex-rttd-plan", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRTTDSumProto, bRTTDSumProto, errRTTDSumProto := doReq(http.MethodPost, basePath+"/Patient/$codex-rttd-summary", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSDOHConProto, bSDOHConProto, errSDOHConProto := doReq(http.MethodPost, basePath+"/Consent/$sdoh-consent-record", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSDOHCareProto, bSDOHCareProto, errSDOHCareProto := doReq(http.MethodPost, basePath+"/Patient/$sdoh-care-bundle", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respUDAPRegProto, bUDAPRegProto, errUDAPRegProto := doReq(http.MethodPost, basePath+"/Organization/$udap-register", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respUDAPSumProto, bUDAPSumProto, errUDAPSumProto := doReq(http.MethodPost, basePath+"/Organization/$udap-trust-summary", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPDexMMProto, bPDexMMProto, errPDexMMProto := doReq(http.MethodPost, basePath+"/Group/$pdex-provider-member-match", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPDexEvProto, bPDexEvProto, errPDexEvProto := doReq(http.MethodPost, basePath+"/Patient/$pdex-provider-everything", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPDexExProto, bPDexExProto, errPDexExProto := doReq(http.MethodPost, basePath+"/Patient/$pdex-payer-exchange", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPDexSumProto, bPDexSumProto, errPDexSumProto := doReq(http.MethodPost, basePath+"/Patient/$pdex-payer-summary", "application/x-protobuf", bW92ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		sortChainVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_sort_sortdesc_chained_predicates_view","status":"active","resource":"Patient","select":[{"column":[{"name":"sorted_given","path":"name.given.sort().join(',')"},{"name":"reverse_given","path":"name.given.sortDesc().join(',')"},{"name":"first_sorted","path":"name.given.sort().first()"},{"name":"first_rev","path":"name.given.sortDesc().first()"}]}],"where":[{"path":"name.family.first().lower().startsWith('cert') and name.family.first().upper().endsWith('TIFY') and coalesce(name.family.first(), 'none').contains('ti') and name.given.sort().first() = 'Alice'"}]}`)
+		respSortDoris, bSortDoris, errSortDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", sortChainVD, nil)
+		respSortPg, bSortPg, errSortPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", sortChainVD, nil)
+
+		if errW92ParamsConv != nil || respW92ParamsConv.StatusCode != http.StatusOK || len(bW92ParamsProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert to return binary Proto3 Parameters, got %d", respW92ParamsConv.StatusCode)
+		} else if errRAEvalProto != nil || respRAEvalProto.StatusCode != http.StatusOK || !strings.Contains(respRAEvalProto.Header.Get("Content-Type"), "application/x-protobuf") || respRAEvalProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bRAEvalProto) == 0 {
+			err = fmt.Errorf("expected POST /MeasureReport/$ra-evaluate-risk with binary Proto3 Parameters to return binary Proto3 MeasureReport, got %d", respRAEvalProto.StatusCode)
+		} else if errRAGapProto != nil || respRAGapProto.StatusCode != http.StatusOK || !strings.Contains(respRAGapProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bRAGapProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$ra-coding-gap-report with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respRAGapProto.StatusCode)
+		} else if errCDexTaskAttProto != nil || respCDexTaskAttProto.StatusCode != http.StatusOK || !strings.Contains(respCDexTaskAttProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCDexTaskAttProto) == 0 {
+			err = fmt.Errorf("expected POST /Task/$cdex-submit-attachment with binary Proto3 Parameters to return binary Proto3 Task, got %d", respCDexTaskAttProto.StatusCode)
+		} else if errNHSNDQMProto != nil || respNHSNDQMProto.StatusCode != http.StatusOK || !strings.Contains(respNHSNDQMProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bNHSNDQMProto) == 0 {
+			err = fmt.Errorf("expected POST /Measure/$nhsn-dqm-evaluate with binary Proto3 Parameters to return binary Proto3 MeasureReport, got %d", respNHSNDQMProto.StatusCode)
+		} else if errNHSNACHProto != nil || respNHSNACHProto.StatusCode != http.StatusOK || !strings.Contains(respNHSNACHProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bNHSNACHProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$nhsn-ach-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respNHSNACHProto.StatusCode)
+		} else if errDTRPkgProto != nil || respDTRPkgProto.StatusCode != http.StatusOK || !strings.Contains(respDTRPkgProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bDTRPkgProto) == 0 {
+			err = fmt.Errorf("expected POST /Questionnaire/$dtr-questionnaire-package with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respDTRPkgProto.StatusCode)
+		} else if errPASInqProto != nil || respPASInqProto.StatusCode != http.StatusOK || !strings.Contains(respPASInqProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPASInqProto) == 0 {
+			err = fmt.Errorf("expected POST /Claim/$pas-inquire with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respPASInqProto.StatusCode)
+		} else if errBRSumProto != nil || respBRSumProto.StatusCode != http.StatusOK || !strings.Contains(respBRSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bBRSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$burden-reduction-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respBRSumProto.StatusCode)
+		} else if errMCODETSProto != nil || respMCODETSProto.StatusCode != http.StatusOK || !strings.Contains(respMCODETSProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bMCODETSProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$mcode-trial-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respMCODETSProto.StatusCode)
+		} else if errNDHVerProto != nil || respNDHVerProto.StatusCode != http.StatusOK || !strings.Contains(respNDHVerProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bNDHVerProto) == 0 {
+			err = fmt.Errorf("expected POST /VerificationResult/$ndh-verify with binary Proto3 Parameters to return binary Proto3 VerificationResult, got %d", respNDHVerProto.StatusCode)
+		} else if errNDHDirProto != nil || respNDHDirProto.StatusCode != http.StatusOK || !strings.Contains(respNDHDirProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bNDHDirProto) == 0 {
+			err = fmt.Errorf("expected POST /Organization/$ndh-directory-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respNDHDirProto.StatusCode)
+		} else if errATRConfProto != nil || respATRConfProto.StatusCode != http.StatusOK || !strings.Contains(respATRConfProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bATRConfProto) == 0 {
+			err = fmt.Errorf("expected POST /Group/$confirm-attribution-list with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respATRConfProto.StatusCode)
+		} else if errATRSumProto != nil || respATRSumProto.StatusCode != http.StatusOK || !strings.Contains(respATRSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bATRSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Group/$atr-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respATRSumProto.StatusCode)
+		} else if errSPLRecProto != nil || respSPLRecProto.StatusCode != http.StatusOK || !strings.Contains(respSPLRecProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bSPLRecProto) == 0 {
+			err = fmt.Errorf("expected POST /Observation/$pacio-splasch-record with binary Proto3 Parameters to return binary Proto3 DiagnosticReport, got %d", respSPLRecProto.StatusCode)
+		} else if errSPLSumProto != nil || respSPLSumProto.StatusCode != http.StatusOK || !strings.Contains(respSPLSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bSPLSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$pacio-splasch-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respSPLSumProto.StatusCode)
+		} else if errRWDCohProto != nil || respRWDCohProto.StatusCode != http.StatusOK || !strings.Contains(respRWDCohProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bRWDCohProto) == 0 {
+			err = fmt.Errorf("expected POST /ResearchStudy/$vulcan-rwd-cohort with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respRWDCohProto.StatusCode)
+		} else if errRWDSumProto != nil || respRWDSumProto.StatusCode != http.StatusOK || !strings.Contains(respRWDSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bRWDSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$vulcan-rwd-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respRWDSumProto.StatusCode)
+		} else if errSANERRepProto != nil || respSANERRepProto.StatusCode != http.StatusOK || !strings.Contains(respSANERRepProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bSANERRepProto) == 0 {
+			err = fmt.Errorf("expected POST /MeasureReport/$saner-report-capacity with binary Proto3 Parameters to return binary Proto3 MeasureReport, got %d", respSANERRepProto.StatusCode)
+		} else if errSANERSumProto != nil || respSANERSumProto.StatusCode != http.StatusOK || !strings.Contains(respSANERSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bSANERSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Location/$saner-capacity-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respSANERSumProto.StatusCode)
+		} else if errRTTDPlanProto != nil || respRTTDPlanProto.StatusCode != http.StatusOK || !strings.Contains(respRTTDPlanProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bRTTDPlanProto) == 0 {
+			err = fmt.Errorf("expected POST /ServiceRequest/$codex-rttd-plan with binary Proto3 Parameters to return binary Proto3 ServiceRequest, got %d", respRTTDPlanProto.StatusCode)
+		} else if errRTTDSumProto != nil || respRTTDSumProto.StatusCode != http.StatusOK || !strings.Contains(respRTTDSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bRTTDSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$codex-rttd-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respRTTDSumProto.StatusCode)
+		} else if errSDOHConProto != nil || respSDOHConProto.StatusCode != http.StatusOK || !strings.Contains(respSDOHConProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bSDOHConProto) == 0 {
+			err = fmt.Errorf("expected POST /Consent/$sdoh-consent-record with binary Proto3 Parameters to return binary Proto3 Consent, got %d", respSDOHConProto.StatusCode)
+		} else if errSDOHCareProto != nil || respSDOHCareProto.StatusCode != http.StatusOK || !strings.Contains(respSDOHCareProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bSDOHCareProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$sdoh-care-bundle with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respSDOHCareProto.StatusCode)
+		} else if errUDAPRegProto != nil || respUDAPRegProto.StatusCode != http.StatusOK || !strings.Contains(respUDAPRegProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bUDAPRegProto) == 0 {
+			err = fmt.Errorf("expected POST /Organization/$udap-register with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respUDAPRegProto.StatusCode)
+		} else if errUDAPSumProto != nil || respUDAPSumProto.StatusCode != http.StatusOK || !strings.Contains(respUDAPSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bUDAPSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Organization/$udap-trust-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respUDAPSumProto.StatusCode)
+		} else if errPDexMMProto != nil || respPDexMMProto.StatusCode != http.StatusOK || !strings.Contains(respPDexMMProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPDexMMProto) == 0 {
+			err = fmt.Errorf("expected POST /Group/$pdex-provider-member-match with binary Proto3 Parameters to return binary Proto3 Group, got %d", respPDexMMProto.StatusCode)
+		} else if errPDexEvProto != nil || respPDexEvProto.StatusCode != http.StatusOK || !strings.Contains(respPDexEvProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPDexEvProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$pdex-provider-everything with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respPDexEvProto.StatusCode)
+		} else if errPDexExProto != nil || respPDexExProto.StatusCode != http.StatusOK || !strings.Contains(respPDexExProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPDexExProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$pdex-payer-exchange with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respPDexExProto.StatusCode)
+		} else if errPDexSumProto != nil || respPDexSumProto.StatusCode != http.StatusOK || !strings.Contains(respPDexSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPDexSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$pdex-payer-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respPDexSumProto.StatusCode)
+		} else if errSortDoris != nil || respSortDoris.StatusCode != http.StatusOK || !strings.Contains(string(bSortDoris), "ARRAY_SORT(") || !strings.Contains(string(bSortDoris), "ARRAY_REVERSE_SORT(") || !strings.Contains(string(bSortDoris), "LIKE 'cert%'") || !strings.Contains(string(bSortDoris), "LIKE '%TIFY'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with .sort()/.sortDesc() and chained string predicates pushdown, got %d: %s", respSortDoris.StatusCode, string(bSortDoris))
+		} else if errSortPg != nil || respSortPg.StatusCode != http.StatusOK || !strings.Contains(string(bSortPg), "ORDER BY sp_value ASC") || !strings.Contains(string(bSortPg), "ORDER BY sp_value DESC") || !strings.Contains(string(bSortPg), "LIKE 'cert%'") || !strings.Contains(string(bSortPg), "LIKE '%TIFY'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with .sort()/.sortDesc() and chained string predicates pushdown, got %d: %s", respSortPg.StatusCode, string(bSortPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-26", suite10, "Zero-JSON Binary Proto3 Da Vinci RA/CDex ($ra-evaluate-risk, $ra-coding-gap-report, Task/$cdex-submit-attachment), CDC NHSN dQM/ACH ($nhsn-dqm-evaluate, $nhsn-ach-summary), Da Vinci DTR/PAS/Burden Reduction ($dtr-questionnaire-package, $pas-inquire, $burden-reduction-summary), CodeX mCODE ($mcode-trial-summary), FAST NDH ($ndh-verify, $ndh-directory-summary), Da Vinci ATR ($confirm-attribution-list, $atr-summary), PACIO SPLASCH ($pacio-splasch-record, $pacio-splasch-summary), Vulcan RWD ($vulcan-rwd-cohort, $vulcan-rwd-summary), Public Health SANER ($saner-report-capacity, $saner-capacity-summary), CodeX RTTD ($codex-rttd-plan, $codex-rttd-summary), Gravity SDOH ($sdoh-consent-record, $sdoh-care-bundle), FAST UDAP ($udap-register, $udap-trust-summary), Da Vinci PDex ($pdex-provider-member-match, $pdex-provider-everything, $pdex-payer-exchange, $pdex-payer-summary) & SQL-on-FHIR v2 .sort()/.sortDesc() + Chained String Predicates $sql Pushdown", t0, err, "Binary Proto3 Da Vinci RA/CDex/DTR/PAS/ATR/PDex, CDC NHSN dQM, CodeX mCODE/RTTD, FAST NDH/UDAP, PACIO SPLASCH, Vulcan RWD, Public Health SANER, Gravity SDOH & .sort()/.sortDesc() + chained string predicates $sql pushdown verified")
 
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
