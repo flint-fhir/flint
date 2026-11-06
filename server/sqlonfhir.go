@@ -2894,6 +2894,19 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 				}
 			}
 		}
+		if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+			collExpr, _ := dorisZeroJSONCollectionColumnExpr(basePath)
+			switch fn {
+			case "anyTrue":
+				return fmt.Sprintf("ARRAY_CONTAINS(%s, 'true')", collExpr)
+			case "allTrue":
+				return fmt.Sprintf("NOT ARRAY_CONTAINS(%s, 'false')", collExpr)
+			case "anyFalse":
+				return fmt.Sprintf("ARRAY_CONTAINS(%s, 'false')", collExpr)
+			case "allFalse":
+				return fmt.Sprintf("NOT ARRAY_CONTAINS(%s, 'true')", collExpr)
+			}
+		}
 		sp := normalizeFHIRPathToSearchParam(basePath)
 		switch fn {
 		case "anyTrue":
@@ -2907,6 +2920,21 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		}
 	}
 	if basePath, criteria, ok := parseCollectionCriteriaCall(p, ".all("); ok {
+		if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+			collExpr, _ := dorisZeroJSONCollectionColumnExpr(basePath)
+			if strings.HasSuffix(criteria, ".exists()") {
+				return fmt.Sprintf("NOT ARRAY_EXISTS(x -> x = '', %s)", collExpr)
+			}
+			if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+				negOp := negateComparisonOp(cOp)
+				if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
+					trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
+					return fmt.Sprintf("NOT ARRAY_EXISTS(x -> CHAR_LENGTH(x) %s %s, %s)", negOp, trimmedRHS, collExpr)
+				}
+				escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
+				return fmt.Sprintf("NOT ARRAY_EXISTS(x -> x %s '%s', %s)", negOp, escapedVal, collExpr)
+			}
+		}
 		if strings.HasSuffix(criteria, ".exists()") {
 			subField := strings.TrimSpace(criteria[:len(criteria)-len(".exists()")])
 			fullPath := basePath
@@ -2921,16 +2949,27 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 			return fmt.Sprintf("NOT array_exists(x -> x LIKE '%s=|%%' AND SPLIT_PART(x, '|', 2) = '', r.code_tokens)", sp)
 		}
 		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+			negOp := negateComparisonOp(cOp)
+			if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
+				subField := strings.TrimSpace(cLHS[:len(cLHS)-len(".length()")])
+				fullPath := basePath
+				if subField != "" && subField != "$this" {
+					fullPath = basePath + "." + subField
+				}
+				sp := normalizeFHIRPathToSearchParam(fullPath)
+				trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
+				isStringParam := strings.HasPrefix(fullPath, "name") || fullPath == "given" || fullPath == "family" || strings.HasPrefix(fullPath, "address") || strings.HasPrefix(fullPath, "telecom")
+				if isStringParam {
+					return fmt.Sprintf("NOT array_exists(x -> x LIKE '%s=%%' AND CHAR_LENGTH(SPLIT_PART(x, '=', 2)) %s %s, r.string_tokens)", sp, negOp, trimmedRHS)
+				}
+				return fmt.Sprintf("NOT array_exists(x -> x LIKE '%s=|%%' AND CHAR_LENGTH(SPLIT_PART(x, '|', 2)) %s %s, r.code_tokens)", sp, negOp, trimmedRHS)
+			}
 			fullPath := basePath
 			if cLHS != "" && cLHS != "$this" {
 				fullPath = basePath + "." + cLHS
 			}
 			sp := normalizeFHIRPathToSearchParam(fullPath)
 			escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
-			negOp := "<>"
-			if cOp == "!=" || cOp == "<>" {
-				negOp = "="
-			}
 			isStringParam := strings.HasPrefix(fullPath, "name") || fullPath == "given" || fullPath == "family" || strings.HasPrefix(fullPath, "address") || strings.HasPrefix(fullPath, "telecom")
 			if isStringParam {
 				return fmt.Sprintf("NOT array_exists(x -> x LIKE '%s=%%' AND SPLIT_PART(x, '=', 2) %s '%s', r.string_tokens)", sp, negOp, escapedVal)
@@ -3075,7 +3114,43 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		}
 	}
 	if basePath, criteria, ok := parseCollectionCriteriaCall(p, ".exists("); ok {
+		if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+			collExpr, _ := dorisZeroJSONCollectionColumnExpr(basePath)
+			if strings.HasSuffix(criteria, ".exists()") {
+				return fmt.Sprintf("ARRAY_EXISTS(x -> x <> '', %s)", collExpr)
+			}
+			if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+				sqlOp := cOp
+				if sqlOp == "!=" {
+					sqlOp = "<>"
+				}
+				if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
+					trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
+					return fmt.Sprintf("ARRAY_EXISTS(x -> CHAR_LENGTH(x) %s %s, %s)", sqlOp, trimmedRHS, collExpr)
+				}
+				escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
+				return fmt.Sprintf("ARRAY_EXISTS(x -> x %s '%s', %s)", sqlOp, escapedVal, collExpr)
+			}
+		}
 		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+			if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
+				subField := strings.TrimSpace(cLHS[:len(cLHS)-len(".length()")])
+				fullPath := basePath
+				if subField != "" && subField != "$this" {
+					fullPath = basePath + "." + subField
+				}
+				sp := normalizeFHIRPathToSearchParam(fullPath)
+				trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
+				sqlOp := cOp
+				if sqlOp == "!=" {
+					sqlOp = "<>"
+				}
+				isStringParam := strings.HasPrefix(fullPath, "name") || fullPath == "given" || fullPath == "family" || strings.HasPrefix(fullPath, "address") || strings.HasPrefix(fullPath, "telecom")
+				if isStringParam {
+					return fmt.Sprintf("array_exists(x -> x LIKE '%s=%%' AND CHAR_LENGTH(SPLIT_PART(x, '=', 2)) %s %s, r.string_tokens)", sp, sqlOp, trimmedRHS)
+				}
+				return fmt.Sprintf("array_exists(x -> x LIKE '%s=|%%' AND CHAR_LENGTH(SPLIT_PART(x, '|', 2)) %s %s, r.code_tokens)", sp, sqlOp, trimmedRHS)
+			}
 			fullPath := basePath
 			if cLHS != "" && cLHS != "$this" {
 				fullPath = basePath + "." + cLHS
@@ -3190,6 +3265,25 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		return fmt.Sprintf("NOT array_contains(r.code_tokens, '%s=|%s')", sp, escapedRHS)
 	}
 	return fmt.Sprintf("array_contains(r.code_tokens, '%s=|%s')", sp, escapedRHS)
+}
+
+func negateComparisonOp(op string) string {
+	switch strings.TrimSpace(op) {
+	case "=":
+		return "<>"
+	case "!=", "<>":
+		return "="
+	case ">":
+		return "<="
+	case ">=":
+		return "<"
+	case "<":
+		return ">="
+	case "<=":
+		return ">"
+	default:
+		return "<>"
+	}
 }
 
 func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
@@ -4212,6 +4306,19 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 				}
 			}
 		}
+		if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+			subQ, _ := buildModifiedSpidxSubquery(mods, dialect)
+			switch fn {
+			case "anyTrue":
+				return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value = 'true')", subQ)
+			case "allTrue":
+				return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value = 'false')", subQ)
+			case "anyFalse":
+				return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value = 'false')", subQ)
+			case "allFalse":
+				return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value = 'true')", subQ)
+			}
+		}
 		sp := normalizeFHIRPathToSearchParam(basePath)
 		switch fn {
 		case "anyTrue":
@@ -4225,6 +4332,25 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 		}
 	}
 	if basePath, criteria, ok := parseCollectionCriteriaCall(p, ".all("); ok {
+		if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+			subQ, _ := buildModifiedSpidxSubquery(mods, dialect)
+			if strings.HasSuffix(criteria, ".exists()") {
+				return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value IS NULL OR sub.sp_value = '')", subQ)
+			}
+			if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+				negOp := negateComparisonOp(cOp)
+				if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
+					lenFn := "CHAR_LENGTH"
+					if dialect == "sqlite" {
+						lenFn = "LENGTH"
+					}
+					trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
+					return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE %s(sub.sp_value) %s %s)", subQ, lenFn, negOp, trimmedRHS)
+				}
+				escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
+				return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value %s '%s')", subQ, negOp, escapedVal)
+			}
+		}
 		if strings.HasSuffix(criteria, ".exists()") {
 			subField := strings.TrimSpace(criteria[:len(criteria)-len(".exists()")])
 			fullPath := basePath
@@ -4239,16 +4365,31 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 			return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND (t.sp_value IS NULL OR t.sp_value = ''))", sp)
 		}
 		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+			negOp := negateComparisonOp(cOp)
+			if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
+				subField := strings.TrimSpace(cLHS[:len(cLHS)-len(".length()")])
+				fullPath := basePath
+				if subField != "" && subField != "$this" {
+					fullPath = basePath + "." + subField
+				}
+				sp := normalizeFHIRPathToSearchParam(fullPath)
+				lenFn := "CHAR_LENGTH"
+				if dialect == "sqlite" {
+					lenFn = "LENGTH"
+				}
+				trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
+				isStringParam := strings.HasPrefix(fullPath, "name") || fullPath == "given" || fullPath == "family" || strings.HasPrefix(fullPath, "address") || strings.HasPrefix(fullPath, "telecom")
+				if isStringParam {
+					return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' AND %s(s.sp_value) %s %s)", sp, lenFn, negOp, trimmedRHS)
+				}
+				return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND %s(t.sp_value) %s %s)", sp, lenFn, negOp, trimmedRHS)
+			}
 			fullPath := basePath
 			if cLHS != "" && cLHS != "$this" {
 				fullPath = basePath + "." + cLHS
 			}
 			sp := normalizeFHIRPathToSearchParam(fullPath)
 			escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
-			negOp := "<>"
-			if cOp == "!=" || cOp == "<>" {
-				negOp = "="
-			}
 			isStringParam := strings.HasPrefix(fullPath, "name") || fullPath == "given" || fullPath == "family" || strings.HasPrefix(fullPath, "address") || strings.HasPrefix(fullPath, "telecom")
 			if isStringParam {
 				return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' AND s.sp_value %s '%s')", sp, negOp, escapedVal)
@@ -4388,17 +4529,57 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 		}
 	}
 	if basePath, criteria, ok := parseCollectionCriteriaCall(p, ".exists("); ok {
+		if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+			subQ, _ := buildModifiedSpidxSubquery(mods, dialect)
+			if strings.HasSuffix(criteria, ".exists()") {
+				return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value IS NOT NULL AND sub.sp_value <> '')", subQ)
+			}
+			if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+				sqlOp := cOp
+				if sqlOp == "!=" {
+					sqlOp = "<>"
+				}
+				if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
+					lenFn := "CHAR_LENGTH"
+					if dialect == "sqlite" {
+						lenFn = "LENGTH"
+					}
+					trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
+					return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE %s(sub.sp_value) %s %s)", subQ, lenFn, sqlOp, trimmedRHS)
+				}
+				escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
+				return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value %s '%s')", subQ, sqlOp, escapedVal)
+			}
+		}
 		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+			sqlOp := cOp
+			if sqlOp == "!=" {
+				sqlOp = "<>"
+			}
+			if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
+				subField := strings.TrimSpace(cLHS[:len(cLHS)-len(".length()")])
+				fullPath := basePath
+				if subField != "" && subField != "$this" {
+					fullPath = basePath + "." + subField
+				}
+				sp := normalizeFHIRPathToSearchParam(fullPath)
+				lenFn := "CHAR_LENGTH"
+				if dialect == "sqlite" {
+					lenFn = "LENGTH"
+				}
+				trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
+				isStringParam := strings.HasPrefix(fullPath, "name") || fullPath == "given" || fullPath == "family" || strings.HasPrefix(fullPath, "address") || strings.HasPrefix(fullPath, "telecom")
+				if isStringParam {
+					return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' AND %s(s.sp_value) %s %s)", sp, lenFn, sqlOp, trimmedRHS)
+				}
+				return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND %s(t.sp_value) %s %s)", sp, lenFn, sqlOp, trimmedRHS)
+			}
 			fullPath := basePath
 			if cLHS != "" && cLHS != "$this" {
 				fullPath = basePath + "." + cLHS
 			}
 			sp := normalizeFHIRPathToSearchParam(fullPath)
 			escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
-			sqlOp := cOp
-			if sqlOp == "!=" {
-				sqlOp = "<>"
-			}
 			isStringParam := strings.HasPrefix(fullPath, "name") || fullPath == "given" || fullPath == "family" || strings.HasPrefix(fullPath, "address") || strings.HasPrefix(fullPath, "telecom")
 			if isStringParam {
 				return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' AND s.sp_value %s '%s')", sp, sqlOp, escapedVal)

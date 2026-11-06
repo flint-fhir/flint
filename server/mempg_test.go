@@ -333,7 +333,22 @@ func (c *memPGConn) ExecContext(_ context.Context, query string, args []driver.N
 		s.deleteSpidxForTenant(tenant)
 		return driver.RowsAffected(1), nil
 
-	case strings.Contains(q, "DELETE FROM fhir_resource") && strings.Contains(q, "res_type = $2") && strings.Contains(q, "res_id = $3"):
+	case strings.HasPrefix(q, "DELETE FROM fhir_resource_history h USING fhir_resource r"):
+		tenant := nvStr(args, 0)
+		removed := 0
+		kept := s.history[:0]
+		for _, h := range s.history {
+			cur := s.resources[memResKey(h.tenantID, h.resType, h.resID)]
+			if h.tenantID == tenant && cur != nil && h.version < cur.version {
+				removed++
+			} else {
+				kept = append(kept, h)
+			}
+		}
+		s.history = kept
+		return driver.RowsAffected(removed), nil
+
+	case strings.Contains(q, "DELETE FROM fhir_resource") && !strings.Contains(q, "fhir_resource_history") && strings.Contains(q, "res_type = $2") && strings.Contains(q, "res_id = $3"):
 		tenant, resType, resID := nvStr(args, 0), nvStr(args, 1), nvStr(args, 2)
 		key := memResKey(tenant, resType, resID)
 		if _, ok := s.resources[key]; ok {
@@ -348,21 +363,6 @@ func (c *memPGConn) ExecContext(_ context.Context, query string, args []driver.N
 		kept := s.history[:0]
 		for _, h := range s.history {
 			if h.tenantID == tenant && h.resType == resType && h.resID == resID {
-				removed++
-			} else {
-				kept = append(kept, h)
-			}
-		}
-		s.history = kept
-		return driver.RowsAffected(removed), nil
-
-	case strings.HasPrefix(q, "DELETE FROM fhir_resource_history h USING fhir_resource r"):
-		tenant := nvStr(args, 0)
-		removed := 0
-		kept := s.history[:0]
-		for _, h := range s.history {
-			cur := s.resources[memResKey(h.tenantID, h.resType, h.resID)]
-			if h.tenantID == tenant && cur != nil && h.version < cur.version {
 				removed++
 			} else {
 				kept = append(kept, h)

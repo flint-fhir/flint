@@ -560,6 +560,11 @@ func (s *Server) resolvePlanDefinition(ctx context.Context, tenant, defID, canon
 		if b, ok := builtins[defID]; ok {
 			return b, nil
 		}
+		if strings.EqualFold(defID, "hypertension-management") {
+			if b, ok := builtins["plandef-hypertension-control"]; ok {
+				return b, nil
+			}
+		}
 	}
 	for _, b := range builtins {
 		if u, _ := b["url"].(string); strings.EqualFold(u, canonical) || strings.EqualFold(b["id"].(string), canonical) {
@@ -606,6 +611,11 @@ func (s *Server) resolveActivityDefinition(ctx context.Context, tenant, defID, c
 	if defID != "" {
 		if b, ok := builtins[defID]; ok {
 			return b, nil
+		}
+		if strings.EqualFold(defID, "bp-monitoring-order") {
+			if b, ok := builtins["activitydef-bp-home-monitoring"]; ok {
+				return b, nil
+			}
 		}
 	}
 	for _, b := range builtins {
@@ -1318,6 +1328,26 @@ func (s *Server) handleDataRequirements(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	if strings.Contains(defID, "/") {
+		if strings.HasPrefix(defID, "http://") || strings.HasPrefix(defID, "https://") {
+			if canonical == "" {
+				canonical = defID
+			}
+			c := defID
+			if idx := strings.IndexByte(c, '|'); idx != -1 {
+				c = c[:idx]
+			}
+			if slash := strings.LastIndexByte(c, '/'); slash != -1 {
+				defID = strings.TrimSpace(c[slash+1:])
+			}
+		} else if parts := strings.SplitN(defID, "/", 2); len(parts) == 2 {
+			if resType == "" && strings.TrimSpace(parts[0]) != "" {
+				resType = strings.TrimSpace(parts[0])
+			}
+			defID = strings.TrimSpace(parts[1])
+		}
+	}
+
 	scopeTarget := resType
 	if scopeTarget == "" {
 		scopeTarget = "Library"
@@ -1463,7 +1493,7 @@ func (s *Server) resolveDataRequirementsLibrary(
 	}
 
 	switch normKey {
-	case "cms165-bp-control", "cms165-logic", "cms165", "library-cms165", "plandef-hypertension-control":
+	case "cms165-bp-control", "cms165-logic", "cms165", "library-cms165", "plandef-hypertension-control", "hypertension-management":
 		obsReq := map[string]any{
 			"type":    "Observation",
 			"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-blood-pressure"},
@@ -1523,7 +1553,7 @@ func (s *Server) resolveDataRequirementsLibrary(
 			},
 			obsReq,
 		}
-		if normKey == "plandef-hypertension-control" {
+		if normKey == "plandef-hypertension-control" || normKey == "hypertension-management" {
 			reqs = append(reqs, map[string]any{
 				"type":    "MedicationRequest",
 				"profile": []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationrequest"},
@@ -1918,10 +1948,23 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 							if expr == "" {
 								expr = extractParamString(pm)
 							}
-						case "resource":
-							if rm, ok := pm["resource"].(map[string]any); ok {
-								inlineResource = rm
-							} else if refStr := extractParamString(pm); refStr != "" && resID == "" {
+						case "resource", "subject", "patient", "input":
+							if rm, ok := pm["resource"].(map[string]any); ok && len(rm) > 0 {
+								if _, hasRT := rm["resourceType"].(string); hasRT {
+									inlineResource = rm
+								} else {
+									for k, v := range rm {
+										if inner, ok := v.(map[string]any); ok && len(inner) > 0 {
+											if _, hasInnerRT := inner["resourceType"].(string); !hasInnerRT && len(k) > 0 {
+												inner["resourceType"] = strings.ToUpper(k[:1]) + k[1:]
+											}
+											inlineResource = inner
+											break
+										}
+									}
+								}
+							}
+							if refStr := extractParamStringOrRef(pm); refStr != "" && resID == "" {
 								if parts := strings.SplitN(refStr, "/", 2); len(parts) == 2 {
 									resType = strings.TrimSpace(parts[0])
 									resID = strings.TrimSpace(parts[1])
@@ -6131,7 +6174,7 @@ func (s *Server) handleResourceConvert(w http.ResponseWriter, r *http.Request) {
 		}
 
 		inputMap := bodyMap
-		if bodyMap["resourceType"] == "Parameters" {
+		if bodyMap["resourceType"] == "Parameters" && !strings.EqualFold(strings.TrimSpace(r.PathValue("resourceType")), "Parameters") {
 			inputMap = nil
 			if params, ok := bodyMap["parameter"].([]any); ok {
 				for _, rawP := range params {
@@ -6156,9 +6199,6 @@ func (s *Server) handleResourceConvert(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
-			}
-			if inputMap == nil && strings.EqualFold(strings.TrimSpace(r.PathValue("resourceType")), "Parameters") {
-				inputMap = bodyMap
 			}
 		}
 

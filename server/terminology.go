@@ -326,11 +326,20 @@ func (s *Server) resolveValueSetConceptsWithDepth(ctx context.Context, tenant, v
 		vsMap = inlineVS
 	} else if vsID != "" && s.store != nil {
 		rec, err := s.store.ReadResourceWithMeta(ctx, tenant, "ValueSet", vsID)
-		if err != nil {
-			return "", "", nil, err
-		}
-		if m, err := s.protoToFHIRMapWithMeta("ValueSet", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
-			vsMap = m
+		if err == nil {
+			if m, err := s.protoToFHIRMapWithMeta("ValueSet", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+				vsMap = m
+			}
+		} else {
+			for _, candURL := range []string{"http://hl7.org/fhir/ValueSet/" + vsID, "http://hl7.org/fhir/us/core/ValueSet/" + vsID} {
+				if _, ok := builtInValueSetToCodeSystem[candURL]; ok {
+					vsURL = candURL
+					break
+				}
+			}
+			if vsURL == "" {
+				return "", "", nil, err
+			}
 		}
 	} else if vsURL != "" && s.store != nil {
 		sr, err := s.store.Search(ctx, postgres.SearchParams{
@@ -647,11 +656,28 @@ func (s *Server) resolveCodeSystemConceptsWithInline(ctx context.Context, tenant
 		csMap = inlineCS
 	} else if csID != "" && s.store != nil {
 		rec, err := s.store.ReadResourceWithMeta(ctx, tenant, "CodeSystem", csID)
-		if err != nil {
-			return nil, "", err
-		}
-		if m, err := s.protoToFHIRMapWithMeta("CodeSystem", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
-			csMap = m
+		if err == nil {
+			if m, err := s.protoToFHIRMapWithMeta("CodeSystem", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+				csMap = m
+			}
+		} else {
+			builtInByID := map[string]string{
+				"administrative-gender":       "http://hl7.org/fhir/administrative-gender",
+				"loinc":                       "http://loinc.org",
+				"snomed-ct":                   "http://snomed.info/sct",
+				"sct":                         "http://snomed.info/sct",
+				"snomed":                      "http://snomed.info/sct",
+				"rxnorm":                      "http://www.nlm.nih.gov/research/umls/rxnorm",
+				"observation-status":          "http://hl7.org/fhir/observation-status",
+				"condition-clinical":          "http://terminology.hl7.org/CodeSystem/condition-clinical",
+				"allergyintolerance-clinical": "http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical",
+				"observation-category":        "http://terminology.hl7.org/CodeSystem/observation-category",
+			}
+			if bURL, ok := builtInByID[strings.ToLower(strings.TrimSpace(csID))]; ok {
+				csURL = bURL
+			} else if csURL == "" {
+				return nil, "", err
+			}
 		}
 	} else if csURL != "" && s.store != nil {
 		sr, err := s.store.Search(ctx, postgres.SearchParams{
@@ -1280,10 +1306,19 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 	} else if cmID != "" && s.store != nil {
 		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "ConceptMap", cmID)
 		if err != nil {
-			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("ConceptMap/%s not found", cmID))
-			return
-		}
-		if cmMap, err := s.protoToFHIRMapWithMeta("ConceptMap", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+			builtInCMByID := map[string]string{
+				"loinc-to-snomed":    "http://hl7.org/fhir/ConceptMap/cm-loinc-to-snomed",
+				"cm-loinc-to-snomed": "http://hl7.org/fhir/ConceptMap/cm-loinc-to-snomed",
+				"snomed-to-icd10":    "http://hl7.org/fhir/ConceptMap/cm-snomed-to-icd10",
+				"cm-snomed-to-icd10": "http://hl7.org/fhir/ConceptMap/cm-snomed-to-icd10",
+			}
+			if bURL, ok := builtInCMByID[strings.ToLower(strings.TrimSpace(cmID))]; ok {
+				cmURL = bURL
+			} else {
+				writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("ConceptMap/%s not found", cmID))
+				return
+			}
+		} else if cmMap, err := s.protoToFHIRMapWithMeta("ConceptMap", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
 			candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
 			foundExplicitMap = true
 		}
