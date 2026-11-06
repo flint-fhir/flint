@@ -2600,14 +2600,18 @@ func (s *Server) handleGroupMemberMutate(w http.ResponseWriter, r *http.Request,
 					if !ok {
 						continue
 					}
-					if v := extractParamString(pm); v != "" {
-						memberRefs = append(memberRefs, v)
-					}
-					if parts, ok := pm["part"].([]any); ok {
-						for _, pt := range parts {
-							if ptm, ok := pt.(map[string]any); ok {
-								if v := extractParamString(ptm); v != "" {
-									memberRefs = append(memberRefs, v)
+					pName, _ := pm["name"].(string)
+					switch strings.ToLower(strings.TrimSpace(pName)) {
+					case "member", "members", "memberid", "patient", "subject", "entity", "":
+						if v := firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)); v != "" {
+							memberRefs = append(memberRefs, v)
+						}
+						if parts, ok := pm["part"].([]any); ok {
+							for _, pt := range parts {
+								if ptm, ok := pt.(map[string]any); ok {
+									if v := firstNonEmptyStr(extractParamStringOrRef(ptm), extractParamString(ptm)); v != "" {
+										memberRefs = append(memberRefs, v)
+									}
 								}
 							}
 						}

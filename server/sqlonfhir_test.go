@@ -4397,4 +4397,93 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(scBytes), want)
 		}
 	}
+
+	// 48. Wave 93: Chained .distinct().sort()/.sortDesc() & .split().first()/.last()/.count() $sql Pushdown
+	distSortSplitVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_distinct_sort_split_v1",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "dist_sorted_arr", "path": "name.given.distinct().sort()", "collection": true},
+					{"name": "dist_sorted_join", "path": "name.given.distinct().sort().join(',')"},
+					{"name": "dist_rev_join", "path": "name.given.distinct().sortDesc().join(',')"},
+					{"name": "dist_first", "path": "name.given.distinct().sort().first()"},
+					{"name": "dist_last", "path": "name.given.distinct().sort().last()"},
+					{"name": "id_prefix", "path": "id.split('-').first()"},
+					{"name": "id_suffix", "path": "id.split('-').last()"},
+					{"name": "id_parts", "path": "id.split('-').count()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "name.given.distinct().sort().first() = 'Alice' and id.split('-').first() = 'proto' and id.split('-').count() = 3"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_SORT(ARRAY_DISTINCT(",
+				"ARRAY_JOIN(ARRAY_SORT(ARRAY_DISTINCT(",
+				"ARRAY_JOIN(ARRAY_REVERSE_SORT(ARRAY_DISTINCT(",
+				"element_at(ARRAY_SORT(ARRAY_DISTINCT(",
+				"element_at(SPLIT_BY_STRING(r.res_id, '-'), 1)",
+				"element_at(SPLIT_BY_STRING(r.res_id, '-'), -1)",
+				"ARRAY_SIZE(SPLIT_BY_STRING(r.res_id, '-'))",
+				"= 'Alice'",
+				"= 'proto'",
+				"= 3",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"SELECT DISTINCT s.sp_value",
+				"ORDER BY sp_value ASC) sub) AS dist_sorted_join",
+				"ORDER BY sp_value DESC) sub) AS dist_rev_join",
+				"ORDER BY s.sp_value ASC LIMIT 1) AS dist_first",
+				"ORDER BY s.sp_value DESC LIMIT 1) AS dist_last",
+				"SPLIT_PART(r.res_id, '-', 1) AS id_prefix",
+				"[ARRAY_UPPER(STRING_TO_ARRAY(r.res_id, '-'), 1)] AS id_suffix",
+				"COALESCE(ARRAY_LENGTH(STRING_TO_ARRAY(r.res_id, '-'), 1), 0) AS id_parts",
+				"= 'Alice'",
+				"= 'proto'",
+				"= 3",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"SELECT DISTINCT s.sp_value",
+				"ORDER BY sp_value ASC) sub) AS dist_sorted_join",
+				"ORDER BY sp_value DESC) sub) AS dist_rev_join",
+				"ORDER BY s.sp_value ASC LIMIT 1) AS dist_first",
+				"ORDER BY s.sp_value DESC LIMIT 1) AS dist_last",
+				"INSTR(r.res_id, '-')",
+				"RTRIM(r.res_id, REPLACE(r.res_id, '-', ''))",
+				"LENGTH(r.res_id) - LENGTH(REPLACE(r.res_id, '-', ''))",
+				"= 'Alice'",
+				"= 'proto'",
+				"= 3",
+			},
+		},
+	} {
+		reqDSS, dssErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(distSortSplitVD))
+		require.NoError(t, dssErr)
+		reqDSS.Header.Set("Content-Type", "application/fhir+json")
+		respDSS, dssErr := client.Do(reqDSS)
+		require.NoError(t, dssErr)
+		dssBytes, _ := io.ReadAll(respDSS.Body)
+		respDSS.Body.Close()
+		require.Equal(t, http.StatusOK, respDSS.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(dssBytes), want)
+		}
+	}
 }
