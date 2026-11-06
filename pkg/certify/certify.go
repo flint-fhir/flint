@@ -5068,6 +5068,81 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-32", suite10, "Zero-JSON Binary Proto3 System/Type/Instance Administrative, Lifecycle, Validation, FHIRPath & Messaging Operations (/$expunge, /Patient/$expunge, /Patient/{id}/$expunge, /Patient/{id}/$purge, /$reindex, /Patient/$reindex, /$diff, /Patient/{id}/$diff, /$data-requirements, /$fhirpath, /Patient/{id}/$fhirpath, /$validate, /Patient/{id}/$validate, /MessageHeader/$process-message), Instance & Type-Level Terminology POST Operations (ConceptMap/$closure, ValueSet/{id}/$expand, ValueSet/{id}/$validate-code, CodeSystem/{id}/$lookup, CodeSystem/{id}/$validate-code, CodeSystem/{id}/$subsumes, CodeSystem/{id}/$find-matches, ConceptMap/{id}/$translate), Instance-Level Clinical Reasoning, Subscriptions, IPS/Document & SDC POST Operations (PlanDefinition/{id}/$apply, ActivityDefinition/{id}/$apply, Library/{id}/$data-requirements, PlanDefinition/{id}/$data-requirements, Subscription/{id}/$status, Subscription/{id}/$events, Patient/{id}/$summary, Composition/{id}/$document, Questionnaire/{id}/$populate, QuestionnaireResponse/{id}/$extract) & SQL-on-FHIR v2 Chained Universal & Boolean Collection Quantifiers (.all, .exists, .anyTrue, .allTrue, .anyFalse, .allFalse) $sql Pushdown", t0, err, "Binary Proto3 32 system/type/instance admin, terminology, clinical reasoning, subscription, IPS/document & SDC operations & chained collection quantifiers $sql pushdown verified")
 
+	// AN-33: Zero-JSON Binary Proto3 System, Type & Instance-Level Analytics, Da Vinci, CDS Hooks & Bulk Export Operations (POST /$sync-analytics, POST /$davinci-data-export, POST /Group/{id}/$davinci-data-export, POST /$submit-attachment, POST /Patient/$bulk-member-match, POST /AuditEvent/$verify-integrity, POST /CapabilityStatement/$subset, POST /CapabilityStatement/$implements, POST /NamingSystem/$preferred-id, POST /cds-services/{serviceId}/$dsi-attributes), Type & Instance-Level Clinical, Observation, Document, Scheduling, List, Directory & eCQM POST Operations (POST /Observation/$lastn, POST /Observation/$stats, POST /DocumentReference/$docref, POST /Composition/$document, POST /Appointment/$find, POST /Schedule/$find, POST /List/$find, POST /PractitionerRole/$find-providers, POST /HealthcareService/$find-services, POST /Measure/$evaluate-measure, POST /Measure/{id}/$evaluate-measure, POST /Measure/{id}/$care-gaps), Instance-Level Group Cohort, Inpatient/Lab/Pharmacy, SMART Health Cards, Payer PCDE, Immunization DS & IHE PIXm POST Operations (POST /Group/{id}/$member-add, POST /Group/{id}/$member-remove, POST /ServiceRequest/{id}/$collect-specimen, POST /DiagnosticReport/{id}/$evaluate, POST /MedicationRequest/{id}/$dispense, POST /MedicationRequest/{id}/$check-interactions, POST /Patient/{id}/$health-cards-issue, POST /Patient/{id}/$pcde, POST /Patient/{id}/$immds-forecast, POST /Patient/{id}/$ihe-pix) & SQL-on-FHIR v2 Chained Element-Wise String Transformations (.lower(), .upper(), .trim(), .length(), .replace(), .substring()) on Collection Paths $sql Pushdown
+	t0 = time.Now()
+	{
+		_, bW99ParamsProto, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", []byte(`{"resourceType":"Parameters","parameter":[{"name":"measure","valueString":"CMS165"},{"name":"periodStart","valueDate":"2026-01-01"},{"name":"periodEnd","valueDate":"2026-12-31"},{"name":"subject","valueString":"Patient/cert-pat-1"},{"name":"patient","valueString":"Patient/cert-pat-1"},{"name":"resource","valueCode":"Patient"},{"name":"name","valueString":"medications"},{"name":"code","valueCode":"8867-4"},{"name":"statistic","valueCode":"average"},{"name":"start","valueDateTime":"2026-01-01T00:00:00Z"},{"name":"end","valueDateTime":"2026-12-31T23:59:59Z"},{"name":"specialty","valueString":"207RC0000X"},{"name":"memberId","valueString":"Patient/cert-pat-1"},{"name":"sourceIdentifier","valueString":"http://hospital.example.org/mrn|CERT-MRN-1"},{"name":"MemberPatient","resource":{"resourceType":"Patient","id":"cert-pat-1","active":true,"gender":"female","birthDate":"1985-04-12","name":[{"family":"Certify","given":["Alice"]}]}},{"name":"Attachment","resource":{"resourceType":"DocumentReference","id":"cert-cdex-doc-w99-1","status":"current","type":{"coding":[{"system":"http://loinc.org","code":"34117-2"}]},"subject":{"reference":"Patient/cert-pat-1"},"content":[{"attachment":{"contentType":"text/plain","data":"SGVsbG8="}}]}}]}`), map[string]string{"Accept": "application/x-protobuf"})
+		_, bW99NamingParamsProto, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", []byte(`{"resourceType":"Parameters","parameter":[{"name":"id","valueString":"http://loinc.org"},{"name":"type","valueCode":"oid"}]}`), map[string]string{"Accept": "application/x-protobuf"})
+		_, bW99CompDocParamsProto, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", []byte(`{"resourceType":"Parameters","parameter":[{"name":"id","valueString":"Composition/cert-w98-comp-1"}]}`), map[string]string{"Accept": "application/x-protobuf"})
+		_, bW99CapStmtProto, _ := doReq(http.MethodPost, basePath+"/CapabilityStatement/$convert", "application/fhir+json", []byte(`{"resourceType":"CapabilityStatement","status":"active","date":"2026-01-01","kind":"requirements","fhirVersion":"4.0.1","format":["json"]}`), map[string]string{"Accept": "application/x-protobuf"})
+
+		var opCheckErr error
+		for _, opTC := range []struct {
+			ep   string
+			body []byte
+		}{
+			{"/$sync-analytics", bW99ParamsProto},
+			{"/Patient/$bulk-member-match", bW99ParamsProto},
+			{"/$davinci-data-export", bW99ParamsProto},
+			{"/Group/pdex-matched-group-1/$davinci-data-export", bW99ParamsProto},
+			{"/$submit-attachment", bW99ParamsProto},
+			{"/AuditEvent/$verify-integrity", bW99ParamsProto},
+			{"/CapabilityStatement/$subset", bW99ParamsProto},
+			{"/CapabilityStatement/$implements", bW99CapStmtProto},
+			{"/NamingSystem/$preferred-id", bW99NamingParamsProto},
+			{"/cds-services/flint-hypertension-care-gap/$dsi-attributes", bW99ParamsProto},
+			{"/Observation/$lastn", bW99ParamsProto},
+			{"/Observation/$stats", bW99ParamsProto},
+			{"/DocumentReference/$docref", bW99ParamsProto},
+			{"/Composition/$document", bW99CompDocParamsProto},
+			{"/Appointment/$find", bW99ParamsProto},
+			{"/Schedule/$find", bW99ParamsProto},
+			{"/List/$find", bW99ParamsProto},
+			{"/PractitionerRole/$find-providers", bW99ParamsProto},
+			{"/HealthcareService/$find-services", bW99ParamsProto},
+			{"/Measure/$evaluate-measure", bW99ParamsProto},
+			{"/Measure/cms165-bp-control/$evaluate-measure", bW99ParamsProto},
+			{"/Measure/cms165-bp-control/$care-gaps", bW99ParamsProto},
+			{"/Group/pdex-matched-group-1/$member-add", bW99ParamsProto},
+			{"/Group/pdex-matched-group-1/$member-remove", bW99ParamsProto},
+			{"/ServiceRequest/cert-sr-1/$collect-specimen", bW99ParamsProto},
+			{"/DiagnosticReport/cert-dr-1/$evaluate", bW99ParamsProto},
+			{"/MedicationRequest/cert-medreq-1/$dispense", bW99ParamsProto},
+			{"/MedicationRequest/cert-medreq-1/$check-interactions", bW99ParamsProto},
+			{"/Patient/cert-pat-1/$health-cards-issue", bW99ParamsProto},
+			{"/Patient/cert-pat-1/$pcde", bW99ParamsProto},
+			{"/Patient/cert-pat-1/$immds-forecast", bW99ParamsProto},
+			{"/Patient/cert-pat-1/$ihe-pix", bW99ParamsProto},
+		} {
+			respOp, bOp, errOp := doReq(http.MethodPost, basePath+opTC.ep, "application/x-protobuf", opTC.body, map[string]string{
+				"Accept": "application/x-protobuf",
+			})
+			if errOp != nil || respOp.StatusCode != http.StatusOK || !strings.Contains(respOp.Header.Get("Content-Type"), "application/x-protobuf") || len(bOp) == 0 {
+				status := 0
+				if respOp != nil {
+					status = respOp.StatusCode
+				}
+				opCheckErr = fmt.Errorf("expected POST %s with binary Proto3 payload to return binary Proto3 response, got %d (err=%v, body=%s)", opTC.ep, status, errOp, string(bOp))
+				break
+			}
+		}
+
+		collMapVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_collection_map_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"lower_sorted_given","path":"name.given.distinct().lower().sort().join(',')"},{"name":"upper_first_given","path":"name.given.upper().sortDesc().first()"},{"name":"trimmed_last_given","path":"name.given.trim().sort().last()"},{"name":"replaced_given","path":"name.given.replace('a','A').distinct().join('|')"},{"name":"initials_joined","path":"name.given.substring(0,1).distinct().sort().join('')"},{"name":"given_len_sum","path":"name.given.distinct().length().sum()"},{"name":"lower_given_arr","path":"name.given.distinct().lower()","collection":true}]}],"where":[{"path":"name.given.lower().exists($this = 'alice') and name.given.trim().all($this.length() >= 3) and name.given.distinct().length().sum() >= 5"}]}`)
+		respCMDoris, bCMDoris, errCMDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", collMapVD, nil)
+		respCMPg, bCMPg, errCMPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", collMapVD, nil)
+
+		if opCheckErr != nil {
+			err = opCheckErr
+		} else if errCMDoris != nil || respCMDoris.StatusCode != http.StatusOK || !strings.Contains(string(bCMDoris), "ARRAY_JOIN(ARRAY_SORT(ARRAY_MAP(x -> LOWER(x), ARRAY_DISTINCT(") || !strings.Contains(string(bCMDoris), "element_at(ARRAY_REVERSE_SORT(ARRAY_MAP(x -> UPPER(x),") || !strings.Contains(string(bCMDoris), "ARRAY_MAP(x -> REPLACE(x, 'a', 'A'),") || !strings.Contains(string(bCMDoris), "ARRAY_MAP(x -> SUBSTR(x, 1, 1),") || !strings.Contains(string(bCMDoris), "ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> CHAR_LENGTH(x), ARRAY_DISTINCT(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with chained collection string map pushdown, got %d: %s", respCMDoris.StatusCode, string(bCMDoris))
+		} else if errCMPg != nil || respCMPg.StatusCode != http.StatusOK || !strings.Contains(string(bCMPg), "SELECT DISTINCT LOWER(s.sp_value) AS sp_value FROM spidx_string s") || !strings.Contains(string(bCMPg), "SELECT UPPER(s.sp_value) AS sp_value FROM spidx_string s") || !strings.Contains(string(bCMPg), "SELECT DISTINCT REPLACE(s.sp_value, 'a', 'A') AS sp_value FROM spidx_string s") || !strings.Contains(string(bCMPg), "SELECT DISTINCT SUBSTR(s.sp_value, 1, 1) AS sp_value FROM spidx_string s") || !strings.Contains(string(bCMPg), "SELECT SUM(CAST(sub.sp_value AS DOUBLE PRECISION)) FROM (SELECT DISTINCT CHAR_LENGTH(s.sp_value) AS sp_value FROM spidx_string s") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with chained collection string map pushdown, got %d: %s", respCMPg.StatusCode, string(bCMPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-33", suite10, "Zero-JSON Binary Proto3 System, Type & Instance-Level Analytics, Da Vinci, CDS Hooks & Bulk Export Operations (/$sync-analytics, /$davinci-data-export, /Group/{id}/$davinci-data-export, /$submit-attachment, /Patient/$bulk-member-match, /AuditEvent/$verify-integrity, /CapabilityStatement/$subset, /CapabilityStatement/$implements, /NamingSystem/$preferred-id, /cds-services/{serviceId}/$dsi-attributes), Type & Instance-Level Clinical, Observation, Document, Scheduling, List, Directory & eCQM POST Operations (/Observation/$lastn, /Observation/$stats, /DocumentReference/$docref, /Composition/$document, /Appointment/$find, /Schedule/$find, /List/$find, /PractitionerRole/$find-providers, /HealthcareService/$find-services, /Measure/$evaluate-measure, /Measure/{id}/$evaluate-measure, /Measure/{id}/$care-gaps), Instance-Level Group Cohort, Inpatient/Lab/Pharmacy, SMART Health Cards, Payer PCDE, Immunization DS & IHE PIXm POST Operations (/Group/{id}/$member-add, /Group/{id}/$member-remove, /ServiceRequest/{id}/$collect-specimen, /DiagnosticReport/{id}/$evaluate, /MedicationRequest/{id}/$dispense, /MedicationRequest/{id}/$check-interactions, /Patient/{id}/$health-cards-issue, /Patient/{id}/$pcde, /Patient/{id}/$immds-forecast, /Patient/{id}/$ihe-pix) & SQL-on-FHIR v2 Chained Element-Wise String Transformations (.lower, .upper, .trim, .length, .replace, .substring) on Collection Paths $sql Pushdown", t0, err, "Binary Proto3 32 system/type/instance analytics, Da Vinci, CDS Hooks, clinical, observation, scheduling, directory, eCQM, cohort, lab, pharmacy, SHC, PCDE, ImmDS & PIXm operations & chained collection string map $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

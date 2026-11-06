@@ -5150,4 +5150,164 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", opTC.ep)
 		assert.NotEmpty(t, opBytes, "endpoint %s", opTC.ep)
 	}
+
+	// 48. Wave 99: SQL-on-FHIR v2 Chained Element-Wise String Transformations on Collection Paths ($sql & $run) + 32 Binary Proto3 POST Operations
+	elemStrVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_collection_elem_str_transforms",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "lower_sorted_given", "path": "name.given.distinct().lower().sort().join(',')"},
+					{"name": "upper_first_given", "path": "name.given.upper().sortDesc().first()"},
+					{"name": "trim_last_given", "path": "name.given.trim().sort().last()"},
+					{"name": "repl_given", "path": "name.given.distinct().replace('a', 'A').sort().join(',')"},
+					{"name": "sub_given", "path": "name.given.distinct().substring(0, 1).sort().join(',')"},
+					{"name": "sum_given_len", "path": "name.given.distinct().length().sum()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "name.given.lower().first().exists()"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_JOIN(ARRAY_SORT(ARRAY_MAP(x -> LOWER(x), ARRAY_DISTINCT(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))))), ',') AS lower_sorted_given",
+				"element_at(ARRAY_REVERSE_SORT(ARRAY_MAP(x -> UPPER(x), ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)))), 1) AS upper_first_given",
+				"element_at(ARRAY_SORT(ARRAY_MAP(x -> TRIM(x), ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)))), -1) AS trim_last_given",
+				"ARRAY_JOIN(ARRAY_SORT(ARRAY_MAP(x -> REPLACE(x, 'a', 'A'), ARRAY_DISTINCT(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))))), ',') AS repl_given",
+				"ARRAY_JOIN(ARRAY_SORT(ARRAY_MAP(x -> SUBSTR(x, 1, 1), ARRAY_DISTINCT(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens))))), ',') AS sub_given",
+				"ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> CHAR_LENGTH(x), ARRAY_DISTINCT(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)))))) AS sum_given_len",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"SELECT DISTINCT LOWER(s.sp_value) AS sp_value FROM spidx_string s",
+				"SELECT UPPER(s.sp_value) AS sp_value FROM spidx_string s",
+				"SELECT TRIM(s.sp_value) AS sp_value FROM spidx_string s",
+				"SELECT DISTINCT REPLACE(s.sp_value, 'a', 'A') AS sp_value FROM spidx_string s",
+				"SELECT DISTINCT SUBSTR(s.sp_value, 1, 1) AS sp_value FROM spidx_string s",
+				"SELECT SUM(CAST(sub.sp_value AS DOUBLE PRECISION)) FROM (SELECT DISTINCT CHAR_LENGTH(s.sp_value) AS sp_value FROM spidx_string s",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"SELECT DISTINCT LOWER(s.sp_value) AS sp_value FROM spidx_string s",
+				"SELECT UPPER(s.sp_value) AS sp_value FROM spidx_string s",
+				"SELECT TRIM(s.sp_value) AS sp_value FROM spidx_string s",
+				"SELECT DISTINCT REPLACE(s.sp_value, 'a', 'A') AS sp_value FROM spidx_string s",
+				"SELECT DISTINCT SUBSTR(s.sp_value, 1, 1) AS sp_value FROM spidx_string s",
+				"SELECT SUM(CAST(sub.sp_value AS REAL)) FROM (SELECT DISTINCT LENGTH(s.sp_value) AS sp_value FROM spidx_string s",
+			},
+		},
+	} {
+		reqES, esErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(elemStrVD))
+		require.NoError(t, esErr)
+		reqES.Header.Set("Content-Type", "application/fhir+json")
+		respES, esErr := client.Do(reqES)
+		require.NoError(t, esErr)
+		esBytes, _ := io.ReadAll(respES.Body)
+		respES.Body.Close()
+		require.Equal(t, http.StatusOK, respES.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(esBytes), want)
+		}
+	}
+
+	reqESRun, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run", strings.NewReader(elemStrVD))
+	require.NoError(t, err)
+	reqESRun.Header.Set("Content-Type", "application/fhir+json")
+	respESRun, err := client.Do(reqESRun)
+	require.NoError(t, err)
+	esRunBytes, _ := io.ReadAll(respESRun.Body)
+	respESRun.Body.Close()
+	require.Equal(t, http.StatusOK, respESRun.StatusCode)
+	assert.Contains(t, string(esRunBytes), `"lower_sorted_given"`)
+	assert.Contains(t, string(esRunBytes), `"upper_first_given"`)
+
+	for _, seed := range []struct {
+		path string
+		body string
+	}{
+		{"/fhir/r4/proto/Group/w99-grp-1", `{"resourceType":"Group","id":"w99-grp-1","type":"person","actual":true,"name":"Wave 99 Cohort","member":[{"entity":{"reference":"Patient/proto-pat-1"}}]}`},
+		{"/fhir/r4/proto/ServiceRequest/w99-sr-1", `{"resourceType":"ServiceRequest","id":"w99-sr-1","status":"active","intent":"order","code":{"coding":[{"system":"http://loinc.org","code":"2345-7","display":"Glucose"}]},"subject":{"reference":"Patient/proto-pat-1"}}`},
+		{"/fhir/r4/proto/DiagnosticReport/w99-dr-1", `{"resourceType":"DiagnosticReport","id":"w99-dr-1","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"24323-8","display":"Comprehensive metabolic 2000 panel"}]},"subject":{"reference":"Patient/proto-pat-1"}}`},
+		{"/fhir/r4/proto/MedicationRequest/w99-mr-1", `{"resourceType":"MedicationRequest","id":"w99-mr-1","status":"active","intent":"order","medicationCodeableConcept":{"coding":[{"system":"http://www.nlm.nih.gov/research/umls/rxnorm","code":"197361","display":"Amlodipine 5 MG Oral Tablet"}]},"subject":{"reference":"Patient/proto-pat-1"}}`},
+	} {
+		reqSeed, sErr := http.NewRequest(http.MethodPut, ts.URL+seed.path, strings.NewReader(seed.body))
+		require.NoError(t, sErr)
+		reqSeed.Header.Set("Content-Type", "application/fhir+json")
+		respSeed, sErr := client.Do(reqSeed)
+		require.NoError(t, sErr)
+		respSeed.Body.Close()
+	}
+
+	bSyncW99 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"since","valueString":"2020-01-01T00:00:00Z"}]}`)
+	bBMMW99 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"MemberPatient","resource":{"resourceType":"Patient","id":"proto-pat-1","gender":"female","birthDate":"1980-01-01","name":[{"family":"ValidPat","given":["Alice"]}]}}]}`)
+	bSubAttW99 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"TrackingId","valueString":"TRK-W99-1"},{"name":"AttachTo","valueString":"Claim"},{"name":"Member","resource":{"resourceType":"Patient","id":"proto-pat-1"}},{"name":"Attachment","resource":{"resourceType":"DocumentReference","id":"w99-att-doc-1","status":"current","subject":{"reference":"Patient/proto-pat-1"},"content":[{"attachment":{"contentType":"text/plain","data":"SGVsbG8="}}]}}]}`)
+	bCapW99 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"resource","valueCode":"Patient"},{"name":"resource","valueCode":"Observation"},{"name":"server","valueUri":"http://flint.fhir.org/CapabilityStatement/base"}]}`)
+	bCapImplW99 := toProtoHelper("CapabilityStatement", `{"resourceType":"CapabilityStatement","status":"active","date":"2026-01-01","kind":"requirements","fhirVersion":"4.0.1","format":["json"]}`)
+	bNSW99 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"id","valueString":"http://loinc.org"},{"name":"type","valueCode":"oid"}]}`)
+	bClinW99 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"Patient/proto-pat-1"},{"name":"subject","valueString":"Patient/proto-pat-1"},{"name":"id","valueString":"Composition/w98-comp-1"},{"name":"name","valueString":"medications"},{"name":"code","valueCode":"8867-4"},{"name":"statistic","valueCode":"average"},{"name":"measure","valueString":"CMS165"},{"name":"periodStart","valueDate":"2020-01-01"},{"name":"periodEnd","valueDate":"2030-12-31"},{"name":"start","valueDateTime":"2020-01-01T00:00:00Z"},{"name":"end","valueDateTime":"2030-12-31T23:59:59Z"},{"name":"specialty","valueString":"207RC0000X"},{"name":"memberId","valueString":"Patient/proto-pat-1"},{"name":"entity","valueReference":{"reference":"Patient/proto-pat-1"}},{"name":"sourceIdentifier","valueString":"http://hospital.example.org/mrn|MRN-PROTO-1"}]}`)
+
+	for _, opTC := range []struct {
+		ep   string
+		body []byte
+	}{
+		{"/fhir/r4/proto/$sync-analytics", bSyncW99},
+		{"/fhir/r4/proto/Patient/$bulk-member-match", bBMMW99},
+		{"/fhir/r4/proto/$davinci-data-export", bSyncW99},
+		{"/fhir/r4/proto/Group/w99-grp-1/$davinci-data-export", bSyncW99},
+		{"/fhir/r4/proto/$submit-attachment", bSubAttW99},
+		{"/fhir/r4/proto/AuditEvent/$verify-integrity", bSyncW99},
+		{"/fhir/r4/proto/CapabilityStatement/$subset", bCapW99},
+		{"/fhir/r4/proto/CapabilityStatement/$implements", bCapImplW99},
+		{"/fhir/r4/proto/NamingSystem/$preferred-id", bNSW99},
+		{"/fhir/r4/proto/cds-services/flint-hypertension-care-gap/$dsi-attributes", bSyncW99},
+		{"/fhir/r4/proto/Observation/$lastn", bClinW99},
+		{"/fhir/r4/proto/Observation/$stats", bClinW99},
+		{"/fhir/r4/proto/DocumentReference/$docref", bClinW99},
+		{"/fhir/r4/proto/Composition/$document", bClinW99},
+		{"/fhir/r4/proto/Appointment/$find", bClinW99},
+		{"/fhir/r4/proto/Schedule/$find", bClinW99},
+		{"/fhir/r4/proto/List/$find", bClinW99},
+		{"/fhir/r4/proto/PractitionerRole/$find-providers", bClinW99},
+		{"/fhir/r4/proto/HealthcareService/$find-services", bClinW99},
+		{"/fhir/r4/proto/Measure/$evaluate-measure", bClinW99},
+		{"/fhir/r4/proto/Measure/cms165-bp-control/$evaluate-measure", bClinW99},
+		{"/fhir/r4/proto/Measure/cms165-bp-control/$care-gaps", bClinW99},
+		{"/fhir/r4/proto/Group/w99-grp-1/$member-add", bClinW99},
+		{"/fhir/r4/proto/Group/w99-grp-1/$member-remove", bClinW99},
+		{"/fhir/r4/proto/ServiceRequest/w99-sr-1/$collect-specimen", bClinW99},
+		{"/fhir/r4/proto/DiagnosticReport/w99-dr-1/$evaluate", bClinW99},
+		{"/fhir/r4/proto/MedicationRequest/w99-mr-1/$dispense", bClinW99},
+		{"/fhir/r4/proto/MedicationRequest/w99-mr-1/$check-interactions", bClinW99},
+		{"/fhir/r4/proto/Patient/proto-pat-1/$health-cards-issue", bClinW99},
+		{"/fhir/r4/proto/Patient/proto-pat-1/$pcde", bClinW99},
+		{"/fhir/r4/proto/Patient/proto-pat-1/$immds-forecast", bClinW99},
+		{"/fhir/r4/proto/Patient/proto-pat-1/$ihe-pix", bClinW99},
+	} {
+		reqOp, opErr := http.NewRequest(http.MethodPost, ts.URL+opTC.ep, bytes.NewReader(opTC.body))
+		require.NoError(t, opErr)
+		reqOp.Header.Set("Content-Type", "application/x-protobuf")
+		reqOp.Header.Set("Accept", "application/x-protobuf")
+		respOp, opErr := client.Do(reqOp)
+		require.NoError(t, opErr)
+		opBytes, _ := io.ReadAll(respOp.Body)
+		respOp.Body.Close()
+		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s: %s", opTC.ep, string(opBytes))
+		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", opTC.ep)
+		assert.NotEmpty(t, opBytes, "endpoint %s", opTC.ep)
+	}
 }

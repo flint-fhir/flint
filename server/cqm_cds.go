@@ -1665,9 +1665,39 @@ func buildDSISourceAttributes(serviceID string) (map[string]any, bool) {
 // and GET/POST /fhir/r4/{tenant}/cds-services/{serviceId}/$dsi-attributes per ONC HTI-1 §170.315(b)(11).
 func (s *Server) handleCDSServiceDSIAttributes(w http.ResponseWriter, r *http.Request) {
 	serviceID := strings.TrimSpace(r.PathValue("serviceId"))
+	if r.Method == http.MethodPost && r.Body != nil {
+		if body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)); err == nil && len(strings.TrimSpace(string(body))) > 0 {
+			if payload, err := s.decodeOperationBodyMap(r, body, "Parameters"); err == nil {
+				if params, ok := payload["parameter"].([]any); ok {
+					for _, rawP := range params {
+						if pm, ok := rawP.(map[string]any); ok {
+							if name, _ := pm["name"].(string); name == "serviceId" && serviceID == "" {
+								serviceID = strings.TrimSpace(extractParamString(pm))
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 	attrs, ok := buildDSISourceAttributes(serviceID)
 	if !ok {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("CDS service %q not found", serviceID))
+		return
+	}
+	if okProto, _ := wantsProtoResponse(r); okProto {
+		params := map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "serviceId", "valueString": fmt.Sprintf("%v", attrs["serviceId"])},
+				{"name": "title", "valueString": fmt.Sprintf("%v", attrs["title"])},
+				{"name": "regulatoryCriterion", "valueString": fmt.Sprintf("%v", attrs["regulatoryCriterion"])},
+				{"name": "interventionType", "valueString": fmt.Sprintf("%v", attrs["interventionType"])},
+				{"name": "fundingSource", "valueString": fmt.Sprintf("%v", attrs["fundingSource"])},
+				{"name": "revisionDate", "valueString": fmt.Sprintf("%v", attrs["revisionDate"])},
+			},
+		}
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", params)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
