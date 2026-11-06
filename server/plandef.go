@@ -14699,7 +14699,25 @@ func (s *Server) handleIHEMHDExchange(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		bodyBytes, _ := io.ReadAll(http.MaxBytesReader(w, r.Body, 8<<20))
-		bundleMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Bundle")
+		var bundleMap map[string]any
+		var err error
+		if paramMap, pErr := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); pErr == nil && paramMap != nil && paramMap["resourceType"] == "Parameters" {
+			if params, ok := paramMap["parameter"].([]any); ok && len(params) > 0 {
+				for _, p := range params {
+					pm, ok := p.(map[string]any)
+					if !ok {
+						continue
+					}
+					if res, ok := pm["resource"].(map[string]any); ok && res["resourceType"] == "Bundle" {
+						bundleMap = res
+						break
+					}
+				}
+			}
+		}
+		if bundleMap == nil {
+			bundleMap, err = s.decodeOperationBodyMap(r, bodyBytes, "Bundle")
+		}
 		if err != nil || bundleMap == nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid Bundle body")
 			return

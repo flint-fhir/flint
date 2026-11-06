@@ -4486,4 +4486,79 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(dssBytes), want)
 		}
 	}
+
+	// 49. Wave 94: Chained .skip().take() & .sort().take()/.skip() $sql Pushdown
+	sliceSortVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_slice_sort_v1",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "sliced_arr", "path": "name.given.skip(1).take(2)", "collection": true},
+					{"name": "sliced_join", "path": "name.given.skip(1).take(2).join(',')"},
+					{"name": "sorted_top2", "path": "name.given.sort().take(2).join(',')"},
+					{"name": "sorted_second", "path": "name.given.sort().skip(1).first()"},
+					{"name": "sliced_count", "path": "name.given.skip(1).take(2).count()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "name.given.sort().skip(1).first() = 'Bob' and name.given.skip(1).take(2).count() = 2"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_SLICE(ARRAY_SLICE(",
+				"ARRAY_JOIN(ARRAY_SLICE(ARRAY_SLICE(",
+				"ARRAY_JOIN(ARRAY_SLICE(ARRAY_SORT(",
+				"element_at(ARRAY_SLICE(ARRAY_SORT(",
+				"ARRAY_SIZE(ARRAY_SLICE(ARRAY_SLICE(",
+				"= 'Bob'",
+				"= 2",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"LIMIT 2 OFFSET 1) sub) AS sliced_arr",
+				"LIMIT 2 OFFSET 1) sub) AS sliced_join",
+				"ORDER BY sp_value ASC LIMIT 2) sub) AS sorted_top2",
+				"ORDER BY s.sp_value ASC LIMIT 1 OFFSET 1) AS sorted_second",
+				"SELECT COUNT(*) FROM (",
+				"= 'Bob'",
+				"= 2",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"LIMIT 2 OFFSET 1) sub) AS sliced_arr",
+				"LIMIT 2 OFFSET 1) sub) AS sliced_join",
+				"ORDER BY sp_value ASC LIMIT 2) sub) AS sorted_top2",
+				"ORDER BY s.sp_value ASC LIMIT 1 OFFSET 1) AS sorted_second",
+				"SELECT COUNT(*) FROM (",
+				"= 'Bob'",
+				"= 2",
+			},
+		},
+	} {
+		reqSS, ssErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(sliceSortVD))
+		require.NoError(t, ssErr)
+		reqSS.Header.Set("Content-Type", "application/fhir+json")
+		respSS, ssErr := client.Do(reqSS)
+		require.NoError(t, ssErr)
+		ssBytes, _ := io.ReadAll(respSS.Body)
+		respSS.Body.Close()
+		require.Equal(t, http.StatusOK, respSS.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(ssBytes), want)
+		}
+	}
 }
