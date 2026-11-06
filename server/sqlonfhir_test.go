@@ -4561,4 +4561,145 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(ssBytes), want)
 		}
 	}
+
+	// 50. Wave 95: Chained Set Operations (.union/.combine/.intersect/.exclude) + .distinct()/.sort()/.skip()/.take()/.first()/.last()/.join()/.count() $sql Pushdown & Instance-Level Operations over Binary Proto3
+	setOpSortSliceVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_setop_sort_slice_v1",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "union_sorted_top2", "path": "name.given.union(name.family).sort().take(2)", "collection": true},
+					{"name": "union_sorted_join", "path": "name.given.union(name.family).sort().take(2).join(',')"},
+					{"name": "union_second", "path": "name.given.union(name.family).sort().skip(1).first()"},
+					{"name": "union_last", "path": "name.given.union(name.family).sort().last()"},
+					{"name": "comb_dist_count", "path": "name.given.combine(name.family).distinct().sort().take(2).count()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "name.given.union(name.family).sort().skip(1).first() = 'Smith' and name.given.combine(name.family).distinct().sort().take(2).count() = 2"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_SLICE(ARRAY_SORT(ARRAY_UNION(",
+				"ARRAY_JOIN(ARRAY_SLICE(ARRAY_SORT(ARRAY_UNION(",
+				"element_at(ARRAY_SLICE(ARRAY_SORT(ARRAY_UNION(",
+				"element_at(ARRAY_SORT(ARRAY_UNION(",
+				"ARRAY_SIZE(ARRAY_SLICE(ARRAY_SORT(ARRAY_DISTINCT(ARRAY_CONCAT(",
+				"= 'Smith'",
+				"= 2",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"UNION SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' ORDER BY sp_value ASC LIMIT 2) sub) AS union_sorted_top2",
+				"ORDER BY sp_value ASC LIMIT 2) sub) AS union_sorted_join",
+				"ORDER BY sp_value ASC LIMIT 1 OFFSET 1) AS union_second",
+				"ORDER BY sp_value DESC LIMIT 1) AS union_last",
+				"SELECT COUNT(*) FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' UNION SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' ORDER BY sp_value ASC LIMIT 2) sub",
+				"= 'Smith'",
+				"= 2",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"UNION SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' ORDER BY sp_value ASC LIMIT 2) sub) AS union_sorted_top2",
+				"ORDER BY sp_value ASC LIMIT 2) sub) AS union_sorted_join",
+				"ORDER BY sp_value ASC LIMIT 1 OFFSET 1) AS union_second",
+				"ORDER BY sp_value DESC LIMIT 1) AS union_last",
+				"SELECT COUNT(*) FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' UNION SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' ORDER BY sp_value ASC LIMIT 2) sub",
+				"= 'Smith'",
+				"= 2",
+			},
+		},
+	} {
+		reqSOS, sosErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(setOpSortSliceVD))
+		require.NoError(t, sosErr)
+		reqSOS.Header.Set("Content-Type", "application/fhir+json")
+		respSOS, sosErr := client.Do(reqSOS)
+		require.NoError(t, sosErr)
+		sosBytes, _ := io.ReadAll(respSOS.Body)
+		respSOS.Body.Close()
+		require.Equal(t, http.StatusOK, respSOS.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(sosBytes), want)
+		}
+	}
+
+	w95ParamsJSON := `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"Patient/proto-pat-1"},{"name":"subject","valueString":"Patient/proto-pat-1"},{"name":"ial","valueCode":"IAL2"},{"name":"domain","valueCode":"mobility"},{"name":"observationCode","valueCode":"89555-7"},{"name":"fractionsDelivered","valueInteger":25},{"name":"totalDoseCgy","valueInteger":5000},{"name":"gene","valueString":"EGFR"},{"name":"variant","valueString":"L858R"},{"name":"condition","valueCode":"73211009"},{"name":"signer","valueString":"Practitioner/prac-1"},{"name":"signature","valueString":"eyJhbGciOiJFUzI1NiJ9.flint.sig"}]}`
+	reqW95Conv, w95ConvErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/Parameters/$convert", strings.NewReader(w95ParamsJSON))
+	require.NoError(t, w95ConvErr)
+	reqW95Conv.Header.Set("Content-Type", "application/fhir+json")
+	reqW95Conv.Header.Set("Accept", "application/x-protobuf")
+	respW95Conv, w95ConvErr := client.Do(reqW95Conv)
+	require.NoError(t, w95ConvErr)
+	w95ParamsProtoBytes, _ := io.ReadAll(respW95Conv.Body)
+	respW95Conv.Body.Close()
+	require.Equal(t, http.StatusOK, respW95Conv.StatusCode)
+	require.NotEmpty(t, w95ParamsProtoBytes)
+
+	for _, ep := range []string{
+		"/fhir/r4/proto/Claim/w95-claim-1/$rtpbc-submit",
+		"/fhir/r4/proto/ClaimResponse/w95-cr-1/$rtpbc-coverage",
+		"/fhir/r4/proto/Person/w95-pers-1/$verify-identity",
+		"/fhir/r4/proto/Encounter/w95-enc-1/$pacio-timepoint",
+		"/fhir/r4/proto/Encounter/w95-enc-1/$pacio-timepoints",
+		"/fhir/r4/proto/Composition/w95-comp-1/$vrdr-document",
+		"/fhir/r4/proto/Task/w95-task-1/$cdex-request",
+		"/fhir/r4/proto/Task/w95-task-1/$cdex-poll",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pacio-pfe-record",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pacio-pfe-summary",
+		"/fhir/r4/proto/Composition/w95-comp-1/$bfdr-document",
+		"/fhir/r4/proto/Communication/w95-comm-1/$cdex-submit-attachment",
+		"/fhir/r4/proto/Task/w95-task-1/$cdex-questionnaire-request",
+		"/fhir/r4/proto/Procedure/w95-proc-1/$mcode-radiotherapy-record",
+		"/fhir/r4/proto/Patient/proto-pat-1/$mcode-radiotherapy-summary",
+		"/fhir/r4/proto/Immunization/w95-imm-1/$iis-submit",
+		"/fhir/r4/proto/Patient/proto-pat-1/$iis-history",
+		"/fhir/r4/proto/Bundle/w95-bnd-1/$cdex-sign",
+		"/fhir/r4/proto/Bundle/w95-bnd-1/$cdex-verify-signature",
+		"/fhir/r4/proto/DiagnosticReport/w95-dr-1/$mcode-genomics-report",
+		"/fhir/r4/proto/Patient/proto-pat-1/$mcode-genomics-summary",
+		"/fhir/r4/proto/DiagnosticReport/w95-dr-1/$nbs-submit",
+		"/fhir/r4/proto/Patient/proto-pat-1/$nbs-summary",
+		"/fhir/r4/proto/ExplanationOfBenefit/w95-eob-1/$pct-aeob-summary",
+		"/fhir/r4/proto/Task/w95-task-1/$pct-gfe-coordination",
+		"/fhir/r4/proto/AdverseEvent/w95-ae-1/$vulcan-icsr-report",
+		"/fhir/r4/proto/ResearchSubject/w95-rsubj-1/$vulcan-soa-timeline",
+		"/fhir/r4/proto/Bundle/w95-bnd-1/$ecr-submit",
+		"/fhir/r4/proto/Patient/proto-pat-1/$ecr-summary",
+		"/fhir/r4/proto/QuestionnaireResponse/w95-qr-1/$sdoh-assess",
+		"/fhir/r4/proto/Task/w95-task-1/$sdoh-fulfill",
+		"/fhir/r4/proto/ResearchSubject/w95-rsubj-1/$vulcan-esource-extract",
+		"/fhir/r4/proto/ResearchStudy/w95-study-1/$vulcan-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$elr-summary",
+		"/fhir/r4/proto/Bundle/w95-bnd-1/$cancer-registry-submit",
+		"/fhir/r4/proto/ExplanationOfBenefit/w95-eob-1/$carin-bb-claims",
+		"/fhir/r4/proto/Patient/proto-pat-1/$rtpbc-summary",
+		"/fhir/r4/proto/Composition/w95-comp-1/$pacio-toc-bundle",
+		"/fhir/r4/proto/Consent/w95-con-1/$adi-verify",
+	} {
+		reqOp, opErr := http.NewRequest(http.MethodPost, ts.URL+ep, bytes.NewReader(w95ParamsProtoBytes))
+		require.NoError(t, opErr)
+		reqOp.Header.Set("Content-Type", "application/x-protobuf")
+		reqOp.Header.Set("Accept", "application/x-protobuf")
+		respOp, opErr := client.Do(reqOp)
+		require.NoError(t, opErr)
+		opBytes, _ := io.ReadAll(respOp.Body)
+		respOp.Body.Close()
+		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s", ep)
+		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", ep)
+		assert.NotEmpty(t, opBytes, "endpoint %s", ep)
+	}
 }
