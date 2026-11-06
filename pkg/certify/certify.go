@@ -1,6 +1,6 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, and 35+ National HL7 Implementation Guide
-// conformance & certification runner. It executes 10 structured test suites (105 checks) against
+// conformance & certification runner. It executes 10 structured test suites (106 checks) against
 // a target Flint server and produces both a standard FHIR R4 TestReport resource
 // and a human-readable scorecard.
 package certify
@@ -3641,6 +3641,140 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("AN-23", suite10, "Zero-JSON Binary Proto3 Physical Activity ($physical-activity-summary, $physical-activity-referral), Vulcan ePI ($epi-document, $evaluate-authorization), Public Health ELR ($elr-submit, $reportable-labs), PACIO ADI ($adi-record, $adi-document), Da Vinci Risk Adjustment ($ra-coding-gaps, $ra-remediate), Public Health eICR/RR ($eicr-document, $rr-process), Da Vinci PDex/Formulary ($pdex-WriteData, $formulary-alternatives), HL7 ODH ($record-occupation, $odh-summary), Public Health CCRR/MedMorph ($cancer-registry-report, $medmorph-kar), Da Vinci VBPR ($vbpr-performance, $vbpr-attest), PACIO Cognitive Status ($pacio-cognitive-assess, $pacio-cognitive-summary) & SQL-on-FHIR v2 .hasValue(), .aggregate(), .repeat()/.children()/.descendants() & .lowBoundary()/.highBoundary() $sql Pushdown", t0, err, "Binary Proto3 Physical Activity, Vulcan ePI, Public Health ELR, PACIO ADI, Da Vinci RA, eICR/RR, PDex/Formulary, HL7 ODH, CCRR/MedMorph, Da Vinci VBPR, PACIO Cognitive Status & .hasValue/.aggregate/.repeat/.lowBoundary/.highBoundary $sql pushdown verified")
+
+	// AN-24: Zero-JSON Binary Proto3 CARIN RTPBC ($rtpbc-submit, $rtpbc-coverage), FAST Digital Identity ($idi-match, $verify-identity), PACIO Re-Assessment Timepoints ($pacio-timepoint, $pacio-timepoints), Public Health VRDR ($vrdr-document, $vrdr-submit), Da Vinci CDex ($cdex-request, $cdex-poll, $cdex-submit-attachment, $cdex-questionnaire-request, $cdex-sign, $cdex-verify-signature), PACIO PFE ($pacio-pfe-record, $pacio-pfe-summary), Public Health BFDR ($bfdr-document, $bfdr-submit), CodeX/mCODE Radiotherapy ($mcode-radiotherapy-record, $mcode-radiotherapy-summary), Public Health IIS ($iis-submit, $iis-history) & SQL-on-FHIR v2 .precision(), .escape()/.unescape() & .comparable() $sql Pushdown
+	t0 = time.Now()
+	{
+		w90ParamsRaw := []byte(`{"resourceType":"Parameters","parameter":[{"name":"patient","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"subject","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"person","valueReference":{"reference":"Person/cert-pers-w90-1"}},{"name":"encounter","valueReference":{"reference":"Encounter/cert-enc-1"}},{"name":"mother","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"signer","valueReference":{"reference":"Practitioner/cert-prac-1"}},{"name":"code","valueString":"1049502"},{"name":"causeOfDeathCode","valueString":"I21.9"},{"name":"query","valueString":"Condition?patient=Patient/cert-pat-1"},{"name":"icfCode","valueString":"d450"},{"name":"goal","valueString":"Walk 150 feet independently"},{"name":"TrackingId","valueString":"cdex-track-w90-1"},{"name":"questionnaire","valueString":"http://hl7.org/fhir/us/davinci-cdex/Questionnaire/cdex-questionnaire-example1"},{"name":"cvx","valueString":"208"},{"name":"bundleId","valueString":"cdex-signed-bundle-w90-1"}]}`)
+		respW90ParamsConv, bW90ParamsProto, errW90ParamsConv := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", w90ParamsRaw, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRTPBCSubProto, bRTPBCSubProto, errRTPBCSubProto := doReq(http.MethodPost, basePath+"/Claim/$rtpbc-submit", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRTPBCCovProto, bRTPBCCovProto, errRTPBCCovProto := doReq(http.MethodPost, basePath+"/ClaimResponse/$rtpbc-coverage", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respIDIMatchProto, bIDIMatchProto, errIDIMatchProto := doReq(http.MethodPost, basePath+"/Patient/$idi-match", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respIDIVerProto, bIDIVerProto, errIDIVerProto := doReq(http.MethodPost, basePath+"/Person/$verify-identity", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPACIOTPProto, bPACIOTPProto, errPACIOTPProto := doReq(http.MethodPost, basePath+"/Encounter/$pacio-timepoint", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPACIOTPsProto, bPACIOTPsProto, errPACIOTPsProto := doReq(http.MethodPost, basePath+"/Encounter/$pacio-timepoints", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respVRDRDocProto, bVRDRDocProto, errVRDRDocProto := doReq(http.MethodPost, basePath+"/Composition/$vrdr-document", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respVRDRSubProto, bVRDRSubProto, errVRDRSubProto := doReq(http.MethodPost, basePath+"/Bundle/$vrdr-submit", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCDexReqProto, bCDexReqProto, errCDexReqProto := doReq(http.MethodPost, basePath+"/Task/$cdex-request", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCDexPollProto, bCDexPollProto, errCDexPollProto := doReq(http.MethodPost, basePath+"/Task/$cdex-poll", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPFERecProto, bPFERecProto, errPFERecProto := doReq(http.MethodPost, basePath+"/Patient/$pacio-pfe-record", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPFESumProto, bPFESumProto, errPFESumProto := doReq(http.MethodPost, basePath+"/Patient/$pacio-pfe-summary", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respBFDRDocProto, bBFDRDocProto, errBFDRDocProto := doReq(http.MethodPost, basePath+"/Composition/$bfdr-document", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respBFDRSubProto, bBFDRSubProto, errBFDRSubProto := doReq(http.MethodPost, basePath+"/Bundle/$bfdr-submit", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCDexAttProto, bCDexAttProto, errCDexAttProto := doReq(http.MethodPost, basePath+"/Communication/$cdex-submit-attachment", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCDexQReqProto, bCDexQReqProto, errCDexQReqProto := doReq(http.MethodPost, basePath+"/Task/$cdex-questionnaire-request", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respMCODERecProto, bMCODERecProto, errMCODERecProto := doReq(http.MethodPost, basePath+"/Procedure/$mcode-radiotherapy-record", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respMCODESumProto, bMCODESumProto, errMCODESumProto := doReq(http.MethodPost, basePath+"/Patient/$mcode-radiotherapy-summary", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respIISSubProto, bIISSubProto, errIISSubProto := doReq(http.MethodPost, basePath+"/Immunization/$iis-submit", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respIISHistProto, bIISHistProto, errIISHistProto := doReq(http.MethodPost, basePath+"/Patient/$iis-history", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCDexSignProto, bCDexSignProto, errCDexSignProto := doReq(http.MethodPost, basePath+"/Bundle/$cdex-sign", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCDexVerProto, bCDexVerProto, errCDexVerProto := doReq(http.MethodPost, basePath+"/Bundle/$cdex-verify-signature", "application/x-protobuf", bW90ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		precEscCompVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_precision_escape_comparable_view","status":"active","resource":"Observation","select":[{"column":[{"name":"val_prec","path":"valueQuantity.value.precision()"},{"name":"code_esc_html","path":"code.coding.code.first().escape('html')"},{"name":"code_unesc_html","path":"code.coding.code.first().unescape('html')"},{"name":"code_esc_json","path":"code.coding.code.first().escape('json')"},{"name":"qty_comp","path":"valueQuantity.comparable(valueQuantity)"}]}],"where":[{"path":"valueQuantity.value.precision() >= 1 and valueQuantity.comparable(valueQuantity) and code.coding.code.first().escape('html') = '8867-4'"}]}`)
+		respPECDoris, bPECDoris, errPECDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", precEscCompVD, nil)
+		respPECPg, bPECPg, errPECPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", precEscCompVD, nil)
+
+		if errW90ParamsConv != nil || respW90ParamsConv.StatusCode != http.StatusOK || len(bW90ParamsProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert to return binary Proto3 Parameters, got %d", respW90ParamsConv.StatusCode)
+		} else if errRTPBCSubProto != nil || respRTPBCSubProto.StatusCode != http.StatusOK || !strings.Contains(respRTPBCSubProto.Header.Get("Content-Type"), "application/x-protobuf") || respRTPBCSubProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bRTPBCSubProto) == 0 {
+			err = fmt.Errorf("expected POST /Claim/$rtpbc-submit with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respRTPBCSubProto.StatusCode)
+		} else if errRTPBCCovProto != nil || respRTPBCCovProto.StatusCode != http.StatusOK || !strings.Contains(respRTPBCCovProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bRTPBCCovProto) == 0 {
+			err = fmt.Errorf("expected POST /ClaimResponse/$rtpbc-coverage with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respRTPBCCovProto.StatusCode)
+		} else if errIDIMatchProto != nil || respIDIMatchProto.StatusCode != http.StatusOK || !strings.Contains(respIDIMatchProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bIDIMatchProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$idi-match with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respIDIMatchProto.StatusCode)
+		} else if errIDIVerProto != nil || respIDIVerProto.StatusCode != http.StatusOK || !strings.Contains(respIDIVerProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bIDIVerProto) == 0 {
+			err = fmt.Errorf("expected POST /Person/$verify-identity with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respIDIVerProto.StatusCode)
+		} else if errPACIOTPProto != nil || respPACIOTPProto.StatusCode != http.StatusOK || !strings.Contains(respPACIOTPProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPACIOTPProto) == 0 {
+			err = fmt.Errorf("expected POST /Encounter/$pacio-timepoint with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respPACIOTPProto.StatusCode)
+		} else if errPACIOTPsProto != nil || respPACIOTPsProto.StatusCode != http.StatusOK || !strings.Contains(respPACIOTPsProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPACIOTPsProto) == 0 {
+			err = fmt.Errorf("expected POST /Encounter/$pacio-timepoints with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respPACIOTPsProto.StatusCode)
+		} else if errVRDRDocProto != nil || respVRDRDocProto.StatusCode != http.StatusOK || !strings.Contains(respVRDRDocProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bVRDRDocProto) == 0 {
+			err = fmt.Errorf("expected POST /Composition/$vrdr-document with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respVRDRDocProto.StatusCode)
+		} else if errVRDRSubProto != nil || respVRDRSubProto.StatusCode != http.StatusOK || !strings.Contains(respVRDRSubProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bVRDRSubProto) == 0 {
+			err = fmt.Errorf("expected POST /Bundle/$vrdr-submit with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respVRDRSubProto.StatusCode)
+		} else if errCDexReqProto != nil || respCDexReqProto.StatusCode != http.StatusOK || !strings.Contains(respCDexReqProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCDexReqProto) == 0 {
+			err = fmt.Errorf("expected POST /Task/$cdex-request with binary Proto3 Parameters to return binary Proto3 Task, got %d", respCDexReqProto.StatusCode)
+		} else if errCDexPollProto != nil || respCDexPollProto.StatusCode != http.StatusOK || !strings.Contains(respCDexPollProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCDexPollProto) == 0 {
+			err = fmt.Errorf("expected POST /Task/$cdex-poll with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respCDexPollProto.StatusCode)
+		} else if errPFERecProto != nil || respPFERecProto.StatusCode != http.StatusOK || !strings.Contains(respPFERecProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPFERecProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$pacio-pfe-record with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respPFERecProto.StatusCode)
+		} else if errPFESumProto != nil || respPFESumProto.StatusCode != http.StatusOK || !strings.Contains(respPFESumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPFESumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$pacio-pfe-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respPFESumProto.StatusCode)
+		} else if errBFDRDocProto != nil || respBFDRDocProto.StatusCode != http.StatusOK || !strings.Contains(respBFDRDocProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bBFDRDocProto) == 0 {
+			err = fmt.Errorf("expected POST /Composition/$bfdr-document with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respBFDRDocProto.StatusCode)
+		} else if errBFDRSubProto != nil || respBFDRSubProto.StatusCode != http.StatusOK || !strings.Contains(respBFDRSubProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bBFDRSubProto) == 0 {
+			err = fmt.Errorf("expected POST /Bundle/$bfdr-submit with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respBFDRSubProto.StatusCode)
+		} else if errCDexAttProto != nil || respCDexAttProto.StatusCode != http.StatusOK || !strings.Contains(respCDexAttProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCDexAttProto) == 0 {
+			err = fmt.Errorf("expected POST /Communication/$cdex-submit-attachment with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respCDexAttProto.StatusCode)
+		} else if errCDexQReqProto != nil || respCDexQReqProto.StatusCode != http.StatusOK || !strings.Contains(respCDexQReqProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCDexQReqProto) == 0 {
+			err = fmt.Errorf("expected POST /Task/$cdex-questionnaire-request with binary Proto3 Parameters to return binary Proto3 Task, got %d", respCDexQReqProto.StatusCode)
+		} else if errMCODERecProto != nil || respMCODERecProto.StatusCode != http.StatusOK || !strings.Contains(respMCODERecProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bMCODERecProto) == 0 {
+			err = fmt.Errorf("expected POST /Procedure/$mcode-radiotherapy-record with binary Proto3 Parameters to return binary Proto3 Procedure, got %d", respMCODERecProto.StatusCode)
+		} else if errMCODESumProto != nil || respMCODESumProto.StatusCode != http.StatusOK || !strings.Contains(respMCODESumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bMCODESumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$mcode-radiotherapy-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respMCODESumProto.StatusCode)
+		} else if errIISSubProto != nil || respIISSubProto.StatusCode != http.StatusOK || !strings.Contains(respIISSubProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bIISSubProto) == 0 {
+			err = fmt.Errorf("expected POST /Immunization/$iis-submit with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respIISSubProto.StatusCode)
+		} else if errIISHistProto != nil || respIISHistProto.StatusCode != http.StatusOK || !strings.Contains(respIISHistProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bIISHistProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$iis-history with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respIISHistProto.StatusCode)
+		} else if errCDexSignProto != nil || respCDexSignProto.StatusCode != http.StatusOK || !strings.Contains(respCDexSignProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCDexSignProto) == 0 {
+			err = fmt.Errorf("expected POST /Bundle/$cdex-sign with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respCDexSignProto.StatusCode)
+		} else if errCDexVerProto != nil || respCDexVerProto.StatusCode != http.StatusOK || !strings.Contains(respCDexVerProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCDexVerProto) == 0 {
+			err = fmt.Errorf("expected POST /Bundle/$cdex-verify-signature with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respCDexVerProto.StatusCode)
+		} else if errPECDoris != nil || respPECDoris.StatusCode != http.StatusOK || !strings.Contains(string(bPECDoris), "CHAR_LENGTH(CAST(") || !strings.Contains(string(bPECDoris), "REPLACE(REPLACE(REPLACE(") || !strings.Contains(string(bPECDoris), "'&', '&amp;'") || !strings.Contains(string(bPECDoris), "'&gt;', '>'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with .precision/.escape/.unescape/.comparable pushdown, got %d: %s", respPECDoris.StatusCode, string(bPECDoris))
+		} else if errPECPg != nil || respPECPg.StatusCode != http.StatusOK || !strings.Contains(string(bPECPg), "CHAR_LENGTH(CAST(") || !strings.Contains(string(bPECPg), "REPLACE(REPLACE(REPLACE(") || !strings.Contains(string(bPECPg), "'&', '&amp;'") || !strings.Contains(string(bPECPg), "'&gt;', '>'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with .precision/.escape/.unescape/.comparable pushdown, got %d: %s", respPECPg.StatusCode, string(bPECPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-24", suite10, "Zero-JSON Binary Proto3 CARIN RTPBC ($rtpbc-submit, $rtpbc-coverage), FAST Digital Identity ($idi-match, $verify-identity), PACIO Re-Assessment Timepoints ($pacio-timepoint, $pacio-timepoints), Public Health VRDR ($vrdr-document, $vrdr-submit), Da Vinci CDex ($cdex-request, $cdex-poll, $cdex-submit-attachment, $cdex-questionnaire-request, $cdex-sign, $cdex-verify-signature), PACIO PFE ($pacio-pfe-record, $pacio-pfe-summary), Public Health BFDR ($bfdr-document, $bfdr-submit), CodeX/mCODE Radiotherapy ($mcode-radiotherapy-record, $mcode-radiotherapy-summary), Public Health IIS ($iis-submit, $iis-history) & SQL-on-FHIR v2 .precision(), .escape()/.unescape() & .comparable() $sql Pushdown", t0, err, "Binary Proto3 CARIN RTPBC, FAST Digital Identity, PACIO RT/PFE, Public Health VRDR/BFDR/IIS, Da Vinci CDex, CodeX/mCODE Radiotherapy & .precision/.escape/.unescape/.comparable $sql pushdown verified")
 
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)

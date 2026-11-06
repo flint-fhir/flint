@@ -2509,6 +2509,34 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		}
 		return fmt.Sprintf("FROM_BASE64(%s)", colExpr), colSrc + ".decode(base64)"
 	}
+	if strings.HasSuffix(p, ".precision()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".precision()")])
+		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
+		return fmt.Sprintf("CHAR_LENGTH(CAST(%s AS STRING))", colExpr), colSrc + ".precision"
+	}
+	if idx := strings.LastIndex(p, ".escape("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".escape(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		fmtArg := strings.ToLower(strings.Trim(strings.TrimSpace(p[idx+len(".escape("):len(p)-1]), "'\""))
+		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
+		if fmtArg == "json" {
+			return fmt.Sprintf("REPLACE(REPLACE(%s, '\\\\', '\\\\\\\\'), '\"', '\\\\\"')", colExpr), colSrc + ".escape(json)"
+		}
+		return fmt.Sprintf("REPLACE(REPLACE(REPLACE(%s, '&', '&amp;'), '<', '&lt;'), '>', '&gt;')", colExpr), colSrc + ".escape(html)"
+	}
+	if idx := strings.LastIndex(p, ".unescape("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".unescape(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		fmtArg := strings.ToLower(strings.Trim(strings.TrimSpace(p[idx+len(".unescape("):len(p)-1]), "'\""))
+		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
+		if fmtArg == "json" {
+			return fmt.Sprintf("REPLACE(REPLACE(%s, '\\\\\"', '\"'), '\\\\\\\\', '\\\\')", colExpr), colSrc + ".unescape(json)"
+		}
+		return fmt.Sprintf("REPLACE(REPLACE(REPLACE(%s, '&gt;', '>'), '&lt;', '<'), '&amp;', '&')", colExpr), colSrc + ".unescape(html)"
+	}
+	if idx := strings.LastIndex(p, ".comparable("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".comparable(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
+		return fmt.Sprintf("(%s IS NOT NULL)", colExpr), colSrc + ".comparable"
+	}
 	if idx := strings.LastIndex(p, ".indexOf("); idx != -1 && strings.HasSuffix(p, ")") {
 		basePath := strings.TrimSpace(p[:idx])
 		rawSub := strings.Trim(strings.TrimSpace(p[idx+len(".indexOf("):len(p)-1]), "'\"")
@@ -2779,7 +2807,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 			return fmt.Sprintf("NOT (array_exists(x -> x LIKE '%s=%s|%%', r.code_tokens))", spSys, escapedSys)
 		}
 	}
-	if strings.HasSuffix(p, ".toBoolean()") || strings.HasSuffix(p, ".hasValue()") || (strings.Contains(p, ".convertsTo") && strings.HasSuffix(p, "()")) {
+	if strings.HasSuffix(p, ".toBoolean()") || strings.HasSuffix(p, ".hasValue()") || (strings.Contains(p, ".convertsTo") && strings.HasSuffix(p, "()")) || (strings.Contains(p, ".comparable(") && strings.HasSuffix(p, ")")) {
 		colExpr, _ := dorisZeroJSONColumnExpr(p, isCore)
 		return colExpr
 	}
@@ -2927,7 +2955,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 	}
 	_, _, _, isArithLHS := splitTopLevelArithmeticOp(lhs)
 
-	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") || strings.Contains(lhs, ".aggregate(") || strings.Contains(lhs, ".lowBoundary(") || strings.Contains(lhs, ".highBoundary(") {
+	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".precision()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") || strings.Contains(lhs, ".aggregate(") || strings.Contains(lhs, ".lowBoundary(") || strings.Contains(lhs, ".highBoundary(") {
 		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
 			lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
 			sqlOp := op
@@ -2938,7 +2966,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		}
 	}
 	_, _, hasSubLHS := parseTrailingSubscriptIndex(lhs)
-	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") {
+	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") {
 		lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
 		sqlOp := op
 		if sqlOp == "!=" {
@@ -3659,6 +3687,37 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		}
 		return fmt.Sprintf("CONVERT_FROM(DECODE(%s, 'base64'), 'UTF8')", colExpr), colSrc + ".decode(base64)"
 	}
+	if strings.HasSuffix(p, ".precision()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".precision()")])
+		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+		if dialect == "sqlite" {
+			return fmt.Sprintf("LENGTH(CAST(%s AS TEXT))", colExpr), colSrc + ".precision"
+		}
+		return fmt.Sprintf("CHAR_LENGTH(CAST(%s AS TEXT))", colExpr), colSrc + ".precision"
+	}
+	if idx := strings.LastIndex(p, ".escape("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".escape(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		fmtArg := strings.ToLower(strings.Trim(strings.TrimSpace(p[idx+len(".escape("):len(p)-1]), "'\""))
+		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+		if fmtArg == "json" {
+			return fmt.Sprintf("REPLACE(REPLACE(%s, '\\\\', '\\\\\\\\'), '\"', '\\\\\"')", colExpr), colSrc + ".escape(json)"
+		}
+		return fmt.Sprintf("REPLACE(REPLACE(REPLACE(%s, '&', '&amp;'), '<', '&lt;'), '>', '&gt;')", colExpr), colSrc + ".escape(html)"
+	}
+	if idx := strings.LastIndex(p, ".unescape("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".unescape(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		fmtArg := strings.ToLower(strings.Trim(strings.TrimSpace(p[idx+len(".unescape("):len(p)-1]), "'\""))
+		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+		if fmtArg == "json" {
+			return fmt.Sprintf("REPLACE(REPLACE(%s, '\\\\\"', '\"'), '\\\\\\\\', '\\\\')", colExpr), colSrc + ".unescape(json)"
+		}
+		return fmt.Sprintf("REPLACE(REPLACE(REPLACE(%s, '&gt;', '>'), '&lt;', '<'), '&amp;', '&')", colExpr), colSrc + ".unescape(html)"
+	}
+	if idx := strings.LastIndex(p, ".comparable("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".comparable(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+		return fmt.Sprintf("(%s IS NOT NULL)", colExpr), colSrc + ".comparable"
+	}
 	if idx := strings.LastIndex(p, ".indexOf("); idx != -1 && strings.HasSuffix(p, ")") {
 		basePath := strings.TrimSpace(p[:idx])
 		rawSub := strings.Trim(strings.TrimSpace(p[idx+len(".indexOf("):len(p)-1]), "'\"")
@@ -3909,7 +3968,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 			return fmt.Sprintf("NOT (EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_system = '%s'))", spSys, escapedSys)
 		}
 	}
-	if strings.HasSuffix(p, ".toBoolean()") || strings.HasSuffix(p, ".hasValue()") || (strings.Contains(p, ".convertsTo") && strings.HasSuffix(p, "()")) {
+	if strings.HasSuffix(p, ".toBoolean()") || strings.HasSuffix(p, ".hasValue()") || (strings.Contains(p, ".convertsTo") && strings.HasSuffix(p, "()")) || (strings.Contains(p, ".comparable(") && strings.HasSuffix(p, ")")) {
 		colExpr, _ := spidxZeroJSONColumnExpr(p, dialect)
 		return colExpr
 	}
@@ -4051,7 +4110,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 	}
 	_, _, _, isArithLHS := splitTopLevelArithmeticOp(lhs)
 
-	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") || strings.Contains(lhs, ".aggregate(") || strings.Contains(lhs, ".lowBoundary(") || strings.Contains(lhs, ".highBoundary(") {
+	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".precision()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") || strings.Contains(lhs, ".aggregate(") || strings.Contains(lhs, ".lowBoundary(") || strings.Contains(lhs, ".highBoundary(") {
 		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
 			lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, dialect)
 			sqlOp := op
@@ -4062,7 +4121,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 		}
 	}
 	_, _, hasSubLHS := parseTrailingSubscriptIndex(lhs)
-	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") {
+	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") {
 		lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, dialect)
 		sqlOp := op
 		if sqlOp == "!=" {
