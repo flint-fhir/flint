@@ -1894,6 +1894,15 @@ func buildModifiedSpidxSubquery(mods spidxCollectionModifiers, dialect string) (
 	return subQ, subSrc
 }
 
+func spidxSetOperandSubquery(fhirPath, dialect string) (string, string) {
+	mods := parseSpidxCollectionModifiers(fhirPath)
+	subQ, subSrc := buildModifiedSpidxSubquery(mods, dialect)
+	if mods.hasSubqueryMods() {
+		return fmt.Sprintf("SELECT sub.sp_value FROM (%s) sub", subQ), subSrc + mods.tag
+	}
+	return subQ, subSrc + mods.tag
+}
+
 func spidxZeroJSONCollectionColumnExpr(fhirPath, dialect string) (string, string) {
 	p := normalizePolymorphicFHIRPath(strings.TrimSpace(fhirPath))
 	if mods := parseSpidxCollectionModifiers(p); mods.hasAnyMods() {
@@ -2416,14 +2425,14 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
 		return fmt.Sprintf("(ARRAY_SIZE(ARRAY_DISTINCT(%s)) = ARRAY_SIZE(%s))", collExpr, collExpr), strings.TrimSuffix(collSrc, "[]") + ".isDistinct"
 	}
-	if idx := strings.LastIndex(p, ".subsetOf("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".subsetOf("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".subsetOf(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		otherPath := strings.TrimSpace(p[idx+len(".subsetOf(") : len(p)-1])
 		lhsColl, lhsSrc := dorisZeroJSONCollectionColumnExpr(basePath)
 		rhsColl, _ := dorisZeroJSONCollectionColumnExpr(otherPath)
 		return fmt.Sprintf("(ARRAY_SIZE(ARRAY_EXCEPT(%s, %s)) = 0)", lhsColl, rhsColl), strings.TrimSuffix(lhsSrc, "[]") + ".subsetOf"
 	}
-	if idx := strings.LastIndex(p, ".supersetOf("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".supersetOf("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".supersetOf(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		otherPath := strings.TrimSpace(p[idx+len(".supersetOf(") : len(p)-1])
 		lhsColl, lhsSrc := dorisZeroJSONCollectionColumnExpr(basePath)
@@ -2953,10 +2962,14 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 	}
 	if strings.HasSuffix(p, ".exists()") {
 		fieldPath := strings.TrimSpace(p[:len(p)-len(".exists()")])
-		if strings.HasSuffix(fieldPath, ".tail()") {
+		if strings.HasSuffix(fieldPath, ".tail()") && !strings.Contains(fieldPath[:len(fieldPath)-len(".tail()")], "(") {
 			rootPath := strings.TrimSpace(fieldPath[:len(fieldPath)-len(".tail()")])
 			collExpr, _ := dorisZeroJSONCollectionColumnExpr(rootPath)
 			return fmt.Sprintf("(ARRAY_SIZE(%s) > 1)", collExpr)
+		}
+		if mods := parseSpidxCollectionModifiers(fieldPath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+			collExpr, _ := dorisZeroJSONCollectionColumnExpr(fieldPath)
+			return fmt.Sprintf("(ARRAY_SIZE(%s) > 0)", collExpr)
 		}
 		switch fieldPath {
 		case "valueQuantity", "valueQuantity.value":
@@ -2979,10 +2992,14 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 	}
 	if strings.HasSuffix(p, ".empty()") {
 		fieldPath := strings.TrimSpace(p[:len(p)-len(".empty()")])
-		if strings.HasSuffix(fieldPath, ".tail()") {
+		if strings.HasSuffix(fieldPath, ".tail()") && !strings.Contains(fieldPath[:len(fieldPath)-len(".tail()")], "(") {
 			rootPath := strings.TrimSpace(fieldPath[:len(fieldPath)-len(".tail()")])
 			collExpr, _ := dorisZeroJSONCollectionColumnExpr(rootPath)
 			return fmt.Sprintf("(ARRAY_SIZE(%s) <= 1)", collExpr)
+		}
+		if mods := parseSpidxCollectionModifiers(fieldPath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+			collExpr, _ := dorisZeroJSONCollectionColumnExpr(fieldPath)
+			return fmt.Sprintf("(ARRAY_SIZE(%s) = 0)", collExpr)
 		}
 		if sub := dorisZeroJSONWhereExpr(fieldPath+".exists()", isCore); sub != "" {
 			return "NOT (" + sub + ")"
@@ -3419,6 +3436,10 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 	}
 	if strings.HasSuffix(p, ".isDistinct()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".isDistinct()")])
+		if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+			subQ, subSrc := buildModifiedSpidxSubquery(mods, dialect)
+			return fmt.Sprintf("((SELECT COUNT(DISTINCT sub.sp_value) FROM (%s) sub) = (SELECT COUNT(*) FROM (%s) sub))", subQ, subQ), subSrc + mods.tag + ".isDistinct"
+		}
 		sp := normalizeFHIRPathToSearchParam(basePath)
 		isStringParam := strings.HasPrefix(basePath, "name") || basePath == "given" || basePath == "family" || strings.HasPrefix(basePath, "address") || strings.HasPrefix(basePath, "telecom")
 		if isStringParam {
@@ -3426,18 +3447,18 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		}
 		return fmt.Sprintf("((SELECT COUNT(DISTINCT t.sp_value) FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s') = (SELECT COUNT(*) FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s'))", sp, sp), "spidx_token.isDistinct"
 	}
-	if idx := strings.LastIndex(p, ".subsetOf("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".subsetOf("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".subsetOf(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		otherPath := strings.TrimSpace(p[idx+len(".subsetOf(") : len(p)-1])
-		lhsSub, lhsSrc := spidxSubqueryForPath(basePath)
-		rhsSub, _ := spidxSubqueryForPath(otherPath)
+		lhsSub, lhsSrc := spidxSetOperandSubquery(basePath, dialect)
+		rhsSub, _ := spidxSetOperandSubquery(otherPath, dialect)
 		return fmt.Sprintf("NOT EXISTS (%s EXCEPT %s)", lhsSub, rhsSub), lhsSrc + ".subsetOf"
 	}
-	if idx := strings.LastIndex(p, ".supersetOf("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".supersetOf("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".supersetOf(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		otherPath := strings.TrimSpace(p[idx+len(".supersetOf(") : len(p)-1])
-		lhsSub, lhsSrc := spidxSubqueryForPath(basePath)
-		rhsSub, _ := spidxSubqueryForPath(otherPath)
+		lhsSub, lhsSrc := spidxSetOperandSubquery(basePath, dialect)
+		rhsSub, _ := spidxSetOperandSubquery(otherPath, dialect)
 		return fmt.Sprintf("NOT EXISTS (%s EXCEPT %s)", rhsSub, lhsSub), lhsSrc + ".supersetOf"
 	}
 	if idx := strings.LastIndex(p, ".split("); idx != -1 && strings.HasSuffix(p, ")") && !strings.Contains(p[idx+len(".split("):len(p)-1], ").") {
@@ -4091,13 +4112,8 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 	}
 
 	if strings.HasSuffix(p, ".isDistinct()") {
-		basePath := strings.TrimSpace(p[:len(p)-len(".isDistinct()")])
-		sp := normalizeFHIRPathToSearchParam(basePath)
-		isStringParam := strings.HasPrefix(basePath, "name") || basePath == "given" || basePath == "family" || strings.HasPrefix(basePath, "address") || strings.HasPrefix(basePath, "telecom")
-		if isStringParam {
-			return fmt.Sprintf("((SELECT COUNT(DISTINCT s.sp_value) FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s') = (SELECT COUNT(*) FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s'))", sp, sp)
-		}
-		return fmt.Sprintf("((SELECT COUNT(DISTINCT t.sp_value) FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s') = (SELECT COUNT(*) FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s'))", sp, sp)
+		expr, _ := spidxZeroJSONColumnExpr(p, dialect)
+		return expr
 	}
 	if (strings.Contains(p, ".subsetOf(") || strings.Contains(p, ".supersetOf(")) && strings.HasSuffix(p, ")") {
 		expr, _ := spidxZeroJSONColumnExpr(p, dialect)
@@ -4200,10 +4216,14 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 	}
 	if strings.HasSuffix(p, ".exists()") {
 		fieldPath := strings.TrimSpace(p[:len(p)-len(".exists()")])
-		if strings.HasSuffix(fieldPath, ".tail()") {
+		if strings.HasSuffix(fieldPath, ".tail()") && !strings.Contains(fieldPath[:len(fieldPath)-len(".tail()")], "(") {
 			rootPath := strings.TrimSpace(fieldPath[:len(fieldPath)-len(".tail()")])
 			subQ, _ := spidxSubqueryForPath(rootPath)
 			return fmt.Sprintf("EXISTS (%s LIMIT 1 OFFSET 1)", subQ)
+		}
+		if mods := parseSpidxCollectionModifiers(fieldPath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+			subQ, _ := buildModifiedSpidxSubquery(mods, dialect)
+			return fmt.Sprintf("EXISTS (%s)", subQ)
 		}
 		switch fieldPath {
 		case "valueQuantity", "valueQuantity.value":
