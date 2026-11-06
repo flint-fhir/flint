@@ -1,6 +1,6 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, and 35+ National HL7 Implementation Guide
-// conformance & certification runner. It executes 10 structured test suites (106 checks) against
+// conformance & certification runner. It executes 10 structured test suites (107 checks) against
 // a target Flint server and produces both a standard FHIR R4 TestReport resource
 // and a human-readable scorecard.
 package certify
@@ -3775,6 +3775,160 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("AN-24", suite10, "Zero-JSON Binary Proto3 CARIN RTPBC ($rtpbc-submit, $rtpbc-coverage), FAST Digital Identity ($idi-match, $verify-identity), PACIO Re-Assessment Timepoints ($pacio-timepoint, $pacio-timepoints), Public Health VRDR ($vrdr-document, $vrdr-submit), Da Vinci CDex ($cdex-request, $cdex-poll, $cdex-submit-attachment, $cdex-questionnaire-request, $cdex-sign, $cdex-verify-signature), PACIO PFE ($pacio-pfe-record, $pacio-pfe-summary), Public Health BFDR ($bfdr-document, $bfdr-submit), CodeX/mCODE Radiotherapy ($mcode-radiotherapy-record, $mcode-radiotherapy-summary), Public Health IIS ($iis-submit, $iis-history) & SQL-on-FHIR v2 .precision(), .escape()/.unescape() & .comparable() $sql Pushdown", t0, err, "Binary Proto3 CARIN RTPBC, FAST Digital Identity, PACIO RT/PFE, Public Health VRDR/BFDR/IIS, Da Vinci CDex, CodeX/mCODE Radiotherapy & .precision/.escape/.unescape/.comparable $sql pushdown verified")
+
+	// AN-25: Zero-JSON Binary Proto3 CodeX/mCODE Genomics & Trial Matching ($mcode-genomics-report, $mcode-genomics-summary, $mcode-trial-match, $mcode-disease-status), Public Health NBS ($nbs-submit, $nbs-summary), Da Vinci PCT ($pct-aeob-summary, $pct-gfe-coordination), Vulcan ICSR/SOA/eSource ($vulcan-icsr-report, $vulcan-soa-timeline, $vulcan-esource-extract, $vulcan-summary), Public Health eCR/ELR/CCRR ($ecr-submit, $ecr-summary, $elr-summary, $cancer-registry-submit), Gravity SDOH ($sdoh-assess, $sdoh-fulfill), CARIN BB/RTPBC ($carin-bb-claims, $rtpbc-summary), PACIO TOC/ADI ($pacio-toc-bundle, $adi-verify), CDC NHSN HAI/AUR ($nhsn-aur-submit, $nhsn-hai-summary), FAST NDH ($fast-network-query, $fast-attest) & SQL-on-FHIR v2 .toQuantity()/.convertsToQuantity(), .matchesFull(), timeOfDay(), .trace()/.check()/.defineVariable() $sql Pushdown
+	t0 = time.Now()
+	{
+		w91ParamsRaw := []byte(`{"resourceType":"Parameters","parameter":[{"name":"patient","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"subject","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"study","valueReference":{"reference":"ResearchStudy/cert-study-w91-1"}},{"name":"healthcareService","valueReference":{"reference":"HealthcareService/ndh-hs-1"}},{"name":"network","valueReference":{"reference":"Organization/plannet-network-1"}},{"name":"organizationAffiliation","valueReference":{"reference":"OrganizationAffiliation/ndh-orgaff-1"}},{"name":"gene","valueString":"BRCA1"},{"name":"result","valueString":"Normal newborn dried blood spot and hearing screening"}]}`)
+		respW91ParamsConv, bW91ParamsProto, errW91ParamsConv := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", w91ParamsRaw, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respGenRepProto, bGenRepProto, errGenRepProto := doReq(http.MethodPost, basePath+"/DiagnosticReport/$mcode-genomics-report", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respGenSumProto, bGenSumProto, errGenSumProto := doReq(http.MethodPost, basePath+"/Patient/$mcode-genomics-summary", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respNBSSubProto, bNBSSubProto, errNBSSubProto := doReq(http.MethodPost, basePath+"/DiagnosticReport/$nbs-submit", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respNBSSumProto, bNBSSumProto, errNBSSumProto := doReq(http.MethodPost, basePath+"/Patient/$nbs-summary", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPCTAEOBProto, bPCTAEOBProto, errPCTAEOBProto := doReq(http.MethodPost, basePath+"/ExplanationOfBenefit/$pct-aeob-summary", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPCTGFEProto, bPCTGFEProto, errPCTGFEProto := doReq(http.MethodPost, basePath+"/Task/$pct-gfe-coordination", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respVulcanICSRProto, bVulcanICSRProto, errVulcanICSRProto := doReq(http.MethodPost, basePath+"/AdverseEvent/$vulcan-icsr-report", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respVulcanSOAProto, bVulcanSOAProto, errVulcanSOAProto := doReq(http.MethodPost, basePath+"/ResearchSubject/$vulcan-soa-timeline", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respECRSubProto, bECRSubProto, errECRSubProto := doReq(http.MethodPost, basePath+"/Bundle/$ecr-submit", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respECRSumProto, bECRSumProto, errECRSumProto := doReq(http.MethodPost, basePath+"/Patient/$ecr-summary", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSDOHAssProto, bSDOHAssProto, errSDOHAssProto := doReq(http.MethodPost, basePath+"/QuestionnaireResponse/$sdoh-assess", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respSDOHFulProto, bSDOHFulProto, errSDOHFulProto := doReq(http.MethodPost, basePath+"/Task/$sdoh-fulfill", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respVulcanESProto, bVulcanESProto, errVulcanESProto := doReq(http.MethodPost, basePath+"/ResearchSubject/$vulcan-esource-extract", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respVulcanSumProto, bVulcanSumProto, errVulcanSumProto := doReq(http.MethodPost, basePath+"/ResearchStudy/$vulcan-summary", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respELRSumProto, bELRSumProto, errELRSumProto := doReq(http.MethodPost, basePath+"/Patient/$elr-summary", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCCRRSubProto, bCCRRSubProto, errCCRRSubProto := doReq(http.MethodPost, basePath+"/Bundle/$cancer-registry-submit", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respCARINBBProto, bCARINBBProto, errCARINBBProto := doReq(http.MethodPost, basePath+"/ExplanationOfBenefit/$carin-bb-claims", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respRTPBCSumProto, bRTPBCSumProto, errRTPBCSumProto := doReq(http.MethodPost, basePath+"/Patient/$rtpbc-summary", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respPACIOTOCProto, bPACIOTOCProto, errPACIOTOCProto := doReq(http.MethodPost, basePath+"/Composition/$pacio-toc-bundle", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respADIVerProto, bADIVerProto, errADIVerProto := doReq(http.MethodPost, basePath+"/Consent/$adi-verify", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respNHSNAURProto, bNHSNAURProto, errNHSNAURProto := doReq(http.MethodPost, basePath+"/MeasureReport/$nhsn-aur-submit", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respNHSNHAIProto, bNHSNHAIProto, errNHSNHAIProto := doReq(http.MethodPost, basePath+"/Patient/$nhsn-hai-summary", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respMCODETMProto, bMCODETMProto, errMCODETMProto := doReq(http.MethodPost, basePath+"/Patient/$mcode-trial-match", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respMCODEDSProto, bMCODEDSProto, errMCODEDSProto := doReq(http.MethodPost, basePath+"/Observation/$mcode-disease-status", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respFASTNQProto, bFASTNQProto, errFASTNQProto := doReq(http.MethodPost, basePath+"/OrganizationAffiliation/$fast-network-query", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+		respFASTAttProto, bFASTAttProto, errFASTAttProto := doReq(http.MethodPost, basePath+"/HealthcareService/$fast-attest", "application/x-protobuf", bW91ParamsProto, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		toQtyMatchesVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_toquantity_matchesfull_timeofday_view","status":"active","resource":"Observation","select":[{"column":[{"name":"qty_val","path":"valueQuantity.toQuantity('bpm').trace('qty').check($this > 0, 'positive')"},{"name":"can_qty","path":"valueQuantity.convertsToQuantity('bpm').defineVariable('v', code)"},{"name":"full_match","path":"code.coding.code.first().matchesFull('8867-4')"},{"name":"tod_val","path":"timeOfDay()"}]}],"where":[{"path":"valueQuantity.toQuantity('bpm') >= 60 and valueQuantity.convertsToQuantity('bpm') and code.coding.code.first().matchesFull('8867-4') and effectiveDateTime.toTime() <= timeOfDay()"}]}`)
+		respTQMDoris, bTQMDoris, errTQMDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", toQtyMatchesVD, nil)
+		respTQMPg, bTQMPg, errTQMPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", toQtyMatchesVD, nil)
+
+		if errW91ParamsConv != nil || respW91ParamsConv.StatusCode != http.StatusOK || len(bW91ParamsProto) == 0 {
+			err = fmt.Errorf("expected POST /Parameters/$convert to return binary Proto3 Parameters, got %d", respW91ParamsConv.StatusCode)
+		} else if errGenRepProto != nil || respGenRepProto.StatusCode != http.StatusOK || !strings.Contains(respGenRepProto.Header.Get("Content-Type"), "application/x-protobuf") || respGenRepProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bGenRepProto) == 0 {
+			err = fmt.Errorf("expected POST /DiagnosticReport/$mcode-genomics-report with binary Proto3 Parameters to return binary Proto3 DiagnosticReport, got %d", respGenRepProto.StatusCode)
+		} else if errGenSumProto != nil || respGenSumProto.StatusCode != http.StatusOK || !strings.Contains(respGenSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bGenSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$mcode-genomics-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respGenSumProto.StatusCode)
+		} else if errNBSSubProto != nil || respNBSSubProto.StatusCode != http.StatusOK || !strings.Contains(respNBSSubProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bNBSSubProto) == 0 {
+			err = fmt.Errorf("expected POST /DiagnosticReport/$nbs-submit with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respNBSSubProto.StatusCode)
+		} else if errNBSSumProto != nil || respNBSSumProto.StatusCode != http.StatusOK || !strings.Contains(respNBSSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bNBSSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$nbs-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respNBSSumProto.StatusCode)
+		} else if errPCTAEOBProto != nil || respPCTAEOBProto.StatusCode != http.StatusOK || !strings.Contains(respPCTAEOBProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPCTAEOBProto) == 0 {
+			err = fmt.Errorf("expected POST /ExplanationOfBenefit/$pct-aeob-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respPCTAEOBProto.StatusCode)
+		} else if errPCTGFEProto != nil || respPCTGFEProto.StatusCode != http.StatusOK || !strings.Contains(respPCTGFEProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPCTGFEProto) == 0 {
+			err = fmt.Errorf("expected POST /Task/$pct-gfe-coordination with binary Proto3 Parameters to return binary Proto3 Task, got %d", respPCTGFEProto.StatusCode)
+		} else if errVulcanICSRProto != nil || respVulcanICSRProto.StatusCode != http.StatusOK || !strings.Contains(respVulcanICSRProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bVulcanICSRProto) == 0 {
+			err = fmt.Errorf("expected POST /AdverseEvent/$vulcan-icsr-report with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respVulcanICSRProto.StatusCode)
+		} else if errVulcanSOAProto != nil || respVulcanSOAProto.StatusCode != http.StatusOK || !strings.Contains(respVulcanSOAProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bVulcanSOAProto) == 0 {
+			err = fmt.Errorf("expected POST /ResearchSubject/$vulcan-soa-timeline with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respVulcanSOAProto.StatusCode)
+		} else if errECRSubProto != nil || respECRSubProto.StatusCode != http.StatusOK || !strings.Contains(respECRSubProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bECRSubProto) == 0 {
+			err = fmt.Errorf("expected POST /Bundle/$ecr-submit with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respECRSubProto.StatusCode)
+		} else if errECRSumProto != nil || respECRSumProto.StatusCode != http.StatusOK || !strings.Contains(respECRSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bECRSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$ecr-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respECRSumProto.StatusCode)
+		} else if errSDOHAssProto != nil || respSDOHAssProto.StatusCode != http.StatusOK || !strings.Contains(respSDOHAssProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bSDOHAssProto) == 0 {
+			err = fmt.Errorf("expected POST /QuestionnaireResponse/$sdoh-assess with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respSDOHAssProto.StatusCode)
+		} else if errSDOHFulProto != nil || respSDOHFulProto.StatusCode != http.StatusOK || !strings.Contains(respSDOHFulProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bSDOHFulProto) == 0 {
+			err = fmt.Errorf("expected POST /Task/$sdoh-fulfill with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respSDOHFulProto.StatusCode)
+		} else if errVulcanESProto != nil || respVulcanESProto.StatusCode != http.StatusOK || !strings.Contains(respVulcanESProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bVulcanESProto) == 0 {
+			err = fmt.Errorf("expected POST /ResearchSubject/$vulcan-esource-extract with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respVulcanESProto.StatusCode)
+		} else if errVulcanSumProto != nil || respVulcanSumProto.StatusCode != http.StatusOK || !strings.Contains(respVulcanSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bVulcanSumProto) == 0 {
+			err = fmt.Errorf("expected POST /ResearchStudy/$vulcan-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respVulcanSumProto.StatusCode)
+		} else if errELRSumProto != nil || respELRSumProto.StatusCode != http.StatusOK || !strings.Contains(respELRSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bELRSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$elr-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respELRSumProto.StatusCode)
+		} else if errCCRRSubProto != nil || respCCRRSubProto.StatusCode != http.StatusOK || !strings.Contains(respCCRRSubProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCCRRSubProto) == 0 {
+			err = fmt.Errorf("expected POST /Bundle/$cancer-registry-submit with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respCCRRSubProto.StatusCode)
+		} else if errCARINBBProto != nil || respCARINBBProto.StatusCode != http.StatusOK || !strings.Contains(respCARINBBProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bCARINBBProto) == 0 {
+			err = fmt.Errorf("expected POST /ExplanationOfBenefit/$carin-bb-claims with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respCARINBBProto.StatusCode)
+		} else if errRTPBCSumProto != nil || respRTPBCSumProto.StatusCode != http.StatusOK || !strings.Contains(respRTPBCSumProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bRTPBCSumProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$rtpbc-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respRTPBCSumProto.StatusCode)
+		} else if errPACIOTOCProto != nil || respPACIOTOCProto.StatusCode != http.StatusOK || !strings.Contains(respPACIOTOCProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bPACIOTOCProto) == 0 {
+			err = fmt.Errorf("expected POST /Composition/$pacio-toc-bundle with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respPACIOTOCProto.StatusCode)
+		} else if errADIVerProto != nil || respADIVerProto.StatusCode != http.StatusOK || !strings.Contains(respADIVerProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bADIVerProto) == 0 {
+			err = fmt.Errorf("expected POST /Consent/$adi-verify with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respADIVerProto.StatusCode)
+		} else if errNHSNAURProto != nil || respNHSNAURProto.StatusCode != http.StatusOK || !strings.Contains(respNHSNAURProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bNHSNAURProto) == 0 {
+			err = fmt.Errorf("expected POST /MeasureReport/$nhsn-aur-submit with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respNHSNAURProto.StatusCode)
+		} else if errNHSNHAIProto != nil || respNHSNHAIProto.StatusCode != http.StatusOK || !strings.Contains(respNHSNHAIProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bNHSNHAIProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$nhsn-hai-summary with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respNHSNHAIProto.StatusCode)
+		} else if errMCODETMProto != nil || respMCODETMProto.StatusCode != http.StatusOK || !strings.Contains(respMCODETMProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bMCODETMProto) == 0 {
+			err = fmt.Errorf("expected POST /Patient/$mcode-trial-match with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respMCODETMProto.StatusCode)
+		} else if errMCODEDSProto != nil || respMCODEDSProto.StatusCode != http.StatusOK || !strings.Contains(respMCODEDSProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bMCODEDSProto) == 0 {
+			err = fmt.Errorf("expected POST /Observation/$mcode-disease-status with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respMCODEDSProto.StatusCode)
+		} else if errFASTNQProto != nil || respFASTNQProto.StatusCode != http.StatusOK || !strings.Contains(respFASTNQProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bFASTNQProto) == 0 {
+			err = fmt.Errorf("expected POST /OrganizationAffiliation/$fast-network-query with binary Proto3 Parameters to return binary Proto3 Bundle, got %d", respFASTNQProto.StatusCode)
+		} else if errFASTAttProto != nil || respFASTAttProto.StatusCode != http.StatusOK || !strings.Contains(respFASTAttProto.Header.Get("Content-Type"), "application/x-protobuf") || len(bFASTAttProto) == 0 {
+			err = fmt.Errorf("expected POST /HealthcareService/$fast-attest with binary Proto3 Parameters to return binary Proto3 Parameters, got %d", respFASTAttProto.StatusCode)
+		} else if errTQMDoris != nil || respTQMDoris.StatusCode != http.StatusOK || !strings.Contains(string(bTQMDoris), "CAST(r.value_quantity AS DOUBLE)") || !strings.Contains(string(bTQMDoris), "REGEXP(r.code, '^8867-4$')") || !strings.Contains(string(bTQMDoris), "CURTIME()") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with .toQuantity/.convertsToQuantity/.matchesFull/timeOfDay pushdown, got %d: %s", respTQMDoris.StatusCode, string(bTQMDoris))
+		} else if errTQMPg != nil || respTQMPg.StatusCode != http.StatusOK || !strings.Contains(string(bTQMPg), "AS DOUBLE PRECISION)") || !strings.Contains(string(bTQMPg), "~ '^8867-4$'") || !strings.Contains(string(bTQMPg), "CURRENT_TIME") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with .toQuantity/.convertsToQuantity/.matchesFull/timeOfDay pushdown, got %d: %s", respTQMPg.StatusCode, string(bTQMPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-25", suite10, "Zero-JSON Binary Proto3 CodeX/mCODE Genomics & Trial Matching ($mcode-genomics-report, $mcode-genomics-summary, $mcode-trial-match, $mcode-disease-status), Public Health NBS ($nbs-submit, $nbs-summary), Da Vinci PCT ($pct-aeob-summary, $pct-gfe-coordination), Vulcan ICSR/SOA/eSource ($vulcan-icsr-report, $vulcan-soa-timeline, $vulcan-esource-extract, $vulcan-summary), Public Health eCR/ELR/CCRR ($ecr-submit, $ecr-summary, $elr-summary, $cancer-registry-submit), Gravity SDOH ($sdoh-assess, $sdoh-fulfill), CARIN BB/RTPBC ($carin-bb-claims, $rtpbc-summary), PACIO TOC/ADI ($pacio-toc-bundle, $adi-verify), CDC NHSN HAI/AUR ($nhsn-aur-submit, $nhsn-hai-summary), FAST NDH ($fast-network-query, $fast-attest) & SQL-on-FHIR v2 .toQuantity()/.convertsToQuantity(), .matchesFull(), timeOfDay(), .trace()/.check()/.defineVariable() $sql Pushdown", t0, err, "Binary Proto3 CodeX/mCODE Genomics/Trial Matching, Public Health NBS/eCR/ELR/CCRR, Da Vinci PCT, Vulcan ICSR/SOA/eSource, Gravity SDOH, CARIN BB/RTPBC, PACIO TOC/ADI, CDC NHSN HAI/AUR, FAST NDH & .toQuantity/.convertsToQuantity/.matchesFull/timeOfDay $sql pushdown verified")
 
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)

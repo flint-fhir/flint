@@ -3946,4 +3946,215 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(pecBytes), want)
 		}
 	}
+
+	// 36. Wave 91: Binary Proto3 CodeX/mCODE Genomics & Trial Matching, Public Health NBS/eCR/ELR/CCRR, Da Vinci PCT, Vulcan ICSR/SOA/eSource, Gravity SDOH, CARIN BB/RTPBC, PACIO TOC/ADI, CDC NHSN HAI/AUR, FAST NDH & .toQuantity()/.convertsToQuantity(), .matchesFull(), timeOfDay(), .trace()/.check()/.defineVariable() $sql Pushdown
+	w91ParamsPb := &parampb.Parameters{
+		Parameter: []*parampb.Parameters_Parameter{
+			{
+				Name: &dtpb.String{Value: "patient"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Patient/" + patID},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "subject"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Patient/" + patID},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "study"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "ResearchStudy/study-w91-1"},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "healthcareService"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "HealthcareService/ndh-hs-1"},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "network"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Organization/plannet-network-1"},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "organizationAffiliation"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "OrganizationAffiliation/ndh-orgaff-1"},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "gene"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "BRCA1"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "result"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "Normal newborn dried blood spot and hearing screening"},
+					},
+				},
+			},
+		},
+	}
+	w91ParamsBytes, err := proto.Marshal(w91ParamsPb)
+	require.NoError(t, err)
+
+	for _, ep := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/fhir/r4/proto/DiagnosticReport/$mcode-genomics-report"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$mcode-genomics-summary"},
+		{http.MethodPost, "/fhir/r4/proto/DiagnosticReport/$nbs-submit"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$nbs-summary"},
+		{http.MethodPost, "/fhir/r4/proto/ExplanationOfBenefit/$pct-aeob-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Task/$pct-gfe-coordination"},
+		{http.MethodPost, "/fhir/r4/proto/AdverseEvent/$vulcan-icsr-report"},
+		{http.MethodPost, "/fhir/r4/proto/ResearchSubject/$vulcan-soa-timeline"},
+		{http.MethodPost, "/fhir/r4/proto/Bundle/$ecr-submit"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$ecr-summary"},
+		{http.MethodPost, "/fhir/r4/proto/QuestionnaireResponse/$sdoh-assess"},
+		{http.MethodPost, "/fhir/r4/proto/Task/$sdoh-fulfill"},
+		{http.MethodPost, "/fhir/r4/proto/ResearchSubject/$vulcan-esource-extract"},
+		{http.MethodPost, "/fhir/r4/proto/ResearchStudy/$vulcan-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$elr-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Bundle/$cancer-registry-submit"},
+		{http.MethodPost, "/fhir/r4/proto/ExplanationOfBenefit/$carin-bb-claims"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$rtpbc-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Composition/$pacio-toc-bundle"},
+		{http.MethodPost, "/fhir/r4/proto/Consent/$adi-verify"},
+		{http.MethodPost, "/fhir/r4/proto/MeasureReport/$nhsn-aur-submit"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$nhsn-hai-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$mcode-trial-match"},
+		{http.MethodPost, "/fhir/r4/proto/Observation/$mcode-disease-status"},
+		{http.MethodPost, "/fhir/r4/proto/OrganizationAffiliation/$fast-network-query"},
+		{http.MethodPost, "/fhir/r4/proto/HealthcareService/$fast-attest"},
+	} {
+		reqOp, opErr := http.NewRequest(ep.method, ts.URL+ep.path, bytes.NewReader(w91ParamsBytes))
+		require.NoError(t, opErr)
+		reqOp.Header.Set("Content-Type", "application/x-protobuf")
+		reqOp.Header.Set("Accept", "application/x-protobuf")
+		respOp, opErr := client.Do(reqOp)
+		require.NoError(t, opErr)
+		opBytes, _ := io.ReadAll(respOp.Body)
+		respOp.Body.Close()
+		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s failed: %s", ep.path, string(opBytes))
+		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s Content-Type", ep.path)
+		assert.Equal(t, "google.fhir.r4.proto3", respOp.Header.Get("X-Flint-Wire-Format"), "endpoint %s X-Flint-Wire-Format", ep.path)
+		require.NotEmpty(t, opBytes, "endpoint %s empty body", ep.path)
+	}
+
+	toQtyMatchesVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "obs_toquantity_matchesfull_timeofday_v1",
+		"status": "active",
+		"resource": "Observation",
+		"select": [
+			{
+				"column": [
+					{"name": "qty_val", "path": "valueQuantity.toQuantity('bpm').trace('qty').check($this > 0, 'positive')"},
+					{"name": "can_qty", "path": "valueQuantity.convertsToQuantity('bpm').defineVariable('v', code)"},
+					{"name": "full_match", "path": "code.coding.code.first().matchesFull('8867-4')"},
+					{"name": "tod_val", "path": "timeOfDay()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "valueQuantity.toQuantity('bpm') >= 60 and valueQuantity.convertsToQuantity('bpm') and code.coding.code.first().matchesFull('8867-4') and effectiveDateTime.toTime() <= timeOfDay()"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"CAST(r.value_quantity AS DOUBLE) AS qty_val",
+				"(CAST(r.value_quantity AS DOUBLE) IS NOT NULL) AS can_qty",
+				"REGEXP(r.code, '^8867-4$') AS full_match",
+				"CURTIME() AS tod_val",
+				"CAST(r.value_quantity AS DOUBLE) >= 60",
+				"CAST(r.effective_start AS TIME) <= CURTIME()",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"CAST((SELECT q.sp_value FROM spidx_quantity q",
+				"AS DOUBLE PRECISION) AS qty_val",
+				"IS NOT NULL) AS can_qty",
+				"~ '^8867-4$' AS full_match",
+				"CURRENT_TIME AS tod_val",
+				"<= CURRENT_TIME",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"CAST((SELECT q.sp_value FROM spidx_quantity q",
+				"AS REAL) AS qty_val",
+				"IS NOT NULL) AS can_qty",
+				"REGEXP '^8867-4$' AS full_match",
+				"CURRENT_TIME AS tod_val",
+				"<= CURRENT_TIME",
+			},
+		},
+	} {
+		reqTQM, tqmErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(toQtyMatchesVD))
+		require.NoError(t, tqmErr)
+		reqTQM.Header.Set("Content-Type", "application/fhir+json")
+		respTQM, tqmErr := client.Do(reqTQM)
+		require.NoError(t, tqmErr)
+		tqmBytes, _ := io.ReadAll(respTQM.Body)
+		respTQM.Body.Close()
+		require.Equal(t, http.StatusOK, respTQM.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(tqmBytes), want)
+		}
+	}
 }
