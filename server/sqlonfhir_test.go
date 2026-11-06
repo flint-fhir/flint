@@ -4996,7 +4996,157 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		require.NoError(t, opErr)
 		opBytes, _ := io.ReadAll(respOp.Body)
 		respOp.Body.Close()
-		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s", opTC.ep)
+		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s: %s", opTC.ep, string(opBytes))
+		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", opTC.ep)
+		assert.NotEmpty(t, opBytes, "endpoint %s", opTC.ep)
+	}
+
+	// 53. Wave 98: Chained Universal & Boolean Collection Quantifiers (.all(criteria), .exists(criteria), .anyTrue(), .allTrue(), .anyFalse(), .allFalse()) on Modified & Set-Operation Collections $sql Pushdown & 32 System/Type/Instance Operations over Binary Proto3
+	chainedQuantVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_chained_quantifiers_v1",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "skip_all_nonempty", "path": "name.given.skip(1).all($this != '')"},
+					{"name": "union_all_len", "path": "name.given.union(name.family).all($this.length() >= 2)"},
+					{"name": "top2_exists_len", "path": "name.given.sort().take(2).exists($this.length() >= 3)"},
+					{"name": "comb_any_true", "path": "active.combine(deceasedBoolean).anyTrue()"},
+					{"name": "union_all_true", "path": "active.union(deceasedBoolean).allTrue()"},
+					{"name": "comb_any_false", "path": "active.combine(deceasedBoolean).anyFalse()"},
+					{"name": "excl_all_false", "path": "active.exclude(deceasedBoolean).allFalse()"}
+				]
+			}
+		],
+		"where": [
+			{"path": "name.given.skip(1).all($this != '') and name.given.union(name.family).all($this.length() >= 2) and active.combine(deceasedBoolean).anyTrue() and active.exclude(deceasedBoolean).allFalse()"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"NOT ARRAY_EXISTS(x -> x = '', ARRAY_SLICE(",
+				"NOT ARRAY_EXISTS(x -> CHAR_LENGTH(x) < 2, ARRAY_UNION(",
+				"ARRAY_EXISTS(x -> CHAR_LENGTH(x) >= 3, ARRAY_SLICE(ARRAY_SORT(",
+				"ARRAY_CONTAINS(ARRAY_CONCAT(",
+				"NOT ARRAY_CONTAINS(ARRAY_UNION(",
+				"NOT ARRAY_CONTAINS(ARRAY_EXCEPT(",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"NOT EXISTS (SELECT 1 FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' OFFSET 1) sub WHERE sub.sp_value = '')",
+				"NOT EXISTS (SELECT 1 FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' UNION SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family') sub WHERE CHAR_LENGTH(sub.sp_value) < 2)",
+				"EXISTS (SELECT 1 FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' ORDER BY sp_value ASC LIMIT 2) sub WHERE CHAR_LENGTH(sub.sp_value) >= 3)",
+				"EXISTS (SELECT 1 FROM (SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'active' UNION ALL SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'deceased') sub WHERE sub.sp_value = 'true')",
+				"NOT EXISTS (SELECT 1 FROM (SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'active' UNION SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'deceased') sub WHERE sub.sp_value = 'false')",
+				"NOT EXISTS (SELECT 1 FROM (SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'active' EXCEPT SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'deceased') sub WHERE sub.sp_value = 'true')",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"NOT EXISTS (SELECT 1 FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' LIMIT -1 OFFSET 1) sub WHERE sub.sp_value = '')",
+				"NOT EXISTS (SELECT 1 FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' UNION SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family') sub WHERE LENGTH(sub.sp_value) < 2)",
+				"EXISTS (SELECT 1 FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' ORDER BY sp_value ASC LIMIT 2) sub WHERE LENGTH(sub.sp_value) >= 3)",
+				"EXISTS (SELECT 1 FROM (SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'active' UNION ALL SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'deceased') sub WHERE sub.sp_value = 'true')",
+			},
+		},
+	} {
+		reqCQ, cqErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(chainedQuantVD))
+		require.NoError(t, cqErr)
+		reqCQ.Header.Set("Content-Type", "application/fhir+json")
+		respCQ, cqErr := client.Do(reqCQ)
+		require.NoError(t, cqErr)
+		cqBytes, _ := io.ReadAll(respCQ.Body)
+		respCQ.Body.Close()
+		require.Equal(t, http.StatusOK, respCQ.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(cqBytes), want)
+		}
+	}
+
+	for _, seed := range []struct {
+		path string
+		body string
+	}{
+		{"/fhir/r4/proto/Patient/proto-pat-1", `{"resourceType":"Patient","id":"proto-pat-1","active":true,"gender":"female","birthDate":"1980-01-01","identifier":[{"system":"http://hospital.example.org/mrn","value":"MRN-PROTO-1"}],"name":[{"family":"ValidPat","given":["Alice"]}]}`},
+		{"/fhir/r4/proto/Patient/w98-purge-pat-1", `{"resourceType":"Patient","id":"w98-purge-pat-1","active":true,"gender":"female","birthDate":"1990-01-01","identifier":[{"system":"http://hospital.example.org/mrn","value":"MRN-PURGE-1"}],"name":[{"family":"PurgeTarget","given":["Temp"]}]}`},
+		{"/fhir/r4/proto/Subscription/w98-sub-1", `{"resourceType":"Subscription","id":"w98-sub-1","status":"active","reason":"Wave 98 Subscription","criteria":"Observation?code=8867-4","channel":{"type":"rest-hook","endpoint":"https://flint.example.org/StepWebhook","payload":"application/fhir+json"}}`},
+		{"/fhir/r4/proto/Composition/w98-comp-1", `{"resourceType":"Composition","id":"w98-comp-1","status":"final","type":{"coding":[{"system":"http://loinc.org","code":"60591-5","display":"Patient summary Document"}]},"subject":{"reference":"Patient/proto-pat-1"},"date":"2026-01-15T10:00:00Z","author":[{"reference":"Practitioner/w96-prac-1"}],"title":"Wave 98 Summary"}`},
+		{"/fhir/r4/proto/QuestionnaireResponse/w98-qr-1", `{"resourceType":"QuestionnaireResponse","id":"w98-qr-1","status":"completed","subject":{"reference":"Patient/proto-pat-1"},"authored":"2026-01-15T10:00:00Z","item":[{"linkId":"vital-heart-rate","text":"Heart Rate","answer":[{"valueQuantity":{"value":72,"unit":"/min","system":"http://unitsofmeasure.org","code":"/min"}}]}]}`},
+	} {
+		reqSeed, sErr := http.NewRequest(http.MethodPut, ts.URL+seed.path, strings.NewReader(seed.body))
+		require.NoError(t, sErr)
+		reqSeed.Header.Set("Content-Type", "application/fhir+json")
+		respSeed, sErr := client.Do(reqSeed)
+		require.NoError(t, sErr)
+		respSeed.Body.Close()
+	}
+
+	bExpW98 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"expungePreviousVersions","valueBoolean":true},{"name":"limit","valueInteger":10}]}`)
+	bDiffW98 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"from","resource":{"resourceType":"Patient","id":"proto-pat-1","active":true,"gender":"female"}},{"name":"to","resource":{"resourceType":"Patient","id":"proto-pat-1","active":true,"gender":"other"}}]}`)
+	bFPW98 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"expression","valueString":"Patient.gender"},{"name":"resource","resource":{"resourceType":"Patient","id":"proto-pat-1","active":true,"gender":"female"}}]}`)
+	bValW98 := toProtoHelper("Patient", `{"resourceType":"Patient","id":"proto-pat-1","active":true,"gender":"female","birthDate":"1980-01-01","identifier":[{"system":"http://hospital.example.org/mrn","value":"MRN-W98-1"}],"name":[{"family":"ValidPat","given":["Alice"]}]}`)
+	bMsgW98 := toProtoHelper("Bundle", `{"resourceType":"Bundle","type":"message","entry":[{"resource":{"resourceType":"MessageHeader","id":"mh-w98-1","eventCoding":{"system":"http://example.org/events","code":"admin-notify"},"source":{"endpoint":"http://example.org/src"}}}]}`)
+	bClosW98 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"name","valueString":"w98-closure-table"},{"name":"concept","valueCoding":{"system":"http://snomed.info/sct","code":"73211009"}}]}`)
+	bTermW98 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"url","valueUri":"http://hl7.org/fhir/ValueSet/administrative-gender"},{"name":"system","valueUri":"http://hl7.org/fhir/administrative-gender"},{"name":"code","valueCode":"female"},{"name":"codeA","valueCode":"73211009"},{"name":"codeB","valueCode":"44054006"}]}`)
+	bClinW98 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"subject","valueString":"Patient/proto-pat-1"},{"name":"patient","valueString":"Patient/proto-pat-1"},{"name":"target","valueString":"Library/CMS165-Logic"}]}`)
+
+	for _, opTC := range []struct {
+		ep   string
+		body []byte
+	}{
+		{"/fhir/r4/proto/$expunge", bExpW98},
+		{"/fhir/r4/proto/Patient/$expunge", bExpW98},
+		{"/fhir/r4/proto/Patient/proto-pat-1/$expunge", bExpW98},
+		{"/fhir/r4/proto/Patient/w98-purge-pat-1/$purge", bExpW98},
+		{"/fhir/r4/proto/$reindex", bExpW98},
+		{"/fhir/r4/proto/Patient/$reindex", bExpW98},
+		{"/fhir/r4/proto/$diff", bDiffW98},
+		{"/fhir/r4/proto/Patient/proto-pat-1/$diff", bDiffW98},
+		{"/fhir/r4/proto/$data-requirements", bClinW98},
+		{"/fhir/r4/proto/$fhirpath", bFPW98},
+		{"/fhir/r4/proto/Patient/proto-pat-1/$fhirpath", bFPW98},
+		{"/fhir/r4/proto/$validate", bValW98},
+		{"/fhir/r4/proto/Patient/proto-pat-1/$validate", bValW98},
+		{"/fhir/r4/proto/MessageHeader/$process-message", bMsgW98},
+		{"/fhir/r4/proto/ConceptMap/$closure", bClosW98},
+		{"/fhir/r4/proto/ValueSet/administrative-gender/$expand", bTermW98},
+		{"/fhir/r4/proto/ValueSet/administrative-gender/$validate-code", bTermW98},
+		{"/fhir/r4/proto/CodeSystem/administrative-gender/$lookup", bTermW98},
+		{"/fhir/r4/proto/CodeSystem/administrative-gender/$validate-code", bTermW98},
+		{"/fhir/r4/proto/CodeSystem/snomed-ct/$subsumes", bTermW98},
+		{"/fhir/r4/proto/CodeSystem/loinc/$find-matches", bTermW98},
+		{"/fhir/r4/proto/ConceptMap/loinc-to-snomed/$translate", bTermW98},
+		{"/fhir/r4/proto/PlanDefinition/hypertension-management/$apply", bClinW98},
+		{"/fhir/r4/proto/ActivityDefinition/bp-monitoring-order/$apply", bClinW98},
+		{"/fhir/r4/proto/Library/CMS165-Logic/$data-requirements", bClinW98},
+		{"/fhir/r4/proto/PlanDefinition/hypertension-management/$data-requirements", bClinW98},
+		{"/fhir/r4/proto/Subscription/w98-sub-1/$status", bClinW98},
+		{"/fhir/r4/proto/Subscription/w98-sub-1/$events", bClinW98},
+		{"/fhir/r4/proto/Patient/proto-pat-1/$summary", bClinW98},
+		{"/fhir/r4/proto/Composition/w98-comp-1/$document", bClinW98},
+		{"/fhir/r4/proto/Questionnaire/phq-9/$populate", bClinW98},
+		{"/fhir/r4/proto/QuestionnaireResponse/w98-qr-1/$extract", bClinW98},
+	} {
+		reqOp, opErr := http.NewRequest(http.MethodPost, ts.URL+opTC.ep, bytes.NewReader(opTC.body))
+		require.NoError(t, opErr)
+		reqOp.Header.Set("Content-Type", "application/x-protobuf")
+		reqOp.Header.Set("Accept", "application/x-protobuf")
+		respOp, opErr := client.Do(reqOp)
+		require.NoError(t, opErr)
+		opBytes, _ := io.ReadAll(respOp.Body)
+		respOp.Body.Close()
+		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s: %s", opTC.ep, string(opBytes))
 		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", opTC.ep)
 		assert.NotEmpty(t, opBytes, "endpoint %s", opTC.ep)
 	}

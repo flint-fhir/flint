@@ -4983,6 +4983,91 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-31", suite10, "Zero-JSON Binary Proto3 System/Type/Instance Metadata & Graph (/$meta, /Patient/$meta, /Patient/{id}/$meta-add, /Patient/{id}/$meta-delete, /GraphDefinition/$graph, /GraphDefinition/{id}/$graph), Compartment Everything (/Encounter/{id}/$everything, /Group/{id}/$everything), Instance-Level Clinical, Conformance, Scheduling, Payer & eCQM/DEQM Operations (Consent/{id}/$evaluate, MedicationKnowledge/{id}/$lookup, ChargeItem/{id}/$apply, StructureMap/{id}/$transform, Appointment/{id}/$hold, Appointment/{id}/$book, StructureDefinition/{id}/$snapshot, TestScript/{id}/$evaluate, CoverageEligibilityRequest/{id}/$submit, Task/{id}/$submit-attachment, Library/{id}/$evaluate, ResearchStudy/{id}/$evaluate-eligibility, Claim/{id}/$predetermine, Measure/{id}/$evaluate-risk-condition-category, Schedule/{id}/$find, MedicationRequest/{id}/$crd, AdverseEvent/{id}/$evaluate, CarePlan/{id}/$evaluate, Patient/{id}/$gfe, RiskAssessment/{id}/$evaluate, Questionnaire/{id}/$package, Claim/{id}/$inquire, Measure/{id}/$collect-data, Measure/{id}/$submit-data) & SQL-on-FHIR v2 Chained Collection Aggregations (.sum, .avg, .min, .max, .aggregate) & .single()/[idx] Subscript $sql Pushdown", t0, err, "Binary Proto3 System/Type/Instance $meta, $meta-add, $meta-delete, $graph, Encounter/Group $everything, 24 instance-level clinical/conformance/scheduling/payer/eCQM operations & chained collection aggregations/subscript $sql pushdown verified")
 
+	// AN-32: Zero-JSON Binary Proto3 System/Type/Instance Administrative, Lifecycle, Validation, FHIRPath & Messaging Operations (POST /$expunge, POST /Patient/$expunge, POST /Patient/{id}/$expunge, POST /Patient/{id}/$purge, POST /$reindex, POST /Patient/$reindex, POST /$diff, POST /Patient/{id}/$diff, POST /$data-requirements, POST /$fhirpath, POST /Patient/{id}/$fhirpath, POST /$validate, POST /Patient/{id}/$validate, POST /MessageHeader/$process-message), Instance & Type-Level Terminology POST Operations (ConceptMap/$closure, ValueSet/{id}/$expand, ValueSet/{id}/$validate-code, CodeSystem/{id}/$lookup, CodeSystem/{id}/$validate-code, CodeSystem/{id}/$subsumes, CodeSystem/{id}/$find-matches, ConceptMap/{id}/$translate), Instance-Level Clinical Reasoning, Subscriptions, IPS/Document & SDC POST Operations (PlanDefinition/{id}/$apply, ActivityDefinition/{id}/$apply, Library/{id}/$data-requirements, PlanDefinition/{id}/$data-requirements, Subscription/{id}/$status, Subscription/{id}/$events, Patient/{id}/$summary, Composition/{id}/$document, Questionnaire/{id}/$populate, QuestionnaireResponse/{id}/$extract) & SQL-on-FHIR v2 Chained Universal & Boolean Collection Quantifiers (.all(criteria), .exists(criteria), .anyTrue(), .allTrue(), .anyFalse(), .allFalse()) on Modified & Set-Operation Collections $sql Pushdown
+	t0 = time.Now()
+	{
+		_, _, _ = doReq(http.MethodPut, basePath+"/Patient/cert-pat-1", "application/fhir+json", []byte(`{"resourceType":"Patient","id":"cert-pat-1","active":true,"gender":"female","birthDate":"1985-04-12","identifier":[{"system":"http://hospital.example.org/mrn","value":"CERT-MRN-1"}],"name":[{"family":"Certify","given":["Alice"]}]}`), nil)
+		_, _, _ = doReq(http.MethodPut, basePath+"/Patient/cert-w98-purge-pat-1", "application/fhir+json", []byte(`{"resourceType":"Patient","id":"cert-w98-purge-pat-1","active":true,"gender":"female","birthDate":"1990-01-01","identifier":[{"system":"http://hospital.example.org/mrn","value":"CERT-MRN-PURGE-1"}],"name":[{"family":"PurgeTarget","given":["Temp"]}]}`), nil)
+		_, _, _ = doReq(http.MethodPut, basePath+"/Subscription/cert-w98-sub-1", "application/fhir+json", []byte(`{"resourceType":"Subscription","id":"cert-w98-sub-1","status":"active","reason":"Wave 98 Cert Subscription","criteria":"Observation?code=8867-4","channel":{"type":"rest-hook","endpoint":"https://flint.example.org/CertWebhook","payload":"application/fhir+json"}}`), nil)
+		_, _, _ = doReq(http.MethodPut, basePath+"/Composition/cert-w98-comp-1", "application/fhir+json", []byte(`{"resourceType":"Composition","id":"cert-w98-comp-1","status":"final","type":{"coding":[{"system":"http://loinc.org","code":"60591-5","display":"Patient summary Document"}]},"subject":{"reference":"Patient/cert-pat-1"},"date":"2026-01-15T10:00:00Z","author":[{"reference":"Practitioner/cert-prac-1"}],"title":"Cert Summary"}`), nil)
+		_, _, _ = doReq(http.MethodPut, basePath+"/QuestionnaireResponse/cert-w98-qr-1", "application/fhir+json", []byte(`{"resourceType":"QuestionnaireResponse","id":"cert-w98-qr-1","status":"completed","subject":{"reference":"Patient/cert-pat-1"},"authored":"2026-01-15T10:00:00Z","item":[{"linkId":"vital-heart-rate","text":"Heart Rate","answer":[{"valueQuantity":{"value":72,"unit":"/min","system":"http://unitsofmeasure.org","code":"/min"}}]}]}`), nil)
+
+		_, bExpParamsProto, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", []byte(`{"resourceType":"Parameters","parameter":[{"name":"expungePreviousVersions","valueBoolean":true},{"name":"limit","valueInteger":10}]}`), map[string]string{"Accept": "application/x-protobuf"})
+		_, bDiffParamsProto, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", []byte(`{"resourceType":"Parameters","parameter":[{"name":"from","resource":{"resourceType":"Patient","id":"cert-pat-1","active":true,"gender":"female"}},{"name":"to","resource":{"resourceType":"Patient","id":"cert-pat-1","active":true,"gender":"other"}}]}`), map[string]string{"Accept": "application/x-protobuf"})
+		_, bFPParamsProto, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", []byte(`{"resourceType":"Parameters","parameter":[{"name":"expression","valueString":"Patient.gender"},{"name":"resource","resource":{"resourceType":"Patient","id":"cert-pat-1","active":true,"gender":"female"}}]}`), map[string]string{"Accept": "application/x-protobuf"})
+		_, bValPatProto, _ := doReq(http.MethodPost, basePath+"/Patient/$convert", "application/fhir+json", []byte(`{"resourceType":"Patient","id":"cert-pat-1","active":true,"gender":"female","birthDate":"1985-04-12","identifier":[{"system":"http://hospital.example.org/mrn","value":"CERT-MRN-1"}],"name":[{"family":"Certify","given":["Alice"]}]}`), map[string]string{"Accept": "application/x-protobuf"})
+		_, bMsgBundleProto, _ := doReq(http.MethodPost, basePath+"/Bundle/$convert", "application/fhir+json", []byte(`{"resourceType":"Bundle","type":"message","entry":[{"resource":{"resourceType":"MessageHeader","id":"cert-mh-w98-1","eventCoding":{"system":"http://example.org/events","code":"admin-notify"},"source":{"endpoint":"http://example.org/src"}}}]}`), map[string]string{"Accept": "application/x-protobuf"})
+		_, bClosParamsProto, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", []byte(`{"resourceType":"Parameters","parameter":[{"name":"name","valueString":"cert-w98-closure"},{"name":"concept","valueCoding":{"system":"http://snomed.info/sct","code":"73211009"}}]}`), map[string]string{"Accept": "application/x-protobuf"})
+		_, bTermParamsProto, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", []byte(`{"resourceType":"Parameters","parameter":[{"name":"url","valueUri":"http://hl7.org/fhir/ValueSet/administrative-gender"},{"name":"system","valueUri":"http://hl7.org/fhir/administrative-gender"},{"name":"code","valueCode":"female"},{"name":"codeA","valueCode":"73211009"},{"name":"codeB","valueCode":"44054006"}]}`), map[string]string{"Accept": "application/x-protobuf"})
+		_, bClinParamsProto, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", []byte(`{"resourceType":"Parameters","parameter":[{"name":"subject","valueString":"Patient/cert-pat-1"},{"name":"patient","valueString":"Patient/cert-pat-1"},{"name":"target","valueString":"Library/CMS165-Logic"}]}`), map[string]string{"Accept": "application/x-protobuf"})
+
+		var opCheckErr error
+		for _, opTC := range []struct {
+			ep   string
+			body []byte
+		}{
+			{"/$expunge", bExpParamsProto},
+			{"/Patient/$expunge", bExpParamsProto},
+			{"/Patient/cert-pat-1/$expunge", bExpParamsProto},
+			{"/Patient/cert-w98-purge-pat-1/$purge", bExpParamsProto},
+			{"/$reindex", bExpParamsProto},
+			{"/Patient/$reindex", bExpParamsProto},
+			{"/$diff", bDiffParamsProto},
+			{"/Patient/cert-pat-1/$diff", bDiffParamsProto},
+			{"/$data-requirements", bClinParamsProto},
+			{"/$fhirpath", bFPParamsProto},
+			{"/Patient/cert-pat-1/$fhirpath", bFPParamsProto},
+			{"/$validate", bValPatProto},
+			{"/Patient/cert-pat-1/$validate", bValPatProto},
+			{"/MessageHeader/$process-message", bMsgBundleProto},
+			{"/ConceptMap/$closure", bClosParamsProto},
+			{"/ValueSet/administrative-gender/$expand", bTermParamsProto},
+			{"/ValueSet/administrative-gender/$validate-code", bTermParamsProto},
+			{"/CodeSystem/administrative-gender/$lookup", bTermParamsProto},
+			{"/CodeSystem/administrative-gender/$validate-code", bTermParamsProto},
+			{"/CodeSystem/snomed-ct/$subsumes", bTermParamsProto},
+			{"/CodeSystem/loinc/$find-matches", bTermParamsProto},
+			{"/ConceptMap/loinc-to-snomed/$translate", bTermParamsProto},
+			{"/PlanDefinition/hypertension-management/$apply", bClinParamsProto},
+			{"/ActivityDefinition/bp-monitoring-order/$apply", bClinParamsProto},
+			{"/Library/CMS165-Logic/$data-requirements", bClinParamsProto},
+			{"/PlanDefinition/hypertension-management/$data-requirements", bClinParamsProto},
+			{"/Subscription/cert-w98-sub-1/$status", bClinParamsProto},
+			{"/Subscription/cert-w98-sub-1/$events", bClinParamsProto},
+			{"/Patient/cert-pat-1/$summary", bClinParamsProto},
+			{"/Composition/cert-w98-comp-1/$document", bClinParamsProto},
+			{"/Questionnaire/phq-9/$populate", bClinParamsProto},
+			{"/QuestionnaireResponse/cert-w98-qr-1/$extract", bClinParamsProto},
+		} {
+			respOp, bOp, errOp := doReq(http.MethodPost, basePath+opTC.ep, "application/x-protobuf", opTC.body, map[string]string{
+				"Accept": "application/x-protobuf",
+			})
+			if errOp != nil || respOp.StatusCode != http.StatusOK || !strings.Contains(respOp.Header.Get("Content-Type"), "application/x-protobuf") || len(bOp) == 0 {
+				status := 0
+				if respOp != nil {
+					status = respOp.StatusCode
+				}
+				opCheckErr = fmt.Errorf("expected POST %s with binary Proto3 payload to return binary Proto3 response, got %d (err=%v, body=%s)", opTC.ep, status, errOp, string(bOp))
+				break
+			}
+		}
+
+		chainedQuantVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_chained_quantifiers_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"skip_all_nonempty","path":"name.given.skip(1).all($this != '')"},{"name":"union_all_len","path":"name.given.union(name.family).all($this.length() >= 2)"},{"name":"top2_exists_len","path":"name.given.sort().take(2).exists($this.length() >= 3)"},{"name":"comb_any_true","path":"active.combine(deceasedBoolean).anyTrue()"},{"name":"union_all_true","path":"active.union(deceasedBoolean).allTrue()"},{"name":"comb_any_false","path":"active.combine(deceasedBoolean).anyFalse()"},{"name":"excl_all_false","path":"active.exclude(deceasedBoolean).allFalse()"}]}],"where":[{"path":"name.given.skip(1).all($this != '') and name.given.union(name.family).all($this.length() >= 2) and active.combine(deceasedBoolean).anyTrue() and active.exclude(deceasedBoolean).allFalse()"}]}`)
+		respCQDoris, bCQDoris, errCQDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", chainedQuantVD, nil)
+		respCQPg, bCQPg, errCQPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", chainedQuantVD, nil)
+
+		if opCheckErr != nil {
+			err = opCheckErr
+		} else if errCQDoris != nil || respCQDoris.StatusCode != http.StatusOK || !strings.Contains(string(bCQDoris), "NOT ARRAY_EXISTS(x -> x = '', ARRAY_SLICE(") || !strings.Contains(string(bCQDoris), "NOT ARRAY_EXISTS(x -> CHAR_LENGTH(x) < 2, ARRAY_UNION(") || !strings.Contains(string(bCQDoris), "ARRAY_EXISTS(x -> CHAR_LENGTH(x) >= 3, ARRAY_SLICE(ARRAY_SORT(") || !strings.Contains(string(bCQDoris), "ARRAY_CONTAINS(ARRAY_CONCAT(") || !strings.Contains(string(bCQDoris), "NOT ARRAY_CONTAINS(ARRAY_EXCEPT(") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with chained collection quantifiers pushdown, got %d: %s", respCQDoris.StatusCode, string(bCQDoris))
+		} else if errCQPg != nil || respCQPg.StatusCode != http.StatusOK || !strings.Contains(string(bCQPg), "NOT EXISTS (SELECT 1 FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' OFFSET 1) sub WHERE sub.sp_value = '')") || !strings.Contains(string(bCQPg), "WHERE CHAR_LENGTH(sub.sp_value) < 2)") || !strings.Contains(string(bCQPg), "WHERE CHAR_LENGTH(sub.sp_value) >= 3)") || !strings.Contains(string(bCQPg), "WHERE sub.sp_value = 'true')") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with chained collection quantifiers pushdown, got %d: %s", respCQPg.StatusCode, string(bCQPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-32", suite10, "Zero-JSON Binary Proto3 System/Type/Instance Administrative, Lifecycle, Validation, FHIRPath & Messaging Operations (/$expunge, /Patient/$expunge, /Patient/{id}/$expunge, /Patient/{id}/$purge, /$reindex, /Patient/$reindex, /$diff, /Patient/{id}/$diff, /$data-requirements, /$fhirpath, /Patient/{id}/$fhirpath, /$validate, /Patient/{id}/$validate, /MessageHeader/$process-message), Instance & Type-Level Terminology POST Operations (ConceptMap/$closure, ValueSet/{id}/$expand, ValueSet/{id}/$validate-code, CodeSystem/{id}/$lookup, CodeSystem/{id}/$validate-code, CodeSystem/{id}/$subsumes, CodeSystem/{id}/$find-matches, ConceptMap/{id}/$translate), Instance-Level Clinical Reasoning, Subscriptions, IPS/Document & SDC POST Operations (PlanDefinition/{id}/$apply, ActivityDefinition/{id}/$apply, Library/{id}/$data-requirements, PlanDefinition/{id}/$data-requirements, Subscription/{id}/$status, Subscription/{id}/$events, Patient/{id}/$summary, Composition/{id}/$document, Questionnaire/{id}/$populate, QuestionnaireResponse/{id}/$extract) & SQL-on-FHIR v2 Chained Universal & Boolean Collection Quantifiers (.all, .exists, .anyTrue, .allTrue, .anyFalse, .allFalse) $sql Pushdown", t0, err, "Binary Proto3 32 system/type/instance admin, terminology, clinical reasoning, subscription, IPS/document & SDC operations & chained collection quantifiers $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

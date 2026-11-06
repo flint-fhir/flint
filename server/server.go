@@ -4330,6 +4330,25 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+			} else if protoType == "Parameters" {
+				hasNamedParam := false
+				if params, ok := rootMap["parameter"].([]any); ok {
+					for _, p := range params {
+						if pm, ok := p.(map[string]any); ok {
+							if n, _ := pm["name"].(string); strings.TrimSpace(n) != "" && len(pm) >= 2 {
+								hasNamedParam = true
+								break
+							}
+						}
+					}
+				}
+				if !hasNamedParam {
+					if patMD, ok := s.protoRegistry["Patient"]; ok {
+						if patMap, pErr := fhirutil.ProtoBytesToFHIRMap(patMD, "Patient", body, 0, time.Time{}); pErr == nil && len(patMap) > 1 {
+							rootMap = patMap
+						}
+					}
+				}
 			}
 			unwrapValidateParameters(rootMap)
 		}
