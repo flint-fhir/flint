@@ -2509,7 +2509,7 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 	} {
 		if strings.HasSuffix(p, aggSpec.suffix) {
 			basePath := strings.TrimSpace(p[:len(p)-len(aggSpec.suffix)])
-			if strings.Contains(basePath, "Quantity") {
+			if mods := parseSpidxCollectionModifiers(basePath); !mods.hasAnyMods() && !isSetOpFHIRPath(mods.basePath) && strings.Contains(basePath, "Quantity") {
 				return fmt.Sprintf("%s(ARRAY_MAP(x -> CAST(SPLIT_PART(x, '|', 2) AS DOUBLE), ARRAY_FILTER(x -> x LIKE 'value-quantity=|%%', r.code_tokens)))", aggSpec.dorisFn), "code_tokens[value-quantity]" + aggSpec.tag
 			}
 			collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
@@ -3291,13 +3291,25 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 				sumExpr, sumSrc := spidxZeroJSONColumnExpr(basePath+".sum()", dialect)
 				return fmt.Sprintf("COALESCE(%s, %s)", sumExpr, initVal), sumSrc + ".aggregate"
 			case strings.Contains(aggNoSpace, "$this.length()"):
-				subQ, subSrc := spidxSubqueryForPath(basePath)
+				var subQ, subSrc string
+				if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+					subQ, subSrc = buildModifiedSpidxSubquery(mods, dialect)
+					subSrc += mods.tag
+				} else {
+					subQ, subSrc = spidxSubqueryForPath(basePath)
+				}
 				if dialect == "sqlite" {
 					return fmt.Sprintf("COALESCE((SELECT SUM(LENGTH(sub.sp_value)) FROM (%s) sub), %s)", subQ, initVal), subSrc + ".aggregate"
 				}
 				return fmt.Sprintf("COALESCE((SELECT SUM(CHAR_LENGTH(sub.sp_value)) FROM (%s) sub), %s)", subQ, initVal), subSrc + ".aggregate"
 			default:
-				subQ, subSrc := spidxSubqueryForPath(basePath)
+				var subQ, subSrc string
+				if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+					subQ, subSrc = buildModifiedSpidxSubquery(mods, dialect)
+					subSrc += mods.tag
+				} else {
+					subQ, subSrc = spidxSubqueryForPath(basePath)
+				}
 				return fmt.Sprintf("COALESCE((SELECT COUNT(*) FROM (%s) sub), %s)", subQ, initVal), subSrc + ".aggregate"
 			}
 		}
@@ -3635,6 +3647,15 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 	}
 	if strings.HasSuffix(p, ".single()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".single()")])
+		if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+			origTag := mods.tag
+			if !mods.hasTake || mods.takeLimit > 1 {
+				mods.hasTake = true
+				mods.takeLimit = 1
+			}
+			subQ, subSrc := buildModifiedSpidxSubquery(mods, dialect)
+			return fmt.Sprintf("(%s)", subQ), subSrc + origTag + ".single"
+		}
 		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
 		return colExpr, colSrc + ".single"
 	}
@@ -3685,6 +3706,22 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		}
 	}
 	if basePath, subIdx, okSub := parseTrailingSubscriptIndex(p); okSub {
+		if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+			origTag := mods.tag
+			mods.offset += subIdx
+			if mods.hasTake {
+				if subIdx >= mods.takeLimit {
+					mods.takeLimit = 0
+				} else {
+					mods.takeLimit = 1
+				}
+			} else {
+				mods.hasTake = true
+				mods.takeLimit = 1
+			}
+			subQ, subSrc := buildModifiedSpidxSubquery(mods, dialect)
+			return fmt.Sprintf("(%s)", subQ), fmt.Sprintf("%s%s[%d]", subSrc, origTag, subIdx)
+		}
 		subQ, subSrc := spidxSubqueryForPath(basePath)
 		if subIdx == 0 {
 			return fmt.Sprintf("(%s LIMIT 1)", subQ), subSrc + "[0]"
@@ -3703,6 +3740,33 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 	} {
 		if strings.HasSuffix(p, aggSpec.suffix) {
 			basePath := strings.TrimSpace(p[:len(p)-len(aggSpec.suffix)])
+			if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+				if strings.Contains(mods.basePath, "Quantity") {
+					distinctKw := ""
+					if mods.isDistinct {
+						distinctKw = "DISTINCT "
+					}
+					subQ := fmt.Sprintf("SELECT %sq.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity'", distinctKw)
+					if mods.sortDir != "" {
+						subQ += " ORDER BY q.sp_value " + mods.sortDir
+					}
+					if mods.hasTake {
+						subQ += fmt.Sprintf(" LIMIT %d", mods.takeLimit)
+					} else if mods.offset > 0 && dialect == "sqlite" {
+						subQ += " LIMIT -1"
+					}
+					if mods.offset > 0 {
+						subQ += fmt.Sprintf(" OFFSET %d", mods.offset)
+					}
+					return fmt.Sprintf("(SELECT %s(sub.sp_value) FROM (%s) sub)", aggSpec.sqlFn, subQ), "spidx_quantity" + mods.tag + aggSpec.tag
+				}
+				subQ, subSrc := buildModifiedSpidxSubquery(mods, dialect)
+				castType := "DOUBLE PRECISION"
+				if dialect == "sqlite" {
+					castType = "REAL"
+				}
+				return fmt.Sprintf("(SELECT %s(CAST(sub.sp_value AS %s)) FROM (%s) sub)", aggSpec.sqlFn, castType, subQ), subSrc + mods.tag + aggSpec.tag
+			}
 			if strings.Contains(basePath, "Quantity") {
 				return fmt.Sprintf("(SELECT %s(q.sp_value) FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity')", aggSpec.sqlFn), "spidx_quantity" + aggSpec.tag
 			}

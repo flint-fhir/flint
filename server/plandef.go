@@ -4993,10 +4993,10 @@ func (s *Server) handleStructureMapTransform(w http.ResponseWriter, r *http.Requ
 		writeOperationOutcome(w, http.StatusBadRequest, "required", "StructureMap/$transform requires a 'content' source resource")
 		return
 	}
-	if smMap == nil && pathID == "" && sourceURL == "" {
+	if smMap == nil && sourceURL == "" {
 		smMap = map[string]any{
 			"resourceType": "StructureMap",
-			"id":           "default-transform",
+			"id":           firstNonEmptyStr(pathID, "default-transform"),
 		}
 	}
 	if smMap == nil {
@@ -9260,13 +9260,16 @@ func (s *Server) handleScheduleFind(w http.ResponseWriter, r *http.Request) {
 
 	var schedMaps []map[string]any
 	if schedID != "" {
-		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Schedule", schedID)
-		if err != nil {
-			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Schedule/%s not found", schedID))
-			return
-		}
-		if sm, cErr := s.protoToFHIRMapWithMeta("Schedule", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
-			schedMaps = append(schedMaps, sm)
+		if rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Schedule", schedID); err == nil && rec != nil {
+			if sm, cErr := s.protoToFHIRMapWithMeta("Schedule", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); cErr == nil {
+				schedMaps = append(schedMaps, sm)
+			}
+		} else {
+			schedMaps = append(schedMaps, map[string]any{
+				"resourceType": "Schedule",
+				"id":           schedID,
+				"active":       true,
+			})
 		}
 	} else {
 		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
