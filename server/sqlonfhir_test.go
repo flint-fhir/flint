@@ -3682,4 +3682,268 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 			assert.Contains(t, string(habBytes), want)
 		}
 	}
+
+	// 35. Wave 90: Binary Proto3 CARIN RTPBC, FAST Digital Identity, PACIO RT/PFE, Public Health VRDR/BFDR/IIS, Da Vinci CDex, CodeX/mCODE Radiotherapy & .precision(), .escape()/.unescape() & .comparable() $sql Pushdown
+	w90ParamsPb := &parampb.Parameters{
+		Parameter: []*parampb.Parameters_Parameter{
+			{
+				Name: &dtpb.String{Value: "patient"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Patient/" + patID},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "subject"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Patient/" + patID},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "person"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Person/pers-w90-1"},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "encounter"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Encounter/enc-w90-1"},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "mother"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Patient/" + patID},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "signer"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_Reference{
+						Reference: &dtpb.Reference{
+							Reference: &dtpb.Reference_Uri{
+								Uri: &dtpb.String{Value: "Practitioner/prac-w90-1"},
+							},
+						},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "code"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "1049502"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "causeOfDeathCode"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "I21.9"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "query"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "Condition?patient=Patient/" + patID},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "icfCode"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "d450"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "goal"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "Walk 150 feet independently"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "TrackingId"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "cdex-track-w90-1"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "questionnaire"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "http://hl7.org/fhir/us/davinci-cdex/Questionnaire/cdex-questionnaire-example1"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "cvx"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "208"},
+					},
+				},
+			},
+			{
+				Name: &dtpb.String{Value: "bundleId"},
+				Value: &parampb.Parameters_Parameter_ValueX{
+					Choice: &parampb.Parameters_Parameter_ValueX_StringValue{
+						StringValue: &dtpb.String{Value: "cdex-signed-bundle-w90-1"},
+					},
+				},
+			},
+		},
+	}
+	w90ParamsBytes, err := proto.Marshal(w90ParamsPb)
+	require.NoError(t, err)
+
+	for _, ep := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/fhir/r4/proto/Claim/$rtpbc-submit"},
+		{http.MethodPost, "/fhir/r4/proto/ClaimResponse/$rtpbc-coverage"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$idi-match"},
+		{http.MethodPost, "/fhir/r4/proto/Person/$verify-identity"},
+		{http.MethodPost, "/fhir/r4/proto/Encounter/$pacio-timepoint"},
+		{http.MethodPost, "/fhir/r4/proto/Encounter/$pacio-timepoints"},
+		{http.MethodPost, "/fhir/r4/proto/Composition/$vrdr-document"},
+		{http.MethodPost, "/fhir/r4/proto/Bundle/$vrdr-submit"},
+		{http.MethodPost, "/fhir/r4/proto/Task/$cdex-request"},
+		{http.MethodPost, "/fhir/r4/proto/Task/$cdex-poll"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$pacio-pfe-record"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$pacio-pfe-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Composition/$bfdr-document"},
+		{http.MethodPost, "/fhir/r4/proto/Bundle/$bfdr-submit"},
+		{http.MethodPost, "/fhir/r4/proto/Communication/$cdex-submit-attachment"},
+		{http.MethodPost, "/fhir/r4/proto/Task/$cdex-questionnaire-request"},
+		{http.MethodPost, "/fhir/r4/proto/Procedure/$mcode-radiotherapy-record"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$mcode-radiotherapy-summary"},
+		{http.MethodPost, "/fhir/r4/proto/Immunization/$iis-submit"},
+		{http.MethodPost, "/fhir/r4/proto/Patient/$iis-history"},
+		{http.MethodPost, "/fhir/r4/proto/Bundle/$cdex-sign"},
+		{http.MethodPost, "/fhir/r4/proto/Bundle/$cdex-verify-signature"},
+	} {
+		reqOp, opErr := http.NewRequest(ep.method, ts.URL+ep.path, bytes.NewReader(w90ParamsBytes))
+		require.NoError(t, opErr)
+		reqOp.Header.Set("Content-Type", "application/x-protobuf")
+		reqOp.Header.Set("Accept", "application/x-protobuf")
+		respOp, opErr := client.Do(reqOp)
+		require.NoError(t, opErr)
+		opBytes, _ := io.ReadAll(respOp.Body)
+		respOp.Body.Close()
+		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s failed: %s", ep.path, string(opBytes))
+		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s Content-Type", ep.path)
+		assert.Equal(t, "google.fhir.r4.proto3", respOp.Header.Get("X-Flint-Wire-Format"), "endpoint %s X-Flint-Wire-Format", ep.path)
+		require.NotEmpty(t, opBytes, "endpoint %s empty body", ep.path)
+	}
+
+	precEscCompVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "obs_precision_escape_comparable_v1",
+		"status": "active",
+		"resource": "Observation",
+		"select": [
+			{
+				"column": [
+					{"name": "val_prec", "path": "valueQuantity.value.precision()"},
+					{"name": "code_esc_html", "path": "code.coding.code.first().escape('html')"},
+					{"name": "code_unesc_html", "path": "code.coding.code.first().unescape('html')"},
+					{"name": "code_esc_json", "path": "code.coding.code.first().escape('json')"},
+					{"name": "qty_comp", "path": "valueQuantity.comparable(valueQuantity)"}
+				]
+			}
+		],
+		"where": [
+			{"path": "valueQuantity.value.precision() >= 1 and valueQuantity.comparable(valueQuantity) and code.coding.code.first().escape('html') = '8867-4'"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"CHAR_LENGTH(CAST(r.value_quantity AS STRING)) AS val_prec",
+				"REPLACE(REPLACE(REPLACE(r.code, '&', '&amp;'), '<', '&lt;'), '>', '&gt;') AS code_esc_html",
+				"REPLACE(REPLACE(REPLACE(r.code, '&gt;', '>'), '&lt;', '<'), '&amp;', '&') AS code_unesc_html",
+				"AS code_esc_json",
+				"IS NOT NULL) AS qty_comp",
+				"CHAR_LENGTH(CAST(r.value_quantity AS STRING)) >= 1",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"CHAR_LENGTH(CAST((SELECT q.sp_value FROM spidx_quantity q",
+				"AS TEXT)) AS val_prec",
+				"REPLACE(REPLACE(REPLACE((SELECT t.sp_value FROM spidx_token t",
+				"'&', '&amp;'), '<', '&lt;'), '>', '&gt;') AS code_esc_html",
+				"'&gt;', '>'), '&lt;', '<'), '&amp;', '&') AS code_unesc_html",
+				"IS NOT NULL) AS qty_comp",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"LENGTH(CAST((SELECT q.sp_value FROM spidx_quantity q",
+				"AS TEXT)) AS val_prec",
+				"REPLACE(REPLACE(REPLACE((SELECT t.sp_value FROM spidx_token t",
+				"'&', '&amp;'), '<', '&lt;'), '>', '&gt;') AS code_esc_html",
+				"'&gt;', '>'), '&lt;', '<'), '&amp;', '&') AS code_unesc_html",
+				"IS NOT NULL) AS qty_comp",
+			},
+		},
+	} {
+		reqPEC, pecErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(precEscCompVD))
+		require.NoError(t, pecErr)
+		reqPEC.Header.Set("Content-Type", "application/fhir+json")
+		respPEC, pecErr := client.Do(reqPEC)
+		require.NoError(t, pecErr)
+		pecBytes, _ := io.ReadAll(respPEC.Body)
+		respPEC.Body.Close()
+		require.Equal(t, http.StatusOK, respPEC.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(pecBytes), want)
+		}
+	}
 }

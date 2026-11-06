@@ -18702,14 +18702,15 @@ func (s *Server) handleCarinRTPBC(w http.ResponseWriter, r *http.Request) {
 								continue
 							}
 							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
 							switch name {
 							case "patient", "subject":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" && patParam == "" {
-									patParam = strings.TrimSpace(vs)
+								if val != "" && patParam == "" {
+									patParam = val
 								}
 							case "code", "medicationCode":
-								if vc, ok := pm["valueCode"].(string); ok && strings.TrimSpace(vc) != "" {
-									rxnormCode = strings.TrimSpace(vc)
+								if val != "" {
+									rxnormCode = val
 								}
 							case "copay":
 								if vd, ok := pm["valueDecimal"].(float64); ok && vd >= 0 {
@@ -18825,8 +18826,39 @@ func (s *Server) handleFASTDigitalIdentity(w http.ResponseWriter, r *http.Reques
 	resID := strings.TrimSpace(r.PathValue("id"))
 	nowStr := time.Now().UTC().Format(time.RFC3339)
 
+	var patParam, personParam string
+	if r.Body != nil {
+		bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+		if len(strings.TrimSpace(string(bodyBytes))) > 0 {
+			if bodyMap, err := s.decodeOperationBodyMap(r, bodyBytes, "Parameters"); err == nil {
+				if rt, _ := bodyMap["resourceType"].(string); rt == "Parameters" {
+					if params, ok := bodyMap["parameter"].([]any); ok {
+						for _, raw := range params {
+							pm, ok := raw.(map[string]any)
+							if !ok {
+								continue
+							}
+							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
+							switch name {
+							case "patient", "subject":
+								if val != "" && patParam == "" {
+									patParam = strings.TrimPrefix(val, "Patient/")
+								}
+							case "person":
+								if val != "" && personParam == "" {
+									personParam = strings.TrimPrefix(val, "Person/")
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if op == "$idi-match" {
-		patID := "idi-matched-pat-1"
+		patID := firstNonEmptyStr(patParam, "idi-matched-pat-1")
 		patRes := map[string]any{
 			"resourceType": "Patient",
 			"id":           patID,
@@ -18873,7 +18905,7 @@ func (s *Server) handleFASTDigitalIdentity(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	personID := firstNonEmptyStr(resID, "fast-person-1")
+	personID := firstNonEmptyStr(resID, personParam, "fast-person-1")
 	personRes := map[string]any{
 		"resourceType": "Person",
 		"id":           personID,
@@ -18949,10 +18981,12 @@ func (s *Server) handlePACIOReassessmentTimepoints(w http.ResponseWriter, r *htt
 								continue
 							}
 							name, _ := pm["name"].(string)
-							if (name == "patient" || name == "subject") && patParam == "" {
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-									patParam = strings.TrimSpace(vs)
-								}
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
+							if (name == "patient" || name == "subject") && patParam == "" && val != "" {
+								patParam = val
+							}
+							if name == "encounter" && resID == "" && val != "" {
+								resID = strings.TrimPrefix(val, "Encounter/")
 							}
 						}
 					}
@@ -19072,14 +19106,15 @@ func (s *Server) handlePublicHealthVRDRWave41(w http.ResponseWriter, r *http.Req
 								continue
 							}
 							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
 							switch name {
 							case "patient", "subject":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" && patParam == "" {
-									patParam = strings.TrimSpace(vs)
+								if val != "" && patParam == "" {
+									patParam = val
 								}
 							case "causeOfDeathCode":
-								if vc, ok := pm["valueCode"].(string); ok && strings.TrimSpace(vc) != "" {
-									causeOfDeathCode = strings.TrimSpace(vc)
+								if val != "" {
+									causeOfDeathCode = val
 								}
 							}
 						}
@@ -19285,14 +19320,15 @@ func (s *Server) handleDaVinciCDexTaskRequestAndPoll(w http.ResponseWriter, r *h
 								continue
 							}
 							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
 							switch name {
 							case "patient", "subject":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" && patParam == "" {
-									patParam = strings.TrimSpace(vs)
+								if val != "" && patParam == "" {
+									patParam = val
 								}
 							case "query", "fhirQuery":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-									fhirQuery = strings.TrimSpace(vs)
+								if val != "" {
+									fhirQuery = val
 								}
 							}
 						}
@@ -19429,18 +19465,19 @@ func (s *Server) handlePACIOPFE(w http.ResponseWriter, r *http.Request) {
 								continue
 							}
 							name, _ := pm["name"].(string)
+							val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
 							switch name {
 							case "patient", "subject":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" && resID == "" {
-									resID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+								if val != "" && resID == "" {
+									resID = strings.TrimPrefix(val, "Patient/")
 								}
 							case "icfCode":
-								if vc, ok := pm["valueCode"].(string); ok && strings.TrimSpace(vc) != "" {
-									icfCode = strings.TrimSpace(vc)
+								if val != "" {
+									icfCode = val
 								}
 							case "goal":
-								if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-									goalText = strings.TrimSpace(vs)
+								if val != "" {
+									goalText = val
 								}
 							}
 						}
@@ -19562,19 +19599,15 @@ func (s *Server) handlePublicHealthBFDRWave42(w http.ResponseWriter, r *http.Req
 						for _, p := range params {
 							if pm, ok := p.(map[string]any); ok {
 								name, _ := pm["name"].(string)
+								val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
 								switch name {
 								case "patient", "child":
-									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-										patientID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
-									}
-									if vr, ok := pm["valueReference"].(map[string]any); ok {
-										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-											patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
-										}
+									if val != "" {
+										patientID = strings.TrimPrefix(val, "Patient/")
 									}
 								case "mother":
-									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-										motherID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
+									if val != "" {
+										motherID = strings.TrimPrefix(val, "Patient/")
 									}
 								case "birthWeightGrams":
 									if vf, ok := pm["valueDecimal"].(float64); ok && vf > 0 {
@@ -19820,26 +19853,19 @@ func (s *Server) handleDaVinciCDexWave42(w http.ResponseWriter, r *http.Request)
 						for _, p := range params {
 							if pm, ok := p.(map[string]any); ok {
 								name, _ := pm["name"].(string)
+								val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
 								switch name {
 								case "patient", "MemberId":
-									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-										patientID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
-									}
-									if vr, ok := pm["valueReference"].(map[string]any); ok {
-										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-											patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
-										}
+									if val != "" {
+										patientID = strings.TrimPrefix(val, "Patient/")
 									}
 								case "TrackingId", "trackingId":
-									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-										trackingID = strings.TrimSpace(vs)
+									if val != "" {
+										trackingID = val
 									}
 								case "questionnaire":
-									if vc, ok := pm["valueCanonical"].(string); ok && strings.TrimSpace(vc) != "" {
-										questionnaireCanonical = strings.TrimSpace(vc)
-									}
-									if vu, ok := pm["valueUri"].(string); ok && strings.TrimSpace(vu) != "" {
-										questionnaireCanonical = strings.TrimSpace(vu)
+									if val != "" {
+										questionnaireCanonical = val
 									}
 								}
 							}
@@ -20005,15 +20031,11 @@ func (s *Server) handleMCODERadiotherapyWave42(w http.ResponseWriter, r *http.Re
 						for _, p := range params {
 							if pm, ok := p.(map[string]any); ok {
 								name, _ := pm["name"].(string)
+								val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
 								switch name {
 								case "patient", "subject":
-									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-										patientID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
-									}
-									if vr, ok := pm["valueReference"].(map[string]any); ok {
-										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-											patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
-										}
+									if val != "" {
+										patientID = strings.TrimPrefix(val, "Patient/")
 									}
 								case "totalDoseCGy":
 									if vf, ok := pm["valueDecimal"].(float64); ok && vf > 0 {
@@ -20179,22 +20201,15 @@ func (s *Server) handlePublicHealthIISWave43(w http.ResponseWriter, r *http.Requ
 						for _, p := range params {
 							if pm, ok := p.(map[string]any); ok {
 								name, _ := pm["name"].(string)
+								val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
 								switch name {
 								case "patient", "subject":
-									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-										patientID = strings.TrimPrefix(strings.TrimSpace(vs), "Patient/")
-									}
-									if vr, ok := pm["valueReference"].(map[string]any); ok {
-										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-											patientID = strings.TrimPrefix(strings.TrimSpace(ref), "Patient/")
-										}
+									if val != "" {
+										patientID = strings.TrimPrefix(val, "Patient/")
 									}
 								case "cvx", "vaccineCode":
-									if vc, ok := pm["valueCode"].(string); ok && strings.TrimSpace(vc) != "" {
-										cvxCode = strings.TrimSpace(vc)
-									}
-									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-										cvxCode = strings.TrimSpace(vs)
+									if val != "" {
+										cvxCode = val
 									}
 								}
 							}
@@ -20359,19 +20374,15 @@ func (s *Server) handleDaVinciCDexSignatureWave43(w http.ResponseWriter, r *http
 						for _, p := range params {
 							if pm, ok := p.(map[string]any); ok {
 								name, _ := pm["name"].(string)
+								val := strings.TrimSpace(firstNonEmptyStr(extractParamStringOrRef(pm), extractParamString(pm)))
 								switch name {
 								case "signer", "who":
-									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-										signerRef = strings.TrimSpace(vs)
-									}
-									if vr, ok := pm["valueReference"].(map[string]any); ok {
-										if ref, _ := vr["reference"].(string); strings.TrimSpace(ref) != "" {
-											signerRef = strings.TrimSpace(ref)
-										}
+									if val != "" {
+										signerRef = val
 									}
 								case "bundleId":
-									if vs, ok := pm["valueString"].(string); ok && strings.TrimSpace(vs) != "" {
-										bundleID = strings.TrimSpace(vs)
+									if val != "" {
+										bundleID = val
 									}
 								}
 							}
