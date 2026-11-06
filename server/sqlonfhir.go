@@ -1630,6 +1630,16 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 
 func dorisZeroJSONCollectionColumnExpr(fhirPath string) (string, string) {
 	p := normalizePolymorphicFHIRPath(strings.TrimSpace(fhirPath))
+	if strings.HasSuffix(p, ".sort()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".sort()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_SORT(%s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".sort[]"
+	}
+	if strings.HasSuffix(p, ".sortDesc()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".sortDesc()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_REVERSE_SORT(%s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".sortDesc[]"
+	}
 	if strings.HasSuffix(p, ".distinct()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".distinct()")])
 		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
@@ -1756,6 +1766,21 @@ func spidxSubqueryForPath(fhirPath string) (string, string) {
 
 func spidxZeroJSONCollectionColumnExpr(fhirPath, dialect string) (string, string) {
 	p := normalizePolymorphicFHIRPath(strings.TrimSpace(fhirPath))
+	if strings.HasSuffix(p, ".sort()") || strings.HasSuffix(p, ".sortDesc()") {
+		sortDir := "ASC"
+		tag := ".sort[]"
+		basePath := strings.TrimSpace(p[:len(p)-len(".sort()")])
+		if strings.HasSuffix(p, ".sortDesc()") {
+			sortDir = "DESC"
+			tag = ".sortDesc[]"
+			basePath = strings.TrimSpace(p[:len(p)-len(".sortDesc()")])
+		}
+		subQ, subSrc := spidxSubqueryForPath(basePath)
+		if dialect == "sqlite" {
+			return fmt.Sprintf("(SELECT json_group_array(sub.sp_value) FROM (%s ORDER BY sp_value %s) sub)", subQ, sortDir), subSrc + tag
+		}
+		return fmt.Sprintf("(SELECT COALESCE(ARRAY_AGG(sub.sp_value), ARRAY[]::text[]) FROM (%s ORDER BY sp_value %s) sub)", subQ, sortDir), subSrc + tag
+	}
 	if strings.HasSuffix(p, ".distinct()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".distinct()")])
 		sp := normalizeFHIRPathToSearchParam(basePath)
@@ -2360,7 +2385,7 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
 		return fmt.Sprintf("element_at(%s, 1)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".single"
 	}
-	if strings.HasSuffix(p, ".first()") && (strings.Contains(p, ".skip(") || strings.Contains(p, ".take(") || strings.Contains(p, ".tail()")) {
+	if strings.HasSuffix(p, ".first()") && (strings.Contains(p, ".skip(") || strings.Contains(p, ".take(") || strings.Contains(p, ".tail()") || strings.Contains(p, ".sort(") || strings.Contains(p, ".sortDesc(")) {
 		basePath := strings.TrimSpace(p[:len(p)-len(".first()")])
 		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
 		return fmt.Sprintf("element_at(%s, 1)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".first"
@@ -2439,7 +2464,7 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		escapedSys := strings.ReplaceAll(sysVal, "'", "''")
 		return fmt.Sprintf("element_at(array_map(x -> split_part(x, '|', 2), array_filter(x -> x LIKE '%s=%s|%%', r.code_tokens)), 1)", spSys, escapedSys), "code_tokens[" + spSys + "|" + sysVal + "]"
 	}
-	if strings.HasSuffix(p, ".distinct()") || strings.HasSuffix(p, ".tail()") || (strings.Contains(p, ".skip(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".take(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".union(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".combine(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".intersect(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".exclude(") && strings.HasSuffix(p, ")")) {
+	if strings.HasSuffix(p, ".sort()") || strings.HasSuffix(p, ".sortDesc()") || strings.HasSuffix(p, ".distinct()") || strings.HasSuffix(p, ".tail()") || (strings.Contains(p, ".skip(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".take(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".union(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".combine(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".intersect(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".exclude(") && strings.HasSuffix(p, ")")) {
 		return dorisZeroJSONCollectionColumnExpr(p)
 	}
 	if strings.HasSuffix(p, ".lower()") {
@@ -2884,30 +2909,42 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		colExpr, _ := dorisZeroJSONColumnExpr(fieldPath, isCore)
 		return fmt.Sprintf("REGEXP(%s, '%s')", colExpr, escapedArg)
 	}
-	if idx := strings.Index(p, ".startsWith("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".startsWith("); idx != -1 && strings.HasSuffix(p, ")") {
 		fieldPath := strings.TrimSpace(p[:idx])
 		rawArg := strings.Trim(strings.TrimSpace(p[idx+len(".startsWith("):len(p)-1]), "'\"")
 		escapedArg := strings.ReplaceAll(rawArg, "'", "''")
+		if isComputedStringFHIRPath(fieldPath) {
+			colExpr, _ := dorisZeroJSONColumnExpr(fieldPath, isCore)
+			return fmt.Sprintf("%s LIKE '%s%%'", colExpr, escapedArg)
+		}
 		if fieldPath == "code" || fieldPath == "code.coding.code" {
 			return fmt.Sprintf("%s LIKE '%s%%'", codeCol, escapedArg)
 		}
 		sp := normalizeFHIRPathToSearchParam(fieldPath)
 		return fmt.Sprintf("array_exists(x -> x LIKE '%s=%s%%', r.string_tokens)", sp, escapedArg)
 	}
-	if idx := strings.Index(p, ".contains("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".contains("); idx != -1 && strings.HasSuffix(p, ")") {
 		fieldPath := strings.TrimSpace(p[:idx])
 		rawArg := strings.Trim(strings.TrimSpace(p[idx+len(".contains("):len(p)-1]), "'\"")
 		escapedArg := strings.ReplaceAll(rawArg, "'", "''")
+		if isComputedStringFHIRPath(fieldPath) {
+			colExpr, _ := dorisZeroJSONColumnExpr(fieldPath, isCore)
+			return fmt.Sprintf("%s LIKE '%%%s%%'", colExpr, escapedArg)
+		}
 		if fieldPath == "code" || fieldPath == "code.coding.code" {
 			return fmt.Sprintf("%s LIKE '%%%s%%'", codeCol, escapedArg)
 		}
 		sp := normalizeFHIRPathToSearchParam(fieldPath)
 		return fmt.Sprintf("array_exists(x -> x LIKE '%s=%%%s%%', r.string_tokens)", sp, escapedArg)
 	}
-	if idx := strings.Index(p, ".endsWith("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".endsWith("); idx != -1 && strings.HasSuffix(p, ")") {
 		fieldPath := strings.TrimSpace(p[:idx])
 		rawArg := strings.Trim(strings.TrimSpace(p[idx+len(".endsWith("):len(p)-1]), "'\"")
 		escapedArg := strings.ReplaceAll(rawArg, "'", "''")
+		if isComputedStringFHIRPath(fieldPath) {
+			colExpr, _ := dorisZeroJSONColumnExpr(fieldPath, isCore)
+			return fmt.Sprintf("%s LIKE '%%%s'", colExpr, escapedArg)
+		}
 		if fieldPath == "code" || fieldPath == "code.coding.code" {
 			return fmt.Sprintf("%s LIKE '%%%s'", codeCol, escapedArg)
 		}
@@ -2995,7 +3032,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		}
 	}
 	_, _, hasSubLHS := parseTrailingSubscriptIndex(lhs)
-	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") {
+	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasPrefix(strings.ToLower(lhs), "coalesce(") || strings.HasPrefix(strings.ToLower(lhs), "iif(") || strings.Contains(lhs, ".join(") || strings.HasSuffix(lhs, ".last()") || strings.HasSuffix(lhs, ".single()") || strings.Contains(lhs, ".sort(") || strings.Contains(lhs, ".sortDesc(") || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") {
 		lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
 		sqlOp := op
 		if sqlOp == "!=" {
@@ -3378,6 +3415,14 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 			isDistinct = true
 			basePath = strings.TrimSpace(basePath[:len(basePath)-len(".distinct()")])
 		}
+		sortDir := ""
+		if strings.HasSuffix(basePath, ".sort()") {
+			sortDir = "ASC"
+			basePath = strings.TrimSpace(basePath[:len(basePath)-len(".sort()")])
+		} else if strings.HasSuffix(basePath, ".sortDesc()") {
+			sortDir = "DESC"
+			basePath = strings.TrimSpace(basePath[:len(basePath)-len(".sortDesc()")])
+		}
 		isTail := false
 		if strings.HasSuffix(basePath, ".tail()") {
 			isTail = true
@@ -3396,6 +3441,17 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 				skipOffset = n
 				basePath = strings.TrimSpace(basePath[:sIdx])
 			}
+		}
+		if sortDir != "" {
+			subQ, subSrc := spidxSubqueryForPath(basePath)
+			tag := ".sort.join"
+			if sortDir == "DESC" {
+				tag = ".sortDesc.join"
+			}
+			if dialect == "sqlite" {
+				return fmt.Sprintf("(SELECT COALESCE(group_concat(sub.sp_value, '%s'), '') FROM (%s ORDER BY sp_value %s) sub)", escapedSep, subQ, sortDir), subSrc + tag
+			}
+			return fmt.Sprintf("(SELECT COALESCE(ARRAY_TO_STRING(ARRAY_AGG(sub.sp_value), '%s'), '') FROM (%s ORDER BY sp_value %s) sub)", escapedSep, subQ, sortDir), subSrc + tag
 		}
 		if spSys, sysVal, _, okSys := parseSystemFilteredTokenPath(basePath); okSys {
 			escapedSys := strings.ReplaceAll(sysVal, "'", "''")
@@ -3470,12 +3526,23 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 	}
 	if strings.HasSuffix(p, ".last()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".last()")])
+		orderDir := "DESC"
+		tag := ".last"
+		if strings.HasSuffix(basePath, ".sort()") {
+			basePath = strings.TrimSpace(basePath[:len(basePath)-len(".sort()")])
+			orderDir = "DESC"
+			tag = ".sort.last"
+		} else if strings.HasSuffix(basePath, ".sortDesc()") {
+			basePath = strings.TrimSpace(basePath[:len(basePath)-len(".sortDesc()")])
+			orderDir = "ASC"
+			tag = ".sortDesc.last"
+		}
 		sp := normalizeFHIRPathToSearchParam(basePath)
 		isStringParam := strings.HasPrefix(basePath, "name") || basePath == "given" || basePath == "family" || strings.HasPrefix(basePath, "address") || strings.HasPrefix(basePath, "telecom")
 		if isStringParam {
-			return fmt.Sprintf("(SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' ORDER BY s.sp_value DESC LIMIT 1)", sp), "spidx_string.last"
+			return fmt.Sprintf("(SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' ORDER BY s.sp_value %s LIMIT 1)", sp, orderDir), "spidx_string" + tag
 		}
-		return fmt.Sprintf("(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' ORDER BY t.sp_value DESC LIMIT 1)", sp), "spidx_token.last"
+		return fmt.Sprintf("(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' ORDER BY t.sp_value %s LIMIT 1)", sp, orderDir), "spidx_token" + tag
 	}
 	if strings.HasSuffix(p, ".single()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".single()")])
@@ -3484,6 +3551,22 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 	}
 	if strings.HasSuffix(p, ".first()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".first()")])
+		if strings.HasSuffix(basePath, ".sort()") || strings.HasSuffix(basePath, ".sortDesc()") {
+			orderDir := "ASC"
+			tag := ".sort.first"
+			rootPath := strings.TrimSpace(basePath[:len(basePath)-len(".sort()")])
+			if strings.HasSuffix(basePath, ".sortDesc()") {
+				orderDir = "DESC"
+				tag = ".sortDesc.first"
+				rootPath = strings.TrimSpace(basePath[:len(basePath)-len(".sortDesc()")])
+			}
+			sp := normalizeFHIRPathToSearchParam(rootPath)
+			isStringParam := strings.HasPrefix(rootPath, "name") || rootPath == "given" || rootPath == "family" || strings.HasPrefix(rootPath, "address") || strings.HasPrefix(rootPath, "telecom")
+			if isStringParam {
+				return fmt.Sprintf("(SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' ORDER BY s.sp_value %s LIMIT 1)", sp, orderDir), "spidx_string" + tag
+			}
+			return fmt.Sprintf("(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' ORDER BY t.sp_value %s LIMIT 1)", sp, orderDir), "spidx_token" + tag
+		}
 		if strings.HasSuffix(basePath, ".tail()") {
 			rootPath := strings.TrimSpace(basePath[:len(basePath)-len(".tail()")])
 			sp := normalizeFHIRPathToSearchParam(rootPath)
@@ -3626,7 +3709,7 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		escapedSys := strings.ReplaceAll(sysVal, "'", "''")
 		return fmt.Sprintf("(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_system = '%s' LIMIT 1)", spSys, escapedSys), "spidx_token[" + spSys + "]"
 	}
-	if strings.HasSuffix(p, ".distinct()") || strings.HasSuffix(p, ".tail()") || (strings.Contains(p, ".skip(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".take(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".union(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".combine(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".intersect(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".exclude(") && strings.HasSuffix(p, ")")) {
+	if strings.HasSuffix(p, ".sort()") || strings.HasSuffix(p, ".sortDesc()") || strings.HasSuffix(p, ".distinct()") || strings.HasSuffix(p, ".tail()") || (strings.Contains(p, ".skip(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".take(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".union(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".combine(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".intersect(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".exclude(") && strings.HasSuffix(p, ")")) {
 		return spidxZeroJSONCollectionColumnExpr(p, dialect)
 	}
 	if strings.HasSuffix(p, ".lower()") {
@@ -4085,24 +4168,36 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 		}
 		return fmt.Sprintf("%s ~ '%s'", colExpr, escapedArg)
 	}
-	if idx := strings.Index(p, ".startsWith("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".startsWith("); idx != -1 && strings.HasSuffix(p, ")") {
 		fieldPath := strings.TrimSpace(p[:idx])
 		rawArg := strings.Trim(strings.TrimSpace(p[idx+len(".startsWith("):len(p)-1]), "'\"")
 		escapedArg := strings.ReplaceAll(rawArg, "'", "''")
+		if isComputedStringFHIRPath(fieldPath) {
+			colExpr, _ := spidxZeroJSONColumnExpr(fieldPath, dialect)
+			return fmt.Sprintf("%s LIKE '%s%%'", colExpr, escapedArg)
+		}
 		sp := normalizeFHIRPathToSearchParam(fieldPath)
 		return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' AND s.sp_value LIKE '%s%%')", sp, escapedArg)
 	}
-	if idx := strings.Index(p, ".contains("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".contains("); idx != -1 && strings.HasSuffix(p, ")") {
 		fieldPath := strings.TrimSpace(p[:idx])
 		rawArg := strings.Trim(strings.TrimSpace(p[idx+len(".contains("):len(p)-1]), "'\"")
 		escapedArg := strings.ReplaceAll(rawArg, "'", "''")
+		if isComputedStringFHIRPath(fieldPath) {
+			colExpr, _ := spidxZeroJSONColumnExpr(fieldPath, dialect)
+			return fmt.Sprintf("%s LIKE '%%%s%%'", colExpr, escapedArg)
+		}
 		sp := normalizeFHIRPathToSearchParam(fieldPath)
 		return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' AND s.sp_value LIKE '%%%s%%')", sp, escapedArg)
 	}
-	if idx := strings.Index(p, ".endsWith("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".endsWith("); idx != -1 && strings.HasSuffix(p, ")") {
 		fieldPath := strings.TrimSpace(p[:idx])
 		rawArg := strings.Trim(strings.TrimSpace(p[idx+len(".endsWith("):len(p)-1]), "'\"")
 		escapedArg := strings.ReplaceAll(rawArg, "'", "''")
+		if isComputedStringFHIRPath(fieldPath) {
+			colExpr, _ := spidxZeroJSONColumnExpr(fieldPath, dialect)
+			return fmt.Sprintf("%s LIKE '%%%s'", colExpr, escapedArg)
+		}
 		sp := normalizeFHIRPathToSearchParam(fieldPath)
 		return fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = '%s' AND s.sp_value LIKE '%%%s')", sp, escapedArg)
 	}
@@ -4185,7 +4280,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 		}
 	}
 	_, _, hasSubLHS := parseTrailingSubscriptIndex(lhs)
-	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") {
+	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasPrefix(strings.ToLower(lhs), "coalesce(") || strings.HasPrefix(strings.ToLower(lhs), "iif(") || strings.Contains(lhs, ".join(") || strings.HasSuffix(lhs, ".last()") || strings.HasSuffix(lhs, ".single()") || strings.Contains(lhs, ".sort(") || strings.Contains(lhs, ".sortDesc(") || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") {
 		lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, dialect)
 		sqlOp := op
 		if sqlOp == "!=" {
@@ -4667,6 +4762,11 @@ func parseBoundaryCall(p string) (basePath string, isHigh bool, precArg string, 
 func isTemporalFHIRPath(basePath string) bool {
 	lower := strings.ToLower(basePath)
 	return strings.Contains(lower, "date") || strings.Contains(lower, "time") || strings.Contains(lower, "effective") || strings.Contains(lower, "issued") || strings.Contains(lower, "authored")
+}
+
+func isComputedStringFHIRPath(fieldPath string) bool {
+	s := strings.TrimSpace(fieldPath)
+	return strings.HasSuffix(s, ")") || strings.HasSuffix(s, "]") || len(splitTopLevelConcatOp(s)) > 1
 }
 
 func decimalBoundaryHalfStep(precArg string) string {
