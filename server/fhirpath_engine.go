@@ -1160,38 +1160,52 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return []any{strings.Index(s, sub)}
 
 	case "substring":
-		if len(current) != 1 || len(args) < 1 {
+		if len(current) == 0 || len(args) < 1 {
 			return nil
 		}
-		s, ok := current[0].(string)
-		if !ok {
-			return nil
-		}
-		runes := []rune(s)
 		startVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
 		if len(startVals) != 1 {
 			return nil
 		}
 		start, ok := toInt(startVals[0])
-		if !ok || start < 0 || start >= len(runes) {
+		if !ok || start < 0 {
 			return nil
 		}
+		hasLen := false
+		length := 0
 		if len(args) >= 2 {
 			lenVals := evalFHIRPathExpr(scopeInput, ctx, args[1])
 			if len(lenVals) != 1 {
 				return nil
 			}
-			length, ok := toInt(lenVals[0])
-			if !ok || length < 0 {
+			l, okL := toInt(lenVals[0])
+			if !okL || l < 0 {
 				return nil
 			}
-			end := start + length
-			if end > len(runes) {
-				end = len(runes)
-			}
-			return []any{string(runes[start:end])}
+			hasLen = true
+			length = l
 		}
-		return []any{string(runes[start:])}
+		var out []any
+		for _, item := range current {
+			s, okS := item.(string)
+			if !okS {
+				continue
+			}
+			runes := []rune(s)
+			if start >= len(runes) {
+				continue
+			}
+			if hasLen {
+				end := start + length
+				if end > len(runes) {
+					end = len(runes)
+				}
+				out = append(out, string(runes[start:end]))
+			} else {
+				out = append(out, string(runes[start:]))
+			}
+		}
+		return out
 
 	case "startswith":
 		if len(current) != 1 || len(args) != 1 {
@@ -1248,38 +1262,43 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return []any{strings.Contains(s, sub)}
 
 	case "upper":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if s, ok := current[0].(string); ok {
-			return []any{strings.ToUpper(s)}
+		var out []any
+		for _, item := range current {
+			if s, ok := item.(string); ok {
+				out = append(out, strings.ToUpper(s))
+			}
 		}
-		return nil
+		return out
 
 	case "lower":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if s, ok := current[0].(string); ok {
-			return []any{strings.ToLower(s)}
+		var out []any
+		for _, item := range current {
+			if s, ok := item.(string); ok {
+				out = append(out, strings.ToLower(s))
+			}
 		}
-		return nil
+		return out
 
 	case "trim":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if s, ok := current[0].(string); ok {
-			return []any{strings.TrimSpace(s)}
+		var out []any
+		for _, item := range current {
+			if s, ok := item.(string); ok {
+				out = append(out, strings.TrimSpace(s))
+			}
 		}
-		return nil
+		return out
 
 	case "replace":
-		if len(current) != 1 || len(args) != 2 {
-			return nil
-		}
-		s, ok := current[0].(string)
-		if !ok {
+		if len(current) == 0 || len(args) != 2 {
 			return nil
 		}
 		pVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
@@ -1292,7 +1311,13 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if !ok1 || !ok2 {
 			return nil
 		}
-		return []any{strings.ReplaceAll(s, pat, rep)}
+		var out []any
+		for _, item := range current {
+			if s, ok := item.(string); ok {
+				out = append(out, strings.ReplaceAll(s, pat, rep))
+			}
+		}
+		return out
 
 	case "matches":
 		if len(current) != 1 || len(args) != 1 {
@@ -1341,13 +1366,16 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return []any{re.ReplaceAllString(s, rep)}
 
 	case "length":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if s, ok := current[0].(string); ok {
-			return []any{len([]rune(s))}
+		var out []any
+		for _, item := range current {
+			if s, ok := item.(string); ok {
+				out = append(out, len([]rune(s)))
+			}
 		}
-		return nil
+		return out
 
 	case "tochars":
 		if len(current) != 1 {
