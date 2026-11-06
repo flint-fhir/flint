@@ -1750,8 +1750,35 @@ func splitTopLevelCommaArgs(inner string) []string {
 	return out
 }
 
+func isSetOpFHIRPath(p string) bool {
+	for _, call := range []string{".union(", ".combine(", ".intersect(", ".exclude("} {
+		if idx := strings.LastIndex(p, call); idx != -1 && strings.HasSuffix(p, ")") && !strings.Contains(p[idx+len(call):len(p)-1], ").") {
+			return true
+		}
+	}
+	return false
+}
+
 func spidxSubqueryForPath(fhirPath string) (string, string) {
 	p := normalizePolymorphicFHIRPath(strings.TrimSpace(fhirPath))
+	for _, setSpec := range []struct {
+		call   string
+		sqlOp  string
+		suffix string
+	}{
+		{".union(", "UNION", ".union"},
+		{".combine(", "UNION ALL", ".combine"},
+		{".intersect(", "INTERSECT", ".intersect"},
+		{".exclude(", "EXCEPT", ".exclude"},
+	} {
+		if idx := strings.LastIndex(p, setSpec.call); idx != -1 && strings.HasSuffix(p, ")") && !strings.Contains(p[idx+len(setSpec.call):len(p)-1], ").") {
+			basePath := strings.TrimSpace(p[:idx])
+			otherPath := strings.TrimSpace(p[idx+len(setSpec.call) : len(p)-1])
+			lhsSub, lhsSrc := spidxSubqueryForPath(basePath)
+			rhsSub, _ := spidxSubqueryForPath(otherPath)
+			return fmt.Sprintf("%s %s %s", lhsSub, setSpec.sqlOp, rhsSub), lhsSrc + setSpec.suffix
+		}
+	}
 	if spSys, sysVal, _, okSys := parseSystemFilteredTokenPath(p); okSys {
 		escapedSys := strings.ReplaceAll(sysVal, "'", "''")
 		return fmt.Sprintf("SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND t.sp_system = '%s'", spSys, escapedSys), "spidx_token"
@@ -1847,7 +1874,11 @@ func parseSpidxCollectionModifiers(fhirPath string) spidxCollectionModifiers {
 func buildModifiedSpidxSubquery(mods spidxCollectionModifiers, dialect string) (string, string) {
 	subQ, subSrc := spidxSubqueryForPath(mods.basePath)
 	if mods.isDistinct {
-		subQ = strings.Replace(subQ, "SELECT ", "SELECT DISTINCT ", 1)
+		if strings.Contains(subQ, " UNION ALL ") {
+			subQ = strings.ReplaceAll(subQ, " UNION ALL ", " UNION ")
+		} else if !strings.Contains(subQ, " UNION ") && !strings.Contains(subQ, " INTERSECT ") && !strings.Contains(subQ, " EXCEPT ") {
+			subQ = strings.Replace(subQ, "SELECT ", "SELECT DISTINCT ", 1)
+		}
 	}
 	if mods.sortDir != "" {
 		subQ += " ORDER BY sp_value " + mods.sortDir
@@ -1866,7 +1897,7 @@ func buildModifiedSpidxSubquery(mods spidxCollectionModifiers, dialect string) (
 func spidxZeroJSONCollectionColumnExpr(fhirPath, dialect string) (string, string) {
 	p := normalizePolymorphicFHIRPath(strings.TrimSpace(fhirPath))
 	if mods := parseSpidxCollectionModifiers(p); mods.hasAnyMods() {
-		if mods.hasSubqueryMods() {
+		if mods.hasSubqueryMods() || isSetOpFHIRPath(mods.basePath) {
 			subQ, subSrc := buildModifiedSpidxSubquery(mods, dialect)
 			if dialect == "sqlite" {
 				return fmt.Sprintf("(SELECT json_group_array(sub.sp_value) FROM (%s) sub)", subQ), subSrc + mods.tag + "[]"
@@ -1915,7 +1946,7 @@ func spidxZeroJSONCollectionColumnExpr(fhirPath, dialect string) (string, string
 		{".intersect(", "INTERSECT", ".intersect[]"},
 		{".exclude(", "EXCEPT", ".exclude[]"},
 	} {
-		if idx := strings.LastIndex(p, setSpec.call); idx != -1 && strings.HasSuffix(p, ")") {
+		if idx := strings.LastIndex(p, setSpec.call); idx != -1 && strings.HasSuffix(p, ")") && !strings.Contains(p[idx+len(setSpec.call):len(p)-1], ").") {
 			basePath := strings.TrimSpace(p[:idx])
 			otherPath := strings.TrimSpace(p[idx+len(setSpec.call) : len(p)-1])
 			lhsSub, lhsSrc := spidxSubqueryForPath(basePath)
@@ -3095,7 +3126,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		}
 	}
 	_, _, hasSubLHS := parseTrailingSubscriptIndex(lhs)
-	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasPrefix(strings.ToLower(lhs), "coalesce(") || strings.HasPrefix(strings.ToLower(lhs), "iif(") || strings.Contains(lhs, ".join(") || strings.HasSuffix(lhs, ".last()") || strings.HasSuffix(lhs, ".single()") || strings.Contains(lhs, ".sort(") || strings.Contains(lhs, ".sortDesc(") || strings.Contains(lhs, ".distinct()") || strings.Contains(lhs, ".skip(") || strings.Contains(lhs, ".take(") || strings.Contains(lhs, ".tail()") || strings.Contains(lhs, ".split(") || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") {
+	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasPrefix(strings.ToLower(lhs), "coalesce(") || strings.HasPrefix(strings.ToLower(lhs), "iif(") || strings.Contains(lhs, ".join(") || strings.HasSuffix(lhs, ".last()") || strings.HasSuffix(lhs, ".single()") || strings.Contains(lhs, ".sort(") || strings.Contains(lhs, ".sortDesc(") || strings.Contains(lhs, ".distinct()") || strings.Contains(lhs, ".skip(") || strings.Contains(lhs, ".take(") || strings.Contains(lhs, ".tail()") || strings.Contains(lhs, ".split(") || strings.Contains(lhs, ".union(") || strings.Contains(lhs, ".combine(") || strings.Contains(lhs, ".intersect(") || strings.Contains(lhs, ".exclude(") || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") {
 		lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
 		sqlOp := op
 		if sqlOp == "!=" {
@@ -3462,7 +3493,7 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 			{".intersect(", "INTERSECT", ".intersect.join"},
 			{".exclude(", "EXCEPT", ".exclude.join"},
 		} {
-			if sIdx := strings.LastIndex(basePath, setSpec.call); sIdx != -1 && strings.HasSuffix(basePath, ")") {
+			if sIdx := strings.LastIndex(basePath, setSpec.call); sIdx != -1 && strings.HasSuffix(basePath, ")") && !strings.Contains(basePath[sIdx+len(setSpec.call):len(basePath)-1], ").") {
 				lhsPath := strings.TrimSpace(basePath[:sIdx])
 				rhsPath := strings.TrimSpace(basePath[sIdx+len(setSpec.call) : len(basePath)-1])
 				lhsSub, lhsSrc := spidxSubqueryForPath(lhsPath)
@@ -3475,7 +3506,7 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		}
 		mods := parseSpidxCollectionModifiers(basePath)
 		basePath = mods.basePath
-		if mods.hasSubqueryMods() {
+		if mods.hasSubqueryMods() || isSetOpFHIRPath(basePath) {
 			subQ, subSrc := buildModifiedSpidxSubquery(mods, dialect)
 			if dialect == "sqlite" {
 				return fmt.Sprintf("(SELECT COALESCE(group_concat(sub.sp_value, '%s'), '') FROM (%s) sub)", escapedSep, subQ), subSrc + mods.tag + ".join"
@@ -3516,7 +3547,7 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 	}
 	if strings.HasSuffix(p, ".last()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".last()")])
-		if sIdx := strings.LastIndex(basePath, ".split("); sIdx != -1 && strings.HasSuffix(basePath, ")") {
+		if sIdx := strings.LastIndex(basePath, ".split("); sIdx != -1 && strings.HasSuffix(basePath, ")") && !strings.Contains(basePath[sIdx+len(".split("):len(basePath)-1], ").") {
 			rootPath := strings.TrimSpace(basePath[:sIdx])
 			rawSep := strings.Trim(strings.TrimSpace(basePath[sIdx+len(".split("):len(basePath)-1]), "'\"")
 			escapedSep := strings.ReplaceAll(rawSep, "'", "''")
@@ -3525,6 +3556,17 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 				return fmt.Sprintf("SUBSTR(%s, LENGTH(RTRIM(%s, REPLACE(%s, '%s', ''))) + 1)", colExpr, colExpr, colExpr, escapedSep), colSrc + ".split.last"
 			}
 			return fmt.Sprintf("(STRING_TO_ARRAY(%s, '%s'))[ARRAY_UPPER(STRING_TO_ARRAY(%s, '%s'), 1)]", colExpr, escapedSep, colExpr, escapedSep), colSrc + ".split.last"
+		}
+		if mods := parseSpidxCollectionModifiers(basePath); isSetOpFHIRPath(mods.basePath) {
+			if mods.sortDir == "DESC" {
+				mods.sortDir = "ASC"
+			} else {
+				mods.sortDir = "DESC"
+			}
+			mods.hasTake = true
+			mods.takeLimit = 1
+			subQ, subSrc := buildModifiedSpidxSubquery(mods, dialect)
+			return fmt.Sprintf("(%s)", subQ), subSrc + mods.tag + ".last"
 		}
 		isDistinct := false
 		hasSort := false
@@ -3577,7 +3619,7 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 	}
 	if strings.HasSuffix(p, ".first()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".first()")])
-		if sIdx := strings.LastIndex(basePath, ".split("); sIdx != -1 && strings.HasSuffix(basePath, ")") {
+		if sIdx := strings.LastIndex(basePath, ".split("); sIdx != -1 && strings.HasSuffix(basePath, ")") && !strings.Contains(basePath[sIdx+len(".split("):len(basePath)-1], ").") {
 			rootPath := strings.TrimSpace(basePath[:sIdx])
 			rawSep := strings.Trim(strings.TrimSpace(basePath[sIdx+len(".split("):len(basePath)-1]), "'\"")
 			escapedSep := strings.ReplaceAll(rawSep, "'", "''")
@@ -3587,7 +3629,15 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 			}
 			return fmt.Sprintf("SPLIT_PART(%s, '%s', 1)", colExpr, escapedSep), colSrc + ".split.first"
 		}
-		if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() {
+		if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+			if isSetOpFHIRPath(mods.basePath) {
+				if !mods.hasTake || mods.takeLimit > 1 {
+					mods.hasTake = true
+					mods.takeLimit = 1
+				}
+				subQ, subSrc := buildModifiedSpidxSubquery(mods, dialect)
+				return fmt.Sprintf("(%s)", subQ), subSrc + mods.tag + ".first"
+			}
 			rootPath := mods.basePath
 			distinctKw := ""
 			if mods.isDistinct {
@@ -3663,7 +3713,7 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 			{".intersect(", "INTERSECT", ".intersect.count"},
 			{".exclude(", "EXCEPT", ".exclude.count"},
 		} {
-			if sIdx := strings.LastIndex(basePath, setSpec.call); sIdx != -1 && strings.HasSuffix(basePath, ")") {
+			if sIdx := strings.LastIndex(basePath, setSpec.call); sIdx != -1 && strings.HasSuffix(basePath, ")") && !strings.Contains(basePath[sIdx+len(setSpec.call):len(basePath)-1], ").") {
 				lhsPath := strings.TrimSpace(basePath[:sIdx])
 				rhsPath := strings.TrimSpace(basePath[sIdx+len(setSpec.call) : len(basePath)-1])
 				lhsSub, lhsSrc := spidxSubqueryForPath(lhsPath)
@@ -3671,7 +3721,7 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 				return fmt.Sprintf("(SELECT COUNT(*) FROM (%s %s %s) u)", lhsSub, setSpec.sqlOp, rhsSub), lhsSrc + setSpec.suffix
 			}
 		}
-		if sIdx := strings.LastIndex(basePath, ".split("); sIdx != -1 && strings.HasSuffix(basePath, ")") {
+		if sIdx := strings.LastIndex(basePath, ".split("); sIdx != -1 && strings.HasSuffix(basePath, ")") && !strings.Contains(basePath[sIdx+len(".split("):len(basePath)-1], ").") {
 			rootPath := strings.TrimSpace(basePath[:sIdx])
 			rawSep := strings.Trim(strings.TrimSpace(basePath[sIdx+len(".split("):len(basePath)-1]), "'\"")
 			escapedSep := strings.ReplaceAll(rawSep, "'", "''")
@@ -3686,7 +3736,7 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 			return fmt.Sprintf("COALESCE(ARRAY_LENGTH(STRING_TO_ARRAY(%s, '%s'), 1), 0)", colExpr, escapedSep), colSrc + ".split.count"
 		}
 		mods := parseSpidxCollectionModifiers(basePath)
-		if mods.hasSkip || mods.hasTake || mods.isTail {
+		if mods.hasSkip || mods.hasTake || mods.isTail || isSetOpFHIRPath(mods.basePath) {
 			subQ, subSrc := buildModifiedSpidxSubquery(mods, dialect)
 			return fmt.Sprintf("(SELECT COUNT(*) FROM (%s) sub)", subQ), subSrc + mods.tag + ".count"
 		}
@@ -4320,7 +4370,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 		}
 	}
 	_, _, hasSubLHS := parseTrailingSubscriptIndex(lhs)
-	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasPrefix(strings.ToLower(lhs), "coalesce(") || strings.HasPrefix(strings.ToLower(lhs), "iif(") || strings.Contains(lhs, ".join(") || strings.HasSuffix(lhs, ".last()") || strings.HasSuffix(lhs, ".single()") || strings.Contains(lhs, ".sort(") || strings.Contains(lhs, ".sortDesc(") || strings.Contains(lhs, ".distinct()") || strings.Contains(lhs, ".skip(") || strings.Contains(lhs, ".take(") || strings.Contains(lhs, ".tail()") || strings.Contains(lhs, ".split(") || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") {
+	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasPrefix(strings.ToLower(lhs), "coalesce(") || strings.HasPrefix(strings.ToLower(lhs), "iif(") || strings.Contains(lhs, ".join(") || strings.HasSuffix(lhs, ".last()") || strings.HasSuffix(lhs, ".single()") || strings.Contains(lhs, ".sort(") || strings.Contains(lhs, ".sortDesc(") || strings.Contains(lhs, ".distinct()") || strings.Contains(lhs, ".skip(") || strings.Contains(lhs, ".take(") || strings.Contains(lhs, ".tail()") || strings.Contains(lhs, ".split(") || strings.Contains(lhs, ".union(") || strings.Contains(lhs, ".combine(") || strings.Contains(lhs, ".intersect(") || strings.Contains(lhs, ".exclude(") || strings.HasSuffix(lhs, ".lower()") || strings.HasSuffix(lhs, ".upper()") || strings.HasSuffix(lhs, ".trim()") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") {
 		lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, dialect)
 		sqlOp := op
 		if sqlOp == "!=" {
