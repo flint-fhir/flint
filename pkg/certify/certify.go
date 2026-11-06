@@ -5143,6 +5143,79 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-33", suite10, "Zero-JSON Binary Proto3 System, Type & Instance-Level Analytics, Da Vinci, CDS Hooks & Bulk Export Operations (/$sync-analytics, /$davinci-data-export, /Group/{id}/$davinci-data-export, /$submit-attachment, /Patient/$bulk-member-match, /AuditEvent/$verify-integrity, /CapabilityStatement/$subset, /CapabilityStatement/$implements, /NamingSystem/$preferred-id, /cds-services/{serviceId}/$dsi-attributes), Type & Instance-Level Clinical, Observation, Document, Scheduling, List, Directory & eCQM POST Operations (/Observation/$lastn, /Observation/$stats, /DocumentReference/$docref, /Composition/$document, /Appointment/$find, /Schedule/$find, /List/$find, /PractitionerRole/$find-providers, /HealthcareService/$find-services, /Measure/$evaluate-measure, /Measure/{id}/$evaluate-measure, /Measure/{id}/$care-gaps), Instance-Level Group Cohort, Inpatient/Lab/Pharmacy, SMART Health Cards, Payer PCDE, Immunization DS & IHE PIXm POST Operations (/Group/{id}/$member-add, /Group/{id}/$member-remove, /ServiceRequest/{id}/$collect-specimen, /DiagnosticReport/{id}/$evaluate, /MedicationRequest/{id}/$dispense, /MedicationRequest/{id}/$check-interactions, /Patient/{id}/$health-cards-issue, /Patient/{id}/$pcde, /Patient/{id}/$immds-forecast, /Patient/{id}/$ihe-pix) & SQL-on-FHIR v2 Chained Element-Wise String Transformations (.lower, .upper, .trim, .length, .replace, .substring) on Collection Paths $sql Pushdown", t0, err, "Binary Proto3 32 system/type/instance analytics, Da Vinci, CDS Hooks, clinical, observation, scheduling, directory, eCQM, cohort, lab, pharmacy, SHC, PCDE, ImmDS & PIXm operations & chained collection string map $sql pushdown verified")
 
+	// AN-34: Zero-JSON Binary Proto3 Instance-Level National HL7 IG Operations (POST /Patient/{id}/$elr-summary, POST /Bundle/{id}/$cancer-registry-submit, POST /ExplanationOfBenefit/{id}/$carin-bb-claims, POST /Patient/{id}/$rtpbc-summary, POST /Composition/{id}/$pacio-toc-bundle, POST /Consent/{id}/$adi-verify, POST /Bundle/{id}/$ecr-submit, POST /Patient/{id}/$ecr-summary, POST /QuestionnaireResponse/{id}/$sdoh-assess, POST /Task/{id}/$sdoh-fulfill, POST /ResearchSubject/{id}/$vulcan-esource-extract, POST /ResearchStudy/{id}/$vulcan-summary, POST /DiagnosticReport/{id}/$nbs-submit, POST /Patient/{id}/$nbs-summary, POST /ExplanationOfBenefit/{id}/$pct-aeob-summary, POST /Task/{id}/$pct-gfe-coordination, POST /AdverseEvent/{id}/$vulcan-icsr-report, POST /ResearchSubject/{id}/$vulcan-soa-timeline, POST /Immunization/{id}/$iis-submit, POST /Patient/{id}/$iis-history, POST /Bundle/{id}/$cdex-sign, POST /Bundle/{id}/$cdex-verify-signature, POST /DiagnosticReport/{id}/$mcode-genomics-report, POST /Patient/{id}/$mcode-genomics-summary, POST /Composition/{id}/$bfdr-document, POST /Communication/{id}/$cdex-submit-attachment, POST /Task/{id}/$cdex-questionnaire-request, POST /Procedure/{id}/$mcode-radiotherapy-record, POST /Patient/{id}/$mcode-radiotherapy-summary, POST /Composition/{id}/$vrdr-document, POST /Task/{id}/$cdex-request, POST /Task/{id}/$cdex-poll, POST /Patient/{id}/$pacio-pfe-record, POST /Patient/{id}/$pacio-pfe-summary, POST /Claim/{id}/$rtpbc-submit, POST /ClaimResponse/{id}/$rtpbc-coverage) & SQL-on-FHIR v2 Element-Wise .replaceMatches(), .indexOf(), .toInteger(), .toDecimal() & .toString() on Collection Paths $sql Pushdown
+	t0 = time.Now()
+	{
+		_, bW100ParamsProto, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", []byte(`{"resourceType":"Parameters","parameter":[{"name":"patient","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"subject","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"study","valueReference":{"reference":"ResearchStudy/cert-study-w93-1"}},{"name":"mother","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"signer","valueReference":{"reference":"Practitioner/cert-prac-1"}},{"name":"gene","valueString":"BRCA1"},{"name":"result","valueString":"Normal newborn dried blood spot and hearing screening"},{"name":"code","valueString":"1049502"},{"name":"causeOfDeathCode","valueString":"I21.9"},{"name":"query","valueString":"Condition?patient=Patient/cert-pat-1"},{"name":"icfCode","valueString":"d450"},{"name":"goal","valueString":"Walk 150 feet independently"},{"name":"TrackingId","valueString":"cdex-track-w100-1"},{"name":"questionnaire","valueString":"http://hl7.org/fhir/us/davinci-cdex/Questionnaire/cdex-questionnaire-example1"},{"name":"cvx","valueString":"208"},{"name":"bundleId","valueString":"cert-bnd-w100-1"}]}`), map[string]string{"Accept": "application/x-protobuf"})
+
+		var opCheckErr error
+		for _, ep := range []string{
+			"/Patient/cert-pat-1/$elr-summary",
+			"/Bundle/cert-bnd-w100-1/$cancer-registry-submit",
+			"/ExplanationOfBenefit/cert-eob-1/$carin-bb-claims",
+			"/Patient/cert-pat-1/$rtpbc-summary",
+			"/Composition/cert-w98-comp-1/$pacio-toc-bundle",
+			"/Consent/cert-con-w97-1/$adi-verify",
+			"/Bundle/cert-bnd-w100-1/$ecr-submit",
+			"/Patient/cert-pat-1/$ecr-summary",
+			"/QuestionnaireResponse/cert-qr-1/$sdoh-assess",
+			"/Task/cert-task-1/$sdoh-fulfill",
+			"/ResearchSubject/cert-rsub-w100-1/$vulcan-esource-extract",
+			"/ResearchStudy/cert-study-w93-1/$vulcan-summary",
+			"/DiagnosticReport/cert-dr-1/$nbs-submit",
+			"/Patient/cert-pat-1/$nbs-summary",
+			"/ExplanationOfBenefit/cert-eob-1/$pct-aeob-summary",
+			"/Task/cert-task-1/$pct-gfe-coordination",
+			"/AdverseEvent/cert-ae-proto-1/$vulcan-icsr-report",
+			"/ResearchSubject/cert-rsub-w100-1/$vulcan-soa-timeline",
+			"/Immunization/cert-imm-1/$iis-submit",
+			"/Patient/cert-pat-1/$iis-history",
+			"/Bundle/cert-bnd-w100-1/$cdex-sign",
+			"/Bundle/cert-bnd-w100-1/$cdex-verify-signature",
+			"/DiagnosticReport/cert-dr-1/$mcode-genomics-report",
+			"/Patient/cert-pat-1/$mcode-genomics-summary",
+			"/Composition/cert-w98-comp-1/$bfdr-document",
+			"/Communication/cert-comm-w100-1/$cdex-submit-attachment",
+			"/Task/cert-task-1/$cdex-questionnaire-request",
+			"/Procedure/cert-proc-1/$mcode-radiotherapy-record",
+			"/Patient/cert-pat-1/$mcode-radiotherapy-summary",
+			"/Composition/cert-w98-comp-1/$vrdr-document",
+			"/Task/cert-task-1/$cdex-request",
+			"/Task/cert-task-1/$cdex-poll",
+			"/Patient/cert-pat-1/$pacio-pfe-record",
+			"/Patient/cert-pat-1/$pacio-pfe-summary",
+			"/Claim/cert-claim-proto-1/$rtpbc-submit",
+			"/ClaimResponse/cert-cr-w100-1/$rtpbc-coverage",
+		} {
+			respOp, bOp, errOp := doReq(http.MethodPost, basePath+ep, "application/x-protobuf", bW100ParamsProto, map[string]string{
+				"Accept": "application/x-protobuf",
+			})
+			if errOp != nil || respOp.StatusCode != http.StatusOK || !strings.Contains(respOp.Header.Get("Content-Type"), "application/x-protobuf") || len(bOp) == 0 {
+				status := 0
+				if respOp != nil {
+					status = respOp.StatusCode
+				}
+				opCheckErr = fmt.Errorf("expected POST %s with binary Proto3 payload to return binary Proto3 response, got %d (err=%v, body=%s)", ep, status, errOp, string(bOp))
+				break
+			}
+		}
+
+		collRegexTypeVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_collection_regex_type_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"masked_given","path":"name.given.replaceMatches('[0-9]+', '#').sort().join(',')"},{"name":"given_idx_sum","path":"name.given.distinct().indexOf('a').sum()"},{"name":"id_int_max","path":"identifier.value.toInteger().max()"},{"name":"id_dec_avg","path":"identifier.value.toDecimal().avg()"},{"name":"id_str_joined","path":"identifier.value.toString().distinct().join('|')"},{"name":"masked_given_arr","path":"name.given.replaceMatches('[0-9]+', '#')","collection":true},{"name":"given_idx_arr","path":"name.given.indexOf('a')","collection":true},{"name":"id_int_arr","path":"identifier.value.toInteger()","collection":true}]}],"where":[{"path":"name.given.replaceMatches('[0-9]+', '#').exists($this = 'Alice') and name.given.indexOf('A').exists($this >= 0) and identifier.value.toInteger().all($this >= 0)"}]}`)
+		respCRTDoris, bCRTDoris, errCRTDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", collRegexTypeVD, nil)
+		respCRTPg, bCRTPg, errCRTPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", collRegexTypeVD, nil)
+
+		if opCheckErr != nil {
+			err = opCheckErr
+		} else if errCRTDoris != nil || respCRTDoris.StatusCode != http.StatusOK || !strings.Contains(string(bCRTDoris), "ARRAY_JOIN(ARRAY_SORT(ARRAY_MAP(x -> REGEXP_REPLACE(x, '[0-9]+', '#'),") || !strings.Contains(string(bCRTDoris), "ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> (LOCATE('a', x) - 1), ARRAY_DISTINCT(") || !strings.Contains(string(bCRTDoris), "ARRAY_MAX(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> CAST(x AS BIGINT),") || !strings.Contains(string(bCRTDoris), "ARRAY_JOIN(ARRAY_DISTINCT(ARRAY_MAP(x -> CAST(x AS STRING),") || !strings.Contains(string(bCRTDoris), "NOT ARRAY_EXISTS(x -> x < 0, ARRAY_MAP(x -> CAST(x AS BIGINT),") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with collection regex/indexOf/type conversion pushdown, got %d: %s", respCRTDoris.StatusCode, string(bCRTDoris))
+		} else if errCRTPg != nil || respCRTPg.StatusCode != http.StatusOK || !strings.Contains(string(bCRTPg), "SELECT REGEXP_REPLACE(s.sp_value, '[0-9]+', '#', 'g') AS sp_value FROM spidx_string s") || !strings.Contains(string(bCRTPg), "SELECT DISTINCT (STRPOS(s.sp_value, 'a') - 1) AS sp_value FROM spidx_string s") || !strings.Contains(string(bCRTPg), "SELECT CAST(t.sp_value AS BIGINT) AS sp_value FROM spidx_token t") || !strings.Contains(string(bCRTPg), "ARRAY[]::bigint[]") || !strings.Contains(string(bCRTPg), "WHERE sub.sp_value < 0)") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with collection regex/indexOf/type conversion pushdown, got %d: %s", respCRTPg.StatusCode, string(bCRTPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-34", suite10, "Zero-JSON Binary Proto3 Instance-Level National HL7 IG Operations (Patient/{id}/$elr-summary, Bundle/{id}/$cancer-registry-submit, ExplanationOfBenefit/{id}/$carin-bb-claims, Patient/{id}/$rtpbc-summary, Composition/{id}/$pacio-toc-bundle, Consent/{id}/$adi-verify, Bundle/{id}/$ecr-submit, Patient/{id}/$ecr-summary, QuestionnaireResponse/{id}/$sdoh-assess, Task/{id}/$sdoh-fulfill, ResearchSubject/{id}/$vulcan-esource-extract, ResearchStudy/{id}/$vulcan-summary, DiagnosticReport/{id}/$nbs-submit, Patient/{id}/$nbs-summary, ExplanationOfBenefit/{id}/$pct-aeob-summary, Task/{id}/$pct-gfe-coordination, AdverseEvent/{id}/$vulcan-icsr-report, ResearchSubject/{id}/$vulcan-soa-timeline, Immunization/{id}/$iis-submit, Patient/{id}/$iis-history, Bundle/{id}/$cdex-sign, Bundle/{id}/$cdex-verify-signature, DiagnosticReport/{id}/$mcode-genomics-report, Patient/{id}/$mcode-genomics-summary, Composition/{id}/$bfdr-document, Communication/{id}/$cdex-submit-attachment, Task/{id}/$cdex-questionnaire-request, Procedure/{id}/$mcode-radiotherapy-record, Patient/{id}/$mcode-radiotherapy-summary, Composition/{id}/$vrdr-document, Task/{id}/$cdex-request, Task/{id}/$cdex-poll, Patient/{id}/$pacio-pfe-record, Patient/{id}/$pacio-pfe-summary, Claim/{id}/$rtpbc-submit, ClaimResponse/{id}/$rtpbc-coverage) & SQL-on-FHIR v2 Element-Wise .replaceMatches(), .indexOf(), .toInteger(), .toDecimal() & .toString() on Collection Paths $sql Pushdown", t0, err, "Binary Proto3 36 instance-level National HL7 IG operations (Waves 41-46) & element-wise collection regex/indexOf/type conversion $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

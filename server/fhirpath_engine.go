@@ -1074,13 +1074,16 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 
 	case "tostring":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if s, ok := toStringConv(current[0]); ok {
-			return []any{s}
+		var out []any
+		for _, item := range current {
+			if s, ok := toStringConv(item); ok {
+				out = append(out, s)
+			}
 		}
-		return nil
+		return out
 
 	case "convertstostring":
 		if len(current) != 1 {
@@ -1090,13 +1093,16 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return []any{ok}
 
 	case "tointeger":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if iv, ok := toIntegerConv(current[0]); ok {
-			return []any{iv}
+		var out []any
+		for _, item := range current {
+			if iv, ok := toIntegerConv(item); ok {
+				out = append(out, iv)
+			}
 		}
-		return nil
+		return out
 
 	case "convertstointeger":
 		if len(current) != 1 {
@@ -1106,13 +1112,16 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return []any{ok}
 
 	case "todecimal":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if fv, ok := toDecimalConv(current[0]); ok {
-			return []any{fv}
+		var out []any
+		for _, item := range current {
+			if fv, ok := toDecimalConv(item); ok {
+				out = append(out, fv)
+			}
 		}
-		return nil
+		return out
 
 	case "convertstodecimal":
 		if len(current) != 1 {
@@ -1139,11 +1148,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 
 	// String Functions
 	case "indexof":
-		if len(current) != 1 || len(args) != 1 {
-			return nil
-		}
-		s, ok := current[0].(string)
-		if !ok {
+		if len(current) == 0 || len(args) != 1 {
 			return nil
 		}
 		subVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
@@ -1154,10 +1159,19 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if !ok {
 			return nil
 		}
-		if sub == "" {
-			return []any{0}
+		var out []any
+		for _, item := range current {
+			s, okS := item.(string)
+			if !okS {
+				continue
+			}
+			if sub == "" {
+				out = append(out, 0)
+			} else {
+				out = append(out, strings.Index(s, sub))
+			}
 		}
-		return []any{strings.Index(s, sub)}
+		return out
 
 	case "substring":
 		if len(current) == 0 || len(args) < 1 {
@@ -1342,11 +1356,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return []any{re.MatchString(s)}
 
 	case "replacematches":
-		if len(current) != 1 || len(args) != 2 {
-			return nil
-		}
-		s, ok := current[0].(string)
-		if !ok {
+		if len(current) == 0 || len(args) != 2 {
 			return nil
 		}
 		pVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
@@ -1363,7 +1373,13 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if err != nil {
 			return nil
 		}
-		return []any{re.ReplaceAllString(s, rep)}
+		var out []any
+		for _, item := range current {
+			if s, ok := item.(string); ok {
+				out = append(out, re.ReplaceAllString(s, rep))
+			}
+		}
+		return out
 
 	case "length":
 		if len(current) == 0 {
@@ -1427,6 +1443,8 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		var strs []string
 		for _, it := range current {
 			if s, ok := it.(string); ok {
+				strs = append(strs, s)
+			} else if s, ok := toStringConv(it); ok {
 				strs = append(strs, s)
 			}
 		}

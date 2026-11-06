@@ -5310,4 +5310,145 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", opTC.ep)
 		assert.NotEmpty(t, opBytes, "endpoint %s", opTC.ep)
 	}
+
+	// 49. Wave 100: SQL-on-FHIR v2 Element-Wise .replaceMatches(), .indexOf(), .toInteger(), .toDecimal() & .toString() on Collection Paths ($sql & $run) + 36 Instance-Level National IG Binary Proto3 POST Operations
+	elemRegexTypeVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_collection_regex_type_transforms",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "masked_given", "path": "name.given.replaceMatches('[0-9]+', '#').sort().join(',')"},
+					{"name": "given_idx_sum", "path": "name.given.distinct().indexOf('l').sum()"},
+					{"name": "id_int_max", "path": "identifier.value.toInteger().max()"},
+					{"name": "id_dec_avg", "path": "identifier.value.toDecimal().avg()"},
+					{"name": "id_str_joined", "path": "identifier.value.toString().distinct().join('|')"},
+					{"name": "masked_given_arr", "path": "name.given.replaceMatches('[0-9]+', '#')", "collection": true},
+					{"name": "given_idx_arr", "path": "name.given.indexOf('l')", "collection": true},
+					{"name": "id_int_arr", "path": "identifier.value.toInteger()", "collection": true}
+				]
+			}
+		],
+		"where": [
+			{"path": "name.given.replaceMatches('[0-9]+', '#').exists($this = 'Alice') and name.given.indexOf('A').exists($this >= 0)"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_JOIN(ARRAY_SORT(ARRAY_MAP(x -> REGEXP_REPLACE(x, '[0-9]+', '#'), ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)))), ',') AS masked_given",
+				"ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> (LOCATE('l', x) - 1), ARRAY_DISTINCT(ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)))))) AS given_idx_sum",
+				"ARRAY_MAX(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> CAST(x AS BIGINT), ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE 'identifier=|%', r.code_tokens))))) AS id_int_max",
+				"ARRAY_AVG(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE 'identifier=|%', r.code_tokens))))) AS id_dec_avg",
+				"ARRAY_JOIN(ARRAY_DISTINCT(ARRAY_MAP(x -> CAST(x AS STRING), ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE 'identifier=|%', r.code_tokens)))), '|') AS id_str_joined",
+				"ARRAY_EXISTS(x -> x >= 0, ARRAY_MAP(x -> (LOCATE('A', x) - 1),",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"SELECT REGEXP_REPLACE(s.sp_value, '[0-9]+', '#', 'g') AS sp_value FROM spidx_string s",
+				"SELECT DISTINCT (STRPOS(s.sp_value, 'l') - 1) AS sp_value FROM spidx_string s",
+				"SELECT CAST(t.sp_value AS BIGINT) AS sp_value FROM spidx_token t",
+				"SELECT CAST(t.sp_value AS DOUBLE PRECISION) AS sp_value FROM spidx_token t",
+				"SELECT DISTINCT CAST(t.sp_value AS TEXT) AS sp_value FROM spidx_token t",
+				"ARRAY[]::int[]",
+				"ARRAY[]::bigint[]",
+				"WHERE sub.sp_value >= 0)",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"SELECT REGEXP_REPLACE(s.sp_value, '[0-9]+', '#') AS sp_value FROM spidx_string s",
+				"SELECT DISTINCT (INSTR(s.sp_value, 'l') - 1) AS sp_value FROM spidx_string s",
+				"SELECT CAST(t.sp_value AS INTEGER) AS sp_value FROM spidx_token t",
+				"SELECT CAST(t.sp_value AS REAL) AS sp_value FROM spidx_token t",
+				"SELECT DISTINCT CAST(t.sp_value AS TEXT) AS sp_value FROM spidx_token t",
+			},
+		},
+	} {
+		reqERT, ertErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(elemRegexTypeVD))
+		require.NoError(t, ertErr)
+		reqERT.Header.Set("Content-Type", "application/fhir+json")
+		respERT, ertErr := client.Do(reqERT)
+		require.NoError(t, ertErr)
+		ertBytes, _ := io.ReadAll(respERT.Body)
+		respERT.Body.Close()
+		require.Equal(t, http.StatusOK, respERT.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(ertBytes), want)
+		}
+	}
+
+	reqERTRun, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run", strings.NewReader(elemRegexTypeVD))
+	require.NoError(t, err)
+	reqERTRun.Header.Set("Content-Type", "application/fhir+json")
+	respERTRun, err := client.Do(reqERTRun)
+	require.NoError(t, err)
+	ertRunBytes, _ := io.ReadAll(respERTRun.Body)
+	respERTRun.Body.Close()
+	require.Equal(t, http.StatusOK, respERTRun.StatusCode)
+	assert.Contains(t, string(ertRunBytes), `"masked_given"`)
+	assert.Contains(t, string(ertRunBytes), `"given_idx_sum"`)
+
+	bW100Params := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"patient","valueReference":{"reference":"Patient/proto-pat-1"}},{"name":"subject","valueReference":{"reference":"Patient/proto-pat-1"}},{"name":"study","valueReference":{"reference":"ResearchStudy/study-w91-1"}},{"name":"mother","valueReference":{"reference":"Patient/proto-pat-1"}},{"name":"signer","valueReference":{"reference":"Practitioner/prac-w90-1"}},{"name":"gene","valueString":"BRCA1"},{"name":"result","valueString":"Normal newborn dried blood spot and hearing screening"},{"name":"code","valueString":"1049502"},{"name":"causeOfDeathCode","valueString":"I21.9"},{"name":"query","valueString":"Condition?patient=Patient/proto-pat-1"},{"name":"icfCode","valueString":"d450"},{"name":"goal","valueString":"Walk 150 feet independently"},{"name":"TrackingId","valueString":"cdex-track-w100-1"},{"name":"questionnaire","valueString":"http://hl7.org/fhir/us/davinci-cdex/Questionnaire/cdex-questionnaire-example1"},{"name":"cvx","valueString":"208"},{"name":"bundleId","valueString":"bnd-w100-1"}]}`)
+
+	for _, ep := range []string{
+		"/fhir/r4/proto/Patient/proto-pat-1/$elr-summary",
+		"/fhir/r4/proto/Bundle/bnd-w100-1/$cancer-registry-submit",
+		"/fhir/r4/proto/ExplanationOfBenefit/eob-w100-1/$carin-bb-claims",
+		"/fhir/r4/proto/Patient/proto-pat-1/$rtpbc-summary",
+		"/fhir/r4/proto/Composition/w98-comp-1/$pacio-toc-bundle",
+		"/fhir/r4/proto/Consent/con-w100-1/$adi-verify",
+		"/fhir/r4/proto/Bundle/bnd-w100-1/$ecr-submit",
+		"/fhir/r4/proto/Patient/proto-pat-1/$ecr-summary",
+		"/fhir/r4/proto/QuestionnaireResponse/w98-qr-1/$sdoh-assess",
+		"/fhir/r4/proto/Task/task-w100-1/$sdoh-fulfill",
+		"/fhir/r4/proto/ResearchSubject/rsub-w100-1/$vulcan-esource-extract",
+		"/fhir/r4/proto/ResearchStudy/study-w91-1/$vulcan-summary",
+		"/fhir/r4/proto/DiagnosticReport/w99-dr-1/$nbs-submit",
+		"/fhir/r4/proto/Patient/proto-pat-1/$nbs-summary",
+		"/fhir/r4/proto/ExplanationOfBenefit/eob-w100-1/$pct-aeob-summary",
+		"/fhir/r4/proto/Task/task-w100-1/$pct-gfe-coordination",
+		"/fhir/r4/proto/AdverseEvent/ae-w100-1/$vulcan-icsr-report",
+		"/fhir/r4/proto/ResearchSubject/rsub-w100-1/$vulcan-soa-timeline",
+		"/fhir/r4/proto/Immunization/imm-w100-1/$iis-submit",
+		"/fhir/r4/proto/Patient/proto-pat-1/$iis-history",
+		"/fhir/r4/proto/Bundle/bnd-w100-1/$cdex-sign",
+		"/fhir/r4/proto/Bundle/bnd-w100-1/$cdex-verify-signature",
+		"/fhir/r4/proto/DiagnosticReport/w99-dr-1/$mcode-genomics-report",
+		"/fhir/r4/proto/Patient/proto-pat-1/$mcode-genomics-summary",
+		"/fhir/r4/proto/Composition/w98-comp-1/$bfdr-document",
+		"/fhir/r4/proto/Communication/comm-w100-1/$cdex-submit-attachment",
+		"/fhir/r4/proto/Task/task-w100-1/$cdex-questionnaire-request",
+		"/fhir/r4/proto/Procedure/proc-w100-1/$mcode-radiotherapy-record",
+		"/fhir/r4/proto/Patient/proto-pat-1/$mcode-radiotherapy-summary",
+		"/fhir/r4/proto/Composition/w98-comp-1/$vrdr-document",
+		"/fhir/r4/proto/Task/task-w100-1/$cdex-request",
+		"/fhir/r4/proto/Task/task-w100-1/$cdex-poll",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pacio-pfe-record",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pacio-pfe-summary",
+		"/fhir/r4/proto/Claim/clm-w100-1/$rtpbc-submit",
+		"/fhir/r4/proto/ClaimResponse/cr-w100-1/$rtpbc-coverage",
+	} {
+		reqOp, opErr := http.NewRequest(http.MethodPost, ts.URL+ep, bytes.NewReader(bW100Params))
+		require.NoError(t, opErr)
+		reqOp.Header.Set("Content-Type", "application/x-protobuf")
+		reqOp.Header.Set("Accept", "application/x-protobuf")
+		respOp, opErr := client.Do(reqOp)
+		require.NoError(t, opErr)
+		opBytes, _ := io.ReadAll(respOp.Body)
+		respOp.Body.Close()
+		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s: %s", ep, string(opBytes))
+		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", ep)
+		assert.NotEmpty(t, opBytes, "endpoint %s", ep)
+	}
 }
