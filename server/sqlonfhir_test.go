@@ -4702,4 +4702,122 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", ep)
 		assert.NotEmpty(t, opBytes, "endpoint %s", ep)
 	}
+
+	// 51. Wave 96: Chained Collection Existence, Distinctness & Set-Inclusion Predicates (.exists/.empty/.isDistinct/.subsetOf/.supersetOf) $sql Pushdown & Instance-Level Operations over Binary Proto3
+	predSetOpVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_chained_set_predicates_v1",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "has_second_given", "path": "name.given.skip(1).exists()"},
+					{"name": "no_extra_given", "path": "name.given.exclude(name.family).empty()"},
+					{"name": "top2_distinct", "path": "name.given.combine(name.family).take(2).isDistinct()"},
+					{"name": "top2_subset", "path": "name.given.sort().take(2).subsetOf(name.family)"},
+					{"name": "union_superset", "path": "name.given.union(name.family).supersetOf(name.given.take(1))"}
+				]
+			}
+		],
+		"where": [
+			{"path": "name.given.skip(1).exists() and name.given.exclude(name.family).empty() and name.given.combine(name.family).take(2).isDistinct() and name.given.sort().take(2).subsetOf(name.family)"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_SIZE(ARRAY_SLICE(",
+				"ARRAY_SIZE(ARRAY_EXCEPT(",
+				"ARRAY_SIZE(ARRAY_DISTINCT(ARRAY_SLICE(ARRAY_CONCAT(",
+				"ARRAY_EXCEPT(ARRAY_SLICE(ARRAY_SORT(",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"EXISTS (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' OFFSET 1)",
+				"NOT (EXISTS (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' EXCEPT SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family'))",
+				"SELECT COUNT(DISTINCT sub.sp_value) FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' UNION ALL SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 2) sub",
+				"NOT EXISTS (SELECT sub.sp_value FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' ORDER BY sp_value ASC LIMIT 2) sub EXCEPT SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family')",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"EXISTS (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' LIMIT -1 OFFSET 1)",
+				"NOT (EXISTS (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' EXCEPT SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family'))",
+				"SELECT COUNT(DISTINCT sub.sp_value) FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' UNION ALL SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family' LIMIT 2) sub",
+				"NOT EXISTS (SELECT sub.sp_value FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' ORDER BY sp_value ASC LIMIT 2) sub EXCEPT SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'family')",
+			},
+		},
+	} {
+		reqPSO, psoErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(predSetOpVD))
+		require.NoError(t, psoErr)
+		reqPSO.Header.Set("Content-Type", "application/fhir+json")
+		respPSO, psoErr := client.Do(reqPSO)
+		require.NoError(t, psoErr)
+		psoBytes, _ := io.ReadAll(respPSO.Body)
+		respPSO.Body.Close()
+		require.Equal(t, http.StatusOK, respPSO.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(psoBytes), want)
+		}
+	}
+
+	for _, ep := range []string{
+		"/fhir/r4/proto/MeasureReport/w96-mr-1/$nhsn-aur-submit",
+		"/fhir/r4/proto/Patient/proto-pat-1/$nhsn-hai-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$mcode-trial-match",
+		"/fhir/r4/proto/Observation/w96-obs-1/$mcode-disease-status",
+		"/fhir/r4/proto/Patient/proto-pat-1/$mcode-trial-summary",
+		"/fhir/r4/proto/OrganizationAffiliation/w96-oa-1/$fast-network-query",
+		"/fhir/r4/proto/HealthcareService/w96-hs-1/$fast-attest",
+		"/fhir/r4/proto/ServiceRequest/w96-sr-1/$sdoh-referral",
+		"/fhir/r4/proto/MeasureReport/w96-mr-1/$ra-evaluate-risk",
+		"/fhir/r4/proto/Patient/proto-pat-1/$ra-coding-gap-report",
+		"/fhir/r4/proto/Task/w96-task-1/$cdex-submit-attachment",
+		"/fhir/r4/proto/Measure/w96-meas-1/$nhsn-dqm-evaluate",
+		"/fhir/r4/proto/Patient/proto-pat-1/$nhsn-ach-summary",
+		"/fhir/r4/proto/Questionnaire/phq-9/$dtr-questionnaire-package",
+		"/fhir/r4/proto/Claim/w96-claim-1/$pas-inquire",
+		"/fhir/r4/proto/Patient/proto-pat-1/$burden-reduction-summary",
+		"/fhir/r4/proto/VerificationResult/w96-vr-1/$ndh-verify",
+		"/fhir/r4/proto/Organization/w96-org-1/$ndh-directory-summary",
+		"/fhir/r4/proto/Group/w96-grp-1/$confirm-attribution-list",
+		"/fhir/r4/proto/Group/w96-grp-1/$atr-summary",
+		"/fhir/r4/proto/Observation/w96-obs-1/$pacio-splasch-record",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pacio-splasch-summary",
+		"/fhir/r4/proto/ResearchStudy/w96-study-1/$vulcan-rwd-cohort",
+		"/fhir/r4/proto/Patient/proto-pat-1/$vulcan-rwd-summary",
+		"/fhir/r4/proto/MeasureReport/w96-mr-1/$saner-report-capacity",
+		"/fhir/r4/proto/Location/w96-loc-1/$saner-capacity-summary",
+		"/fhir/r4/proto/ServiceRequest/w96-sr-1/$codex-rttd-plan",
+		"/fhir/r4/proto/Patient/proto-pat-1/$codex-rttd-summary",
+		"/fhir/r4/proto/Consent/w96-con-1/$sdoh-consent-record",
+		"/fhir/r4/proto/Patient/proto-pat-1/$sdoh-care-bundle",
+		"/fhir/r4/proto/Organization/w96-org-1/$udap-register",
+		"/fhir/r4/proto/Organization/w96-org-1/$udap-trust-summary",
+		"/fhir/r4/proto/Group/w96-grp-1/$pdex-provider-member-match",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pdex-provider-everything",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pdex-payer-exchange",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pdex-payer-summary",
+		"/fhir/r4/proto/ViewDefinition/observation-vitals/$sql",
+	} {
+		reqOp, opErr := http.NewRequest(http.MethodPost, ts.URL+ep, bytes.NewReader(w95ParamsProtoBytes))
+		require.NoError(t, opErr)
+		reqOp.Header.Set("Content-Type", "application/x-protobuf")
+		reqOp.Header.Set("Accept", "application/x-protobuf")
+		respOp, opErr := client.Do(reqOp)
+		require.NoError(t, opErr)
+		opBytes, _ := io.ReadAll(respOp.Body)
+		respOp.Body.Close()
+		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s", ep)
+		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", ep)
+		assert.NotEmpty(t, opBytes, "endpoint %s", ep)
+	}
 }
