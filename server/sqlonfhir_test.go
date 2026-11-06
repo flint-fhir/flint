@@ -4820,4 +4820,184 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", ep)
 		assert.NotEmpty(t, opBytes, "endpoint %s", ep)
 	}
+
+	// 52. Wave 97: Chained Collection Numeric Aggregations (.sum, .avg, .min, .max, .aggregate) & .single()/[idx] Subscript $sql Pushdown & 32 System/Type/Instance Operations over Binary Proto3
+	chainedAggSubVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "obs_chained_agg_subscript_v1",
+		"status": "active",
+		"resource": "Observation",
+		"select": [
+			{
+				"column": [
+					{"name": "skip_qty_sum", "path": "component.value.ofType(Quantity).value.skip(1).sum()"},
+					{"name": "top2_qty_avg", "path": "component.value.ofType(Quantity).value.sort().take(2).avg()"},
+					{"name": "second_sorted_given", "path": "name.given.distinct().sort()[1]"},
+					{"name": "single_skipped_given", "path": "name.given.skip(1).take(1).single()"},
+					{"name": "top2_len_agg", "path": "name.given.distinct().take(2).aggregate($total + $this.length(), 0)"}
+				]
+			}
+		],
+		"where": [
+			{"path": "component.value.ofType(Quantity).value.skip(1).sum() >= 60 and name.given.distinct().sort()[1] = 'Bob' and name.given.skip(1).take(1).single() = 'Bob'"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_SLICE(",
+				"ARRAY_AVG(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_SLICE(ARRAY_SORT(",
+				"element_at(ARRAY_SORT(ARRAY_DISTINCT(",
+				"element_at(ARRAY_SLICE(ARRAY_SLICE(",
+				"COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CHAR_LENGTH(x), ARRAY_SLICE(ARRAY_DISTINCT(",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"SELECT SUM(sub.sp_value) FROM (SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' OFFSET 1) sub",
+				"SELECT AVG(sub.sp_value) FROM (SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' ORDER BY q.sp_value ASC LIMIT 2) sub",
+				"ORDER BY sp_value ASC LIMIT 1 OFFSET 1) AS second_sorted_given",
+				"LIMIT 1 OFFSET 1) AS single_skipped_given",
+				"SELECT SUM(CHAR_LENGTH(sub.sp_value)) FROM (SELECT DISTINCT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' LIMIT 2) sub",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"SELECT SUM(sub.sp_value) FROM (SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT -1 OFFSET 1) sub",
+				"SELECT AVG(sub.sp_value) FROM (SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' ORDER BY q.sp_value ASC LIMIT 2) sub",
+				"ORDER BY sp_value ASC LIMIT 1 OFFSET 1) AS second_sorted_given",
+				"LIMIT 1 OFFSET 1) AS single_skipped_given",
+				"SELECT SUM(LENGTH(sub.sp_value)) FROM (SELECT DISTINCT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' LIMIT 2) sub",
+			},
+		},
+	} {
+		reqCAS, casErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(chainedAggSubVD))
+		require.NoError(t, casErr)
+		reqCAS.Header.Set("Content-Type", "application/fhir+json")
+		respCAS, casErr := client.Do(reqCAS)
+		require.NoError(t, casErr)
+		casBytes, _ := io.ReadAll(respCAS.Body)
+		respCAS.Body.Close()
+		require.Equal(t, http.StatusOK, respCAS.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(casBytes), want)
+		}
+	}
+
+	for _, seed := range []struct {
+		path string
+		body string
+	}{
+		{"/fhir/r4/proto/Encounter/w97-enc-1", `{"resourceType":"Encounter","id":"w97-enc-1","status":"finished","class":{"system":"http://terminology.hl7.org/CodeSystem/v3-ActCode","code":"AMB"},"subject":{"reference":"Patient/proto-pat-1"}}`},
+		{"/fhir/r4/proto/Slot/w97-slot-1", `{"resourceType":"Slot","id":"w97-slot-1","schedule":{"reference":"Schedule/w97-sched-1"},"status":"free","start":"2026-02-01T11:00:00Z","end":"2026-02-01T11:30:00Z"}`},
+		{"/fhir/r4/proto/Slot/w97-slot-2", `{"resourceType":"Slot","id":"w97-slot-2","schedule":{"reference":"Schedule/w97-sched-1"},"status":"free","start":"2026-02-01T12:00:00Z","end":"2026-02-01T12:30:00Z"}`},
+		{"/fhir/r4/proto/ResearchStudy/w97-study-1", `{"resourceType":"ResearchStudy","id":"w97-study-1","status":"active","title":"Wave 97 Study"}`},
+		{"/fhir/r4/proto/Questionnaire/phq-9", `{"resourceType":"Questionnaire","id":"phq-9","url":"http://flint.fhir.org/Questionnaire/phq-9","status":"active","title":"PHQ-9"}`},
+	} {
+		reqSeed, sErr := http.NewRequest(http.MethodPut, ts.URL+seed.path, strings.NewReader(seed.body))
+		require.NoError(t, sErr)
+		reqSeed.Header.Set("Content-Type", "application/fhir+json")
+		respSeed, sErr := client.Do(reqSeed)
+		require.NoError(t, sErr)
+		respSeed.Body.Close()
+	}
+
+	for _, getEP := range []string{
+		"/fhir/r4/proto/$meta?_format=application/x-protobuf",
+		"/fhir/r4/proto/Patient/$meta?_format=application/x-protobuf",
+	} {
+		reqGet, gErr := http.NewRequest(http.MethodGet, ts.URL+getEP, nil)
+		require.NoError(t, gErr)
+		reqGet.Header.Set("Accept", "application/x-protobuf")
+		respGet, gErr := client.Do(reqGet)
+		require.NoError(t, gErr)
+		getBytes, _ := io.ReadAll(respGet.Body)
+		respGet.Body.Close()
+		require.Equal(t, http.StatusOK, respGet.StatusCode, "endpoint %s", getEP)
+		assert.Contains(t, respGet.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", getEP)
+		assert.NotEmpty(t, getBytes, "endpoint %s", getEP)
+	}
+
+	toProtoHelper := func(resType, rawJSON string) []byte {
+		reqC, cErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/"+resType+"/$convert", strings.NewReader(rawJSON))
+		require.NoError(t, cErr)
+		reqC.Header.Set("Content-Type", "application/fhir+json")
+		reqC.Header.Set("Accept", "application/x-protobuf")
+		respC, cErr := client.Do(reqC)
+		require.NoError(t, cErr)
+		bC, _ := io.ReadAll(respC.Body)
+		respC.Body.Close()
+		require.Equal(t, http.StatusOK, respC.StatusCode)
+		return bC
+	}
+
+	bMetaW97 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"meta","valueMeta":{"tag":[{"system":"http://terminology.hl7.org/CodeSystem/v3-ObservationValue","code":"SUBSETTED"}]}}]}`)
+	bGraphW97 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"graph","valueUri":"us-core-patient-care-graph"},{"name":"start","valueString":"Patient/proto-pat-1"}]}`)
+	bHoldW97 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"slot-id","valueString":"Slot/w97-slot-1"},{"name":"patient-id","valueString":"Patient/proto-pat-1"}]}`)
+	bBookW97 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"slot-id","valueString":"Slot/w97-slot-2"},{"name":"patient-id","valueString":"Patient/proto-pat-1"}]}`)
+	bConW97 := toProtoHelper("Consent", `{"resourceType":"Consent","id":"w97-con-1","status":"active","scope":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/consentscope","code":"patient-privacy"}]},"category":[{"coding":[{"system":"http://loinc.org","code":"59284-0"}]}],"patient":{"reference":"Patient/proto-pat-1"},"provision":{"type":"permit"}}`)
+	bCIW97 := toProtoHelper("ChargeItem", `{"resourceType":"ChargeItem","id":"w97-ci-1","status":"billable","code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"99213"}]},"subject":{"reference":"Patient/proto-pat-1"},"quantity":{"value":1}}`)
+	bSMW97 := toProtoHelper("Patient", `{"resourceType":"Patient","id":"w97-sm-pat-1","gender":"female","birthDate":"1985-04-12","name":[{"family":"Certify","given":["Alice"]}]}`)
+	bTSW97 := toProtoHelper("TestScript", `{"resourceType":"TestScript","id":"w97-ts-1","url":"http://flint.fhir.org/TestScript/w97-ts-1","name":"W97TS","status":"active","test":[{"name":"ReadPatient","action":[{"operation":{"type":{"system":"http://terminology.hl7.org/CodeSystem/testscript-operation-codes","code":"read"},"resource":"Patient","params":"/proto-pat-1"}},{"assert":{"response":"okay"}}]}]}`)
+	bCERW97 := toProtoHelper("CoverageEligibilityRequest", `{"resourceType":"CoverageEligibilityRequest","id":"w97-cer-1","status":"active","purpose":["benefits","validation"],"patient":{"reference":"Patient/proto-pat-1"},"insurer":{"reference":"Organization/w96-org-1"},"insurance":[{"coverage":{"reference":"Coverage/w96-cov-1"}}]}`)
+	bAEW97 := toProtoHelper("AdverseEvent", `{"resourceType":"AdverseEvent","id":"w97-ae-1","actuality":"actual","subject":{"reference":"Patient/proto-pat-1"}}`)
+	bCPW97 := toProtoHelper("CarePlan", `{"resourceType":"CarePlan","id":"w97-cp-1","status":"active","intent":"plan","subject":{"reference":"Patient/proto-pat-1"},"activity":[{"detail":{"status":"completed"}},{"detail":{"status":"in-progress"}}]}`)
+	bRAW97 := toProtoHelper("RiskAssessment", `{"resourceType":"RiskAssessment","id":"w97-ra-1","status":"final","subject":{"reference":"Patient/proto-pat-1"}}`)
+	bMRW97 := toProtoHelper("MedicationRequest", `{"resourceType":"MedicationRequest","id":"w97-mr-1","status":"active","intent":"order","subject":{"reference":"Patient/proto-pat-1"},"medicationCodeableConcept":{"coding":[{"system":"http://www.nlm.nih.gov/research/umls/rxnorm","code":"860975"}]}}`)
+	bQW97 := toProtoHelper("Questionnaire", `{"resourceType":"Questionnaire","id":"phq-9","url":"http://flint.fhir.org/Questionnaire/phq-9","name":"PHQ9","status":"active"}`)
+	bParamsW97 := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"patient","valueString":"Patient/proto-pat-1"},{"name":"subject","valueString":"Patient/proto-pat-1"},{"name":"measure","valueString":"cms165-bp-control"},{"name":"library","valueString":"Library/CMS165-Logic"},{"name":"questionnaire","valueString":"Questionnaire/phq-9"},{"name":"study","valueString":"ResearchStudy/w97-study-1"},{"name":"code","valueCode":"723"},{"name":"periodStart","valueString":"2026-01-01"},{"name":"periodEnd","valueString":"2026-12-31"},{"name":"start","valueString":"2026-02-01T08:00:00Z"},{"name":"end","valueString":"2026-02-01T18:00:00Z"},{"name":"TrackingId","valueString":"w97-task-1"},{"name":"MemberId","valueString":"proto-pat-1"},{"name":"Attachment","part":[{"name":"LineItem","valueString":"1"},{"name":"Content","resource":{"resourceType":"DocumentReference","id":"w97-cdex-doc","status":"current","content":[{"attachment":{"contentType":"text/plain","url":"https://flint.example.org/cdex/w97.txt"}}]}}]},{"name":"measureReport","resource":{"resourceType":"MeasureReport","id":"w97-mr-1","status":"complete","type":"data-collection","measure":"http://flint.fhir.org/Measure/cms165-bp-control","subject":{"reference":"Patient/proto-pat-1"},"period":{"start":"2026-01-01","end":"2026-12-31"}}},{"name":"claim","resource":{"resourceType":"Claim","id":"w97-claim-1","status":"active","use":"predetermination","patient":{"reference":"Patient/proto-pat-1"},"insurer":{"reference":"Organization/w96-org-1"},"provider":{"reference":"Practitioner/w96-prac-1"}}}]}`)
+
+	for _, opTC := range []struct {
+		ep   string
+		body []byte
+	}{
+		{"/fhir/r4/proto/Patient/proto-pat-1/$meta-add", bMetaW97},
+		{"/fhir/r4/proto/Patient/proto-pat-1/$meta-delete", bMetaW97},
+		{"/fhir/r4/proto/GraphDefinition/$graph", bGraphW97},
+		{"/fhir/r4/proto/GraphDefinition/us-core-patient-care-graph/$graph", bGraphW97},
+		{"/fhir/r4/proto/Encounter/w97-enc-1/$everything", bParamsW97},
+		{"/fhir/r4/proto/Group/all-patients/$everything", bParamsW97},
+		{"/fhir/r4/proto/Consent/w97-con-1/$evaluate", bConW97},
+		{"/fhir/r4/proto/MedicationKnowledge/w97-mk-1/$lookup", bParamsW97},
+		{"/fhir/r4/proto/ChargeItem/w97-ci-1/$apply", bCIW97},
+		{"/fhir/r4/proto/StructureMap/w97-sm-1/$transform", bSMW97},
+		{"/fhir/r4/proto/Appointment/w97-appt-1/$hold", bHoldW97},
+		{"/fhir/r4/proto/Appointment/w97-appt-1/$book", bBookW97},
+		{"/fhir/r4/proto/StructureDefinition/us-core-patient/$snapshot", bParamsW97},
+		{"/fhir/r4/proto/TestScript/w97-ts-1/$evaluate", bTSW97},
+		{"/fhir/r4/proto/CoverageEligibilityRequest/w97-cer-1/$submit", bCERW97},
+		{"/fhir/r4/proto/Task/w97-task-1/$submit-attachment", bParamsW97},
+		{"/fhir/r4/proto/Library/CMS165-Logic/$evaluate", bParamsW97},
+		{"/fhir/r4/proto/ResearchStudy/w97-study-1/$evaluate-eligibility", bParamsW97},
+		{"/fhir/r4/proto/Claim/w97-claim-1/$predetermine", bParamsW97},
+		{"/fhir/r4/proto/Measure/cms165-bp-control/$evaluate-risk-condition-category", bParamsW97},
+		{"/fhir/r4/proto/Schedule/w97-sched-1/$find", bParamsW97},
+		{"/fhir/r4/proto/MedicationRequest/w97-mr-1/$crd", bMRW97},
+		{"/fhir/r4/proto/AdverseEvent/w97-ae-1/$evaluate", bAEW97},
+		{"/fhir/r4/proto/CarePlan/w97-cp-1/$evaluate", bCPW97},
+		{"/fhir/r4/proto/Patient/proto-pat-1/$gfe", bParamsW97},
+		{"/fhir/r4/proto/RiskAssessment/w97-ra-1/$evaluate", bRAW97},
+		{"/fhir/r4/proto/Questionnaire/phq-9/$package", bQW97},
+		{"/fhir/r4/proto/Claim/w97-claim-1/$inquire", bParamsW97},
+		{"/fhir/r4/proto/Measure/cms165-bp-control/$collect-data", bParamsW97},
+		{"/fhir/r4/proto/Measure/cms165-bp-control/$submit-data", bParamsW97},
+	} {
+		reqOp, opErr := http.NewRequest(http.MethodPost, ts.URL+opTC.ep, bytes.NewReader(opTC.body))
+		require.NoError(t, opErr)
+		reqOp.Header.Set("Content-Type", "application/x-protobuf")
+		reqOp.Header.Set("Accept", "application/x-protobuf")
+		respOp, opErr := client.Do(reqOp)
+		require.NoError(t, opErr)
+		opBytes, _ := io.ReadAll(respOp.Body)
+		respOp.Body.Close()
+		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s", opTC.ep)
+		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", opTC.ep)
+		assert.NotEmpty(t, opBytes, "endpoint %s", opTC.ep)
+	}
 }
