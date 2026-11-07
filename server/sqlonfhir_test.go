@@ -5451,4 +5451,169 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", ep)
 		assert.NotEmpty(t, opBytes, "endpoint %s", ep)
 	}
+
+	// 50. Wave 101: SQL-on-FHIR v2 Element-Wise Math & Encoding/Escaping (.abs, .ceiling, .floor, .truncate, .round, .sqrt, .exp, .ln, .log, .power, .encode, .decode, .escape, .unescape) on Collection Paths ($sql & $run) + 36 Instance-Level National IG Binary Proto3 GET/POST Operations
+	elemMathEncVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_collection_math_encode_escape",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"column": [
+					{"name": "id", "path": "id"},
+					{"name": "id_abs_sum", "path": "identifier.value.toInteger().abs().sum()"},
+					{"name": "id_round_avg", "path": "identifier.value.toDecimal().round(1).avg()"},
+					{"name": "id_pow_max", "path": "identifier.value.toInteger().power(2).max()"},
+					{"name": "id_sqrt_min", "path": "identifier.value.toDecimal().sqrt().min()"},
+					{"name": "given_hex", "path": "name.given.encode('hex').sort().join(',')"},
+					{"name": "given_b64", "path": "name.given.encode('base64').first()"},
+					{"name": "given_html_esc", "path": "name.given.escape('html').join('|')"},
+					{"name": "given_json_esc", "path": "name.given.escape('json').join('|')"},
+					{"name": "id_abs_arr", "path": "identifier.value.toInteger().abs()", "collection": true},
+					{"name": "given_hex_arr", "path": "name.given.encode('hex')", "collection": true}
+				]
+			}
+		],
+		"where": [
+			{"path": "identifier.value.toInteger().abs().all($this >= 0) and name.given.encode('hex').exists($this != '')"}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> ABS(x), ARRAY_MAP(x -> CAST(x AS BIGINT),",
+				"ARRAY_AVG(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> ROUND(x, 1), ARRAY_MAP(x -> CAST(x AS DOUBLE),",
+				"ARRAY_MAX(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> POW(x, 2), ARRAY_MAP(x -> CAST(x AS BIGINT),",
+				"ARRAY_MIN(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> SQRT(x), ARRAY_MAP(x -> CAST(x AS DOUBLE),",
+				"ARRAY_JOIN(ARRAY_SORT(ARRAY_MAP(x -> HEX(x),",
+				"element_at(ARRAY_MAP(x -> TO_BASE64(x),",
+				"NOT ARRAY_EXISTS(x -> x < 0, ARRAY_MAP(x -> ABS(x), ARRAY_MAP(x -> CAST(x AS BIGINT),",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"SELECT ABS(CAST(t.sp_value AS BIGINT)) AS sp_value FROM spidx_token t",
+				"SELECT ROUND(CAST(t.sp_value AS DOUBLE PRECISION), 1) AS sp_value FROM spidx_token t",
+				"SELECT POWER(CAST(t.sp_value AS BIGINT), 2) AS sp_value FROM spidx_token t",
+				"SELECT SQRT(CAST(t.sp_value AS DOUBLE PRECISION)) AS sp_value FROM spidx_token t",
+				"SELECT ENCODE(CAST(s.sp_value AS BYTEA), 'hex') AS sp_value FROM spidx_string s",
+				"SELECT ENCODE(CAST(s.sp_value AS BYTEA), 'base64') AS sp_value FROM spidx_string s",
+				"ARRAY[]::double precision[]",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"SELECT ABS(CAST(t.sp_value AS INTEGER)) AS sp_value FROM spidx_token t",
+				"SELECT ROUND(CAST(t.sp_value AS REAL), 1) AS sp_value FROM spidx_token t",
+				"SELECT POW(CAST(t.sp_value AS INTEGER), 2) AS sp_value FROM spidx_token t",
+				"SELECT SQRT(CAST(t.sp_value AS REAL)) AS sp_value FROM spidx_token t",
+				"SELECT HEX(s.sp_value) AS sp_value FROM spidx_string s",
+			},
+		},
+	} {
+		reqCME, cmeErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(elemMathEncVD))
+		require.NoError(t, cmeErr)
+		reqCME.Header.Set("Content-Type", "application/fhir+json")
+		respCME, cmeErr := client.Do(reqCME)
+		require.NoError(t, cmeErr)
+		cmeBytes, _ := io.ReadAll(respCME.Body)
+		respCME.Body.Close()
+		require.Equal(t, http.StatusOK, respCME.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(cmeBytes), want)
+		}
+	}
+
+	reqCMERun, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run", strings.NewReader(elemMathEncVD))
+	require.NoError(t, err)
+	reqCMERun.Header.Set("Content-Type", "application/fhir+json")
+	respCMERun, err := client.Do(reqCMERun)
+	require.NoError(t, err)
+	cmeRunBytes, _ := io.ReadAll(respCMERun.Body)
+	respCMERun.Body.Close()
+	require.Equal(t, http.StatusOK, respCMERun.StatusCode)
+	assert.Contains(t, string(cmeRunBytes), `"given_hex"`)
+	assert.Contains(t, string(cmeRunBytes), `"given_b64"`)
+
+	for _, seed := range []struct {
+		path string
+		body string
+	}{
+		{"/fhir/r4/proto/Person/pers-w101-1", `{"resourceType":"Person","id":"pers-w101-1","active":true,"name":[{"family":"ValidPat","given":["Alice"]}],"gender":"female","birthDate":"1980-01-01","link":[{"target":{"reference":"Patient/proto-pat-1"},"assurance":"level3"}]}`},
+		{"/fhir/r4/proto/MeasureReport/w97-mr-1", `{"resourceType":"MeasureReport","id":"w97-mr-1","status":"complete","type":"individual","measure":"http://flint.fhir.org/Measure/cms165-bp-control","subject":{"reference":"Patient/proto-pat-1"},"period":{"start":"2026-01-01","end":"2026-12-31"}}`},
+		{"/fhir/r4/proto/Communication/comm-w101-1", `{"resourceType":"Communication","id":"comm-w101-1","status":"completed","subject":{"reference":"Patient/proto-pat-1"},"payload":[{"contentString":"Reportability response: Condition is reportable"}]}`},
+		{"/fhir/r4/proto/MedicinalProduct/mp-w101-1", `{"resourceType":"MedicinalProduct","id":"mp-w101-1","name":[{"productName":"Lisinopril 10mg Oral Tablet"}]}`},
+		{"/fhir/r4/proto/MedicinalProductAuthorization/mpa-w101-1", `{"resourceType":"MedicinalProductAuthorization","id":"mpa-w101-1","subject":{"reference":"MedicinalProduct/mp-w101-1"},"status":{"coding":[{"system":"http://hl7.org/fhir/publication-status","code":"active"}]}}`},
+		{"/fhir/r4/proto/ResearchSubject/rsub-w101-1", `{"resourceType":"ResearchSubject","id":"rsub-w101-1","status":"on-study","study":{"reference":"ResearchStudy/w97-study-1"},"individual":{"reference":"Patient/proto-pat-1"}}`},
+		{"/fhir/r4/proto/DocumentReference/docref-w101-1", `{"resourceType":"DocumentReference","id":"docref-w101-1","status":"current","type":{"coding":[{"system":"http://loinc.org","code":"34117-2"}]},"category":[{"coding":[{"system":"http://hl7.org/fhir/us/core/CodeSystem/us-core-documentreference-category","code":"clinical-note"}]}],"subject":{"reference":"Patient/proto-pat-1"},"content":[{"attachment":{"contentType":"text/plain","url":"https://flint.example.org/notes/docref-w101-1.txt"}}]}`},
+		{"/fhir/r4/proto/Condition/cond-w101-1", `{"resourceType":"Condition","id":"cond-w101-1","clinicalStatus":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/condition-clinical","code":"active"}]},"code":{"coding":[{"system":"http://snomed.info/sct","code":"363346000","display":"Malignant neoplastic disease"}]},"subject":{"reference":"Patient/proto-pat-1"}}`},
+		{"/fhir/r4/proto/Coverage/cov-w101-1", `{"resourceType":"Coverage","id":"cov-w101-1","status":"active","subscriberId":"SUB-W101-1","beneficiary":{"reference":"Patient/proto-pat-1"},"payor":[{"reference":"Organization/w96-org-1"}]}`},
+	} {
+		reqSeed, sErr := http.NewRequest(http.MethodPut, ts.URL+seed.path, strings.NewReader(seed.body))
+		require.NoError(t, sErr)
+		reqSeed.Header.Set("Content-Type", "application/fhir+json")
+		respSeed, sErr := client.Do(reqSeed)
+		require.NoError(t, sErr)
+		respSeed.Body.Close()
+	}
+
+	bW101Params := toProtoHelper("Parameters", `{"resourceType":"Parameters","parameter":[{"name":"patient","valueReference":{"reference":"Patient/proto-pat-1"}},{"name":"subject","valueReference":{"reference":"Patient/proto-pat-1"}},{"name":"encounter","valueReference":{"reference":"Encounter/w97-enc-1"}},{"name":"mother","valueReference":{"reference":"Patient/proto-pat-1"}},{"name":"assuranceLevel","valueString":"IAL2"},{"name":"timepointType","valueString":"admission"},{"name":"occupationCode","valueString":"29-1141.00"},{"name":"industryCode","valueString":"622110"},{"name":"treatmentSummary","valueString":"CPR and intubation preferences documented"},{"name":"hccCode","valueString":"HCC85"},{"name":"stage","valueString":"IIA"},{"name":"tCategory","valueString":"cT2"},{"name":"nCategory","valueString":"cN0"},{"name":"mCategory","valueString":"cM0"}]}`)
+
+	for _, ep := range []string{
+		"/fhir/r4/proto/Person/pers-w101-1/$verify-identity",
+		"/fhir/r4/proto/Encounter/w97-enc-1/$pacio-timepoint",
+		"/fhir/r4/proto/Encounter/w97-enc-1/$pacio-timepoints",
+		"/fhir/r4/proto/Patient/proto-pat-1/$cancer-registry-report",
+		"/fhir/r4/proto/PlanDefinition/hypertension-management/$medmorph-kar",
+		"/fhir/r4/proto/MeasureReport/w97-mr-1/$vbpr-performance",
+		"/fhir/r4/proto/MeasureReport/w97-mr-1/$vbpr-attest",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pacio-cognitive-assess",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pacio-cognitive-summary",
+		"/fhir/r4/proto/Composition/w98-comp-1/$eicr-document",
+		"/fhir/r4/proto/Communication/comm-w101-1/$rr-process",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pdex-WriteData",
+		"/fhir/r4/proto/MedicationKnowledge/w97-mk-1/$formulary-alternatives",
+		"/fhir/r4/proto/Patient/proto-pat-1/$record-occupation",
+		"/fhir/r4/proto/Patient/proto-pat-1/$odh-summary",
+		"/fhir/r4/proto/DiagnosticReport/w99-dr-1/$elr-submit",
+		"/fhir/r4/proto/Patient/proto-pat-1/$adi-record",
+		"/fhir/r4/proto/Patient/proto-pat-1/$ra-coding-gaps",
+		"/fhir/r4/proto/MeasureReport/w97-mr-1/$ra-remediate",
+		"/fhir/r4/proto/Organization/w96-org-1/$fast-verify",
+		"/fhir/r4/proto/Patient/proto-pat-1/$physical-activity-summary",
+		"/fhir/r4/proto/MedicinalProduct/mp-w101-1/$epi-document",
+		"/fhir/r4/proto/MedicinalProductAuthorization/mpa-w101-1/$evaluate-authorization",
+		"/fhir/r4/proto/ResearchStudy/w97-study-1/$rwd-cohort",
+		"/fhir/r4/proto/ResearchSubject/rsub-w101-1/$enroll",
+		"/fhir/r4/proto/Patient/proto-pat-1/$birth-report",
+		"/fhir/r4/proto/DocumentReference/docref-w101-1/$ihe-iti-68",
+		"/fhir/r4/proto/Patient/proto-pat-1/$find-subject-variants",
+		"/fhir/r4/proto/Patient/proto-pat-1/$find-subject-tx-implications",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pacio-summary",
+		"/fhir/r4/proto/QuestionnaireResponse/w98-qr-1/$pacio-assess",
+		"/fhir/r4/proto/Encounter/w97-enc-1/$nhsn-hai-report",
+		"/fhir/r4/proto/Patient/proto-pat-1/$mcode-summary",
+		"/fhir/r4/proto/Condition/cond-w101-1/$stage-cancer",
+		"/fhir/r4/proto/Coverage/cov-w101-1/$formulary-coverage",
+		"/fhir/r4/proto/Patient/proto-pat-1/$carin-bb",
+	} {
+		reqOp, opErr := http.NewRequest(http.MethodPost, ts.URL+ep, bytes.NewReader(bW101Params))
+		require.NoError(t, opErr)
+		reqOp.Header.Set("Content-Type", "application/x-protobuf")
+		reqOp.Header.Set("Accept", "application/x-protobuf")
+		respOp, opErr := client.Do(reqOp)
+		require.NoError(t, opErr)
+		opBytes, _ := io.ReadAll(respOp.Body)
+		respOp.Body.Close()
+		require.Equal(t, http.StatusOK, respOp.StatusCode, "endpoint %s: %s", ep, string(opBytes))
+		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", ep)
+		assert.NotEmpty(t, opBytes, "endpoint %s", ep)
+	}
 }
