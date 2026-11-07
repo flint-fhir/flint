@@ -1724,6 +1724,38 @@ func dorisZeroJSONCollectionColumnExpr(fhirPath string) (string, string) {
 		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
 		return fmt.Sprintf("ARRAY_MAP(x -> CHAR_LENGTH(x), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".length[]"
 	}
+	if strings.HasSuffix(p, ".toInteger()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".toInteger()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_MAP(x -> CAST(x AS BIGINT), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".toInteger[]"
+	}
+	if strings.HasSuffix(p, ".toDecimal()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".toDecimal()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_MAP(x -> CAST(x AS DOUBLE), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".toDecimal[]"
+	}
+	if strings.HasSuffix(p, ".toString()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".toString()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_MAP(x -> CAST(x AS STRING), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".toString[]"
+	}
+	if idx := strings.LastIndex(p, ".indexOf("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".indexOf(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		rawSub := strings.Trim(strings.TrimSpace(p[idx+len(".indexOf("):len(p)-1]), "'\"")
+		escapedSub := strings.ReplaceAll(rawSub, "'", "''")
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_MAP(x -> (LOCATE('%s', x) - 1), %s)", escapedSub, collExpr), strings.TrimSuffix(collSrc, "[]") + ".indexOf[]"
+	}
+	if idx := strings.LastIndex(p, ".replaceMatches("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".replaceMatches(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		args := splitTopLevelCommaArgs(p[idx+len(".replaceMatches(") : len(p)-1])
+		if len(args) == 2 {
+			pat := strings.ReplaceAll(strings.Trim(strings.TrimSpace(args[0]), "'\""), "'", "''")
+			sub := strings.ReplaceAll(strings.Trim(strings.TrimSpace(args[1]), "'\""), "'", "''")
+			collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+			return fmt.Sprintf("ARRAY_MAP(x -> REGEXP_REPLACE(x, '%s', '%s'), %s)", pat, sub, collExpr), strings.TrimSuffix(collSrc, "[]") + ".replaceMatches[]"
+		}
+	}
 	if idx := strings.LastIndex(p, ".replace("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".replace(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		args := splitTopLevelCommaArgs(p[idx+len(".replace(") : len(p)-1])
@@ -1867,6 +1899,18 @@ func (m spidxCollectionModifiers) hasAnyMods() bool {
 	return m.isDistinct || m.hasSubqueryMods()
 }
 
+func (m spidxCollectionModifiers) isNumericElemTransform() bool {
+	if len(m.elemTransforms) == 0 {
+		return false
+	}
+	switch m.elemTransforms[len(m.elemTransforms)-1].kind {
+	case "length", "indexOf", "toInteger", "toDecimal":
+		return true
+	default:
+		return false
+	}
+}
+
 func parseSpidxCollectionModifiers(fhirPath string) spidxCollectionModifiers {
 	cur := strings.TrimSpace(fhirPath)
 	var mods spidxCollectionModifiers
@@ -1943,6 +1987,42 @@ func parseSpidxCollectionModifiers(fhirPath string) spidxCollectionModifiers {
 			cur = strings.TrimSpace(cur[:len(cur)-len(".length()")])
 			continue
 		}
+		if strings.HasSuffix(cur, ".toInteger()") {
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "toInteger"}}, mods.elemTransforms...)
+			tagParts = append([]string{".toInteger"}, tagParts...)
+			cur = strings.TrimSpace(cur[:len(cur)-len(".toInteger()")])
+			continue
+		}
+		if strings.HasSuffix(cur, ".toDecimal()") {
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "toDecimal"}}, mods.elemTransforms...)
+			tagParts = append([]string{".toDecimal"}, tagParts...)
+			cur = strings.TrimSpace(cur[:len(cur)-len(".toDecimal()")])
+			continue
+		}
+		if strings.HasSuffix(cur, ".toString()") {
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "toString"}}, mods.elemTransforms...)
+			tagParts = append([]string{".toString"}, tagParts...)
+			cur = strings.TrimSpace(cur[:len(cur)-len(".toString()")])
+			continue
+		}
+		if idx := strings.LastIndex(cur, ".indexOf("); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(".indexOf(")-1) == len(cur)-1 {
+			rawSub := strings.Trim(strings.TrimSpace(cur[idx+len(".indexOf("):len(cur)-1]), "'\"")
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "indexOf", arg1: rawSub}}, mods.elemTransforms...)
+			tagParts = append([]string{".indexOf"}, tagParts...)
+			cur = strings.TrimSpace(cur[:idx])
+			continue
+		}
+		if idx := strings.LastIndex(cur, ".replaceMatches("); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(".replaceMatches(")-1) == len(cur)-1 {
+			args := splitTopLevelCommaArgs(cur[idx+len(".replaceMatches(") : len(cur)-1])
+			if len(args) == 2 {
+				pat := strings.Trim(strings.TrimSpace(args[0]), "'\"")
+				sub := strings.Trim(strings.TrimSpace(args[1]), "'\"")
+				mods.elemTransforms = append([]spidxElemTransform{{kind: "replaceMatches", arg1: pat, arg2: sub}}, mods.elemTransforms...)
+				tagParts = append([]string{".replaceMatches"}, tagParts...)
+				cur = strings.TrimSpace(cur[:idx])
+				continue
+			}
+		}
 		if idx := strings.LastIndex(cur, ".replace("); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(".replace(")-1) == len(cur)-1 {
 			args := splitTopLevelCommaArgs(cur[idx+len(".replace(") : len(cur)-1])
 			if len(args) == 2 {
@@ -1994,6 +2074,35 @@ func applySpidxElemTransforms(colExpr string, transforms []spidxElemTransform, d
 				expr = fmt.Sprintf("LENGTH(%s)", expr)
 			} else {
 				expr = fmt.Sprintf("CHAR_LENGTH(%s)", expr)
+			}
+		case "toInteger":
+			if dialect == "sqlite" {
+				expr = fmt.Sprintf("CAST(%s AS INTEGER)", expr)
+			} else {
+				expr = fmt.Sprintf("CAST(%s AS BIGINT)", expr)
+			}
+		case "toDecimal":
+			if dialect == "sqlite" {
+				expr = fmt.Sprintf("CAST(%s AS REAL)", expr)
+			} else {
+				expr = fmt.Sprintf("CAST(%s AS DOUBLE PRECISION)", expr)
+			}
+		case "toString":
+			expr = fmt.Sprintf("CAST(%s AS TEXT)", expr)
+		case "indexOf":
+			sub := strings.ReplaceAll(tr.arg1, "'", "''")
+			if dialect == "sqlite" {
+				expr = fmt.Sprintf("(INSTR(%s, '%s') - 1)", expr, sub)
+			} else {
+				expr = fmt.Sprintf("(STRPOS(%s, '%s') - 1)", expr, sub)
+			}
+		case "replaceMatches":
+			pat := strings.ReplaceAll(tr.arg1, "'", "''")
+			sub := strings.ReplaceAll(tr.arg2, "'", "''")
+			if dialect == "sqlite" {
+				expr = fmt.Sprintf("REGEXP_REPLACE(%s, '%s', '%s')", expr, pat, sub)
+			} else {
+				expr = fmt.Sprintf("REGEXP_REPLACE(%s, '%s', '%s', 'g')", expr, pat, sub)
 			}
 		case "replace":
 			pat := strings.ReplaceAll(tr.arg1, "'", "''")
@@ -2067,8 +2176,15 @@ func spidxZeroJSONCollectionColumnExpr(fhirPath, dialect string) (string, string
 				return fmt.Sprintf("(SELECT json_group_array(sub.sp_value) FROM (%s) sub)", subQ), subSrc + mods.tag + "[]"
 			}
 			emptyArr := "ARRAY[]::text[]"
-			if n := len(mods.elemTransforms); n > 0 && mods.elemTransforms[n-1].kind == "length" {
-				emptyArr = "ARRAY[]::int[]"
+			if n := len(mods.elemTransforms); n > 0 {
+				switch mods.elemTransforms[n-1].kind {
+				case "length", "indexOf":
+					emptyArr = "ARRAY[]::int[]"
+				case "toInteger":
+					emptyArr = "ARRAY[]::bigint[]"
+				case "toDecimal":
+					emptyArr = "ARRAY[]::double precision[]"
+				}
 			}
 			return fmt.Sprintf("(SELECT COALESCE(ARRAY_AGG(sub.sp_value), %s) FROM (%s) sub)", emptyArr, subQ), subSrc + mods.tag + "[]"
 		}
@@ -3092,6 +3208,11 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 					trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
 					return fmt.Sprintf("NOT ARRAY_EXISTS(x -> CHAR_LENGTH(x) %s %s, %s)", negOp, trimmedRHS, collExpr)
 				}
+				if mods.isNumericElemTransform() && !strings.HasPrefix(strings.TrimSpace(cRHS), "'") {
+					if _, err := strconv.ParseFloat(strings.TrimSpace(cRHS), 64); err == nil {
+						return fmt.Sprintf("NOT ARRAY_EXISTS(x -> x %s %s, %s)", negOp, strings.TrimSpace(cRHS), collExpr)
+					}
+				}
 				escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
 				return fmt.Sprintf("NOT ARRAY_EXISTS(x -> x %s '%s', %s)", negOp, escapedVal, collExpr)
 			}
@@ -3288,6 +3409,11 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 				if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
 					trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
 					return fmt.Sprintf("ARRAY_EXISTS(x -> CHAR_LENGTH(x) %s %s, %s)", sqlOp, trimmedRHS, collExpr)
+				}
+				if mods.isNumericElemTransform() && !strings.HasPrefix(strings.TrimSpace(cRHS), "'") {
+					if _, err := strconv.ParseFloat(strings.TrimSpace(cRHS), 64); err == nil {
+						return fmt.Sprintf("ARRAY_EXISTS(x -> x %s %s, %s)", sqlOp, strings.TrimSpace(cRHS), collExpr)
+					}
 				}
 				escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
 				return fmt.Sprintf("ARRAY_EXISTS(x -> x %s '%s', %s)", sqlOp, escapedVal, collExpr)
@@ -4508,6 +4634,11 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 					trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
 					return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE %s(sub.sp_value) %s %s)", subQ, lenFn, negOp, trimmedRHS)
 				}
+				if mods.isNumericElemTransform() && !strings.HasPrefix(strings.TrimSpace(cRHS), "'") {
+					if _, err := strconv.ParseFloat(strings.TrimSpace(cRHS), 64); err == nil {
+						return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value %s %s)", subQ, negOp, strings.TrimSpace(cRHS))
+					}
+				}
 				escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
 				return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value %s '%s')", subQ, negOp, escapedVal)
 			}
@@ -4707,6 +4838,11 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 					}
 					trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
 					return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE %s(sub.sp_value) %s %s)", subQ, lenFn, sqlOp, trimmedRHS)
+				}
+				if mods.isNumericElemTransform() && !strings.HasPrefix(strings.TrimSpace(cRHS), "'") {
+					if _, err := strconv.ParseFloat(strings.TrimSpace(cRHS), 64); err == nil {
+						return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value %s %s)", subQ, sqlOp, strings.TrimSpace(cRHS))
+					}
 				}
 				escapedVal := strings.ReplaceAll(strings.Trim(strings.TrimSpace(cRHS), "'\""), "'", "''")
 				return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value %s '%s')", subQ, sqlOp, escapedVal)
