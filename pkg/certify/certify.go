@@ -5328,6 +5328,81 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-35", suite10, "Zero-JSON Binary Proto3 Instance-Level National HL7 IG Operations (Person/{id}/$verify-identity, Encounter/{id}/$pacio-timepoint, Encounter/{id}/$pacio-timepoints, Patient/{id}/$cancer-registry-report, PlanDefinition/{id}/$medmorph-kar, MeasureReport/{id}/$vbpr-performance, MeasureReport/{id}/$vbpr-attest, Patient/{id}/$pacio-cognitive-assess, Patient/{id}/$pacio-cognitive-summary, Composition/{id}/$eicr-document, Communication/{id}/$rr-process, Patient/{id}/$pdex-WriteData, MedicationKnowledge/{id}/$formulary-alternatives, Patient/{id}/$record-occupation, Patient/{id}/$odh-summary, DiagnosticReport/{id}/$elr-submit, Patient/{id}/$adi-record, Patient/{id}/$ra-coding-gaps, MeasureReport/{id}/$ra-remediate, Organization/{id}/$fast-verify, Patient/{id}/$physical-activity-summary, MedicinalProduct/{id}/$epi-document, MedicinalProductAuthorization/{id}/$evaluate-authorization, ResearchStudy/{id}/$rwd-cohort, ResearchSubject/{id}/$enroll, Patient/{id}/$birth-report, DocumentReference/{id}/$ihe-iti-68, Patient/{id}/$find-subject-variants, Patient/{id}/$find-subject-tx-implications, Patient/{id}/$pacio-summary, QuestionnaireResponse/{id}/$pacio-assess, Encounter/{id}/$nhsn-hai-report, Patient/{id}/$mcode-summary, Condition/{id}/$stage-cancer, Coverage/{id}/$formulary-coverage, Patient/{id}/$carin-bb) & SQL-on-FHIR v2 Element-Wise Math & Encoding/Escaping (.abs, .ceiling, .floor, .truncate, .round, .sqrt, .exp, .ln, .log, .power, .encode, .decode, .escape, .unescape) on Collection Paths $sql Pushdown", t0, err, "Binary Proto3 36 instance-level National HL7 IG GET/POST operations (Waves 29-40) & element-wise collection math/encode/escape $sql pushdown verified")
 
+	// AN-36: Zero-JSON Binary Proto3 Instance-Level GET Operations Across Waves 93-100 & Clinical Reasoning ($data-requirements) & SQL-on-FHIR v2 Element-Wise .where($this ...) Collection Filter Pushdown
+	t0 = time.Now()
+	{
+		_, _, _ = doReq(http.MethodPut, basePath+"/ActivityDefinition/bp-monitoring-order", "application/fhir+json", []byte(`{"resourceType":"ActivityDefinition","id":"bp-monitoring-order","status":"active","title":"BP Monitoring Order"}`), nil)
+		_, _, _ = doReq(http.MethodPut, basePath+"/Questionnaire/phq-9", "application/fhir+json", []byte(`{"resourceType":"Questionnaire","id":"phq-9","status":"active","title":"PHQ-9 Questionnaire"}`), nil)
+
+		var opCheckErr error
+		getEndpoints := []string{
+			"/Organization/cert-org-1/$udap-trust-summary",
+			"/Patient/cert-pat-1/$pdex-provider-everything",
+			"/Patient/cert-pat-1/$pdex-payer-summary",
+			"/Location/cert-loc-1/$saner-capacity-summary",
+			"/Patient/cert-pat-1/$codex-rttd-summary",
+			"/Patient/cert-pat-1/$sdoh-care-bundle",
+			"/Group/cert-grp-w93-1/$atr-summary",
+			"/Patient/cert-pat-1/$pacio-splasch-summary",
+			"/Patient/cert-pat-1/$vulcan-rwd-summary",
+			"/Patient/cert-pat-1/$burden-reduction-summary",
+			"/Patient/cert-pat-1/$mcode-trial-summary",
+			"/Organization/cert-org-1/$ndh-directory-summary",
+			"/Patient/cert-pat-1/$ra-coding-gap-report",
+			"/Patient/cert-pat-1/$nhsn-ach-summary",
+			"/Patient/cert-pat-1/$nhsn-hai-summary",
+			"/OrganizationAffiliation/cert-oa-w96-1/$fast-network-query",
+			"/Patient/cert-pat-1/$elr-summary",
+			"/ExplanationOfBenefit/cert-eob-1/$carin-bb-claims",
+			"/Patient/cert-pat-1/$rtpbc-summary",
+			"/Patient/cert-pat-1/$ecr-summary",
+			"/ResearchStudy/cert-study-w93-1/$vulcan-summary",
+			"/Patient/cert-pat-1/$nbs-summary",
+			"/ExplanationOfBenefit/cert-eob-1/$pct-aeob-summary",
+			"/ResearchSubject/cert-rsub-w100-1/$vulcan-soa-timeline",
+			"/Patient/cert-pat-1/$iis-history",
+			"/Patient/cert-pat-1/$mcode-genomics-summary",
+			"/Composition/cert-w98-comp-1/$bfdr-document",
+			"/Patient/cert-pat-1/$mcode-radiotherapy-summary",
+			"/Composition/cert-w98-comp-1/$vrdr-document",
+			"/Task/cert-task-1/$cdex-poll",
+			"/Patient/cert-pat-1/$pacio-pfe-summary",
+			"/ClaimResponse/cert-cr-w100-1/$rtpbc-coverage",
+			"/Patient/cert-pat-1/$sdoh-summary",
+			"/Measure/cms165-bp-control/$data-requirements",
+			"/ActivityDefinition/bp-monitoring-order/$data-requirements",
+			"/Questionnaire/phq-9/$data-requirements",
+		}
+		for _, getEp := range getEndpoints {
+			respG, bG, errG := doReq(http.MethodGet, basePath+getEp+"?_format=application/x-protobuf", "", nil, map[string]string{
+				"Accept": "application/x-protobuf",
+			})
+			if errG != nil || respG.StatusCode != http.StatusOK || !strings.Contains(respG.Header.Get("Content-Type"), "application/x-protobuf") || len(bG) == 0 {
+				status := 0
+				if respG != nil {
+					status = respG.StatusCode
+				}
+				opCheckErr = fmt.Errorf("expected binary proto3 200 OK from GET %s, got %d (err=%v): %s", getEp, status, errG, string(bG))
+				break
+			}
+		}
+
+		collWhereVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_collection_where_filter_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"non_alice_given","path":"name.given.where($this != 'Alice').sort().join(',')"},{"name":"long_given_cnt","path":"name.given.where($this.length() >= 4).count()"},{"name":"starts_a_first","path":"name.given.where($this.startsWith('A')).first()"},{"name":"ends_e_last","path":"name.given.where($this.endsWith('e')).last()"},{"name":"contains_li_upper","path":"name.given.where($this.contains('li')).upper().join('|')"},{"name":"regex_given_arr","path":"name.given.where($this.matches('^A.*'))","collection":true},{"name":"high_id_sum","path":"identifier.value.toInteger().where($this >= 10).sum()"}]}],"where":[{"path":"name.given.where($this.startsWith('A')).exists() and name.given.where($this != 'Alice').empty().not() and name.given.where($this.length() >= 3).count() >= 1"}]}`)
+		respCWDoris, bCWDoris, errCWDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", collWhereVD, nil)
+		respCWPg, bCWPg, errCWPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", collWhereVD, nil)
+
+		if opCheckErr != nil {
+			err = opCheckErr
+		} else if errCWDoris != nil || respCWDoris.StatusCode != http.StatusOK || !strings.Contains(string(bCWDoris), "ARRAY_JOIN(ARRAY_SORT(ARRAY_FILTER(x -> x <> 'Alice',") || !strings.Contains(string(bCWDoris), "ARRAY_SIZE(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 4,") || !strings.Contains(string(bCWDoris), "element_at(ARRAY_FILTER(x -> x LIKE 'A%',") || !strings.Contains(string(bCWDoris), "element_at(ARRAY_FILTER(x -> x LIKE '%e',") || !strings.Contains(string(bCWDoris), "ARRAY_JOIN(ARRAY_MAP(x -> UPPER(x), ARRAY_FILTER(x -> x LIKE '%li%',") || !strings.Contains(string(bCWDoris), "ARRAY_FILTER(x -> REGEXP(x, '^A.*'),") || !strings.Contains(string(bCWDoris), "ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_FILTER(x -> x >= 10, ARRAY_MAP(x -> CAST(x AS BIGINT),") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with collection .where($this ...) pushdown, got %d: %s", respCWDoris.StatusCode, string(bCWDoris))
+		} else if errCWPg != nil || respCWPg.StatusCode != http.StatusOK || !strings.Contains(string(bCWPg), "AND s.sp_value <> 'Alice' ORDER BY sp_value ASC") || !strings.Contains(string(bCWPg), "AND CHAR_LENGTH(s.sp_value) >= 4) sub)") || !strings.Contains(string(bCWPg), "AND s.sp_value LIKE 'A%' LIMIT 1)") || !strings.Contains(string(bCWPg), "AND s.sp_value LIKE '%e' ORDER BY sp_value DESC LIMIT 1)") || !strings.Contains(string(bCWPg), "SELECT UPPER(s.sp_value) AS sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' AND s.sp_value LIKE '%li%'") || !strings.Contains(string(bCWPg), "AND s.sp_value ~ '^A.*') sub)") || !strings.Contains(string(bCWPg), "AND CAST(t.sp_value AS BIGINT) >= 10) sub)") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with collection .where($this ...) pushdown, got %d: %s", respCWPg.StatusCode, string(bCWPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-36", suite10, "Zero-JSON Binary Proto3 Instance-Level GET Operations Across Waves 93-100 & Clinical Reasoning ($udap-trust-summary, $pdex-provider-everything, $pdex-payer-summary, $saner-capacity-summary, $codex-rttd-summary, $sdoh-care-bundle, $atr-summary, $pacio-splasch-summary, $vulcan-rwd-summary, $burden-reduction-summary, $mcode-trial-summary, $ndh-directory-summary, $ra-coding-gap-report, $nhsn-ach-summary, $nhsn-hai-summary, $fast-network-query, $elr-summary, $carin-bb-claims, $rtpbc-summary, $ecr-summary, $vulcan-summary, $nbs-summary, $pct-aeob-summary, $vulcan-soa-timeline, $iis-history, $mcode-genomics-summary, $bfdr-document, $mcode-radiotherapy-summary, $vrdr-document, $cdex-poll, $pacio-pfe-summary, $rtpbc-coverage, $sdoh-summary, Measure/{id}/$data-requirements, ActivityDefinition/{id}/$data-requirements, Questionnaire/{id}/$data-requirements) & SQL-on-FHIR v2 Element-Wise .where($this ...) Collection Filter Pushdown", t0, err, "Binary Proto3 36 instance-level GET operations & element-wise .where($this ...) collection filter $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}
