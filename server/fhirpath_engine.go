@@ -1,9 +1,13 @@
 package server
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"html"
 	"math"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -1450,106 +1454,140 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		return []any{strings.Join(strs, sep)}
 
-	// Math Functions
+	// Math Functions (supports both singleton and element-wise collection evaluation)
 	case "abs":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		switch v := current[0].(type) {
-		case int:
-			if v < 0 {
-				return []any{-v}
+		var out []any
+		for _, item := range current {
+			switch v := item.(type) {
+			case int:
+				if v < 0 {
+					out = append(out, -v)
+				} else {
+					out = append(out, v)
+				}
+			case int64:
+				if v < 0 {
+					out = append(out, -v)
+				} else {
+					out = append(out, v)
+				}
+			case float64:
+				out = append(out, math.Abs(v))
+			default:
+				if fv, ok := toFloat(item); ok {
+					out = append(out, math.Abs(fv))
+				}
 			}
-			return []any{v}
-		case int64:
-			if v < 0 {
-				return []any{-v}
-			}
-			return []any{v}
-		case float64:
-			return []any{math.Abs(v)}
 		}
-		return nil
+		return out
 
 	case "ceiling":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if fv, ok := toFloat(current[0]); ok {
-			return []any{int(math.Ceil(fv))}
+		var out []any
+		for _, item := range current {
+			if fv, ok := toFloat(item); ok {
+				out = append(out, int(math.Ceil(fv)))
+			}
 		}
-		return nil
+		return out
 
 	case "floor":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if fv, ok := toFloat(current[0]); ok {
-			return []any{int(math.Floor(fv))}
+		var out []any
+		for _, item := range current {
+			if fv, ok := toFloat(item); ok {
+				out = append(out, int(math.Floor(fv)))
+			}
 		}
-		return nil
+		return out
 
 	case "truncate":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if fv, ok := toFloat(current[0]); ok {
-			return []any{int(math.Trunc(fv))}
+		var out []any
+		for _, item := range current {
+			if fv, ok := toFloat(item); ok {
+				out = append(out, int(math.Trunc(fv)))
+			}
 		}
-		return nil
+		return out
 
 	case "round":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		fv, ok := toFloat(current[0])
-		if !ok {
-			return nil
-		}
+		hasPrecision := false
+		precision := 0
 		if len(args) == 1 {
 			pVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
 			if len(pVals) == 1 {
 				if p, ok := toInt(pVals[0]); ok && p >= 0 {
-					pow := math.Pow(10, float64(p))
-					return []any{math.Round(fv*pow) / pow}
+					hasPrecision = true
+					precision = p
 				}
 			}
 		}
-		return []any{int(math.Round(fv))}
+		var out []any
+		for _, item := range current {
+			fv, ok := toFloat(item)
+			if !ok {
+				continue
+			}
+			if hasPrecision {
+				pow := math.Pow(10, float64(precision))
+				out = append(out, math.Round(fv*pow)/pow)
+			} else {
+				out = append(out, int(math.Round(fv)))
+			}
+		}
+		return out
 
 	case "sqrt":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if fv, ok := toFloat(current[0]); ok && fv >= 0 {
-			return []any{math.Sqrt(fv)}
+		var out []any
+		for _, item := range current {
+			if fv, ok := toFloat(item); ok && fv >= 0 {
+				out = append(out, math.Sqrt(fv))
+			}
 		}
-		return nil
+		return out
 
 	case "exp":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if fv, ok := toFloat(current[0]); ok {
-			return []any{math.Exp(fv)}
+		var out []any
+		for _, item := range current {
+			if fv, ok := toFloat(item); ok {
+				out = append(out, math.Exp(fv))
+			}
 		}
-		return nil
+		return out
 
 	case "ln":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if fv, ok := toFloat(current[0]); ok && fv > 0 {
-			return []any{math.Log(fv)}
+		var out []any
+		for _, item := range current {
+			if fv, ok := toFloat(item); ok && fv > 0 {
+				out = append(out, math.Log(fv))
+			}
 		}
-		return nil
+		return out
 
 	case "log":
-		if len(current) != 1 || len(args) != 1 {
-			return nil
-		}
-		fv, ok := toFloat(current[0])
-		if !ok || fv <= 0 {
+		if len(current) == 0 || len(args) != 1 {
 			return nil
 		}
 		bVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
@@ -1560,14 +1598,16 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if !ok || base <= 0 || base == 1 {
 			return nil
 		}
-		return []any{math.Log(fv) / math.Log(base)}
+		var out []any
+		for _, item := range current {
+			if fv, ok := toFloat(item); ok && fv > 0 {
+				out = append(out, math.Log(fv)/math.Log(base))
+			}
+		}
+		return out
 
 	case "power":
-		if len(current) != 1 || len(args) != 1 {
-			return nil
-		}
-		fv, ok := toFloat(current[0])
-		if !ok {
+		if len(current) == 0 || len(args) != 1 {
 			return nil
 		}
 		eVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
@@ -1578,16 +1618,242 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if !ok {
 			return nil
 		}
-		res := math.Pow(fv, expVal)
-		if math.IsNaN(res) || math.IsInf(res, 0) {
-			return nil
-		}
-		if _, isInt1 := toInt(current[0]); isInt1 {
-			if expInt, isInt2 := toInt(eVals[0]); isInt2 && expInt >= 0 {
-				return []any{int(math.Round(res))}
+		expInt, isInt2 := toInt(eVals[0])
+		var out []any
+		for _, item := range current {
+			fv, ok := toFloat(item)
+			if !ok {
+				continue
+			}
+			res := math.Pow(fv, expVal)
+			if math.IsNaN(res) || math.IsInf(res, 0) {
+				continue
+			}
+			if _, isInt1 := toInt(item); isInt1 && isInt2 && expInt >= 0 {
+				out = append(out, int(math.Round(res)))
+			} else {
+				out = append(out, res)
 			}
 		}
-		return []any{res}
+		return out
+
+	case "encode":
+		if len(current) == 0 || len(args) != 1 {
+			return nil
+		}
+		fVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
+		format := strings.ToLower(strings.Trim(args[0], "'\""))
+		if len(fVals) == 1 {
+			if fs, ok := fVals[0].(string); ok {
+				format = strings.ToLower(fs)
+			}
+		}
+		var out []any
+		for _, item := range current {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			switch format {
+			case "hex":
+				out = append(out, hex.EncodeToString([]byte(s)))
+			case "urlbase64":
+				out = append(out, base64.URLEncoding.EncodeToString([]byte(s)))
+			default:
+				out = append(out, base64.StdEncoding.EncodeToString([]byte(s)))
+			}
+		}
+		return out
+
+	case "decode":
+		if len(current) == 0 || len(args) != 1 {
+			return nil
+		}
+		fVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
+		format := strings.ToLower(strings.Trim(args[0], "'\""))
+		if len(fVals) == 1 {
+			if fs, ok := fVals[0].(string); ok {
+				format = strings.ToLower(fs)
+			}
+		}
+		var out []any
+		for _, item := range current {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			switch format {
+			case "hex":
+				if b, err := hex.DecodeString(s); err == nil {
+					out = append(out, string(b))
+				}
+			case "urlbase64":
+				if b, err := base64.URLEncoding.DecodeString(s); err == nil {
+					out = append(out, string(b))
+				}
+			default:
+				if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+					out = append(out, string(b))
+				}
+			}
+		}
+		return out
+
+	case "escape":
+		if len(current) == 0 || len(args) != 1 {
+			return nil
+		}
+		fVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
+		format := strings.ToLower(strings.Trim(args[0], "'\""))
+		if len(fVals) == 1 {
+			if fs, ok := fVals[0].(string); ok {
+				format = strings.ToLower(fs)
+			}
+		}
+		var out []any
+		for _, item := range current {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			switch format {
+			case "json":
+				escaped := strings.ReplaceAll(s, `\`, `\\`)
+				escaped = strings.ReplaceAll(escaped, `"`, `\"`)
+				out = append(out, escaped)
+			default:
+				out = append(out, html.EscapeString(s))
+			}
+		}
+		return out
+
+	case "unescape":
+		if len(current) == 0 || len(args) != 1 {
+			return nil
+		}
+		fVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
+		format := strings.ToLower(strings.Trim(args[0], "'\""))
+		if len(fVals) == 1 {
+			if fs, ok := fVals[0].(string); ok {
+				format = strings.ToLower(fs)
+			}
+		}
+		var out []any
+		for _, item := range current {
+			s, ok := item.(string)
+			if !ok {
+				continue
+			}
+			switch format {
+			case "json":
+				unescaped := strings.ReplaceAll(s, `\"`, `"`)
+				unescaped = strings.ReplaceAll(unescaped, `\\`, `\`)
+				out = append(out, unescaped)
+			default:
+				out = append(out, html.UnescapeString(s))
+			}
+		}
+		return out
+
+	case "sort", "sortdesc":
+		if len(current) <= 1 {
+			return current
+		}
+		desc := strings.EqualFold(fnName, "sortdesc")
+		if len(args) == 1 && strings.EqualFold(strings.Trim(args[0], "'\""), "desc") {
+			desc = true
+		}
+		sorted := make([]any, len(current))
+		copy(sorted, current)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			f1, ok1 := toFloat(sorted[i])
+			f2, ok2 := toFloat(sorted[j])
+			if ok1 && ok2 {
+				if desc {
+					return f1 > f2
+				}
+				return f1 < f2
+			}
+			s1 := fmt.Sprintf("%v", sorted[i])
+			s2 := fmt.Sprintf("%v", sorted[j])
+			if desc {
+				return s1 > s2
+			}
+			return s1 < s2
+		})
+		return sorted
+
+	case "sum":
+		if len(current) == 0 {
+			return []any{0}
+		}
+		sum := 0.0
+		allInt := true
+		for _, item := range current {
+			if _, isI := toInt(item); !isI {
+				allInt = false
+			}
+			if fv, ok := toFloat(item); ok {
+				sum += fv
+			}
+		}
+		if allInt {
+			return []any{int(math.Round(sum))}
+		}
+		return []any{sum}
+
+	case "avg":
+		if len(current) == 0 {
+			return nil
+		}
+		sum := 0.0
+		count := 0
+		for _, item := range current {
+			if fv, ok := toFloat(item); ok {
+				sum += fv
+				count++
+			}
+		}
+		if count == 0 {
+			return nil
+		}
+		return []any{sum / float64(count)}
+
+	case "min":
+		if len(current) == 0 {
+			return nil
+		}
+		best := current[0]
+		for _, item := range current[1:] {
+			f1, ok1 := toFloat(item)
+			f2, ok2 := toFloat(best)
+			if ok1 && ok2 {
+				if f1 < f2 {
+					best = item
+				}
+			} else if fmt.Sprintf("%v", item) < fmt.Sprintf("%v", best) {
+				best = item
+			}
+		}
+		return []any{best}
+
+	case "max":
+		if len(current) == 0 {
+			return nil
+		}
+		best := current[0]
+		for _, item := range current[1:] {
+			f1, ok1 := toFloat(item)
+			f2, ok2 := toFloat(best)
+			if ok1 && ok2 {
+				if f1 > f2 {
+					best = item
+				}
+			} else if fmt.Sprintf("%v", item) > fmt.Sprintf("%v", best) {
+				best = item
+			}
+		}
+		return []any{best}
 
 	// FHIR R4 Specific Functions
 	case "extension":

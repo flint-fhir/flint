@@ -5216,6 +5216,118 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-34", suite10, "Zero-JSON Binary Proto3 Instance-Level National HL7 IG Operations (Patient/{id}/$elr-summary, Bundle/{id}/$cancer-registry-submit, ExplanationOfBenefit/{id}/$carin-bb-claims, Patient/{id}/$rtpbc-summary, Composition/{id}/$pacio-toc-bundle, Consent/{id}/$adi-verify, Bundle/{id}/$ecr-submit, Patient/{id}/$ecr-summary, QuestionnaireResponse/{id}/$sdoh-assess, Task/{id}/$sdoh-fulfill, ResearchSubject/{id}/$vulcan-esource-extract, ResearchStudy/{id}/$vulcan-summary, DiagnosticReport/{id}/$nbs-submit, Patient/{id}/$nbs-summary, ExplanationOfBenefit/{id}/$pct-aeob-summary, Task/{id}/$pct-gfe-coordination, AdverseEvent/{id}/$vulcan-icsr-report, ResearchSubject/{id}/$vulcan-soa-timeline, Immunization/{id}/$iis-submit, Patient/{id}/$iis-history, Bundle/{id}/$cdex-sign, Bundle/{id}/$cdex-verify-signature, DiagnosticReport/{id}/$mcode-genomics-report, Patient/{id}/$mcode-genomics-summary, Composition/{id}/$bfdr-document, Communication/{id}/$cdex-submit-attachment, Task/{id}/$cdex-questionnaire-request, Procedure/{id}/$mcode-radiotherapy-record, Patient/{id}/$mcode-radiotherapy-summary, Composition/{id}/$vrdr-document, Task/{id}/$cdex-request, Task/{id}/$cdex-poll, Patient/{id}/$pacio-pfe-record, Patient/{id}/$pacio-pfe-summary, Claim/{id}/$rtpbc-submit, ClaimResponse/{id}/$rtpbc-coverage) & SQL-on-FHIR v2 Element-Wise .replaceMatches(), .indexOf(), .toInteger(), .toDecimal() & .toString() on Collection Paths $sql Pushdown", t0, err, "Binary Proto3 36 instance-level National HL7 IG operations (Waves 41-46) & element-wise collection regex/indexOf/type conversion $sql pushdown verified")
 
+	// AN-35: Zero-JSON Binary Proto3 Instance-Level National HL7 IG Operations (Waves 29–40) & SQL-on-FHIR v2 Element-Wise Math & Encoding/Escaping (.abs, .ceiling, .floor, .truncate, .round, .sqrt, .exp, .ln, .log, .power, .encode, .decode, .escape, .unescape) on Collection Paths $sql Pushdown
+	t0 = time.Now()
+	{
+		w101ParamsJSON := []byte(`{"resourceType":"Parameters","parameter":[{"name":"patient","valueReference":{"reference":"Patient/cert-pat-1"}},{"name":"subject","valueReference":{"reference":"Patient/cert-pat-1"}}]}`)
+		_, bW101ParamsProto, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", w101ParamsJSON, map[string]string{
+			"Accept": "application/x-protobuf",
+		})
+
+		var opCheckErr error
+		for _, ep := range []string{
+			"/Person/cert-person-w101-1/$verify-identity",
+			"/Encounter/cert-enc-1/$pacio-timepoint",
+			"/Encounter/cert-enc-1/$pacio-timepoints",
+			"/Patient/cert-pat-1/$cancer-registry-report",
+			"/PlanDefinition/cert-pd-w101-1/$medmorph-kar",
+			"/MeasureReport/cert-mr-w101-1/$vbpr-performance",
+			"/MeasureReport/cert-mr-w101-1/$vbpr-attest",
+			"/Patient/cert-pat-1/$pacio-cognitive-assess",
+			"/Patient/cert-pat-1/$pacio-cognitive-summary",
+			"/Composition/cert-w98-comp-1/$eicr-document",
+			"/Communication/cert-comm-w100-1/$rr-process",
+			"/Patient/cert-pat-1/$pdex-WriteData",
+			"/MedicationKnowledge/cert-mk-w101-1/$formulary-alternatives",
+			"/Patient/cert-pat-1/$record-occupation",
+			"/Patient/cert-pat-1/$odh-summary",
+			"/DiagnosticReport/cert-dr-1/$elr-submit",
+			"/Patient/cert-pat-1/$adi-record",
+			"/Patient/cert-pat-1/$ra-coding-gaps",
+			"/MeasureReport/cert-mr-w101-1/$ra-remediate",
+			"/Organization/cert-org-1/$fast-verify",
+			"/Patient/cert-pat-1/$physical-activity-summary",
+			"/MedicinalProduct/cert-mp-w101-1/$epi-document",
+			"/MedicinalProductAuthorization/cert-mpa-w101-1/$evaluate-authorization",
+			"/ResearchStudy/cert-study-w93-1/$rwd-cohort",
+			"/ResearchSubject/cert-rsub-w100-1/$enroll",
+			"/Patient/cert-pat-1/$birth-report",
+			"/DocumentReference/cert-doc-1/$ihe-iti-68",
+			"/Patient/cert-pat-1/$find-subject-variants",
+			"/Patient/cert-pat-1/$find-subject-tx-implications",
+			"/Patient/cert-pat-1/$pacio-summary",
+			"/QuestionnaireResponse/cert-qr-1/$pacio-assess",
+			"/Encounter/cert-enc-1/$nhsn-hai-report",
+			"/Patient/cert-pat-1/$mcode-summary",
+			"/Condition/cert-cond-1/$stage-cancer",
+			"/Coverage/cert-cov-1/$formulary-coverage",
+			"/Patient/cert-pat-1/$carin-bb",
+		} {
+			respOp, bOp, errOp := doReq(http.MethodPost, basePath+ep, "application/x-protobuf", bW101ParamsProto, map[string]string{
+				"Accept": "application/x-protobuf",
+			})
+			if errOp != nil || respOp.StatusCode != http.StatusOK || !strings.Contains(respOp.Header.Get("Content-Type"), "application/x-protobuf") || len(bOp) == 0 {
+				status := 0
+				if respOp != nil {
+					status = respOp.StatusCode
+				}
+				opCheckErr = fmt.Errorf("expected POST %s with binary Proto3 payload to return binary Proto3 response, got %d (err=%v, body=%s)", ep, status, errOp, string(bOp))
+				break
+			}
+		}
+
+		if opCheckErr == nil {
+			for _, getEp := range []string{
+				"/Encounter/cert-enc-1/$pacio-timepoints",
+				"/Patient/cert-pat-1/$cancer-registry-report",
+				"/PlanDefinition/cert-pd-w101-1/$medmorph-kar",
+				"/MeasureReport/cert-mr-w101-1/$vbpr-performance",
+				"/Patient/cert-pat-1/$pacio-cognitive-summary",
+				"/Composition/cert-w98-comp-1/$eicr-document",
+				"/MedicationKnowledge/cert-mk-w101-1/$formulary-alternatives",
+				"/Patient/cert-pat-1/$odh-summary",
+				"/Patient/cert-pat-1/$ra-coding-gaps",
+				"/Patient/cert-pat-1/$physical-activity-summary",
+				"/MedicinalProduct/cert-mp-w101-1/$epi-document",
+				"/ResearchStudy/cert-study-w93-1/$rwd-cohort",
+				"/DocumentReference/cert-doc-1/$ihe-iti-68",
+				"/Patient/cert-pat-1/$find-subject-variants",
+				"/Patient/cert-pat-1/$find-subject-tx-implications",
+				"/Patient/cert-pat-1/$pacio-summary",
+				"/Patient/cert-pat-1/$mcode-summary",
+				"/Coverage/cert-cov-1/$formulary-coverage",
+				"/Patient/cert-pat-1/$carin-bb",
+			} {
+				respGetOp, bGetOp, errGetOp := doReq(http.MethodGet, basePath+getEp+"?_format=application/x-protobuf", "", nil, map[string]string{
+					"Accept": "application/x-protobuf",
+				})
+				if errGetOp != nil || respGetOp.StatusCode != http.StatusOK || !strings.Contains(respGetOp.Header.Get("Content-Type"), "application/x-protobuf") || len(bGetOp) == 0 {
+					status := 0
+					if respGetOp != nil {
+						status = respGetOp.StatusCode
+					}
+					opCheckErr = fmt.Errorf("expected GET %s?_format=application/x-protobuf to return binary Proto3 response, got %d (err=%v)", getEp, status, errGetOp)
+					break
+				}
+			}
+		}
+
+		collMathEncVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_collection_math_encode_escape_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"id_abs_sum","path":"identifier.value.toInteger().abs().sum()"},{"name":"id_round_avg","path":"identifier.value.toDecimal().round(1).avg()"},{"name":"id_pow_max","path":"identifier.value.toInteger().power(2).max()"},{"name":"id_sqrt_min","path":"identifier.value.toDecimal().sqrt().min()"},{"name":"given_hex","path":"name.given.encode('hex').sort().join(',')"},{"name":"given_b64","path":"name.given.encode('base64').first()"},{"name":"given_html_esc","path":"name.given.escape('html').join('|')"},{"name":"given_json_esc","path":"name.given.escape('json').join('|')"},{"name":"id_abs_arr","path":"identifier.value.toInteger().abs()","collection":true},{"name":"given_hex_arr","path":"name.given.encode('hex')","collection":true}]}],"where":[{"path":"identifier.value.toInteger().abs().all($this >= 0) and name.given.encode('hex').exists($this != '')"}]}`)
+		respCMEDoris, bCMEDoris, errCMEDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", collMathEncVD, nil)
+		respCMEPg, bCMEPg, errCMEPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", collMathEncVD, nil)
+
+		if opCheckErr != nil {
+			err = opCheckErr
+		} else if errCMEDoris != nil || respCMEDoris.StatusCode != http.StatusOK || !strings.Contains(string(bCMEDoris), "ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> ABS(x), ARRAY_MAP(x -> CAST(x AS BIGINT),") || !strings.Contains(string(bCMEDoris), "ARRAY_AVG(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> ROUND(x, 1), ARRAY_MAP(x -> CAST(x AS DOUBLE),") || !strings.Contains(string(bCMEDoris), "ARRAY_MAX(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> POW(x, 2), ARRAY_MAP(x -> CAST(x AS BIGINT),") || !strings.Contains(string(bCMEDoris), "ARRAY_JOIN(ARRAY_SORT(ARRAY_MAP(x -> HEX(x),") || !strings.Contains(string(bCMEDoris), "element_at(ARRAY_MAP(x -> TO_BASE64(x),") || !strings.Contains(string(bCMEDoris), "NOT ARRAY_EXISTS(x -> x < 0, ARRAY_MAP(x -> ABS(x), ARRAY_MAP(x -> CAST(x AS BIGINT),") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with collection math/encode/escape pushdown, got %d: %s", respCMEDoris.StatusCode, string(bCMEDoris))
+		} else if errCMEPg != nil || respCMEPg.StatusCode != http.StatusOK || !strings.Contains(string(bCMEPg), "SELECT ABS(CAST(t.sp_value AS BIGINT)) AS sp_value FROM spidx_token t") || !strings.Contains(string(bCMEPg), "SELECT ROUND(CAST(t.sp_value AS DOUBLE PRECISION), 1) AS sp_value FROM spidx_token t") || !strings.Contains(string(bCMEPg), "SELECT POWER(CAST(t.sp_value AS BIGINT), 2) AS sp_value FROM spidx_token t") || !strings.Contains(string(bCMEPg), "SELECT ENCODE(CAST(s.sp_value AS BYTEA), 'hex') AS sp_value FROM spidx_string s") || !strings.Contains(string(bCMEPg), "SELECT ENCODE(CAST(s.sp_value AS BYTEA), 'base64') AS sp_value FROM spidx_string s") || !strings.Contains(string(bCMEPg), "ARRAY[]::double precision[]") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with collection math/encode/escape pushdown, got %d: %s", respCMEPg.StatusCode, string(bCMEPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-35", suite10, "Zero-JSON Binary Proto3 Instance-Level National HL7 IG Operations (Person/{id}/$verify-identity, Encounter/{id}/$pacio-timepoint, Encounter/{id}/$pacio-timepoints, Patient/{id}/$cancer-registry-report, PlanDefinition/{id}/$medmorph-kar, MeasureReport/{id}/$vbpr-performance, MeasureReport/{id}/$vbpr-attest, Patient/{id}/$pacio-cognitive-assess, Patient/{id}/$pacio-cognitive-summary, Composition/{id}/$eicr-document, Communication/{id}/$rr-process, Patient/{id}/$pdex-WriteData, MedicationKnowledge/{id}/$formulary-alternatives, Patient/{id}/$record-occupation, Patient/{id}/$odh-summary, DiagnosticReport/{id}/$elr-submit, Patient/{id}/$adi-record, Patient/{id}/$ra-coding-gaps, MeasureReport/{id}/$ra-remediate, Organization/{id}/$fast-verify, Patient/{id}/$physical-activity-summary, MedicinalProduct/{id}/$epi-document, MedicinalProductAuthorization/{id}/$evaluate-authorization, ResearchStudy/{id}/$rwd-cohort, ResearchSubject/{id}/$enroll, Patient/{id}/$birth-report, DocumentReference/{id}/$ihe-iti-68, Patient/{id}/$find-subject-variants, Patient/{id}/$find-subject-tx-implications, Patient/{id}/$pacio-summary, QuestionnaireResponse/{id}/$pacio-assess, Encounter/{id}/$nhsn-hai-report, Patient/{id}/$mcode-summary, Condition/{id}/$stage-cancer, Coverage/{id}/$formulary-coverage, Patient/{id}/$carin-bb) & SQL-on-FHIR v2 Element-Wise Math & Encoding/Escaping (.abs, .ceiling, .floor, .truncate, .round, .sqrt, .exp, .ln, .log, .power, .encode, .decode, .escape, .unescape) on Collection Paths $sql Pushdown", t0, err, "Binary Proto3 36 instance-level National HL7 IG GET/POST operations (Waves 29-40) & element-wise collection math/encode/escape $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

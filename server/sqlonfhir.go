@@ -1781,6 +1781,100 @@ func dorisZeroJSONCollectionColumnExpr(fhirPath string) (string, string) {
 			}
 		}
 	}
+	if strings.HasSuffix(p, ".abs()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".abs()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_MAP(x -> ABS(x), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".abs[]"
+	}
+	if strings.HasSuffix(p, ".ceiling()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".ceiling()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_MAP(x -> CEIL(x), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".ceiling[]"
+	}
+	if strings.HasSuffix(p, ".floor()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".floor()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_MAP(x -> FLOOR(x), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".floor[]"
+	}
+	if strings.HasSuffix(p, ".truncate()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".truncate()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_MAP(x -> TRUNCATE(x, 0), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".truncate[]"
+	}
+	if idx := strings.LastIndex(p, ".round("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".round(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		argStr := strings.TrimSpace(p[idx+len(".round(") : len(p)-1])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		if argStr == "" {
+			return fmt.Sprintf("ARRAY_MAP(x -> ROUND(x), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".round[]"
+		}
+		if prec, err := strconv.Atoi(argStr); err == nil {
+			return fmt.Sprintf("ARRAY_MAP(x -> ROUND(x, %d), %s)", prec, collExpr), strings.TrimSuffix(collSrc, "[]") + ".round[]"
+		}
+	}
+	if strings.HasSuffix(p, ".sqrt()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".sqrt()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_MAP(x -> SQRT(x), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".sqrt[]"
+	}
+	if strings.HasSuffix(p, ".exp()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".exp()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_MAP(x -> EXP(x), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".exp[]"
+	}
+	if strings.HasSuffix(p, ".ln()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".ln()")])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_MAP(x -> LN(x), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".ln[]"
+	}
+	if idx := strings.LastIndex(p, ".log("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".log(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		argStr := strings.TrimSpace(p[idx+len(".log(") : len(p)-1])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_MAP(x -> LOG(%s, x), %s)", argStr, collExpr), strings.TrimSuffix(collSrc, "[]") + ".log[]"
+	}
+	if idx := strings.LastIndex(p, ".power("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".power(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		argStr := strings.TrimSpace(p[idx+len(".power(") : len(p)-1])
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		return fmt.Sprintf("ARRAY_MAP(x -> POW(x, %s), %s)", argStr, collExpr), strings.TrimSuffix(collSrc, "[]") + ".power[]"
+	}
+	if idx := strings.LastIndex(p, ".encode("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".encode(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		fmtArg := strings.ToLower(strings.Trim(strings.TrimSpace(p[idx+len(".encode("):len(p)-1]), "'\""))
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		if fmtArg == "hex" {
+			return fmt.Sprintf("ARRAY_MAP(x -> HEX(x), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".encode(hex)[]"
+		}
+		return fmt.Sprintf("ARRAY_MAP(x -> TO_BASE64(x), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".encode(base64)[]"
+	}
+	if idx := strings.LastIndex(p, ".decode("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".decode(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		fmtArg := strings.ToLower(strings.Trim(strings.TrimSpace(p[idx+len(".decode("):len(p)-1]), "'\""))
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		if fmtArg == "hex" {
+			return fmt.Sprintf("ARRAY_MAP(x -> UNHEX(x), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".decode(hex)[]"
+		}
+		return fmt.Sprintf("ARRAY_MAP(x -> FROM_BASE64(x), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".decode(base64)[]"
+	}
+	if idx := strings.LastIndex(p, ".escape("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".escape(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		fmtArg := strings.ToLower(strings.Trim(strings.TrimSpace(p[idx+len(".escape("):len(p)-1]), "'\""))
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		if fmtArg == "json" {
+			return fmt.Sprintf("ARRAY_MAP(x -> REPLACE(REPLACE(x, '\\\\', '\\\\\\\\'), '\"', '\\\\\"'), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".escape(json)[]"
+		}
+		return fmt.Sprintf("ARRAY_MAP(x -> REPLACE(REPLACE(REPLACE(x, '&', '&amp;'), '<', '&lt;'), '>', '&gt;'), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".escape(html)[]"
+	}
+	if idx := strings.LastIndex(p, ".unescape("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".unescape(")-1) == len(p)-1 {
+		basePath := strings.TrimSpace(p[:idx])
+		fmtArg := strings.ToLower(strings.Trim(strings.TrimSpace(p[idx+len(".unescape("):len(p)-1]), "'\""))
+		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
+		if fmtArg == "json" {
+			return fmt.Sprintf("ARRAY_MAP(x -> REPLACE(REPLACE(x, '\\\\\"', '\"'), '\\\\\\\\', '\\\\'), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".unescape(json)[]"
+		}
+		return fmt.Sprintf("ARRAY_MAP(x -> REPLACE(REPLACE(REPLACE(x, '&gt;', '>'), '&lt;', '<'), '&amp;', '&'), %s)", collExpr), strings.TrimSuffix(collSrc, "[]") + ".unescape(html)[]"
+	}
 	if spSys, sysVal, _, okSys := parseSystemFilteredTokenPath(p); okSys {
 		escapedSys := strings.ReplaceAll(sysVal, "'", "''")
 		return fmt.Sprintf("ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE '%s=%s|%%', r.code_tokens))", spSys, escapedSys), "code_tokens[" + spSys + "|" + sysVal + "][]"
@@ -1904,7 +1998,7 @@ func (m spidxCollectionModifiers) isNumericElemTransform() bool {
 		return false
 	}
 	switch m.elemTransforms[len(m.elemTransforms)-1].kind {
-	case "length", "indexOf", "toInteger", "toDecimal":
+	case "length", "indexOf", "toInteger", "toDecimal", "abs", "ceiling", "floor", "truncate", "round", "sqrt", "exp", "ln", "log", "power":
 		return true
 	default:
 		return false
@@ -2052,6 +2146,109 @@ func parseSpidxCollectionModifiers(fhirPath string) spidxCollectionModifiers {
 				}
 			}
 		}
+		if strings.HasSuffix(cur, ".abs()") {
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "abs"}}, mods.elemTransforms...)
+			tagParts = append([]string{".abs"}, tagParts...)
+			cur = strings.TrimSpace(cur[:len(cur)-len(".abs()")])
+			continue
+		}
+		if strings.HasSuffix(cur, ".ceiling()") {
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "ceiling"}}, mods.elemTransforms...)
+			tagParts = append([]string{".ceiling"}, tagParts...)
+			cur = strings.TrimSpace(cur[:len(cur)-len(".ceiling()")])
+			continue
+		}
+		if strings.HasSuffix(cur, ".floor()") {
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "floor"}}, mods.elemTransforms...)
+			tagParts = append([]string{".floor"}, tagParts...)
+			cur = strings.TrimSpace(cur[:len(cur)-len(".floor()")])
+			continue
+		}
+		if strings.HasSuffix(cur, ".truncate()") {
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "truncate"}}, mods.elemTransforms...)
+			tagParts = append([]string{".truncate"}, tagParts...)
+			cur = strings.TrimSpace(cur[:len(cur)-len(".truncate()")])
+			continue
+		}
+		if idx := strings.LastIndex(cur, ".round("); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(".round(")-1) == len(cur)-1 {
+			argStr := strings.TrimSpace(cur[idx+len(".round(") : len(cur)-1])
+			if argStr == "" {
+				mods.elemTransforms = append([]spidxElemTransform{{kind: "round"}}, mods.elemTransforms...)
+				tagParts = append([]string{".round"}, tagParts...)
+				cur = strings.TrimSpace(cur[:idx])
+				continue
+			}
+			if prec, err := strconv.Atoi(argStr); err == nil {
+				mods.elemTransforms = append([]spidxElemTransform{{kind: "round", int1: prec, hasInt2: true}}, mods.elemTransforms...)
+				tagParts = append([]string{".round"}, tagParts...)
+				cur = strings.TrimSpace(cur[:idx])
+				continue
+			}
+		}
+		if strings.HasSuffix(cur, ".sqrt()") {
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "sqrt"}}, mods.elemTransforms...)
+			tagParts = append([]string{".sqrt"}, tagParts...)
+			cur = strings.TrimSpace(cur[:len(cur)-len(".sqrt()")])
+			continue
+		}
+		if strings.HasSuffix(cur, ".exp()") {
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "exp"}}, mods.elemTransforms...)
+			tagParts = append([]string{".exp"}, tagParts...)
+			cur = strings.TrimSpace(cur[:len(cur)-len(".exp()")])
+			continue
+		}
+		if strings.HasSuffix(cur, ".ln()") {
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "ln"}}, mods.elemTransforms...)
+			tagParts = append([]string{".ln"}, tagParts...)
+			cur = strings.TrimSpace(cur[:len(cur)-len(".ln()")])
+			continue
+		}
+		if idx := strings.LastIndex(cur, ".log("); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(".log(")-1) == len(cur)-1 {
+			argStr := strings.TrimSpace(cur[idx+len(".log(") : len(cur)-1])
+			if argStr != "" {
+				mods.elemTransforms = append([]spidxElemTransform{{kind: "log", arg1: argStr}}, mods.elemTransforms...)
+				tagParts = append([]string{".log"}, tagParts...)
+				cur = strings.TrimSpace(cur[:idx])
+				continue
+			}
+		}
+		if idx := strings.LastIndex(cur, ".power("); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(".power(")-1) == len(cur)-1 {
+			argStr := strings.TrimSpace(cur[idx+len(".power(") : len(cur)-1])
+			if argStr != "" {
+				mods.elemTransforms = append([]spidxElemTransform{{kind: "power", arg1: argStr}}, mods.elemTransforms...)
+				tagParts = append([]string{".power"}, tagParts...)
+				cur = strings.TrimSpace(cur[:idx])
+				continue
+			}
+		}
+		if idx := strings.LastIndex(cur, ".encode("); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(".encode(")-1) == len(cur)-1 {
+			fmtArg := strings.ToLower(strings.Trim(strings.TrimSpace(cur[idx+len(".encode("):len(cur)-1]), "'\""))
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "encode", arg1: fmtArg}}, mods.elemTransforms...)
+			tagParts = append([]string{".encode"}, tagParts...)
+			cur = strings.TrimSpace(cur[:idx])
+			continue
+		}
+		if idx := strings.LastIndex(cur, ".decode("); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(".decode(")-1) == len(cur)-1 {
+			fmtArg := strings.ToLower(strings.Trim(strings.TrimSpace(cur[idx+len(".decode("):len(cur)-1]), "'\""))
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "decode", arg1: fmtArg}}, mods.elemTransforms...)
+			tagParts = append([]string{".decode"}, tagParts...)
+			cur = strings.TrimSpace(cur[:idx])
+			continue
+		}
+		if idx := strings.LastIndex(cur, ".escape("); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(".escape(")-1) == len(cur)-1 {
+			fmtArg := strings.ToLower(strings.Trim(strings.TrimSpace(cur[idx+len(".escape("):len(cur)-1]), "'\""))
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "escape", arg1: fmtArg}}, mods.elemTransforms...)
+			tagParts = append([]string{".escape"}, tagParts...)
+			cur = strings.TrimSpace(cur[:idx])
+			continue
+		}
+		if idx := strings.LastIndex(cur, ".unescape("); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(".unescape(")-1) == len(cur)-1 {
+			fmtArg := strings.ToLower(strings.Trim(strings.TrimSpace(cur[idx+len(".unescape("):len(cur)-1]), "'\""))
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "unescape", arg1: fmtArg}}, mods.elemTransforms...)
+			tagParts = append([]string{".unescape"}, tagParts...)
+			cur = strings.TrimSpace(cur[:idx])
+			continue
+		}
 		break
 	}
 	mods.basePath = cur
@@ -2114,6 +2311,78 @@ func applySpidxElemTransforms(colExpr string, transforms []spidxElemTransform, d
 				expr = fmt.Sprintf("SUBSTR(%s, %d, %d)", expr, sqlStart, tr.int2)
 			} else {
 				expr = fmt.Sprintf("SUBSTR(%s, %d)", expr, sqlStart)
+			}
+		case "abs":
+			expr = fmt.Sprintf("ABS(%s)", expr)
+		case "ceiling":
+			expr = fmt.Sprintf("CEIL(%s)", expr)
+		case "floor":
+			expr = fmt.Sprintf("FLOOR(%s)", expr)
+		case "truncate":
+			if dialect == "sqlite" {
+				expr = fmt.Sprintf("CAST(%s AS INTEGER)", expr)
+			} else {
+				expr = fmt.Sprintf("TRUNC(%s)", expr)
+			}
+		case "round":
+			if tr.hasInt2 {
+				expr = fmt.Sprintf("ROUND(%s, %d)", expr, tr.int1)
+			} else {
+				expr = fmt.Sprintf("ROUND(%s)", expr)
+			}
+		case "sqrt":
+			expr = fmt.Sprintf("SQRT(%s)", expr)
+		case "exp":
+			expr = fmt.Sprintf("EXP(%s)", expr)
+		case "ln":
+			expr = fmt.Sprintf("LN(%s)", expr)
+		case "log":
+			expr = fmt.Sprintf("LOG(%s, %s)", tr.arg1, expr)
+		case "power":
+			if dialect == "sqlite" {
+				expr = fmt.Sprintf("POW(%s, %s)", expr, tr.arg1)
+			} else {
+				expr = fmt.Sprintf("POWER(%s, %s)", expr, tr.arg1)
+			}
+		case "encode":
+			if tr.arg1 == "hex" {
+				if dialect == "sqlite" {
+					expr = fmt.Sprintf("HEX(%s)", expr)
+				} else {
+					expr = fmt.Sprintf("ENCODE(CAST(%s AS BYTEA), 'hex')", expr)
+				}
+			} else {
+				if dialect == "sqlite" {
+					expr = fmt.Sprintf("HEX(%s)", expr)
+				} else {
+					expr = fmt.Sprintf("ENCODE(CAST(%s AS BYTEA), 'base64')", expr)
+				}
+			}
+		case "decode":
+			if tr.arg1 == "hex" {
+				if dialect == "sqlite" {
+					expr = fmt.Sprintf("CAST(UNHEX(%s) AS TEXT)", expr)
+				} else {
+					expr = fmt.Sprintf("CONVERT_FROM(DECODE(%s, 'hex'), 'UTF8')", expr)
+				}
+			} else {
+				if dialect == "sqlite" {
+					expr = fmt.Sprintf("CAST(UNHEX(%s) AS TEXT)", expr)
+				} else {
+					expr = fmt.Sprintf("CONVERT_FROM(DECODE(%s, 'base64'), 'UTF8')", expr)
+				}
+			}
+		case "escape":
+			if tr.arg1 == "json" {
+				expr = fmt.Sprintf("REPLACE(REPLACE(%s, '\\\\', '\\\\\\\\'), '\"', '\\\\\"')", expr)
+			} else {
+				expr = fmt.Sprintf("REPLACE(REPLACE(REPLACE(%s, '&', '&amp;'), '<', '&lt;'), '>', '&gt;')", expr)
+			}
+		case "unescape":
+			if tr.arg1 == "json" {
+				expr = fmt.Sprintf("REPLACE(REPLACE(%s, '\\\\\"', '\"'), '\\\\\\\\', '\\\\')", expr)
+			} else {
+				expr = fmt.Sprintf("REPLACE(REPLACE(REPLACE(%s, '&gt;', '>'), '&lt;', '<'), '&amp;', '&')", expr)
 			}
 		}
 	}
@@ -2182,7 +2451,7 @@ func spidxZeroJSONCollectionColumnExpr(fhirPath, dialect string) (string, string
 					emptyArr = "ARRAY[]::int[]"
 				case "toInteger":
 					emptyArr = "ARRAY[]::bigint[]"
-				case "toDecimal":
+				case "toDecimal", "abs", "ceiling", "floor", "truncate", "round", "sqrt", "exp", "ln", "log", "power":
 					emptyArr = "ARRAY[]::double precision[]"
 				}
 			}
@@ -2650,7 +2919,7 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
 		return fmt.Sprintf("FLOOR(%s)", colExpr), colSrc + ".floor"
 	}
-	if idx := strings.LastIndex(p, ".round("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".round("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".round(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		argStr := strings.TrimSpace(p[idx+len(".round(") : len(p)-1])
 		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
@@ -2676,14 +2945,14 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
 		return fmt.Sprintf("LN(%s)", colExpr), colSrc + ".ln"
 	}
-	if idx := strings.LastIndex(p, ".log("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".log("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".log(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		argStr := strings.TrimSpace(p[idx+len(".log(") : len(p)-1])
 		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
 		baseExpr, _ := dorisZeroJSONColumnExpr(argStr, isCore)
 		return fmt.Sprintf("LOG(%s, %s)", baseExpr, colExpr), colSrc + ".log"
 	}
-	if idx := strings.LastIndex(p, ".power("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".power("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".power(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		argStr := strings.TrimSpace(p[idx+len(".power(") : len(p)-1])
 		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
@@ -3776,7 +4045,7 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
 		return fmt.Sprintf("FLOOR(%s)", colExpr), colSrc + ".floor"
 	}
-	if idx := strings.LastIndex(p, ".round("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".round("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".round(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		argStr := strings.TrimSpace(p[idx+len(".round(") : len(p)-1])
 		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
@@ -3802,14 +4071,14 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
 		return fmt.Sprintf("LN(%s)", colExpr), colSrc + ".ln"
 	}
-	if idx := strings.LastIndex(p, ".log("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".log("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".log(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		argStr := strings.TrimSpace(p[idx+len(".log(") : len(p)-1])
 		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
 		baseExpr, _ := spidxZeroJSONColumnExpr(argStr, dialect)
 		return fmt.Sprintf("LOG(%s, %s)", baseExpr, colExpr), colSrc + ".log"
 	}
-	if idx := strings.LastIndex(p, ".power("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".power("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".power(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		argStr := strings.TrimSpace(p[idx+len(".power(") : len(p)-1])
 		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
