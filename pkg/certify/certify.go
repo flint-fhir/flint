@@ -5501,6 +5501,76 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-37", suite10, "Zero-JSON Binary Proto3 Type-Level GET Operations Across 62 National HL7 IG Endpoints ($sdoh-summary, $carin-bb, $carin-bb-summary, $ersd-lookup, $mcode-summary, $formulary-lookup, $formulary-coverage, $iti-67, $find-subject-variants, $find-subject-tx-implications, $pacio-summary, $nhsn-acute-care, $rwd-cohort, $bfdr-summary, $ihe-pdqm, $ihe-iti-68, $fast-endpoint-query, $physical-activity-summary, $epi-document, $reportable-labs, $adi-document, $ra-coding-gaps, $eicr-document, $formulary-alternatives, $odh-summary, $cancer-registry-report, $medmorph-kar, $vbpr-performance, $pacio-cognitive-summary, $rtpbc-coverage, $pacio-timepoints, $vrdr-document, $cdex-poll, $pacio-pfe-summary, $bfdr-document, $mcode-radiotherapy-summary, $iis-history, $mcode-genomics-summary, $nbs-summary, $pct-aeob-summary, $vulcan-soa-timeline, $ecr-summary, $vulcan-summary, $elr-summary, $carin-bb-claims, $rtpbc-summary, $nhsn-hai-summary, $fast-network-query, $ra-coding-gap-report, $nhsn-ach-summary, $burden-reduction-summary, $mcode-trial-summary, $ndh-directory-summary, $atr-summary, $pacio-splasch-summary, $vulcan-rwd-summary, $saner-capacity-summary, $codex-rttd-summary, $sdoh-care-bundle, $udap-trust-summary, $pdex-provider-everything, $pdex-payer-summary) & SQL-on-FHIR v2 Element-Wise .select($this...) Projection & Compound .where($this ... and/or/not/in ...) Pushdown", t0, err, "Binary Proto3 62 type-level GET operations & element-wise .select($this...) projection and compound .where($this...) $sql pushdown verified")
 
+	// AN-38: Zero-JSON Binary Proto3 Type-Level GET Clinical, Terminology, CQM, Scheduling & Metadata Operations Across 30 Endpoints ($expand, $validate-code, $lookup, $subsumes, $find-matches, $translate, $lastn, $stats, Patient/$everything, Appointment/$find, Schedule/$find, List/$find, $subset, $implements, $snapshot, $preferred-id, PlanDefinition/$apply, ActivityDefinition/$apply, $data-requirements, $collect-data, Library/$evaluate, $evaluate-risk-condition-category, $pcde, AdverseEvent/$evaluate, RiskAssessment/$evaluate, $verify-integrity) & SQL-on-FHIR v2 Element-Wise iif() Conditional & coalesce() Fallback Pushdown in .select() / .where()
+	t0 = time.Now()
+	{
+		var opCheckErr error
+		typeGetClinicalEndpoints := []string{
+			"/ValueSet/$expand?url=http://hl7.org/fhir/ValueSet/administrative-gender",
+			"/ValueSet/$validate-code?url=http://hl7.org/fhir/ValueSet/administrative-gender&code=female",
+			"/CodeSystem/$lookup?system=http://loinc.org&code=8867-4",
+			"/CodeSystem/$validate-code?url=http://loinc.org&code=8867-4",
+			"/CodeSystem/$subsumes?system=http://snomed.info/sct&codeA=73211009&codeB=44054006",
+			"/CodeSystem/$find-matches?system=http://loinc.org&property=heart",
+			"/ConceptMap/$translate?system=http://snomed.info/sct&code=44054006",
+			"/Observation/$lastn?patient=Patient/cert-pat-1",
+			"/Observation/$stats?patient=Patient/cert-pat-1&code=8867-4",
+			"/Patient/$everything?_id=cert-pat-1",
+			"/Appointment/$find?start=2026-01-01&end=2026-12-31",
+			"/Schedule/$find?start=2026-01-01&end=2026-12-31",
+			"/List/$find?patient=Patient/cert-pat-1&name=problems",
+			"/CapabilityStatement/$subset?resource=Patient",
+			"/CapabilityStatement/$implements?server=http://hl7.org/fhir/us/core/CapabilityStatement/us-core-server",
+			"/StructureDefinition/$snapshot?url=http://hl7.org/fhir/StructureDefinition/Patient",
+			"/NamingSystem/$preferred-id?id=http://loinc.org&type=uri",
+			"/PlanDefinition/$apply?planDefinition=plandef-hypertension-control&subject=Patient/cert-pat-1",
+			"/ActivityDefinition/$apply?activityDefinition=activitydef-bp-home-monitoring&subject=Patient/cert-pat-1",
+			"/Library/$data-requirements?target=cms165-logic",
+			"/Measure/$data-requirements?measure=cms165-bp-control",
+			"/PlanDefinition/$data-requirements?planDefinition=plandef-hypertension-control",
+			"/ActivityDefinition/$data-requirements?activityDefinition=activitydef-bp-home-monitoring",
+			"/Measure/$collect-data?measure=cms165-bp-control&subject=Patient/cert-pat-1",
+			"/Library/$evaluate?library=Library/cms165-logic&subject=Patient/cert-pat-1",
+			"/Measure/$evaluate-risk-condition-category?subject=Patient/cert-pat-1",
+			"/Patient/$pcde?patient=Patient/cert-pat-1",
+			"/AdverseEvent/$evaluate?subject=Patient/cert-pat-1",
+			"/RiskAssessment/$evaluate?subject=Patient/cert-pat-1",
+			"/AuditEvent/$verify-integrity",
+		}
+		for _, tgClinEp := range typeGetClinicalEndpoints {
+			sep := "&"
+			if !strings.Contains(tgClinEp, "?") {
+				sep = "?"
+			}
+			respTGC, bTGC, errTGC := doReq(http.MethodGet, basePath+tgClinEp+sep+"_format=application/x-protobuf", "", nil, map[string]string{
+				"Accept": "application/x-protobuf",
+			})
+			if errTGC != nil || respTGC.StatusCode != http.StatusOK || !strings.Contains(respTGC.Header.Get("Content-Type"), "application/x-protobuf") || len(bTGC) == 0 {
+				status := 0
+				if respTGC != nil {
+					status = respTGC.StatusCode
+				}
+				opCheckErr = fmt.Errorf("expected binary proto3 200 OK from type GET %s, got %d (err=%v): %s", tgClinEp, status, errTGC, string(bTGC))
+				break
+			}
+		}
+
+		elemIifCoalesceVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_elem_iif_coalesce_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"iif_given_join","path":"name.given.select(iif($this = 'Alice', $this.upper(), $this.lower())).join(',')"},{"name":"coalesce_given_first","path":"name.given.select(coalesce($this.substring(10, 2), $this.lower())).first()"},{"name":"where_iif_first","path":"name.given.where(iif($this.startsWith('A'), $this.length() >= 4, $this = 'Bob')).first()"},{"name":"iif_num_sum","path":"identifier.value.toInteger().select(iif($this > 50, $this * 2, $this + 5)).sum()"}]}],"where":[{"path":"name.given.where(iif($this.startsWith('A'), $this.length() >= 4, $this = 'Bob')).exists() and name.given.exists(iif($this = 'Alice', true, false))"}]}`)
+		respEICDoris, bEICDoris, errEICDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", elemIifCoalesceVD, nil)
+		respEICPg, bEICPg, errEICPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", elemIifCoalesceVD, nil)
+
+		if opCheckErr != nil {
+			err = opCheckErr
+		} else if errEICDoris != nil || respEICDoris.StatusCode != http.StatusOK || !strings.Contains(string(bEICDoris), "ARRAY_JOIN(ARRAY_MAP(x -> CASE WHEN x = 'Alice' THEN UPPER(x) ELSE LOWER(x) END,") || !strings.Contains(string(bEICDoris), "element_at(ARRAY_MAP(x -> COALESCE(NULLIF(SUBSTR(x, 11, 2), ''), NULLIF(LOWER(x), '')),") || !strings.Contains(string(bEICDoris), "element_at(ARRAY_FILTER(x -> (CASE WHEN x LIKE 'A%' THEN CHAR_LENGTH(x) >= 4 ELSE x = 'Bob' END),") || !strings.Contains(string(bEICDoris), "ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> CASE WHEN x > 50 THEN (CAST(x AS DOUBLE) * 2) ELSE (CAST(x AS DOUBLE) + 5) END, ARRAY_MAP(x -> CAST(x AS BIGINT),") || !strings.Contains(string(bEICDoris), "ARRAY_EXISTS(x -> (CASE WHEN x = 'Alice' THEN (1 = 1) ELSE (1 = 0) END),") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with element-wise iif() and coalesce() pushdown, got %d: %s", respEICDoris.StatusCode, string(bEICDoris))
+		} else if errEICPg != nil || respEICPg.StatusCode != http.StatusOK || !strings.Contains(string(bEICPg), "SELECT CASE WHEN s.sp_value = 'Alice' THEN UPPER(s.sp_value) ELSE LOWER(s.sp_value) END AS sp_value FROM spidx_string s") || !strings.Contains(string(bEICPg), "SELECT COALESCE(NULLIF(SUBSTR(s.sp_value, 11, 2), ''), NULLIF(LOWER(s.sp_value), '')) AS sp_value FROM spidx_string s") || !strings.Contains(string(bEICPg), "AND (CASE WHEN s.sp_value LIKE 'A%' THEN CHAR_LENGTH(s.sp_value) >= 4 ELSE s.sp_value = 'Bob' END) LIMIT 1)") || !strings.Contains(string(bEICPg), "SELECT CASE WHEN CAST(t.sp_value AS BIGINT) > 50 THEN (CAST(CAST(t.sp_value AS BIGINT) AS DOUBLE PRECISION) * 2) ELSE (CAST(CAST(t.sp_value AS BIGINT) AS DOUBLE PRECISION) + 5) END AS sp_value FROM spidx_token t") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with element-wise iif() and coalesce() pushdown, got %d: %s", respEICPg.StatusCode, string(bEICPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-38", suite10, "Zero-JSON Binary Proto3 Type-Level GET Clinical, Terminology, CQM, Scheduling & Metadata Operations Across 30 Endpoints ($expand, $validate-code, $lookup, $subsumes, $find-matches, $translate, $lastn, $stats, Patient/$everything, Appointment/$find, Schedule/$find, List/$find, $subset, $implements, $snapshot, $preferred-id, PlanDefinition/$apply, ActivityDefinition/$apply, $data-requirements, $collect-data, Library/$evaluate, $evaluate-risk-condition-category, $pcde, AdverseEvent/$evaluate, RiskAssessment/$evaluate, $verify-integrity) & SQL-on-FHIR v2 Element-Wise iif() Conditional & coalesce() Fallback Pushdown in .select() / .where()", t0, err, "Binary Proto3 30 type-level GET clinical/terminology/CQM/scheduling/metadata operations & element-wise iif() / coalesce() $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

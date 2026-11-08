@@ -2472,6 +2472,44 @@ func buildElemSelectExprSQL(proj, colExpr, dialect string) (string, bool, bool) 
 	if p == "" {
 		return "", false, false
 	}
+	lowerP := strings.ToLower(p)
+	if strings.HasPrefix(lowerP, "iif(") && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, 3) == len(p)-1 {
+		args := splitTopLevelCommaArgs(p[4 : len(p)-1])
+		if len(args) >= 2 && len(args) <= 3 {
+			condSQL, okCond := buildElemWherePredicateSQL(args[0], colExpr, dialect, false)
+			trueSQL, trueIsNum, okTrue := buildElemSelectExprSQL(args[1], colExpr, dialect)
+			falseSQL := "NULL"
+			falseIsNum := false
+			okFalse := true
+			if len(args) == 3 {
+				falseSQL, falseIsNum, okFalse = buildElemSelectExprSQL(args[2], colExpr, dialect)
+			}
+			if okCond && okTrue && okFalse {
+				return fmt.Sprintf("CASE WHEN %s THEN %s ELSE %s END", condSQL, trueSQL, falseSQL), trueIsNum || falseIsNum, true
+			}
+		}
+	}
+	if strings.HasPrefix(lowerP, "coalesce(") && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, 8) == len(p)-1 {
+		args := splitTopLevelCommaArgs(p[9 : len(p)-1])
+		if len(args) >= 2 {
+			exprs := make([]string, 0, len(args))
+			allNum := true
+			for _, a := range args {
+				ce, isNum, okA := buildElemSelectExprSQL(a, colExpr, dialect)
+				if !okA {
+					return "", false, false
+				}
+				if !isNum {
+					allNum = false
+					if !strings.HasPrefix(strings.TrimSpace(a), "'") {
+						ce = fmt.Sprintf("NULLIF(%s, '')", ce)
+					}
+				}
+				exprs = append(exprs, ce)
+			}
+			return fmt.Sprintf("COALESCE(%s)", strings.Join(exprs, ", ")), allNum, true
+		}
+	}
 	if concatParts := splitTopLevelConcatOp(p); len(concatParts) > 1 {
 		exprs := make([]string, 0, len(concatParts))
 		for _, cp := range concatParts {
@@ -2552,6 +2590,28 @@ func buildElemWherePredicateSQL(crit, colExpr, dialect string, isNumeric bool) (
 	c := stripOuterParens(strings.TrimSpace(crit))
 	if c == "" {
 		return "", false
+	}
+	if strings.EqualFold(c, "true") {
+		return "(1 = 1)", true
+	}
+	if strings.EqualFold(c, "false") {
+		return "(1 = 0)", true
+	}
+	lowerC := strings.ToLower(c)
+	if strings.HasPrefix(lowerC, "iif(") && strings.HasSuffix(c, ")") && findMatchingCloseParen(c, 3) == len(c)-1 {
+		args := splitTopLevelCommaArgs(c[4 : len(c)-1])
+		if len(args) >= 2 && len(args) <= 3 {
+			condSQL, okCond := buildElemWherePredicateSQL(args[0], colExpr, dialect, isNumeric)
+			trueSQL, okTrue := buildElemWherePredicateSQL(args[1], colExpr, dialect, isNumeric)
+			falseSQL := "(1 = 0)"
+			okFalse := true
+			if len(args) == 3 {
+				falseSQL, okFalse = buildElemWherePredicateSQL(args[2], colExpr, dialect, isNumeric)
+			}
+			if okCond && okTrue && okFalse {
+				return fmt.Sprintf("(CASE WHEN %s THEN %s ELSE %s END)", condSQL, trueSQL, falseSQL), true
+			}
+		}
 	}
 	if strings.HasPrefix(c, "not(") && strings.HasSuffix(c, ")") && findMatchingCloseParen(c, 3) == len(c)-1 {
 		inner := strings.TrimSpace(c[4 : len(c)-1])
@@ -2946,8 +3006,9 @@ func normalizePolymorphicFHIRPath(expr string) string {
 				break
 			}
 			inner := strings.TrimSpace(s[openIdx+1 : closeIdx])
+			lowerInner := strings.ToLower(inner)
 			_, _, _, hasArith := splitTopLevelArithmeticOp(inner)
-			if _, _, _, hasComp := parseViewWhereComparison(inner); hasComp || hasArith || len(splitTopLevelConcatOp(inner)) > 1 {
+			if _, _, _, hasComp := parseViewWhereComparison(inner); hasComp || hasArith || len(splitTopLevelConcatOp(inner)) > 1 || strings.HasPrefix(lowerInner, "iif(") || strings.HasPrefix(lowerInner, "coalesce(") {
 				selectFrom = closeIdx + 1
 				continue
 			}

@@ -5866,4 +5866,129 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		assert.Contains(t, respTypeGet.Header.Get("Content-Type"), "application/x-protobuf", "type GET endpoint %s", typeGetEp)
 		assert.NotEmpty(t, typeGetBytes, "type GET endpoint %s", typeGetEp)
 	}
+
+	// 53. Wave 104: SQL-on-FHIR v2 Element-Wise iif() Conditional & coalesce() Fallback Pushdown in .select() / .where() & Binary Proto3 Type-Level GET Clinical, Terminology, CQM, Scheduling & Metadata Operations
+	elemIifCoalesceVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "elem_iif_coalesce_view",
+		"status": "active",
+		"resource": "Patient",
+		"select": [{
+			"column": [
+				{"name": "id", "path": "id"},
+				{"name": "iif_given_join", "path": "name.given.select(iif($this = 'Alice', $this.upper(), $this.lower())).join(',')"},
+				{"name": "coalesce_given_first", "path": "name.given.select(coalesce($this.substring(10, 2), $this.lower())).first()"},
+				{"name": "where_iif_first", "path": "name.given.where(iif($this.startsWith('A'), $this.length() >= 4, $this = 'Bob')).first()"},
+				{"name": "iif_num_sum", "path": "identifier.value.toInteger().select(iif($this > 50, $this * 2, $this + 5)).sum()"}
+			]
+		}],
+		"where": [
+			{"path": "name.given.where(iif($this.startsWith('A'), $this.length() >= 4, $this = 'Bob')).exists() and name.given.exists(iif($this = 'Alice', true, false))"}
+		]
+	}`
+
+	respEIifDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(elemIifCoalesceVD))
+	require.NoError(t, err)
+	sqlEIifDorisBytes, _ := io.ReadAll(respEIifDoris.Body)
+	respEIifDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respEIifDoris.StatusCode, string(sqlEIifDorisBytes))
+	sqlEIifDoris := string(sqlEIifDorisBytes)
+	assert.Contains(t, sqlEIifDoris, "ARRAY_JOIN(ARRAY_MAP(x -> CASE WHEN x = 'Alice' THEN UPPER(x) ELSE LOWER(x) END,")
+	assert.Contains(t, sqlEIifDoris, "element_at(ARRAY_MAP(x -> COALESCE(NULLIF(SUBSTR(x, 11, 2), ''), NULLIF(LOWER(x), '')),")
+	assert.Contains(t, sqlEIifDoris, "element_at(ARRAY_FILTER(x -> (CASE WHEN x LIKE 'A%' THEN CHAR_LENGTH(x) >= 4 ELSE x = 'Bob' END),")
+	assert.Contains(t, sqlEIifDoris, "ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> CASE WHEN x > 50 THEN (CAST(x AS DOUBLE) * 2) ELSE (CAST(x AS DOUBLE) + 5) END, ARRAY_MAP(x -> CAST(x AS BIGINT),")
+	assert.Contains(t, sqlEIifDoris, "ARRAY_EXISTS(x -> (CASE WHEN x = 'Alice' THEN (1 = 1) ELSE (1 = 0) END),")
+
+	respEIifPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(elemIifCoalesceVD))
+	require.NoError(t, err)
+	sqlEIifPgBytes, _ := io.ReadAll(respEIifPg.Body)
+	respEIifPg.Body.Close()
+	require.Equal(t, http.StatusOK, respEIifPg.StatusCode, string(sqlEIifPgBytes))
+	sqlEIifPg := string(sqlEIifPgBytes)
+	assert.Contains(t, sqlEIifPg, "SELECT CASE WHEN s.sp_value = 'Alice' THEN UPPER(s.sp_value) ELSE LOWER(s.sp_value) END AS sp_value FROM spidx_string s")
+	assert.Contains(t, sqlEIifPg, "SELECT COALESCE(NULLIF(SUBSTR(s.sp_value, 11, 2), ''), NULLIF(LOWER(s.sp_value), '')) AS sp_value FROM spidx_string s")
+	assert.Contains(t, sqlEIifPg, "AND (CASE WHEN s.sp_value LIKE 'A%' THEN CHAR_LENGTH(s.sp_value) >= 4 ELSE s.sp_value = 'Bob' END) LIMIT 1)")
+	assert.Contains(t, sqlEIifPg, "SELECT CASE WHEN CAST(t.sp_value AS BIGINT) > 50 THEN (CAST(CAST(t.sp_value AS BIGINT) AS DOUBLE PRECISION) * 2) ELSE (CAST(CAST(t.sp_value AS BIGINT) AS DOUBLE PRECISION) + 5) END AS sp_value FROM spidx_token t")
+
+	respEIifSqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(elemIifCoalesceVD))
+	require.NoError(t, err)
+	sqlEIifSqliteBytes, _ := io.ReadAll(respEIifSqlite.Body)
+	respEIifSqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respEIifSqlite.StatusCode, string(sqlEIifSqliteBytes))
+	sqlEIifSqlite := string(sqlEIifSqliteBytes)
+	assert.Contains(t, sqlEIifSqlite, "SELECT CASE WHEN s.sp_value = 'Alice' THEN UPPER(s.sp_value) ELSE LOWER(s.sp_value) END AS sp_value FROM spidx_string s")
+	assert.Contains(t, sqlEIifSqlite, "SELECT COALESCE(NULLIF(SUBSTR(s.sp_value, 11, 2), ''), NULLIF(LOWER(s.sp_value), '')) AS sp_value FROM spidx_string s")
+	assert.Contains(t, sqlEIifSqlite, "AND (CASE WHEN s.sp_value LIKE 'A%' THEN LENGTH(s.sp_value) >= 4 ELSE s.sp_value = 'Bob' END) LIMIT 1)")
+
+	// Verify in-memory ViewDefinition/$run parity for element-wise iif() and coalesce()
+	elemIifRunVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "elem_iif_coalesce_run",
+		"status": "active",
+		"resource": "Patient",
+		"select": [{
+			"column": [
+				{"name": "id", "path": "id"},
+				{"name": "iif_first", "path": "name.given.select(iif($this = 'Alice', $this.upper(), $this.lower())).first()"},
+				{"name": "coalesce_first", "path": "name.given.select(coalesce($this.substring(10, 2), $this.lower())).first()"},
+				{"name": "where_iif_first", "path": "name.given.where(iif($this.startsWith('A'), $this.length() >= 4, $this = 'Bob')).first()"}
+			]
+		}]
+	}`
+	respEIifRun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(elemIifRunVD))
+	require.NoError(t, err)
+	eIifRunBytes, _ := io.ReadAll(respEIifRun.Body)
+	respEIifRun.Body.Close()
+	require.Equal(t, http.StatusOK, respEIifRun.StatusCode, string(eIifRunBytes))
+	assert.Contains(t, string(eIifRunBytes), `"iif_first":"ALICE"`)
+	assert.Contains(t, string(eIifRunBytes), `"coalesce_first":"alice"`)
+	assert.Contains(t, string(eIifRunBytes), `"where_iif_first":"Alice"`)
+
+	// Verify binary Proto3 across 30 type-level GET clinical, terminology, CQM, scheduling & metadata operation endpoints
+	for _, typeGetClinicalEp := range []string{
+		"/fhir/r4/proto/ValueSet/$expand?url=http://hl7.org/fhir/ValueSet/administrative-gender",
+		"/fhir/r4/proto/ValueSet/$validate-code?url=http://hl7.org/fhir/ValueSet/administrative-gender&code=female",
+		"/fhir/r4/proto/CodeSystem/$lookup?system=http://loinc.org&code=8867-4",
+		"/fhir/r4/proto/CodeSystem/$validate-code?url=http://loinc.org&code=8867-4",
+		"/fhir/r4/proto/CodeSystem/$subsumes?system=http://snomed.info/sct&codeA=73211009&codeB=44054006",
+		"/fhir/r4/proto/CodeSystem/$find-matches?system=http://loinc.org&property=heart",
+		"/fhir/r4/proto/ConceptMap/$translate?system=http://snomed.info/sct&code=44054006",
+		"/fhir/r4/proto/Observation/$lastn?patient=Patient/proto-pat-1",
+		"/fhir/r4/proto/Observation/$stats?patient=Patient/proto-pat-1&code=8867-4",
+		"/fhir/r4/proto/Patient/$everything?_id=proto-pat-1",
+		"/fhir/r4/proto/Appointment/$find?start=2026-01-01&end=2026-12-31",
+		"/fhir/r4/proto/Schedule/$find?start=2026-01-01&end=2026-12-31",
+		"/fhir/r4/proto/List/$find?patient=Patient/proto-pat-1&name=problems",
+		"/fhir/r4/proto/CapabilityStatement/$subset?resource=Patient",
+		"/fhir/r4/proto/CapabilityStatement/$implements?server=http://hl7.org/fhir/us/core/CapabilityStatement/us-core-server",
+		"/fhir/r4/proto/StructureDefinition/$snapshot?url=http://hl7.org/fhir/StructureDefinition/Patient",
+		"/fhir/r4/proto/NamingSystem/$preferred-id?id=http://loinc.org&type=uri",
+		"/fhir/r4/proto/PlanDefinition/$apply?planDefinition=plandef-hypertension-control&subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/ActivityDefinition/$apply?activityDefinition=activitydef-bp-home-monitoring&subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/Library/$data-requirements?target=cms165-logic",
+		"/fhir/r4/proto/Measure/$data-requirements?measure=cms165-bp-control",
+		"/fhir/r4/proto/PlanDefinition/$data-requirements?planDefinition=plandef-hypertension-control",
+		"/fhir/r4/proto/ActivityDefinition/$data-requirements?activityDefinition=activitydef-bp-home-monitoring",
+		"/fhir/r4/proto/Measure/$collect-data?measure=cms165-bp-control&subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/Library/$evaluate?library=Library/cms165-logic&subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/Measure/$evaluate-risk-condition-category?subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/Patient/$pcde?patient=Patient/proto-pat-1",
+		"/fhir/r4/proto/AdverseEvent/$evaluate?subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/RiskAssessment/$evaluate?subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/AuditEvent/$verify-integrity",
+	} {
+		reqTGClin, tgClinErr := http.NewRequest(http.MethodGet, ts.URL+typeGetClinicalEp+"&_format=application/x-protobuf", nil)
+		if !strings.Contains(typeGetClinicalEp, "?") {
+			reqTGClin, tgClinErr = http.NewRequest(http.MethodGet, ts.URL+typeGetClinicalEp+"?_format=application/x-protobuf", nil)
+		}
+		require.NoError(t, tgClinErr)
+		reqTGClin.Header.Set("Accept", "application/x-protobuf")
+		respTGClin, tgClinErr := client.Do(reqTGClin)
+		require.NoError(t, tgClinErr)
+		tgClinBytes, _ := io.ReadAll(respTGClin.Body)
+		respTGClin.Body.Close()
+		require.Equal(t, http.StatusOK, respTGClin.StatusCode, "type GET clinical endpoint %s: %s", typeGetClinicalEp, string(tgClinBytes))
+		assert.Contains(t, respTGClin.Header.Get("Content-Type"), "application/x-protobuf", "type GET clinical endpoint %s", typeGetClinicalEp)
+		assert.NotEmpty(t, tgClinBytes, "type GET clinical endpoint %s", typeGetClinicalEp)
+	}
 }
