@@ -17394,6 +17394,9 @@ func (s *Server) handleDaVinciRiskAdjustmentWave37(w http.ResponseWriter, r *htt
 	tenant := r.PathValue("tenant")
 	op := strings.TrimSpace(r.PathValue("op"))
 	resID := cleanID(r.PathValue("id"))
+	if resID == "" {
+		resID = cleanID(strings.TrimPrefix(strings.TrimPrefix(firstNonEmptyStr(r.URL.Query().Get("patient"), r.URL.Query().Get("subject"), r.URL.Query().Get("id")), "Patient/"), "MeasureReport/"))
+	}
 	actionCode := strings.TrimSpace(r.URL.Query().Get("action"))
 	hccCode := strings.TrimSpace(r.URL.Query().Get("hcc"))
 
@@ -18050,6 +18053,9 @@ func (s *Server) handleODHOccupationalHealth(w http.ResponseWriter, r *http.Requ
 	tenant := r.PathValue("tenant")
 	op := strings.TrimSpace(r.PathValue("op"))
 	resID := strings.TrimSpace(r.PathValue("id"))
+	if resID == "" {
+		resID = cleanID(strings.TrimPrefix(firstNonEmptyStr(r.URL.Query().Get("patient"), r.URL.Query().Get("subject"), r.URL.Query().Get("id")), "Patient/"))
+	}
 	occupationText := strings.TrimSpace(r.URL.Query().Get("occupation"))
 
 	if r.Method == http.MethodPost && r.Body != nil {
@@ -18619,6 +18625,9 @@ func (s *Server) handlePACIOCognitiveStatus(w http.ResponseWriter, r *http.Reque
 	tenant := r.PathValue("tenant")
 	op := strings.TrimSpace(r.PathValue("op"))
 	resID := strings.TrimSpace(r.PathValue("id"))
+	if resID == "" {
+		resID = cleanID(strings.TrimPrefix(firstNonEmptyStr(r.URL.Query().Get("patient"), r.URL.Query().Get("subject"), r.URL.Query().Get("id")), "Patient/"))
+	}
 	bimsScore := 14
 
 	if r.Method == http.MethodPost && r.Body != nil {
@@ -19515,6 +19524,9 @@ func (s *Server) handlePACIOPFE(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	op := strings.TrimSpace(r.PathValue("op"))
 	resID := strings.TrimSpace(r.PathValue("id"))
+	if resID == "" {
+		resID = cleanID(strings.TrimPrefix(firstNonEmptyStr(r.URL.Query().Get("patient"), r.URL.Query().Get("subject"), r.URL.Query().Get("id")), "Patient/"))
+	}
 	icfCode := "d450"
 	goalText := "Walk 150 feet independently with rolling walker within 14 days"
 

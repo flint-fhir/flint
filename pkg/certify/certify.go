@@ -5403,6 +5403,104 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-36", suite10, "Zero-JSON Binary Proto3 Instance-Level GET Operations Across Waves 93-100 & Clinical Reasoning ($udap-trust-summary, $pdex-provider-everything, $pdex-payer-summary, $saner-capacity-summary, $codex-rttd-summary, $sdoh-care-bundle, $atr-summary, $pacio-splasch-summary, $vulcan-rwd-summary, $burden-reduction-summary, $mcode-trial-summary, $ndh-directory-summary, $ra-coding-gap-report, $nhsn-ach-summary, $nhsn-hai-summary, $fast-network-query, $elr-summary, $carin-bb-claims, $rtpbc-summary, $ecr-summary, $vulcan-summary, $nbs-summary, $pct-aeob-summary, $vulcan-soa-timeline, $iis-history, $mcode-genomics-summary, $bfdr-document, $mcode-radiotherapy-summary, $vrdr-document, $cdex-poll, $pacio-pfe-summary, $rtpbc-coverage, $sdoh-summary, Measure/{id}/$data-requirements, ActivityDefinition/{id}/$data-requirements, Questionnaire/{id}/$data-requirements) & SQL-on-FHIR v2 Element-Wise .where($this ...) Collection Filter Pushdown", t0, err, "Binary Proto3 36 instance-level GET operations & element-wise .where($this ...) collection filter $sql pushdown verified")
 
+	// AN-37: Zero-JSON Binary Proto3 Type-Level GET Operations Across 62 National HL7 IG Endpoints & SQL-on-FHIR v2 Element-Wise .select($this...) Projection & Compound .where($this ... and/or/not/in ...) Pushdown
+	t0 = time.Now()
+	{
+		var opCheckErr error
+		typeGetEndpoints := []string{
+			"/Patient/$sdoh-summary",
+			"/Patient/$carin-bb",
+			"/ExplanationOfBenefit/$carin-bb-summary",
+			"/PlanDefinition/$ersd-lookup",
+			"/Patient/$mcode-summary",
+			"/MedicationKnowledge/$formulary-lookup",
+			"/Coverage/$formulary-coverage",
+			"/DocumentReference/$iti-67",
+			"/Patient/$find-subject-variants",
+			"/Patient/$find-subject-tx-implications",
+			"/Patient/$pacio-summary",
+			"/Measure/$nhsn-acute-care",
+			"/ResearchStudy/$rwd-cohort",
+			"/Composition/$bfdr-summary",
+			"/Patient/$ihe-pdqm",
+			"/DocumentReference/$ihe-iti-68",
+			"/Endpoint/$fast-endpoint-query",
+			"/Patient/$physical-activity-summary",
+			"/MedicinalProduct/$epi-document",
+			"/Observation/$reportable-labs",
+			"/Composition/$adi-document",
+			"/Patient/$ra-coding-gaps",
+			"/Composition/$eicr-document",
+			"/MedicationKnowledge/$formulary-alternatives",
+			"/Patient/$odh-summary",
+			"/Patient/$cancer-registry-report",
+			"/PlanDefinition/$medmorph-kar",
+			"/MeasureReport/$vbpr-performance",
+			"/Patient/$pacio-cognitive-summary",
+			"/ClaimResponse/$rtpbc-coverage",
+			"/Encounter/$pacio-timepoints",
+			"/Composition/$vrdr-document",
+			"/Task/$cdex-poll",
+			"/Patient/$pacio-pfe-summary",
+			"/Composition/$bfdr-document",
+			"/Patient/$mcode-radiotherapy-summary",
+			"/Patient/$iis-history",
+			"/Patient/$mcode-genomics-summary",
+			"/Patient/$nbs-summary",
+			"/ExplanationOfBenefit/$pct-aeob-summary",
+			"/ResearchSubject/$vulcan-soa-timeline",
+			"/Patient/$ecr-summary",
+			"/ResearchStudy/$vulcan-summary",
+			"/Patient/$elr-summary",
+			"/ExplanationOfBenefit/$carin-bb-claims",
+			"/Patient/$rtpbc-summary",
+			"/Patient/$nhsn-hai-summary",
+			"/OrganizationAffiliation/$fast-network-query",
+			"/Patient/$ra-coding-gap-report",
+			"/Patient/$nhsn-ach-summary",
+			"/Patient/$burden-reduction-summary",
+			"/Patient/$mcode-trial-summary",
+			"/Organization/$ndh-directory-summary",
+			"/Group/$atr-summary",
+			"/Patient/$pacio-splasch-summary",
+			"/Patient/$vulcan-rwd-summary",
+			"/Location/$saner-capacity-summary",
+			"/Patient/$codex-rttd-summary",
+			"/Patient/$sdoh-care-bundle",
+			"/Organization/$udap-trust-summary",
+			"/Patient/$pdex-provider-everything",
+			"/Patient/$pdex-payer-summary",
+		}
+		for _, typeGetEp := range typeGetEndpoints {
+			respTG, bTG, errTG := doReq(http.MethodGet, basePath+typeGetEp+"?patient=Patient/cert-pat-1&subject=Patient/cert-pat-1&id=cert-doc-1&_format=application/x-protobuf", "", nil, map[string]string{
+				"Accept": "application/x-protobuf",
+			})
+			if errTG != nil || respTG.StatusCode != http.StatusOK || !strings.Contains(respTG.Header.Get("Content-Type"), "application/x-protobuf") || len(bTG) == 0 {
+				status := 0
+				if respTG != nil {
+					status = respTG.StatusCode
+				}
+				opCheckErr = fmt.Errorf("expected binary proto3 200 OK from type GET %s, got %d (err=%v): %s", typeGetEp, status, errTG, string(bTG))
+				break
+			}
+		}
+
+		collSelectCompoundWhereVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_collection_select_compound_where_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"tagged_given","path":"name.given.select('[' & $this.upper() & ']').join(',')"},{"name":"compound_and_first","path":"name.given.where($this.startsWith('A') and $this.length() >= 4).first()"},{"name":"compound_or_cnt","path":"name.given.where($this = 'Alice' or $this = 'Bob').count()"},{"name":"not_alice_join","path":"name.given.where(($this = 'Alice').not()).sort().join(',')"},{"name":"in_set_arr","path":"name.given.where($this in ('Alice' | 'Marie'))","collection":true},{"name":"scaled_id_sum","path":"identifier.value.toInteger().select($this * 2).sum()"},{"name":"len_plus_ten_max","path":"name.given.select($this.length() + 10).max()"}]}],"where":[{"path":"name.given.where($this.startsWith('A') and $this.length() >= 4).exists() and name.given.exists($this = 'Alice' or $this = 'Bob') and name.given.all(($this = 'Zed').not())"}]}`)
+		respCSWDoris, bCSWDoris, errCSWDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", collSelectCompoundWhereVD, nil)
+		respCSWPg, bCSWPg, errCSWPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", collSelectCompoundWhereVD, nil)
+
+		if opCheckErr != nil {
+			err = opCheckErr
+		} else if errCSWDoris != nil || respCSWDoris.StatusCode != http.StatusOK || !strings.Contains(string(bCSWDoris), "ARRAY_JOIN(ARRAY_MAP(x -> CONCAT('[', COALESCE(UPPER(x), ''), ']'),") || !strings.Contains(string(bCSWDoris), "element_at(ARRAY_FILTER(x -> (x LIKE 'A%' AND CHAR_LENGTH(x) >= 4),") || !strings.Contains(string(bCSWDoris), "ARRAY_SIZE(ARRAY_FILTER(x -> (x = 'Alice' OR x = 'Bob'),") || !strings.Contains(string(bCSWDoris), "ARRAY_JOIN(ARRAY_SORT(ARRAY_FILTER(x -> NOT (x = 'Alice'),") || !strings.Contains(string(bCSWDoris), "ARRAY_FILTER(x -> x IN ('Alice', 'Marie'),") || !strings.Contains(string(bCSWDoris), "ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> (CAST(x AS DOUBLE) * 2), ARRAY_MAP(x -> CAST(x AS BIGINT),") || !strings.Contains(string(bCSWDoris), "ARRAY_MAP(x -> (CAST(CHAR_LENGTH(x) AS DOUBLE) + 10),") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with collection .select($this...) and compound .where($this...) pushdown, got %d: %s", respCSWDoris.StatusCode, string(bCSWDoris))
+		} else if errCSWPg != nil || respCSWPg.StatusCode != http.StatusOK || !strings.Contains(string(bCSWPg), "SELECT ('[' || COALESCE(UPPER(s.sp_value), '') || ']') AS sp_value FROM spidx_string s") || !strings.Contains(string(bCSWPg), "AND (s.sp_value LIKE 'A%' AND CHAR_LENGTH(s.sp_value) >= 4) LIMIT 1)") || !strings.Contains(string(bCSWPg), "AND (s.sp_value = 'Alice' OR s.sp_value = 'Bob')) sub)") || !strings.Contains(string(bCSWPg), "AND NOT (s.sp_value = 'Alice') ORDER BY sp_value ASC") || !strings.Contains(string(bCSWPg), "AND s.sp_value IN ('Alice', 'Marie')) sub)") || !strings.Contains(string(bCSWPg), "SELECT (CAST(CAST(t.sp_value AS BIGINT) AS DOUBLE PRECISION) * 2) AS sp_value FROM spidx_token t") || !strings.Contains(string(bCSWPg), "SELECT (CAST(CHAR_LENGTH(s.sp_value) AS DOUBLE PRECISION) + 10) AS sp_value FROM spidx_string s") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with collection .select($this...) and compound .where($this...) pushdown, got %d: %s", respCSWPg.StatusCode, string(bCSWPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-37", suite10, "Zero-JSON Binary Proto3 Type-Level GET Operations Across 62 National HL7 IG Endpoints ($sdoh-summary, $carin-bb, $carin-bb-summary, $ersd-lookup, $mcode-summary, $formulary-lookup, $formulary-coverage, $iti-67, $find-subject-variants, $find-subject-tx-implications, $pacio-summary, $nhsn-acute-care, $rwd-cohort, $bfdr-summary, $ihe-pdqm, $ihe-iti-68, $fast-endpoint-query, $physical-activity-summary, $epi-document, $reportable-labs, $adi-document, $ra-coding-gaps, $eicr-document, $formulary-alternatives, $odh-summary, $cancer-registry-report, $medmorph-kar, $vbpr-performance, $pacio-cognitive-summary, $rtpbc-coverage, $pacio-timepoints, $vrdr-document, $cdex-poll, $pacio-pfe-summary, $bfdr-document, $mcode-radiotherapy-summary, $iis-history, $mcode-genomics-summary, $nbs-summary, $pct-aeob-summary, $vulcan-soa-timeline, $ecr-summary, $vulcan-summary, $elr-summary, $carin-bb-claims, $rtpbc-summary, $nhsn-hai-summary, $fast-network-query, $ra-coding-gap-report, $nhsn-ach-summary, $burden-reduction-summary, $mcode-trial-summary, $ndh-directory-summary, $atr-summary, $pacio-splasch-summary, $vulcan-rwd-summary, $saner-capacity-summary, $codex-rttd-summary, $sdoh-care-bundle, $udap-trust-summary, $pdex-provider-everything, $pdex-payer-summary) & SQL-on-FHIR v2 Element-Wise .select($this...) Projection & Compound .where($this ... and/or/not/in ...) Pushdown", t0, err, "Binary Proto3 62 type-level GET operations & element-wise .select($this...) projection and compound .where($this...) $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

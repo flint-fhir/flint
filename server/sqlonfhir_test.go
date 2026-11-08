@@ -5735,4 +5735,135 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		assert.Contains(t, respGetOp.Header.Get("Content-Type"), "application/x-protobuf", "GET endpoint %s", getEp)
 		assert.NotEmpty(t, getOpBytes, "GET endpoint %s", getEp)
 	}
+
+	// 52. Wave 103: SQL-on-FHIR v2 Element-Wise .select($this...) Projection & Compound .where($this ... and/or/not/in ...) Pushdown & Binary Proto3 Type-Level GET Operations Across 60 National HL7 IG Endpoints
+	collSelectCompoundWhereVD := `{"resourceType":"ViewDefinition","name":"collection_select_compound_where_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"tagged_given","path":"name.given.select('[' & $this.upper() & ']').join(',')"},{"name":"compound_and_first","path":"name.given.where($this.startsWith('A') and $this.length() >= 4).first()"},{"name":"compound_or_cnt","path":"name.given.where($this = 'Alice' or $this = 'Bob').count()"},{"name":"not_alice_join","path":"name.given.where(($this = 'Alice').not()).sort().join(',')"},{"name":"in_set_arr","path":"name.given.where($this in ('Alice' | 'Marie'))","collection":true},{"name":"scaled_id_sum","path":"identifier.value.toInteger().select($this * 2).sum()"},{"name":"len_plus_ten_max","path":"name.given.select($this.length() + 10).max()"}]}],"where":[{"path":"name.given.where($this.startsWith('A') and $this.length() >= 4).exists() and name.given.exists($this = 'Alice' or $this = 'Bob') and name.given.all(($this = 'Zed').not())"}]}`
+
+	for _, dialect := range []string{"doris", "postgres", "sqlite"} {
+		reqCSW, cswErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+dialect+"&_format=application/sql", strings.NewReader(collSelectCompoundWhereVD))
+		require.NoError(t, cswErr)
+		reqCSW.Header.Set("Content-Type", "application/fhir+json")
+		respCSW, cswErr := client.Do(reqCSW)
+		require.NoError(t, cswErr)
+		cswSQLBytes, _ := io.ReadAll(respCSW.Body)
+		respCSW.Body.Close()
+		require.Equal(t, http.StatusOK, respCSW.StatusCode, "dialect %s: %s", dialect, string(cswSQLBytes))
+		cswSQL := string(cswSQLBytes)
+		switch dialect {
+		case "doris":
+			assert.Contains(t, cswSQL, "ARRAY_JOIN(ARRAY_MAP(x -> CONCAT('[', COALESCE(UPPER(x), ''), ']'),")
+			assert.Contains(t, cswSQL, "element_at(ARRAY_FILTER(x -> (x LIKE 'A%' AND CHAR_LENGTH(x) >= 4),")
+			assert.Contains(t, cswSQL, "ARRAY_SIZE(ARRAY_FILTER(x -> (x = 'Alice' OR x = 'Bob'),")
+			assert.Contains(t, cswSQL, "ARRAY_JOIN(ARRAY_SORT(ARRAY_FILTER(x -> NOT (x = 'Alice'),")
+			assert.Contains(t, cswSQL, "ARRAY_FILTER(x -> x IN ('Alice', 'Marie'),")
+			assert.Contains(t, cswSQL, "ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_MAP(x -> (CAST(x AS DOUBLE) * 2), ARRAY_MAP(x -> CAST(x AS BIGINT),")
+			assert.Contains(t, cswSQL, "ARRAY_MAP(x -> (CAST(CHAR_LENGTH(x) AS DOUBLE) + 10),")
+			assert.Contains(t, cswSQL, "ARRAY_EXISTS(x -> (x = 'Alice' OR x = 'Bob'),")
+			assert.Contains(t, cswSQL, "NOT ARRAY_EXISTS(x -> NOT (NOT (x = 'Zed')),")
+		case "postgres":
+			assert.Contains(t, cswSQL, "SELECT ('[' || COALESCE(UPPER(s.sp_value), '') || ']') AS sp_value FROM spidx_string s")
+			assert.Contains(t, cswSQL, "AND (s.sp_value LIKE 'A%' AND CHAR_LENGTH(s.sp_value) >= 4) LIMIT 1)")
+			assert.Contains(t, cswSQL, "AND (s.sp_value = 'Alice' OR s.sp_value = 'Bob')) sub)")
+			assert.Contains(t, cswSQL, "AND NOT (s.sp_value = 'Alice') ORDER BY sp_value ASC")
+			assert.Contains(t, cswSQL, "AND s.sp_value IN ('Alice', 'Marie')) sub)")
+			assert.Contains(t, cswSQL, "SELECT (CAST(CAST(t.sp_value AS BIGINT) AS DOUBLE PRECISION) * 2) AS sp_value FROM spidx_token t")
+			assert.Contains(t, cswSQL, "SELECT (CAST(CHAR_LENGTH(s.sp_value) AS DOUBLE PRECISION) + 10) AS sp_value FROM spidx_string s")
+			assert.Contains(t, cswSQL, "EXISTS (SELECT 1 FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given') sub WHERE (sub.sp_value = 'Alice' OR sub.sp_value = 'Bob'))")
+			assert.Contains(t, cswSQL, "NOT EXISTS (SELECT 1 FROM (SELECT s.sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given') sub WHERE NOT (NOT (sub.sp_value = 'Zed')))")
+		case "sqlite":
+			assert.Contains(t, cswSQL, "SELECT ('[' || COALESCE(UPPER(s.sp_value), '') || ']') AS sp_value FROM spidx_string s")
+			assert.Contains(t, cswSQL, "AND (s.sp_value LIKE 'A%' AND LENGTH(s.sp_value) >= 4) LIMIT 1)")
+			assert.Contains(t, cswSQL, "AND s.sp_value IN ('Alice', 'Marie')) sub)")
+		}
+	}
+
+	// Verify $run evaluates element-wise .select($this...) and compound .where($this ... and/or/not/in ...)
+	runCSWVD := `{"resourceType":"ViewDefinition","name":"run_csw_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"tagged_first","path":"name.given.select('[' & $this.upper() & ']').first()"},{"name":"compound_match","path":"name.given.where($this.startsWith('A') and $this.length() >= 4).first()"}]}],"where":[{"path":"name.given.where($this.startsWith('A') and $this.length() >= 4).exists()"}]}`
+	reqRunCSW, runCSWErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run", strings.NewReader(runCSWVD))
+	require.NoError(t, runCSWErr)
+	reqRunCSW.Header.Set("Content-Type", "application/fhir+json")
+	reqRunCSW.Header.Set("Accept", "application/json")
+	respRunCSW, runCSWErr := client.Do(reqRunCSW)
+	require.NoError(t, runCSWErr)
+	runCSWBytes, _ := io.ReadAll(respRunCSW.Body)
+	respRunCSW.Body.Close()
+	require.Equal(t, http.StatusOK, respRunCSW.StatusCode, string(runCSWBytes))
+	assert.Contains(t, string(runCSWBytes), `"tagged_first":"[ALICE]"`)
+	assert.Contains(t, string(runCSWBytes), `"compound_match":"Alice"`)
+
+	for _, typeGetEp := range []string{
+		"/fhir/r4/proto/Patient/$sdoh-summary",
+		"/fhir/r4/proto/Patient/$carin-bb",
+		"/fhir/r4/proto/ExplanationOfBenefit/$carin-bb-summary",
+		"/fhir/r4/proto/PlanDefinition/$ersd-lookup",
+		"/fhir/r4/proto/Patient/$mcode-summary",
+		"/fhir/r4/proto/MedicationKnowledge/$formulary-lookup",
+		"/fhir/r4/proto/Coverage/$formulary-coverage",
+		"/fhir/r4/proto/DocumentReference/$iti-67",
+		"/fhir/r4/proto/Patient/$find-subject-variants",
+		"/fhir/r4/proto/Patient/$find-subject-tx-implications",
+		"/fhir/r4/proto/Patient/$pacio-summary",
+		"/fhir/r4/proto/Measure/$nhsn-acute-care",
+		"/fhir/r4/proto/ResearchStudy/$rwd-cohort",
+		"/fhir/r4/proto/Composition/$bfdr-summary",
+		"/fhir/r4/proto/Patient/$ihe-pdqm",
+		"/fhir/r4/proto/DocumentReference/$ihe-iti-68",
+		"/fhir/r4/proto/Endpoint/$fast-endpoint-query",
+		"/fhir/r4/proto/Patient/$physical-activity-summary",
+		"/fhir/r4/proto/MedicinalProduct/$epi-document",
+		"/fhir/r4/proto/Observation/$reportable-labs",
+		"/fhir/r4/proto/Composition/$adi-document",
+		"/fhir/r4/proto/Patient/$ra-coding-gaps",
+		"/fhir/r4/proto/Composition/$eicr-document",
+		"/fhir/r4/proto/MedicationKnowledge/$formulary-alternatives",
+		"/fhir/r4/proto/Patient/$odh-summary",
+		"/fhir/r4/proto/Patient/$cancer-registry-report",
+		"/fhir/r4/proto/PlanDefinition/$medmorph-kar",
+		"/fhir/r4/proto/MeasureReport/$vbpr-performance",
+		"/fhir/r4/proto/Patient/$pacio-cognitive-summary",
+		"/fhir/r4/proto/ClaimResponse/$rtpbc-coverage",
+		"/fhir/r4/proto/Encounter/$pacio-timepoints",
+		"/fhir/r4/proto/Composition/$vrdr-document",
+		"/fhir/r4/proto/Task/$cdex-poll",
+		"/fhir/r4/proto/Patient/$pacio-pfe-summary",
+		"/fhir/r4/proto/Composition/$bfdr-document",
+		"/fhir/r4/proto/Patient/$mcode-radiotherapy-summary",
+		"/fhir/r4/proto/Patient/$iis-history",
+		"/fhir/r4/proto/Patient/$mcode-genomics-summary",
+		"/fhir/r4/proto/Patient/$nbs-summary",
+		"/fhir/r4/proto/ExplanationOfBenefit/$pct-aeob-summary",
+		"/fhir/r4/proto/ResearchSubject/$vulcan-soa-timeline",
+		"/fhir/r4/proto/Patient/$ecr-summary",
+		"/fhir/r4/proto/ResearchStudy/$vulcan-summary",
+		"/fhir/r4/proto/Patient/$elr-summary",
+		"/fhir/r4/proto/ExplanationOfBenefit/$carin-bb-claims",
+		"/fhir/r4/proto/Patient/$rtpbc-summary",
+		"/fhir/r4/proto/Patient/$nhsn-hai-summary",
+		"/fhir/r4/proto/OrganizationAffiliation/$fast-network-query",
+		"/fhir/r4/proto/Patient/$ra-coding-gap-report",
+		"/fhir/r4/proto/Patient/$nhsn-ach-summary",
+		"/fhir/r4/proto/Patient/$burden-reduction-summary",
+		"/fhir/r4/proto/Patient/$mcode-trial-summary",
+		"/fhir/r4/proto/Organization/$ndh-directory-summary",
+		"/fhir/r4/proto/Group/$atr-summary",
+		"/fhir/r4/proto/Patient/$pacio-splasch-summary",
+		"/fhir/r4/proto/Patient/$vulcan-rwd-summary",
+		"/fhir/r4/proto/Location/$saner-capacity-summary",
+		"/fhir/r4/proto/Patient/$codex-rttd-summary",
+		"/fhir/r4/proto/Patient/$sdoh-care-bundle",
+		"/fhir/r4/proto/Organization/$udap-trust-summary",
+		"/fhir/r4/proto/Patient/$pdex-provider-everything",
+		"/fhir/r4/proto/Patient/$pdex-payer-summary",
+	} {
+		reqTypeGet, typeGetErr := http.NewRequest(http.MethodGet, ts.URL+typeGetEp+"?patient=Patient/proto-pat-1&subject=Patient/proto-pat-1&id=docref-w101-1&_format=application/x-protobuf", nil)
+		require.NoError(t, typeGetErr)
+		reqTypeGet.Header.Set("Accept", "application/x-protobuf")
+		respTypeGet, typeGetErr := client.Do(reqTypeGet)
+		require.NoError(t, typeGetErr)
+		typeGetBytes, _ := io.ReadAll(respTypeGet.Body)
+		respTypeGet.Body.Close()
+		require.Equal(t, http.StatusOK, respTypeGet.StatusCode, "type GET endpoint %s: %s", typeGetEp, string(typeGetBytes))
+		assert.Contains(t, respTypeGet.Header.Get("Content-Type"), "application/x-protobuf", "type GET endpoint %s", typeGetEp)
+		assert.NotEmpty(t, typeGetBytes, "type GET endpoint %s", typeGetEp)
+	}
 }
