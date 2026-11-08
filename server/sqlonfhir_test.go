@@ -5616,4 +5616,123 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		assert.Contains(t, respOp.Header.Get("Content-Type"), "application/x-protobuf", "endpoint %s", ep)
 		assert.NotEmpty(t, opBytes, "endpoint %s", ep)
 	}
+
+	// 51. Wave 102: SQL-on-FHIR v2 Element-Wise .where($this ...) Collection Filter Pushdown & Binary Proto3 Instance-Level GET Operations Across Waves 93-100 & Clinical Reasoning ($data-requirements)
+	collWhereVD := `{"resourceType":"ViewDefinition","name":"collection_where_filter_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"non_alice_given","path":"name.given.where($this != 'Alice').sort().join(',')"},{"name":"long_given_cnt","path":"name.given.where($this.length() >= 4).count()"},{"name":"starts_a_first","path":"name.given.where($this.startsWith('A')).first()"},{"name":"ends_e_last","path":"name.given.where($this.endsWith('e')).last()"},{"name":"contains_li_upper","path":"name.given.where($this.contains('li')).upper().join('|')"},{"name":"regex_given_arr","path":"name.given.where($this.matches('^A.*'))","collection":true},{"name":"high_id_sum","path":"identifier.value.toInteger().where($this >= 10).sum()"}]}],"where":[{"path":"name.given.where($this.startsWith('A')).exists() and name.given.where($this != 'Alice').empty().not() and name.given.where($this.length() >= 3).count() >= 1"}]}`
+
+	for _, dialect := range []string{"doris", "postgres", "sqlite"} {
+		reqCW, cwErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+dialect+"&_format=application/sql", strings.NewReader(collWhereVD))
+		require.NoError(t, cwErr)
+		reqCW.Header.Set("Content-Type", "application/fhir+json")
+		respCW, cwErr := client.Do(reqCW)
+		require.NoError(t, cwErr)
+		cwSQLBytes, _ := io.ReadAll(respCW.Body)
+		respCW.Body.Close()
+		require.Equal(t, http.StatusOK, respCW.StatusCode, "dialect %s: %s", dialect, string(cwSQLBytes))
+		cwSQL := string(cwSQLBytes)
+		switch dialect {
+		case "doris":
+			assert.Contains(t, cwSQL, "ARRAY_JOIN(ARRAY_SORT(ARRAY_FILTER(x -> x <> 'Alice',")
+			assert.Contains(t, cwSQL, "ARRAY_SIZE(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 4,")
+			assert.Contains(t, cwSQL, "element_at(ARRAY_FILTER(x -> x LIKE 'A%',")
+			assert.Contains(t, cwSQL, "element_at(ARRAY_FILTER(x -> x LIKE '%e',")
+			assert.Contains(t, cwSQL, "ARRAY_JOIN(ARRAY_MAP(x -> UPPER(x), ARRAY_FILTER(x -> x LIKE '%li%',")
+			assert.Contains(t, cwSQL, "ARRAY_FILTER(x -> REGEXP(x, '^A.*'),")
+			assert.Contains(t, cwSQL, "ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), ARRAY_FILTER(x -> x >= 10, ARRAY_MAP(x -> CAST(x AS BIGINT),")
+		case "postgres":
+			assert.Contains(t, cwSQL, "AND s.sp_value <> 'Alice' ORDER BY sp_value ASC")
+			assert.Contains(t, cwSQL, "AND CHAR_LENGTH(s.sp_value) >= 4) sub)")
+			assert.Contains(t, cwSQL, "AND s.sp_value LIKE 'A%' LIMIT 1)")
+			assert.Contains(t, cwSQL, "AND s.sp_value LIKE '%e' ORDER BY sp_value DESC LIMIT 1)")
+			assert.Contains(t, cwSQL, "SELECT UPPER(s.sp_value) AS sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' AND s.sp_value LIKE '%li%'")
+			assert.Contains(t, cwSQL, "AND s.sp_value ~ '^A.*') sub)")
+			assert.Contains(t, cwSQL, "AND CAST(t.sp_value AS BIGINT) >= 10) sub)")
+		case "sqlite":
+			assert.Contains(t, cwSQL, "AND s.sp_value <> 'Alice' ORDER BY sp_value ASC")
+			assert.Contains(t, cwSQL, "AND LENGTH(s.sp_value) >= 4) sub)")
+			assert.Contains(t, cwSQL, "AND s.sp_value LIKE 'A%' LIMIT 1)")
+			assert.Contains(t, cwSQL, "AND CAST(t.sp_value AS INTEGER) >= 10) sub)")
+		}
+	}
+
+	// Verify $run evaluates element-wise .where($this ...) on collections
+	runWhereVD := `{"resourceType":"ViewDefinition","name":"run_where_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"starts_a","path":"name.given.where($this.startsWith('A')).first()"},{"name":"len_ge_4","path":"name.given.where($this.length() >= 4).count()"}]}],"where":[{"path":"name.given.where($this.startsWith('A')).exists()"}]}`
+	reqRunCW, runCWErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run", strings.NewReader(runWhereVD))
+	require.NoError(t, runCWErr)
+	reqRunCW.Header.Set("Content-Type", "application/fhir+json")
+	reqRunCW.Header.Set("Accept", "application/json")
+	respRunCW, runCWErr := client.Do(reqRunCW)
+	require.NoError(t, runCWErr)
+	runCWBytes, _ := io.ReadAll(respRunCW.Body)
+	respRunCW.Body.Close()
+	require.Equal(t, http.StatusOK, respRunCW.StatusCode, string(runCWBytes))
+	assert.Contains(t, string(runCWBytes), `"starts_a":"Alice"`)
+
+	// Seed Measure, ActivityDefinition, and Questionnaire for instance-level $data-requirements GET proto3
+	for _, seedItem := range []struct {
+		url  string
+		body string
+	}{
+		{"/fhir/r4/proto/Measure/w102-meas-1", `{"resourceType":"Measure","id":"w102-meas-1","status":"active","title":"Wave 102 Measure"}`},
+		{"/fhir/r4/proto/ActivityDefinition/w102-ad-1", `{"resourceType":"ActivityDefinition","id":"w102-ad-1","status":"active","title":"Wave 102 ActivityDefinition"}`},
+		{"/fhir/r4/proto/Questionnaire/w102-q-1", `{"resourceType":"Questionnaire","id":"w102-q-1","status":"active","title":"Wave 102 Questionnaire"}`},
+	} {
+		reqSeed, seedErr := http.NewRequest(http.MethodPut, ts.URL+seedItem.url, strings.NewReader(seedItem.body))
+		require.NoError(t, seedErr)
+		reqSeed.Header.Set("Content-Type", "application/fhir+json")
+		respSeed, seedErr := client.Do(reqSeed)
+		require.NoError(t, seedErr)
+		respSeed.Body.Close()
+		require.Contains(t, []int{http.StatusOK, http.StatusCreated}, respSeed.StatusCode)
+	}
+
+	for _, getEp := range []string{
+		"/fhir/r4/proto/Organization/w96-org-1/$udap-trust-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pdex-provider-everything",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pdex-payer-summary",
+		"/fhir/r4/proto/Location/w93-loc-1/$saner-capacity-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$codex-rttd-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$sdoh-care-bundle",
+		"/fhir/r4/proto/Group/w93-grp-1/$atr-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pacio-splasch-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$vulcan-rwd-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$burden-reduction-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$mcode-trial-summary",
+		"/fhir/r4/proto/Organization/w96-org-1/$ndh-directory-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$ra-coding-gap-report",
+		"/fhir/r4/proto/Patient/proto-pat-1/$nhsn-ach-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$nhsn-hai-summary",
+		"/fhir/r4/proto/OrganizationAffiliation/w96-oa-1/$fast-network-query",
+		"/fhir/r4/proto/Patient/proto-pat-1/$elr-summary",
+		"/fhir/r4/proto/ExplanationOfBenefit/w97-eob-1/$carin-bb-claims",
+		"/fhir/r4/proto/Patient/proto-pat-1/$rtpbc-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$ecr-summary",
+		"/fhir/r4/proto/ResearchStudy/w93-study-1/$vulcan-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$nbs-summary",
+		"/fhir/r4/proto/ExplanationOfBenefit/w97-eob-1/$pct-aeob-summary",
+		"/fhir/r4/proto/ResearchSubject/w100-rsub-1/$vulcan-soa-timeline",
+		"/fhir/r4/proto/Patient/proto-pat-1/$iis-history",
+		"/fhir/r4/proto/Patient/proto-pat-1/$mcode-genomics-summary",
+		"/fhir/r4/proto/Composition/w98-comp-1/$bfdr-document",
+		"/fhir/r4/proto/Patient/proto-pat-1/$mcode-radiotherapy-summary",
+		"/fhir/r4/proto/Composition/w98-comp-1/$vrdr-document",
+		"/fhir/r4/proto/Task/w100-task-1/$cdex-poll",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pacio-pfe-summary",
+		"/fhir/r4/proto/ClaimResponse/w100-cr-1/$rtpbc-coverage",
+		"/fhir/r4/proto/Patient/proto-pat-1/$sdoh-summary",
+		"/fhir/r4/proto/Measure/w102-meas-1/$data-requirements",
+		"/fhir/r4/proto/ActivityDefinition/w102-ad-1/$data-requirements",
+		"/fhir/r4/proto/Questionnaire/w102-q-1/$data-requirements",
+	} {
+		reqGetOp, getOpErr := http.NewRequest(http.MethodGet, ts.URL+getEp+"?_format=application/x-protobuf", nil)
+		require.NoError(t, getOpErr)
+		reqGetOp.Header.Set("Accept", "application/x-protobuf")
+		respGetOp, getOpErr := client.Do(reqGetOp)
+		require.NoError(t, getOpErr)
+		getOpBytes, _ := io.ReadAll(respGetOp.Body)
+		respGetOp.Body.Close()
+		require.Equal(t, http.StatusOK, respGetOp.StatusCode, "GET endpoint %s: %s", getEp, string(getOpBytes))
+		assert.Contains(t, respGetOp.Header.Get("Content-Type"), "application/x-protobuf", "GET endpoint %s", getEp)
+		assert.NotEmpty(t, getOpBytes, "GET endpoint %s", getEp)
+	}
 }
