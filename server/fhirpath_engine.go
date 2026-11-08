@@ -1055,6 +1055,25 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		return nil
 
+	case "coalesce":
+		for _, rawArg := range args {
+			vals := evalFHIRPathExpr(current, ctx, strings.TrimSpace(rawArg))
+			var nonEmpty []any
+			for _, v := range vals {
+				if v == nil {
+					continue
+				}
+				if s, isStr := v.(string); isStr && s == "" {
+					continue
+				}
+				nonEmpty = append(nonEmpty, v)
+			}
+			if len(nonEmpty) > 0 {
+				return nonEmpty
+			}
+		}
+		return nil
+
 	case "not":
 		if len(current) != 1 {
 			return nil
