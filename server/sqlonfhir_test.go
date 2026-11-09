@@ -6563,4 +6563,116 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		assert.Contains(t, respPS.Header.Get("Content-Type"), "application/x-protobuf", "POST _search endpoint %s", postSearchEp)
 		assert.NotEmpty(t, psBytes, "POST _search endpoint %s", postSearchEp)
 	}
+
+	// Wave 108: Reference Collection forEach / forEachOrNull + getReferenceKey([type]) / reference / type & Element Function Pushdown (iif, coalesce, &) + Multi-Compartment / System Search / _history / $meta Binary Proto3
+	_, err = client.Do(func() *http.Request {
+		r, _ := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Patient/proto-pat-gp", strings.NewReader(`{"resourceType":"Patient","id":"proto-pat-gp","active":true,"gender":"female","name":[{"family":"RefFamily","given":["Alice"]}],"generalPractitioner":[{"reference":"Practitioner/w96-prac-1"},{"reference":"Organization/w98-org-1"}]}`))
+		r.Header.Set("Content-Type", "application/fhir+json")
+		return r
+	}())
+	require.NoError(t, err)
+
+	refForEachVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "ref_foreach_elem_func_view",
+		"status": "active",
+		"resource": "Patient",
+		"where": [{"path": "id = 'proto-pat-gp'"}],
+		"select": [{
+			"forEach": "generalPractitioner",
+			"where": [
+				{"path": "type = 'Practitioner' and getReferenceKey('Practitioner').startsWith('w96-prac')"}
+			],
+			"column": [
+				{"name": "rk", "path": "getResourceKey()"},
+				{"name": "gp_ref", "path": "reference"},
+				{"name": "gp_type", "path": "type"},
+				{"name": "gp_id", "path": "getReferenceKey()"},
+				{"name": "gp_prac_id", "path": "getReferenceKey('Practitioner')"},
+				{"name": "gp_org_id", "path": "getReferenceKey('Organization')"},
+				{"name": "gp_label", "path": "iif(type = 'Practitioner', 'PRAC:' & getReferenceKey('Practitioner'), 'ORG:' & getReferenceKey())"},
+				{"name": "gp_coal", "path": "coalesce(getReferenceKey('Organization'), getReferenceKey('Practitioner'))"},
+				{"name": "is_prac", "path": "type = 'Practitioner'"},
+				{"name": "first_gp_prac", "path": "generalPractitioner.getReferenceKey('Practitioner').first()"}
+			]
+		}]
+	}`
+
+	respRFEDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(refForEachVD))
+	require.NoError(t, err)
+	sqlRFEDorisBytes, _ := io.ReadAll(respRFEDoris.Body)
+	respRFEDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respRFEDoris.StatusCode, string(sqlRFEDorisBytes))
+	sqlRFEDoris := string(sqlRFEDorisBytes)
+	assert.Contains(t, sqlRFEDoris, "LATERAL VIEW EXPLODE(ARRAY_FILTER(x -> x LIKE 'general-practitioner=%', r.ref_tokens)) fe_tbl AS fe_tok")
+	assert.Contains(t, sqlRFEDoris, "SPLIT_PART(fe_tok, '=', 2) AS gp_ref")
+	assert.Contains(t, sqlRFEDoris, "SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '/', 1) AS gp_type")
+	assert.Contains(t, sqlRFEDoris, "SPLIT_PART(fe_tok, '/', 2) AS gp_id")
+	assert.Contains(t, sqlRFEDoris, "CASE WHEN SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '/', 1) = 'Practitioner' THEN SPLIT_PART(fe_tok, '/', 2) ELSE NULL END AS gp_prac_id")
+	assert.Contains(t, sqlRFEDoris, "CONCAT('PRAC:', COALESCE(CASE WHEN SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '/', 1) = 'Practitioner'")
+
+	respRFEPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(refForEachVD))
+	require.NoError(t, err)
+	sqlRFEPgBytes, _ := io.ReadAll(respRFEPg.Body)
+	respRFEPg.Body.Close()
+	require.Equal(t, http.StatusOK, respRFEPg.StatusCode, string(sqlRFEPgBytes))
+	sqlRFEPg := string(sqlRFEPgBytes)
+	assert.Contains(t, sqlRFEPg, "INNER JOIN spidx_reference fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'general-practitioner'")
+	assert.Contains(t, sqlRFEPg, "(fe.target_type || '/' || fe.target_id) AS gp_ref")
+	assert.Contains(t, sqlRFEPg, "fe.target_type AS gp_type")
+	assert.Contains(t, sqlRFEPg, "fe.target_id AS gp_id")
+	assert.Contains(t, sqlRFEPg, "CASE WHEN fe.target_type = 'Practitioner' THEN fe.target_id ELSE NULL END AS gp_prac_id")
+	assert.Contains(t, sqlRFEPg, "('PRAC:' || COALESCE(CASE WHEN fe.target_type = 'Practitioner' THEN fe.target_id ELSE NULL END, ''))")
+
+	respRFESqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(refForEachVD))
+	require.NoError(t, err)
+	sqlRFESqliteBytes, _ := io.ReadAll(respRFESqlite.Body)
+	respRFESqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respRFESqlite.StatusCode, string(sqlRFESqliteBytes))
+	sqlRFESqlite := string(sqlRFESqliteBytes)
+	assert.Contains(t, sqlRFESqlite, "INNER JOIN spidx_reference fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'general-practitioner'")
+	assert.Contains(t, sqlRFESqlite, "(fe.target_type || '/' || fe.target_id) AS gp_ref")
+
+	respRFERun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(refForEachVD))
+	require.NoError(t, err)
+	rfeRunBytes, _ := io.ReadAll(respRFERun.Body)
+	respRFERun.Body.Close()
+	require.Equal(t, http.StatusOK, respRFERun.StatusCode, string(rfeRunBytes))
+	assert.Contains(t, string(rfeRunBytes), `"rk":"proto-pat-gp"`)
+	assert.Contains(t, string(rfeRunBytes), `"gp_ref":"Practitioner/w96-prac-1"`)
+	assert.Contains(t, string(rfeRunBytes), `"gp_type":"Practitioner"`)
+	assert.Contains(t, string(rfeRunBytes), `"gp_id":"w96-prac-1"`)
+	assert.Contains(t, string(rfeRunBytes), `"gp_prac_id":"w96-prac-1"`)
+	assert.Contains(t, string(rfeRunBytes), `"gp_label":"PRAC:w96-prac-1"`)
+	assert.Contains(t, string(rfeRunBytes), `"gp_coal":"w96-prac-1"`)
+	assert.NotContains(t, string(rfeRunBytes), `"gp_ref":"Organization/w98-org-1"`)
+
+	for _, w108GetEp := range []string{
+		"/fhir/r4/proto/Patient/proto-pat-1/*?_format=application/x-protobuf",
+		"/fhir/r4/proto/Patient/proto-pat-1/Condition?_format=application/x-protobuf",
+		"/fhir/r4/proto/Patient/proto-pat-1/Encounter?_format=application/x-protobuf",
+		"/fhir/r4/proto/Encounter/w97-enc-1/*?_format=application/x-protobuf",
+		"/fhir/r4/proto/Encounter/w97-enc-1/Observation?_format=application/x-protobuf",
+		"/fhir/r4/proto/Practitioner/w96-prac-1/*?_format=application/x-protobuf",
+		"/fhir/r4/proto/Practitioner/w96-prac-1/Observation?_format=application/x-protobuf",
+		"/fhir/r4/proto/RelatedPerson/rp-1/*?_format=application/x-protobuf",
+		"/fhir/r4/proto/Device/dev-1/*?_format=application/x-protobuf",
+		"/fhir/r4/proto?_type=Patient,Observation&_count=5&_format=application/x-protobuf",
+		"/fhir/r4/proto/$meta?_format=application/x-protobuf",
+		"/fhir/r4/proto/Patient/$meta?_format=application/x-protobuf",
+		"/fhir/r4/proto/_history?_count=5&_format=application/x-protobuf",
+		"/fhir/r4/proto/Patient/_history?_count=5&_format=application/x-protobuf",
+		"/fhir/r4/proto/Patient/proto-pat-1/_history?_format=application/x-protobuf",
+	} {
+		reqW108, wErr := http.NewRequest(http.MethodGet, ts.URL+w108GetEp, nil)
+		require.NoError(t, wErr)
+		reqW108.Header.Set("Accept", "application/x-protobuf")
+		respW108, wErr := client.Do(reqW108)
+		require.NoError(t, wErr)
+		wBytes, _ := io.ReadAll(respW108.Body)
+		respW108.Body.Close()
+		require.Equal(t, http.StatusOK, respW108.StatusCode, "GET %s: %s", w108GetEp, string(wBytes))
+		assert.Contains(t, respW108.Header.Get("Content-Type"), "application/x-protobuf", "GET %s", w108GetEp)
+		assert.NotEmpty(t, wBytes, "GET %s", w108GetEp)
+	}
 }

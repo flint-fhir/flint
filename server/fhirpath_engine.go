@@ -730,6 +730,15 @@ func evalFHIRPathStep(current []any, scopeInput []any, ctx fhirPathContext, seg 
 			}
 			continue
 		}
+		if seg == "type" {
+			if refStr, okRef := m["reference"].(string); okRef && strings.Contains(refStr, "/") && !strings.HasPrefix(refStr, "urn:") {
+				parts := strings.Split(strings.TrimSpace(refStr), "/")
+				if len(parts) >= 2 && parts[len(parts)-2] != "" {
+					next = append(next, parts[len(parts)-2])
+					continue
+				}
+			}
+		}
 		// Polymorphic choice[x] resolution: e.g., "value" -> valueQuantity, valueString, etc., or "effective" -> effectiveDateTime
 		prefix := seg
 		matchedChoice := false
