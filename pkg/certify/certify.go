@@ -6062,6 +6062,36 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-43", suite10, "Zero-JSON Binary Proto3 SQL-on-FHIR v2 (ViewDefinition CRUD, $run, $export, $sql) & 28 Instance-Level Clinical/Financial/Scheduling/Terminology Operations (42 Endpoints) + SQL-on-FHIR v2 Multi-forEach / forEachOrNull Cross-Join Unnesting (fe, fe2) & Built-In Environment Variable Pushdown (%resource, %rootResource, %context, %ucum, %sct, %loinc)", t0, err, "Binary Proto3 42 SQL-on-FHIR v2 & instance-level clinical/financial/scheduling/terminology endpoints + multi-forEach (fe, fe2) & %resource/%loinc $sql & $run pushdown verified")
 
+	// AN-44: SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Arithmetic, Math, String & Mixed-Root Expression Pushdown + Binary Proto3 Wire
+	t0 = time.Now()
+	{
+		forEachArithVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_foreach_elem_arith_math_view","status":"active","resource":"Patient","select":[{"forEach":"identifier","where":[{"path":"(system & '|' & value).startsWith('http://hospital.example.org/mrn|CERT-') and system.length() + value.length() > 10"}],"column":[{"name":"rk","path":"getResourceKey()"},{"name":"sys_val_upper","path":"(system & '|' & value).upper()"},{"name":"sys_val_len","path":"system.length() + value.length()"},{"name":"root_plus_val_len","path":"%resource.id.length() + value.length()"},{"name":"val_len_abs","path":"(value.length() - 20).abs()"},{"name":"val_len_scaled","path":"(value.length() * 1.5).round(1)"}]}]}`)
+
+		respFEADoris, bFEADoris, errFEADoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", forEachArithVD, nil)
+		respFEAPg, bFEAPg, errFEAPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", forEachArithVD, nil)
+		respFEASqlite, bFEASqlite, errFEASqlite := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", forEachArithVD, nil)
+		respFEARun, bFEARun, errFEARun := doReq(http.MethodPost, basePath+"/ViewDefinition/$run", "application/fhir+json", forEachArithVD, nil)
+		respFEASqlProto, bFEASqlProto, errFEASqlProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/x-protobuf", "application/fhir+json", forEachArithVD, map[string]string{"Accept": "application/x-protobuf"})
+		respFEARunProto, bFEARunProto, errFEARunProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$run?_format=application/x-protobuf", "application/fhir+json", forEachArithVD, map[string]string{"Accept": "application/x-protobuf"})
+
+		if errFEADoris != nil || respFEADoris.StatusCode != http.StatusOK || !strings.Contains(string(bFEADoris), "UPPER(CONCAT(COALESCE(SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '|', 1), ''), '|', COALESCE(SPLIT_PART(fe_tok, '|', 2), ''))) AS sys_val_upper") || !strings.Contains(string(bFEADoris), "(CHAR_LENGTH(SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '|', 1)) + CHAR_LENGTH(SPLIT_PART(fe_tok, '|', 2))) AS sys_val_len") || !strings.Contains(string(bFEADoris), "(CHAR_LENGTH(r.res_id) + CHAR_LENGTH(SPLIT_PART(fe_tok, '|', 2))) AS root_plus_val_len") || !strings.Contains(string(bFEADoris), "ABS((CHAR_LENGTH(SPLIT_PART(fe_tok, '|', 2)) - 20)) AS val_len_abs") || !strings.Contains(string(bFEADoris), "ROUND((CHAR_LENGTH(SPLIT_PART(fe_tok, '|', 2)) * 1.5), 1) AS val_len_scaled") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with forEach element arithmetic, math & string method chain pushdown, got %d: %s", respFEADoris.StatusCode, string(bFEADoris))
+		} else if errFEAPg != nil || respFEAPg.StatusCode != http.StatusOK || !strings.Contains(string(bFEAPg), "UPPER((COALESCE(fe.sp_system, '') || '|' || COALESCE(fe.sp_value, ''))) AS sys_val_upper") || !strings.Contains(string(bFEAPg), "(CHAR_LENGTH(fe.sp_system) + CHAR_LENGTH(fe.sp_value)) AS sys_val_len") || !strings.Contains(string(bFEAPg), "(LENGTH(r.res_id) + CHAR_LENGTH(fe.sp_value)) AS root_plus_val_len") || !strings.Contains(string(bFEAPg), "ABS((CHAR_LENGTH(fe.sp_value) - 20)) AS val_len_abs") || !strings.Contains(string(bFEAPg), "ROUND((CHAR_LENGTH(fe.sp_value) * 1.5), 1) AS val_len_scaled") || !strings.Contains(string(bFEAPg), "((COALESCE(fe.sp_system, '') || '|' || COALESCE(fe.sp_value, '')) LIKE 'http://hospital.example.org/mrn|CERT-%' AND (CHAR_LENGTH(fe.sp_system) + CHAR_LENGTH(fe.sp_value)) > 10)") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with forEach element arithmetic, math & string method chain pushdown, got %d: %s", respFEAPg.StatusCode, string(bFEAPg))
+		} else if errFEASqlite != nil || respFEASqlite.StatusCode != http.StatusOK || !strings.Contains(string(bFEASqlite), "(LENGTH(fe.sp_system) + LENGTH(fe.sp_value)) AS sys_val_len") || !strings.Contains(string(bFEASqlite), "(LENGTH(r.res_id) + LENGTH(fe.sp_value)) AS root_plus_val_len") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=sqlite with forEach element arithmetic, math & string method chain pushdown, got %d: %s", respFEASqlite.StatusCode, string(bFEASqlite))
+		} else if errFEARun != nil || respFEARun.StatusCode != http.StatusOK || !strings.Contains(string(bFEARun), `"sys_val_upper":"HTTP://HOSPITAL.EXAMPLE.ORG/MRN|CERT-MRN-1"`) || !strings.Contains(string(bFEARun), `"sys_val_len":41`) || !strings.Contains(string(bFEARun), `"root_plus_val_len":20`) || !strings.Contains(string(bFEARun), `"val_len_abs":10`) || !strings.Contains(string(bFEARun), `"val_len_scaled":15`) {
+			err = fmt.Errorf("expected POST /ViewDefinition/$run with forEach element arithmetic, math & string method chain evaluation, got %d: %s", respFEARun.StatusCode, string(bFEARun))
+		} else if errFEASqlProto != nil || respFEASqlProto == nil || respFEASqlProto.StatusCode != http.StatusOK || !strings.Contains(respFEASqlProto.Header.Get("Content-Type"), "application/x-protobuf") || respFEASqlProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bFEASqlProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$sql?_format=application/x-protobuf, got %v", errFEASqlProto)
+		} else if errFEARunProto != nil || respFEARunProto == nil || respFEARunProto.StatusCode != http.StatusOK || !strings.Contains(respFEARunProto.Header.Get("Content-Type"), "application/x-protobuf") || respFEARunProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bFEARunProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$run?_format=application/x-protobuf, got %v", errFEARunProto)
+		} else {
+			err = nil
+		}
+	}
+	record("AN-44", suite10, "SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Arithmetic (+, -, *, /, div, mod), Math/String Method Chaining on Composite Expressions (.abs(), .round(), .upper(), .length()) & Mixed %resource + forEach Pushdown + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 forEach element arithmetic, math/string method chaining, mixed %resource pushdown & binary Proto3 $sql/$run verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}
