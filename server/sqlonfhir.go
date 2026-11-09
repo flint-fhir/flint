@@ -436,11 +436,16 @@ func qualifyForEachColumnPath(forEachPrefix, colPath string) string {
 	if prefix == "" || p == "" {
 		return p
 	}
-	if strings.HasPrefix(p, "'") || strings.HasPrefix(p, "%") || strings.HasPrefix(p, "getResourceKey(") || p == "id" || strings.HasPrefix(p, prefix+".") || p == prefix {
+	isPureLiteral := strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") && len(splitTopLevelConcatOp(p)) <= 1
+	isPureConst := strings.HasPrefix(p, "%") && !strings.ContainsAny(p, " .&+-*/(")
+	if isPureLiteral || isPureConst || strings.HasPrefix(p, "getResourceKey(") || p == "id" || strings.HasPrefix(p, prefix+".") || p == prefix {
 		return p
 	}
 	if p == "$this" {
 		return prefix
+	}
+	if strings.HasPrefix(p, "$this.") {
+		return prefix + p[len("$this"):]
 	}
 	return prefix + "." + p
 }
@@ -1046,7 +1051,17 @@ func evaluateSingleSelect(root map[string]any, focus any, sel sqlOnFHIRSelect, c
 		if len(sel.Column) > 0 {
 			colRow := make(map[string]any, len(sel.Column))
 			for _, col := range sel.Column {
+				expr := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
 				if item == nil && isForEachOrNull {
+					if expr == "getResourceKey()" || expr == "id" {
+						vals := evalFHIRPathExpr([]any{root}, fhirPathContext{root: root, thisItem: root, index: 0, total: 1}, expr)
+						if len(vals) > 0 {
+							colRow[col.Name] = vals[0]
+						} else {
+							colRow[col.Name] = nil
+						}
+						continue
+					}
 					if col.Collection {
 						colRow[col.Name] = []any{}
 					} else {
@@ -1054,7 +1069,6 @@ func evaluateSingleSelect(root map[string]any, focus any, sel sqlOnFHIRSelect, c
 					}
 					continue
 				}
-				expr := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
 				vals := evalFHIRPathExpr([]any{item}, fhirPathContext{root: root, thisItem: item, index: 0, total: 1}, expr)
 				if col.Collection {
 					if vals == nil {
@@ -1397,7 +1411,8 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 	constMap := buildViewConstantReplacements(opts.viewDef.Constant)
 	columns := collectViewDefinitionColumns(opts.viewDef.Select)
 	branches := extractViewUnionBranches(opts.viewDef.Select)
-	forEachPath, forEachOuter := extractViewForEachSpec(opts.viewDef.Select)
+	rawForEachPath, forEachOuter := extractViewForEachSpec(opts.viewDef.Select)
+	forEachPath := substituteViewConstants(strings.TrimSpace(rawForEachPath), constMap)
 	resType := strings.TrimSpace(opts.viewDef.Resource)
 	escapedTenant := strings.ReplaceAll(tenant, "'", "''")
 
@@ -1457,11 +1472,19 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 			if forEachOuter {
 				explodeFunc = "OUTER EXPLODE"
 			}
-			arrCol := "r.code_tokens"
-			if strings.HasPrefix(forEachPath, "name") || strings.HasPrefix(forEachPath, "address") || strings.HasPrefix(forEachPath, "telecom") {
-				arrCol = "r.string_tokens"
+			if isModifiedForEachCollectionPath(forEachPath) {
+				collExpr, _ := dorisZeroJSONCollectionColumnExpr(forEachPath)
+				lateralClause = fmt.Sprintf(" LATERAL VIEW %s(%s) fe_tbl AS fe_tok", explodeFunc, collExpr)
+			} else if spSys, sysVal, sysTail, okSys := parseSystemFilteredTokenPath(forEachPath); okSys && (sysTail == "" || sysTail == ".value") {
+				escapedSys := strings.ReplaceAll(sysVal, "'", "''")
+				lateralClause = fmt.Sprintf(" LATERAL VIEW %s(ARRAY_FILTER(x -> x LIKE '%s=%s|%%', r.code_tokens)) fe_tbl AS fe_tok", explodeFunc, spSys, escapedSys)
+			} else {
+				arrCol := "r.code_tokens"
+				if strings.HasPrefix(forEachPath, "name") || forEachPath == "given" || forEachPath == "family" || strings.HasPrefix(forEachPath, "address") || strings.HasPrefix(forEachPath, "telecom") {
+					arrCol = "r.string_tokens"
+				}
+				lateralClause = fmt.Sprintf(" LATERAL VIEW %s(%s) fe_tbl AS fe_tok", explodeFunc, arrCol)
 			}
-			lateralClause = fmt.Sprintf(" LATERAL VIEW %s(%s) fe_tbl AS fe_tok", explodeFunc, arrCol)
 		}
 
 		whereClause := strings.Join(whereConds, " AND ")
@@ -1568,16 +1591,31 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		if forEachOuter {
 			joinType = "LEFT JOIN"
 		}
-		feTable := "spidx_token"
-		feSpCond := fmt.Sprintf("fe.sp_name = '%s'", normalizeFHIRPathToSearchParam(forEachPath))
-		if strings.HasPrefix(forEachPath, "name") {
-			feTable = "spidx_string"
-			feSpCond = "fe.sp_name IN ('family', 'given', 'name')"
-		} else if strings.HasPrefix(forEachPath, "address") {
-			feTable = "spidx_string"
-			feSpCond = "fe.sp_name = 'address'"
+		if isModifiedForEachCollectionPath(forEachPath) {
+			subQ, _ := buildSpidxForEachSubquery(forEachPath, dialect)
+			if dialect == "sqlite" {
+				joinClause = fmt.Sprintf(" %s (%s) fe ON 1=1", joinType, subQ)
+			} else {
+				joinClause = fmt.Sprintf(" %s LATERAL (%s) fe ON TRUE", joinType, subQ)
+			}
+		} else if spSys, sysVal, sysTail, okSys := parseSystemFilteredTokenPath(forEachPath); okSys && (sysTail == "" || sysTail == ".value") {
+			escapedSys := strings.ReplaceAll(sysVal, "'", "''")
+			joinClause = fmt.Sprintf(" %s spidx_token fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = '%s' AND fe.sp_system = '%s'", joinType, spSys, escapedSys)
+		} else {
+			feTable := "spidx_token"
+			feSpCond := fmt.Sprintf("fe.sp_name = '%s'", normalizeFHIRPathToSearchParam(forEachPath))
+			if forEachPath == "name" {
+				feTable = "spidx_string"
+				feSpCond = "fe.sp_name IN ('family', 'given', 'name')"
+			} else if strings.HasPrefix(forEachPath, "name.") || forEachPath == "given" || forEachPath == "family" {
+				feTable = "spidx_string"
+				feSpCond = fmt.Sprintf("fe.sp_name = '%s'", normalizeFHIRPathToSearchParam(forEachPath))
+			} else if strings.HasPrefix(forEachPath, "address") {
+				feTable = "spidx_string"
+				feSpCond = "fe.sp_name = 'address'"
+			}
+			joinClause = fmt.Sprintf(" %s %s fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND %s", joinType, feTable, feSpCond)
 		}
-		joinClause = fmt.Sprintf(" %s %s fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND %s", joinType, feTable, feSpCond)
 	}
 
 	whereClause := strings.Join(whereConds, " AND ")
@@ -2955,17 +2993,144 @@ func spidxZeroJSONCollectionColumnExpr(fhirPath, dialect string) (string, string
 	return fmt.Sprintf("(SELECT COALESCE(ARRAY_AGG(t.sp_value), ARRAY[]::text[]) FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s')", sp), "spidx_token[]"
 }
 
+func isModifiedForEachCollectionPath(forEachPath string) bool {
+	p := normalizePolymorphicFHIRPath(strings.TrimSpace(forEachPath))
+	if p == "" {
+		return false
+	}
+	if mods := parseSpidxCollectionModifiers(p); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
+		return true
+	}
+	if strings.HasSuffix(p, ".toChars()") {
+		return true
+	}
+	if idx := strings.LastIndex(p, ".split("); idx != -1 && strings.HasSuffix(p, ")") && !strings.Contains(p[idx+len(".split("):len(p)-1], ").") {
+		return true
+	}
+	return false
+}
+
+func buildSpidxForEachSubquery(forEachPath, dialect string) (string, string) {
+	p := normalizePolymorphicFHIRPath(strings.TrimSpace(forEachPath))
+	if idx := strings.LastIndex(p, ".split("); idx != -1 && strings.HasSuffix(p, ")") && !strings.Contains(p[idx+len(".split("):len(p)-1], ").") {
+		basePath := strings.TrimSpace(p[:idx])
+		rawSep := strings.Trim(strings.TrimSpace(p[idx+len(".split("):len(p)-1]), "'\"")
+		escapedSep := strings.ReplaceAll(rawSep, "'", "''")
+		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+		if dialect == "sqlite" {
+			return fmt.Sprintf("SELECT j.value AS sp_value FROM json_each(json_array(%s)) j", colExpr), colSrc + ".split"
+		}
+		return fmt.Sprintf("SELECT u AS sp_value FROM UNNEST(STRING_TO_ARRAY(%s, '%s')) AS u", colExpr, escapedSep), colSrc + ".split"
+	}
+	if strings.HasSuffix(p, ".toChars()") {
+		basePath := strings.TrimSpace(p[:len(p)-len(".toChars()")])
+		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
+		if dialect == "sqlite" {
+			return fmt.Sprintf("SELECT j.value AS sp_value FROM json_each(json_array(%s)) j", colExpr), colSrc + ".toChars"
+		}
+		return fmt.Sprintf("SELECT u AS sp_value FROM UNNEST(REGEXP_SPLIT_TO_ARRAY(%s, '')) AS u", colExpr), colSrc + ".toChars"
+	}
+	mods := parseSpidxCollectionModifiers(p)
+	return buildModifiedSpidxSubquery(mods, dialect)
+}
+
+func replaceForEachFieldRefsWithThis(expr string) string {
+	var b strings.Builder
+	inQuote := false
+	i := 0
+	isIdentChar := func(ch byte) bool {
+		return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '$'
+	}
+	for i < len(expr) {
+		ch := expr[i]
+		if ch == '\'' {
+			inQuote = !inQuote
+			b.WriteByte(ch)
+			i++
+			continue
+		}
+		if inQuote {
+			b.WriteByte(ch)
+			i++
+			continue
+		}
+		if (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') {
+			prevOK := i == 0 || !isIdentChar(expr[i-1])
+			j := i
+			for j < len(expr) && isIdentChar(expr[j]) {
+				j++
+			}
+			word := expr[i:j]
+			if prevOK && (word == "value" || word == "family" || word == "given" || word == "code" || word == "text" || word == "display") {
+				b.WriteString("$this")
+				i = j
+				continue
+			}
+			b.WriteString(word)
+			i = j
+			continue
+		}
+		b.WriteByte(ch)
+		i++
+	}
+	return b.String()
+}
+
+func forEachElemSelectSQL(tail, valExpr, sysExpr, dialect string) (string, bool) {
+	t := strings.TrimSpace(tail)
+	if t == "" || t == "$this" || t == "value" || t == "family" || t == "given" || t == "code" || t == "text" || t == "display" {
+		return valExpr, true
+	}
+	if t == "system" {
+		return sysExpr, true
+	}
+	if strings.HasPrefix(t, "system.") {
+		if sqlExpr, _, ok := buildElemSelectExprSQL("$this."+t[len("system."):], sysExpr, dialect); ok {
+			return sqlExpr, true
+		}
+	}
+	for _, fp := range []string{"value.", "family.", "given.", "code.", "text.", "display."} {
+		if strings.HasPrefix(t, fp) {
+			if sqlExpr, _, ok := buildElemSelectExprSQL("$this."+t[len(fp):], valExpr, dialect); ok {
+				return sqlExpr, true
+			}
+		}
+	}
+	if sqlExpr, _, ok := buildElemSelectExprSQL(t, valExpr, dialect); ok {
+		return sqlExpr, true
+	}
+	if sqlExpr, _, ok := buildElemSelectExprSQL("$this."+t, valExpr, dialect); ok {
+		return sqlExpr, true
+	}
+	if norm := replaceForEachFieldRefsWithThis(t); norm != t {
+		if sqlExpr, _, ok := buildElemSelectExprSQL(norm, valExpr, dialect); ok {
+			return sqlExpr, true
+		}
+	}
+	return "", false
+}
+
 func dorisZeroJSONForEachColumnExpr(fhirPath, forEachPath string, isCore bool) (string, string) {
 	p := strings.TrimSpace(fhirPath)
 	fe := strings.TrimSpace(forEachPath)
 	if fe != "" && (p == fe || strings.HasPrefix(p, fe+".")) {
-		if strings.HasSuffix(p, ".system") {
-			return "SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '|', 1)", "fe_tok"
+		valExpr := "SPLIT_PART(fe_tok, '|', 2)"
+		sysExpr := "SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '|', 1)"
+		if isModifiedForEachCollectionPath(fe) {
+			valExpr = "fe_tok"
+		} else if _, _, _, okSys := parseSystemFilteredTokenPath(fe); okSys {
+			valExpr = "SPLIT_PART(fe_tok, '|', 2)"
+		} else if strings.HasPrefix(fe, "name") || fe == "given" || fe == "family" || strings.HasPrefix(fe, "address") || strings.HasPrefix(fe, "telecom") {
+			valExpr = "SPLIT_PART(fe_tok, '=', 2)"
 		}
-		if strings.HasPrefix(fe, "name") || strings.HasPrefix(fe, "address") || strings.HasPrefix(fe, "telecom") {
-			return "SPLIT_PART(fe_tok, '=', 2)", "fe_tok"
+		tail := "$this"
+		if strings.HasPrefix(p, fe+".") {
+			tail = strings.TrimSpace(p[len(fe)+1:])
 		}
-		return "SPLIT_PART(fe_tok, '|', 2)", "fe_tok"
+		if sqlExpr, ok := forEachElemSelectSQL(tail, valExpr, sysExpr, "doris"); ok {
+			return sqlExpr, "fe_tok"
+		}
+		return valExpr, "fe_tok"
 	}
 	return dorisZeroJSONColumnExpr(fhirPath, isCore)
 }
@@ -2975,11 +3140,17 @@ func spidxZeroJSONForEachColumnExpr(fhirPath, forEachPath, dialect string) (stri
 	fe := strings.TrimSpace(forEachPath)
 	if fe != "" && (p == fe || strings.HasPrefix(p, fe+".")) {
 		feTable := "spidx_token"
-		if strings.HasPrefix(fe, "name") || strings.HasPrefix(fe, "address") {
+		if isModifiedForEachCollectionPath(fe) {
+			_, feTable = buildSpidxForEachSubquery(fe, dialect)
+		} else if strings.HasPrefix(fe, "name") || fe == "given" || fe == "family" || strings.HasPrefix(fe, "address") {
 			feTable = "spidx_string"
 		}
-		if strings.HasSuffix(p, ".system") {
-			return "fe.sp_system", feTable
+		tail := "$this"
+		if strings.HasPrefix(p, fe+".") {
+			tail = strings.TrimSpace(p[len(fe)+1:])
+		}
+		if sqlExpr, ok := forEachElemSelectSQL(tail, "fe.sp_value", "fe.sp_system", dialect); ok {
+			return sqlExpr, feTable
 		}
 		return "fe.sp_value", feTable
 	}

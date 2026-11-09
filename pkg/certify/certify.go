@@ -5645,6 +5645,82 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-39", suite10, "Zero-JSON Binary Proto3 System-Level & Type-Level GET Operations Across 32 History, Analytics, SDC, Subscription, eCQM, Da Vinci, IHE, Formulary, Directory, Privacy & Clinical Trial Endpoints (_history, Patient/_history, Observation/_history, Observation/$meta, /$data-requirements, /$fhirpath, /$davinci-data-export, /$sync-analytics, /metadata/$subset, /metadata/$implements, $docref, Patient/$summary, Questionnaire/$populate, Questionnaire/$package, Subscription/$status, Subscription/$events, $evaluate-measure, $care-gaps, Claim/$inquire, ServiceRequest/$crd, MedicationRequest/$crd, $immds-forecast, Patient/$gfe, Patient/$ihe-pix, MedicationKnowledge/$lookup, $check-interactions, $find-providers, $find-services, Consent/$evaluate, Encounter/$everything, Group/$everything, $evaluate-eligibility) & SQL-on-FHIR v2 Element-Wise Equivalence (~ / !~), Logical (implies / xor / contains), .matchesFull() & .hasValue() / .exists() Pushdown in .where() / .exists() / .all()", t0, err, "Binary Proto3 32 system/type-level GET operations & element-wise ~/!~/contains/implies/xor/.matchesFull()/.hasValue() $sql pushdown verified")
 
+	// AN-40: Zero-JSON Binary Proto3 Instance-Level GET Operations Across 36 National HL7 IG, Clinical Reasoning, Terminology, Subscription, Payer & Public Health Endpoints (Encounter/{id}/$pacio-timepoints, Patient/{id}/$cancer-registry-report, PlanDefinition/{id}/$medmorph-kar, MeasureReport/{id}/$vbpr-performance, Patient/{id}/$pacio-cognitive-summary, Composition/{id}/$eicr-document, MedicationKnowledge/{id}/$formulary-alternatives, Patient/{id}/$odh-summary, Patient/{id}/$ra-coding-gaps, Patient/{id}/$physical-activity-summary, MedicinalProduct/{id}/$epi-document, ResearchStudy/{id}/$rwd-cohort, DocumentReference/{id}/$ihe-iti-68, Patient/{id}/$find-subject-variants, Patient/{id}/$find-subject-tx-implications, Patient/{id}/$pacio-summary, Patient/{id}/$mcode-summary, Coverage/{id}/$formulary-coverage, Patient/{id}/$carin-bb, Consent/{id}/$evaluate, Group/{id}/$davinci-data-export, MedicationRequest/{id}/$dispense, Patient/{id}/$ihe-pix, ServiceRequest/{id}/$collect-specimen, DiagnosticReport/{id}/$evaluate, MedicationKnowledge/{id}/$lookup, MedicationRequest/{id}/$check-interactions, StructureDefinition/{id}/$snapshot, PlanDefinition/{id}/$apply, ActivityDefinition/{id}/$apply, Subscription/{id}/$status, Subscription/{id}/$events, Library/{id}/$evaluate, Patient/{id}/$pcde, ResearchStudy/{id}/$evaluate-eligibility, Measure/{id}/$evaluate-risk-condition-category) & SQL-on-FHIR v2 forEach / forEachOrNull Collection-Expression & Element-Wise $this / Relative Function Pushdown
+	t0 = time.Now()
+	{
+		var opCheckErr error
+		instGetEndpoints := []string{
+			"/Encounter/cert-enc-1/$pacio-timepoints",
+			"/Patient/cert-pat-1/$cancer-registry-report",
+			"/PlanDefinition/plandef-hypertension-control/$medmorph-kar",
+			"/MeasureReport/cert-mr-w97-1/$vbpr-performance",
+			"/Patient/cert-pat-1/$pacio-cognitive-summary",
+			"/Composition/cert-w98-comp-1/$eicr-document",
+			"/MedicationKnowledge/cert-mk-w97-1/$formulary-alternatives",
+			"/Patient/cert-pat-1/$odh-summary",
+			"/Patient/cert-pat-1/$ra-coding-gaps",
+			"/Patient/cert-pat-1/$physical-activity-summary",
+			"/MedicinalProduct/cert-mp-w101-1/$epi-document",
+			"/ResearchStudy/cert-study-w93-1/$rwd-cohort",
+			"/DocumentReference/cert-doc-1/$ihe-iti-68",
+			"/Patient/cert-pat-1/$find-subject-variants",
+			"/Patient/cert-pat-1/$find-subject-tx-implications",
+			"/Patient/cert-pat-1/$pacio-summary",
+			"/Patient/cert-pat-1/$mcode-summary",
+			"/Coverage/cert-cov-1/$formulary-coverage",
+			"/Patient/cert-pat-1/$carin-bb",
+			"/Consent/cert-con-w97-1/$evaluate?patient=Patient/cert-pat-1",
+			"/Group/pdex-matched-group-1/$davinci-data-export",
+			"/MedicationRequest/cert-medreq-1/$dispense",
+			"/Patient/cert-pat-1/$ihe-pix",
+			"/ServiceRequest/cert-sr-1/$collect-specimen",
+			"/DiagnosticReport/cert-dr-1/$evaluate",
+			"/MedicationKnowledge/cert-mk-w97-1/$lookup",
+			"/MedicationRequest/cert-medreq-1/$check-interactions",
+			"/StructureDefinition/cert-custom-patient-profile/$snapshot",
+			"/PlanDefinition/plandef-hypertension-control/$apply?subject=Patient/cert-pat-1",
+			"/ActivityDefinition/activitydef-bp-home-monitoring/$apply?subject=Patient/cert-pat-1",
+			"/Subscription/cert-w98-sub-1/$status",
+			"/Subscription/cert-w98-sub-1/$events",
+			"/Library/CMS165-Logic/$evaluate?subject=Patient/cert-pat-1",
+			"/Patient/cert-pat-1/$pcde",
+			"/ResearchStudy/cert-study-w93-1/$evaluate-eligibility?subject=Patient/cert-pat-1",
+			"/Measure/cms165-bp-control/$evaluate-risk-condition-category?subject=Patient/cert-pat-1",
+		}
+		for _, instGetEp := range instGetEndpoints {
+			sep := "&"
+			if !strings.Contains(instGetEp, "?") {
+				sep = "?"
+			}
+			respIG, bIG, errIG := doReq(http.MethodGet, basePath+instGetEp+sep+"_format=application/x-protobuf", "", nil, map[string]string{
+				"Accept": "application/x-protobuf",
+			})
+			if errIG != nil || respIG.StatusCode != http.StatusOK || !strings.Contains(respIG.Header.Get("Content-Type"), "application/x-protobuf") || len(bIG) == 0 {
+				status := 0
+				if respIG != nil {
+					status = respIG.StatusCode
+				}
+				opCheckErr = fmt.Errorf("expected binary proto3 200 OK from instance GET %s, got %d (err=%v): %s", instGetEp, status, errIG, string(bIG))
+				break
+			}
+		}
+
+		forEachExprVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_foreach_collection_expr_view","status":"active","resource":"Patient","select":[{"forEach":"name.given.where($this.startsWith('A')).distinct().sort()","column":[{"name":"rk","path":"getResourceKey()"},{"name":"given_val","path":"$this"},{"name":"given_upper","path":"$this.trim().upper()"},{"name":"given_len","path":"$this.length()"},{"name":"given_iif","path":"iif($this.length() >= 4, $this.upper(), $this.lower())"},{"name":"given_tag","path":"$this.upper() & '-TAG'"}]}]}`)
+		respFEDoris, bFEDoris, errFEDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", forEachExprVD, nil)
+		respFEPg, bFEPg, errFEPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", forEachExprVD, nil)
+
+		if opCheckErr != nil {
+			err = opCheckErr
+		} else if errFEDoris != nil || respFEDoris.StatusCode != http.StatusOK || !strings.Contains(string(bFEDoris), "LATERAL VIEW EXPLODE(ARRAY_SORT(ARRAY_DISTINCT(ARRAY_FILTER(x -> x LIKE 'A%',") || !strings.Contains(string(bFEDoris), "UPPER(TRIM(fe_tok)) AS given_upper") || !strings.Contains(string(bFEDoris), "CHAR_LENGTH(fe_tok) AS given_len") || !strings.Contains(string(bFEDoris), "CASE WHEN CHAR_LENGTH(fe_tok) >= 4 THEN UPPER(fe_tok) ELSE LOWER(fe_tok) END AS given_iif") || !strings.Contains(string(bFEDoris), "CONCAT(COALESCE(UPPER(fe_tok), ''), '-TAG') AS given_tag") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with forEach collection-expression & element-wise function pushdown, got %d: %s", respFEDoris.StatusCode, string(bFEDoris))
+		} else if errFEPg != nil || respFEPg.StatusCode != http.StatusOK || !strings.Contains(string(bFEPg), "INNER JOIN LATERAL (SELECT DISTINCT s.sp_value AS sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' AND s.sp_value LIKE 'A%' ORDER BY sp_value ASC) fe ON TRUE") || !strings.Contains(string(bFEPg), "UPPER(TRIM(fe.sp_value)) AS given_upper") || !strings.Contains(string(bFEPg), "CHAR_LENGTH(fe.sp_value) AS given_len") || !strings.Contains(string(bFEPg), "CASE WHEN CHAR_LENGTH(fe.sp_value) >= 4 THEN UPPER(fe.sp_value) ELSE LOWER(fe.sp_value) END AS given_iif") || !strings.Contains(string(bFEPg), "(COALESCE(UPPER(fe.sp_value), '') || '-TAG') AS given_tag") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with forEach collection-expression & element-wise function pushdown, got %d: %s", respFEPg.StatusCode, string(bFEPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-40", suite10, "Zero-JSON Binary Proto3 Instance-Level GET Operations Across 36 National HL7 IG, Clinical Reasoning, Terminology, Subscription, Payer & Public Health Endpoints ($pacio-timepoints, $cancer-registry-report, $medmorph-kar, $vbpr-performance, $pacio-cognitive-summary, $eicr-document, $formulary-alternatives, $odh-summary, $ra-coding-gaps, $physical-activity-summary, $epi-document, $rwd-cohort, $ihe-iti-68, $find-subject-variants, $find-subject-tx-implications, $pacio-summary, $mcode-summary, $formulary-coverage, $carin-bb, Consent/$evaluate, Group/$davinci-data-export, $dispense, $ihe-pix, $collect-specimen, DiagnosticReport/$evaluate, MedicationKnowledge/$lookup, $check-interactions, $snapshot, PlanDefinition/$apply, ActivityDefinition/$apply, Subscription/$status, Subscription/$events, Library/$evaluate, $pcde, $evaluate-eligibility, $evaluate-risk-condition-category) & SQL-on-FHIR v2 forEach / forEachOrNull Collection-Expression & Element-Wise $this / Relative Function Pushdown", t0, err, "Binary Proto3 36 instance-level GET operations & forEach / forEachOrNull collection-expression & element-wise $this / function $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

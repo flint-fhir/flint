@@ -1953,6 +1953,11 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 				}
 			}
 		}
+		if len(keys) == 0 && ctx.root != nil {
+			if id, ok := ctx.root["id"].(string); ok && strings.TrimSpace(id) != "" {
+				keys = append(keys, strings.TrimSpace(id))
+			}
+		}
 		return keys
 
 	case "getreferencekey":
