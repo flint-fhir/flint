@@ -5822,6 +5822,107 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-41", suite10, "Zero-JSON Binary Proto3 Core Instance-Level GET Operations Across 36 Clinical, Terminology, Measure, SDC & Conformance Endpoints ($meta, $everything, $validate, $diff, $graph, $data-requirements, $find, $crd, $evaluate, $immds-forecast, $gfe, $fhirpath, $provenance, $summary, $document, $populate, $package, $inquire, $evaluate-measure, $collect-data, $care-gaps, $expand, $validate-code, $lookup, $subsumes, $find-matches, $translate, TestScript/$evaluate, AuditEvent & Compartment Search) & SQL-on-FHIR v2 Nested select + forEach / forEachOrNull, forEach where Pushdown & forEach + unionAll", t0, err, "Binary Proto3 36 core instance-level GET operations + AuditEvent/compartment search & nested forEach + where + unionAll $sql & $run pushdown verified")
 
+	// AN-42: Zero-JSON Binary Proto3 Multi-Compartment (Patient, Encounter, Practitioner, RelatedPerson, Device), Wildcard /*, System Search, POST _search, _history & $meta Negotiation + SQL-on-FHIR v2 Reference Collection forEach / forEachOrNull & Element Function Pushdown (getReferenceKey, reference, type, iif, coalesce, &)
+	t0 = time.Now()
+	{
+		_, _, _ = doReq(http.MethodPut, basePath+"/Patient/cert-pat-1", "application/fhir+json", []byte(`{"resourceType":"Patient","id":"cert-pat-1","active":true,"gender":"female","birthDate":"1985-04-12","identifier":[{"use":"usual","type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/v2-0203","code":"MR"}]},"system":"http://hospital.example.org/mrn","value":"CERT-MRN-1"}],"name":[{"use":"official","family":"Certify","given":["Alice","Marie"]}],"generalPractitioner":[{"reference":"Practitioner/cert-prac-1"}],"managingOrganization":{"reference":"Organization/cert-org-1"}}`), nil)
+		var opCheckErr error
+		for _, protoGetEp := range []string{
+			basePath + "/Patient/cert-pat-1/*?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/Condition?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/Encounter?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/MedicationRequest?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/AllergyIntolerance?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/Procedure?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/DiagnosticReport?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/Immunization?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/CarePlan?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/CareTeam?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/Goal?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/ServiceRequest?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/Coverage?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/DocumentReference?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/Provenance?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/AuditEvent?_format=application/x-protobuf",
+			basePath + "/Encounter/cert-enc-1/*?_format=application/x-protobuf",
+			basePath + "/Encounter/cert-enc-1/Observation?_format=application/x-protobuf",
+			basePath + "/Encounter/cert-enc-1/Condition?_format=application/x-protobuf",
+			basePath + "/Encounter/cert-enc-1/Procedure?_format=application/x-protobuf",
+			basePath + "/Practitioner/cert-prac-1/*?_format=application/x-protobuf",
+			basePath + "/Practitioner/cert-prac-1/Encounter?_format=application/x-protobuf",
+			basePath + "/Practitioner/cert-prac-1/Observation?_format=application/x-protobuf",
+			basePath + "/Practitioner/cert-prac-1/MedicationRequest?_format=application/x-protobuf",
+			basePath + "/RelatedPerson/cert-rp-1/*?_format=application/x-protobuf",
+			basePath + "/RelatedPerson/cert-rp-1/Patient?_format=application/x-protobuf",
+			basePath + "/Device/cert-dev-1/*?_format=application/x-protobuf",
+			basePath + "/Device/cert-dev-1/Observation?_format=application/x-protobuf",
+			basePath + "?_type=Patient,Observation&_count=5&_format=application/x-protobuf",
+			basePath + "/$meta?_format=application/x-protobuf",
+			basePath + "/Patient/$meta?_format=application/x-protobuf",
+			basePath + "/Observation/$meta?_format=application/x-protobuf",
+			basePath + "/_history?_count=5&_format=application/x-protobuf",
+			basePath + "/Patient/_history?_count=5&_format=application/x-protobuf",
+			basePath + "/Observation/_history?_count=5&_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/_history?_format=application/x-protobuf",
+		} {
+			respPG, bPG, errPG := doReq(http.MethodGet, protoGetEp, "", nil, map[string]string{"Accept": "application/x-protobuf"})
+			if errPG != nil || respPG == nil || respPG.StatusCode != http.StatusOK || !strings.Contains(respPG.Header.Get("Content-Type"), "application/x-protobuf") || len(bPG) == 0 {
+				status := 0
+				if respPG != nil {
+					status = respPG.StatusCode
+				}
+				opCheckErr = fmt.Errorf("expected binary proto3 200 OK from GET %s, got %d (err=%v): %s", protoGetEp, status, errPG, string(bPG))
+				break
+			}
+		}
+
+		if opCheckErr == nil {
+			for _, postSearchEp := range []struct {
+				url  string
+				form string
+			}{
+				{basePath + "/_search?_format=application/x-protobuf", "_type=Patient,Observation&_count=5"},
+				{basePath + "/Patient/_search?_format=application/x-protobuf", "_id=cert-pat-1"},
+				{basePath + "/Patient/cert-pat-1/*/_search?_format=application/x-protobuf", "_count=5"},
+				{basePath + "/Encounter/cert-enc-1/Observation/_search?_format=application/x-protobuf", "_count=5"},
+				{basePath + "/Practitioner/cert-prac-1/Observation/_search?_format=application/x-protobuf", "_count=5"},
+				{basePath + "/Device/cert-dev-1/Observation/_search?_format=application/x-protobuf", "_count=5"},
+			} {
+				respPS, bPS, errPS := doReq(http.MethodPost, postSearchEp.url, "application/x-www-form-urlencoded", []byte(postSearchEp.form), map[string]string{"Accept": "application/x-protobuf"})
+				if errPS != nil || respPS == nil || respPS.StatusCode != http.StatusOK || !strings.Contains(respPS.Header.Get("Content-Type"), "application/x-protobuf") || len(bPS) == 0 {
+					status := 0
+					if respPS != nil {
+						status = respPS.StatusCode
+					}
+					opCheckErr = fmt.Errorf("expected binary proto3 200 OK from POST %s, got %d (err=%v): %s", postSearchEp.url, status, errPS, string(bPS))
+					break
+				}
+			}
+		}
+
+		refForEachVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_ref_foreach_elem_func_view","status":"active","resource":"Patient","select":[{"forEach":"generalPractitioner","where":[{"path":"type = 'Practitioner' and getReferenceKey('Practitioner').startsWith('cert-prac')"}],"column":[{"name":"rk","path":"getResourceKey()"},{"name":"gp_ref","path":"reference"},{"name":"gp_type","path":"type"},{"name":"gp_id","path":"getReferenceKey()"},{"name":"gp_prac_id","path":"getReferenceKey('Practitioner')"},{"name":"gp_org_id","path":"getReferenceKey('Organization')"},{"name":"gp_label","path":"iif(type = 'Practitioner', 'PRAC:' & getReferenceKey('Practitioner'), 'ORG:' & getReferenceKey())"},{"name":"gp_coal","path":"coalesce(getReferenceKey('Organization'), getReferenceKey('Practitioner'))"},{"name":"is_prac","path":"type = 'Practitioner'"}]}]}`)
+
+		respRFEDoris, bRFEDoris, errRFEDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", refForEachVD, nil)
+		respRFEPg, bRFEPg, errRFEPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", refForEachVD, nil)
+		respRFESqlite, bRFESqlite, errRFESqlite := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", refForEachVD, nil)
+		respRFERun, bRFERun, errRFERun := doReq(http.MethodPost, basePath+"/ViewDefinition/$run", "application/fhir+json", refForEachVD, nil)
+
+		if opCheckErr != nil {
+			err = opCheckErr
+		} else if errRFEDoris != nil || respRFEDoris.StatusCode != http.StatusOK || !strings.Contains(string(bRFEDoris), "LATERAL VIEW EXPLODE(ARRAY_FILTER(x -> x LIKE 'general-practitioner=%', r.ref_tokens)) fe_tbl AS fe_tok") || !strings.Contains(string(bRFEDoris), "SPLIT_PART(fe_tok, '=', 2) AS gp_ref") || !strings.Contains(string(bRFEDoris), "SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '/', 1) AS gp_type") || !strings.Contains(string(bRFEDoris), "SPLIT_PART(fe_tok, '/', 2) AS gp_id") || !strings.Contains(string(bRFEDoris), "CASE WHEN SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '/', 1) = 'Practitioner' THEN SPLIT_PART(fe_tok, '/', 2) ELSE NULL END AS gp_prac_id") || !strings.Contains(string(bRFEDoris), "CONCAT('PRAC:', COALESCE(CASE WHEN SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '/', 1) = 'Practitioner'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with reference forEach & getReferenceKey/iif/coalesce pushdown, got %d: %s", respRFEDoris.StatusCode, string(bRFEDoris))
+		} else if errRFEPg != nil || respRFEPg.StatusCode != http.StatusOK || !strings.Contains(string(bRFEPg), "INNER JOIN spidx_reference fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'general-practitioner'") || !strings.Contains(string(bRFEPg), "(fe.target_type || '/' || fe.target_id) AS gp_ref") || !strings.Contains(string(bRFEPg), "fe.target_type AS gp_type") || !strings.Contains(string(bRFEPg), "fe.target_id AS gp_id") || !strings.Contains(string(bRFEPg), "CASE WHEN fe.target_type = 'Practitioner' THEN fe.target_id ELSE NULL END AS gp_prac_id") || !strings.Contains(string(bRFEPg), "('PRAC:' || COALESCE(CASE WHEN fe.target_type = 'Practitioner' THEN fe.target_id ELSE NULL END, ''))") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with reference forEach & getReferenceKey/iif/coalesce pushdown, got %d: %s", respRFEPg.StatusCode, string(bRFEPg))
+		} else if errRFESqlite != nil || respRFESqlite.StatusCode != http.StatusOK || !strings.Contains(string(bRFESqlite), "INNER JOIN spidx_reference fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'general-practitioner'") || !strings.Contains(string(bRFESqlite), "(fe.target_type || '/' || fe.target_id) AS gp_ref") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=sqlite with reference forEach & getReferenceKey/iif/coalesce pushdown, got %d: %s", respRFESqlite.StatusCode, string(bRFESqlite))
+		} else if errRFERun != nil || respRFERun.StatusCode != http.StatusOK || !strings.Contains(string(bRFERun), `"gp_ref":"Practitioner/cert-prac-1"`) || !strings.Contains(string(bRFERun), `"gp_type":"Practitioner"`) || !strings.Contains(string(bRFERun), `"gp_prac_id":"cert-prac-1"`) || !strings.Contains(string(bRFERun), `"gp_label":"PRAC:cert-prac-1"`) || !strings.Contains(string(bRFERun), `"gp_coal":"cert-prac-1"`) {
+			err = fmt.Errorf("expected POST /ViewDefinition/$run with reference forEach & getReferenceKey/iif/coalesce evaluation, got %d: %s", respRFERun.StatusCode, string(bRFERun))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-42", suite10, "Zero-JSON Binary Proto3 Multi-Compartment (Patient, Encounter, Practitioner, RelatedPerson, Device), Wildcard /*, System Search, POST _search, _history & $meta Negotiation Across 42 Endpoints + SQL-on-FHIR v2 Reference Collection forEach / forEachOrNull & Element Function Pushdown (getReferenceKey, reference, type, iif, coalesce, &)", t0, err, "Binary Proto3 42 multi-compartment/system search/_history/$meta endpoints & reference collection forEach + getReferenceKey/iif/coalesce $sql & $run pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}
