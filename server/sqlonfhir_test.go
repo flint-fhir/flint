@@ -6778,4 +6778,102 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		assert.Contains(t, respW108.Header.Get("Content-Type"), "application/x-protobuf", "GET %s", w108GetEp)
 		assert.NotEmpty(t, wBytes, "GET %s", w108GetEp)
 	}
+
+	// Wave 110: forEach / forEachOrNull Element-Level Arithmetic, Math, String & Mixed-Root Expression Pushdown + Binary Proto3 Wire
+	_, err = client.Do(func() *http.Request {
+		r, _ := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Patient/proto-pat-mrn-w110", strings.NewReader(`{"resourceType":"Patient","id":"proto-pat-mrn-w110","active":true,"gender":"female","name":[{"family":"ArithFamily","given":["Alice"]}],"identifier":[{"system":"http://hospital.example.org/mrn","value":"MRN-1001"}]}`))
+		r.Header.Set("Content-Type", "application/fhir+json")
+		return r
+	}())
+	require.NoError(t, err)
+
+	forEachArithVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "w110_foreach_elem_arith_math_view",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"forEach": "identifier",
+				"where": [
+					{"path": "(system & '|' & value).startsWith('http://hospital.example.org/mrn|MRN-') and system.length() + value.length() > 10"}
+				],
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "sys_val_upper", "path": "(system & '|' & value).upper()"},
+					{"name": "sys_val_len", "path": "system.length() + value.length()"},
+					{"name": "root_plus_val_len", "path": "%resource.id.length() + value.length()"},
+					{"name": "val_len_abs", "path": "(value.length() - 20).abs()"},
+					{"name": "val_len_scaled", "path": "(value.length() * 1.5).round(1)"},
+					{"name": "val_len_div", "path": "value.length() div 3"},
+					{"name": "val_len_mod", "path": "value.length() mod 3"}
+				]
+			}
+		]
+	}`
+
+	respDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(forEachArithVD))
+	require.NoError(t, err)
+	sqlDorisBytes, _ := io.ReadAll(respDoris.Body)
+	respDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respDoris.StatusCode, string(sqlDorisBytes))
+	sqlDoris := string(sqlDorisBytes)
+	assert.Contains(t, sqlDoris, "UPPER(CONCAT(COALESCE(SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '|', 1), ''), '|', COALESCE(SPLIT_PART(fe_tok, '|', 2), ''))) AS sys_val_upper")
+	assert.Contains(t, sqlDoris, "(CHAR_LENGTH(SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '|', 1)) + CHAR_LENGTH(SPLIT_PART(fe_tok, '|', 2))) AS sys_val_len")
+	assert.Contains(t, sqlDoris, "(CHAR_LENGTH(r.res_id) + CHAR_LENGTH(SPLIT_PART(fe_tok, '|', 2))) AS root_plus_val_len")
+	assert.Contains(t, sqlDoris, "ABS((CHAR_LENGTH(SPLIT_PART(fe_tok, '|', 2)) - 20)) AS val_len_abs")
+	assert.Contains(t, sqlDoris, "ROUND((CHAR_LENGTH(SPLIT_PART(fe_tok, '|', 2)) * 1.5), 1) AS val_len_scaled")
+	assert.Contains(t, sqlDoris, "CAST((CHAR_LENGTH(SPLIT_PART(fe_tok, '|', 2)) / 3) AS BIGINT) AS val_len_div")
+	assert.Contains(t, sqlDoris, "MOD(CHAR_LENGTH(SPLIT_PART(fe_tok, '|', 2)), 3) AS val_len_mod")
+
+	respPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(forEachArithVD))
+	require.NoError(t, err)
+	sqlPgBytes, _ := io.ReadAll(respPg.Body)
+	respPg.Body.Close()
+	require.Equal(t, http.StatusOK, respPg.StatusCode, string(sqlPgBytes))
+	sqlPg := string(sqlPgBytes)
+	assert.Contains(t, sqlPg, "UPPER((COALESCE(fe.sp_system, '') || '|' || COALESCE(fe.sp_value, ''))) AS sys_val_upper")
+	assert.Contains(t, sqlPg, "(CHAR_LENGTH(fe.sp_system) + CHAR_LENGTH(fe.sp_value)) AS sys_val_len")
+	assert.Contains(t, sqlPg, "(LENGTH(r.res_id) + CHAR_LENGTH(fe.sp_value)) AS root_plus_val_len")
+	assert.Contains(t, sqlPg, "ABS((CHAR_LENGTH(fe.sp_value) - 20)) AS val_len_abs")
+	assert.Contains(t, sqlPg, "ROUND((CHAR_LENGTH(fe.sp_value) * 1.5), 1) AS val_len_scaled")
+	assert.Contains(t, sqlPg, "CAST(TRUNC(CHAR_LENGTH(fe.sp_value) / 3) AS BIGINT) AS val_len_div")
+	assert.Contains(t, sqlPg, "MOD(CAST(CHAR_LENGTH(fe.sp_value) AS NUMERIC), CAST(3 AS NUMERIC)) AS val_len_mod")
+	assert.Contains(t, sqlPg, "((COALESCE(fe.sp_system, '') || '|' || COALESCE(fe.sp_value, '')) LIKE 'http://hospital.example.org/mrn|MRN-%' AND (CHAR_LENGTH(fe.sp_system) + CHAR_LENGTH(fe.sp_value)) > 10)")
+
+	respSqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(forEachArithVD))
+	require.NoError(t, err)
+	sqlSqliteBytes, _ := io.ReadAll(respSqlite.Body)
+	respSqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respSqlite.StatusCode, string(sqlSqliteBytes))
+	sqlSqlite := string(sqlSqliteBytes)
+	assert.Contains(t, sqlSqlite, "(LENGTH(fe.sp_system) + LENGTH(fe.sp_value)) AS sys_val_len")
+	assert.Contains(t, sqlSqlite, "(LENGTH(r.res_id) + LENGTH(fe.sp_value)) AS root_plus_val_len")
+	assert.Contains(t, sqlSqlite, "CAST((LENGTH(fe.sp_value) / 3) AS INTEGER) AS val_len_div")
+	assert.Contains(t, sqlSqlite, "(CAST(LENGTH(fe.sp_value) AS INTEGER) % CAST(3 AS INTEGER)) AS val_len_mod")
+
+	respRun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(forEachArithVD))
+	require.NoError(t, err)
+	runBytes, _ := io.ReadAll(respRun.Body)
+	respRun.Body.Close()
+	require.Equal(t, http.StatusOK, respRun.StatusCode, string(runBytes))
+	assert.Contains(t, string(runBytes), `"sys_val_upper":"HTTP://HOSPITAL.EXAMPLE.ORG/MRN|MRN-1001"`)
+	assert.Contains(t, string(runBytes), `"sys_val_len":39`)
+	assert.Contains(t, string(runBytes), `"val_len_abs":12`)
+	assert.Contains(t, string(runBytes), `"val_len_scaled":12`)
+	assert.Contains(t, string(runBytes), `"val_len_div":2`)
+	assert.Contains(t, string(runBytes), `"val_len_mod":2`)
+
+	reqProtoRun, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run?_format=application/x-protobuf", strings.NewReader(forEachArithVD))
+	require.NoError(t, err)
+	reqProtoRun.Header.Set("Content-Type", "application/fhir+json")
+	reqProtoRun.Header.Set("Accept", "application/x-protobuf")
+	respProtoRun, err := client.Do(reqProtoRun)
+	require.NoError(t, err)
+	protoRunBytes, _ := io.ReadAll(respProtoRun.Body)
+	respProtoRun.Body.Close()
+	require.Equal(t, http.StatusOK, respProtoRun.StatusCode)
+	assert.Contains(t, respProtoRun.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.Equal(t, "google.fhir.r4.proto3", respProtoRun.Header.Get("X-Flint-Wire-Format"))
+	assert.NotEmpty(t, protoRunBytes)
 }
