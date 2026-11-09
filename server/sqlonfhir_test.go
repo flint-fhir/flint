@@ -6341,4 +6341,226 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		assert.Contains(t, respIG.Header.Get("Content-Type"), "application/x-protobuf", "instance GET endpoint %s", instGetEp)
 		assert.NotEmpty(t, igBytes, "instance GET endpoint %s", instGetEp)
 	}
+
+	// 56. Wave 107: SQL-on-FHIR v2 Nested select + forEach / forEachOrNull, forEach where Pushdown & forEach + unionAll ($sql & $run) & Binary Proto3 Core Instance-Level GET, Compartment & Audit Endpoints
+	nestedFEWhereVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "nested_foreach_where_view",
+		"status": "active",
+		"resource": "Patient",
+		"select": [{
+			"forEach": "name",
+			"column": [
+				{"name": "rk", "path": "getResourceKey()"},
+				{"name": "family_val", "path": "family"}
+			],
+			"select": [{
+				"forEach": "given",
+				"where": [
+					{"path": "$this.startsWith('A') and $this.length() >= 3"}
+				],
+				"column": [
+					{"name": "given_val", "path": "$this"},
+					{"name": "given_upper", "path": "$this.upper()"}
+				]
+			}]
+		}]
+	}`
+
+	respNFEWDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(nestedFEWhereVD))
+	require.NoError(t, err)
+	sqlNFEWDorisBytes, _ := io.ReadAll(respNFEWDoris.Body)
+	respNFEWDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respNFEWDoris.StatusCode, string(sqlNFEWDorisBytes))
+	sqlNFEWDoris := string(sqlNFEWDorisBytes)
+	assert.Contains(t, sqlNFEWDoris, "LATERAL VIEW EXPLODE(r.string_tokens) fe_tbl AS fe_tok")
+	assert.Contains(t, sqlNFEWDoris, "SPLIT_PART(fe_tok, '=', 2) AS given_val")
+	assert.Contains(t, sqlNFEWDoris, "UPPER(SPLIT_PART(fe_tok, '=', 2)) AS given_upper")
+	assert.Contains(t, sqlNFEWDoris, "SPLIT_PART(fe_tok, '=', 2) LIKE 'A%'")
+	assert.Contains(t, sqlNFEWDoris, "CHAR_LENGTH(SPLIT_PART(fe_tok, '=', 2)) >= 3")
+
+	respNFEWPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(nestedFEWhereVD))
+	require.NoError(t, err)
+	sqlNFEWPgBytes, _ := io.ReadAll(respNFEWPg.Body)
+	respNFEWPg.Body.Close()
+	require.Equal(t, http.StatusOK, respNFEWPg.StatusCode, string(sqlNFEWPgBytes))
+	sqlNFEWPg := string(sqlNFEWPgBytes)
+	assert.Contains(t, sqlNFEWPg, "INNER JOIN spidx_string fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'given'")
+	assert.Contains(t, sqlNFEWPg, "fe.sp_value AS given_val")
+	assert.Contains(t, sqlNFEWPg, "UPPER(fe.sp_value) AS given_upper")
+	assert.Contains(t, sqlNFEWPg, "fe.sp_value LIKE 'A%'")
+	assert.Contains(t, sqlNFEWPg, "CHAR_LENGTH(fe.sp_value) >= 3")
+
+	respNFEWSqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(nestedFEWhereVD))
+	require.NoError(t, err)
+	sqlNFEWSqliteBytes, _ := io.ReadAll(respNFEWSqlite.Body)
+	respNFEWSqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respNFEWSqlite.StatusCode, string(sqlNFEWSqliteBytes))
+	sqlNFEWSqlite := string(sqlNFEWSqliteBytes)
+	assert.Contains(t, sqlNFEWSqlite, "INNER JOIN spidx_string fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'given'")
+	assert.Contains(t, sqlNFEWSqlite, "fe.sp_value LIKE 'A%'")
+	assert.Contains(t, sqlNFEWSqlite, "LENGTH(fe.sp_value) >= 3")
+
+	respNFEWRun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(nestedFEWhereVD))
+	require.NoError(t, err)
+	nfewRunBytes, _ := io.ReadAll(respNFEWRun.Body)
+	respNFEWRun.Body.Close()
+	require.Equal(t, http.StatusOK, respNFEWRun.StatusCode, string(nfewRunBytes))
+	assert.Contains(t, string(nfewRunBytes), `"rk":"proto-pat-1"`)
+	assert.Contains(t, string(nfewRunBytes), `"family_val":"ProtoFamily"`)
+	assert.Contains(t, string(nfewRunBytes), `"given_val":"Alice"`)
+	assert.Contains(t, string(nfewRunBytes), `"given_upper":"ALICE"`)
+	assert.NotContains(t, string(nfewRunBytes), `"given_val":"Marie"`)
+
+	feUnionVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "foreach_union_where_view",
+		"status": "active",
+		"resource": "Patient",
+		"select": [{
+			"column": [
+				{"name": "rk", "path": "getResourceKey()"}
+			],
+			"unionAll": [
+				{
+					"forEach": "name.given",
+					"where": [{"path": "$this.startsWith('A')"}],
+					"column": [
+						{"name": "kind", "path": "'given'"},
+						{"name": "item_val", "path": "$this.upper()"}
+					]
+				},
+				{
+					"forEach": "identifier",
+					"where": [{"path": "value.startsWith('MRN')"}],
+					"column": [
+						{"name": "kind", "path": "'mrn'"},
+						{"name": "item_val", "path": "value"}
+					]
+				}
+			]
+		}]
+	}`
+
+	respFEUDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(feUnionVD))
+	require.NoError(t, err)
+	sqlFEUDorisBytes, _ := io.ReadAll(respFEUDoris.Body)
+	respFEUDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respFEUDoris.StatusCode, string(sqlFEUDorisBytes))
+	sqlFEUDoris := string(sqlFEUDorisBytes)
+	assert.Contains(t, sqlFEUDoris, "UNION ALL")
+	assert.Contains(t, sqlFEUDoris, "SPLIT_PART(fe_tok, '=', 2) LIKE 'A%'")
+	assert.Contains(t, sqlFEUDoris, "SPLIT_PART(fe_tok, '|', 2) LIKE 'MRN%'")
+
+	respFEUPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(feUnionVD))
+	require.NoError(t, err)
+	sqlFEUPgBytes, _ := io.ReadAll(respFEUPg.Body)
+	respFEUPg.Body.Close()
+	require.Equal(t, http.StatusOK, respFEUPg.StatusCode, string(sqlFEUPgBytes))
+	sqlFEUPg := string(sqlFEUPgBytes)
+	assert.Contains(t, sqlFEUPg, "UNION ALL")
+	assert.Contains(t, sqlFEUPg, "INNER JOIN spidx_string fe")
+	assert.Contains(t, sqlFEUPg, "INNER JOIN spidx_token fe")
+	assert.Contains(t, sqlFEUPg, "fe.sp_value LIKE 'A%'")
+	assert.Contains(t, sqlFEUPg, "fe.sp_value LIKE 'MRN%'")
+
+	respFEURun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(feUnionVD))
+	require.NoError(t, err)
+	feuRunBytes, _ := io.ReadAll(respFEURun.Body)
+	respFEURun.Body.Close()
+	require.Equal(t, http.StatusOK, respFEURun.StatusCode, string(feuRunBytes))
+	assert.Contains(t, string(feuRunBytes), `"item_val":"ALICE"`)
+	assert.Contains(t, string(feuRunBytes), `"item_val":"MRN-PROTO-1"`)
+
+	// Seed CarePlan, AdverseEvent, RiskAssessment, Schedule, TestScript & Observation for core instance-level GET endpoints
+	for _, seed := range []struct {
+		path string
+		body string
+	}{
+		{"/fhir/r4/proto/Observation/proto-obs-1", `{"resourceType":"Observation","id":"proto-obs-1","status":"final","code":{"coding":[{"system":"http://loinc.org","code":"8867-4"}]},"subject":{"reference":"Patient/proto-pat-1"},"valueQuantity":{"value":72,"unit":"/min"}}`},
+		{"/fhir/r4/proto/CarePlan/w107-cp-1", `{"resourceType":"CarePlan","id":"w107-cp-1","status":"active","intent":"plan","subject":{"reference":"Patient/proto-pat-1"}}`},
+		{"/fhir/r4/proto/AdverseEvent/w107-ae-1", `{"resourceType":"AdverseEvent","id":"w107-ae-1","actuality":"actual","subject":{"reference":"Patient/proto-pat-1"}}`},
+		{"/fhir/r4/proto/RiskAssessment/w107-ra-1", `{"resourceType":"RiskAssessment","id":"w107-ra-1","status":"final","subject":{"reference":"Patient/proto-pat-1"}}`},
+		{"/fhir/r4/proto/Schedule/w107-sched-1", `{"resourceType":"Schedule","id":"w107-sched-1","active":true,"actor":[{"reference":"Practitioner/w96-prac-1"}]}`},
+		{"/fhir/r4/proto/TestScript/w107-ts-1", `{"resourceType":"TestScript","id":"w107-ts-1","url":"http://flint.fhir.org/TestScript/w107-ts-1","name":"W107TS","status":"active"}`},
+	} {
+		reqSeed, sErr := http.NewRequest(http.MethodPut, ts.URL+seed.path, strings.NewReader(seed.body))
+		require.NoError(t, sErr)
+		reqSeed.Header.Set("Content-Type", "application/fhir+json")
+		respSeed, sErr := client.Do(reqSeed)
+		require.NoError(t, sErr)
+		respSeed.Body.Close()
+	}
+
+	for _, coreInstGetEp := range []string{
+		"/fhir/r4/proto/Patient/proto-pat-1/$meta",
+		"/fhir/r4/proto/Observation/proto-obs-1/$meta",
+		"/fhir/r4/proto/Encounter/w97-enc-1/$everything",
+		"/fhir/r4/proto/Group/w99-grp-1/$everything",
+		"/fhir/r4/proto/Patient/proto-pat-1/$validate",
+		"/fhir/r4/proto/Patient/proto-pat-1/$diff",
+		"/fhir/r4/proto/GraphDefinition/us-core-patient-care-graph/$graph?start=Patient/proto-pat-1",
+		"/fhir/r4/proto/Patient/proto-pat-1/$graph",
+		"/fhir/r4/proto/Library/CMS165-Logic/$data-requirements",
+		"/fhir/r4/proto/PlanDefinition/hypertension-management/$data-requirements",
+		"/fhir/r4/proto/Schedule/w107-sched-1/$find",
+		"/fhir/r4/proto/ServiceRequest/w99-sr-1/$crd",
+		"/fhir/r4/proto/MedicationRequest/w99-mr-1/$crd",
+		"/fhir/r4/proto/AdverseEvent/w107-ae-1/$evaluate",
+		"/fhir/r4/proto/CarePlan/w107-cp-1/$evaluate",
+		"/fhir/r4/proto/Patient/proto-pat-1/$immds-forecast",
+		"/fhir/r4/proto/Patient/proto-pat-1/$gfe",
+		"/fhir/r4/proto/RiskAssessment/w107-ra-1/$evaluate",
+		"/fhir/r4/proto/Patient/proto-pat-1/$fhirpath?expression=Patient.gender",
+		"/fhir/r4/proto/Patient/proto-pat-1/$provenance",
+		"/fhir/r4/proto/Patient/proto-pat-1/$summary",
+		"/fhir/r4/proto/Composition/w98-comp-1/$document",
+		"/fhir/r4/proto/Questionnaire/phq-9/$populate?subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/Questionnaire/phq-9/$package",
+		"/fhir/r4/proto/Claim/w105-claim-1/$inquire",
+		"/fhir/r4/proto/Measure/cms165-bp-control/$evaluate-measure?periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/Measure/cms165-bp-control/$collect-data?periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/Measure/cms165-bp-control/$care-gaps?periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/ValueSet/administrative-gender/$expand",
+		"/fhir/r4/proto/ValueSet/administrative-gender/$validate-code?code=female",
+		"/fhir/r4/proto/CodeSystem/administrative-gender/$lookup?code=female",
+		"/fhir/r4/proto/CodeSystem/administrative-gender/$validate-code?code=female",
+		"/fhir/r4/proto/CodeSystem/snomed-ct/$subsumes?codeA=73211009&codeB=44054006",
+		"/fhir/r4/proto/CodeSystem/loinc/$find-matches?property=heart",
+		"/fhir/r4/proto/ConceptMap/loinc-to-snomed/$translate?code=8867-4&system=http://loinc.org",
+		"/fhir/r4/proto/TestScript/w107-ts-1/$evaluate",
+		"/fhir/r4/proto/AuditEvent?_count=5",
+		"/fhir/r4/proto/Patient/proto-pat-1/Observation",
+	} {
+		reqCIG, cigErr := http.NewRequest(http.MethodGet, ts.URL+coreInstGetEp+"&_format=application/x-protobuf", nil)
+		if !strings.Contains(coreInstGetEp, "?") {
+			reqCIG, cigErr = http.NewRequest(http.MethodGet, ts.URL+coreInstGetEp+"?_format=application/x-protobuf", nil)
+		}
+		require.NoError(t, cigErr)
+		reqCIG.Header.Set("Accept", "application/x-protobuf")
+		respCIG, cigErr := client.Do(reqCIG)
+		require.NoError(t, cigErr)
+		cigBytes, _ := io.ReadAll(respCIG.Body)
+		respCIG.Body.Close()
+		require.Equal(t, http.StatusOK, respCIG.StatusCode, "core instance GET endpoint %s: %s", coreInstGetEp, string(cigBytes))
+		assert.Contains(t, respCIG.Header.Get("Content-Type"), "application/x-protobuf", "core instance GET endpoint %s", coreInstGetEp)
+		assert.NotEmpty(t, cigBytes, "core instance GET endpoint %s", coreInstGetEp)
+	}
+
+	for _, postSearchEp := range []string{
+		"/fhir/r4/proto/AuditEvent/_search",
+		"/fhir/r4/proto/Patient/proto-pat-1/Observation/_search",
+	} {
+		reqPS, psErr := http.NewRequest(http.MethodPost, ts.URL+postSearchEp+"?_format=application/x-protobuf", strings.NewReader("_count=5"))
+		require.NoError(t, psErr)
+		reqPS.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		reqPS.Header.Set("Accept", "application/x-protobuf")
+		respPS, psErr := client.Do(reqPS)
+		require.NoError(t, psErr)
+		psBytes, _ := io.ReadAll(respPS.Body)
+		respPS.Body.Close()
+		require.Equal(t, http.StatusOK, respPS.StatusCode, "POST _search endpoint %s: %s", postSearchEp, string(psBytes))
+		assert.Contains(t, respPS.Header.Get("Content-Type"), "application/x-protobuf", "POST _search endpoint %s", postSearchEp)
+		assert.NotEmpty(t, psBytes, "POST _search endpoint %s", postSearchEp)
+	}
 }
