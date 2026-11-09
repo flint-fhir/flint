@@ -5923,6 +5923,145 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-42", suite10, "Zero-JSON Binary Proto3 Multi-Compartment (Patient, Encounter, Practitioner, RelatedPerson, Device), Wildcard /*, System Search, POST _search, _history & $meta Negotiation Across 42 Endpoints + SQL-on-FHIR v2 Reference Collection forEach / forEachOrNull & Element Function Pushdown (getReferenceKey, reference, type, iif, coalesce, &)", t0, err, "Binary Proto3 42 multi-compartment/system search/_history/$meta endpoints & reference collection forEach + getReferenceKey/iif/coalesce $sql & $run pushdown verified")
 
+	// AN-43: Zero-JSON Binary Proto3 SQL-on-FHIR v2 (ViewDefinition CRUD, $run, $export, $sql) & 28 Instance-Level Clinical/Financial/Scheduling/Terminology Operations (42 Endpoints) + SQL-on-FHIR v2 Multi-forEach / forEachOrNull Cross-Join Unnesting (fe, fe2) & Built-In Environment Variable Pushdown (%resource, %rootResource, %context, %ucum, %sct, %loinc)
+	t0 = time.Now()
+	{
+		var opCheckErr error
+
+		// Seed Schedule, Appointment, ChargeItem, CoverageEligibilityRequest, and Questionnaire instances for instance-level Proto3 operations
+		_, _, _ = doReq(http.MethodPut, basePath+"/Schedule/cert-sched-w109", "application/fhir+json", []byte(`{"resourceType":"Schedule","id":"cert-sched-w109","active":true,"actor":[{"reference":"Practitioner/cert-prac-1"}]}`), nil)
+		_, _, _ = doReq(http.MethodPut, basePath+"/Appointment/cert-appt-w109", "application/fhir+json", []byte(`{"resourceType":"Appointment","id":"cert-appt-w109","status":"proposed","participant":[{"actor":{"reference":"Patient/cert-pat-1"},"status":"accepted"}]}`), nil)
+		_, _, _ = doReq(http.MethodPut, basePath+"/ChargeItem/cert-ci-w109", "application/fhir+json", []byte(`{"resourceType":"ChargeItem","id":"cert-ci-w109","status":"billable","code":{"coding":[{"system":"http://www.ama-assn.org/go/cpt","code":"99213"}]},"subject":{"reference":"Patient/cert-pat-1"},"quantity":{"value":1}}`), nil)
+		_, _, _ = doReq(http.MethodPut, basePath+"/CoverageEligibilityRequest/cert-cer-w109", "application/fhir+json", []byte(`{"resourceType":"CoverageEligibilityRequest","id":"cert-cer-w109","status":"active","purpose":["benefits"],"patient":{"reference":"Patient/cert-pat-1"},"created":"2026-01-15","insurer":{"reference":"Organization/cert-org-1"}}`), nil)
+		_, _, _ = doReq(http.MethodPut, basePath+"/Questionnaire/phq-9", "application/fhir+json", []byte(`{"resourceType":"Questionnaire","id":"phq-9","url":"http://flint.fhir.org/Questionnaire/phq-9","name":"PHQ9","status":"active"}`), nil)
+
+		vdProtoParamsJSON := []byte(`{"resourceType":"Parameters","parameter":[{"name":"id","valueString":"cert-vd-proto-w109"},{"name":"name","valueString":"cert_vd_proto_w109"},{"name":"status","valueCode":"active"},{"name":"resource","valueCode":"Patient"},{"name":"viewDefinitionJson","valueString":"{\"resourceType\":\"ViewDefinition\",\"id\":\"cert-vd-proto-w109\",\"name\":\"cert_vd_proto_w109\",\"status\":\"active\",\"resource\":\"Patient\",\"select\":[{\"column\":[{\"name\":\"id\",\"path\":\"getResourceKey()\"},{\"name\":\"gender\",\"path\":\"%resource.gender\"}]}]}"},{"name":"view","valueString":"patient-demographics"},{"name":"dialect","valueCode":"doris"}]}`)
+		_, bVDProtoParams, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", vdProtoParamsJSON, map[string]string{"Accept": "application/x-protobuf"})
+
+		termProtoParamsJSON := []byte(`{"resourceType":"Parameters","parameter":[{"name":"code","valueCode":"vital-signs"},{"name":"system","valueUri":"http://snomed.info/sct"},{"name":"codeA","valueCode":"38341003"},{"name":"codeB","valueCode":"59621000"},{"name":"patient","valueString":"Patient/cert-pat-1"},{"name":"subject","valueString":"Patient/cert-pat-1"},{"name":"periodStart","valueString":"2026-01-01"},{"name":"periodEnd","valueString":"2026-12-31"}]}`)
+		_, bTermProtoParams, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", termProtoParamsJSON, map[string]string{"Accept": "application/x-protobuf"})
+
+		valFemaleProtoParamsJSON := []byte(`{"resourceType":"Parameters","parameter":[{"name":"code","valueCode":"female"}]}`)
+		_, bValFemaleProtoParams, _ := doReq(http.MethodPost, basePath+"/Parameters/$convert", "application/fhir+json", valFemaleProtoParamsJSON, map[string]string{"Accept": "application/x-protobuf"})
+
+		_, bCollDataProto, _ := doReq(http.MethodGet, basePath+"/Measure/CMS165/$collect-data?subject=Patient/cert-pat-1&_format=application/x-protobuf", "", nil, map[string]string{"Accept": "application/x-protobuf"})
+
+		// 14 SQL-on-FHIR v2 Endpoints + 28 Instance-Level Clinical/Financial/Scheduling/Terminology Operations (42 Endpoints Total)
+		for _, protoGetEp := range []string{
+			// SQL-on-FHIR v2 GET Endpoints
+			basePath + "/ViewDefinition?_format=application/x-protobuf",
+			basePath + "/ViewDefinition/patient-demographics?_format=application/x-protobuf",
+			basePath + "/ViewDefinition/$run?view=patient-demographics&_format=application/x-protobuf",
+			basePath + "/ViewDefinition/patient-demographics/$run?_format=application/x-protobuf",
+			basePath + "/ViewDefinition/$export?view=patient-demographics&_format=application/x-protobuf",
+			basePath + "/ViewDefinition/patient-demographics/$export?_format=application/x-protobuf",
+			basePath + "/$sql?view=patient-demographics&dialect=doris&_format=application/x-protobuf",
+			// Instance-Level GET Operations
+			basePath + "/ValueSet/administrative-gender/$expand?_format=application/x-protobuf",
+			basePath + "/ValueSet/administrative-gender/$validate-code?code=female&_format=application/x-protobuf",
+			basePath + "/CodeSystem/observation-category/$lookup?code=vital-signs&_format=application/x-protobuf",
+			basePath + "/CodeSystem/observation-category/$validate-code?code=vital-signs&_format=application/x-protobuf",
+			basePath + "/CodeSystem/snomed-ct/$subsumes?codeA=38341003&codeB=59621000&_format=application/x-protobuf",
+			basePath + "/ConceptMap/snomed-to-icd10/$translate?system=http://snomed.info/sct&code=38341003&_format=application/x-protobuf",
+			basePath + "/Measure/CMS165/$evaluate-measure?patient=Patient/cert-pat-1&periodStart=2026-01-01&periodEnd=2026-12-31&_format=application/x-protobuf",
+			basePath + "/Measure/CMS165/$collect-data?subject=Patient/cert-pat-1&_format=application/x-protobuf",
+			basePath + "/Measure/CMS165/$data-requirements?_format=application/x-protobuf",
+			basePath + "/PlanDefinition/plandef-hypertension-control/$data-requirements?_format=application/x-protobuf",
+			basePath + "/ActivityDefinition/activitydef-bp-home-monitoring/$data-requirements?_format=application/x-protobuf",
+			basePath + "/Questionnaire/phq-9/$data-requirements?_format=application/x-protobuf",
+			basePath + "/Encounter/cert-enc-1/$everything?_format=application/x-protobuf",
+			basePath + "/Group/pdex-matched-group-1/$everything?_format=application/x-protobuf",
+			basePath + "/Schedule/cert-sched-w109/$find?_format=application/x-protobuf",
+		} {
+			respPG, bPG, errPG := doReq(http.MethodGet, protoGetEp, "", nil, map[string]string{"Accept": "application/x-protobuf"})
+			if errPG != nil || respPG == nil || respPG.StatusCode != http.StatusOK || !strings.Contains(respPG.Header.Get("Content-Type"), "application/x-protobuf") || respPG.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bPG) == 0 {
+				status := 0
+				if respPG != nil {
+					status = respPG.StatusCode
+				}
+				opCheckErr = fmt.Errorf("expected binary proto3 200 OK from GET %s, got %d (err=%v): %s", protoGetEp, status, errPG, string(bPG))
+				break
+			}
+		}
+
+		if opCheckErr == nil {
+			for _, protoPostEp := range []struct {
+				method string
+				url    string
+				body   []byte
+			}{
+				// SQL-on-FHIR v2 POST/PUT Endpoints
+				{http.MethodPost, basePath + "/ViewDefinition", bVDProtoParams},
+				{http.MethodPut, basePath + "/ViewDefinition/cert-vd-proto-w109", bVDProtoParams},
+				{http.MethodPost, basePath + "/ViewDefinition/$run", bVDProtoParams},
+				{http.MethodPost, basePath + "/ViewDefinition/patient-demographics/$run", bVDProtoParams},
+				{http.MethodPost, basePath + "/ViewDefinition/$export", bVDProtoParams},
+				{http.MethodPost, basePath + "/ViewDefinition/patient-demographics/$export", bVDProtoParams},
+				{http.MethodPost, basePath + "/$sql", bVDProtoParams},
+				{http.MethodPost, basePath + "/ViewDefinition/$sql", bVDProtoParams},
+				// Instance-Level POST Operations
+				{http.MethodPost, basePath + "/ValueSet/administrative-gender/$expand", bValFemaleProtoParams},
+				{http.MethodPost, basePath + "/ValueSet/administrative-gender/$validate-code", bValFemaleProtoParams},
+				{http.MethodPost, basePath + "/CodeSystem/observation-category/$lookup", bTermProtoParams},
+				{http.MethodPost, basePath + "/CodeSystem/observation-category/$validate-code", bTermProtoParams},
+				{http.MethodPost, basePath + "/CodeSystem/snomed-ct/$subsumes", bTermProtoParams},
+				{http.MethodPost, basePath + "/ConceptMap/snomed-to-icd10/$translate", bTermProtoParams},
+				{http.MethodPost, basePath + "/Measure/CMS165/$evaluate-measure", bTermProtoParams},
+				{http.MethodPost, basePath + "/Measure/CMS165/$collect-data", bTermProtoParams},
+				{http.MethodPost, basePath + "/Measure/CMS165/$submit-data", bCollDataProto},
+				{http.MethodPost, basePath + "/Encounter/cert-enc-1/$everything", bTermProtoParams},
+				{http.MethodPost, basePath + "/Group/pdex-matched-group-1/$everything", bTermProtoParams},
+				{http.MethodPost, basePath + "/Appointment/cert-appt-w109/$hold", bTermProtoParams},
+				{http.MethodPost, basePath + "/Appointment/cert-appt-w109/$book", bTermProtoParams},
+				{http.MethodPost, basePath + "/ChargeItem/cert-ci-w109/$apply", bTermProtoParams},
+				{http.MethodPost, basePath + "/CoverageEligibilityRequest/cert-cer-w109/$submit", bTermProtoParams},
+			} {
+				respPP, bPP, errPP := doReq(protoPostEp.method, protoPostEp.url, "application/x-protobuf", protoPostEp.body, map[string]string{"Accept": "application/x-protobuf"})
+				if errPP != nil || respPP == nil || (respPP.StatusCode != http.StatusOK && respPP.StatusCode != http.StatusCreated) || !strings.Contains(respPP.Header.Get("Content-Type"), "application/x-protobuf") || respPP.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bPP) == 0 {
+					status := 0
+					if respPP != nil {
+						status = respPP.StatusCode
+					}
+					opCheckErr = fmt.Errorf("expected binary proto3 200/201 from %s %s, got %d (err=%v): %s", protoPostEp.method, protoPostEp.url, status, errPP, string(bPP))
+					break
+				}
+			}
+		}
+
+		if opCheckErr == nil {
+			respDelVD, _, errDelVD := doReq(http.MethodDelete, basePath+"/ViewDefinition/cert-vd-proto-w109", "", nil, nil)
+			if errDelVD != nil || respDelVD == nil || (respDelVD.StatusCode != http.StatusNoContent && respDelVD.StatusCode != http.StatusOK) {
+				status := 0
+				if respDelVD != nil {
+					status = respDelVD.StatusCode
+				}
+				opCheckErr = fmt.Errorf("expected 204 No Content from DELETE /ViewDefinition/cert-vd-proto-w109, got %d (err=%v)", status, errDelVD)
+			}
+		}
+
+		multiForEachEnvVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_multi_foreach_env_vars_view","status":"active","resource":"Patient","select":[{"forEach":"name.given","where":[{"path":"$this.startsWith('A') and %resource.active"}],"column":[{"name":"rk","path":"getResourceKey()"},{"name":"given_val","path":"$this"},{"name":"pat_gender","path":"%resource.gender"},{"name":"loinc_uri","path":"%loinc"},{"name":"sct_uri","path":"%sct"},{"name":"ucum_uri","path":"%ucum"}]},{"forEach":"%resource.identifier","where":[{"path":"system = 'http://hospital.example.org/mrn'"}],"column":[{"name":"mrn_val","path":"value"},{"name":"gender_mrn","path":"%resource.gender & ':' & value"},{"name":"active_mrn","path":"iif(%resource.active, value, 'INACTIVE')"}]}]}`)
+
+		respMFEDoris, bMFEDoris, errMFEDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", multiForEachEnvVD, nil)
+		respMFEPg, bMFEPg, errMFEPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", multiForEachEnvVD, nil)
+		respMFESqlite, bMFESqlite, errMFESqlite := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", multiForEachEnvVD, nil)
+		respMFERun, bMFERun, errMFERun := doReq(http.MethodPost, basePath+"/ViewDefinition/$run", "application/fhir+json", multiForEachEnvVD, nil)
+
+		if opCheckErr != nil {
+			err = opCheckErr
+		} else if errMFEDoris != nil || respMFEDoris.StatusCode != http.StatusOK || !strings.Contains(string(bMFEDoris), "LATERAL VIEW EXPLODE(r.string_tokens) fe_tbl AS fe_tok") || !strings.Contains(string(bMFEDoris), "LATERAL VIEW EXPLODE(r.code_tokens) fe2_tbl AS fe2_tok") || !strings.Contains(string(bMFEDoris), "SPLIT_PART(fe_tok, '=', 2) AS given_val") || !strings.Contains(string(bMFEDoris), "SPLIT_PART(fe2_tok, '|', 2) AS mrn_val") || !strings.Contains(string(bMFEDoris), "AS pat_gender") || !strings.Contains(string(bMFEDoris), "'http://loinc.org' AS loinc_uri") || !strings.Contains(string(bMFEDoris), "COALESCE(SPLIT_PART(fe2_tok, '|', 2), '')) AS gender_mrn") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with multi-forEach (fe_tok, fe2_tok) & %%resource/%%loinc pushdown, got %d: %s", respMFEDoris.StatusCode, string(bMFEDoris))
+		} else if errMFEPg != nil || respMFEPg.StatusCode != http.StatusOK || !strings.Contains(string(bMFEPg), "INNER JOIN spidx_string fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'given'") || !strings.Contains(string(bMFEPg), "INNER JOIN spidx_token fe2 ON fe2.tenant_id = r.tenant_id AND fe2.res_type = r.res_type AND fe2.res_id = r.res_id AND fe2.sp_name = 'identifier'") || !strings.Contains(string(bMFEPg), "fe.sp_value AS given_val") || !strings.Contains(string(bMFEPg), "fe2.sp_value AS mrn_val") || !strings.Contains(string(bMFEPg), "'http://loinc.org' AS loinc_uri") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with multi-forEach (fe, fe2) & %%resource/%%loinc pushdown, got %d: %s", respMFEPg.StatusCode, string(bMFEPg))
+		} else if errMFESqlite != nil || respMFESqlite.StatusCode != http.StatusOK || !strings.Contains(string(bMFESqlite), "INNER JOIN spidx_string fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'given'") || !strings.Contains(string(bMFESqlite), "INNER JOIN spidx_token fe2 ON fe2.tenant_id = r.tenant_id AND fe2.res_type = r.res_type AND fe2.res_id = r.res_id AND fe2.sp_name = 'identifier'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=sqlite with multi-forEach (fe, fe2) & %%resource/%%loinc pushdown, got %d: %s", respMFESqlite.StatusCode, string(bMFESqlite))
+		} else if errMFERun != nil || respMFERun.StatusCode != http.StatusOK || !strings.Contains(string(bMFERun), `"given_val":"Alice"`) || !strings.Contains(string(bMFERun), `"mrn_val":"CERT-MRN-1"`) || !strings.Contains(string(bMFERun), `"pat_gender":"female"`) || !strings.Contains(string(bMFERun), `"gender_mrn":"female:CERT-MRN-1"`) || !strings.Contains(string(bMFERun), `"loinc_uri":"http://loinc.org"`) {
+			err = fmt.Errorf("expected POST /ViewDefinition/$run with multi-forEach & %%resource/%%loinc evaluation, got %d: %s", respMFERun.StatusCode, string(bMFERun))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-43", suite10, "Zero-JSON Binary Proto3 SQL-on-FHIR v2 (ViewDefinition CRUD, $run, $export, $sql) & 28 Instance-Level Clinical/Financial/Scheduling/Terminology Operations (42 Endpoints) + SQL-on-FHIR v2 Multi-forEach / forEachOrNull Cross-Join Unnesting (fe, fe2) & Built-In Environment Variable Pushdown (%resource, %rootResource, %context, %ucum, %sct, %loinc)", t0, err, "Binary Proto3 42 SQL-on-FHIR v2 & instance-level clinical/financial/scheduling/terminology endpoints + multi-forEach (fe, fe2) & %resource/%loinc $sql & $run pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

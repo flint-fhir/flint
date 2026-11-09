@@ -66,6 +66,8 @@ type sqlOnFHIRColumn struct {
 	Description string `json:"description,omitempty"`
 	Type        string `json:"type,omitempty"`
 	Collection  bool   `json:"collection,omitempty"`
+	forEachPath string `json:"-"`
+	forEachIdx  int    `json:"-"`
 }
 
 func builtinViewDefinitions() map[string]sqlOnFHIRViewDefinition {
@@ -290,6 +292,105 @@ func parseViewSelectsFromSlice(raw []any) []sqlOnFHIRSelect {
 	return out
 }
 
+func viewDefinitionToParametersMap(vd sqlOnFHIRViewDefinition) map[string]any {
+	rawJSON, _ := json.Marshal(vd)
+	params := []any{
+		map[string]any{"name": "resourceType", "valueCode": "ViewDefinition"},
+		map[string]any{"name": "id", "valueString": vd.ID},
+		map[string]any{"name": "name", "valueString": vd.Name},
+		map[string]any{"name": "status", "valueCode": vd.Status},
+		map[string]any{"name": "resource", "valueCode": vd.Resource},
+		map[string]any{"name": "viewDefinitionJson", "valueString": string(rawJSON)},
+	}
+	if vd.URL != "" {
+		params = append(params, map[string]any{"name": "url", "valueUri": vd.URL})
+	}
+	if vd.Title != "" {
+		params = append(params, map[string]any{"name": "title", "valueString": vd.Title})
+	}
+	return map[string]any{
+		"resourceType": "Parameters",
+		"id":           vd.ID,
+		"parameter":    params,
+	}
+}
+
+func viewDefinitionFromParametersMap(pm map[string]any) (sqlOnFHIRViewDefinition, bool) {
+	if pm == nil {
+		return sqlOnFHIRViewDefinition{}, false
+	}
+	rawParams, _ := pm["parameter"].([]any)
+	var vd sqlOnFHIRViewDefinition
+	vd.ResourceType = "ViewDefinition"
+	for _, rp := range rawParams {
+		pMap, ok := rp.(map[string]any)
+		if !ok {
+			continue
+		}
+		pName, _ := pMap["name"].(string)
+		switch pName {
+		case "viewDefinitionJson", "viewJson", "json":
+			if js, ok := pMap["valueString"].(string); ok && strings.TrimSpace(js) != "" {
+				var parsed sqlOnFHIRViewDefinition
+				if err := json.Unmarshal([]byte(js), &parsed); err == nil && parsed.Resource != "" {
+					return parsed, true
+				}
+			}
+		case "id":
+			if v, ok := pMap["valueString"].(string); ok && v != "" {
+				vd.ID = v
+			}
+		case "url":
+			if v, ok := pMap["valueUri"].(string); ok && v != "" {
+				vd.URL = v
+			} else if v, ok := pMap["valueString"].(string); ok && v != "" {
+				vd.URL = v
+			}
+		case "name":
+			if v, ok := pMap["valueString"].(string); ok && v != "" {
+				vd.Name = v
+			}
+		case "title":
+			if v, ok := pMap["valueString"].(string); ok && v != "" {
+				vd.Title = v
+			}
+		case "status":
+			if v, ok := pMap["valueCode"].(string); ok && v != "" {
+				vd.Status = v
+			} else if v, ok := pMap["valueString"].(string); ok && v != "" {
+				vd.Status = v
+			}
+		case "resource":
+			if v, ok := pMap["valueCode"].(string); ok && v != "" {
+				vd.Resource = v
+			} else if v, ok := pMap["valueString"].(string); ok && v != "" {
+				vd.Resource = v
+			}
+		}
+	}
+	if vd.ID == "" {
+		if id, ok := pm["id"].(string); ok {
+			vd.ID = id
+		}
+	}
+	if vd.Resource != "" && len(vd.Select) == 0 {
+		vd.Select = []sqlOnFHIRSelect{
+			{
+				Column: []sqlOnFHIRColumn{
+					{Name: "id", Path: "getResourceKey()", Type: "string"},
+				},
+			},
+		}
+		return vd, true
+	}
+	return vd, vd.Resource != "" && len(vd.Select) > 0
+}
+
+func isProtoFormatRequested(r *http.Request) bool {
+	ok, _ := wantsProtoResponse(r)
+	return ok
+}
+
 // handleViewDefinitionCRUD handles RESTful CRUD operations on /fhir/r4/{tenant}/ViewDefinition
 // and /fhir/r4/{tenant}/ViewDefinition/{id}.
 func (s *Server) handleViewDefinitionCRUD(w http.ResponseWriter, r *http.Request) {
@@ -301,7 +402,11 @@ func (s *Server) handleViewDefinitionCRUD(w http.ResponseWriter, r *http.Request
 		if id != "" {
 			vd, ok := s.resolveViewDefinitionByID(r.Context(), tenant, id)
 			if !ok {
-				writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("ViewDefinition/%s not found", id))
+				writeValidateErrorOutcome(w, r, http.StatusNotFound, "not-found", fmt.Sprintf("ViewDefinition/%s not found", id))
+				return
+			}
+			if isProtoFormatRequested(r) {
+				s.writeOperationResponse(w, r, http.StatusOK, "Parameters", viewDefinitionToParametersMap(vd))
 				return
 			}
 			w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
@@ -312,6 +417,7 @@ func (s *Server) handleViewDefinitionCRUD(w http.ResponseWriter, r *http.Request
 			return
 		}
 		var entries []map[string]any
+		var protoEntries []any
 		seen := make(map[string]bool)
 		s.viewDefsMu.RLock()
 		for k, vd := range s.viewDefs[tenant] {
@@ -319,6 +425,10 @@ func (s *Server) handleViewDefinitionCRUD(w http.ResponseWriter, r *http.Request
 			entries = append(entries, map[string]any{
 				"fullUrl":  fmt.Sprintf("ViewDefinition/%s", vd.ID),
 				"resource": vd,
+			})
+			protoEntries = append(protoEntries, map[string]any{
+				"fullUrl":  fmt.Sprintf("ViewDefinition/%s", vd.ID),
+				"resource": viewDefinitionToParametersMap(vd),
 			})
 		}
 		s.viewDefsMu.RUnlock()
@@ -328,11 +438,29 @@ func (s *Server) handleViewDefinitionCRUD(w http.ResponseWriter, r *http.Request
 					"fullUrl":  fmt.Sprintf("ViewDefinition/%s", vd.ID),
 					"resource": vd,
 				})
+				protoEntries = append(protoEntries, map[string]any{
+					"fullUrl":  fmt.Sprintf("ViewDefinition/%s", vd.ID),
+					"resource": viewDefinitionToParametersMap(vd),
+				})
 			}
 		}
 		sort.Slice(entries, func(i, j int) bool {
 			return fmt.Sprint(entries[i]["fullUrl"]) < fmt.Sprint(entries[j]["fullUrl"])
 		})
+		sort.Slice(protoEntries, func(i, j int) bool {
+			ei, _ := protoEntries[i].(map[string]any)
+			ej, _ := protoEntries[j].(map[string]any)
+			return fmt.Sprint(ei["fullUrl"]) < fmt.Sprint(ej["fullUrl"])
+		})
+		if isProtoFormatRequested(r) {
+			s.writeOperationResponse(w, r, http.StatusOK, "Bundle", map[string]any{
+				"resourceType": "Bundle",
+				"type":         "searchset",
+				"total":        len(protoEntries),
+				"entry":        protoEntries,
+			})
+			return
+		}
 		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		if r.Method != http.MethodHead {
@@ -347,19 +475,28 @@ func (s *Server) handleViewDefinitionCRUD(w http.ResponseWriter, r *http.Request
 	case http.MethodPost, http.MethodPut:
 		body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
 		if err != nil {
-			writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read request body")
+			writeValidateErrorOutcome(w, r, http.StatusBadRequest, "invalid", "failed to read request body")
 			return
 		}
 		var vd sqlOnFHIRViewDefinition
-		if err := json.Unmarshal(body, &vd); err != nil {
-			writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid ViewDefinition JSON: %v", err))
-			return
+		if isProtoContentType(r) {
+			if pm, pErr := s.protoToFHIRMap("Parameters", bytes.TrimSpace(body)); pErr == nil && pm != nil {
+				if parsed, ok := viewDefinitionFromParametersMap(pm); ok {
+					vd = parsed
+				}
+			}
+		}
+		if vd.Resource == "" {
+			if err := json.Unmarshal(body, &vd); err != nil {
+				writeValidateErrorOutcome(w, r, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid ViewDefinition payload: %v", err))
+				return
+			}
 		}
 		if id != "" {
 			vd.ID = id
 		}
 		if err := validateViewDefinition(vd); err != nil {
-			writeOperationOutcome(w, http.StatusUnprocessableEntity, "invalid", err.Error())
+			writeValidateErrorOutcome(w, r, http.StatusUnprocessableEntity, "invalid", err.Error())
 			return
 		}
 		_, existed := s.resolveViewDefinitionByID(r.Context(), tenant, vd.ID)
@@ -368,14 +505,18 @@ func (s *Server) handleViewDefinitionCRUD(w http.ResponseWriter, r *http.Request
 		if r.Method == http.MethodPut && existed {
 			status = http.StatusOK
 		}
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 		w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/ViewDefinition/%s", tenant, saved.ID))
+		if isProtoFormatRequested(r) {
+			s.writeOperationResponse(w, r, status, "Parameters", viewDefinitionToParametersMap(saved))
+			return
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(saved)
 
 	case http.MethodDelete:
 		if id == "" {
-			writeOperationOutcome(w, http.StatusBadRequest, "required", "ViewDefinition id is required for DELETE")
+			writeValidateErrorOutcome(w, r, http.StatusBadRequest, "required", "ViewDefinition id is required for DELETE")
 			return
 		}
 		s.viewDefsMu.Lock()
@@ -386,7 +527,7 @@ func (s *Server) handleViewDefinitionCRUD(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported", fmt.Sprintf("method %s not allowed", r.Method))
+		writeValidateErrorOutcome(w, r, http.StatusMethodNotAllowed, "not-supported", fmt.Sprintf("method %s not allowed", r.Method))
 	}
 }
 
@@ -451,10 +592,49 @@ func collectViewDefinitionColumnsWithPrefix(selects []sqlOnFHIRSelect, initPrefi
 	return out
 }
 
+func stripRootResourceEnvPrefix(expr string) (string, bool) {
+	s := strings.TrimSpace(expr)
+	for _, pfx := range []string{"%resource.", "%rootResource.", "%context."} {
+		if strings.HasPrefix(s, pfx) {
+			return strings.TrimSpace(s[len(pfx):]), true
+		}
+	}
+	if s == "%resource" || s == "%rootResource" || s == "%context" {
+		return "$this", true
+	}
+	return s, false
+}
+
+func hasRootResourceEnvPrefix(expr string) bool {
+	_, ok := stripRootResourceEnvPrefix(expr)
+	return ok
+}
+
+func isPureRootResourceExpr(expr string) bool {
+	s := strings.TrimSpace(expr)
+	if !hasRootResourceEnvPrefix(s) {
+		return false
+	}
+	if len(splitTopLevelConcatOp(s)) > 1 {
+		return false
+	}
+	lower := strings.ToLower(s)
+	if strings.HasPrefix(lower, "iif(") || strings.HasPrefix(lower, "coalesce(") {
+		return false
+	}
+	return true
+}
+
 func qualifyForEachColumnPath(forEachPrefix, colPath string) string {
 	p := strings.TrimSpace(colPath)
 	prefix := strings.TrimSpace(forEachPrefix)
+	if stripped, ok := stripRootResourceEnvPrefix(prefix); ok {
+		prefix = stripped
+	}
 	if prefix == "" || p == "" {
+		return p
+	}
+	if isPureRootResourceExpr(p) {
 		return p
 	}
 	isPureLiteral := strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") && len(splitTopLevelConcatOp(p)) <= 1
@@ -471,6 +651,138 @@ func qualifyForEachColumnPath(forEachPrefix, colPath string) string {
 	return prefix + "." + p
 }
 
+func isRootScopedColumnPath(rawColPath string) bool {
+	p := strings.TrimSpace(rawColPath)
+	if p == "" {
+		return true
+	}
+	if isPureRootResourceExpr(p) {
+		return true
+	}
+	isPureLiteral := strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'") && len(splitTopLevelConcatOp(p)) <= 1
+	isPureConst := strings.HasPrefix(p, "%") && !strings.ContainsAny(p, " .&+-*/(")
+	return isPureLiteral || isPureConst || strings.HasPrefix(p, "getResourceKey(") || p == "id"
+}
+
+type viewForEachSpec struct {
+	aliasIdx    int
+	forEachPath string
+	isOuter     bool
+	wherePaths  []string
+}
+
+func forEachDorisAliases(aliasIdx int) (tblAlias, tokAlias string) {
+	if aliasIdx <= 1 {
+		return "fe_tbl", "fe_tok"
+	}
+	return fmt.Sprintf("fe%d_tbl", aliasIdx), fmt.Sprintf("fe%d_tok", aliasIdx)
+}
+
+func forEachSpidxAlias(aliasIdx int) string {
+	if aliasIdx <= 1 {
+		return "fe"
+	}
+	return fmt.Sprintf("fe%d", aliasIdx)
+}
+
+// extractViewForEachSpecsAndColumns extracts all forEach / forEachOrNull clauses across sibling
+// and nested select blocks along with the qualified columns and their bound forEach alias index.
+func extractViewForEachSpecsAndColumns(selects []sqlOnFHIRSelect) ([]viewForEachSpec, []sqlOnFHIRColumn, []string) {
+	var specs []viewForEachSpec
+	var cols []sqlOnFHIRColumn
+	var rootWherePaths []string
+	seenCols := make(map[string]bool)
+
+	var walk func(sels []sqlOnFHIRSelect, prefix string, parentSpecIdx int, outerAcc bool)
+	walk = func(sels []sqlOnFHIRSelect, prefix string, parentSpecIdx int, outerAcc bool) {
+		for _, sel := range sels {
+			fe := strings.TrimSpace(sel.ForEach)
+			outer := false
+			if fe == "" {
+				fe = strings.TrimSpace(sel.ForEachOrNull)
+				outer = fe != ""
+			}
+			curPrefix := prefix
+			curSpecIdx := parentSpecIdx
+			curOuter := outerAcc || outer
+
+			if fe != "" {
+				if stripped, isRootFE := stripRootResourceEnvPrefix(fe); isRootFE {
+					curPrefix = stripped
+					specs = append(specs, viewForEachSpec{
+						aliasIdx:    len(specs) + 1,
+						forEachPath: curPrefix,
+						isOuter:     outer,
+					})
+					curSpecIdx = len(specs) - 1
+				} else if parentSpecIdx >= 0 && specs[parentSpecIdx].forEachPath == prefix {
+					// Relative nested forEach refines its parent forEach path (e.g. forEach: "name" -> select: [{forEach: "given"}])
+					curPrefix = qualifyForEachColumnPath(prefix, fe)
+					specs[parentSpecIdx].forEachPath = curPrefix
+					specs[parentSpecIdx].isOuter = specs[parentSpecIdx].isOuter || outer
+					curSpecIdx = parentSpecIdx
+				} else {
+					curPrefix = qualifyForEachColumnPath(prefix, fe)
+					specs = append(specs, viewForEachSpec{
+						aliasIdx:    len(specs) + 1,
+						forEachPath: curPrefix,
+						isOuter:     curOuter,
+					})
+					curSpecIdx = len(specs) - 1
+				}
+			}
+
+			for _, w := range sel.Where {
+				if p := strings.TrimSpace(w.Path); p != "" {
+					if curSpecIdx >= 0 {
+						specs[curSpecIdx].wherePaths = append(specs[curSpecIdx].wherePaths, p)
+					} else {
+						rootWherePaths = append(rootWherePaths, p)
+					}
+				}
+			}
+
+			colStartIdx := len(cols)
+			for _, col := range sel.Column {
+				if !seenCols[col.Name] {
+					seenCols[col.Name] = true
+					c := col
+					rawPath := strings.TrimSpace(col.Path)
+					c.Path = qualifyForEachColumnPath(curPrefix, rawPath)
+					if curSpecIdx >= 0 && !isRootScopedColumnPath(rawPath) {
+						c.forEachPath = specs[curSpecIdx].forEachPath
+						c.forEachIdx = specs[curSpecIdx].aliasIdx
+					}
+					cols = append(cols, c)
+				}
+			}
+
+			beforeSpecPath := ""
+			if curSpecIdx >= 0 {
+				beforeSpecPath = specs[curSpecIdx].forEachPath
+			}
+			walk(sel.Select, curPrefix, curSpecIdx, curOuter)
+			if curSpecIdx >= 0 && beforeSpecPath != "" && specs[curSpecIdx].forEachPath != beforeSpecPath {
+				// Parent forEach was refined by a relative child forEach (e.g. "name" -> "name.given");
+				// keep parent-level columns (like "name.family") bound to the root resource table.
+				for i := colStartIdx; i < len(cols); i++ {
+					if cols[i].forEachIdx == specs[curSpecIdx].aliasIdx && cols[i].forEachPath == beforeSpecPath {
+						if !strings.HasPrefix(cols[i].Path, specs[curSpecIdx].forEachPath+".") && cols[i].Path != specs[curSpecIdx].forEachPath {
+							cols[i].forEachPath = ""
+							cols[i].forEachIdx = 0
+						} else {
+							cols[i].forEachPath = specs[curSpecIdx].forEachPath
+						}
+					}
+				}
+			}
+			walk(sel.UnionAll, curPrefix, curSpecIdx, curOuter)
+		}
+	}
+	walk(selects, "", -1, false)
+	return specs, cols, rootWherePaths
+}
+
 // extractViewForEachSpec returns the deepest qualified forEach / forEachOrNull path and whether
 // outer unnesting (forEachOrNull) was requested.
 func extractViewForEachSpec(selects []sqlOnFHIRSelect) (forEachPath string, isOuter bool) {
@@ -485,7 +797,11 @@ func extractViewForEachSpec(selects []sqlOnFHIRSelect) (forEachPath string, isOu
 			}
 			curPrefix := prefix
 			if fe != "" {
-				curPrefix = qualifyForEachColumnPath(prefix, fe)
+				if stripped, isRootFE := stripRootResourceEnvPrefix(fe); isRootFE {
+					curPrefix = stripped
+				} else {
+					curPrefix = qualifyForEachColumnPath(prefix, fe)
+				}
 				forEachPath = curPrefix
 				isOuter = isOuter || outer
 				if len(sel.Select) > 0 {
@@ -717,7 +1033,7 @@ func (s *Server) parseViewRunRequest(r *http.Request, defaultFormat string) (vie
 				}
 				for _, p := range params.Parameter {
 					switch p.Name {
-					case "viewResource", "view":
+					case "viewResource", "view", "viewDefinitionJson", "viewJson":
 						if len(p.Resource) > 0 {
 							var vd sqlOnFHIRViewDefinition
 							if err := json.Unmarshal(p.Resource, &vd); err != nil {
@@ -725,7 +1041,17 @@ func (s *Server) parseViewRunRequest(r *http.Request, defaultFormat string) (vie
 							}
 							parsedVD = &vd
 						} else if p.ValueString != "" {
-							viewRef = p.ValueString
+							trimmedVal := strings.TrimSpace(p.ValueString)
+							if strings.HasPrefix(trimmedVal, "{") {
+								var vd sqlOnFHIRViewDefinition
+								if err := json.Unmarshal([]byte(trimmedVal), &vd); err == nil && vd.Resource != "" {
+									parsedVD = &vd
+								} else {
+									return opts, http.StatusBadRequest, fmt.Errorf("invalid inline ViewDefinition JSON in %s: %v", p.Name, err)
+								}
+							} else {
+								viewRef = trimmedVal
+							}
 						}
 					case "viewReference":
 						if p.ValueReference != nil && p.ValueReference.Reference != "" {
@@ -808,6 +1134,8 @@ func (s *Server) parseViewRunRequest(r *http.Request, defaultFormat string) (vie
 	if opts.format == "" {
 		accept := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
 		switch {
+		case strings.Contains(accept, "x-protobuf") || strings.Contains(accept, "fhir+protobuf") || strings.Contains(accept, "application/protobuf"):
+			opts.format = "application/x-protobuf"
 		case strings.Contains(accept, "text/tab-separated-values") || strings.Contains(accept, "text/tsv"):
 			opts.format = "text/tab-separated-values"
 		case strings.Contains(accept, "text/csv"):
@@ -931,6 +1259,45 @@ func (s *Server) executeViewDefinition(w http.ResponseWriter, r *http.Request, d
 
 	fmtLower := strings.ToLower(strings.TrimSpace(opts.format))
 	switch {
+	case strings.Contains(fmtLower, "protobuf") || isProtoFormatRequested(r):
+		viewName := opts.viewDef.Name
+		if viewName == "" {
+			viewName = opts.viewDef.ID
+		}
+		paramList := []any{
+			map[string]any{"name": "viewName", "valueString": viewName},
+			map[string]any{"name": "resource", "valueCode": opts.viewDef.Resource},
+			map[string]any{"name": "storageModel", "valueString": "zero-json-proto3"},
+			map[string]any{"name": "rowCount", "valueInteger": len(rows)},
+		}
+		for _, row := range rows {
+			var parts []any
+			for _, c := range columns {
+				val := row[c.Name]
+				if val == nil {
+					continue
+				}
+				switch v := val.(type) {
+				case bool:
+					parts = append(parts, map[string]any{"name": c.Name, "valueBoolean": v})
+				case int:
+					parts = append(parts, map[string]any{"name": c.Name, "valueInteger": v})
+				case int64:
+					parts = append(parts, map[string]any{"name": c.Name, "valueInteger": int(v)})
+				default:
+					parts = append(parts, map[string]any{"name": c.Name, "valueString": formatCSVCellValue(v)})
+				}
+			}
+			paramList = append(paramList, map[string]any{
+				"name": "row",
+				"part": parts,
+			})
+		}
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
+			"resourceType": "Parameters",
+			"parameter":    paramList,
+		})
+
 	case strings.Contains(fmtLower, "tab-separated-values") || strings.Contains(fmtLower, "tsv"):
 		w.Header().Set("Content-Type", "text/tab-separated-values; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
@@ -999,7 +1366,11 @@ func (s *Server) executeViewDefinition(w http.ResponseWriter, r *http.Request, d
 }
 
 func buildViewConstantReplacements(constants []sqlOnFHIRConstant) map[string]string {
-	out := make(map[string]string, len(constants))
+	out := map[string]string{
+		"%ucum":  "'http://unitsofmeasure.org'",
+		"%sct":   "'http://snomed.info/sct'",
+		"%loinc": "'http://loinc.org'",
+	}
 	for _, c := range constants {
 		name := strings.TrimSpace(c.Name)
 		if name == "" {
@@ -1154,7 +1525,7 @@ func evaluateSingleSelect(root map[string]any, focus any, sel sqlOnFHIRSelect, c
 			for _, col := range sel.Column {
 				expr := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
 				if item == nil && isForEachOrNull {
-					if expr == "getResourceKey()" || expr == "id" {
+					if isRootScopedColumnPath(expr) {
 						vals := evalFHIRPathExpr([]any{root}, fhirPathContext{root: root, thisItem: root, index: 0, total: 1}, expr)
 						if len(vals) > 0 {
 							colRow[col.Name] = vals[0]
@@ -1513,25 +1884,37 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 	}
 
 	constMap := buildViewConstantReplacements(opts.viewDef.Constant)
-	columns := collectViewDefinitionColumns(opts.viewDef.Select)
+	forEachSpecs, columns, rootSelectWherePaths := extractViewForEachSpecsAndColumns(opts.viewDef.Select)
+	for i := range forEachSpecs {
+		forEachSpecs[i].forEachPath = substituteViewConstants(strings.TrimSpace(forEachSpecs[i].forEachPath), constMap)
+	}
 	branchSpecs := extractViewUnionBranchSpecs(opts.viewDef.Select)
 	rawForEachPath, forEachOuter := extractViewForEachSpec(opts.viewDef.Select)
 	forEachPath := substituteViewConstants(strings.TrimSpace(rawForEachPath), constMap)
-	selectWherePaths := extractViewSelectWherePaths(opts.viewDef.Select)
+	if len(forEachSpecs) > 0 && forEachPath == "" {
+		forEachPath = forEachSpecs[0].forEachPath
+		forEachOuter = forEachSpecs[0].isOuter
+	}
 	resType := strings.TrimSpace(opts.viewDef.Resource)
 	escapedTenant := strings.ReplaceAll(tenant, "'", "''")
 
-	resolveColForEach := func(exprPath string) string {
-		if forEachPath != "" {
-			return forEachPath
+	resolveColForEach := func(col sqlOnFHIRColumn, exprPath string) (string, int) {
+		if col.forEachIdx > 0 {
+			return substituteViewConstants(strings.TrimSpace(col.forEachPath), constMap), col.forEachIdx
+		}
+		if len(forEachSpecs) == 1 && !isRootScopedColumnPath(exprPath) {
+			return forEachSpecs[0].forEachPath, forEachSpecs[0].aliasIdx
+		}
+		if forEachPath != "" && len(forEachSpecs) == 0 && !isRootScopedColumnPath(exprPath) {
+			return forEachPath, 1
 		}
 		for _, bs := range branchSpecs {
 			bFE := substituteViewConstants(strings.TrimSpace(bs.forEachPath), constMap)
 			if bFE != "" && (exprPath == bFE || strings.HasPrefix(exprPath, bFE+".")) {
-				return bFE
+				return bFE, 1
 			}
 		}
-		return ""
+		return "", 0
 	}
 
 	if dialect == "doris" {
@@ -1544,12 +1927,12 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		colMaps := make([]map[string]any, 0, len(columns))
 		for _, col := range columns {
 			exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
-			colFE := resolveColForEach(exprPath)
+			colFE, colAliasIdx := resolveColForEach(col, exprPath)
 			var sqlExpr, sourceCol string
 			if col.Collection {
 				sqlExpr, sourceCol = dorisZeroJSONCollectionColumnExpr(exprPath)
 			} else {
-				sqlExpr, sourceCol = dorisZeroJSONForEachColumnExpr(exprPath, colFE, isCore)
+				sqlExpr, sourceCol = dorisZeroJSONForEachColumnExprWithAlias(exprPath, colFE, colAliasIdx, isCore)
 			}
 			colMaps = append(colMaps, map[string]any{
 				"name": "column",
@@ -1581,7 +1964,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		for _, w := range opts.viewDef.Where {
 			wPath := substituteViewConstants(strings.TrimSpace(w.Path), constMap)
 			if forEachPath != "" && len(branchSpecs) <= 1 && strings.Contains(wPath, "$this") {
-				valExpr, sysExpr := dorisForEachTokenExprs(forEachPath)
+				valExpr, sysExpr := dorisForEachTokenExprsWithAlias(forEachPath, 1)
 				if feSQL, ok := forEachElemWhereSQL(wPath, forEachPath, valExpr, sysExpr, "doris"); ok {
 					whereConds = append(whereConds, feSQL)
 					continue
@@ -1590,7 +1973,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 			if wSQL := dorisZeroJSONWhereExpr(wPath, isCore); wSQL != "" {
 				whereConds = append(whereConds, wSQL)
 			} else if forEachPath != "" && len(branchSpecs) <= 1 {
-				valExpr, sysExpr := dorisForEachTokenExprs(forEachPath)
+				valExpr, sysExpr := dorisForEachTokenExprsWithAlias(forEachPath, 1)
 				if feSQL, ok := forEachElemWhereSQL(wPath, forEachPath, valExpr, sysExpr, "doris"); ok {
 					whereConds = append(whereConds, feSQL)
 				}
@@ -1607,7 +1990,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 				for _, sw := range bSpec.wherePaths {
 					swPath := substituteViewConstants(strings.TrimSpace(sw), constMap)
 					if bFE != "" {
-						valExpr, sysExpr := dorisForEachTokenExprs(bFE)
+						valExpr, sysExpr := dorisForEachTokenExprsWithAlias(bFE, 1)
 						if feSQL, ok := forEachElemWhereSQL(swPath, bFE, valExpr, sysExpr, "doris"); ok {
 							bWhereConds = append(bWhereConds, feSQL)
 							continue
@@ -1624,7 +2007,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 					if col.Collection {
 						sqlExpr, _ = dorisZeroJSONCollectionColumnExpr(exprPath)
 					} else {
-						sqlExpr, _ = dorisZeroJSONForEachColumnExpr(exprPath, bFE, isCore)
+						sqlExpr, _ = dorisZeroJSONForEachColumnExprWithAlias(exprPath, bFE, 1, isCore)
 					}
 					selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
 				}
@@ -1637,16 +2020,27 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 			}
 			sqlQuery = strings.Join(branchQueries, " UNION ALL ")
 		} else {
-			lateralClause := buildDorisForEachLateralClause(forEachPath, forEachOuter)
-			for _, sw := range selectWherePaths {
-				swPath := substituteViewConstants(strings.TrimSpace(sw), constMap)
-				if forEachPath != "" {
-					valExpr, sysExpr := dorisForEachTokenExprs(forEachPath)
-					if feSQL, ok := forEachElemWhereSQL(swPath, forEachPath, valExpr, sysExpr, "doris"); ok {
-						whereConds = append(whereConds, feSQL)
-						continue
+			var lateralClauses strings.Builder
+			if len(forEachSpecs) > 0 {
+				for _, feSpec := range forEachSpecs {
+					lateralClauses.WriteString(buildDorisForEachLateralClauseWithAlias(feSpec.forEachPath, feSpec.isOuter, feSpec.aliasIdx))
+					valExpr, sysExpr := dorisForEachTokenExprsWithAlias(feSpec.forEachPath, feSpec.aliasIdx)
+					for _, sw := range feSpec.wherePaths {
+						swPath := substituteViewConstants(strings.TrimSpace(sw), constMap)
+						if feSQL, ok := forEachElemWhereSQL(swPath, feSpec.forEachPath, valExpr, sysExpr, "doris"); ok {
+							whereConds = append(whereConds, feSQL)
+							continue
+						}
+						if wSQL := dorisZeroJSONWhereExpr(swPath, isCore); wSQL != "" {
+							whereConds = append(whereConds, wSQL)
+						}
 					}
 				}
+			} else {
+				lateralClauses.WriteString(buildDorisForEachLateralClause(forEachPath, forEachOuter))
+			}
+			for _, sw := range rootSelectWherePaths {
+				swPath := substituteViewConstants(strings.TrimSpace(sw), constMap)
 				if wSQL := dorisZeroJSONWhereExpr(swPath, isCore); wSQL != "" {
 					whereConds = append(whereConds, wSQL)
 				}
@@ -1655,18 +2049,19 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 			selectExprs := make([]string, 0, len(columns))
 			for _, col := range columns {
 				exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
+				colFE, colAliasIdx := resolveColForEach(col, exprPath)
 				var sqlExpr string
 				if col.Collection {
 					sqlExpr, _ = dorisZeroJSONCollectionColumnExpr(exprPath)
 				} else {
-					sqlExpr, _ = dorisZeroJSONForEachColumnExpr(exprPath, forEachPath, isCore)
+					sqlExpr, _ = dorisZeroJSONForEachColumnExprWithAlias(exprPath, colFE, colAliasIdx, isCore)
 				}
 				selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
 			}
 			sqlQuery = fmt.Sprintf("SELECT %s FROM %s r%s WHERE %s ORDER BY r.res_id ASC",
 				strings.Join(selectExprs, ", "),
 				targetTable,
-				lateralClause,
+				lateralClauses.String(),
 				whereClause,
 			)
 		}
@@ -1687,12 +2082,12 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 	colMaps := make([]map[string]any, 0, len(columns))
 	for _, col := range columns {
 		exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
-		colFE := resolveColForEach(exprPath)
+		colFE, colAliasIdx := resolveColForEach(col, exprPath)
 		var sqlExpr, sourceTbl string
 		if col.Collection {
 			sqlExpr, sourceTbl = spidxZeroJSONCollectionColumnExpr(exprPath, dialect)
 		} else {
-			sqlExpr, sourceTbl = spidxZeroJSONForEachColumnExpr(exprPath, colFE, dialect)
+			sqlExpr, sourceTbl = spidxZeroJSONForEachColumnExprWithAlias(exprPath, colFE, colAliasIdx, dialect)
 		}
 		colMaps = append(colMaps, map[string]any{
 			"name": "column",
@@ -1725,7 +2120,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 			whereConds = append(whereConds, fmt.Sprintf("EXISTS (SELECT 1 FROM spidx_reference ref WHERE ref.tenant_id = r.tenant_id AND ref.res_type = r.res_type AND ref.res_id = r.res_id AND ref.sp_name IN ('patient', 'subject') AND ref.target_id = '%s')", escapedPat))
 		}
 	}
-	feValExpr, feSysExpr := spidxForEachTokenExprs(forEachPath, dialect)
+	feValExpr, feSysExpr := spidxForEachTokenExprsWithAlias(forEachPath, dialect, 1)
 	for _, w := range opts.viewDef.Where {
 		wPath := substituteViewConstants(strings.TrimSpace(w.Path), constMap)
 		if forEachPath != "" && len(branchSpecs) <= 1 && strings.Contains(wPath, "$this") {
@@ -1749,7 +2144,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		for _, bSpec := range branchSpecs {
 			bFE := substituteViewConstants(strings.TrimSpace(bSpec.forEachPath), constMap)
 			bJoin := buildSpidxForEachJoinClause(bFE, bSpec.isOuter, dialect)
-			bValExpr, bSysExpr := spidxForEachTokenExprs(bFE, dialect)
+			bValExpr, bSysExpr := spidxForEachTokenExprsWithAlias(bFE, dialect, 1)
 			bWhereConds := append([]string(nil), whereConds...)
 			for _, sw := range bSpec.wherePaths {
 				swPath := substituteViewConstants(strings.TrimSpace(sw), constMap)
@@ -1770,7 +2165,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 				if col.Collection {
 					sqlExpr, _ = spidxZeroJSONCollectionColumnExpr(exprPath, dialect)
 				} else {
-					sqlExpr, _ = spidxZeroJSONForEachColumnExpr(exprPath, bFE, dialect)
+					sqlExpr, _ = spidxZeroJSONForEachColumnExprWithAlias(exprPath, bFE, 1, dialect)
 				}
 				selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
 			}
@@ -1782,15 +2177,27 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		}
 		sqlQuery = strings.Join(branchQueries, " UNION ALL ")
 	} else {
-		joinClause := buildSpidxForEachJoinClause(forEachPath, forEachOuter, dialect)
-		for _, sw := range selectWherePaths {
-			swPath := substituteViewConstants(strings.TrimSpace(sw), constMap)
-			if forEachPath != "" {
-				if feSQL, ok := forEachElemWhereSQL(swPath, forEachPath, feValExpr, feSysExpr, dialect); ok {
-					whereConds = append(whereConds, feSQL)
-					continue
+		var joinClauses strings.Builder
+		if len(forEachSpecs) > 0 {
+			for _, feSpec := range forEachSpecs {
+				joinClauses.WriteString(buildSpidxForEachJoinClauseWithAlias(feSpec.forEachPath, feSpec.isOuter, dialect, feSpec.aliasIdx))
+				specValExpr, specSysExpr := spidxForEachTokenExprsWithAlias(feSpec.forEachPath, dialect, feSpec.aliasIdx)
+				for _, sw := range feSpec.wherePaths {
+					swPath := substituteViewConstants(strings.TrimSpace(sw), constMap)
+					if feSQL, ok := forEachElemWhereSQL(swPath, feSpec.forEachPath, specValExpr, specSysExpr, dialect); ok {
+						whereConds = append(whereConds, feSQL)
+						continue
+					}
+					if wSQL := spidxZeroJSONWhereExprForDialect(swPath, dialect); wSQL != "" {
+						whereConds = append(whereConds, wSQL)
+					}
 				}
 			}
+		} else {
+			joinClauses.WriteString(buildSpidxForEachJoinClause(forEachPath, forEachOuter, dialect))
+		}
+		for _, sw := range rootSelectWherePaths {
+			swPath := substituteViewConstants(strings.TrimSpace(sw), constMap)
 			if wSQL := spidxZeroJSONWhereExprForDialect(swPath, dialect); wSQL != "" {
 				whereConds = append(whereConds, wSQL)
 			}
@@ -1799,17 +2206,18 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		selectExprs := make([]string, 0, len(columns))
 		for _, col := range columns {
 			exprPath := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
+			colFE, colAliasIdx := resolveColForEach(col, exprPath)
 			var sqlExpr string
 			if col.Collection {
 				sqlExpr, _ = spidxZeroJSONCollectionColumnExpr(exprPath, dialect)
 			} else {
-				sqlExpr, _ = spidxZeroJSONForEachColumnExpr(exprPath, forEachPath, dialect)
+				sqlExpr, _ = spidxZeroJSONForEachColumnExprWithAlias(exprPath, colFE, colAliasIdx, dialect)
 			}
 			selectExprs = append(selectExprs, fmt.Sprintf("%s AS %s", sqlExpr, col.Name))
 		}
 		sqlQuery = fmt.Sprintf("SELECT %s FROM fhir_resource r%s WHERE %s ORDER BY r.res_id ASC",
 			strings.Join(selectExprs, ", "),
-			joinClause,
+			joinClauses.String(),
 			whereClause,
 		)
 	}
@@ -3345,10 +3753,15 @@ func parseReferenceCollectionPath(base string) (spName string, refTail string, o
 }
 
 func forEachRefFullExpr(valExpr, sysExpr, dialect string) string {
-	if dialect == "doris" && valExpr == "SPLIT_PART(fe_tok, '/', 2)" {
-		return "SPLIT_PART(fe_tok, '=', 2)"
+	if dialect == "doris" && strings.HasPrefix(valExpr, "SPLIT_PART(") && strings.HasSuffix(valExpr, ", '/', 2)") {
+		tokName := strings.TrimSuffix(strings.TrimPrefix(valExpr, "SPLIT_PART("), ", '/', 2)")
+		return fmt.Sprintf("SPLIT_PART(%s, '=', 2)", tokName)
 	}
 	return fmt.Sprintf("(%s || '/' || %s)", sysExpr, valExpr)
+}
+
+func isForEachRefTargetValExpr(valExpr string) bool {
+	return strings.HasSuffix(valExpr, ".target_id") || (strings.HasPrefix(valExpr, "SPLIT_PART(") && strings.HasSuffix(valExpr, ", '/', 2)"))
 }
 
 func parseForEachGetReferenceKey(t string) (targetType string, rest string, ok bool) {
@@ -3381,6 +3794,15 @@ func forEachElemSelectSQL(tail, valExpr, sysExpr, dialect string) (string, bool)
 	}
 	if strings.HasPrefix(t, "'") && strings.HasSuffix(t, "'") {
 		return t, true
+	}
+	if isPureRootResourceExpr(t) {
+		rootTail, _ := stripRootResourceEnvPrefix(t)
+		if dialect == "doris" {
+			sqlExpr, _ := dorisZeroJSONColumnExpr(rootTail, true)
+			return sqlExpr, true
+		}
+		sqlExpr, _ := spidxZeroJSONColumnExpr(rootTail, dialect)
+		return sqlExpr, true
 	}
 	lowerT := strings.ToLower(t)
 	if strings.HasPrefix(lowerT, "iif(") && strings.HasSuffix(t, ")") && findMatchingCloseParen(t, 3) == len(t)-1 {
@@ -3456,14 +3878,14 @@ func forEachElemSelectSQL(tail, valExpr, sysExpr, dialect string) (string, bool)
 		}
 	}
 	if t == "reference" {
-		if valExpr == "fe.target_id" || valExpr == "SPLIT_PART(fe_tok, '/', 2)" {
+		if isForEachRefTargetValExpr(valExpr) {
 			return forEachRefFullExpr(valExpr, sysExpr, dialect), true
 		}
 		return valExpr, true
 	}
 	if strings.HasPrefix(t, "reference.") {
 		refExpr := valExpr
-		if valExpr == "fe.target_id" || valExpr == "SPLIT_PART(fe_tok, '/', 2)" {
+		if isForEachRefTargetValExpr(valExpr) {
 			refExpr = forEachRefFullExpr(valExpr, sysExpr, dialect)
 		}
 		if sqlExpr, _, ok := buildElemSelectExprSQL("$this."+t[len("reference."):], refExpr, dialect); ok {
@@ -3507,63 +3929,75 @@ func forEachElemSelectSQL(tail, valExpr, sysExpr, dialect string) (string, bool)
 	return "", false
 }
 
-func dorisForEachTokenExprs(forEachPath string) (valExpr, sysExpr string) {
+func dorisForEachTokenExprsWithAlias(forEachPath string, aliasIdx int) (valExpr, sysExpr string) {
 	fe := strings.TrimSpace(forEachPath)
-	valExpr = "SPLIT_PART(fe_tok, '|', 2)"
-	sysExpr = "SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '|', 1)"
+	_, tokAlias := forEachDorisAliases(aliasIdx)
+	valExpr = fmt.Sprintf("SPLIT_PART(%s, '|', 2)", tokAlias)
+	sysExpr = fmt.Sprintf("SPLIT_PART(SPLIT_PART(%s, '=', 2), '|', 1)", tokAlias)
 	if isModifiedForEachCollectionPath(fe) {
-		valExpr = "fe_tok"
+		valExpr = tokAlias
 	} else if _, okRef := isReferenceForEachPath(fe); okRef {
-		valExpr = "SPLIT_PART(fe_tok, '/', 2)"
-		sysExpr = "SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '/', 1)"
+		valExpr = fmt.Sprintf("SPLIT_PART(%s, '/', 2)", tokAlias)
+		sysExpr = fmt.Sprintf("SPLIT_PART(SPLIT_PART(%s, '=', 2), '/', 1)", tokAlias)
 	} else if _, _, _, okSys := parseSystemFilteredTokenPath(fe); okSys {
-		valExpr = "SPLIT_PART(fe_tok, '|', 2)"
+		valExpr = fmt.Sprintf("SPLIT_PART(%s, '|', 2)", tokAlias)
 	} else if strings.HasPrefix(fe, "name") || fe == "given" || fe == "family" || strings.HasPrefix(fe, "address") || strings.HasPrefix(fe, "telecom") {
-		valExpr = "SPLIT_PART(fe_tok, '=', 2)"
+		valExpr = fmt.Sprintf("SPLIT_PART(%s, '=', 2)", tokAlias)
 	}
 	return valExpr, sysExpr
 }
 
-func spidxForEachTokenExprs(forEachPath, dialect string) (valExpr, sysExpr string) {
+func spidxForEachTokenExprsWithAlias(forEachPath, dialect string, aliasIdx int) (valExpr, sysExpr string) {
 	fe := strings.TrimSpace(forEachPath)
+	alias := forEachSpidxAlias(aliasIdx)
 	if _, okRef := isReferenceForEachPath(fe); okRef {
-		return "fe.target_id", "fe.target_type"
+		return alias + ".target_id", alias + ".target_type"
 	}
-	return "fe.sp_value", "fe.sp_system"
+	return alias + ".sp_value", alias + ".sp_system"
 }
 
 func buildDorisForEachLateralClause(forEachPath string, forEachOuter bool) string {
+	return buildDorisForEachLateralClauseWithAlias(forEachPath, forEachOuter, 1)
+}
+
+func buildDorisForEachLateralClauseWithAlias(forEachPath string, forEachOuter bool, aliasIdx int) string {
 	fe := strings.TrimSpace(forEachPath)
 	if fe == "" {
 		return ""
 	}
+	tblAlias, tokAlias := forEachDorisAliases(aliasIdx)
 	explodeFunc := "EXPLODE"
 	if forEachOuter {
 		explodeFunc = "OUTER EXPLODE"
 	}
 	if isModifiedForEachCollectionPath(fe) {
 		collExpr, _ := dorisZeroJSONCollectionColumnExpr(fe)
-		return fmt.Sprintf(" LATERAL VIEW %s(%s) fe_tbl AS fe_tok", explodeFunc, collExpr)
+		return fmt.Sprintf(" LATERAL VIEW %s(%s) %s AS %s", explodeFunc, collExpr, tblAlias, tokAlias)
 	}
 	if spRef, okRef := isReferenceForEachPath(fe); okRef {
-		return fmt.Sprintf(" LATERAL VIEW %s(ARRAY_FILTER(x -> x LIKE '%s=%%', r.ref_tokens)) fe_tbl AS fe_tok", explodeFunc, spRef)
+		return fmt.Sprintf(" LATERAL VIEW %s(ARRAY_FILTER(x -> x LIKE '%s=%%', r.ref_tokens)) %s AS %s", explodeFunc, spRef, tblAlias, tokAlias)
 	}
 	if spSys, sysVal, sysTail, okSys := parseSystemFilteredTokenPath(fe); okSys && (sysTail == "" || sysTail == ".value") {
 		escapedSys := strings.ReplaceAll(sysVal, "'", "''")
-		return fmt.Sprintf(" LATERAL VIEW %s(ARRAY_FILTER(x -> x LIKE '%s=%s|%%', r.code_tokens)) fe_tbl AS fe_tok", explodeFunc, spSys, escapedSys)
+		return fmt.Sprintf(" LATERAL VIEW %s(ARRAY_FILTER(x -> x LIKE '%s=%s|%%', r.code_tokens)) %s AS %s", explodeFunc, spSys, escapedSys, tblAlias, tokAlias)
 	}
 	arrCol := "r.code_tokens"
 	if strings.HasPrefix(fe, "name") || fe == "given" || fe == "family" || strings.HasPrefix(fe, "address") || strings.HasPrefix(fe, "telecom") {
 		arrCol = "r.string_tokens"
 	}
-	return fmt.Sprintf(" LATERAL VIEW %s(%s) fe_tbl AS fe_tok", explodeFunc, arrCol)
+	return fmt.Sprintf(" LATERAL VIEW %s(%s) %s AS %s", explodeFunc, arrCol, tblAlias, tokAlias)
 }
 
 func buildSpidxForEachJoinClause(forEachPath string, forEachOuter bool, dialect string) string {
+	return buildSpidxForEachJoinClauseWithAlias(forEachPath, forEachOuter, dialect, 1)
+}
+
+func buildSpidxForEachJoinClauseWithAlias(forEachPath string, forEachOuter bool, dialect string, aliasIdx int) string {
 	fe := strings.TrimSpace(forEachPath)
 	if fe == "" {
 		return ""
 	}
+	alias := forEachSpidxAlias(aliasIdx)
 	joinType := "INNER JOIN"
 	if forEachOuter {
 		joinType = "LEFT JOIN"
@@ -3571,30 +4005,30 @@ func buildSpidxForEachJoinClause(forEachPath string, forEachOuter bool, dialect 
 	if isModifiedForEachCollectionPath(fe) {
 		subQ, _ := buildSpidxForEachSubquery(fe, dialect)
 		if dialect == "sqlite" {
-			return fmt.Sprintf(" %s (%s) fe ON 1=1", joinType, subQ)
+			return fmt.Sprintf(" %s (%s) %s ON 1=1", joinType, subQ, alias)
 		}
-		return fmt.Sprintf(" %s LATERAL (%s) fe ON TRUE", joinType, subQ)
+		return fmt.Sprintf(" %s LATERAL (%s) %s ON TRUE", joinType, subQ, alias)
 	}
 	if spRef, okRef := isReferenceForEachPath(fe); okRef {
-		return fmt.Sprintf(" %s spidx_reference fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = '%s'", joinType, spRef)
+		return fmt.Sprintf(" %s spidx_reference %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = '%s'", joinType, alias, alias, alias, alias, alias, spRef)
 	}
 	if spSys, sysVal, sysTail, okSys := parseSystemFilteredTokenPath(fe); okSys && (sysTail == "" || sysTail == ".value") {
 		escapedSys := strings.ReplaceAll(sysVal, "'", "''")
-		return fmt.Sprintf(" %s spidx_token fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = '%s' AND fe.sp_system = '%s'", joinType, spSys, escapedSys)
+		return fmt.Sprintf(" %s spidx_token %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s.sp_name = '%s' AND %s.sp_system = '%s'", joinType, alias, alias, alias, alias, alias, spSys, alias, escapedSys)
 	}
 	feTable := "spidx_token"
-	feSpCond := fmt.Sprintf("fe.sp_name = '%s'", normalizeFHIRPathToSearchParam(fe))
+	feSpCond := fmt.Sprintf("%s.sp_name = '%s'", alias, normalizeFHIRPathToSearchParam(fe))
 	if fe == "name" {
 		feTable = "spidx_string"
-		feSpCond = "fe.sp_name IN ('family', 'given', 'name')"
+		feSpCond = fmt.Sprintf("%s.sp_name IN ('family', 'given', 'name')", alias)
 	} else if strings.HasPrefix(fe, "name.") || fe == "given" || fe == "family" {
 		feTable = "spidx_string"
-		feSpCond = fmt.Sprintf("fe.sp_name = '%s'", normalizeFHIRPathToSearchParam(fe))
+		feSpCond = fmt.Sprintf("%s.sp_name = '%s'", alias, normalizeFHIRPathToSearchParam(fe))
 	} else if strings.HasPrefix(fe, "address") {
 		feTable = "spidx_string"
-		feSpCond = "fe.sp_name = 'address'"
+		feSpCond = fmt.Sprintf("%s.sp_name = 'address'", alias)
 	}
-	return fmt.Sprintf(" %s %s fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND %s", joinType, feTable, feSpCond)
+	return fmt.Sprintf(" %s %s %s ON %s.tenant_id = r.tenant_id AND %s.res_type = r.res_type AND %s.res_id = r.res_id AND %s", joinType, feTable, alias, alias, alias, alias, feSpCond)
 }
 
 func forEachElemWhereSQL(rawExpr, forEachPath, valExpr, sysExpr, dialect string) (string, bool) {
@@ -3649,6 +4083,18 @@ func forEachElemWhereSQL(rawExpr, forEachPath, valExpr, sysExpr, dialect string)
 			compiled = append(compiled, sub)
 		}
 		return "(" + strings.Join(compiled, " AND ") + ")", true
+	}
+
+	if rootPred, okRoot := stripRootResourceEnvPrefix(c); okRoot {
+		if dialect == "doris" {
+			if wSQL := dorisZeroJSONWhereExpr(rootPred, true); wSQL != "" {
+				return wSQL, true
+			}
+		} else {
+			if wSQL := spidxZeroJSONWhereExprForDialect(rootPred, dialect); wSQL != "" {
+				return wSQL, true
+			}
+		}
 	}
 
 	fe := strings.TrimSpace(forEachPath)
@@ -3707,7 +4153,7 @@ func forEachElemWhereSQL(rawExpr, forEachPath, valExpr, sysExpr, dialect string)
 	}
 	if strings.HasPrefix(c, "reference") && (len(c) == len("reference") || c[len("reference")] == '.' || c[len("reference")] == ' ' || c[len("reference")] == '=' || c[len("reference")] == '!' || c[len("reference")] == '~') {
 		refExpr := valExpr
-		if valExpr == "fe.target_id" || valExpr == "SPLIT_PART(fe_tok, '/', 2)" {
+		if isForEachRefTargetValExpr(valExpr) {
 			refExpr = forEachRefFullExpr(valExpr, sysExpr, dialect)
 		}
 		if c == "reference.exists()" || c == "reference.hasValue()" {
@@ -3736,27 +4182,28 @@ func forEachElemWhereSQL(rawExpr, forEachPath, valExpr, sysExpr, dialect string)
 	return "", false
 }
 
-func dorisZeroJSONForEachColumnExpr(fhirPath, forEachPath string, isCore bool) (string, string) {
+func dorisZeroJSONForEachColumnExprWithAlias(fhirPath, forEachPath string, aliasIdx int, isCore bool) (string, string) {
 	p := strings.TrimSpace(fhirPath)
 	fe := strings.TrimSpace(forEachPath)
-	if fe != "" && (p == fe || strings.HasPrefix(p, fe+".")) {
-		valExpr, sysExpr := dorisForEachTokenExprs(fe)
+	if fe != "" && aliasIdx > 0 && (p == fe || strings.HasPrefix(p, fe+".")) {
+		_, tokAlias := forEachDorisAliases(aliasIdx)
+		valExpr, sysExpr := dorisForEachTokenExprsWithAlias(fe, aliasIdx)
 		tail := "$this"
 		if strings.HasPrefix(p, fe+".") {
 			tail = strings.TrimSpace(p[len(fe)+1:])
 		}
 		if sqlExpr, ok := forEachElemSelectSQL(tail, valExpr, sysExpr, "doris"); ok {
-			return sqlExpr, "fe_tok"
+			return sqlExpr, tokAlias
 		}
-		return valExpr, "fe_tok"
+		return valExpr, tokAlias
 	}
 	return dorisZeroJSONColumnExpr(fhirPath, isCore)
 }
 
-func spidxZeroJSONForEachColumnExpr(fhirPath, forEachPath, dialect string) (string, string) {
+func spidxZeroJSONForEachColumnExprWithAlias(fhirPath, forEachPath string, aliasIdx int, dialect string) (string, string) {
 	p := strings.TrimSpace(fhirPath)
 	fe := strings.TrimSpace(forEachPath)
-	if fe != "" && (p == fe || strings.HasPrefix(p, fe+".")) {
+	if fe != "" && aliasIdx > 0 && (p == fe || strings.HasPrefix(p, fe+".")) {
 		feTable := "spidx_token"
 		if isModifiedForEachCollectionPath(fe) {
 			_, feTable = buildSpidxForEachSubquery(fe, dialect)
@@ -3765,7 +4212,7 @@ func spidxZeroJSONForEachColumnExpr(fhirPath, forEachPath, dialect string) (stri
 		} else if strings.HasPrefix(fe, "name") || fe == "given" || fe == "family" || strings.HasPrefix(fe, "address") {
 			feTable = "spidx_string"
 		}
-		valExpr, sysExpr := spidxForEachTokenExprs(fe, dialect)
+		valExpr, sysExpr := spidxForEachTokenExprsWithAlias(fe, dialect, aliasIdx)
 		tail := "$this"
 		if strings.HasPrefix(p, fe+".") {
 			tail = strings.TrimSpace(p[len(fe)+1:])
@@ -3808,6 +4255,12 @@ func findMatchingCloseParen(s string, openIdx int) int {
 
 func normalizePolymorphicFHIRPath(expr string) string {
 	s := expr
+	if stripped, ok := stripRootResourceEnvPrefix(s); ok {
+		s = stripped
+	}
+	s = strings.ReplaceAll(s, "%resource.", "")
+	s = strings.ReplaceAll(s, "%rootResource.", "")
+	s = strings.ReplaceAll(s, "%context.", "")
 	s = strings.ReplaceAll(s, ".children()", "")
 	s = strings.ReplaceAll(s, ".descendants()", "")
 	s = strings.TrimPrefix(s, "children().")
