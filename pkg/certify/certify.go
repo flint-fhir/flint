@@ -6092,6 +6092,36 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-44", suite10, "SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Arithmetic (+, -, *, /, div, mod), Math/String Method Chaining on Composite Expressions (.abs(), .round(), .upper(), .length()) & Mixed %resource + forEach Pushdown + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 forEach element arithmetic, math/string method chaining, mixed %resource pushdown & binary Proto3 $sql/$run verified")
 
+	// AN-45: SQL-on-FHIR v2 unionAll Multi-forEach / forEachOrNull Cross-Join Unnesting (fe, fe2), Parent forEach + Child unionAll with %resource & Empty Collection ({} / NULL) Projection Pushdown + Binary Proto3 Wire
+	t0 = time.Now()
+	{
+		unionMultiFEVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_unionall_multi_foreach_null_view","status":"active","resource":"Patient","select":[{"forEach":"name.given","where":[{"path":"$this = 'Alice'"}],"column":[{"name":"rk","path":"getResourceKey()"},{"name":"given_upper","path":"$this.upper()"}],"unionAll":[{"forEach":"%resource.identifier","where":[{"path":"system = 'http://hospital.example.org/mrn'"}],"column":[{"name":"entry_kind","path":"'mrn'"},{"name":"entry_val","path":"value"},{"name":"fallback_note","path":"{}"}]},{"forEachOrNull":"%resource.telecom","where":[{"path":"system = 'phone'"}],"column":[{"name":"entry_kind","path":"'phone'"},{"name":"entry_val","path":"coalesce(value, 'NO_PHONE')"},{"name":"fallback_note","path":"iif(value.exists(), 'HAS_PHONE', {})"}]}]}]}`)
+
+		respUMFEDoris, bUMFEDoris, errUMFEDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", unionMultiFEVD, nil)
+		respUMFEPg, bUMFEPg, errUMFEPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", unionMultiFEVD, nil)
+		respUMFESqlite, bUMFESqlite, errUMFESqlite := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", unionMultiFEVD, nil)
+		respUMFERun, bUMFERun, errUMFERun := doReq(http.MethodPost, basePath+"/ViewDefinition/$run", "application/fhir+json", unionMultiFEVD, nil)
+		respUMFESqlProto, bUMFESqlProto, errUMFESqlProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/x-protobuf", "application/fhir+json", unionMultiFEVD, map[string]string{"Accept": "application/x-protobuf"})
+		respUMFERunProto, bUMFERunProto, errUMFERunProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$run?_format=application/x-protobuf", "application/fhir+json", unionMultiFEVD, map[string]string{"Accept": "application/x-protobuf"})
+
+		if errUMFEDoris != nil || respUMFEDoris.StatusCode != http.StatusOK || !strings.Contains(string(bUMFEDoris), "UNION ALL") || !strings.Contains(string(bUMFEDoris), "LATERAL VIEW EXPLODE(r.string_tokens) fe_tbl AS fe_tok") || !strings.Contains(string(bUMFEDoris), "LATERAL VIEW EXPLODE(r.code_tokens) fe2_tbl AS fe2_tok") || !strings.Contains(string(bUMFEDoris), "LATERAL VIEW OUTER EXPLODE(r.string_tokens) fe2_tbl AS fe2_tok") || !strings.Contains(string(bUMFEDoris), "NULL AS fallback_note") || !strings.Contains(string(bUMFEDoris), "COALESCE(NULLIF(SPLIT_PART(fe2_tok, '=', 2), ''), 'NO_PHONE') AS entry_val") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with unionAll multi-forEach/forEachOrNull & {} NULL pushdown, got %d: %s", respUMFEDoris.StatusCode, string(bUMFEDoris))
+		} else if errUMFEPg != nil || respUMFEPg.StatusCode != http.StatusOK || !strings.Contains(string(bUMFEPg), "UNION ALL") || !strings.Contains(string(bUMFEPg), "INNER JOIN spidx_string fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'given'") || !strings.Contains(string(bUMFEPg), "INNER JOIN spidx_token fe2 ON fe2.tenant_id = r.tenant_id AND fe2.res_type = r.res_type AND fe2.res_id = r.res_id AND fe2.sp_name = 'identifier'") || !strings.Contains(string(bUMFEPg), "LEFT JOIN spidx_token fe2 ON fe2.tenant_id = r.tenant_id AND fe2.res_type = r.res_type AND fe2.res_id = r.res_id AND fe2.sp_name = 'telecom'") || !strings.Contains(string(bUMFEPg), "NULL AS fallback_note") || !strings.Contains(string(bUMFEPg), "COALESCE(NULLIF(fe2.sp_value, ''), 'NO_PHONE') AS entry_val") || !strings.Contains(string(bUMFEPg), "THEN 'HAS_PHONE' ELSE NULL END AS fallback_note") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with unionAll multi-forEach/forEachOrNull & {} NULL pushdown, got %d: %s", respUMFEPg.StatusCode, string(bUMFEPg))
+		} else if errUMFESqlite != nil || respUMFESqlite.StatusCode != http.StatusOK || !strings.Contains(string(bUMFESqlite), "LEFT JOIN spidx_token fe2") || !strings.Contains(string(bUMFESqlite), "COALESCE(NULLIF(fe2.sp_value, ''), 'NO_PHONE') AS entry_val") || !strings.Contains(string(bUMFESqlite), "NULL AS fallback_note") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=sqlite with unionAll multi-forEach/forEachOrNull & {} NULL pushdown, got %d: %s", respUMFESqlite.StatusCode, string(bUMFESqlite))
+		} else if errUMFERun != nil || respUMFERun.StatusCode != http.StatusOK || !strings.Contains(string(bUMFERun), `"entry_kind":"mrn"`) || !strings.Contains(string(bUMFERun), `"entry_val":"CERT-MRN-1"`) || !strings.Contains(string(bUMFERun), `"entry_kind":"phone"`) || !strings.Contains(string(bUMFERun), `"entry_val":"NO_PHONE"`) || !strings.Contains(string(bUMFERun), `"fallback_note":null`) {
+			err = fmt.Errorf("expected POST /ViewDefinition/$run with unionAll multi-forEach/forEachOrNull & {} NULL evaluation, got %d: %s", respUMFERun.StatusCode, string(bUMFERun))
+		} else if errUMFESqlProto != nil || respUMFESqlProto == nil || respUMFESqlProto.StatusCode != http.StatusOK || !strings.Contains(respUMFESqlProto.Header.Get("Content-Type"), "application/x-protobuf") || respUMFESqlProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bUMFESqlProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$sql?_format=application/x-protobuf, got %v", errUMFESqlProto)
+		} else if errUMFERunProto != nil || respUMFERunProto == nil || respUMFERunProto.StatusCode != http.StatusOK || !strings.Contains(respUMFERunProto.Header.Get("Content-Type"), "application/x-protobuf") || respUMFERunProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bUMFERunProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$run?_format=application/x-protobuf, got %v", errUMFERunProto)
+		} else {
+			err = nil
+		}
+	}
+	record("AN-45", suite10, "SQL-on-FHIR v2 unionAll Multi-forEach / forEachOrNull Cross-Join Unnesting (fe, fe2), Parent forEach + Child unionAll with %resource & Empty Collection ({} / NULL) Projection Pushdown + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 unionAll multi-forEach/forEachOrNull (fe, fe2), %resource unnesting, {} NULL projections & binary Proto3 $sql/$run verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

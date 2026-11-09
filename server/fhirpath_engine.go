@@ -593,7 +593,7 @@ func applyFHIRPathIndexer(current []any, scopeInput []any, ctx fhirPathContext, 
 
 func evalFHIRPathPrimaryLiteral(seg string, input []any, ctx fhirPathContext) ([]any, bool) {
 	seg = strings.TrimSpace(seg)
-	if seg == "{}" {
+	if seg == "{}" || strings.EqualFold(seg, "null") {
 		return nil, true
 	}
 	if hasOuterParens(seg) {
