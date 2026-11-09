@@ -1178,6 +1178,96 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		_, ok := toBooleanConv(current[0])
 		return []any{ok}
 
+	case "todate", "todatetime", "totime":
+		if len(current) != 1 {
+			return nil
+		}
+		if s, ok := toStringConv(current[0]); ok && strings.TrimSpace(s) != "" {
+			return []any{strings.TrimPrefix(strings.TrimSpace(s), "@")}
+		}
+		return nil
+
+	case "convertstodate", "convertstodatetime", "convertstotime":
+		if len(current) != 1 {
+			return nil
+		}
+		s, ok := toStringConv(current[0])
+		return []any{ok && strings.TrimSpace(s) != ""}
+
+	case "toquantity":
+		if len(current) != 1 {
+			return nil
+		}
+		if m, isMap := current[0].(map[string]any); isMap {
+			if v, hasV := m["value"]; hasV {
+				if fv, ok := toDecimalConv(v); ok {
+					return []any{fv}
+				}
+			}
+		}
+		if fv, ok := toDecimalConv(current[0]); ok {
+			return []any{fv}
+		}
+		return nil
+
+	case "convertstoquantity":
+		if len(current) != 1 {
+			return nil
+		}
+		if m, isMap := current[0].(map[string]any); isMap {
+			_, hasV := m["value"]
+			return []any{hasV}
+		}
+		_, ok := toDecimalConv(current[0])
+		return []any{ok}
+
+	case "precision":
+		if len(current) == 0 {
+			return nil
+		}
+		var out []any
+		for _, item := range current {
+			if s, ok := toStringConv(item); ok && s != "" {
+				out = append(out, len([]rune(s)))
+			}
+		}
+		return out
+
+	case "lowboundary", "highboundary":
+		if len(current) == 0 {
+			return nil
+		}
+		precArg := ""
+		if len(args) >= 1 {
+			precArg = strings.TrimSpace(args[0])
+		}
+		halfStep, _ := strconv.ParseFloat(decimalBoundaryHalfStep(precArg), 64)
+		isLow := strings.EqualFold(fnName, "lowboundary")
+		var out []any
+		for _, item := range current {
+			if fv, ok := toDecimalConv(item); ok {
+				var res float64
+				if isLow {
+					res = math.Round((fv-halfStep)*1e9) / 1e9
+				} else {
+					res = math.Round((fv+halfStep)*1e9) / 1e9
+				}
+				out = append(out, res)
+			} else if s, ok := item.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+
+	case "comparable":
+		if len(current) != 1 || current[0] == nil {
+			return []any{false}
+		}
+		if s, ok := current[0].(string); ok {
+			return []any{strings.TrimSpace(s) != ""}
+		}
+		return []any{true}
+
 	// String Functions
 	case "indexof":
 		if len(current) == 0 || len(args) != 1 {

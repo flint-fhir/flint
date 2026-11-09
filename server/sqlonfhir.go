@@ -2705,7 +2705,7 @@ func (m spidxCollectionModifiers) hasAnyMods() bool {
 
 func isNumericTransformKind(kind string) bool {
 	switch kind {
-	case "length", "indexOf", "precision", "splitCount", "toInteger", "toDecimal", "abs", "ceiling", "floor", "truncate", "round", "sqrt", "exp", "ln", "log", "power", "selectNumeric":
+	case "length", "indexOf", "precision", "splitCount", "toCharsCount", "lowBoundary", "highBoundary", "toInteger", "toDecimal", "abs", "ceiling", "floor", "truncate", "round", "sqrt", "exp", "ln", "log", "power", "selectNumeric":
 		return true
 	default:
 		return false
@@ -2838,6 +2838,43 @@ func parseSpidxCollectionModifiers(fhirPath string) spidxCollectionModifiers {
 			cur = strings.TrimSpace(cur[:len(cur)-len(".precision()")])
 			continue
 		}
+		if strings.HasSuffix(cur, ".toDate()") {
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "toDate"}}, mods.elemTransforms...)
+			tagParts = append([]string{".toDate"}, tagParts...)
+			cur = strings.TrimSpace(cur[:len(cur)-len(".toDate()")])
+			continue
+		}
+		if strings.HasSuffix(cur, ".toDateTime()") {
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "toDateTime"}}, mods.elemTransforms...)
+			tagParts = append([]string{".toDateTime"}, tagParts...)
+			cur = strings.TrimSpace(cur[:len(cur)-len(".toDateTime()")])
+			continue
+		}
+		if strings.HasSuffix(cur, ".toTime()") {
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "toTime"}}, mods.elemTransforms...)
+			tagParts = append([]string{".toTime"}, tagParts...)
+			cur = strings.TrimSpace(cur[:len(cur)-len(".toTime()")])
+			continue
+		}
+		if bBase, isHigh, precArg, okBound := parseBoundaryCall(cur); okBound {
+			kind := "lowBoundary"
+			tag := ".lowBoundary"
+			if isHigh {
+				kind = "highBoundary"
+				tag = ".highBoundary"
+			}
+			mods.elemTransforms = append([]spidxElemTransform{{kind: kind, arg1: precArg}}, mods.elemTransforms...)
+			tagParts = append([]string{tag}, tagParts...)
+			cur = bBase
+			continue
+		}
+		if idx := strings.LastIndex(cur, ".comparable("); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(".comparable(")-1) == len(cur)-1 {
+			unitArg := strings.Trim(strings.TrimSpace(cur[idx+len(".comparable("):len(cur)-1]), "'\"")
+			mods.elemTransforms = append([]spidxElemTransform{{kind: "comparable", arg1: unitArg}}, mods.elemTransforms...)
+			tagParts = append([]string{".comparable"}, tagParts...)
+			cur = strings.TrimSpace(cur[:idx])
+			continue
+		}
 		matchedConv := false
 		for _, convSpec := range []struct {
 			suffix string
@@ -2863,36 +2900,78 @@ func parseSpidxCollectionModifiers(fhirPath string) spidxCollectionModifiers {
 		if matchedConv {
 			continue
 		}
+		if subBase, subIdx, okSub := parseTrailingSubscriptIndex(cur); okSub {
+			if splitBase, rawSep, okSplit := parseTrailingSplitCall(subBase); okSplit {
+				mods.elemTransforms = append([]spidxElemTransform{{kind: "splitIndex", arg1: rawSep, int1: subIdx}}, mods.elemTransforms...)
+				tagParts = append([]string{fmt.Sprintf(".split[%d]", subIdx)}, tagParts...)
+				cur = splitBase
+				continue
+			}
+			if strings.HasSuffix(subBase, ".toChars()") {
+				mods.elemTransforms = append([]spidxElemTransform{{kind: "toCharsIndex", int1: subIdx}}, mods.elemTransforms...)
+				tagParts = append([]string{fmt.Sprintf(".toChars[%d]", subIdx)}, tagParts...)
+				cur = strings.TrimSpace(subBase[:len(subBase)-len(".toChars()")])
+				continue
+			}
+		}
 		if strings.HasSuffix(cur, ".first()") {
-			if splitBase, rawSep, okSplit := parseTrailingSplitCall(cur[:len(cur)-len(".first()")]); okSplit {
+			prefix := strings.TrimSpace(cur[:len(cur)-len(".first()")])
+			if splitBase, rawSep, okSplit := parseTrailingSplitCall(prefix); okSplit {
 				mods.elemTransforms = append([]spidxElemTransform{{kind: "splitFirst", arg1: rawSep}}, mods.elemTransforms...)
 				tagParts = append([]string{".split.first"}, tagParts...)
 				cur = splitBase
 				continue
 			}
+			if strings.HasSuffix(prefix, ".toChars()") {
+				mods.elemTransforms = append([]spidxElemTransform{{kind: "toCharsFirst"}}, mods.elemTransforms...)
+				tagParts = append([]string{".toChars.first"}, tagParts...)
+				cur = strings.TrimSpace(prefix[:len(prefix)-len(".toChars()")])
+				continue
+			}
 		}
 		if strings.HasSuffix(cur, ".last()") {
-			if splitBase, rawSep, okSplit := parseTrailingSplitCall(cur[:len(cur)-len(".last()")]); okSplit {
+			prefix := strings.TrimSpace(cur[:len(cur)-len(".last()")])
+			if splitBase, rawSep, okSplit := parseTrailingSplitCall(prefix); okSplit {
 				mods.elemTransforms = append([]spidxElemTransform{{kind: "splitLast", arg1: rawSep}}, mods.elemTransforms...)
 				tagParts = append([]string{".split.last"}, tagParts...)
 				cur = splitBase
 				continue
 			}
+			if strings.HasSuffix(prefix, ".toChars()") {
+				mods.elemTransforms = append([]spidxElemTransform{{kind: "toCharsLast"}}, mods.elemTransforms...)
+				tagParts = append([]string{".toChars.last"}, tagParts...)
+				cur = strings.TrimSpace(prefix[:len(prefix)-len(".toChars()")])
+				continue
+			}
 		}
 		if strings.HasSuffix(cur, ".count()") {
-			if splitBase, rawSep, okSplit := parseTrailingSplitCall(cur[:len(cur)-len(".count()")]); okSplit {
+			prefix := strings.TrimSpace(cur[:len(cur)-len(".count()")])
+			if splitBase, rawSep, okSplit := parseTrailingSplitCall(prefix); okSplit {
 				mods.elemTransforms = append([]spidxElemTransform{{kind: "splitCount", arg1: rawSep}}, mods.elemTransforms...)
 				tagParts = append([]string{".split.count"}, tagParts...)
 				cur = splitBase
 				continue
 			}
+			if strings.HasSuffix(prefix, ".toChars()") {
+				mods.elemTransforms = append([]spidxElemTransform{{kind: "toCharsCount"}}, mods.elemTransforms...)
+				tagParts = append([]string{".toChars.count"}, tagParts...)
+				cur = strings.TrimSpace(prefix[:len(prefix)-len(".toChars()")])
+				continue
+			}
 		}
 		if jIdx := strings.LastIndex(cur, ".join("); jIdx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, jIdx+len(".join(")-1) == len(cur)-1 {
-			if splitBase, rawSplitSep, okSplit := parseTrailingSplitCall(cur[:jIdx]); okSplit {
-				rawJoinSep := strings.Trim(strings.TrimSpace(cur[jIdx+len(".join("):len(cur)-1]), "'\"")
+			prefix := strings.TrimSpace(cur[:jIdx])
+			rawJoinSep := strings.Trim(strings.TrimSpace(cur[jIdx+len(".join("):len(cur)-1]), "'\"")
+			if splitBase, rawSplitSep, okSplit := parseTrailingSplitCall(prefix); okSplit {
 				mods.elemTransforms = append([]spidxElemTransform{{kind: "splitJoin", arg1: rawSplitSep, arg2: rawJoinSep}}, mods.elemTransforms...)
 				tagParts = append([]string{".split.join"}, tagParts...)
 				cur = splitBase
+				continue
+			}
+			if strings.HasSuffix(prefix, ".toChars()") {
+				mods.elemTransforms = append([]spidxElemTransform{{kind: "toCharsJoin", arg1: rawJoinSep}}, mods.elemTransforms...)
+				tagParts = append([]string{".toChars.join"}, tagParts...)
+				cur = strings.TrimSpace(prefix[:len(prefix)-len(".toChars()")])
 				continue
 			}
 		}
@@ -3133,6 +3212,51 @@ func applySpidxElemTransforms(colExpr string, transforms []spidxElemTransform, d
 			default:
 				expr = fmt.Sprintf("CHAR_LENGTH(CAST(%s AS TEXT))", expr)
 			}
+		case "toDate":
+			if dialect == "sqlite" {
+				expr = fmt.Sprintf("DATE(%s)", expr)
+			} else {
+				expr = fmt.Sprintf("CAST(%s AS DATE)", expr)
+			}
+		case "toDateTime":
+			switch dialect {
+			case "doris":
+				expr = fmt.Sprintf("CAST(%s AS DATETIME)", expr)
+			case "sqlite":
+				expr = fmt.Sprintf("DATETIME(%s)", expr)
+			default:
+				expr = fmt.Sprintf("CAST(%s AS TIMESTAMPTZ)", expr)
+			}
+		case "toTime":
+			if dialect == "sqlite" {
+				expr = fmt.Sprintf("TIME(%s)", expr)
+			} else {
+				expr = fmt.Sprintf("CAST(%s AS TIME)", expr)
+			}
+		case "lowBoundary", "highBoundary":
+			halfStep := decimalBoundaryHalfStep(tr.arg1)
+			op := "-"
+			if tr.kind == "highBoundary" {
+				op = "+"
+			}
+			if strings.HasPrefix(expr, "CAST(") && (strings.HasSuffix(expr, " AS DOUBLE)") || strings.HasSuffix(expr, " AS REAL)") || strings.HasSuffix(expr, " AS DOUBLE PRECISION)")) {
+				expr = fmt.Sprintf("(%s %s %s)", expr, op, halfStep)
+			} else {
+				switch dialect {
+				case "doris":
+					expr = fmt.Sprintf("(CAST(%s AS DOUBLE) %s %s)", expr, op, halfStep)
+				case "sqlite":
+					expr = fmt.Sprintf("(CAST(%s AS REAL) %s %s)", expr, op, halfStep)
+				default:
+					expr = fmt.Sprintf("(CAST(%s AS DOUBLE PRECISION) %s %s)", expr, op, halfStep)
+				}
+			}
+		case "comparable":
+			if dialect == "doris" {
+				expr = fmt.Sprintf("(%s IS NOT NULL AND CAST(%s AS STRING) <> '')", expr, expr)
+			} else {
+				expr = fmt.Sprintf("(%s IS NOT NULL AND %s <> '')", expr, expr)
+			}
 		case "convertsToBoolean", "convertsToInteger", "convertsToDecimal", "convertsToString", "convertsToDate", "convertsToDateTime", "convertsToTime":
 			if dialect == "doris" {
 				dorisCast := "STRING"
@@ -3153,6 +3277,49 @@ func applySpidxElemTransforms(colExpr string, transforms []spidxElemTransform, d
 				expr = fmt.Sprintf("(CAST(%s AS %s) IS NOT NULL)", expr, dorisCast)
 			} else {
 				expr = fmt.Sprintf("(%s IS NOT NULL AND %s <> '')", expr, expr)
+			}
+		case "splitIndex":
+			escapedSep := strings.ReplaceAll(tr.arg1, "'", "''")
+			sqlIdx := tr.int1 + 1
+			switch dialect {
+			case "doris":
+				expr = fmt.Sprintf("element_at(SPLIT_BY_STRING(%s, '%s'), %d)", expr, escapedSep, sqlIdx)
+			case "sqlite":
+				if tr.int1 == 0 {
+					expr = fmt.Sprintf("SUBSTR(%s, 1, CASE WHEN INSTR(%s, '%s') > 0 THEN INSTR(%s, '%s') - 1 ELSE LENGTH(%s) END)", expr, expr, escapedSep, expr, escapedSep, expr)
+				} else {
+					expr = fmt.Sprintf("(SELECT j.value FROM json_each('[\"' || REPLACE(%s, '%s', '\",\"') || '\"]') j LIMIT 1 OFFSET %d)", expr, escapedSep, tr.int1)
+				}
+			default:
+				expr = fmt.Sprintf("SPLIT_PART(%s, '%s', %d)", expr, escapedSep, sqlIdx)
+			}
+		case "toCharsIndex":
+			expr = fmt.Sprintf("SUBSTR(%s, %d, 1)", expr, tr.int1+1)
+		case "toCharsFirst":
+			expr = fmt.Sprintf("SUBSTR(%s, 1, 1)", expr)
+		case "toCharsLast":
+			if dialect == "postgres" {
+				expr = fmt.Sprintf("RIGHT(%s, 1)", expr)
+			} else {
+				expr = fmt.Sprintf("SUBSTR(%s, -1, 1)", expr)
+			}
+		case "toCharsCount":
+			if dialect == "sqlite" {
+				expr = fmt.Sprintf("LENGTH(%s)", expr)
+			} else {
+				expr = fmt.Sprintf("CHAR_LENGTH(%s)", expr)
+			}
+		case "toCharsJoin":
+			escapedJoinSep := strings.ReplaceAll(tr.arg1, "'", "''")
+			switch dialect {
+			case "doris":
+				expr = fmt.Sprintf("ARRAY_JOIN(SPLIT_BY_STRING(%s, ''), '%s')", expr, escapedJoinSep)
+			case "sqlite":
+				if tr.arg1 != "" {
+					expr = fmt.Sprintf("(SELECT GROUP_CONCAT(SUBSTR(%s, j.value, 1), '%s') FROM json_each(json_array(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)) j WHERE j.value <= LENGTH(%s))", expr, escapedJoinSep, expr)
+				}
+			default:
+				expr = fmt.Sprintf("ARRAY_TO_STRING(REGEXP_SPLIT_TO_ARRAY(%s, ''), '%s')", expr, escapedJoinSep)
 			}
 		case "splitFirst":
 			escapedSep := strings.ReplaceAll(tr.arg1, "'", "''")
@@ -3573,7 +3740,7 @@ func buildElemWherePredicateSQL(crit, colExpr, dialect string, isNumeric bool) (
 			return fmt.Sprintf("(%s IS NULL OR %s = '')", lhsSQL, lhsSQL), true
 		}
 	}
-	if strings.HasSuffix(c, ".toBoolean()") || (strings.Contains(c, ".convertsTo") && strings.HasSuffix(c, "()")) {
+	if strings.HasSuffix(c, ".toBoolean()") || (strings.Contains(c, ".convertsTo") && strings.HasSuffix(c, ")")) || (strings.Contains(c, ".comparable(") && strings.HasSuffix(c, ")")) {
 		if lhsSQL, _, okL := buildElemSelectExprSQL(c, colExpr, dialect); okL {
 			return lhsSQL, true
 		}
@@ -3773,11 +3940,11 @@ func spidxZeroJSONCollectionColumnExpr(fhirPath, dialect string) (string, string
 					continue
 				}
 				switch mods.elemTransforms[i].kind {
-				case "length", "indexOf", "precision", "splitCount":
+				case "length", "indexOf", "precision", "splitCount", "toCharsCount":
 					emptyArr = "ARRAY[]::int[]"
 				case "toInteger":
 					emptyArr = "ARRAY[]::bigint[]"
-				case "toDecimal", "abs", "ceiling", "floor", "truncate", "round", "sqrt", "exp", "ln", "log", "power", "selectNumeric":
+				case "toDecimal", "lowBoundary", "highBoundary", "abs", "ceiling", "floor", "truncate", "round", "sqrt", "exp", "ln", "log", "power", "selectNumeric":
 					emptyArr = "ARRAY[]::double precision[]"
 				}
 				break
@@ -4533,7 +4700,7 @@ func buildForEachCompositeWhereSQL(c, valExpr, sysExpr, dialect string) (string,
 			return fmt.Sprintf("(%s IS NULL OR %s = '')", lhsSQL, lhsSQL), true
 		}
 	}
-	if strings.HasSuffix(c, ".toBoolean()") || (strings.Contains(c, ".convertsTo") && strings.HasSuffix(c, "()")) {
+	if strings.HasSuffix(c, ".toBoolean()") || (strings.Contains(c, ".convertsTo") && strings.HasSuffix(c, ")")) || (strings.Contains(c, ".comparable(") && strings.HasSuffix(c, ")")) {
 		if lhsSQL, okL := forEachElemSelectSQL(c, valExpr, sysExpr, dialect); okL {
 			return lhsSQL, true
 		}
@@ -6538,6 +6705,22 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		}
 	}
 	if basePath, subIdx, okSub := parseTrailingSubscriptIndex(p); okSub {
+		if splitBase, rawSep, okSplit := parseTrailingSplitCall(basePath); okSplit {
+			escapedSep := strings.ReplaceAll(rawSep, "'", "''")
+			colExpr, colSrc := spidxZeroJSONColumnExpr(splitBase, dialect)
+			if dialect == "sqlite" {
+				if subIdx == 0 {
+					return fmt.Sprintf("SUBSTR(%s, 1, CASE WHEN INSTR(%s, '%s') > 0 THEN INSTR(%s, '%s') - 1 ELSE LENGTH(%s) END)", colExpr, colExpr, escapedSep, colExpr, escapedSep, colExpr), fmt.Sprintf("%s.split[%d]", colSrc, subIdx)
+				}
+				return fmt.Sprintf("(SELECT j.value FROM json_each('[\"' || REPLACE(%s, '%s', '\",\"') || '\"]') j LIMIT 1 OFFSET %d)", colExpr, escapedSep, subIdx), fmt.Sprintf("%s.split[%d]", colSrc, subIdx)
+			}
+			return fmt.Sprintf("SPLIT_PART(%s, '%s', %d)", colExpr, escapedSep, subIdx+1), fmt.Sprintf("%s.split[%d]", colSrc, subIdx)
+		}
+		if strings.HasSuffix(basePath, ".toChars()") {
+			charBase := strings.TrimSpace(basePath[:len(basePath)-len(".toChars()")])
+			colExpr, colSrc := spidxZeroJSONColumnExpr(charBase, dialect)
+			return fmt.Sprintf("SUBSTR(%s, %d, 1)", colExpr, subIdx+1), fmt.Sprintf("%s.toChars[%d]", colSrc, subIdx)
+		}
 		if mods := parseSpidxCollectionModifiers(basePath); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
 			origTag := mods.tag
 			mods.offset += subIdx

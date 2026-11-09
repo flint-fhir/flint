@@ -7064,4 +7064,100 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	assert.Contains(t, respFECSEProtoSql.Header.Get("Content-Type"), "application/x-protobuf")
 	assert.Equal(t, "google.fhir.r4.proto3", respFECSEProtoSql.Header.Get("X-Flint-Wire-Format"))
 	assert.NotEmpty(t, fecseProtoSqlBytes)
+
+	// Wave 113: forEach / forEachOrNull Element-Level Subscript Indexing (.split(sep)[idx], .toChars()[idx]), Character Unnesting (.toChars().first(), .last(), .count(), .join()) & Decimal/Temporal Boundary + Conversion (.lowBoundary(), .highBoundary(), .toDate(), .toDateTime(), .toTime(), .comparable()) Pushdown + Binary Proto3 Wire
+	feElemSubCharsBoundVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "w113_foreach_elem_subscript_tochars_boundary_view",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"forEach": "identifier",
+				"where": [{"path": "value.split('-')[0] = 'MRN' and value.toChars().first() = 'M' and value.toChars().count() = 8 and value.comparable('1')"}],
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "val_num", "path": "value.split('-')[1]"},
+					{"name": "char_first", "path": "value.toChars().first()"},
+					{"name": "char_last", "path": "value.toChars().last()"},
+					{"name": "char_second", "path": "value.toChars()[1]"},
+					{"name": "char_count", "path": "value.toChars().count()"},
+					{"name": "pfx_spaced", "path": "value.split('-')[0].toChars().join('.')"},
+					{"name": "num_low", "path": "value.split('-')[1].toDecimal().lowBoundary(1)"},
+					{"name": "num_high", "path": "value.split('-')[1].toDecimal().highBoundary(1)"},
+					{"name": "val_comp", "path": "value.comparable('1')"},
+					{"name": "comp_mid", "path": "(system & '|' & value).split('|')[1]"}
+				]
+			}
+		]
+	}`
+
+	respFESCBDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSubCharsBoundVD))
+	require.NoError(t, err)
+	sqlFESCBDorisBytes, _ := io.ReadAll(respFESCBDoris.Body)
+	respFESCBDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respFESCBDoris.StatusCode, string(sqlFESCBDorisBytes))
+	sqlFESCBDoris := string(sqlFESCBDorisBytes)
+	assert.Contains(t, sqlFESCBDoris, "element_at(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), 2) AS val_num")
+	assert.Contains(t, sqlFESCBDoris, "SUBSTR(SPLIT_PART(fe_tok, '|', 2), 1, 1) AS char_first")
+	assert.Contains(t, sqlFESCBDoris, "SUBSTR(SPLIT_PART(fe_tok, '|', 2), -1, 1) AS char_last")
+	assert.Contains(t, sqlFESCBDoris, "SUBSTR(SPLIT_PART(fe_tok, '|', 2), 2, 1) AS char_second")
+	assert.Contains(t, sqlFESCBDoris, "CHAR_LENGTH(SPLIT_PART(fe_tok, '|', 2)) AS char_count")
+	assert.Contains(t, sqlFESCBDoris, "ARRAY_JOIN(SPLIT_BY_STRING(element_at(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), 1), ''), '.') AS pfx_spaced")
+	assert.Contains(t, sqlFESCBDoris, "(CAST(element_at(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), 2) AS DOUBLE) - 0.05) AS num_low")
+	assert.Contains(t, sqlFESCBDoris, "(SPLIT_PART(fe_tok, '|', 2) IS NOT NULL AND CAST(SPLIT_PART(fe_tok, '|', 2) AS STRING) <> '') AS val_comp")
+	assert.Contains(t, sqlFESCBDoris, "element_at(SPLIT_BY_STRING(CONCAT(COALESCE(SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '|', 1), ''), '|', COALESCE(SPLIT_PART(fe_tok, '|', 2), '')), '|'), 2) AS comp_mid")
+
+	respFESCBPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSubCharsBoundVD))
+	require.NoError(t, err)
+	sqlFESCBPgBytes, _ := io.ReadAll(respFESCBPg.Body)
+	respFESCBPg.Body.Close()
+	require.Equal(t, http.StatusOK, respFESCBPg.StatusCode, string(sqlFESCBPgBytes))
+	sqlFESCBPg := string(sqlFESCBPgBytes)
+	assert.Contains(t, sqlFESCBPg, "SPLIT_PART(fe.sp_value, '-', 2) AS val_num")
+	assert.Contains(t, sqlFESCBPg, "SUBSTR(fe.sp_value, 1, 1) AS char_first")
+	assert.Contains(t, sqlFESCBPg, "RIGHT(fe.sp_value, 1) AS char_last")
+	assert.Contains(t, sqlFESCBPg, "SUBSTR(fe.sp_value, 2, 1) AS char_second")
+	assert.Contains(t, sqlFESCBPg, "CHAR_LENGTH(fe.sp_value) AS char_count")
+	assert.Contains(t, sqlFESCBPg, "ARRAY_TO_STRING(REGEXP_SPLIT_TO_ARRAY(SPLIT_PART(fe.sp_value, '-', 1), ''), '.') AS pfx_spaced")
+	assert.Contains(t, sqlFESCBPg, "(CAST(SPLIT_PART(fe.sp_value, '-', 2) AS DOUBLE PRECISION) - 0.05) AS num_low")
+	assert.Contains(t, sqlFESCBPg, "(fe.sp_value IS NOT NULL AND fe.sp_value <> '') AS val_comp")
+
+	respFESCBSqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSubCharsBoundVD))
+	require.NoError(t, err)
+	sqlFESCBSqliteBytes, _ := io.ReadAll(respFESCBSqlite.Body)
+	respFESCBSqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respFESCBSqlite.StatusCode, string(sqlFESCBSqliteBytes))
+	sqlFESCBSqlite := string(sqlFESCBSqliteBytes)
+	assert.Contains(t, sqlFESCBSqlite, "LIMIT 1 OFFSET 1) AS val_num")
+	assert.Contains(t, sqlFESCBSqlite, "SUBSTR(fe.sp_value, -1, 1) AS char_last")
+
+	respFESCBRun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(feElemSubCharsBoundVD))
+	require.NoError(t, err)
+	fescbRunBytes, _ := io.ReadAll(respFESCBRun.Body)
+	respFESCBRun.Body.Close()
+	require.Equal(t, http.StatusOK, respFESCBRun.StatusCode, string(fescbRunBytes))
+	assert.Contains(t, string(fescbRunBytes), `"val_num":"1001"`)
+	assert.Contains(t, string(fescbRunBytes), `"char_first":"M"`)
+	assert.Contains(t, string(fescbRunBytes), `"char_last":"1"`)
+	assert.Contains(t, string(fescbRunBytes), `"char_second":"R"`)
+	assert.Contains(t, string(fescbRunBytes), `"char_count":8`)
+	assert.Contains(t, string(fescbRunBytes), `"pfx_spaced":"M.R.N"`)
+	assert.Contains(t, string(fescbRunBytes), `"num_low":1000.95`)
+	assert.Contains(t, string(fescbRunBytes), `"num_high":1001.05`)
+	assert.Contains(t, string(fescbRunBytes), `"val_comp":true`)
+	assert.Contains(t, string(fescbRunBytes), `"comp_mid":"MRN-1001"`)
+
+	reqFESCBProtoSql, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/x-protobuf", strings.NewReader(feElemSubCharsBoundVD))
+	require.NoError(t, err)
+	reqFESCBProtoSql.Header.Set("Content-Type", "application/fhir+json")
+	reqFESCBProtoSql.Header.Set("Accept", "application/x-protobuf")
+	respFESCBProtoSql, err := client.Do(reqFESCBProtoSql)
+	require.NoError(t, err)
+	fescbProtoSqlBytes, _ := io.ReadAll(respFESCBProtoSql.Body)
+	respFESCBProtoSql.Body.Close()
+	require.Equal(t, http.StatusOK, respFESCBProtoSql.StatusCode)
+	assert.Contains(t, respFESCBProtoSql.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.Equal(t, "google.fhir.r4.proto3", respFESCBProtoSql.Header.Get("X-Flint-Wire-Format"))
+	assert.NotEmpty(t, fescbProtoSqlBytes)
 }
