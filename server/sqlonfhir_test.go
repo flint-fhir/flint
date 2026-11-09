@@ -6974,4 +6974,94 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	assert.Contains(t, respUMFEProtoSql.Header.Get("Content-Type"), "application/x-protobuf")
 	assert.Equal(t, "google.fhir.r4.proto3", respUMFEProtoSql.Header.Get("X-Flint-Wire-Format"))
 	assert.NotEmpty(t, umfeProtoSqlBytes)
+
+	// Wave 112: forEach / forEachOrNull Element-Level Type Conversion Checks (.convertsToString(), .convertsToInteger(), .toBoolean(), .precision()), String Split/Join (.split().first(), .last(), .count(), .join()) & Encoding/Escaping (.encode('hex'), .escape('html')) Pushdown + Binary Proto3 Wire
+	feElemConvSplitEscapeVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "w112_foreach_elem_conversions_split_escape_view",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"forEach": "identifier",
+				"where": [{"path": "value.convertsToString() and value.split('-').first() = 'MRN' and value.split('-').count() = 2"}],
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "val_prefix", "path": "value.split('-').first()"},
+					{"name": "val_suffix", "path": "value.split('-').last()"},
+					{"name": "val_parts", "path": "value.split('-').count()"},
+					{"name": "val_rejoined", "path": "value.split('-').join('_')"},
+					{"name": "sys_tail_upper", "path": "system.split('/').last().upper()"},
+					{"name": "val_hex", "path": "value.split('-').first().encode('hex')"},
+					{"name": "val_escaped", "path": "value.escape('html')"},
+					{"name": "val_is_str", "path": "value.convertsToString()"},
+					{"name": "comp_last", "path": "(system & '|' & value).split('|').last()"}
+				]
+			}
+		]
+	}`
+
+	respFECSEDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(feElemConvSplitEscapeVD))
+	require.NoError(t, err)
+	sqlFECSEDorisBytes, _ := io.ReadAll(respFECSEDoris.Body)
+	respFECSEDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respFECSEDoris.StatusCode, string(sqlFECSEDorisBytes))
+	sqlFECSEDoris := string(sqlFECSEDorisBytes)
+	assert.Contains(t, sqlFECSEDoris, "element_at(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), 1) AS val_prefix")
+	assert.Contains(t, sqlFECSEDoris, "element_at(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), -1) AS val_suffix")
+	assert.Contains(t, sqlFECSEDoris, "ARRAY_SIZE(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')) AS val_parts")
+	assert.Contains(t, sqlFECSEDoris, "ARRAY_JOIN(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), '_') AS val_rejoined")
+	assert.Contains(t, sqlFECSEDoris, "HEX(element_at(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), 1)) AS val_hex")
+	assert.Contains(t, sqlFECSEDoris, "(CAST(SPLIT_PART(fe_tok, '|', 2) AS STRING) IS NOT NULL) AS val_is_str")
+	assert.Contains(t, sqlFECSEDoris, "element_at(SPLIT_BY_STRING(CONCAT(COALESCE(SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '|', 1), ''), '|', COALESCE(SPLIT_PART(fe_tok, '|', 2), '')), '|'), -1) AS comp_last")
+
+	respFECSEPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(feElemConvSplitEscapeVD))
+	require.NoError(t, err)
+	sqlFECSEPgBytes, _ := io.ReadAll(respFECSEPg.Body)
+	respFECSEPg.Body.Close()
+	require.Equal(t, http.StatusOK, respFECSEPg.StatusCode, string(sqlFECSEPgBytes))
+	sqlFECSEPg := string(sqlFECSEPgBytes)
+	assert.Contains(t, sqlFECSEPg, "SPLIT_PART(fe.sp_value, '-', 1) AS val_prefix")
+	assert.Contains(t, sqlFECSEPg, "(STRING_TO_ARRAY(fe.sp_value, '-'))[ARRAY_UPPER(STRING_TO_ARRAY(fe.sp_value, '-'), 1)] AS val_suffix")
+	assert.Contains(t, sqlFECSEPg, "COALESCE(ARRAY_LENGTH(STRING_TO_ARRAY(fe.sp_value, '-'), 1), 0) AS val_parts")
+	assert.Contains(t, sqlFECSEPg, "ARRAY_TO_STRING(STRING_TO_ARRAY(fe.sp_value, '-'), '_') AS val_rejoined")
+	assert.Contains(t, sqlFECSEPg, "ENCODE(CAST(SPLIT_PART(fe.sp_value, '-', 1) AS BYTEA), 'hex') AS val_hex")
+	assert.Contains(t, sqlFECSEPg, "REPLACE(REPLACE(REPLACE(fe.sp_value, '&', '&amp;'), '<', '&lt;'), '>', '&gt;') AS val_escaped")
+	assert.Contains(t, sqlFECSEPg, "(fe.sp_value IS NOT NULL AND fe.sp_value <> '') AS val_is_str")
+
+	respFECSESqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(feElemConvSplitEscapeVD))
+	require.NoError(t, err)
+	sqlFECSESqliteBytes, _ := io.ReadAll(respFECSESqlite.Body)
+	respFECSESqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respFECSESqlite.StatusCode, string(sqlFECSESqliteBytes))
+	sqlFECSESqlite := string(sqlFECSESqliteBytes)
+	assert.Contains(t, sqlFECSESqlite, "REPLACE(fe.sp_value, '-', '_') AS val_rejoined")
+	assert.Contains(t, sqlFECSESqlite, "HEX(SUBSTR(fe.sp_value, 1, CASE WHEN INSTR(fe.sp_value, '-') > 0")
+
+	respFECSERun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(feElemConvSplitEscapeVD))
+	require.NoError(t, err)
+	fecseRunBytes, _ := io.ReadAll(respFECSERun.Body)
+	respFECSERun.Body.Close()
+	require.Equal(t, http.StatusOK, respFECSERun.StatusCode, string(fecseRunBytes))
+	assert.Contains(t, string(fecseRunBytes), `"val_prefix":"MRN"`)
+	assert.Contains(t, string(fecseRunBytes), `"val_suffix":"1001"`)
+	assert.Contains(t, string(fecseRunBytes), `"val_parts":2`)
+	assert.Contains(t, string(fecseRunBytes), `"val_rejoined":"MRN_1001"`)
+	assert.Contains(t, string(fecseRunBytes), `"sys_tail_upper":"MRN"`)
+	assert.Contains(t, string(fecseRunBytes), `"val_hex":"4d524e"`)
+	assert.Contains(t, string(fecseRunBytes), `"val_is_str":true`)
+	assert.Contains(t, string(fecseRunBytes), `"comp_last":"MRN-1001"`)
+
+	reqFECSEProtoSql, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/x-protobuf", strings.NewReader(feElemConvSplitEscapeVD))
+	require.NoError(t, err)
+	reqFECSEProtoSql.Header.Set("Content-Type", "application/fhir+json")
+	reqFECSEProtoSql.Header.Set("Accept", "application/x-protobuf")
+	respFECSEProtoSql, err := client.Do(reqFECSEProtoSql)
+	require.NoError(t, err)
+	fecseProtoSqlBytes, _ := io.ReadAll(respFECSEProtoSql.Body)
+	respFECSEProtoSql.Body.Close()
+	require.Equal(t, http.StatusOK, respFECSEProtoSql.StatusCode)
+	assert.Contains(t, respFECSEProtoSql.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.Equal(t, "google.fhir.r4.proto3", respFECSEProtoSql.Header.Get("X-Flint-Wire-Format"))
+	assert.NotEmpty(t, fecseProtoSqlBytes)
 }
