@@ -3,16 +3,15 @@
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 WORKDIR /src
 
-ARG TARGETOS=linux
-ARG TARGETARCH
-ARG VERSION=dev
-
 RUN apk add --no-cache ca-certificates git
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN go mod download || (sleep 2 && go mod download) || (sleep 5 && go mod download)
 
 COPY . .
+ARG TARGETOS=linux
+ARG TARGETARCH
+ARG VERSION=dev
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/flintd ./cmd/flintd \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/seed ./cmd/seed \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/certify ./cmd/certify \

@@ -6149,4 +6149,196 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		assert.Contains(t, respSTG.Header.Get("Content-Type"), "application/x-protobuf", "system/type GET endpoint %s", sysTypeGetEp)
 		assert.NotEmpty(t, stgBytes, "system/type GET endpoint %s", sysTypeGetEp)
 	}
+
+	// 55. Wave 106: SQL-on-FHIR v2 forEach / forEachOrNull Collection-Expression & Element-Wise $this / Relative Function Pushdown ($sql & $run) & Binary Proto3 Instance-Level GET Operations Across 36 National IG, Clinical Reasoning, Terminology, Subscription, Payer & Public Health Endpoints
+	forEachExprVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "foreach_collection_expr_view",
+		"status": "active",
+		"resource": "Patient",
+		"select": [{
+			"forEach": "name.given.where($this.startsWith('A')).distinct().sort()",
+			"column": [
+				{"name": "rk", "path": "getResourceKey()"},
+				{"name": "given_val", "path": "$this"},
+				{"name": "given_upper", "path": "$this.trim().upper()"},
+				{"name": "given_len", "path": "$this.length()"},
+				{"name": "given_iif", "path": "iif($this.length() >= 4, $this.upper(), $this.lower())"},
+				{"name": "given_tag", "path": "$this.upper() & '-TAG'"}
+			]
+		}]
+	}`
+
+	respFEW106Doris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(forEachExprVD))
+	require.NoError(t, err)
+	sqlFEDorisBytes, _ := io.ReadAll(respFEW106Doris.Body)
+	respFEW106Doris.Body.Close()
+	require.Equal(t, http.StatusOK, respFEW106Doris.StatusCode, string(sqlFEDorisBytes))
+	sqlFEDoris := string(sqlFEDorisBytes)
+	assert.Contains(t, sqlFEDoris, "LATERAL VIEW EXPLODE(ARRAY_SORT(ARRAY_DISTINCT(ARRAY_FILTER(x -> x LIKE 'A%',")
+	assert.Contains(t, sqlFEDoris, "fe_tok AS given_val")
+	assert.Contains(t, sqlFEDoris, "UPPER(TRIM(fe_tok)) AS given_upper")
+	assert.Contains(t, sqlFEDoris, "CHAR_LENGTH(fe_tok) AS given_len")
+	assert.Contains(t, sqlFEDoris, "CASE WHEN CHAR_LENGTH(fe_tok) >= 4 THEN UPPER(fe_tok) ELSE LOWER(fe_tok) END AS given_iif")
+	assert.Contains(t, sqlFEDoris, "CONCAT(COALESCE(UPPER(fe_tok), ''), '-TAG') AS given_tag")
+
+	respFEW106Pg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(forEachExprVD))
+	require.NoError(t, err)
+	sqlFEPgBytes, _ := io.ReadAll(respFEW106Pg.Body)
+	respFEW106Pg.Body.Close()
+	require.Equal(t, http.StatusOK, respFEW106Pg.StatusCode, string(sqlFEPgBytes))
+	sqlFEPg := string(sqlFEPgBytes)
+	assert.Contains(t, sqlFEPg, "INNER JOIN LATERAL (SELECT DISTINCT s.sp_value AS sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' AND s.sp_value LIKE 'A%' ORDER BY sp_value ASC) fe ON TRUE")
+	assert.Contains(t, sqlFEPg, "fe.sp_value AS given_val")
+	assert.Contains(t, sqlFEPg, "UPPER(TRIM(fe.sp_value)) AS given_upper")
+	assert.Contains(t, sqlFEPg, "CHAR_LENGTH(fe.sp_value) AS given_len")
+	assert.Contains(t, sqlFEPg, "CASE WHEN CHAR_LENGTH(fe.sp_value) >= 4 THEN UPPER(fe.sp_value) ELSE LOWER(fe.sp_value) END AS given_iif")
+	assert.Contains(t, sqlFEPg, "(COALESCE(UPPER(fe.sp_value), '') || '-TAG') AS given_tag")
+
+	respFESqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(forEachExprVD))
+	require.NoError(t, err)
+	sqlFESqliteBytes, _ := io.ReadAll(respFESqlite.Body)
+	respFESqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respFESqlite.StatusCode, string(sqlFESqliteBytes))
+	sqlFESqlite := string(sqlFESqliteBytes)
+	assert.Contains(t, sqlFESqlite, "INNER JOIN (SELECT DISTINCT s.sp_value AS sp_value FROM spidx_string s WHERE s.tenant_id = r.tenant_id AND s.res_type = r.res_type AND s.res_id = r.res_id AND s.sp_name = 'given' AND s.sp_value LIKE 'A%' ORDER BY sp_value ASC) fe ON 1=1")
+	assert.Contains(t, sqlFESqlite, "LENGTH(fe.sp_value) AS given_len")
+
+	respFERun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(forEachExprVD))
+	require.NoError(t, err)
+	feRunBytes, _ := io.ReadAll(respFERun.Body)
+	respFERun.Body.Close()
+	require.Equal(t, http.StatusOK, respFERun.StatusCode, string(feRunBytes))
+	assert.Contains(t, string(feRunBytes), `"rk":"proto-pat-1"`)
+	assert.Contains(t, string(feRunBytes), `"given_val":"Alice"`)
+	assert.Contains(t, string(feRunBytes), `"given_upper":"ALICE"`)
+	assert.Contains(t, string(feRunBytes), `"given_len":5`)
+	assert.Contains(t, string(feRunBytes), `"given_iif":"ALICE"`)
+	assert.Contains(t, string(feRunBytes), `"given_tag":"ALICE-TAG"`)
+
+	// Verify forEachOrNull over system-filtered token path with %constant substitution & relative field functions
+	forEachOrNullSysVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "foreachornull_sys_token_view",
+		"status": "active",
+		"resource": "Patient",
+		"constant": [
+			{"name": "mrn_sys", "valueString": "http://hospital.example.org/mrn"},
+			{"name": "tag_prefix", "valueString": "ID:"}
+		],
+		"select": [{
+			"forEachOrNull": "identifier.where(system = %mrn_sys)",
+			"column": [
+				{"name": "rk", "path": "getResourceKey()"},
+				{"name": "sys_lower", "path": "system.lower()"},
+				{"name": "val_upper", "path": "value.trim().upper()"},
+				{"name": "val_coal", "path": "coalesce(value.upper(), 'NONE')"},
+				{"name": "val_prefixed", "path": "%tag_prefix & value.upper()"}
+			]
+		}]
+	}`
+
+	respFEONDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(forEachOrNullSysVD))
+	require.NoError(t, err)
+	sqlFEONDorisBytes, _ := io.ReadAll(respFEONDoris.Body)
+	respFEONDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respFEONDoris.StatusCode, string(sqlFEONDorisBytes))
+	sqlFEONDoris := string(sqlFEONDorisBytes)
+	assert.Contains(t, sqlFEONDoris, "LATERAL VIEW OUTER EXPLODE(ARRAY_FILTER(x -> x LIKE 'identifier=http://hospital.example.org/mrn|%', r.code_tokens)) fe_tbl AS fe_tok")
+	assert.Contains(t, sqlFEONDoris, "LOWER(SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '|', 1)) AS sys_lower")
+	assert.Contains(t, sqlFEONDoris, "UPPER(TRIM(SPLIT_PART(fe_tok, '|', 2))) AS val_upper")
+	assert.Contains(t, sqlFEONDoris, "COALESCE(NULLIF(UPPER(SPLIT_PART(fe_tok, '|', 2)), ''), 'NONE') AS val_coal")
+	assert.Contains(t, sqlFEONDoris, "CONCAT('ID:', COALESCE(UPPER(SPLIT_PART(fe_tok, '|', 2)), '')) AS val_prefixed")
+
+	respFEONPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(forEachOrNullSysVD))
+	require.NoError(t, err)
+	sqlFEONPgBytes, _ := io.ReadAll(respFEONPg.Body)
+	respFEONPg.Body.Close()
+	require.Equal(t, http.StatusOK, respFEONPg.StatusCode, string(sqlFEONPgBytes))
+	sqlFEONPg := string(sqlFEONPgBytes)
+	assert.Contains(t, sqlFEONPg, "LEFT JOIN spidx_token fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'identifier' AND fe.sp_system = 'http://hospital.example.org/mrn'")
+	assert.Contains(t, sqlFEONPg, "LOWER(fe.sp_system) AS sys_lower")
+	assert.Contains(t, sqlFEONPg, "UPPER(TRIM(fe.sp_value)) AS val_upper")
+	assert.Contains(t, sqlFEONPg, "COALESCE(NULLIF(UPPER(fe.sp_value), ''), 'NONE') AS val_coal")
+	assert.Contains(t, sqlFEONPg, "('ID:' || COALESCE(UPPER(fe.sp_value), '')) AS val_prefixed")
+
+	respFEONRun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(forEachOrNullSysVD))
+	require.NoError(t, err)
+	feonRunBytes, _ := io.ReadAll(respFEONRun.Body)
+	respFEONRun.Body.Close()
+	require.Equal(t, http.StatusOK, respFEONRun.StatusCode, string(feonRunBytes))
+	assert.Contains(t, string(feonRunBytes), `"rk":"proto-pat-1"`)
+	assert.Contains(t, string(feonRunBytes), `"sys_lower":"http://hospital.example.org/mrn"`)
+	assert.Contains(t, string(feonRunBytes), `"val_upper":"MRN-PROTO-1"`)
+	assert.Contains(t, string(feonRunBytes), `"val_prefixed":"ID:MRN-PROTO-1"`)
+
+	// Seed StructureDefinition, Consent & MedicationKnowledge for instance-level GET operations
+	for _, seed := range []struct {
+		path string
+		body string
+	}{
+		{"/fhir/r4/proto/StructureDefinition/w106-sd-1", `{"resourceType":"StructureDefinition","id":"w106-sd-1","url":"http://flint.fhir.org/StructureDefinition/w106-sd-1","name":"W106PatientProfile","status":"active","kind":"resource","abstract":false,"type":"Patient","baseDefinition":"http://hl7.org/fhir/StructureDefinition/Patient","derivation":"constraint"}`},
+		{"/fhir/r4/proto/Consent/w97-con-1", `{"resourceType":"Consent","id":"w97-con-1","status":"active","scope":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/consentscope","code":"patient-privacy"}]},"category":[{"coding":[{"system":"http://loinc.org","code":"59284-0"}]}],"patient":{"reference":"Patient/proto-pat-1"},"provision":{"type":"permit"}}`},
+		{"/fhir/r4/proto/MedicationKnowledge/w97-mk-1", `{"resourceType":"MedicationKnowledge","id":"w97-mk-1","status":"active","code":{"coding":[{"system":"http://www.nlm.nih.gov/research/umls/rxnorm","code":"860975","display":"Metformin hydrochloride 500 MG Oral Tablet"}]}}`},
+	} {
+		reqSeed, sErr := http.NewRequest(http.MethodPut, ts.URL+seed.path, strings.NewReader(seed.body))
+		require.NoError(t, sErr)
+		reqSeed.Header.Set("Content-Type", "application/fhir+json")
+		respSeed, sErr := client.Do(reqSeed)
+		require.NoError(t, sErr)
+		respSeed.Body.Close()
+	}
+
+	for _, instGetEp := range []string{
+		"/fhir/r4/proto/Encounter/w97-enc-1/$pacio-timepoints",
+		"/fhir/r4/proto/Patient/proto-pat-1/$cancer-registry-report",
+		"/fhir/r4/proto/PlanDefinition/hypertension-management/$medmorph-kar",
+		"/fhir/r4/proto/MeasureReport/w97-mr-1/$vbpr-performance",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pacio-cognitive-summary",
+		"/fhir/r4/proto/Composition/w98-comp-1/$eicr-document",
+		"/fhir/r4/proto/MedicationKnowledge/w97-mk-1/$formulary-alternatives",
+		"/fhir/r4/proto/Patient/proto-pat-1/$odh-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$ra-coding-gaps",
+		"/fhir/r4/proto/Patient/proto-pat-1/$physical-activity-summary",
+		"/fhir/r4/proto/MedicinalProduct/mp-w101-1/$epi-document",
+		"/fhir/r4/proto/ResearchStudy/w97-study-1/$rwd-cohort",
+		"/fhir/r4/proto/DocumentReference/docref-w101-1/$ihe-iti-68",
+		"/fhir/r4/proto/Patient/proto-pat-1/$find-subject-variants",
+		"/fhir/r4/proto/Patient/proto-pat-1/$find-subject-tx-implications",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pacio-summary",
+		"/fhir/r4/proto/Patient/proto-pat-1/$mcode-summary",
+		"/fhir/r4/proto/Coverage/cov-w101-1/$formulary-coverage",
+		"/fhir/r4/proto/Patient/proto-pat-1/$carin-bb",
+		"/fhir/r4/proto/Consent/w97-con-1/$evaluate?patient=Patient/proto-pat-1",
+		"/fhir/r4/proto/Group/w99-grp-1/$davinci-data-export",
+		"/fhir/r4/proto/MedicationRequest/w99-mr-1/$dispense",
+		"/fhir/r4/proto/Patient/proto-pat-1/$ihe-pix",
+		"/fhir/r4/proto/ServiceRequest/w99-sr-1/$collect-specimen",
+		"/fhir/r4/proto/DiagnosticReport/w99-dr-1/$evaluate",
+		"/fhir/r4/proto/MedicationKnowledge/w97-mk-1/$lookup",
+		"/fhir/r4/proto/MedicationRequest/w99-mr-1/$check-interactions",
+		"/fhir/r4/proto/StructureDefinition/w106-sd-1/$snapshot",
+		"/fhir/r4/proto/PlanDefinition/hypertension-management/$apply?subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/ActivityDefinition/bp-monitoring-order/$apply?subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/Subscription/w98-sub-1/$status",
+		"/fhir/r4/proto/Subscription/w98-sub-1/$events",
+		"/fhir/r4/proto/Library/CMS165-Logic/$evaluate?subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/Patient/proto-pat-1/$pcde",
+		"/fhir/r4/proto/ResearchStudy/w97-study-1/$evaluate-eligibility?subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/Measure/cms165-bp-control/$evaluate-risk-condition-category?subject=Patient/proto-pat-1",
+	} {
+		reqIG, igErr := http.NewRequest(http.MethodGet, ts.URL+instGetEp+"&_format=application/x-protobuf", nil)
+		if !strings.Contains(instGetEp, "?") {
+			reqIG, igErr = http.NewRequest(http.MethodGet, ts.URL+instGetEp+"?_format=application/x-protobuf", nil)
+		}
+		require.NoError(t, igErr)
+		reqIG.Header.Set("Accept", "application/x-protobuf")
+		respIG, igErr := client.Do(reqIG)
+		require.NoError(t, igErr)
+		igBytes, _ := io.ReadAll(respIG.Body)
+		respIG.Body.Close()
+		require.Equal(t, http.StatusOK, respIG.StatusCode, "instance GET endpoint %s: %s", instGetEp, string(igBytes))
+		assert.Contains(t, respIG.Header.Get("Content-Type"), "application/x-protobuf", "instance GET endpoint %s", instGetEp)
+		assert.NotEmpty(t, igBytes, "instance GET endpoint %s", instGetEp)
+	}
 }
