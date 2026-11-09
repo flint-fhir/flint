@@ -1,6 +1,6 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, and 35+ National HL7 Implementation Guide
-// conformance & certification runner. It executes 10 structured test suites (108 checks) against
+// conformance & certification runner. It executes 10 structured test suites (123 checks) against
 // a target Flint server and produces both a standard FHIR R4 TestReport resource
 // and a human-readable scorecard.
 package certify
@@ -5720,6 +5720,107 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("AN-40", suite10, "Zero-JSON Binary Proto3 Instance-Level GET Operations Across 36 National HL7 IG, Clinical Reasoning, Terminology, Subscription, Payer & Public Health Endpoints ($pacio-timepoints, $cancer-registry-report, $medmorph-kar, $vbpr-performance, $pacio-cognitive-summary, $eicr-document, $formulary-alternatives, $odh-summary, $ra-coding-gaps, $physical-activity-summary, $epi-document, $rwd-cohort, $ihe-iti-68, $find-subject-variants, $find-subject-tx-implications, $pacio-summary, $mcode-summary, $formulary-coverage, $carin-bb, Consent/$evaluate, Group/$davinci-data-export, $dispense, $ihe-pix, $collect-specimen, DiagnosticReport/$evaluate, MedicationKnowledge/$lookup, $check-interactions, $snapshot, PlanDefinition/$apply, ActivityDefinition/$apply, Subscription/$status, Subscription/$events, Library/$evaluate, $pcde, $evaluate-eligibility, $evaluate-risk-condition-category) & SQL-on-FHIR v2 forEach / forEachOrNull Collection-Expression & Element-Wise $this / Relative Function Pushdown", t0, err, "Binary Proto3 36 instance-level GET operations & forEach / forEachOrNull collection-expression & element-wise $this / function $sql pushdown verified")
+
+	// AN-41: Zero-JSON Binary Proto3 Core Instance-Level GET Operations Across 36 Clinical, Terminology, Measure, SDC & Conformance Endpoints + AuditEvent & Compartment Search & SQL-on-FHIR v2 Nested select + forEach / forEachOrNull, forEach where Pushdown & forEach + unionAll
+	t0 = time.Now()
+	{
+		_, _, _ = doReq(http.MethodPut, basePath+"/TestScript/cert-proto-ts-1", "application/fhir+json", []byte(`{"resourceType":"TestScript","id":"cert-proto-ts-1","url":"http://flint.fhir.org/TestScript/cert-proto-ts-1","name":"CertProtoTestScript","status":"active","test":[{"name":"ReadPatient","action":[{"operation":{"type":{"code":"read"},"resource":"Patient","targetId":"cert-pat-1"}},{"assert":{"response":"okay"}}]}]}`), nil)
+
+		var opCheckErr error
+		for _, coreInstGetEp := range []string{
+			basePath + "/Patient/cert-pat-1/$meta?_format=application/x-protobuf",
+			basePath + "/Observation/cert-obs-1/$meta?_format=application/x-protobuf",
+			basePath + "/Encounter/cert-enc-1/$everything?_format=application/x-protobuf",
+			basePath + "/Group/pdex-matched-group-1/$everything?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/$validate?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/$diff?_format=application/x-protobuf",
+			basePath + "/GraphDefinition/us-core-patient-care-graph/$graph?start=Patient/cert-pat-1&_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/$graph?_format=application/x-protobuf",
+			basePath + "/Library/CMS165-Logic/$data-requirements?_format=application/x-protobuf",
+			basePath + "/PlanDefinition/plandef-hypertension-control/$data-requirements?_format=application/x-protobuf",
+			basePath + "/Schedule/cert-sched-w93-1/$find?_format=application/x-protobuf",
+			basePath + "/ServiceRequest/cert-sr-1/$crd?_format=application/x-protobuf",
+			basePath + "/MedicationRequest/cert-medreq-1/$crd?_format=application/x-protobuf",
+			basePath + "/AdverseEvent/cert-ae-proto-1/$evaluate?_format=application/x-protobuf",
+			basePath + "/CarePlan/cert-cp-1/$evaluate?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/$immds-forecast?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/$gfe?_format=application/x-protobuf",
+			basePath + "/RiskAssessment/cert-ra-proto-1/$evaluate?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/$fhirpath?expression=Patient.gender&_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/$provenance?_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/$summary?_format=application/x-protobuf",
+			basePath + "/Composition/cert-w98-comp-1/$document?_format=application/x-protobuf",
+			basePath + "/Questionnaire/phq-9/$populate?subject=Patient/cert-pat-1&_format=application/x-protobuf",
+			basePath + "/Questionnaire/phq-9/$package?_format=application/x-protobuf",
+			basePath + "/Claim/cert-claim-proto-1/$inquire?_format=application/x-protobuf",
+			basePath + "/Measure/cms165-bp-control/$evaluate-measure?periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/cert-pat-1&_format=application/x-protobuf",
+			basePath + "/Measure/cms165-bp-control/$collect-data?periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/cert-pat-1&_format=application/x-protobuf",
+			basePath + "/Measure/cms165-bp-control/$care-gaps?periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/cert-pat-1&_format=application/x-protobuf",
+			basePath + "/ValueSet/administrative-gender/$expand?_format=application/x-protobuf",
+			basePath + "/ValueSet/administrative-gender/$validate-code?code=female&_format=application/x-protobuf",
+			basePath + "/CodeSystem/administrative-gender/$lookup?code=female&_format=application/x-protobuf",
+			basePath + "/CodeSystem/administrative-gender/$validate-code?code=female&_format=application/x-protobuf",
+			basePath + "/CodeSystem/snomed-ct/$subsumes?codeA=73211009&codeB=44054006&_format=application/x-protobuf",
+			basePath + "/CodeSystem/loinc/$find-matches?property=heart&_format=application/x-protobuf",
+			basePath + "/ConceptMap/loinc-to-snomed/$translate?code=8867-4&system=http://loinc.org&_format=application/x-protobuf",
+			basePath + "/TestScript/cert-proto-ts-1/$evaluate?_format=application/x-protobuf",
+			basePath + "/AuditEvent?_count=5&_format=application/x-protobuf",
+			basePath + "/Patient/cert-pat-1/Observation?_format=application/x-protobuf",
+		} {
+			respCIG, bCIG, errCIG := doReq(http.MethodGet, coreInstGetEp, "", nil, map[string]string{"Accept": "application/x-protobuf"})
+			if errCIG != nil || respCIG == nil || respCIG.StatusCode != http.StatusOK || !strings.Contains(respCIG.Header.Get("Content-Type"), "application/x-protobuf") || len(bCIG) == 0 {
+				status := 0
+				if respCIG != nil {
+					status = respCIG.StatusCode
+				}
+				opCheckErr = fmt.Errorf("expected binary proto3 200 OK from core instance GET %s, got %d (err=%v): %s", coreInstGetEp, status, errCIG, string(bCIG))
+				break
+			}
+		}
+
+		if opCheckErr == nil {
+			for _, postSearchEp := range []string{
+				basePath + "/AuditEvent/_search?_format=application/x-protobuf",
+				basePath + "/Patient/cert-pat-1/Observation/_search?_format=application/x-protobuf",
+			} {
+				respPS, bPS, errPS := doReq(http.MethodPost, postSearchEp, "application/x-www-form-urlencoded", []byte("_count=5"), map[string]string{"Accept": "application/x-protobuf"})
+				if errPS != nil || respPS == nil || respPS.StatusCode != http.StatusOK || !strings.Contains(respPS.Header.Get("Content-Type"), "application/x-protobuf") || len(bPS) == 0 {
+					status := 0
+					if respPS != nil {
+						status = respPS.StatusCode
+					}
+					opCheckErr = fmt.Errorf("expected binary proto3 200 OK from POST %s, got %d (err=%v): %s", postSearchEp, status, errPS, string(bPS))
+					break
+				}
+			}
+		}
+
+		nestedFEWhereVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_nested_foreach_where_view","status":"active","resource":"Patient","select":[{"forEach":"name","column":[{"name":"rk","path":"getResourceKey()"},{"name":"family","path":"family"}],"select":[{"forEach":"given","where":[{"path":"$this.startsWith('A') and $this.length() >= 3"}],"column":[{"name":"given","path":"$this"},{"name":"given_upper","path":"$this.upper()"}]}]}]}`)
+		feUnionVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_foreach_unionall_view","status":"active","resource":"Patient","select":[{"column":[{"name":"rk","path":"getResourceKey()"}],"unionAll":[{"forEach":"name.given","where":[{"path":"$this.startsWith('A')"}],"column":[{"name":"part_type","path":"'given'"},{"name":"part_val","path":"$this.upper()"}]},{"forEach":"identifier","where":[{"path":"system = 'http://hospital.example.org/mrn'"}],"column":[{"name":"part_type","path":"'mrn'"},{"name":"part_val","path":"value"}]}]}]}`)
+
+		respNFEDoris, bNFEDoris, errNFEDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", nestedFEWhereVD, nil)
+		respNFEPg, bNFEPg, errNFEPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", nestedFEWhereVD, nil)
+		respFEUDoris, bFEUDoris, errFEUDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", feUnionVD, nil)
+		respFEUPg, bFEUPg, errFEUPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", feUnionVD, nil)
+		respFEURun, bFEURun, errFEURun := doReq(http.MethodPost, basePath+"/ViewDefinition/$run", "application/fhir+json", feUnionVD, nil)
+
+		if opCheckErr != nil {
+			err = opCheckErr
+		} else if errNFEDoris != nil || respNFEDoris.StatusCode != http.StatusOK || !strings.Contains(string(bNFEDoris), "LATERAL VIEW EXPLODE(r.string_tokens) fe_tbl AS fe_tok") || !strings.Contains(string(bNFEDoris), "UPPER(SPLIT_PART(fe_tok, '=', 2)) AS given_upper") || !strings.Contains(string(bNFEDoris), "(SPLIT_PART(fe_tok, '=', 2) LIKE 'A%' AND CHAR_LENGTH(SPLIT_PART(fe_tok, '=', 2)) >= 3)") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with nested forEach + where pushdown, got %d: %s", respNFEDoris.StatusCode, string(bNFEDoris))
+		} else if errNFEPg != nil || respNFEPg.StatusCode != http.StatusOK || !strings.Contains(string(bNFEPg), "INNER JOIN spidx_string fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'given'") || !strings.Contains(string(bNFEPg), "UPPER(fe.sp_value) AS given_upper") || !strings.Contains(string(bNFEPg), "(fe.sp_value LIKE 'A%' AND CHAR_LENGTH(fe.sp_value) >= 3)") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with nested forEach + where pushdown, got %d: %s", respNFEPg.StatusCode, string(bNFEPg))
+		} else if errFEUDoris != nil || respFEUDoris.StatusCode != http.StatusOK || !strings.Contains(string(bFEUDoris), "UNION ALL") || !strings.Contains(string(bFEUDoris), "LATERAL VIEW EXPLODE(r.string_tokens) fe_tbl AS fe_tok") || !strings.Contains(string(bFEUDoris), "LATERAL VIEW EXPLODE(r.code_tokens) fe_tbl AS fe_tok") || !strings.Contains(string(bFEUDoris), "SPLIT_PART(SPLIT_PART(fe_tok, '=', 2), '|', 1) = 'http://hospital.example.org/mrn'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with forEach + unionAll pushdown, got %d: %s", respFEUDoris.StatusCode, string(bFEUDoris))
+		} else if errFEUPg != nil || respFEUPg.StatusCode != http.StatusOK || !strings.Contains(string(bFEUPg), "UNION ALL") || !strings.Contains(string(bFEUPg), "INNER JOIN spidx_string fe") || !strings.Contains(string(bFEUPg), "INNER JOIN spidx_token fe") || !strings.Contains(string(bFEUPg), "fe.sp_system = 'http://hospital.example.org/mrn'") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with forEach + unionAll pushdown, got %d: %s", respFEUPg.StatusCode, string(bFEUPg))
+		} else if errFEURun != nil || respFEURun.StatusCode != http.StatusOK || !strings.Contains(string(bFEURun), `"ALICE"`) || !strings.Contains(string(bFEURun), `"CERT-MRN-1"`) {
+			err = fmt.Errorf("expected POST /ViewDefinition/$run with forEach + unionAll + where evaluation, got %d: %s", respFEURun.StatusCode, string(bFEURun))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-41", suite10, "Zero-JSON Binary Proto3 Core Instance-Level GET Operations Across 36 Clinical, Terminology, Measure, SDC & Conformance Endpoints ($meta, $everything, $validate, $diff, $graph, $data-requirements, $find, $crd, $evaluate, $immds-forecast, $gfe, $fhirpath, $provenance, $summary, $document, $populate, $package, $inquire, $evaluate-measure, $collect-data, $care-gaps, $expand, $validate-code, $lookup, $subsumes, $find-matches, $translate, TestScript/$evaluate, AuditEvent & Compartment Search) & SQL-on-FHIR v2 Nested select + forEach / forEachOrNull, forEach where Pushdown & forEach + unionAll", t0, err, "Binary Proto3 36 core instance-level GET operations + AuditEvent/compartment search & nested forEach + where + unionAll $sql & $run pushdown verified")
 
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
