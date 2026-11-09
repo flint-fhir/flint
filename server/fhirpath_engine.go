@@ -1356,7 +1356,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		return out
 
-	case "matches":
+	case "matches", "matchesfull":
 		if len(current) != 1 || len(args) != 1 {
 			return nil
 		}
@@ -1371,6 +1371,14 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		pat, ok := rVals[0].(string)
 		if !ok {
 			return nil
+		}
+		if strings.EqualFold(fnName, "matchesfull") {
+			if !strings.HasPrefix(pat, "^") {
+				pat = "^" + pat
+			}
+			if !strings.HasSuffix(pat, "$") {
+				pat = pat + "$"
+			}
 		}
 		re, err := regexp.Compile(pat)
 		if err != nil {

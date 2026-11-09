@@ -5991,4 +5991,162 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 		assert.Contains(t, respTGClin.Header.Get("Content-Type"), "application/x-protobuf", "type GET clinical endpoint %s", typeGetClinicalEp)
 		assert.NotEmpty(t, tgClinBytes, "type GET clinical endpoint %s", typeGetClinicalEp)
 	}
+
+	// 54. Wave 105: Zero-JSON Binary Proto3 System-Level & Type-Level GET Operations Across 32 History, Analytics, SDC, Subscription, eCQM, Da Vinci, IHE, Formulary, Directory, Privacy & Clinical Trial Endpoints & SQL-on-FHIR v2 Element-Wise Equivalence (~ / !~), Logical (implies / xor / contains), .matchesFull() & .hasValue() / .exists() Pushdown in .where() / .exists() / .all()
+	elemEquivLogicVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "elem_equiv_logic_matchesfull_view",
+		"status": "active",
+		"resource": "Patient",
+		"select": [{
+			"column": [
+				{"name": "id", "path": "id"},
+				{"name": "equiv_alice", "path": "name.given.where($this ~ 'alice').first()"},
+				{"name": "not_equiv_zed", "path": "name.given.where($this !~ 'zed').sort().join(',')"},
+				{"name": "contains_op_cnt", "path": "name.given.where(('Alice' | 'Bob') contains $this).count()"},
+				{"name": "implies_first", "path": "name.given.where($this.startsWith('A') implies $this.length() >= 4).first()"},
+				{"name": "xor_cnt", "path": "name.given.where($this = 'Alice' xor $this = 'Bob').count()"},
+				{"name": "matches_full_arr", "path": "name.given.where($this.matchesFull('A[a-z]+'))", "collection": true},
+				{"name": "has_value_cnt", "path": "name.given.where($this.hasValue()).count()"}
+			]
+		}],
+		"where": [
+			{"path": "name.given.exists($this ~ 'alice') and name.given.all($this !~ 'zed') and name.given.exists($this.lower() = 'alice')"}
+		]
+	}`
+
+	respEELDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(elemEquivLogicVD))
+	require.NoError(t, err)
+	sqlEELDorisBytes, _ := io.ReadAll(respEELDoris.Body)
+	respEELDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respEELDoris.StatusCode, string(sqlEELDorisBytes))
+	sqlEELDoris := string(sqlEELDorisBytes)
+	assert.Contains(t, sqlEELDoris, "element_at(ARRAY_FILTER(x -> LOWER(TRIM(x)) = LOWER(TRIM('alice')),")
+	assert.Contains(t, sqlEELDoris, "ARRAY_JOIN(ARRAY_SORT(ARRAY_FILTER(x -> LOWER(TRIM(x)) <> LOWER(TRIM('zed')),")
+	assert.Contains(t, sqlEELDoris, "ARRAY_SIZE(ARRAY_FILTER(x -> x IN ('Alice', 'Bob'),")
+	assert.Contains(t, sqlEELDoris, "element_at(ARRAY_FILTER(x -> (NOT (x LIKE 'A%') OR (CHAR_LENGTH(x) >= 4)),")
+	assert.Contains(t, sqlEELDoris, "ARRAY_SIZE(ARRAY_FILTER(x -> ((x = 'Alice') <> (x = 'Bob')),")
+	assert.Contains(t, sqlEELDoris, "ARRAY_FILTER(x -> REGEXP(x, '^A[a-z]+$'),")
+	assert.Contains(t, sqlEELDoris, "ARRAY_SIZE(ARRAY_FILTER(x -> (x IS NOT NULL AND x <> ''),")
+	assert.Contains(t, sqlEELDoris, "ARRAY_EXISTS(x -> LOWER(TRIM(x)) = LOWER(TRIM('alice')),")
+	assert.Contains(t, sqlEELDoris, "NOT ARRAY_EXISTS(x -> NOT (LOWER(TRIM(x)) <> LOWER(TRIM('zed'))),")
+	assert.Contains(t, sqlEELDoris, "ARRAY_EXISTS(x -> LOWER(x) = 'alice',")
+
+	respEELPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(elemEquivLogicVD))
+	require.NoError(t, err)
+	sqlEELPgBytes, _ := io.ReadAll(respEELPg.Body)
+	respEELPg.Body.Close()
+	require.Equal(t, http.StatusOK, respEELPg.StatusCode, string(sqlEELPgBytes))
+	sqlEELPg := string(sqlEELPgBytes)
+	assert.Contains(t, sqlEELPg, "AND LOWER(TRIM(s.sp_value)) = LOWER(TRIM('alice')) LIMIT 1)")
+	assert.Contains(t, sqlEELPg, "AND LOWER(TRIM(s.sp_value)) <> LOWER(TRIM('zed')) ORDER BY sp_value ASC")
+	assert.Contains(t, sqlEELPg, "AND s.sp_value IN ('Alice', 'Bob')) sub)")
+	assert.Contains(t, sqlEELPg, "AND (NOT (s.sp_value LIKE 'A%') OR (CHAR_LENGTH(s.sp_value) >= 4)) LIMIT 1)")
+	assert.Contains(t, sqlEELPg, "AND ((s.sp_value = 'Alice') <> (s.sp_value = 'Bob'))) sub)")
+	assert.Contains(t, sqlEELPg, "AND s.sp_value ~ '^A[a-z]+$') sub)")
+	assert.Contains(t, sqlEELPg, "AND (s.sp_value IS NOT NULL AND s.sp_value <> '')) sub)")
+	assert.Contains(t, sqlEELPg, "WHERE LOWER(TRIM(sub.sp_value)) = LOWER(TRIM('alice')))")
+	assert.Contains(t, sqlEELPg, "WHERE NOT (LOWER(TRIM(sub.sp_value)) <> LOWER(TRIM('zed'))))")
+	assert.Contains(t, sqlEELPg, "WHERE LOWER(sub.sp_value) = 'alice')")
+
+	respEELSqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(elemEquivLogicVD))
+	require.NoError(t, err)
+	sqlEELSqliteBytes, _ := io.ReadAll(respEELSqlite.Body)
+	respEELSqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respEELSqlite.StatusCode, string(sqlEELSqliteBytes))
+	sqlEELSqlite := string(sqlEELSqliteBytes)
+	assert.Contains(t, sqlEELSqlite, "AND LOWER(TRIM(s.sp_value)) = LOWER(TRIM('alice')) LIMIT 1)")
+	assert.Contains(t, sqlEELSqlite, "AND (NOT (s.sp_value LIKE 'A%') OR (LENGTH(s.sp_value) >= 4)) LIMIT 1)")
+	assert.Contains(t, sqlEELSqlite, "AND s.sp_value REGEXP '^A[a-z]+$') sub)")
+
+	// Verify in-memory ViewDefinition/$run parity for element-wise ~, !~, contains, implies, xor, matchesFull, hasValue
+	elemEquivLogicRunVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "elem_equiv_logic_run",
+		"status": "active",
+		"resource": "Patient",
+		"select": [{
+			"column": [
+				{"name": "id", "path": "id"},
+				{"name": "equiv_alice", "path": "name.given.where($this ~ 'alice').first()"},
+				{"name": "implies_first", "path": "name.given.where($this.startsWith('A') implies $this.length() >= 4).first()"},
+				{"name": "matches_full_first", "path": "name.given.where($this.matchesFull('A[a-z]+')).first()"},
+				{"name": "has_value_first", "path": "name.given.where($this.hasValue()).first()"}
+			]
+		}]
+	}`
+	respEELRun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(elemEquivLogicRunVD))
+	require.NoError(t, err)
+	eelRunBytes, _ := io.ReadAll(respEELRun.Body)
+	respEELRun.Body.Close()
+	require.Equal(t, http.StatusOK, respEELRun.StatusCode, string(eelRunBytes))
+	assert.Contains(t, string(eelRunBytes), `"equiv_alice":"Alice"`)
+	assert.Contains(t, string(eelRunBytes), `"implies_first":"Alice"`)
+	assert.Contains(t, string(eelRunBytes), `"matches_full_first":"Alice"`)
+	assert.Contains(t, string(eelRunBytes), `"has_value_first":"Alice"`)
+
+	// Verify binary Proto3 across 32 system-level & type-level GET history, analytics, SDC, Subscription, eCQM, Da Vinci, IHE, formulary, directory, privacy & clinical trial endpoints
+	for _, seed := range []struct {
+		path string
+		body string
+	}{
+		{"/fhir/r4/proto/Patient/proto-pat-1", `{"resourceType":"Patient","id":"proto-pat-1","active":true,"gender":"female","birthDate":"1985-04-12","identifier":[{"system":"http://hospital.example.org/mrn","value":"MRN-PROTO-1"}],"name":[{"family":"ProtoFamily","given":["Alice","Marie"]}]}`},
+		{"/fhir/r4/proto/Claim/w105-claim-1", `{"resourceType":"Claim","id":"w105-claim-1","status":"active","use":"preauthorization","type":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/claim-type","code":"institutional"}]},"patient":{"reference":"Patient/proto-pat-1"},"created":"2026-01-15","provider":{"reference":"Practitioner/w96-prac-1"},"priority":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/processpriority","code":"normal"}]},"insurance":[{"sequence":1,"focal":true,"coverage":{"reference":"Coverage/w96-cov-1"}}]}`},
+	} {
+		reqSeed, sErr := http.NewRequest(http.MethodPut, ts.URL+seed.path, strings.NewReader(seed.body))
+		require.NoError(t, sErr)
+		reqSeed.Header.Set("Content-Type", "application/fhir+json")
+		respSeed, sErr := client.Do(reqSeed)
+		require.NoError(t, sErr)
+		respSeed.Body.Close()
+	}
+
+	for _, sysTypeGetEp := range []string{
+		"/fhir/r4/proto/_history?_count=5",
+		"/fhir/r4/proto/Patient/_history?_count=5",
+		"/fhir/r4/proto/Observation/_history?_count=5",
+		"/fhir/r4/proto/Observation/$meta",
+		"/fhir/r4/proto/$data-requirements?target=cms165-logic",
+		"/fhir/r4/proto/$fhirpath?resource=Patient/proto-pat-1&expression=Patient.name.family",
+		"/fhir/r4/proto/$davinci-data-export?group=w99-grp-1",
+		"/fhir/r4/proto/$sync-analytics",
+		"/fhir/r4/proto/metadata/$subset?resource=Patient",
+		"/fhir/r4/proto/metadata/$implements?server=http://hl7.org/fhir/us/core/CapabilityStatement/us-core-server",
+		"/fhir/r4/proto/DocumentReference/$docref?patient=proto-pat-1",
+		"/fhir/r4/proto/Patient/$summary?patient=Patient/proto-pat-1",
+		"/fhir/r4/proto/Questionnaire/$populate?questionnaire=phq-9&subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/Questionnaire/$package?questionnaire=phq-9",
+		"/fhir/r4/proto/Subscription/$status?id=w98-sub-1",
+		"/fhir/r4/proto/Subscription/$events?id=w98-sub-1",
+		"/fhir/r4/proto/Measure/$evaluate-measure?measure=cms165-bp-control&periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/Measure/$care-gaps?periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/proto-pat-1",
+		"/fhir/r4/proto/Claim/$inquire?claim=w105-claim-1&patient=Patient/proto-pat-1",
+		"/fhir/r4/proto/ServiceRequest/$crd?id=w99-sr-1",
+		"/fhir/r4/proto/MedicationRequest/$crd?id=w99-mr-1",
+		"/fhir/r4/proto/Patient/$immds-forecast?patient=Patient/proto-pat-1",
+		"/fhir/r4/proto/Patient/$gfe?patient=Patient/proto-pat-1",
+		"/fhir/r4/proto/Patient/$ihe-pix?sourceIdentifier=http://hospital.example.org/mrn|MRN-PROTO-1",
+		"/fhir/r4/proto/MedicationKnowledge/$lookup?code=723",
+		"/fhir/r4/proto/MedicationRequest/$check-interactions?patient=Patient/proto-pat-1&code=723",
+		"/fhir/r4/proto/PractitionerRole/$find-providers?specialty=207RC0000X",
+		"/fhir/r4/proto/HealthcareService/$find-services",
+		"/fhir/r4/proto/Consent/$evaluate?patient=Patient/proto-pat-1",
+		"/fhir/r4/proto/Encounter/$everything?_id=w97-enc-1",
+		"/fhir/r4/proto/Group/$everything?_id=w99-grp-1",
+		"/fhir/r4/proto/ResearchStudy/$evaluate-eligibility?study=w97-study-1&subject=Patient/proto-pat-1",
+	} {
+		reqSTG, stgErr := http.NewRequest(http.MethodGet, ts.URL+sysTypeGetEp+"&_format=application/x-protobuf", nil)
+		if !strings.Contains(sysTypeGetEp, "?") {
+			reqSTG, stgErr = http.NewRequest(http.MethodGet, ts.URL+sysTypeGetEp+"?_format=application/x-protobuf", nil)
+		}
+		require.NoError(t, stgErr)
+		reqSTG.Header.Set("Accept", "application/x-protobuf")
+		respSTG, stgErr := client.Do(reqSTG)
+		require.NoError(t, stgErr)
+		stgBytes, _ := io.ReadAll(respSTG.Body)
+		respSTG.Body.Close()
+		require.Equal(t, http.StatusOK, respSTG.StatusCode, "system/type GET endpoint %s: %s", sysTypeGetEp, string(stgBytes))
+		assert.Contains(t, respSTG.Header.Get("Content-Type"), "application/x-protobuf", "system/type GET endpoint %s", sysTypeGetEp)
+		assert.NotEmpty(t, stgBytes, "system/type GET endpoint %s", sysTypeGetEp)
+	}
 }
