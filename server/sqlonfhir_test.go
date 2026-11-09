@@ -6876,4 +6876,102 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	assert.Contains(t, respProtoRun.Header.Get("Content-Type"), "application/x-protobuf")
 	assert.Equal(t, "google.fhir.r4.proto3", respProtoRun.Header.Get("X-Flint-Wire-Format"))
 	assert.NotEmpty(t, protoRunBytes)
+
+	// Wave 111: unionAll Multi-forEach / forEachOrNull Cross-Join Unnesting (fe, fe2), Parent forEach + Child unionAll with %resource & Empty Collection ({} / NULL) Projection Pushdown + Binary Proto3 Wire
+	unionMultiFEVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "w111_unionall_multi_foreach_null_view",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"forEach": "name.given",
+				"where": [{"path": "$this = 'Alice'"}],
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "given_upper", "path": "$this.upper()"}
+				],
+				"unionAll": [
+					{
+						"forEach": "%resource.identifier",
+						"where": [{"path": "system = 'http://hospital.example.org/mrn'"}],
+						"column": [
+							{"name": "entry_kind", "path": "'mrn'"},
+							{"name": "entry_val", "path": "value"},
+							{"name": "fallback_note", "path": "{}"}
+						]
+					},
+					{
+						"forEachOrNull": "%resource.telecom",
+						"where": [{"path": "system = 'phone'"}],
+						"column": [
+							{"name": "entry_kind", "path": "'phone'"},
+							{"name": "entry_val", "path": "coalesce(value, 'NO_PHONE')"},
+							{"name": "fallback_note", "path": "iif(value.exists(), 'HAS_PHONE', {})"}
+						]
+					}
+				]
+			}
+		]
+	}`
+
+	respUMFEDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(unionMultiFEVD))
+	require.NoError(t, err)
+	sqlUMFEDorisBytes, _ := io.ReadAll(respUMFEDoris.Body)
+	respUMFEDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respUMFEDoris.StatusCode, string(sqlUMFEDorisBytes))
+	sqlUMFEDoris := string(sqlUMFEDorisBytes)
+	assert.Contains(t, sqlUMFEDoris, "UNION ALL")
+	assert.Contains(t, sqlUMFEDoris, "LATERAL VIEW EXPLODE(r.string_tokens) fe_tbl AS fe_tok")
+	assert.Contains(t, sqlUMFEDoris, "LATERAL VIEW EXPLODE(r.code_tokens) fe2_tbl AS fe2_tok")
+	assert.Contains(t, sqlUMFEDoris, "LATERAL VIEW OUTER EXPLODE(r.string_tokens) fe2_tbl AS fe2_tok")
+	assert.Contains(t, sqlUMFEDoris, "NULL AS fallback_note")
+	assert.Contains(t, sqlUMFEDoris, "COALESCE(NULLIF(SPLIT_PART(fe2_tok, '=', 2), ''), 'NO_PHONE') AS entry_val")
+
+	respUMFEPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(unionMultiFEVD))
+	require.NoError(t, err)
+	sqlUMFEPgBytes, _ := io.ReadAll(respUMFEPg.Body)
+	respUMFEPg.Body.Close()
+	require.Equal(t, http.StatusOK, respUMFEPg.StatusCode, string(sqlUMFEPgBytes))
+	sqlUMFEPg := string(sqlUMFEPgBytes)
+	assert.Contains(t, sqlUMFEPg, "UNION ALL")
+	assert.Contains(t, sqlUMFEPg, "INNER JOIN spidx_string fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'given'")
+	assert.Contains(t, sqlUMFEPg, "INNER JOIN spidx_token fe2 ON fe2.tenant_id = r.tenant_id AND fe2.res_type = r.res_type AND fe2.res_id = r.res_id AND fe2.sp_name = 'identifier'")
+	assert.Contains(t, sqlUMFEPg, "LEFT JOIN spidx_token fe2 ON fe2.tenant_id = r.tenant_id AND fe2.res_type = r.res_type AND fe2.res_id = r.res_id AND fe2.sp_name = 'telecom'")
+	assert.Contains(t, sqlUMFEPg, "NULL AS fallback_note")
+	assert.Contains(t, sqlUMFEPg, "COALESCE(NULLIF(fe2.sp_value, ''), 'NO_PHONE') AS entry_val")
+	assert.Contains(t, sqlUMFEPg, "THEN 'HAS_PHONE' ELSE NULL END AS fallback_note")
+
+	respUMFESqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(unionMultiFEVD))
+	require.NoError(t, err)
+	sqlUMFESqliteBytes, _ := io.ReadAll(respUMFESqlite.Body)
+	respUMFESqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respUMFESqlite.StatusCode, string(sqlUMFESqliteBytes))
+	sqlUMFESqlite := string(sqlUMFESqliteBytes)
+	assert.Contains(t, sqlUMFESqlite, "LEFT JOIN spidx_token fe2")
+	assert.Contains(t, sqlUMFESqlite, "COALESCE(NULLIF(fe2.sp_value, ''), 'NO_PHONE') AS entry_val")
+	assert.Contains(t, sqlUMFESqlite, "NULL AS fallback_note")
+
+	respUMFERun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(unionMultiFEVD))
+	require.NoError(t, err)
+	umfeRunBytes, _ := io.ReadAll(respUMFERun.Body)
+	respUMFERun.Body.Close()
+	require.Equal(t, http.StatusOK, respUMFERun.StatusCode, string(umfeRunBytes))
+	assert.Contains(t, string(umfeRunBytes), `"entry_kind":"mrn"`)
+	assert.Contains(t, string(umfeRunBytes), `"entry_val":"MRN-1001"`)
+	assert.Contains(t, string(umfeRunBytes), `"entry_kind":"phone"`)
+	assert.Contains(t, string(umfeRunBytes), `"fallback_note":null`)
+
+	reqUMFEProtoSql, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/x-protobuf", strings.NewReader(unionMultiFEVD))
+	require.NoError(t, err)
+	reqUMFEProtoSql.Header.Set("Content-Type", "application/fhir+json")
+	reqUMFEProtoSql.Header.Set("Accept", "application/x-protobuf")
+	respUMFEProtoSql, err := client.Do(reqUMFEProtoSql)
+	require.NoError(t, err)
+	umfeProtoSqlBytes, _ := io.ReadAll(respUMFEProtoSql.Body)
+	respUMFEProtoSql.Body.Close()
+	require.Equal(t, http.StatusOK, respUMFEProtoSql.StatusCode)
+	assert.Contains(t, respUMFEProtoSql.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.Equal(t, "google.fhir.r4.proto3", respUMFEProtoSql.Header.Get("X-Flint-Wire-Format"))
+	assert.NotEmpty(t, umfeProtoSqlBytes)
 }
