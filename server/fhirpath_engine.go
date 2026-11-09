@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type fhirPathContext struct {
@@ -1195,20 +1196,24 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return []any{ok && strings.TrimSpace(s) != ""}
 
 	case "toquantity":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if m, isMap := current[0].(map[string]any); isMap {
-			if v, hasV := m["value"]; hasV {
-				if fv, ok := toDecimalConv(v); ok {
-					return []any{fv}
+		var out []any
+		for _, item := range current {
+			if m, isMap := item.(map[string]any); isMap {
+				if v, hasV := m["value"]; hasV {
+					if fv, ok := toDecimalConv(v); ok {
+						out = append(out, fv)
+					}
 				}
+				continue
+			}
+			if fv, ok := toDecimalConv(item); ok {
+				out = append(out, fv)
 			}
 		}
-		if fv, ok := toDecimalConv(current[0]); ok {
-			return []any{fv}
-		}
-		return nil
+		return out
 
 	case "convertstoquantity":
 		if len(current) != 1 {
@@ -1524,25 +1529,21 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return out
 
 	case "tochars":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if s, ok := current[0].(string); ok {
-			runes := []rune(s)
-			out := make([]any, len(runes))
-			for i, r := range runes {
-				out[i] = string(r)
+		var out []any
+		for _, item := range current {
+			if s, ok := item.(string); ok {
+				for _, r := range s {
+					out = append(out, string(r))
+				}
 			}
-			return out
 		}
-		return nil
+		return out
 
 	case "split":
-		if len(current) != 1 || len(args) != 1 {
-			return nil
-		}
-		s, ok := current[0].(string)
-		if !ok {
+		if len(current) == 0 || len(args) != 1 {
 			return nil
 		}
 		sepVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
@@ -1553,10 +1554,13 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if !ok {
 			return nil
 		}
-		parts := strings.Split(s, sep)
-		out := make([]any, len(parts))
-		for i, p := range parts {
-			out[i] = p
+		var out []any
+		for _, item := range current {
+			if s, ok := item.(string); ok {
+				for _, p := range strings.Split(s, sep) {
+					out = append(out, p)
+				}
+			}
 		}
 		return out
 
@@ -2097,6 +2101,26 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 			}
 		}
 		return keys
+
+	case "today":
+		return []any{time.Now().UTC().Format("2006-01-02")}
+
+	case "now":
+		return []any{time.Now().UTC().Format(time.RFC3339)}
+
+	case "timeofday":
+		return []any{time.Now().UTC().Format("15:04:05")}
+
+	case "trace", "definevariable":
+		return current
+
+	case "check":
+		if len(args) >= 1 {
+			if b, ok := singletonBool(evalFHIRPathExpr(current, ctx, args[0])); !ok || !b {
+				return nil
+			}
+		}
+		return current
 	}
 
 	return nil

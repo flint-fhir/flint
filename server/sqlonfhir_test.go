@@ -7160,4 +7160,99 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	assert.Contains(t, respFESCBProtoSql.Header.Get("Content-Type"), "application/x-protobuf")
 	assert.Equal(t, "google.fhir.r4.proto3", respFESCBProtoSql.Header.Get("X-Flint-Wire-Format"))
 	assert.NotEmpty(t, fescbProtoSqlBytes)
+
+	// 69. Wave 114: SQL-on-FHIR v2 forEach Element-Level Split/ToChars Collection Modifiers (.distinct(), .sort(), .sortDesc(), .tail(), .isDistinct(), .single()), Quantity Conversion (.toQuantity(), .convertsToQuantity()) & Temporal Context Functions (today(), now(), timeOfDay()) Pushdown
+	feElemSplitModsQtyTempVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_foreach_elem_split_tochars_mods_qty_temporal_v1",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"forEach": "identifier",
+				"where": [
+					{"path": "value.split('-').isDistinct() and value.split('-')[0].toChars().isDistinct() and value.split('-').last().convertsToQuantity('mg') and value.split('-').distinct().count() = 2"}
+				],
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "split_dist_cnt", "path": "value.split('-').distinct().count()"},
+					{"name": "split_tail_cnt", "path": "value.split('-').tail().count()"},
+					{"name": "split_tail_first", "path": "value.split('-').tail().first()"},
+					{"name": "split_sorted", "path": "value.split('-').sort().join(':')"},
+					{"name": "split_rev_sorted", "path": "value.split('-').sortDesc().join(':')"},
+					{"name": "split_tail_join", "path": "value.split('-').tail().join('_')"},
+					{"name": "chars_dist_cnt", "path": "value.toChars().distinct().count()"},
+					{"name": "chars_tail_cnt", "path": "value.toChars().tail().count()"},
+					{"name": "chars_tail_first", "path": "value.toChars().tail().first()"},
+					{"name": "pfx_sorted_chars", "path": "value.split('-')[0].toChars().sort().join('')"},
+					{"name": "tail_qty", "path": "value.split('-').last().toQuantity('mg')"},
+					{"name": "tail_conv_qty", "path": "value.split('-').last().convertsToQuantity('mg')"},
+					{"name": "today_len", "path": "today().toString().length()"},
+					{"name": "time_len", "path": "timeOfDay().toString().length()"}
+				]
+			}
+		]
+	}`
+
+	respFESMQTDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitModsQtyTempVD))
+	require.NoError(t, err)
+	sqlFESMQTDorisBytes, _ := io.ReadAll(respFESMQTDoris.Body)
+	respFESMQTDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respFESMQTDoris.StatusCode, string(sqlFESMQTDorisBytes))
+	sqlFESMQTDoris := string(sqlFESMQTDorisBytes)
+	assert.Contains(t, sqlFESMQTDoris, "ARRAY_SIZE(ARRAY_DISTINCT(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) AS split_dist_cnt")
+	assert.Contains(t, sqlFESMQTDoris, "GREATEST(ARRAY_SIZE(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')) - 1, 0) AS split_tail_cnt")
+	assert.Contains(t, sqlFESMQTDoris, "element_at(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), 2) AS split_tail_first")
+	assert.Contains(t, sqlFESMQTDoris, "ARRAY_JOIN(ARRAY_SORT(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), ':') AS split_sorted")
+	assert.Contains(t, sqlFESMQTDoris, "ARRAY_JOIN(ARRAY_REVERSE_SORT(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), ':') AS split_rev_sorted")
+	assert.Contains(t, sqlFESMQTDoris, "ARRAY_JOIN(ARRAY_SLICE(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), 2), '_') AS split_tail_join")
+	assert.Contains(t, sqlFESMQTDoris, "ARRAY_SIZE(ARRAY_DISTINCT(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), ''))) AS chars_dist_cnt")
+	assert.Contains(t, sqlFESMQTDoris, "GREATEST(CHAR_LENGTH(SPLIT_PART(fe_tok, '|', 2)) - 1, 0) AS chars_tail_cnt")
+	assert.Contains(t, sqlFESMQTDoris, "SUBSTR(SPLIT_PART(fe_tok, '|', 2), 2, 1) AS chars_tail_first")
+	assert.Contains(t, sqlFESMQTDoris, "ARRAY_JOIN(ARRAY_SORT(SPLIT_BY_STRING(element_at(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), 1), '')), '') AS pfx_sorted_chars")
+	assert.Contains(t, sqlFESMQTDoris, "CAST(element_at(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), -1) AS DOUBLE) AS tail_qty")
+	assert.Contains(t, sqlFESMQTDoris, "CHAR_LENGTH(CAST(CURRENT_DATE() AS STRING)) AS today_len")
+
+	respFESMQTPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitModsQtyTempVD))
+	require.NoError(t, err)
+	sqlFESMQTPgBytes, _ := io.ReadAll(respFESMQTPg.Body)
+	respFESMQTPg.Body.Close()
+	require.Equal(t, http.StatusOK, respFESMQTPg.StatusCode, string(sqlFESMQTPgBytes))
+	sqlFESMQTPg := string(sqlFESMQTPgBytes)
+	assert.Contains(t, sqlFESMQTPg, "(SELECT COUNT(DISTINCT u) FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) AS split_dist_cnt")
+	assert.Contains(t, sqlFESMQTPg, "GREATEST(COALESCE(ARRAY_LENGTH(STRING_TO_ARRAY(fe.sp_value, '-'), 1), 0) - 1, 0) AS split_tail_cnt")
+	assert.Contains(t, sqlFESMQTPg, "(SELECT STRING_AGG(u, ':' ORDER BY u ASC) FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) AS split_sorted")
+	assert.Contains(t, sqlFESMQTPg, "(SELECT STRING_AGG(u, ':' ORDER BY u DESC) FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) AS split_rev_sorted")
+	assert.Contains(t, sqlFESMQTPg, "ARRAY_TO_STRING((STRING_TO_ARRAY(fe.sp_value, '-'))[2:ARRAY_UPPER(STRING_TO_ARRAY(fe.sp_value, '-'), 1)], '_') AS split_tail_join")
+	assert.Contains(t, sqlFESMQTPg, "(SELECT COUNT(DISTINCT u) FROM UNNEST(REGEXP_SPLIT_TO_ARRAY(fe.sp_value, '')) AS u) AS chars_dist_cnt")
+	assert.Contains(t, sqlFESMQTPg, "CHAR_LENGTH(CAST(CURRENT_DATE AS TEXT)) AS today_len")
+
+	respFESMQTSqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitModsQtyTempVD))
+	require.NoError(t, err)
+	sqlFESMQTSqliteBytes, _ := io.ReadAll(respFESMQTSqlite.Body)
+	respFESMQTSqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respFESMQTSqlite.StatusCode, string(sqlFESMQTSqliteBytes))
+	sqlFESMQTSqlite := string(sqlFESMQTSqliteBytes)
+	assert.Contains(t, sqlFESMQTSqlite, "MAX(LENGTH(fe.sp_value) - 1, 0) AS chars_tail_cnt")
+	assert.Contains(t, sqlFESMQTSqlite, "LENGTH(CAST(CURRENT_DATE AS TEXT)) AS today_len")
+
+	respFESMQTRun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(feElemSplitModsQtyTempVD))
+	require.NoError(t, err)
+	fesmqtrBytes, _ := io.ReadAll(respFESMQTRun.Body)
+	respFESMQTRun.Body.Close()
+	require.Equal(t, http.StatusOK, respFESMQTRun.StatusCode, string(fesmqtrBytes))
+	assert.Contains(t, string(fesmqtrBytes), `"split_dist_cnt":2`)
+	assert.Contains(t, string(fesmqtrBytes), `"split_tail_cnt":1`)
+	assert.Contains(t, string(fesmqtrBytes), `"split_tail_first":"1001"`)
+	assert.Contains(t, string(fesmqtrBytes), `"split_sorted":"1001:MRN"`)
+	assert.Contains(t, string(fesmqtrBytes), `"split_rev_sorted":"MRN:1001"`)
+	assert.Contains(t, string(fesmqtrBytes), `"split_tail_join":"1001"`)
+	assert.Contains(t, string(fesmqtrBytes), `"chars_dist_cnt":6`)
+	assert.Contains(t, string(fesmqtrBytes), `"chars_tail_cnt":7`)
+	assert.Contains(t, string(fesmqtrBytes), `"chars_tail_first":"R"`)
+	assert.Contains(t, string(fesmqtrBytes), `"pfx_sorted_chars":"MNR"`)
+	assert.Contains(t, string(fesmqtrBytes), `"tail_qty":1001`)
+	assert.Contains(t, string(fesmqtrBytes), `"tail_conv_qty":true`)
+	assert.Contains(t, string(fesmqtrBytes), `"today_len":10`)
+	assert.Contains(t, string(fesmqtrBytes), `"time_len":8`)
 }
