@@ -5571,6 +5571,80 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-38", suite10, "Zero-JSON Binary Proto3 Type-Level GET Clinical, Terminology, CQM, Scheduling & Metadata Operations Across 30 Endpoints ($expand, $validate-code, $lookup, $subsumes, $find-matches, $translate, $lastn, $stats, Patient/$everything, Appointment/$find, Schedule/$find, List/$find, $subset, $implements, $snapshot, $preferred-id, PlanDefinition/$apply, ActivityDefinition/$apply, $data-requirements, $collect-data, Library/$evaluate, $evaluate-risk-condition-category, $pcde, AdverseEvent/$evaluate, RiskAssessment/$evaluate, $verify-integrity) & SQL-on-FHIR v2 Element-Wise iif() Conditional & coalesce() Fallback Pushdown in .select() / .where()", t0, err, "Binary Proto3 30 type-level GET clinical/terminology/CQM/scheduling/metadata operations & element-wise iif() / coalesce() $sql pushdown verified")
 
+	// AN-39: Zero-JSON Binary Proto3 System-Level & Type-Level GET Operations Across 32 History, Analytics, SDC, Subscription, eCQM, Da Vinci, IHE, Formulary, Directory, Privacy & Clinical Trial Endpoints (_history, Patient/_history, Observation/_history, Observation/$meta, /$data-requirements, /$fhirpath, /$davinci-data-export, /$sync-analytics, /metadata/$subset, /metadata/$implements, $docref, Patient/$summary, Questionnaire/$populate, Questionnaire/$package, Subscription/$status, Subscription/$events, $evaluate-measure, $care-gaps, Claim/$inquire, ServiceRequest/$crd, MedicationRequest/$crd, $immds-forecast, Patient/$gfe, Patient/$ihe-pix, MedicationKnowledge/$lookup, $check-interactions, $find-providers, $find-services, Consent/$evaluate, Encounter/$everything, Group/$everything, $evaluate-eligibility) & SQL-on-FHIR v2 Element-Wise Equivalence (~ / !~), Logical (implies / xor / contains), .matchesFull() & .hasValue() / .exists() Pushdown in .where() / .exists() / .all()
+	t0 = time.Now()
+	{
+		_, _, _ = doReq(http.MethodPut, basePath+"/Patient/cert-pat-1", "application/fhir+json", []byte(`{"resourceType":"Patient","id":"cert-pat-1","active":true,"gender":"female","birthDate":"1985-04-12","identifier":[{"system":"http://hospital.example.org/mrn","value":"CERT-MRN-1"}],"name":[{"family":"Certify","given":["Alice"]}]}`), nil)
+
+		var opCheckErr error
+		sysTypeGetEndpoints := []string{
+			"/_history?_count=5",
+			"/Patient/_history?_count=5",
+			"/Observation/_history?_count=5",
+			"/Observation/$meta",
+			"/$data-requirements?target=cms165-logic",
+			"/$fhirpath?resource=Patient/cert-pat-1&expression=Patient.name.family",
+			"/$davinci-data-export?group=pdex-matched-group-1",
+			"/$sync-analytics",
+			"/metadata/$subset?resource=Patient",
+			"/metadata/$implements?server=http://hl7.org/fhir/us/core/CapabilityStatement/us-core-server",
+			"/DocumentReference/$docref?patient=cert-pat-1",
+			"/Patient/$summary?patient=Patient/cert-pat-1",
+			"/Questionnaire/$populate?questionnaire=phq-9&subject=Patient/cert-pat-1",
+			"/Questionnaire/$package?questionnaire=phq-9",
+			"/Subscription/$status?id=cert-w98-sub-1",
+			"/Subscription/$events?id=cert-w98-sub-1",
+			"/Measure/$evaluate-measure?measure=cms165-bp-control&periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/cert-pat-1",
+			"/Measure/$care-gaps?periodStart=2025-01-01&periodEnd=2027-01-01&subject=Patient/cert-pat-1",
+			"/Claim/$inquire?claim=cert-claim-proto-1&patient=Patient/cert-pat-1",
+			"/ServiceRequest/$crd?id=cert-sr-1",
+			"/MedicationRequest/$crd?id=cert-medreq-1",
+			"/Patient/$immds-forecast?patient=Patient/cert-pat-1",
+			"/Patient/$gfe?patient=Patient/cert-pat-1",
+			"/Patient/$ihe-pix?sourceIdentifier=http://hospital.example.org/mrn|CERT-MRN-1",
+			"/MedicationKnowledge/$lookup?code=723",
+			"/MedicationRequest/$check-interactions?patient=Patient/cert-pat-1&code=723",
+			"/PractitionerRole/$find-providers?specialty=207RC0000X",
+			"/HealthcareService/$find-services",
+			"/Consent/$evaluate?patient=Patient/cert-pat-1",
+			"/Encounter/$everything?_id=cert-enc-1",
+			"/Group/$everything?_id=pdex-matched-group-1",
+			"/ResearchStudy/$evaluate-eligibility?study=cert-study-w93-1&subject=Patient/cert-pat-1",
+		}
+		for _, stgEp := range sysTypeGetEndpoints {
+			sep := "&"
+			if !strings.Contains(stgEp, "?") {
+				sep = "?"
+			}
+			respSTG, bSTG, errSTG := doReq(http.MethodGet, basePath+stgEp+sep+"_format=application/x-protobuf", "", nil, map[string]string{
+				"Accept": "application/x-protobuf",
+			})
+			if errSTG != nil || respSTG.StatusCode != http.StatusOK || !strings.Contains(respSTG.Header.Get("Content-Type"), "application/x-protobuf") || len(bSTG) == 0 {
+				status := 0
+				if respSTG != nil {
+					status = respSTG.StatusCode
+				}
+				opCheckErr = fmt.Errorf("expected binary proto3 200 OK from system/type GET %s, got %d (err=%v): %s", stgEp, status, errSTG, string(bSTG))
+				break
+			}
+		}
+
+		elemEquivLogicVD := []byte(`{"resourceType":"ViewDefinition","name":"cert_elem_equiv_logic_matchesfull_view","status":"active","resource":"Patient","select":[{"column":[{"name":"id","path":"id"},{"name":"equiv_alice","path":"name.given.where($this ~ 'alice').first()"},{"name":"not_equiv_zed","path":"name.given.where($this !~ 'zed').sort().join(',')"},{"name":"contains_op_cnt","path":"name.given.where(('Alice' | 'Bob') contains $this).count()"},{"name":"implies_first","path":"name.given.where($this.startsWith('A') implies $this.length() >= 4).first()"},{"name":"xor_cnt","path":"name.given.where($this = 'Alice' xor $this = 'Bob').count()"},{"name":"matches_full_arr","path":"name.given.where($this.matchesFull('A[a-z]+'))","collection":true},{"name":"has_value_cnt","path":"name.given.where($this.hasValue()).count()"}]}],"where":[{"path":"name.given.exists($this ~ 'alice') and name.given.all($this !~ 'zed') and name.given.exists($this.lower() = 'alice')"}]}`)
+		respEELDoris, bEELDoris, errEELDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", elemEquivLogicVD, nil)
+		respEELPg, bEELPg, errEELPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", elemEquivLogicVD, nil)
+
+		if opCheckErr != nil {
+			err = opCheckErr
+		} else if errEELDoris != nil || respEELDoris.StatusCode != http.StatusOK || !strings.Contains(string(bEELDoris), "element_at(ARRAY_FILTER(x -> LOWER(TRIM(x)) = LOWER(TRIM('alice')),") || !strings.Contains(string(bEELDoris), "ARRAY_JOIN(ARRAY_SORT(ARRAY_FILTER(x -> LOWER(TRIM(x)) <> LOWER(TRIM('zed')),") || !strings.Contains(string(bEELDoris), "ARRAY_SIZE(ARRAY_FILTER(x -> x IN ('Alice', 'Bob'),") || !strings.Contains(string(bEELDoris), "element_at(ARRAY_FILTER(x -> (NOT (x LIKE 'A%') OR (CHAR_LENGTH(x) >= 4)),") || !strings.Contains(string(bEELDoris), "ARRAY_SIZE(ARRAY_FILTER(x -> ((x = 'Alice') <> (x = 'Bob')),") || !strings.Contains(string(bEELDoris), "ARRAY_FILTER(x -> REGEXP(x, '^A[a-z]+$'),") || !strings.Contains(string(bEELDoris), "ARRAY_SIZE(ARRAY_FILTER(x -> (x IS NOT NULL AND x <> ''),") || !strings.Contains(string(bEELDoris), "ARRAY_EXISTS(x -> LOWER(TRIM(x)) = LOWER(TRIM('alice')),") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=doris with element-wise ~, !~, contains, implies, xor, matchesFull & hasValue pushdown, got %d: %s", respEELDoris.StatusCode, string(bEELDoris))
+		} else if errEELPg != nil || respEELPg.StatusCode != http.StatusOK || !strings.Contains(string(bEELPg), "AND LOWER(TRIM(s.sp_value)) = LOWER(TRIM('alice')) LIMIT 1)") || !strings.Contains(string(bEELPg), "AND LOWER(TRIM(s.sp_value)) <> LOWER(TRIM('zed')) ORDER BY sp_value ASC") || !strings.Contains(string(bEELPg), "AND s.sp_value IN ('Alice', 'Bob')) sub)") || !strings.Contains(string(bEELPg), "AND (NOT (s.sp_value LIKE 'A%') OR (CHAR_LENGTH(s.sp_value) >= 4)) LIMIT 1)") || !strings.Contains(string(bEELPg), "AND ((s.sp_value = 'Alice') <> (s.sp_value = 'Bob'))) sub)") || !strings.Contains(string(bEELPg), "AND s.sp_value ~ '^A[a-z]+$') sub)") || !strings.Contains(string(bEELPg), "AND (s.sp_value IS NOT NULL AND s.sp_value <> '')) sub)") {
+			err = fmt.Errorf("expected POST /ViewDefinition/$sql?dialect=postgres with element-wise ~, !~, contains, implies, xor, matchesFull & hasValue pushdown, got %d: %s", respEELPg.StatusCode, string(bEELPg))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-39", suite10, "Zero-JSON Binary Proto3 System-Level & Type-Level GET Operations Across 32 History, Analytics, SDC, Subscription, eCQM, Da Vinci, IHE, Formulary, Directory, Privacy & Clinical Trial Endpoints (_history, Patient/_history, Observation/_history, Observation/$meta, /$data-requirements, /$fhirpath, /$davinci-data-export, /$sync-analytics, /metadata/$subset, /metadata/$implements, $docref, Patient/$summary, Questionnaire/$populate, Questionnaire/$package, Subscription/$status, Subscription/$events, $evaluate-measure, $care-gaps, Claim/$inquire, ServiceRequest/$crd, MedicationRequest/$crd, $immds-forecast, Patient/$gfe, Patient/$ihe-pix, MedicationKnowledge/$lookup, $check-interactions, $find-providers, $find-services, Consent/$evaluate, Encounter/$everything, Group/$everything, $evaluate-eligibility) & SQL-on-FHIR v2 Element-Wise Equivalence (~ / !~), Logical (implies / xor / contains), .matchesFull() & .hasValue() / .exists() Pushdown in .where() / .exists() / .all()", t0, err, "Binary Proto3 32 system/type-level GET operations & element-wise ~/!~/contains/implies/xor/.matchesFull()/.hasValue() $sql pushdown verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

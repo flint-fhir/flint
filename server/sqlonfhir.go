@@ -2625,6 +2625,13 @@ func buildElemWherePredicateSQL(crit, colExpr, dialect string, isNumeric bool) (
 			return fmt.Sprintf("NOT (%s)", sub), true
 		}
 	}
+	if impParts := splitTopLevelBooleanWord(c, "implies"); len(impParts) == 2 {
+		lhsSub, okL := buildElemWherePredicateSQL(impParts[0], colExpr, dialect, isNumeric)
+		rhsSub, okR := buildElemWherePredicateSQL(impParts[1], colExpr, dialect, isNumeric)
+		if okL && okR {
+			return fmt.Sprintf("(NOT (%s) OR (%s))", lhsSub, rhsSub), true
+		}
+	}
 	if orParts := splitTopLevelBooleanWord(c, "or"); len(orParts) > 1 {
 		compiled := make([]string, 0, len(orParts))
 		for _, part := range orParts {
@@ -2635,6 +2642,13 @@ func buildElemWherePredicateSQL(crit, colExpr, dialect string, isNumeric bool) (
 			compiled = append(compiled, sub)
 		}
 		return "(" + strings.Join(compiled, " OR ") + ")", true
+	}
+	if xorParts := splitTopLevelBooleanWord(c, "xor"); len(xorParts) == 2 {
+		lhsSub, okL := buildElemWherePredicateSQL(xorParts[0], colExpr, dialect, isNumeric)
+		rhsSub, okR := buildElemWherePredicateSQL(xorParts[1], colExpr, dialect, isNumeric)
+		if okL && okR {
+			return fmt.Sprintf("((%s) <> (%s))", lhsSub, rhsSub), true
+		}
 	}
 	if andParts := splitTopLevelBooleanWord(c, "and"); len(andParts) > 1 {
 		compiled := make([]string, 0, len(andParts))
@@ -2655,6 +2669,18 @@ func buildElemWherePredicateSQL(crit, colExpr, dialect string, isNumeric bool) (
 			}
 			return fmt.Sprintf("%s IN (%s)", lhsSQL, strings.Join(quotedVals, ", ")), true
 		}
+	}
+	if contRHS, contVals, okContains := parseTopLevelContainsOp(c); okContains {
+		if rhsSQL, _, okR := buildElemSelectExprSQL(contRHS, colExpr, dialect); okR {
+			quotedVals := make([]string, 0, len(contVals))
+			for _, v := range contVals {
+				quotedVals = append(quotedVals, fmt.Sprintf("'%s'", strings.ReplaceAll(v, "'", "''")))
+			}
+			return fmt.Sprintf("%s IN (%s)", rhsSQL, strings.Join(quotedVals, ", ")), true
+		}
+	}
+	if c == "$this.hasValue()" || c == "$this.exists()" {
+		return fmt.Sprintf("(%s IS NOT NULL AND %s <> '')", colExpr, colExpr), true
 	}
 	if idx := strings.LastIndex(c, ".startsWith("); idx != -1 && strings.HasSuffix(c, ")") && findMatchingCloseParen(c, idx+len(".startsWith(")-1) == len(c)-1 {
 		if lhsSQL, _, okL := buildElemSelectExprSQL(strings.TrimSpace(c[:idx]), colExpr, dialect); okL {
@@ -2677,6 +2703,21 @@ func buildElemWherePredicateSQL(crit, colExpr, dialect string, isNumeric bool) (
 			return fmt.Sprintf("%s LIKE '%%%s%%'", lhsSQL, escapedArg), true
 		}
 	}
+	if idx := strings.LastIndex(c, ".matchesFull("); idx != -1 && strings.HasSuffix(c, ")") && findMatchingCloseParen(c, idx+len(".matchesFull(")-1) == len(c)-1 {
+		if lhsSQL, _, okL := buildElemSelectExprSQL(strings.TrimSpace(c[:idx]), colExpr, dialect); okL {
+			rawArg := strings.Trim(strings.TrimSpace(c[idx+len(".matchesFull("):len(c)-1]), "'\"")
+			rawArg = strings.TrimPrefix(strings.TrimSuffix(rawArg, "$"), "^")
+			escapedArg := strings.ReplaceAll(rawArg, "'", "''")
+			switch dialect {
+			case "doris":
+				return fmt.Sprintf("REGEXP(%s, '^%s$')", lhsSQL, escapedArg), true
+			case "sqlite":
+				return fmt.Sprintf("%s REGEXP '^%s$'", lhsSQL, escapedArg), true
+			default:
+				return fmt.Sprintf("%s ~ '^%s$'", lhsSQL, escapedArg), true
+			}
+		}
+	}
 	if idx := strings.LastIndex(c, ".matches("); idx != -1 && strings.HasSuffix(c, ")") && findMatchingCloseParen(c, idx+len(".matches(")-1) == len(c)-1 {
 		if lhsSQL, _, okL := buildElemSelectExprSQL(strings.TrimSpace(c[:idx]), colExpr, dialect); okL {
 			rawArg := strings.Trim(strings.TrimSpace(c[idx+len(".matches("):len(c)-1]), "'\"")
@@ -2692,12 +2733,26 @@ func buildElemWherePredicateSQL(crit, colExpr, dialect string, isNumeric bool) (
 		}
 	}
 	if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(c); okComp {
+		trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
+		escapedRHS := strings.ReplaceAll(trimmedRHS, "'", "''")
+		if cOp == "~" || cOp == "!~" {
+			if lhsSQL, lhsIsNum, okL := buildElemSelectExprSQL(cLHS, colExpr, dialect); okL {
+				cmpOp := "="
+				if cOp == "!~" {
+					cmpOp = "<>"
+				}
+				if isNumeric || lhsIsNum || !strings.HasPrefix(strings.TrimSpace(cRHS), "'") {
+					if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
+						return fmt.Sprintf("ROUND(%s, 4) %s ROUND(%s, 4)", lhsSQL, cmpOp, trimmedRHS), true
+					}
+				}
+				return fmt.Sprintf("LOWER(TRIM(%s)) %s LOWER(TRIM('%s'))", lhsSQL, cmpOp, escapedRHS), true
+			}
+		}
 		sqlOp := cOp
 		if sqlOp == "!=" {
 			sqlOp = "<>"
 		}
-		trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
-		escapedRHS := strings.ReplaceAll(trimmedRHS, "'", "''")
 		if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
 			lenFn := "CHAR_LENGTH"
 			if dialect == "sqlite" {
@@ -3842,7 +3897,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 			if strings.HasSuffix(criteria, ".exists()") {
 				return fmt.Sprintf("NOT ARRAY_EXISTS(x -> x = '', %s)", collExpr)
 			}
-			if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+			if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp && cOp != "~" && cOp != "!~" && (!strings.Contains(cLHS, "$this") || cLHS == "$this" || cLHS == "$this.length()") {
 				negOp := negateComparisonOp(cOp)
 				if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
 					trimmedRHS := strings.Trim(strings.TrimSpace(cRHS), "'\"")
@@ -3870,7 +3925,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 			}
 			return fmt.Sprintf("NOT array_exists(x -> x LIKE '%s=|%%' AND SPLIT_PART(x, '|', 2) = '', r.code_tokens)", sp)
 		}
-		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp && cOp != "~" && cOp != "!~" && (!strings.Contains(cLHS, "$this") || cLHS == "$this" || cLHS == "$this.length()") {
 			negOp := negateComparisonOp(cOp)
 			if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
 				subField := strings.TrimSpace(cLHS[:len(cLHS)-len(".length()")])
@@ -3900,7 +3955,8 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		}
 		if strings.Contains(criteria, "$this") {
 			collExpr, _ := dorisZeroJSONCollectionColumnExpr(basePath)
-			if pred, okPred := buildElemWherePredicateSQL(criteria, "x", "doris", false); okPred {
+			baseMods := parseSpidxCollectionModifiers(basePath)
+			if pred, okPred := buildElemWherePredicateSQL(criteria, "x", "doris", baseMods.isNumericElemTransform()); okPred {
 				return fmt.Sprintf("NOT ARRAY_EXISTS(x -> NOT (%s), %s)", pred, collExpr)
 			}
 		}
@@ -4047,7 +4103,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 			if strings.HasSuffix(criteria, ".exists()") {
 				return fmt.Sprintf("ARRAY_EXISTS(x -> x <> '', %s)", collExpr)
 			}
-			if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+			if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp && cOp != "~" && cOp != "!~" && (!strings.Contains(cLHS, "$this") || cLHS == "$this" || cLHS == "$this.length()") {
 				sqlOp := cOp
 				if sqlOp == "!=" {
 					sqlOp = "<>"
@@ -4065,7 +4121,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 				return fmt.Sprintf("ARRAY_EXISTS(x -> x %s '%s', %s)", sqlOp, escapedVal, collExpr)
 			}
 		}
-		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp && cOp != "~" && cOp != "!~" && (!strings.Contains(cLHS, "$this") || cLHS == "$this" || cLHS == "$this.length()") {
 			if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
 				subField := strings.TrimSpace(cLHS[:len(cLHS)-len(".length()")])
 				fullPath := basePath
@@ -4104,7 +4160,8 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		}
 		if strings.Contains(criteria, "$this") {
 			collExpr, _ := dorisZeroJSONCollectionColumnExpr(basePath)
-			if pred, okPred := buildElemWherePredicateSQL(criteria, "x", "doris", false); okPred {
+			baseMods := parseSpidxCollectionModifiers(basePath)
+			if pred, okPred := buildElemWherePredicateSQL(criteria, "x", "doris", baseMods.isNumericElemTransform()); okPred {
 				return fmt.Sprintf("ARRAY_EXISTS(x -> %s, %s)", pred, collExpr)
 			}
 		}
@@ -5276,7 +5333,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 			if strings.HasSuffix(criteria, ".exists()") {
 				return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value IS NULL OR sub.sp_value = '')", subQ)
 			}
-			if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+			if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp && cOp != "~" && cOp != "!~" && (!strings.Contains(cLHS, "$this") || cLHS == "$this" || cLHS == "$this.length()") {
 				negOp := negateComparisonOp(cOp)
 				if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
 					lenFn := "CHAR_LENGTH"
@@ -5308,7 +5365,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 			}
 			return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = '%s' AND (t.sp_value IS NULL OR t.sp_value = ''))", sp)
 		}
-		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp && cOp != "~" && cOp != "!~" && (!strings.Contains(cLHS, "$this") || cLHS == "$this" || cLHS == "$this.length()") {
 			negOp := negateComparisonOp(cOp)
 			if cLHS == "$this.length()" || strings.HasSuffix(cLHS, ".length()") {
 				subField := strings.TrimSpace(cLHS[:len(cLHS)-len(".length()")])
@@ -5485,7 +5542,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 			if strings.HasSuffix(criteria, ".exists()") {
 				return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value IS NOT NULL AND sub.sp_value <> '')", subQ)
 			}
-			if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+			if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp && cOp != "~" && cOp != "!~" && (!strings.Contains(cLHS, "$this") || cLHS == "$this" || cLHS == "$this.length()") {
 				sqlOp := cOp
 				if sqlOp == "!=" {
 					sqlOp = "<>"
@@ -5507,7 +5564,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 				return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE sub.sp_value %s '%s')", subQ, sqlOp, escapedVal)
 			}
 		}
-		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp {
+		if cLHS, cOp, cRHS, okComp := parseViewWhereComparison(criteria); okComp && cOp != "~" && cOp != "!~" && (!strings.Contains(cLHS, "$this") || cLHS == "$this" || cLHS == "$this.length()") {
 			sqlOp := cOp
 			if sqlOp == "!=" {
 				sqlOp = "<>"
