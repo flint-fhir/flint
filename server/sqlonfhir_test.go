@@ -1960,6 +1960,109 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	require.NoError(t, proto.Unmarshal(vdSQLProtoBytes, &vdSQLParams))
 	assert.NotEmpty(t, vdSQLParams.GetParameter())
 
+	// Binary Proto3 ViewDefinition CRUD, $run, $export, and Multi-forEach + Environment Variables (%resource, %loinc, %sct, %ucum)
+	reqVDListProto, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/ViewDefinition?_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqVDListProto.Header.Set("Accept", "application/x-protobuf")
+	respVDListProto, err := client.Do(reqVDListProto)
+	require.NoError(t, err)
+	vdListProtoBytes, _ := io.ReadAll(respVDListProto.Body)
+	respVDListProto.Body.Close()
+	require.Equal(t, http.StatusOK, respVDListProto.StatusCode)
+	assert.Contains(t, respVDListProto.Header.Get("Content-Type"), "application/x-protobuf")
+	var vdListBundle bcrpb.Bundle
+	require.NoError(t, proto.Unmarshal(vdListProtoBytes, &vdListBundle))
+	assert.NotEmpty(t, vdListBundle.GetEntry())
+
+	reqVDRunProto, err := http.NewRequest(http.MethodGet, ts.URL+"/fhir/r4/proto/ViewDefinition/patient-demographics/$run?_format=application/x-protobuf", nil)
+	require.NoError(t, err)
+	reqVDRunProto.Header.Set("Accept", "application/x-protobuf")
+	respVDRunProto, err := client.Do(reqVDRunProto)
+	require.NoError(t, err)
+	vdRunProtoBytes, _ := io.ReadAll(respVDRunProto.Body)
+	respVDRunProto.Body.Close()
+	require.Equal(t, http.StatusOK, respVDRunProto.StatusCode)
+	assert.Contains(t, respVDRunProto.Header.Get("Content-Type"), "application/x-protobuf")
+	var vdRunParams parampb.Parameters
+	require.NoError(t, proto.Unmarshal(vdRunProtoBytes, &vdRunParams))
+	assert.NotEmpty(t, vdRunParams.GetParameter())
+
+	multiFEVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "patient_multi_foreach_env",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"forEach": "name.given",
+				"where": [{"path": "$this.startsWith('A') and %resource.active"}],
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "given_val", "path": "$this"},
+					{"name": "pat_gender", "path": "%resource.gender"},
+					{"name": "loinc_uri", "path": "%loinc"},
+					{"name": "sct_uri", "path": "%sct"},
+					{"name": "ucum_uri", "path": "%ucum"}
+				]
+			},
+			{
+				"forEach": "%resource.identifier",
+				"column": [
+					{"name": "id_val", "path": "value"},
+					{"name": "gender_id", "path": "%resource.gender & ':' & value"}
+				]
+			}
+		]
+	}`
+	for _, tc := range []struct {
+		dialect      string
+		wantContains []string
+	}{
+		{
+			dialect: "doris",
+			wantContains: []string{
+				"LATERAL VIEW EXPLODE(r.string_tokens) fe_tbl AS fe_tok",
+				"LATERAL VIEW EXPLODE(r.code_tokens) fe2_tbl AS fe2_tok",
+				"SPLIT_PART(fe_tok, '=', 2) AS given_val",
+				"SPLIT_PART(fe2_tok, '|', 2) AS id_val",
+				"AS pat_gender",
+				"'http://loinc.org' AS loinc_uri",
+				"'http://snomed.info/sct' AS sct_uri",
+				"'http://unitsofmeasure.org' AS ucum_uri",
+				"COALESCE(SPLIT_PART(fe2_tok, '|', 2), '')) AS gender_id",
+			},
+		},
+		{
+			dialect: "postgres",
+			wantContains: []string{
+				"INNER JOIN spidx_string fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'given'",
+				"INNER JOIN spidx_token fe2 ON fe2.tenant_id = r.tenant_id AND fe2.res_type = r.res_type AND fe2.res_id = r.res_id AND fe2.sp_name = 'identifier'",
+				"fe.sp_value AS given_val",
+				"fe2.sp_value AS id_val",
+				"'http://loinc.org' AS loinc_uri",
+			},
+		},
+		{
+			dialect: "sqlite",
+			wantContains: []string{
+				"INNER JOIN spidx_string fe ON fe.tenant_id = r.tenant_id AND fe.res_type = r.res_type AND fe.res_id = r.res_id AND fe.sp_name = 'given'",
+				"INNER JOIN spidx_token fe2 ON fe2.tenant_id = r.tenant_id AND fe2.res_type = r.res_type AND fe2.res_id = r.res_id AND fe2.sp_name = 'identifier'",
+			},
+		},
+	} {
+		reqMFE, mfeErr := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect="+tc.dialect+"&_format=application/sql", strings.NewReader(multiFEVD))
+		require.NoError(t, mfeErr)
+		reqMFE.Header.Set("Content-Type", "application/fhir+json")
+		respMFE, mfeErr := client.Do(reqMFE)
+		require.NoError(t, mfeErr)
+		mfeBytes, _ := io.ReadAll(respMFE.Body)
+		respMFE.Body.Close()
+		require.Equal(t, http.StatusOK, respMFE.StatusCode)
+		for _, want := range tc.wantContains {
+			assert.Contains(t, string(mfeBytes), want)
+		}
+	}
+
 	arithTemporalVD := `{
 		"resourceType": "ViewDefinition",
 		"name": "obs_arith_concat_temporal",
