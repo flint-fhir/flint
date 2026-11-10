@@ -7345,4 +7345,94 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	assert.Contains(t, string(fessorBytes), `"chars_sort_second":"N"`)
 	assert.Contains(t, string(fessorBytes), `"chars_dist_sort":"-01MNR"`)
 	assert.Contains(t, string(fessorBytes), `"traced_val":"MRN-1001"`)
+
+	// 71. Wave 116: SQL-on-FHIR v2 forEach Element-Level Split/ToChars Filtering (.where($this ...)), Mapping (.select($this ...)), Quantifiers (.exists(), .empty(), .exists($this ...), .all($this ...)) & Aggregations (.sum(), .avg(), .min(), .max()) Pushdown
+	feElemSplitWhereSelectQuantAggVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_foreach_elem_split_tochars_where_select_quant_agg_v1",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"forEach": "identifier",
+				"where": [
+					{"path": "value.split('-').where($this.length() >= 3).exists() and value.split('-').exists($this = 'MRN') and value.split('-').all($this.length() > 0) and value.split('-').where($this = 'NONE').empty() and value.split('-').select($this.length()).sum() = 7"}
+				],
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "split_where_join", "path": "value.split('-').where($this.length() >= 3).join(':')"},
+					{"name": "split_where_cnt", "path": "value.split('-').where($this.length() >= 3).count()"},
+					{"name": "split_select_join", "path": "value.split('-').select($this.lower()).join('_')"},
+					{"name": "split_where_select_first", "path": "value.split('-').where($this.length() = 3).select($this.lower()).first()"},
+					{"name": "split_len_sum", "path": "value.split('-').select($this.length()).sum()"},
+					{"name": "split_len_max", "path": "value.split('-').select($this.length()).max()"},
+					{"name": "split_len_min", "path": "value.split('-').select($this.length()).min()"},
+					{"name": "split_exists_crit", "path": "value.split('-').exists($this = 'MRN')"},
+					{"name": "split_all_nonempty", "path": "value.split('-').all($this.length() > 0)"},
+					{"name": "split_where_empty", "path": "value.split('-').where($this = 'NONE').empty()"},
+					{"name": "chars_where_digits_sum", "path": "value.toChars().where($this = '1').select($this.toInteger()).sum()"},
+					{"name": "chars_where_digits_avg", "path": "value.toChars().where($this = '1').select($this.toDecimal()).avg()"},
+					{"name": "chars_min", "path": "value.split('-')[0].toChars().min()"},
+					{"name": "chars_max", "path": "value.split('-')[0].toChars().max()"}
+				]
+			}
+		]
+	}`
+
+	respFESWSDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitWhereSelectQuantAggVD))
+	require.NoError(t, err)
+	sqlFESWSDorisBytes, _ := io.ReadAll(respFESWSDoris.Body)
+	respFESWSDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respFESWSDoris.StatusCode, string(sqlFESWSDorisBytes))
+	sqlFESWSDoris := string(sqlFESWSDorisBytes)
+	assert.Contains(t, sqlFESWSDoris, "ARRAY_JOIN(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 3, SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), ':') AS split_where_join")
+	assert.Contains(t, sqlFESWSDoris, "ARRAY_JOIN(ARRAY_MAP(x -> LOWER(x), SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), '_') AS split_select_join")
+	assert.Contains(t, sqlFESWSDoris, "element_at(ARRAY_MAP(x -> LOWER(x), ARRAY_FILTER(x -> CHAR_LENGTH(x) = 3, SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))), 1) AS split_where_select_first")
+	assert.Contains(t, sqlFESWSDoris, "COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CHAR_LENGTH(x), SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))), 0) AS split_len_sum")
+	assert.Contains(t, sqlFESWSDoris, "ARRAY_MAX(ARRAY_MAP(x -> CHAR_LENGTH(x), SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) AS split_len_max")
+	assert.Contains(t, sqlFESWSDoris, "ARRAY_MIN(ARRAY_MAP(x -> CHAR_LENGTH(x), SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) AS split_len_min")
+	assert.Contains(t, sqlFESWSDoris, "ARRAY_EXISTS(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')) AS split_exists_crit")
+	assert.Contains(t, sqlFESWSDoris, "NOT ARRAY_EXISTS(x -> NOT (CHAR_LENGTH(x) > 0), SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')) AS split_all_nonempty")
+
+	respFESWSPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitWhereSelectQuantAggVD))
+	require.NoError(t, err)
+	sqlFESWSPgBytes, _ := io.ReadAll(respFESWSPg.Body)
+	respFESWSPg.Body.Close()
+	require.Equal(t, http.StatusOK, respFESWSPg.StatusCode, string(sqlFESWSPgBytes))
+	sqlFESWSPg := string(sqlFESWSPgBytes)
+	assert.Contains(t, sqlFESWSPg, "(SELECT COALESCE(STRING_AGG(sub.u, ':'), '') FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE CHAR_LENGTH(u) >= 3) sub) AS split_where_join")
+	assert.Contains(t, sqlFESWSPg, "(SELECT COALESCE(STRING_AGG(sub.u, '_'), '') FROM (SELECT LOWER(u) AS u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) sub) AS split_select_join")
+	assert.Contains(t, sqlFESWSPg, "(SELECT LOWER(u) AS u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE CHAR_LENGTH(u) = 3 LIMIT 1) AS split_where_select_first")
+	assert.Contains(t, sqlFESWSPg, "(SELECT COALESCE(SUM(sub.u), 0) FROM (SELECT CHAR_LENGTH(u) AS u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) sub) AS split_len_sum")
+	assert.Contains(t, sqlFESWSPg, "EXISTS (SELECT 1 FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) sub WHERE sub.u = 'MRN') AS split_exists_crit")
+	assert.Contains(t, sqlFESWSPg, "NOT EXISTS (SELECT 1 FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) sub WHERE NOT (CHAR_LENGTH(sub.u) > 0)) AS split_all_nonempty")
+
+	respFESWSSqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitWhereSelectQuantAggVD))
+	require.NoError(t, err)
+	sqlFESWSSqliteBytes, _ := io.ReadAll(respFESWSSqlite.Body)
+	respFESWSSqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respFESWSSqlite.StatusCode, string(sqlFESWSSqliteBytes))
+	sqlFESWSSqlite := string(sqlFESWSSqliteBytes)
+	assert.Contains(t, sqlFESWSSqlite, "WHERE LENGTH(j.value) >= 3) sub) AS split_where_join")
+	assert.Contains(t, sqlFESWSSqlite, "SELECT COALESCE(SUM(sub.u), 0) FROM (SELECT LENGTH(j.value) AS u")
+
+	respFESWSRun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(feElemSplitWhereSelectQuantAggVD))
+	require.NoError(t, err)
+	feswsBytes, _ := io.ReadAll(respFESWSRun.Body)
+	respFESWSRun.Body.Close()
+	require.Equal(t, http.StatusOK, respFESWSRun.StatusCode, string(feswsBytes))
+	assert.Contains(t, string(feswsBytes), `"split_where_join":"MRN:1001"`)
+	assert.Contains(t, string(feswsBytes), `"split_where_cnt":2`)
+	assert.Contains(t, string(feswsBytes), `"split_select_join":"mrn_1001"`)
+	assert.Contains(t, string(feswsBytes), `"split_where_select_first":"mrn"`)
+	assert.Contains(t, string(feswsBytes), `"split_len_sum":7`)
+	assert.Contains(t, string(feswsBytes), `"split_len_max":4`)
+	assert.Contains(t, string(feswsBytes), `"split_len_min":3`)
+	assert.Contains(t, string(feswsBytes), `"split_exists_crit":true`)
+	assert.Contains(t, string(feswsBytes), `"split_all_nonempty":true`)
+	assert.Contains(t, string(feswsBytes), `"split_where_empty":true`)
+	assert.Contains(t, string(feswsBytes), `"chars_where_digits_sum":2`)
+	assert.Contains(t, string(feswsBytes), `"chars_where_digits_avg":1`)
+	assert.Contains(t, string(feswsBytes), `"chars_min":"M"`)
+	assert.Contains(t, string(feswsBytes), `"chars_max":"R"`)
 }
