@@ -14,10 +14,12 @@ import (
 )
 
 type fhirPathContext struct {
-	root     map[string]any
-	thisItem any
-	index    int
-	total    int
+	root        map[string]any
+	thisItem    any
+	index       int
+	total       int
+	aggTotal    []any
+	hasAggTotal bool
 }
 
 // evalFHIRPath evaluates a full HL7 FHIRPath R4 (http://hl7.org/fhirpath/N1/) expression
@@ -628,6 +630,9 @@ func evalFHIRPathPrimaryLiteral(seg string, input []any, ctx fhirPathContext) ([
 	case "$index":
 		return []any{ctx.index}, true
 	case "$total":
+		if ctx.hasAggTotal {
+			return ctx.aggTotal, true
+		}
 		return []any{ctx.total}, true
 	case "%resource", "%rootResource", "%context":
 		if ctx.root != nil {
@@ -1984,6 +1989,29 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 			}
 		}
 		return []any{best}
+
+	case "aggregate":
+		if len(args) == 0 {
+			return nil
+		}
+		var total []any
+		if len(args) >= 2 {
+			total = evalFHIRPathExpr(scopeInput, ctx, args[1])
+		} else if strings.Contains(args[0], "+") {
+			total = []any{0}
+		}
+		for i, it := range current {
+			subCtx := fhirPathContext{
+				root:        ctx.root,
+				thisItem:    it,
+				index:       i,
+				total:       len(current),
+				aggTotal:    total,
+				hasAggTotal: true,
+			}
+			total = evalFHIRPathExpr([]any{it}, subCtx, args[0])
+		}
+		return total
 
 	// FHIR R4 Specific Functions
 	case "extension":

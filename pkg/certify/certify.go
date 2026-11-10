@@ -6372,6 +6372,63 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-51", suite10, "SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Split/ToChars Set Operations (.union(), .combine(), .intersect(), .exclude()), Set Membership (.subsetOf(), .supersetOf()) & Boolean Collection Aggregators (.allTrue(), .anyTrue(), .allFalse(), .anyFalse()) Pushdown + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 forEach element split/toChars set operations, subsetOf/supersetOf, boolean aggregators & binary Proto3 $sql/$run verified")
 
+	// AN-52: SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Split/ToChars .aggregate(aggregator [, init]) Pushdown, Pipe Union (|) Operator & forEach-Scoped collection: true Array Columns Pushdown + Binary Proto3 Wire
+	t0 = time.Now()
+	{
+		feElemSplitAggregatePipeCollVD := []byte(`{
+			"resourceType": "ViewDefinition",
+			"name": "cert_pat_foreach_elem_split_tochars_aggregate_pipe_coll_v1",
+			"status": "active",
+			"resource": "Patient",
+			"select": [
+				{
+					"forEach": "identifier",
+					"where": [
+						{"path": "value.split('-').aggregate($total + $this.length(), 0) = 8 and (value.split('-').where($this = 'MRN') | value.split('-').where($this = '1')).count() = 2"}
+					],
+					"column": [
+						{"name": "rk", "path": "getResourceKey()"},
+						{"name": "split_agg_len_sum", "path": "value.split('-').aggregate($total + $this.length(), 0)"},
+						{"name": "split_agg_cnt", "path": "value.split('-').where($this.length() >= 3).aggregate($total + 1, 0)"},
+						{"name": "split_agg_join", "path": "value.split('-').where($this.length() >= 3).sort().aggregate(iif($total = '', $this, $total & ':' & $this), '')"},
+						{"name": "split_pipe_join", "path": "(value.split('-').where($this = 'MRN') | value.split('-').where($this = '1')).sort().join(':')"},
+						{"name": "chars_agg_cnt", "path": "value.toChars().distinct().aggregate($total + 1, 0)"},
+						{"name": "split_coll_arr", "path": "value.split('-').where($this.length() >= 3).sort()", "collection": true}
+					]
+				}
+			]
+		}`)
+
+		respFESAPCDoris, bFESAPCDoris, errFESAPCDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", feElemSplitAggregatePipeCollVD, nil)
+		respFESAPCPg, bFESAPCPg, errFESAPCPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", feElemSplitAggregatePipeCollVD, nil)
+		respFESAPCSqlite, bFESAPCSqlite, errFESAPCSqlite := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", feElemSplitAggregatePipeCollVD, nil)
+		respFESAPCRun, bFESAPCRun, errFESAPCRun := doReq(http.MethodPost, basePath+"/ViewDefinition/$run", "application/fhir+json", feElemSplitAggregatePipeCollVD, nil)
+		respFESAPCSqlProto, bFESAPCSqlProto, errFESAPCSqlProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/x-protobuf", "application/fhir+json", feElemSplitAggregatePipeCollVD, map[string]string{"Accept": "application/x-protobuf"})
+		respFESAPCRunProto, bFESAPCRunProto, errFESAPCRunProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$run?_format=application/x-protobuf", "application/fhir+json", feElemSplitAggregatePipeCollVD, map[string]string{"Accept": "application/x-protobuf"})
+
+		sFESAPCDoris := string(bFESAPCDoris)
+		sFESAPCPg := string(bFESAPCPg)
+		sFESAPCSqlite := string(bFESAPCSqlite)
+		sFESAPCRun := string(bFESAPCRun)
+
+		if errFESAPCDoris != nil || respFESAPCDoris.StatusCode != http.StatusOK || !strings.Contains(sFESAPCDoris, "COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CHAR_LENGTH(x), SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))), 0) AS split_agg_len_sum") || !strings.Contains(sFESAPCDoris, "ARRAY_SIZE(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 3, SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) AS split_agg_cnt") || !strings.Contains(sFESAPCDoris, "ARRAY_JOIN(ARRAY_SORT(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 3, SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))), ':') AS split_agg_join") || !strings.Contains(sFESAPCDoris, "ARRAY_JOIN(ARRAY_SORT(ARRAY_UNION(ARRAY_FILTER(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), ARRAY_FILTER(x -> x = '1', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')))), ':') AS split_pipe_join") || !strings.Contains(sFESAPCDoris, "ARRAY_SORT(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 3, SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) AS split_coll_arr") {
+			err = fmt.Errorf("expected Doris $sql forEach element split/toChars aggregate, pipe union & collection array pushdown, got status=%d sql=%s", respFESAPCDoris.StatusCode, sFESAPCDoris)
+		} else if errFESAPCPg != nil || respFESAPCPg.StatusCode != http.StatusOK || !strings.Contains(sFESAPCPg, "(SELECT COALESCE(SUM(CHAR_LENGTH(sub.u)), 0) FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) sub) AS split_agg_len_sum") || !strings.Contains(sFESAPCPg, "(SELECT COUNT(*) FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE CHAR_LENGTH(u) >= 3) sub) AS split_agg_cnt") || !strings.Contains(sFESAPCPg, "(SELECT COALESCE(STRING_AGG(sub.u, ':'), '') FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE CHAR_LENGTH(u) >= 3 ORDER BY u ASC) sub) AS split_agg_join") || !strings.Contains(sFESAPCPg, "(SELECT COALESCE(ARRAY_AGG(sub.u), ARRAY[]::text[]) FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE CHAR_LENGTH(u) >= 3 ORDER BY u ASC) sub) AS split_coll_arr") {
+			err = fmt.Errorf("expected PostgreSQL $sql forEach element split/toChars aggregate, pipe union & collection array pushdown, got status=%d sql=%s", respFESAPCPg.StatusCode, sFESAPCPg)
+		} else if errFESAPCSqlite != nil || respFESAPCSqlite.StatusCode != http.StatusOK || !strings.Contains(sFESAPCSqlite, "COALESCE(SUM(LENGTH(sub.u)), 0)") || !strings.Contains(sFESAPCSqlite, "SELECT json_group_array(sub.u) FROM") {
+			err = fmt.Errorf("expected SQLite $sql forEach element split/toChars aggregate, pipe union & collection array pushdown, got status=%d sql=%s", respFESAPCSqlite.StatusCode, sFESAPCSqlite)
+		} else if errFESAPCRun != nil || respFESAPCRun.StatusCode != http.StatusOK || !strings.Contains(sFESAPCRun, `"split_agg_len_sum":8`) || !strings.Contains(sFESAPCRun, `"split_agg_cnt":2`) || !strings.Contains(sFESAPCRun, `"split_agg_join":"CERT:MRN"`) || !strings.Contains(sFESAPCRun, `"split_pipe_join":"1:MRN"`) || !strings.Contains(sFESAPCRun, `"chars_agg_cnt":8`) || !strings.Contains(sFESAPCRun, `"split_coll_arr":["CERT","MRN"]`) {
+			err = fmt.Errorf("expected $run forEach element split/toChars aggregate, pipe union & collection array row evaluation, got status=%d body=%s", respFESAPCRun.StatusCode, sFESAPCRun)
+		} else if errFESAPCSqlProto != nil || respFESAPCSqlProto == nil || respFESAPCSqlProto.StatusCode != http.StatusOK || !strings.Contains(respFESAPCSqlProto.Header.Get("Content-Type"), "application/x-protobuf") || respFESAPCSqlProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bFESAPCSqlProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$sql?_format=application/x-protobuf, got %v", errFESAPCSqlProto)
+		} else if errFESAPCRunProto != nil || respFESAPCRunProto == nil || respFESAPCRunProto.StatusCode != http.StatusOK || !strings.Contains(respFESAPCRunProto.Header.Get("Content-Type"), "application/x-protobuf") || respFESAPCRunProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bFESAPCRunProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$run?_format=application/x-protobuf, got %v", errFESAPCRunProto)
+		} else {
+			err = nil
+		}
+	}
+	record("AN-52", suite10, "SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Split/ToChars .aggregate(aggregator [, init]) Pushdown, Pipe Union (|) Operator & forEach-Scoped collection: true Array Columns Pushdown + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 forEach element split/toChars .aggregate(), pipe union (|), collection: true array columns & binary Proto3 $sql/$run verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}
