@@ -7435,4 +7435,97 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	assert.Contains(t, string(feswsBytes), `"chars_where_digits_avg":1`)
 	assert.Contains(t, string(feswsBytes), `"chars_min":"M"`)
 	assert.Contains(t, string(feswsBytes), `"chars_max":"R"`)
+
+	// -------------------------------------------------------------------------
+	// 72. Wave 117: SQL-on-FHIR v2 forEach Element-Level Split/ToChars Set Operations (.union(), .combine(), .intersect(), .exclude()), Set Membership (.subsetOf(), .supersetOf()) & Boolean Collection Aggregators (.allTrue(), .anyTrue(), .allFalse(), .anyFalse()) Pushdown
+	// -------------------------------------------------------------------------
+	feElemSplitSetOpsBoolAggVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_foreach_elem_split_tochars_setops_bool_agg_v1",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"forEach": "identifier",
+				"where": [
+					{"path": "value.split('-').where($this = 'MRN').subsetOf(value.split('-')) and value.split('-').supersetOf(value.split('-').where($this = 'MRN')) and value.split('-').select($this.length() >= 3).allTrue() and value.split('-').select($this = 'MRN').anyTrue() and value.split('-').select($this = 'NONE').allFalse() and value.split('-').select($this = 'MRN').anyFalse()"}
+				],
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "split_union_join", "path": "value.split('-').where($this = 'MRN').union(value.split('-').where($this = '1001')).sort().join(':')"},
+					{"name": "split_union_cnt", "path": "value.split('-').union(value.split('-')).count()"},
+					{"name": "split_combine_join", "path": "value.split('-').where($this = 'MRN').combine(value.split('-').where($this = '1001')).join(':')"},
+					{"name": "split_intersect_first", "path": "value.split('-').intersect(value.split('-').where($this = 'MRN')).first()"},
+					{"name": "split_exclude_first", "path": "value.split('-').exclude(value.split('-').where($this = 'MRN')).first()"},
+					{"name": "split_subset", "path": "value.split('-').where($this = 'MRN').subsetOf(value.split('-'))"},
+					{"name": "split_superset", "path": "value.split('-').supersetOf(value.split('-').where($this = 'MRN'))"},
+					{"name": "split_all_true", "path": "value.split('-').select($this.length() >= 3).allTrue()"},
+					{"name": "split_any_true", "path": "value.split('-').select($this = 'MRN').anyTrue()"},
+					{"name": "split_all_false", "path": "value.split('-').select($this = 'NONE').allFalse()"},
+					{"name": "split_any_false", "path": "value.split('-').select($this = 'MRN').anyFalse()"},
+					{"name": "chars_union_sort", "path": "value.toChars().where($this = 'M').union(value.toChars().where($this = '1')).sort().join('')"},
+					{"name": "chars_subset", "path": "value.toChars().where($this = 'M').subsetOf(value.toChars())"},
+					{"name": "chars_superset", "path": "value.toChars().supersetOf(value.toChars().where($this = '1'))"}
+				]
+			}
+		]
+	}`
+
+	respFESOBDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitSetOpsBoolAggVD))
+	require.NoError(t, err)
+	sqlFESOBDorisBytes, _ := io.ReadAll(respFESOBDoris.Body)
+	respFESOBDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respFESOBDoris.StatusCode, string(sqlFESOBDorisBytes))
+	sqlFESOBDoris := string(sqlFESOBDorisBytes)
+	assert.Contains(t, sqlFESOBDoris, "ARRAY_JOIN(ARRAY_SORT(ARRAY_UNION(ARRAY_FILTER(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), ARRAY_FILTER(x -> x = '1001', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')))), ':') AS split_union_join")
+	assert.Contains(t, sqlFESOBDoris, "ARRAY_JOIN(ARRAY_CONCAT(ARRAY_FILTER(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), ARRAY_FILTER(x -> x = '1001', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))), ':') AS split_combine_join")
+	assert.Contains(t, sqlFESOBDoris, "element_at(ARRAY_INTERSECT(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), ARRAY_FILTER(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))), 1) AS split_intersect_first")
+	assert.Contains(t, sqlFESOBDoris, "element_at(ARRAY_EXCEPT(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), ARRAY_FILTER(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))), 1) AS split_exclude_first")
+	assert.Contains(t, sqlFESOBDoris, "(ARRAY_SIZE(ARRAY_EXCEPT(ARRAY_FILTER(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) = 0) AS split_subset")
+	assert.Contains(t, sqlFESOBDoris, "NOT ARRAY_EXISTS(x -> NOT (x), ARRAY_MAP(x -> CHAR_LENGTH(x) >= 3, SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) AS split_all_true")
+	assert.Contains(t, sqlFESOBDoris, "ARRAY_EXISTS(x -> x, ARRAY_MAP(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) AS split_any_true")
+	assert.Contains(t, sqlFESOBDoris, "NOT ARRAY_EXISTS(x -> x, ARRAY_MAP(x -> x = 'NONE', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) AS split_all_false")
+	assert.Contains(t, sqlFESOBDoris, "ARRAY_EXISTS(x -> NOT (x), ARRAY_MAP(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) AS split_any_false")
+
+	respFESOBPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitSetOpsBoolAggVD))
+	require.NoError(t, err)
+	sqlFESOBPgBytes, _ := io.ReadAll(respFESOBPg.Body)
+	respFESOBPg.Body.Close()
+	require.Equal(t, http.StatusOK, respFESOBPg.StatusCode, string(sqlFESOBPgBytes))
+	sqlFESOBPg := string(sqlFESOBPgBytes)
+	assert.Contains(t, sqlFESOBPg, "(SELECT COALESCE(STRING_AGG(sub.u, ':'), '') FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = 'MRN' UNION SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = '1001' ORDER BY u ASC) sub) AS split_union_join")
+	assert.Contains(t, sqlFESOBPg, "(SELECT COALESCE(STRING_AGG(sub.u, ':'), '') FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = 'MRN' UNION ALL SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = '1001') sub) AS split_combine_join")
+	assert.Contains(t, sqlFESOBPg, "(SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u INTERSECT SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = 'MRN' LIMIT 1) AS split_intersect_first")
+	assert.Contains(t, sqlFESOBPg, "(SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u EXCEPT SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = 'MRN' LIMIT 1) AS split_exclude_first")
+	assert.Contains(t, sqlFESOBPg, "NOT EXISTS (SELECT sub.u FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = 'MRN') sub EXCEPT SELECT rhs.u FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) rhs) AS split_subset")
+	assert.Contains(t, sqlFESOBPg, "NOT EXISTS (SELECT 1 FROM (SELECT CHAR_LENGTH(u) >= 3 AS u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) sub WHERE NOT (sub.u)) AS split_all_true")
+
+	respFESOBSqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitSetOpsBoolAggVD))
+	require.NoError(t, err)
+	sqlFESOBSqliteBytes, _ := io.ReadAll(respFESOBSqlite.Body)
+	respFESOBSqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respFESOBSqlite.StatusCode, string(sqlFESOBSqliteBytes))
+	sqlFESOBSqlite := string(sqlFESOBSqliteBytes)
+	assert.Contains(t, sqlFESOBSqlite, "UNION SELECT j.value AS u")
+	assert.Contains(t, sqlFESOBSqlite, "EXCEPT SELECT rhs.u FROM")
+
+	respFESOBRun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(feElemSplitSetOpsBoolAggVD))
+	require.NoError(t, err)
+	fesobBytes, _ := io.ReadAll(respFESOBRun.Body)
+	respFESOBRun.Body.Close()
+	require.Equal(t, http.StatusOK, respFESOBRun.StatusCode, string(fesobBytes))
+	assert.Contains(t, string(fesobBytes), `"split_union_join":"1001:MRN"`)
+	assert.Contains(t, string(fesobBytes), `"split_union_cnt":2`)
+	assert.Contains(t, string(fesobBytes), `"split_combine_join":"MRN:1001"`)
+	assert.Contains(t, string(fesobBytes), `"split_intersect_first":"MRN"`)
+	assert.Contains(t, string(fesobBytes), `"split_exclude_first":"1001"`)
+	assert.Contains(t, string(fesobBytes), `"split_subset":true`)
+	assert.Contains(t, string(fesobBytes), `"split_superset":true`)
+	assert.Contains(t, string(fesobBytes), `"split_all_true":true`)
+	assert.Contains(t, string(fesobBytes), `"split_any_true":true`)
+	assert.Contains(t, string(fesobBytes), `"split_all_false":true`)
+	assert.Contains(t, string(fesobBytes), `"split_any_false":true`)
+	assert.Contains(t, string(fesobBytes), `"chars_union_sort":"1M"`)
+	assert.Contains(t, string(fesobBytes), `"chars_subset":true`)
+	assert.Contains(t, string(fesobBytes), `"chars_superset":true`)
 }

@@ -6307,6 +6307,71 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-50", suite10, "SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Split/ToChars Filtering (.where($this ...)), Mapping (.select($this ...)), Quantifiers (.exists(), .empty(), .exists($this ...), .all($this ...)) & Aggregations (.sum(), .avg(), .min(), .max()) Pushdown + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 forEach element split/toChars where/select/quantifiers/aggregations & binary Proto3 $sql/$run verified")
 
+	// AN-51: SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Split/ToChars Set Operations (.union(), .combine(), .intersect(), .exclude()), Set Membership (.subsetOf(), .supersetOf()) & Boolean Collection Aggregators (.allTrue(), .anyTrue(), .allFalse(), .anyFalse()) Pushdown + Binary Proto3 Wire
+	t0 = time.Now()
+	{
+		feElemSplitSetOpsBoolAggVD := []byte(`{
+			"resourceType": "ViewDefinition",
+			"name": "cert_pat_foreach_elem_split_tochars_setops_bool_agg_v1",
+			"status": "active",
+			"resource": "Patient",
+			"select": [
+				{
+					"forEach": "identifier",
+					"where": [
+						{"path": "value.split('-').where($this = 'MRN').subsetOf(value.split('-')) and value.split('-').supersetOf(value.split('-').where($this = 'MRN')) and value.split('-').select($this.length() >= 1).allTrue() and value.split('-').select($this = 'MRN').anyTrue() and value.split('-').select($this = 'NONE').allFalse() and value.split('-').select($this = 'MRN').anyFalse()"}
+					],
+					"column": [
+						{"name": "rk", "path": "getResourceKey()"},
+						{"name": "split_union_join", "path": "value.split('-').where($this = 'MRN').union(value.split('-').where($this = '1')).sort().join(':')"},
+						{"name": "split_union_cnt", "path": "value.split('-').union(value.split('-')).count()"},
+						{"name": "split_combine_join", "path": "value.split('-').where($this = 'MRN').combine(value.split('-').where($this = '1')).join(':')"},
+						{"name": "split_intersect_first", "path": "value.split('-').intersect(value.split('-').where($this = 'MRN')).first()"},
+						{"name": "split_exclude_sort_first", "path": "value.split('-').exclude(value.split('-').where($this = 'MRN')).sort().first()"},
+						{"name": "split_subset", "path": "value.split('-').where($this = 'MRN').subsetOf(value.split('-'))"},
+						{"name": "split_superset", "path": "value.split('-').supersetOf(value.split('-').where($this = 'MRN'))"},
+						{"name": "split_all_true", "path": "value.split('-').select($this.length() >= 1).allTrue()"},
+						{"name": "split_any_true", "path": "value.split('-').select($this = 'MRN').anyTrue()"},
+						{"name": "split_all_false", "path": "value.split('-').select($this = 'NONE').allFalse()"},
+						{"name": "split_any_false", "path": "value.split('-').select($this = 'MRN').anyFalse()"},
+						{"name": "chars_union_sort", "path": "value.toChars().where($this = 'M').union(value.toChars().where($this = '1')).sort().join('')"},
+						{"name": "chars_subset", "path": "value.toChars().where($this = 'M').subsetOf(value.toChars())"},
+						{"name": "chars_superset", "path": "value.toChars().supersetOf(value.toChars().where($this = '1'))"}
+					]
+				}
+			]
+		}`)
+
+		respFESOBDoris, bFESOBDoris, errFESOBDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", feElemSplitSetOpsBoolAggVD, nil)
+		respFESOBPg, bFESOBPg, errFESOBPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", feElemSplitSetOpsBoolAggVD, nil)
+		respFESOBSqlite, bFESOBSqlite, errFESOBSqlite := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", feElemSplitSetOpsBoolAggVD, nil)
+		respFESOBRun, bFESOBRun, errFESOBRun := doReq(http.MethodPost, basePath+"/ViewDefinition/$run", "application/fhir+json", feElemSplitSetOpsBoolAggVD, nil)
+		respFESOBSqlProto, bFESOBSqlProto, errFESOBSqlProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/x-protobuf", "application/fhir+json", feElemSplitSetOpsBoolAggVD, map[string]string{"Accept": "application/x-protobuf"})
+		respFESOBRunProto, bFESOBRunProto, errFESOBRunProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$run?_format=application/x-protobuf", "application/fhir+json", feElemSplitSetOpsBoolAggVD, map[string]string{"Accept": "application/x-protobuf"})
+
+		sFESOBDoris := string(bFESOBDoris)
+		sFESOBPg := string(bFESOBPg)
+		sFESOBSqlite := string(bFESOBSqlite)
+		sFESOBRun := string(bFESOBRun)
+
+		if errFESOBDoris != nil || respFESOBDoris.StatusCode != http.StatusOK || !strings.Contains(sFESOBDoris, "ARRAY_JOIN(ARRAY_SORT(ARRAY_UNION(ARRAY_FILTER(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), ARRAY_FILTER(x -> x = '1', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')))), ':') AS split_union_join") || !strings.Contains(sFESOBDoris, "ARRAY_JOIN(ARRAY_CONCAT(ARRAY_FILTER(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), ARRAY_FILTER(x -> x = '1', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))), ':') AS split_combine_join") || !strings.Contains(sFESOBDoris, "element_at(ARRAY_INTERSECT(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), ARRAY_FILTER(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))), 1) AS split_intersect_first") || !strings.Contains(sFESOBDoris, "(ARRAY_SIZE(ARRAY_EXCEPT(ARRAY_FILTER(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) = 0) AS split_subset") || !strings.Contains(sFESOBDoris, "NOT ARRAY_EXISTS(x -> NOT (x), ARRAY_MAP(x -> CHAR_LENGTH(x) >= 1, SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) AS split_all_true") || !strings.Contains(sFESOBDoris, "ARRAY_EXISTS(x -> x, ARRAY_MAP(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) AS split_any_true") {
+			err = fmt.Errorf("expected Doris $sql forEach element split/toChars set operations & boolean aggregators pushdown, got status=%d sql=%s", respFESOBDoris.StatusCode, sFESOBDoris)
+		} else if errFESOBPg != nil || respFESOBPg.StatusCode != http.StatusOK || !strings.Contains(sFESOBPg, "(SELECT COALESCE(STRING_AGG(sub.u, ':'), '') FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = 'MRN' UNION SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = '1' ORDER BY u ASC) sub) AS split_union_join") || !strings.Contains(sFESOBPg, "(SELECT COALESCE(STRING_AGG(sub.u, ':'), '') FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = 'MRN' UNION ALL SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = '1') sub) AS split_combine_join") || !strings.Contains(sFESOBPg, "(SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u INTERSECT SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = 'MRN' LIMIT 1) AS split_intersect_first") || !strings.Contains(sFESOBPg, "NOT EXISTS (SELECT sub.u FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = 'MRN') sub EXCEPT SELECT rhs.u FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) rhs) AS split_subset") || !strings.Contains(sFESOBPg, "NOT EXISTS (SELECT 1 FROM (SELECT CHAR_LENGTH(u) >= 1 AS u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) sub WHERE NOT (sub.u)) AS split_all_true") {
+			err = fmt.Errorf("expected PostgreSQL $sql forEach element split/toChars set operations & boolean aggregators pushdown, got status=%d sql=%s", respFESOBPg.StatusCode, sFESOBPg)
+		} else if errFESOBSqlite != nil || respFESOBSqlite.StatusCode != http.StatusOK || !strings.Contains(sFESOBSqlite, "UNION SELECT j.value AS u") || !strings.Contains(sFESOBSqlite, "EXCEPT SELECT rhs.u FROM") {
+			err = fmt.Errorf("expected SQLite $sql forEach element split/toChars set operations & boolean aggregators pushdown, got status=%d sql=%s", respFESOBSqlite.StatusCode, sFESOBSqlite)
+		} else if errFESOBRun != nil || respFESOBRun.StatusCode != http.StatusOK || !strings.Contains(sFESOBRun, `"split_union_join":"1:MRN"`) || !strings.Contains(sFESOBRun, `"split_union_cnt":3`) || !strings.Contains(sFESOBRun, `"split_combine_join":"MRN:1"`) || !strings.Contains(sFESOBRun, `"split_intersect_first":"MRN"`) || !strings.Contains(sFESOBRun, `"split_exclude_sort_first":"1"`) || !strings.Contains(sFESOBRun, `"split_subset":true`) || !strings.Contains(sFESOBRun, `"split_superset":true`) || !strings.Contains(sFESOBRun, `"split_all_true":true`) || !strings.Contains(sFESOBRun, `"split_any_true":true`) || !strings.Contains(sFESOBRun, `"split_all_false":true`) || !strings.Contains(sFESOBRun, `"split_any_false":true`) || !strings.Contains(sFESOBRun, `"chars_union_sort":"1M"`) || !strings.Contains(sFESOBRun, `"chars_subset":true`) || !strings.Contains(sFESOBRun, `"chars_superset":true`) {
+			err = fmt.Errorf("expected $run forEach element split/toChars set operations & boolean aggregators row evaluation, got status=%d body=%s", respFESOBRun.StatusCode, sFESOBRun)
+		} else if errFESOBSqlProto != nil || respFESOBSqlProto == nil || respFESOBSqlProto.StatusCode != http.StatusOK || !strings.Contains(respFESOBSqlProto.Header.Get("Content-Type"), "application/x-protobuf") || respFESOBSqlProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bFESOBSqlProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$sql?_format=application/x-protobuf, got %v", errFESOBSqlProto)
+		} else if errFESOBRunProto != nil || respFESOBRunProto == nil || respFESOBRunProto.StatusCode != http.StatusOK || !strings.Contains(respFESOBRunProto.Header.Get("Content-Type"), "application/x-protobuf") || respFESOBRunProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bFESOBRunProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$run?_format=application/x-protobuf, got %v", errFESOBRunProto)
+		} else {
+			err = nil
+		}
+	}
+	record("AN-51", suite10, "SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Split/ToChars Set Operations (.union(), .combine(), .intersect(), .exclude()), Set Membership (.subsetOf(), .supersetOf()) & Boolean Collection Aggregators (.allTrue(), .anyTrue(), .allFalse(), .anyFalse()) Pushdown + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 forEach element split/toChars set operations, subsetOf/supersetOf, boolean aggregators & binary Proto3 $sql/$run verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

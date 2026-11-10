@@ -2688,7 +2688,12 @@ type spidxElemTransform struct {
 	whereCrit         string
 	selectProj        string
 	isNumProj         bool
+	isBoolProj        bool
 	selectBeforeWhere bool
+	setOp             string
+	lhsChain          *splitCharsModChain
+	rhsChain          *splitCharsModChain
+	setOther          *splitCharsModChain
 }
 
 type splitCharsModChain struct {
@@ -2705,12 +2710,17 @@ type splitCharsModChain struct {
 	whereCrit         string
 	selectProj        string
 	isNumProj         bool
+	isBoolProj        bool
 	selectBeforeWhere bool
+	setOp             string
+	lhsChain          *splitCharsModChain
+	rhsChain          *splitCharsModChain
+	setOther          *splitCharsModChain
 	tagMiddle         string
 }
 
 func (c splitCharsModChain) hasMods() bool {
-	return c.isDistinct || c.sortDir != "" || c.hasSkip || c.isTail || c.hasTake || c.whereCrit != "" || c.selectProj != ""
+	return c.isDistinct || c.sortDir != "" || c.hasSkip || c.isTail || c.hasTake || c.whereCrit != "" || c.selectProj != "" || c.setOp != ""
 }
 
 func (c splitCharsModChain) toTransform(kind, arg2 string, int1 int) spidxElemTransform {
@@ -2728,15 +2738,46 @@ func (c splitCharsModChain) toTransform(kind, arg2 string, int1 int) spidxElemTr
 		whereCrit:         c.whereCrit,
 		selectProj:        c.selectProj,
 		isNumProj:         c.isNumProj,
+		isBoolProj:        c.isBoolProj,
 		selectBeforeWhere: c.selectBeforeWhere,
+		setOp:             c.setOp,
+		lhsChain:          c.lhsChain,
+		rhsChain:          c.rhsChain,
+		setOther:          c.setOther,
 	}
 }
 
 func (c splitCharsModChain) baseTag() string {
+	if c.setOp != "" && c.lhsChain != nil {
+		return c.lhsChain.baseTag() + c.tagMiddle
+	}
 	if c.isToChars {
 		return ".toChars" + c.tagMiddle
 	}
 	return ".split" + c.tagMiddle
+}
+
+func parseCompatSplitOrToCharsChain(rhsStr, expectedBasePath string) (splitCharsModChain, bool) {
+	if rhsChain, ok := parseSplitOrToCharsChain(rhsStr); ok && rhsChain.basePath == expectedBasePath {
+		return rhsChain, true
+	}
+	norm := replaceForEachFieldRefsWithThis(strings.TrimSpace(rhsStr))
+	for _, pfx := range []string{"$this.reference.", "reference.", "$this.system.", "system.", "$this.type.", "type."} {
+		if strings.HasPrefix(norm, pfx) && expectedBasePath != "$this" {
+			norm = expectedBasePath + "." + norm[len(pfx):]
+			break
+		}
+	}
+	if _, rest, okKey := parseForEachGetReferenceKey(norm); okKey && strings.HasPrefix(rest, ".") && expectedBasePath != "$this" {
+		norm = expectedBasePath + rest
+	}
+	if strings.HasPrefix(norm, "$this.") && expectedBasePath != "$this" {
+		norm = expectedBasePath + norm[len("$this"):]
+	}
+	if rhsChain, ok := parseSplitOrToCharsChain(norm); ok && rhsChain.basePath == expectedBasePath {
+		return rhsChain, true
+	}
+	return splitCharsModChain{}, false
 }
 
 func parseSplitOrToCharsChain(prefix string) (splitCharsModChain, bool) {
@@ -2795,6 +2836,18 @@ func parseSplitOrToCharsChain(prefix string) (splitCharsModChain, bool) {
 				if _, isNum, okProj := buildElemSelectExprSQL(proj, "x", "postgres"); okProj {
 					chain.selectProj = proj
 					chain.isNumProj = isNum
+					chain.isBoolProj = strings.HasSuffix(proj, ".toBoolean()") || strings.HasSuffix(proj, ".isDistinct()") || strings.Contains(proj, ".convertsTo") || strings.Contains(proj, ".comparable(")
+					if chain.whereCrit != "" {
+						chain.selectBeforeWhere = true
+					}
+					midTags = append([]string{".select"}, midTags...)
+					cur = strings.TrimSpace(cur[:idx])
+					continue
+				}
+				if _, okPred := buildElemWherePredicateSQL(proj, "x", "postgres", false); okPred {
+					chain.selectProj = proj
+					chain.isNumProj = false
+					chain.isBoolProj = true
 					if chain.whereCrit != "" {
 						chain.selectBeforeWhere = true
 					}
@@ -2816,6 +2869,31 @@ func parseSplitOrToCharsChain(prefix string) (splitCharsModChain, bool) {
 			}
 		}
 		break
+	}
+	for _, setSpec := range []struct {
+		call string
+		op   string
+		tag  string
+	}{
+		{".union(", "union", ".union"},
+		{".combine(", "combine", ".combine"},
+		{".intersect(", "intersect", ".intersect"},
+		{".exclude(", "exclude", ".exclude"},
+	} {
+		if idx := strings.LastIndex(cur, setSpec.call); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(setSpec.call)-1) == len(cur)-1 {
+			lhsStr := strings.TrimSpace(cur[:idx])
+			rhsStr := strings.TrimSpace(cur[idx+len(setSpec.call) : len(cur)-1])
+			if lhsChain, okL := parseSplitOrToCharsChain(lhsStr); okL {
+				if rhsChain, okR := parseCompatSplitOrToCharsChain(rhsStr, lhsChain.basePath); okR {
+					chain.basePath = lhsChain.basePath
+					chain.setOp = setSpec.op
+					chain.lhsChain = &lhsChain
+					chain.rhsChain = &rhsChain
+					chain.tagMiddle = setSpec.tag + strings.Join(midTags, "")
+					return chain, true
+				}
+			}
+		}
 	}
 	chain.tagMiddle = strings.Join(midTags, "")
 	if splitBase, rawSep, okSplit := parseTrailingSplitCall(cur); okSplit {
@@ -3301,6 +3379,10 @@ func parseSpidxCollectionModifiers(fhirPath string) spidxCollectionModifiers {
 		}{
 			{".exists()", "splitChainExists", ".exists"},
 			{".empty()", "splitChainEmpty", ".empty"},
+			{".allTrue()", "splitChainAllTrue", ".allTrue"},
+			{".anyTrue()", "splitChainAnyTrue", ".anyTrue"},
+			{".allFalse()", "splitChainAllFalse", ".allFalse"},
+			{".anyFalse()", "splitChainAnyFalse", ".anyFalse"},
 			{".sum()", "splitChainSum", ".sum"},
 			{".avg()", "splitChainAvg", ".avg"},
 			{".min()", "splitChainMin", ".min"},
@@ -3314,6 +3396,33 @@ func parseSpidxCollectionModifiers(fhirPath string) spidxCollectionModifiers {
 					cur = chain.basePath
 					matchedChainTerm = true
 					break
+				}
+			}
+		}
+		if matchedChainTerm {
+			continue
+		}
+		for _, relSpec := range []struct {
+			call string
+			kind string
+			tag  string
+		}{
+			{".subsetOf(", "splitChainSubsetOf", ".subsetOf"},
+			{".supersetOf(", "splitChainSupersetOf", ".supersetOf"},
+		} {
+			if idx := strings.LastIndex(cur, relSpec.call); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(relSpec.call)-1) == len(cur)-1 {
+				lhsStr := strings.TrimSpace(cur[:idx])
+				rhsStr := strings.TrimSpace(cur[idx+len(relSpec.call) : len(cur)-1])
+				if lhsChain, okL := parseSplitOrToCharsChain(lhsStr); okL {
+					if rhsChain, okR := parseCompatSplitOrToCharsChain(rhsStr, lhsChain.basePath); okR {
+						tr := lhsChain.toTransform(relSpec.kind, "", 0)
+						tr.setOther = &rhsChain
+						mods.elemTransforms = append([]spidxElemTransform{tr}, mods.elemTransforms...)
+						tagParts = append([]string{lhsChain.baseTag() + relSpec.tag}, tagParts...)
+						cur = lhsChain.basePath
+						matchedChainTerm = true
+						break
+					}
 				}
 			}
 		}
@@ -3529,54 +3638,259 @@ func parseSpidxCollectionModifiers(fhirPath string) spidxCollectionModifiers {
 	return mods
 }
 
-func applySplitCharsChainTransform(expr string, tr spidxElemTransform, dialect string) string {
-	escapedSep := strings.ReplaceAll(tr.arg1, "'", "''")
-	escapedJoinSep := strings.ReplaceAll(tr.arg2, "'", "''")
-	switch dialect {
-	case "doris":
-		arrExpr := fmt.Sprintf("SPLIT_BY_STRING(%s, '%s')", expr, escapedSep)
+func buildDorisSplitChainArray(expr string, tr spidxElemTransform) string {
+	var arrExpr string
+	if tr.setOp != "" && tr.lhsChain != nil && tr.rhsChain != nil {
+		lhsArr := buildDorisSplitChainArray(expr, tr.lhsChain.toTransform("", "", 0))
+		rhsArr := buildDorisSplitChainArray(expr, tr.rhsChain.toTransform("", "", 0))
+		switch tr.setOp {
+		case "union":
+			arrExpr = fmt.Sprintf("ARRAY_UNION(%s, %s)", lhsArr, rhsArr)
+		case "combine":
+			arrExpr = fmt.Sprintf("ARRAY_CONCAT(%s, %s)", lhsArr, rhsArr)
+		case "intersect":
+			arrExpr = fmt.Sprintf("ARRAY_INTERSECT(%s, %s)", lhsArr, rhsArr)
+		case "exclude":
+			arrExpr = fmt.Sprintf("ARRAY_EXCEPT(%s, %s)", lhsArr, rhsArr)
+		}
+	} else {
+		escapedSep := strings.ReplaceAll(tr.arg1, "'", "''")
+		arrExpr = fmt.Sprintf("SPLIT_BY_STRING(%s, '%s')", expr, escapedSep)
 		if tr.isToChars {
 			arrExpr = fmt.Sprintf("SPLIT_BY_STRING(%s, '')", expr)
 		}
-		if tr.selectBeforeWhere {
+	}
+	applySelect := func(inArr string) string {
+		if tr.selectProj == "" {
+			return inArr
+		}
+		if tr.isBoolProj {
+			if predSQL, ok := buildElemWherePredicateSQL(tr.selectProj, "x", "doris", false); ok {
+				return fmt.Sprintf("ARRAY_MAP(x -> %s, %s)", predSQL, inArr)
+			}
+		} else if projSQL, _, ok := buildElemSelectExprSQL(tr.selectProj, "x", "doris"); ok {
+			return fmt.Sprintf("ARRAY_MAP(x -> %s, %s)", projSQL, inArr)
+		}
+		return inArr
+	}
+	if tr.selectBeforeWhere {
+		arrExpr = applySelect(arrExpr)
+		if tr.whereCrit != "" {
+			if predSQL, ok := buildElemWherePredicateSQL(tr.whereCrit, "x", "doris", tr.isNumProj); ok {
+				arrExpr = fmt.Sprintf("ARRAY_FILTER(x -> %s, %s)", predSQL, arrExpr)
+			}
+		}
+	} else {
+		if tr.whereCrit != "" {
+			if predSQL, ok := buildElemWherePredicateSQL(tr.whereCrit, "x", "doris", false); ok {
+				arrExpr = fmt.Sprintf("ARRAY_FILTER(x -> %s, %s)", predSQL, arrExpr)
+			}
+		}
+		arrExpr = applySelect(arrExpr)
+	}
+	if tr.isDistinct {
+		arrExpr = fmt.Sprintf("ARRAY_DISTINCT(%s)", arrExpr)
+	}
+	switch tr.sortDir {
+	case "ASC":
+		arrExpr = fmt.Sprintf("ARRAY_SORT(%s)", arrExpr)
+	case "DESC":
+		arrExpr = fmt.Sprintf("ARRAY_REVERSE_SORT(%s)", arrExpr)
+	}
+	if tr.offset > 0 && tr.hasTake {
+		arrExpr = fmt.Sprintf("ARRAY_SLICE(%s, %d, %d)", arrExpr, tr.offset+1, tr.takeLimit)
+	} else if tr.offset > 0 {
+		arrExpr = fmt.Sprintf("ARRAY_SLICE(%s, %d)", arrExpr, tr.offset+1)
+	} else if tr.hasTake {
+		arrExpr = fmt.Sprintf("ARRAY_SLICE(%s, 1, %d)", arrExpr, tr.takeLimit)
+	}
+	return arrExpr
+}
+
+func buildSpidxSplitChainSubquery(expr string, tr spidxElemTransform, dialect string) (fromClause, orderExpr, orderClause, subQ string) {
+	escapedSep := strings.ReplaceAll(tr.arg1, "'", "''")
+	distinctKw := ""
+	if tr.isDistinct {
+		distinctKw = "DISTINCT "
+	}
+	if tr.setOp != "" && tr.lhsChain != nil && tr.rhsChain != nil {
+		_, _, _, lhsSub := buildSpidxSplitChainSubquery(expr, tr.lhsChain.toTransform("", "", 0), dialect)
+		_, _, _, rhsSub := buildSpidxSplitChainSubquery(expr, tr.rhsChain.toTransform("", "", 0), dialect)
+		sqlSetOp := "UNION"
+		switch tr.setOp {
+		case "combine":
+			sqlSetOp = "UNION ALL"
+		case "intersect":
+			sqlSetOp = "INTERSECT"
+		case "exclude":
+			sqlSetOp = "EXCEPT"
+		}
+		lhsHasOrderOrLimit := tr.lhsChain.sortDir != "" || tr.lhsChain.hasTake || tr.lhsChain.offset > 0
+		rhsHasOrderOrLimit := tr.rhsChain.sortDir != "" || tr.rhsChain.hasTake || tr.rhsChain.offset > 0
+		var setCore string
+		if lhsHasOrderOrLimit || rhsHasOrderOrLimit {
+			setCore = fmt.Sprintf("SELECT s1.u FROM (%s) s1 %s SELECT s2.u FROM (%s) s2", lhsSub, sqlSetOp, rhsSub)
+		} else {
+			setCore = fmt.Sprintf("%s %s %s", lhsSub, sqlSetOp, rhsSub)
+		}
+		orderExpr = "u"
+		if tr.isDistinct || tr.whereCrit != "" || tr.selectProj != "" {
+			uSel := "u"
 			if tr.selectProj != "" {
-				if projSQL, _, ok := buildElemSelectExprSQL(tr.selectProj, "x", "doris"); ok {
-					arrExpr = fmt.Sprintf("ARRAY_MAP(x -> %s, %s)", projSQL, arrExpr)
+				if tr.isBoolProj {
+					if predSQL, ok := buildElemWherePredicateSQL(tr.selectProj, "u", dialect, false); ok {
+						uSel = predSQL + " AS u"
+						orderExpr = predSQL
+					}
+				} else if projSQL, _, ok := buildElemSelectExprSQL(tr.selectProj, "u", dialect); ok {
+					uSel = projSQL + " AS u"
+					orderExpr = projSQL
 				}
 			}
+			whereTarget := "u"
+			whereIsNum := false
+			if tr.selectBeforeWhere {
+				whereTarget = orderExpr
+				whereIsNum = tr.isNumProj
+			}
+			whereClause := ""
 			if tr.whereCrit != "" {
-				if predSQL, ok := buildElemWherePredicateSQL(tr.whereCrit, "x", "doris", tr.isNumProj); ok {
-					arrExpr = fmt.Sprintf("ARRAY_FILTER(x -> %s, %s)", predSQL, arrExpr)
+				if predSQL, ok := buildElemWherePredicateSQL(tr.whereCrit, whereTarget, dialect, whereIsNum); ok {
+					whereClause = " WHERE " + predSQL
 				}
+			}
+			fromClause = fmt.Sprintf("SELECT %s%s FROM (%s) u%s", distinctKw, uSel, setCore, whereClause)
+		} else {
+			fromClause = setCore
+		}
+		if tr.sortDir != "" {
+			if dialect == "sqlite" {
+				orderClause = " ORDER BY u " + tr.sortDir
+			} else {
+				orderClause = " ORDER BY " + orderExpr + " " + tr.sortDir
+			}
+		}
+		limitOffset := ""
+		if dialect == "sqlite" {
+			if tr.hasTake && tr.offset > 0 {
+				limitOffset = fmt.Sprintf(" LIMIT %d OFFSET %d", tr.takeLimit, tr.offset)
+			} else if tr.hasTake {
+				limitOffset = fmt.Sprintf(" LIMIT %d", tr.takeLimit)
+			} else if tr.offset > 0 {
+				limitOffset = fmt.Sprintf(" LIMIT -1 OFFSET %d", tr.offset)
 			}
 		} else {
-			if tr.whereCrit != "" {
-				if predSQL, ok := buildElemWherePredicateSQL(tr.whereCrit, "x", "doris", false); ok {
-					arrExpr = fmt.Sprintf("ARRAY_FILTER(x -> %s, %s)", predSQL, arrExpr)
-				}
+			if tr.hasTake {
+				limitOffset += fmt.Sprintf(" LIMIT %d", tr.takeLimit)
 			}
-			if tr.selectProj != "" {
-				if projSQL, _, ok := buildElemSelectExprSQL(tr.selectProj, "x", "doris"); ok {
-					arrExpr = fmt.Sprintf("ARRAY_MAP(x -> %s, %s)", projSQL, arrExpr)
-				}
+			if tr.offset > 0 {
+				limitOffset += fmt.Sprintf(" OFFSET %d", tr.offset)
 			}
 		}
-		if tr.isDistinct {
-			arrExpr = fmt.Sprintf("ARRAY_DISTINCT(%s)", arrExpr)
+		subQ = fromClause + orderClause + limitOffset
+		return fromClause, orderExpr, orderClause, subQ
+	}
+	if dialect == "sqlite" {
+		rawElem := "j.value"
+		if tr.isToChars {
+			rawElem = fmt.Sprintf("SUBSTR(%s, j.value, 1)", expr)
 		}
-		switch tr.sortDir {
-		case "ASC":
-			arrExpr = fmt.Sprintf("ARRAY_SORT(%s)", arrExpr)
-		case "DESC":
-			arrExpr = fmt.Sprintf("ARRAY_REVERSE_SORT(%s)", arrExpr)
+		uExpr := rawElem
+		if tr.selectProj != "" {
+			if tr.isBoolProj {
+				if predSQL, ok := buildElemWherePredicateSQL(tr.selectProj, rawElem, "sqlite", false); ok {
+					uExpr = predSQL
+				}
+			} else if projSQL, _, ok := buildElemSelectExprSQL(tr.selectProj, rawElem, "sqlite"); ok {
+				uExpr = projSQL
+			}
 		}
-		if tr.offset > 0 && tr.hasTake {
-			arrExpr = fmt.Sprintf("ARRAY_SLICE(%s, %d, %d)", arrExpr, tr.offset+1, tr.takeLimit)
-		} else if tr.offset > 0 {
-			arrExpr = fmt.Sprintf("ARRAY_SLICE(%s, %d)", arrExpr, tr.offset+1)
+		whereTarget := rawElem
+		whereIsNum := false
+		if tr.selectBeforeWhere {
+			whereTarget = uExpr
+			whereIsNum = tr.isNumProj
+		}
+		whereSQL := ""
+		if tr.whereCrit != "" {
+			if predSQL, ok := buildElemWherePredicateSQL(tr.whereCrit, whereTarget, "sqlite", whereIsNum); ok {
+				whereSQL = predSQL
+			}
+		}
+		fromClause = fmt.Sprintf("SELECT %s%s AS u FROM json_each('[\"' || REPLACE(%s, '%s', '\",\"') || '\"]') j", distinctKw, uExpr, expr, escapedSep)
+		if whereSQL != "" {
+			fromClause += " WHERE " + whereSQL
+		}
+		if tr.isToChars {
+			fromClause = fmt.Sprintf("SELECT %s%s AS u FROM json_each(json_array(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)) j WHERE j.value <= LENGTH(%s)", distinctKw, uExpr, expr)
+			if whereSQL != "" {
+				fromClause += " AND " + whereSQL
+			}
+		}
+		orderExpr = "u"
+		if tr.sortDir != "" {
+			orderClause = " ORDER BY u " + tr.sortDir
+		}
+		limitOffset := ""
+		if tr.hasTake && tr.offset > 0 {
+			limitOffset = fmt.Sprintf(" LIMIT %d OFFSET %d", tr.takeLimit, tr.offset)
 		} else if tr.hasTake {
-			arrExpr = fmt.Sprintf("ARRAY_SLICE(%s, 1, %d)", arrExpr, tr.takeLimit)
+			limitOffset = fmt.Sprintf(" LIMIT %d", tr.takeLimit)
+		} else if tr.offset > 0 {
+			limitOffset = fmt.Sprintf(" LIMIT -1 OFFSET %d", tr.offset)
 		}
+		subQ = fromClause + orderClause + limitOffset
+		return fromClause, orderExpr, orderClause, subQ
+	}
+	unnestArr := fmt.Sprintf("STRING_TO_ARRAY(%s, '%s')", expr, escapedSep)
+	if tr.isToChars {
+		unnestArr = fmt.Sprintf("REGEXP_SPLIT_TO_ARRAY(%s, '')", expr)
+	}
+	uSel := "u"
+	orderExpr = "u"
+	if tr.selectProj != "" {
+		if tr.isBoolProj {
+			if predSQL, ok := buildElemWherePredicateSQL(tr.selectProj, "u", "postgres", false); ok {
+				uSel = predSQL + " AS u"
+				orderExpr = predSQL
+			}
+		} else if projSQL, _, ok := buildElemSelectExprSQL(tr.selectProj, "u", "postgres"); ok {
+			uSel = projSQL + " AS u"
+			orderExpr = projSQL
+		}
+	}
+	whereTarget := "u"
+	whereIsNum := false
+	if tr.selectBeforeWhere {
+		whereTarget = orderExpr
+		whereIsNum = tr.isNumProj
+	}
+	whereClause := ""
+	if tr.whereCrit != "" {
+		if predSQL, ok := buildElemWherePredicateSQL(tr.whereCrit, whereTarget, "postgres", whereIsNum); ok {
+			whereClause = " WHERE " + predSQL
+		}
+	}
+	fromClause = fmt.Sprintf("SELECT %s%s FROM UNNEST(%s) AS u%s", distinctKw, uSel, unnestArr, whereClause)
+	if tr.sortDir != "" {
+		orderClause = " ORDER BY " + orderExpr + " " + tr.sortDir
+	}
+	limitOffset := ""
+	if tr.hasTake {
+		limitOffset += fmt.Sprintf(" LIMIT %d", tr.takeLimit)
+	}
+	if tr.offset > 0 {
+		limitOffset += fmt.Sprintf(" OFFSET %d", tr.offset)
+	}
+	subQ = fromClause + orderClause + limitOffset
+	return fromClause, orderExpr, orderClause, subQ
+}
+
+func applySplitCharsChainTransform(expr string, tr spidxElemTransform, dialect string) string {
+	escapedJoinSep := strings.ReplaceAll(tr.arg2, "'", "''")
+	switch dialect {
+	case "doris":
+		arrExpr := buildDorisSplitChainArray(expr, tr)
 		switch tr.kind {
 		case "splitChainElem":
 			return fmt.Sprintf("element_at(%s, %d)", arrExpr, tr.int1+1)
@@ -3600,6 +3914,36 @@ func applySplitCharsChainTransform(expr string, tr spidxElemTransform, dialect s
 			if predSQL, ok := buildElemWherePredicateSQL(tr.arg2, "x", "doris", tr.isNumProj); ok {
 				return fmt.Sprintf("NOT ARRAY_EXISTS(x -> NOT (%s), %s)", predSQL, arrExpr)
 			}
+		case "splitChainAllTrue":
+			if tr.isBoolProj {
+				return fmt.Sprintf("NOT ARRAY_EXISTS(x -> NOT (x), %s)", arrExpr)
+			}
+			return fmt.Sprintf("NOT ARRAY_EXISTS(x -> NOT (CAST(x AS BOOLEAN)), %s)", arrExpr)
+		case "splitChainAnyTrue":
+			if tr.isBoolProj {
+				return fmt.Sprintf("ARRAY_EXISTS(x -> x, %s)", arrExpr)
+			}
+			return fmt.Sprintf("ARRAY_EXISTS(x -> CAST(x AS BOOLEAN), %s)", arrExpr)
+		case "splitChainAllFalse":
+			if tr.isBoolProj {
+				return fmt.Sprintf("NOT ARRAY_EXISTS(x -> x, %s)", arrExpr)
+			}
+			return fmt.Sprintf("NOT ARRAY_EXISTS(x -> CAST(x AS BOOLEAN), %s)", arrExpr)
+		case "splitChainAnyFalse":
+			if tr.isBoolProj {
+				return fmt.Sprintf("ARRAY_EXISTS(x -> NOT (x), %s)", arrExpr)
+			}
+			return fmt.Sprintf("ARRAY_EXISTS(x -> NOT (CAST(x AS BOOLEAN)), %s)", arrExpr)
+		case "splitChainSubsetOf":
+			if tr.setOther != nil {
+				rhsArr := buildDorisSplitChainArray(expr, tr.setOther.toTransform("", "", 0))
+				return fmt.Sprintf("(ARRAY_SIZE(ARRAY_EXCEPT(%s, %s)) = 0)", arrExpr, rhsArr)
+			}
+		case "splitChainSupersetOf":
+			if tr.setOther != nil {
+				rhsArr := buildDorisSplitChainArray(expr, tr.setOther.toTransform("", "", 0))
+				return fmt.Sprintf("(ARRAY_SIZE(ARRAY_EXCEPT(%s, %s)) = 0)", rhsArr, arrExpr)
+			}
 		case "splitChainSum":
 			if tr.isNumProj {
 				return fmt.Sprintf("COALESCE(ARRAY_SUM(%s), 0)", arrExpr)
@@ -3616,55 +3960,11 @@ func applySplitCharsChainTransform(expr string, tr spidxElemTransform, dialect s
 			return fmt.Sprintf("ARRAY_MAX(%s)", arrExpr)
 		}
 	case "sqlite":
-		distinctKw := ""
-		if tr.isDistinct {
-			distinctKw = "DISTINCT "
+		fromClause, _, orderClause, subQ := buildSpidxSplitChainSubquery(expr, tr, "sqlite")
+		boolCond := "(LOWER(CAST(sub.u AS TEXT)) IN ('true', '1'))"
+		if tr.isBoolProj {
+			boolCond = "sub.u"
 		}
-		rawElem := "j.value"
-		if tr.isToChars {
-			rawElem = fmt.Sprintf("SUBSTR(%s, j.value, 1)", expr)
-		}
-		uExpr := rawElem
-		if tr.selectProj != "" {
-			if projSQL, _, ok := buildElemSelectExprSQL(tr.selectProj, rawElem, "sqlite"); ok {
-				uExpr = projSQL
-			}
-		}
-		whereTarget := rawElem
-		whereIsNum := false
-		if tr.selectBeforeWhere {
-			whereTarget = uExpr
-			whereIsNum = tr.isNumProj
-		}
-		whereSQL := ""
-		if tr.whereCrit != "" {
-			if predSQL, ok := buildElemWherePredicateSQL(tr.whereCrit, whereTarget, "sqlite", whereIsNum); ok {
-				whereSQL = predSQL
-			}
-		}
-		fromClause := fmt.Sprintf("SELECT %s%s AS u FROM json_each('[\"' || REPLACE(%s, '%s', '\",\"') || '\"]') j", distinctKw, uExpr, expr, escapedSep)
-		if whereSQL != "" {
-			fromClause += " WHERE " + whereSQL
-		}
-		if tr.isToChars {
-			fromClause = fmt.Sprintf("SELECT %s%s AS u FROM json_each(json_array(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)) j WHERE j.value <= LENGTH(%s)", distinctKw, uExpr, expr)
-			if whereSQL != "" {
-				fromClause += " AND " + whereSQL
-			}
-		}
-		orderClause := ""
-		if tr.sortDir != "" {
-			orderClause = " ORDER BY u " + tr.sortDir
-		}
-		limitOffset := ""
-		if tr.hasTake && tr.offset > 0 {
-			limitOffset = fmt.Sprintf(" LIMIT %d OFFSET %d", tr.takeLimit, tr.offset)
-		} else if tr.hasTake {
-			limitOffset = fmt.Sprintf(" LIMIT %d", tr.takeLimit)
-		} else if tr.offset > 0 {
-			limitOffset = fmt.Sprintf(" LIMIT -1 OFFSET %d", tr.offset)
-		}
-		subQ := fromClause + orderClause + limitOffset
 		switch tr.kind {
 		case "splitChainElem":
 			if !tr.hasTake || tr.int1 < tr.takeLimit {
@@ -3703,6 +4003,24 @@ func applySplitCharsChainTransform(expr string, tr spidxElemTransform, dialect s
 			if predSQL, ok := buildElemWherePredicateSQL(tr.arg2, "sub.u", "sqlite", tr.isNumProj); ok {
 				return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE NOT (%s))", subQ, predSQL)
 			}
+		case "splitChainAllTrue":
+			return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE NOT (%s))", subQ, boolCond)
+		case "splitChainAnyTrue":
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE %s)", subQ, boolCond)
+		case "splitChainAllFalse":
+			return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE %s)", subQ, boolCond)
+		case "splitChainAnyFalse":
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE NOT (%s))", subQ, boolCond)
+		case "splitChainSubsetOf":
+			if tr.setOther != nil {
+				_, _, _, rhsSubQ := buildSpidxSplitChainSubquery(expr, tr.setOther.toTransform("", "", 0), "sqlite")
+				return fmt.Sprintf("NOT EXISTS (SELECT sub.u FROM (%s) sub EXCEPT SELECT rhs.u FROM (%s) rhs)", subQ, rhsSubQ)
+			}
+		case "splitChainSupersetOf":
+			if tr.setOther != nil {
+				_, _, _, rhsSubQ := buildSpidxSplitChainSubquery(expr, tr.setOther.toTransform("", "", 0), "sqlite")
+				return fmt.Sprintf("NOT EXISTS (SELECT rhs.u FROM (%s) rhs EXCEPT SELECT sub.u FROM (%s) sub)", rhsSubQ, subQ)
+			}
 		case "splitChainSum":
 			if tr.isNumProj {
 				return fmt.Sprintf("(SELECT COALESCE(SUM(sub.u), 0) FROM (%s) sub)", subQ)
@@ -3716,47 +4034,11 @@ func applySplitCharsChainTransform(expr string, tr spidxElemTransform, dialect s
 			return fmt.Sprintf("(SELECT MAX(sub.u) FROM (%s) sub)", subQ)
 		}
 	default:
-		distinctKw := ""
-		if tr.isDistinct {
-			distinctKw = "DISTINCT "
+		fromClause, orderExpr, orderClause, subQ := buildSpidxSplitChainSubquery(expr, tr, "postgres")
+		boolCond := "CAST(sub.u AS BOOLEAN)"
+		if tr.isBoolProj {
+			boolCond = "sub.u"
 		}
-		unnestArr := fmt.Sprintf("STRING_TO_ARRAY(%s, '%s')", expr, escapedSep)
-		if tr.isToChars {
-			unnestArr = fmt.Sprintf("REGEXP_SPLIT_TO_ARRAY(%s, '')", expr)
-		}
-		uSel := "u"
-		orderExpr := "u"
-		if tr.selectProj != "" {
-			if projSQL, _, ok := buildElemSelectExprSQL(tr.selectProj, "u", "postgres"); ok {
-				uSel = projSQL + " AS u"
-				orderExpr = projSQL
-			}
-		}
-		whereTarget := "u"
-		whereIsNum := false
-		if tr.selectBeforeWhere {
-			whereTarget = orderExpr
-			whereIsNum = tr.isNumProj
-		}
-		whereClause := ""
-		if tr.whereCrit != "" {
-			if predSQL, ok := buildElemWherePredicateSQL(tr.whereCrit, whereTarget, "postgres", whereIsNum); ok {
-				whereClause = " WHERE " + predSQL
-			}
-		}
-		fromClause := fmt.Sprintf("SELECT %s%s FROM UNNEST(%s) AS u%s", distinctKw, uSel, unnestArr, whereClause)
-		orderClause := ""
-		if tr.sortDir != "" {
-			orderClause = " ORDER BY " + orderExpr + " " + tr.sortDir
-		}
-		limitOffset := ""
-		if tr.hasTake {
-			limitOffset += fmt.Sprintf(" LIMIT %d", tr.takeLimit)
-		}
-		if tr.offset > 0 {
-			limitOffset += fmt.Sprintf(" OFFSET %d", tr.offset)
-		}
-		subQ := fromClause + orderClause + limitOffset
 		switch tr.kind {
 		case "splitChainElem":
 			if !tr.hasTake || tr.int1 < tr.takeLimit {
@@ -3794,6 +4076,24 @@ func applySplitCharsChainTransform(expr string, tr spidxElemTransform, dialect s
 		case "splitChainAll":
 			if predSQL, ok := buildElemWherePredicateSQL(tr.arg2, "sub.u", "postgres", tr.isNumProj); ok {
 				return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE NOT (%s))", subQ, predSQL)
+			}
+		case "splitChainAllTrue":
+			return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE NOT (%s))", subQ, boolCond)
+		case "splitChainAnyTrue":
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE %s)", subQ, boolCond)
+		case "splitChainAllFalse":
+			return fmt.Sprintf("NOT EXISTS (SELECT 1 FROM (%s) sub WHERE %s)", subQ, boolCond)
+		case "splitChainAnyFalse":
+			return fmt.Sprintf("EXISTS (SELECT 1 FROM (%s) sub WHERE NOT (%s))", subQ, boolCond)
+		case "splitChainSubsetOf":
+			if tr.setOther != nil {
+				_, _, _, rhsSubQ := buildSpidxSplitChainSubquery(expr, tr.setOther.toTransform("", "", 0), "postgres")
+				return fmt.Sprintf("NOT EXISTS (SELECT sub.u FROM (%s) sub EXCEPT SELECT rhs.u FROM (%s) rhs)", subQ, rhsSubQ)
+			}
+		case "splitChainSupersetOf":
+			if tr.setOther != nil {
+				_, _, _, rhsSubQ := buildSpidxSplitChainSubquery(expr, tr.setOther.toTransform("", "", 0), "postgres")
+				return fmt.Sprintf("NOT EXISTS (SELECT rhs.u FROM (%s) rhs EXCEPT SELECT sub.u FROM (%s) sub)", rhsSubQ, subQ)
 			}
 		case "splitChainSum":
 			if tr.isNumProj {
@@ -3933,7 +4233,7 @@ func applySpidxElemTransforms(colExpr string, transforms []spidxElemTransform, d
 			} else {
 				expr = fmt.Sprintf("(%s IS NOT NULL AND %s <> '')", expr, expr)
 			}
-		case "splitChainElem", "splitChainLast", "splitChainCount", "splitChainJoin", "splitChainIsDistinct", "splitChainExists", "splitChainEmpty", "splitChainExistsCrit", "splitChainAll", "splitChainSum", "splitChainAvg", "splitChainMin", "splitChainMax":
+		case "splitChainElem", "splitChainLast", "splitChainCount", "splitChainJoin", "splitChainIsDistinct", "splitChainExists", "splitChainEmpty", "splitChainExistsCrit", "splitChainAll", "splitChainAllTrue", "splitChainAnyTrue", "splitChainAllFalse", "splitChainAnyFalse", "splitChainSubsetOf", "splitChainSupersetOf", "splitChainSum", "splitChainAvg", "splitChainMin", "splitChainMax":
 			expr = applySplitCharsChainTransform(expr, tr, dialect)
 		case "splitIsDistinct":
 			escapedSep := strings.ReplaceAll(tr.arg1, "'", "''")
@@ -4564,7 +4864,7 @@ func buildElemWherePredicateSQL(crit, colExpr, dialect string, isNumeric bool) (
 	if c == "$this.empty()" {
 		return fmt.Sprintf("(%s IS NULL OR %s = '')", colExpr, colExpr), true
 	}
-	if (strings.Contains(c, ".split(") || strings.Contains(c, ".toChars()")) && (strings.HasSuffix(c, ".exists()") || strings.HasSuffix(c, ".empty()") || (strings.Contains(c, ".exists(") && strings.HasSuffix(c, ")")) || (strings.Contains(c, ".all(") && strings.HasSuffix(c, ")"))) {
+	if isSplitOrToCharsBoolChainExpr(c) {
 		if lhsSQL, _, okL := buildElemSelectExprSQL(c, colExpr, dialect); okL {
 			return lhsSQL, true
 		}
@@ -5530,8 +5830,25 @@ func forEachElemWhereSQL(rawExpr, forEachPath, valExpr, sysExpr, dialect string)
 	return "", false
 }
 
+func isSplitOrToCharsBoolChainExpr(c string) bool {
+	if !strings.Contains(c, ".split(") && !strings.Contains(c, ".toChars()") {
+		return false
+	}
+	for _, suf := range []string{".exists()", ".empty()", ".allTrue()", ".anyTrue()", ".allFalse()", ".anyFalse()"} {
+		if strings.HasSuffix(c, suf) {
+			return true
+		}
+	}
+	for _, call := range []string{".exists(", ".all(", ".subsetOf(", ".supersetOf("} {
+		if strings.Contains(c, call) && strings.HasSuffix(c, ")") {
+			return true
+		}
+	}
+	return false
+}
+
 func buildForEachCompositeWhereSQL(c, valExpr, sysExpr, dialect string) (string, bool) {
-	if (strings.Contains(c, ".split(") || strings.Contains(c, ".toChars()")) && (strings.HasSuffix(c, ".exists()") || strings.HasSuffix(c, ".empty()") || (strings.Contains(c, ".exists(") && strings.HasSuffix(c, ")")) || (strings.Contains(c, ".all(") && strings.HasSuffix(c, ")"))) {
+	if isSplitOrToCharsBoolChainExpr(c) {
 		if baseExpr, transforms, okChain := splitTrailingElemMethodChain(c); okChain {
 			if baseSQL, okB := forEachElemSelectSQL(baseExpr, valExpr, sysExpr, dialect); okB {
 				return applySpidxElemTransforms(baseSQL, transforms, dialect), true
