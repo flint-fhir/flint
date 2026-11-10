@@ -6242,6 +6242,71 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-49", suite10, "SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Split/ToChars Slicing (.skip(N), .take(M)), Ordered/Distinct Subscript & Terminal Indexing (.sort()/.sortDesc()/.distinct() + [idx]/.first()/.last()/.single()/.count()/.join()/.isDistinct()) & Diagnostic Pass-Through (.trace(), .check(), .defineVariable()) Pushdown + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 forEach element split/toChars slicing, ordered/distinct indexing, trace/check/defineVariable & binary Proto3 $sql/$run verified")
 
+	// AN-50: SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Split/ToChars Filtering (.where($this ...)), Mapping (.select($this ...)), Quantifiers (.exists(), .empty(), .exists($this ...), .all($this ...)) & Aggregations (.sum(), .avg(), .min(), .max()) Pushdown + Binary Proto3 Wire
+	t0 = time.Now()
+	{
+		feElemSplitWhereSelectQuantAggVD := []byte(`{
+			"resourceType": "ViewDefinition",
+			"name": "cert_pat_foreach_elem_split_tochars_where_select_quant_agg_v1",
+			"status": "active",
+			"resource": "Patient",
+			"select": [
+				{
+					"forEach": "identifier",
+					"where": [
+						{"path": "value.split('-').where($this.length() >= 3).exists() and value.split('-').exists($this = 'MRN') and value.split('-').all($this.length() > 0) and value.split('-').where($this = 'NONE').empty() and value.split('-').select($this.length()).sum() = 8"}
+					],
+					"column": [
+						{"name": "rk", "path": "getResourceKey()"},
+						{"name": "split_where_join", "path": "value.split('-').where($this.length() >= 3).join(':')"},
+						{"name": "split_where_cnt", "path": "value.split('-').where($this.length() >= 3).count()"},
+						{"name": "split_select_join", "path": "value.split('-').select($this.lower()).join('_')"},
+						{"name": "split_where_select_first", "path": "value.split('-').where($this.length() = 3).select($this.lower()).first()"},
+						{"name": "split_len_sum", "path": "value.split('-').select($this.length()).sum()"},
+						{"name": "split_len_max", "path": "value.split('-').select($this.length()).max()"},
+						{"name": "split_len_min", "path": "value.split('-').select($this.length()).min()"},
+						{"name": "split_exists_crit", "path": "value.split('-').exists($this = 'MRN')"},
+						{"name": "split_all_nonempty", "path": "value.split('-').all($this.length() > 0)"},
+						{"name": "split_where_empty", "path": "value.split('-').where($this = 'NONE').empty()"},
+						{"name": "chars_where_digits_sum", "path": "value.toChars().where($this = '1').select($this.toInteger()).sum()"},
+						{"name": "chars_where_digits_avg", "path": "value.toChars().where($this = '1').select($this.toDecimal()).avg()"},
+						{"name": "chars_min", "path": "value.split('-')[0].toChars().min()"},
+						{"name": "chars_max", "path": "value.split('-')[0].toChars().max()"}
+					]
+				}
+			]
+		}`)
+
+		respFESWSDoris, bFESWSDoris, errFESWSDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", feElemSplitWhereSelectQuantAggVD, nil)
+		respFESWSPg, bFESWSPg, errFESWSPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", feElemSplitWhereSelectQuantAggVD, nil)
+		respFESWSSqlite, bFESWSSqlite, errFESWSSqlite := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", feElemSplitWhereSelectQuantAggVD, nil)
+		respFESWSRun, bFESWSRun, errFESWSRun := doReq(http.MethodPost, basePath+"/ViewDefinition/$run", "application/fhir+json", feElemSplitWhereSelectQuantAggVD, nil)
+		respFESWSSqlProto, bFESWSSqlProto, errFESWSSqlProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/x-protobuf", "application/fhir+json", feElemSplitWhereSelectQuantAggVD, map[string]string{"Accept": "application/x-protobuf"})
+		respFESWSRunProto, bFESWSRunProto, errFESWSRunProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$run?_format=application/x-protobuf", "application/fhir+json", feElemSplitWhereSelectQuantAggVD, map[string]string{"Accept": "application/x-protobuf"})
+
+		sFESWSDoris := string(bFESWSDoris)
+		sFESWSPg := string(bFESWSPg)
+		sFESWSSqlite := string(bFESWSSqlite)
+		sFESWSRun := string(bFESWSRun)
+
+		if errFESWSDoris != nil || respFESWSDoris.StatusCode != http.StatusOK || !strings.Contains(sFESWSDoris, "ARRAY_JOIN(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 3, SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), ':') AS split_where_join") || !strings.Contains(sFESWSDoris, "ARRAY_JOIN(ARRAY_MAP(x -> LOWER(x), SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), '_') AS split_select_join") || !strings.Contains(sFESWSDoris, "COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CHAR_LENGTH(x), SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))), 0) AS split_len_sum") || !strings.Contains(sFESWSDoris, "ARRAY_EXISTS(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')) AS split_exists_crit") || !strings.Contains(sFESWSDoris, "NOT ARRAY_EXISTS(x -> NOT (CHAR_LENGTH(x) > 0), SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')) AS split_all_nonempty") {
+			err = fmt.Errorf("expected Doris $sql forEach element split/toChars where/select/quantifiers/aggregations pushdown, got status=%d sql=%s", respFESWSDoris.StatusCode, sFESWSDoris)
+		} else if errFESWSPg != nil || respFESWSPg.StatusCode != http.StatusOK || !strings.Contains(sFESWSPg, "(SELECT COALESCE(STRING_AGG(sub.u, ':'), '') FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE CHAR_LENGTH(u) >= 3) sub) AS split_where_join") || !strings.Contains(sFESWSPg, "(SELECT COALESCE(STRING_AGG(sub.u, '_'), '') FROM (SELECT LOWER(u) AS u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) sub) AS split_select_join") || !strings.Contains(sFESWSPg, "(SELECT COALESCE(SUM(sub.u), 0) FROM (SELECT CHAR_LENGTH(u) AS u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) sub) AS split_len_sum") || !strings.Contains(sFESWSPg, "EXISTS (SELECT 1 FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) sub WHERE sub.u = 'MRN') AS split_exists_crit") {
+			err = fmt.Errorf("expected PostgreSQL $sql forEach element split/toChars where/select/quantifiers/aggregations pushdown, got status=%d sql=%s", respFESWSPg.StatusCode, sFESWSPg)
+		} else if errFESWSSqlite != nil || respFESWSSqlite.StatusCode != http.StatusOK || !strings.Contains(sFESWSSqlite, "WHERE LENGTH(j.value) >= 3) sub) AS split_where_join") || !strings.Contains(sFESWSSqlite, "SELECT COALESCE(SUM(sub.u), 0) FROM (SELECT LENGTH(j.value) AS u") {
+			err = fmt.Errorf("expected SQLite $sql forEach element split/toChars where/select/quantifiers/aggregations pushdown, got status=%d sql=%s", respFESWSSqlite.StatusCode, sFESWSSqlite)
+		} else if errFESWSRun != nil || respFESWSRun.StatusCode != http.StatusOK || !strings.Contains(sFESWSRun, `"split_where_join":"CERT:MRN"`) || !strings.Contains(sFESWSRun, `"split_where_cnt":2`) || !strings.Contains(sFESWSRun, `"split_select_join":"cert_mrn_1"`) || !strings.Contains(sFESWSRun, `"split_where_select_first":"mrn"`) || !strings.Contains(sFESWSRun, `"split_len_sum":8`) || !strings.Contains(sFESWSRun, `"split_len_max":4`) || !strings.Contains(sFESWSRun, `"split_len_min":1`) || !strings.Contains(sFESWSRun, `"split_exists_crit":true`) || !strings.Contains(sFESWSRun, `"split_all_nonempty":true`) || !strings.Contains(sFESWSRun, `"split_where_empty":true`) || !strings.Contains(sFESWSRun, `"chars_where_digits_sum":1`) || !strings.Contains(sFESWSRun, `"chars_min":"C"`) || !strings.Contains(sFESWSRun, `"chars_max":"T"`) {
+			err = fmt.Errorf("expected $run forEach element split/toChars where/select/quantifiers/aggregations row evaluation, got status=%d body=%s", respFESWSRun.StatusCode, sFESWSRun)
+		} else if errFESWSSqlProto != nil || respFESWSSqlProto == nil || respFESWSSqlProto.StatusCode != http.StatusOK || !strings.Contains(respFESWSSqlProto.Header.Get("Content-Type"), "application/x-protobuf") || respFESWSSqlProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bFESWSSqlProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$sql?_format=application/x-protobuf, got %v", errFESWSSqlProto)
+		} else if errFESWSRunProto != nil || respFESWSRunProto == nil || respFESWSRunProto.StatusCode != http.StatusOK || !strings.Contains(respFESWSRunProto.Header.Get("Content-Type"), "application/x-protobuf") || respFESWSRunProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bFESWSRunProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$run?_format=application/x-protobuf, got %v", errFESWSRunProto)
+		} else {
+			err = nil
+		}
+	}
+	record("AN-50", suite10, "SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Split/ToChars Filtering (.where($this ...)), Mapping (.select($this ...)), Quantifiers (.exists(), .empty(), .exists($this ...), .all($this ...)) & Aggregations (.sum(), .avg(), .min(), .max()) Pushdown + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 forEach element split/toChars where/select/quantifiers/aggregations & binary Proto3 $sql/$run verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}
