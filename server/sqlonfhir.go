@@ -1935,7 +1935,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 			colFE, colAliasIdx := resolveColForEach(col, exprPath)
 			var sqlExpr, sourceCol string
 			if col.Collection {
-				sqlExpr, sourceCol = dorisZeroJSONForEachCollectionColumnExprWithAlias(exprPath, colFE, colAliasIdx)
+				sqlExpr, sourceCol = dorisZeroJSONForEachCollectionColumnExprWithAlias(exprPath, colFE, colAliasIdx, isCore)
 			} else {
 				sqlExpr, sourceCol = dorisZeroJSONForEachColumnExprWithAlias(exprPath, colFE, colAliasIdx, isCore)
 			}
@@ -2035,7 +2035,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 					}
 					var sqlExpr string
 					if col.Collection {
-						sqlExpr, _ = dorisZeroJSONForEachCollectionColumnExprWithAlias(exprPath, colFE, colAliasIdx)
+						sqlExpr, _ = dorisZeroJSONForEachCollectionColumnExprWithAlias(exprPath, colFE, colAliasIdx, isCore)
 					} else {
 						sqlExpr, _ = dorisZeroJSONForEachColumnExprWithAlias(exprPath, colFE, colAliasIdx, isCore)
 					}
@@ -2082,7 +2082,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 				colFE, colAliasIdx := resolveColForEach(col, exprPath)
 				var sqlExpr string
 				if col.Collection {
-					sqlExpr, _ = dorisZeroJSONForEachCollectionColumnExprWithAlias(exprPath, colFE, colAliasIdx)
+					sqlExpr, _ = dorisZeroJSONForEachCollectionColumnExprWithAlias(exprPath, colFE, colAliasIdx, isCore)
 				} else {
 					sqlExpr, _ = dorisZeroJSONForEachColumnExprWithAlias(exprPath, colFE, colAliasIdx, isCore)
 				}
@@ -2290,7 +2290,14 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 }
 
 func dorisZeroJSONCollectionColumnExpr(fhirPath string) (string, string) {
+	return dorisZeroJSONCollectionColumnExprWithCore(fhirPath, true)
+}
+
+func dorisZeroJSONCollectionColumnExprWithCore(fhirPath string, isCore bool) (string, string) {
 	p := normalizePolymorphicFHIRPath(strings.TrimSpace(fhirPath))
+	if expr, src, ok := tryCompileRootSplitCharsCollectionExpr(p, "doris", isCore); ok {
+		return expr, src
+	}
 	if strings.HasSuffix(p, ".sort()") {
 		basePath := strings.TrimSpace(p[:len(p)-len(".sort()")])
 		collExpr, collSrc := dorisZeroJSONCollectionColumnExpr(basePath)
@@ -2695,6 +2702,7 @@ type spidxElemTransform struct {
 	lhsChain          *splitCharsModChain
 	rhsChain          *splitCharsModChain
 	setOther          *splitCharsModChain
+	overrideExpr      string
 }
 
 func hasSplitOrToCharsCall(s string) bool {
@@ -2763,6 +2771,7 @@ type splitCharsModChain struct {
 	lhsChain          *splitCharsModChain
 	rhsChain          *splitCharsModChain
 	setOther          *splitCharsModChain
+	overrideExpr      string
 	tagMiddle         string
 }
 
@@ -2791,6 +2800,7 @@ func (c splitCharsModChain) toTransform(kind, arg2 string, int1 int) spidxElemTr
 		lhsChain:          c.lhsChain,
 		rhsChain:          c.rhsChain,
 		setOther:          c.setOther,
+		overrideExpr:      c.overrideExpr,
 	}
 }
 
@@ -2806,8 +2816,10 @@ func (c splitCharsModChain) baseTag() string {
 
 func parseCompatSplitOrToCharsChain(rhsStr, expectedBasePath string) (splitCharsModChain, bool) {
 	rhsStr = normalizeSplitCharsPipeUnion(stripOuterParens(strings.TrimSpace(rhsStr)))
-	if rhsChain, ok := parseSplitOrToCharsChain(rhsStr); ok && rhsChain.basePath == expectedBasePath {
-		return rhsChain, true
+	if rhsChain, ok := parseSplitOrToCharsChain(rhsStr); ok {
+		if rhsChain.basePath == expectedBasePath || (isScalarRootSplitBasePath(expectedBasePath) && isScalarRootSplitChain(rhsChain)) {
+			return rhsChain, true
+		}
 	}
 	norm := replaceForEachFieldRefsWithThis(strings.TrimSpace(rhsStr))
 	for _, pfx := range []string{"$this.reference.", "reference.", "$this.system.", "system.", "$this.type.", "type."} {
@@ -3710,6 +3722,9 @@ func parseSpidxCollectionModifiers(fhirPath string) spidxCollectionModifiers {
 }
 
 func buildDorisSplitChainArray(expr string, tr spidxElemTransform) string {
+	if tr.overrideExpr != "" {
+		expr = tr.overrideExpr
+	}
 	var arrExpr string
 	if tr.setOp != "" && tr.lhsChain != nil && tr.rhsChain != nil {
 		lhsArr := buildDorisSplitChainArray(expr, tr.lhsChain.toTransform("", "", 0))
@@ -3779,6 +3794,9 @@ func buildDorisSplitChainArray(expr string, tr spidxElemTransform) string {
 }
 
 func buildSpidxSplitChainSubquery(expr string, tr spidxElemTransform, dialect string) (fromClause, orderExpr, orderClause, subQ string) {
+	if tr.overrideExpr != "" {
+		expr = tr.overrideExpr
+	}
 	escapedSep := strings.ReplaceAll(tr.arg1, "'", "''")
 	distinctKw := ""
 	if tr.isDistinct {
@@ -4273,6 +4291,318 @@ func applySplitCharsChainTransform(expr string, tr spidxElemTransform, dialect s
 		}
 	}
 	return expr
+}
+
+func isScalarRootSplitBasePath(basePath string) bool {
+	p := normalizePolymorphicFHIRPath(stripOuterParens(strings.TrimSpace(basePath)))
+	if p == "" || p == "$this" || strings.HasPrefix(p, "$this.") {
+		return false
+	}
+	if (strings.HasPrefix(p, "'") && strings.HasSuffix(p, "'")) || (strings.HasPrefix(p, "\"") && strings.HasSuffix(p, "\"")) {
+		return true
+	}
+	if len(splitTopLevelConcatOp(p)) > 1 {
+		return true
+	}
+	lowerP := strings.ToLower(p)
+	if (strings.HasPrefix(lowerP, "iif(") || strings.HasPrefix(lowerP, "coalesce(")) && strings.HasSuffix(p, ")") {
+		return true
+	}
+	if strings.HasSuffix(p, ".first()") || strings.HasSuffix(p, ".last()") || strings.HasSuffix(p, ".single()") {
+		return true
+	}
+	if _, _, okSub := parseTrailingSubscriptIndex(p); okSub {
+		return true
+	}
+	if idx := strings.LastIndex(p, ".join("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".join(")-1) == len(p)-1 {
+		return true
+	}
+	for _, suf := range []string{".lower()", ".upper()", ".trim()", ".toString()"} {
+		if strings.HasSuffix(p, suf) {
+			return isScalarRootSplitBasePath(strings.TrimSpace(p[:len(p)-len(suf)]))
+		}
+	}
+	for _, call := range []string{".replace(", ".replaceMatches(", ".substring(", ".encode(", ".decode(", ".escape(", ".unescape("} {
+		if idx := strings.LastIndex(p, call); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(call)-1) == len(p)-1 {
+			return isScalarRootSplitBasePath(strings.TrimSpace(p[:idx]))
+		}
+	}
+	switch p {
+	case "id", "getResourceKey()",
+		"birthDate", "effectiveDateTime", "effectivePeriod.start", "effectivePeriod.end", "onsetDateTime", "abatementDateTime", "authoredOn", "issued",
+		"gender", "status", "intent", "priority", "actuality",
+		"valueQuantity.unit", "valueQuantity.code", "valueQuantity.system",
+		"component.valueQuantity.unit", "component.valueQuantity.code", "component.valueQuantity.system",
+		"subject.getReferenceKey('Patient')", "subject.getReferenceKey()",
+		"patient.getReferenceKey('Patient')", "patient.getReferenceKey()",
+		"encounter.getReferenceKey('Encounter')", "encounter.getReferenceKey()",
+		"context.getReferenceKey('Encounter')", "context.getReferenceKey()":
+		return true
+	}
+	return strings.EqualFold(p, "today()") || strings.EqualFold(p, "now()") || strings.EqualFold(p, "timeofday()")
+}
+
+func isScalarRootSplitChain(c splitCharsModChain) bool {
+	if c.setOp != "" && c.lhsChain != nil && c.rhsChain != nil {
+		return isScalarRootSplitChain(*c.lhsChain) && isScalarRootSplitChain(*c.rhsChain)
+	}
+	return isScalarRootSplitBasePath(c.basePath)
+}
+
+func bindRootSplitChainBaseExprs(c *splitCharsModChain, dialect string, isCore bool) (string, string) {
+	if c == nil {
+		return "", ""
+	}
+	if c.setOther != nil {
+		bindRootSplitChainBaseExprs(c.setOther, dialect, isCore)
+	}
+	if c.setOp != "" && c.lhsChain != nil && c.rhsChain != nil {
+		lhsSQL, lhsSrc := bindRootSplitChainBaseExprs(c.lhsChain, dialect, isCore)
+		bindRootSplitChainBaseExprs(c.rhsChain, dialect, isCore)
+		return lhsSQL, lhsSrc
+	}
+	var sqlExpr, srcTag string
+	if dialect == "doris" {
+		sqlExpr, srcTag = dorisZeroJSONColumnExpr(c.basePath, isCore)
+	} else {
+		sqlExpr, srcTag = spidxZeroJSONColumnExpr(c.basePath, dialect)
+	}
+	c.overrideExpr = sqlExpr
+	return sqlExpr, srcTag
+}
+
+func tryCompileRootSplitCharsCollectionExpr(fhirPath, dialect string, isCore bool) (string, string, bool) {
+	p := normalizeSplitCharsPipeUnion(normalizePolymorphicFHIRPath(stripOuterParens(strings.TrimSpace(fhirPath))))
+	chain, ok := parseSplitOrToCharsChain(p)
+	if !ok || !chain.hasMods() || !isScalarRootSplitChain(chain) {
+		return "", "", false
+	}
+	baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
+	tr := chain.toTransform("splitChainArray", "", 0)
+	switch dialect {
+	case "doris":
+		return buildDorisSplitChainArray(baseSQL, tr), baseSrc + chain.baseTag() + "[]", true
+	case "sqlite":
+		_, _, _, subQ := buildSpidxSplitChainSubquery(baseSQL, tr, "sqlite")
+		return fmt.Sprintf("(SELECT json_group_array(sub.u) FROM (%s) sub)", subQ), baseSrc + chain.baseTag() + "[]", true
+	default:
+		_, _, _, subQ := buildSpidxSplitChainSubquery(baseSQL, tr, "postgres")
+		emptyArr := "ARRAY[]::text[]"
+		if chain.isNumProj {
+			emptyArr = "ARRAY[]::double precision[]"
+		} else if chain.isBoolProj {
+			emptyArr = "ARRAY[]::boolean[]"
+		}
+		return fmt.Sprintf("(SELECT COALESCE(ARRAY_AGG(sub.u), %s) FROM (%s) sub)", emptyArr, subQ), baseSrc + chain.baseTag() + "[]", true
+	}
+}
+
+func isRootSplitCharsBooleanExpr(fhirPath string) bool {
+	p := normalizeSplitCharsPipeUnion(normalizePolymorphicFHIRPath(stripOuterParens(strings.TrimSpace(fhirPath))))
+	if !hasSplitOrToCharsCall(p) {
+		return false
+	}
+	for _, suf := range []string{".isDistinct()", ".exists()", ".empty()", ".allTrue()", ".anyTrue()", ".allFalse()", ".anyFalse()"} {
+		if strings.HasSuffix(p, suf) {
+			return true
+		}
+	}
+	for _, call := range []string{".subsetOf(", ".supersetOf("} {
+		if idx := strings.LastIndex(p, call); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(call)-1) == len(p)-1 {
+			return true
+		}
+	}
+	if _, crit, ok := parseCollectionCriteriaCall(p, ".exists("); ok && strings.Contains(crit, "$this") {
+		return true
+	}
+	if _, crit, ok := parseCollectionCriteriaCall(p, ".all("); ok && strings.Contains(crit, "$this") {
+		return true
+	}
+	for _, suf := range []string{".first()", ".last()", ".single()"} {
+		if strings.HasSuffix(p, suf) {
+			prefix := strings.TrimSpace(p[:len(p)-len(suf)])
+			if chain, ok := parseSplitOrToCharsChain(prefix); ok && chain.isBoolProj && isScalarRootSplitChain(chain) {
+				return true
+			}
+		}
+	}
+	if basePath, _, okSub := parseTrailingSubscriptIndex(p); okSub {
+		if chain, ok := parseSplitOrToCharsChain(basePath); ok && chain.isBoolProj && isScalarRootSplitChain(chain) {
+			return true
+		}
+	}
+	return false
+}
+
+func tryCompileRootSplitCharsScalarExpr(fhirPath, dialect string, isCore bool) (string, string, bool) {
+	p := normalizeSplitCharsPipeUnion(normalizePolymorphicFHIRPath(stripOuterParens(strings.TrimSpace(fhirPath))))
+	if !hasSplitOrToCharsCall(p) {
+		return "", "", false
+	}
+	if basePath, subIdx, okSub := parseTrailingSubscriptIndex(p); okSub {
+		if chain, ok := parseSplitOrToCharsChain(basePath); ok && chain.hasMods() && isScalarRootSplitChain(chain) {
+			baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
+			tr := chain.toTransform("splitChainElem", "", subIdx)
+			return applySplitCharsChainTransform(baseSQL, tr, dialect), fmt.Sprintf("%s%s[%d]", baseSrc, chain.baseTag(), subIdx), true
+		}
+	}
+	if strings.HasSuffix(p, ".first()") {
+		prefix := strings.TrimSpace(p[:len(p)-len(".first()")])
+		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || (chain.isToChars && dialect != "doris")) && isScalarRootSplitChain(chain) {
+			baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
+			if !chain.hasMods() && chain.isToChars {
+				return fmt.Sprintf("SUBSTR(%s, 1, 1)", baseSQL), baseSrc + ".toChars.first", true
+			}
+			tr := chain.toTransform("splitChainElem", "", 0)
+			return applySplitCharsChainTransform(baseSQL, tr, dialect), baseSrc + chain.baseTag() + ".first", true
+		}
+	}
+	if strings.HasSuffix(p, ".single()") {
+		prefix := strings.TrimSpace(p[:len(p)-len(".single()")])
+		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || dialect != "doris") && isScalarRootSplitChain(chain) {
+			baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
+			if !chain.hasMods() {
+				if chain.isToChars {
+					return fmt.Sprintf("SUBSTR(%s, 1, 1)", baseSQL), baseSrc + ".toChars.single", true
+				}
+				escapedSep := strings.ReplaceAll(chain.splitSep, "'", "''")
+				if dialect == "sqlite" {
+					return fmt.Sprintf("SUBSTR(%s, 1, CASE WHEN INSTR(%s, '%s') > 0 THEN INSTR(%s, '%s') - 1 ELSE LENGTH(%s) END)", baseSQL, baseSQL, escapedSep, baseSQL, escapedSep, baseSQL), baseSrc + ".split.single", true
+				}
+				return fmt.Sprintf("SPLIT_PART(%s, '%s', 1)", baseSQL, escapedSep), baseSrc + ".split.single", true
+			}
+			tr := chain.toTransform("splitChainElem", "", 0)
+			return applySplitCharsChainTransform(baseSQL, tr, dialect), baseSrc + chain.baseTag() + ".single", true
+		}
+	}
+	if strings.HasSuffix(p, ".last()") {
+		prefix := strings.TrimSpace(p[:len(p)-len(".last()")])
+		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || (chain.isToChars && dialect != "doris")) && isScalarRootSplitChain(chain) {
+			baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
+			if !chain.hasMods() && chain.isToChars {
+				if dialect == "sqlite" {
+					return fmt.Sprintf("SUBSTR(%s, -1, 1)", baseSQL), baseSrc + ".toChars.last", true
+				}
+				return fmt.Sprintf("RIGHT(%s, 1)", baseSQL), baseSrc + ".toChars.last", true
+			}
+			tr := chain.toTransform("splitChainLast", "", 0)
+			return applySplitCharsChainTransform(baseSQL, tr, dialect), baseSrc + chain.baseTag() + ".last", true
+		}
+	}
+	if strings.HasSuffix(p, ".count()") {
+		prefix := strings.TrimSpace(p[:len(p)-len(".count()")])
+		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || (chain.isToChars && dialect != "doris")) && isScalarRootSplitChain(chain) {
+			baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
+			if !chain.hasMods() && chain.isToChars {
+				if dialect == "sqlite" {
+					return fmt.Sprintf("COALESCE(LENGTH(%s), 0)", baseSQL), baseSrc + ".toChars.count", true
+				}
+				return fmt.Sprintf("COALESCE(CHAR_LENGTH(%s), 0)", baseSQL), baseSrc + ".toChars.count", true
+			}
+			tr := chain.toTransform("splitChainCount", "", 0)
+			return applySplitCharsChainTransform(baseSQL, tr, dialect), baseSrc + chain.baseTag() + ".count", true
+		}
+	}
+	if idx := strings.LastIndex(p, ".join("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".join(")-1) == len(p)-1 {
+		prefix := strings.TrimSpace(p[:idx])
+		joinSep := strings.Trim(strings.TrimSpace(p[idx+len(".join("):len(p)-1]), "'\"")
+		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || (chain.isToChars && dialect != "doris")) && isScalarRootSplitChain(chain) {
+			baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
+			tr := chain.toTransform("splitChainJoin", joinSep, 0)
+			return applySplitCharsChainTransform(baseSQL, tr, dialect), baseSrc + chain.baseTag() + ".join", true
+		}
+	}
+	for _, spec := range []struct {
+		suffix string
+		kind   string
+		tag    string
+	}{
+		{".isDistinct()", "splitChainIsDistinct", ".isDistinct"},
+		{".exists()", "splitChainExists", ".exists"},
+		{".empty()", "splitChainEmpty", ".empty"},
+		{".allTrue()", "splitChainAllTrue", ".allTrue"},
+		{".anyTrue()", "splitChainAnyTrue", ".anyTrue"},
+		{".allFalse()", "splitChainAllFalse", ".allFalse"},
+		{".anyFalse()", "splitChainAnyFalse", ".anyFalse"},
+		{".sum()", "splitChainSum", ".sum"},
+		{".avg()", "splitChainAvg", ".avg"},
+		{".min()", "splitChainMin", ".min"},
+		{".max()", "splitChainMax", ".max"},
+	} {
+		if strings.HasSuffix(p, spec.suffix) {
+			prefix := strings.TrimSpace(p[:len(p)-len(spec.suffix)])
+			if chain, ok := parseSplitOrToCharsChain(prefix); ok && isScalarRootSplitChain(chain) {
+				baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
+				tr := chain.toTransform(spec.kind, "", 0)
+				return applySplitCharsChainTransform(baseSQL, tr, dialect), baseSrc + chain.baseTag() + spec.tag, true
+			}
+		}
+	}
+	for _, subSpec := range []struct {
+		call string
+		kind string
+		tag  string
+	}{
+		{".subsetOf(", "splitChainSubsetOf", ".subsetOf"},
+		{".supersetOf(", "splitChainSupersetOf", ".supersetOf"},
+	} {
+		if idx := strings.LastIndex(p, subSpec.call); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(subSpec.call)-1) == len(p)-1 {
+			lhsPrefix := strings.TrimSpace(p[:idx])
+			rhsStr := strings.TrimSpace(p[idx+len(subSpec.call) : len(p)-1])
+			if lhsChain, okL := parseSplitOrToCharsChain(lhsPrefix); okL && isScalarRootSplitChain(lhsChain) {
+				if rhsChain, okR := parseCompatSplitOrToCharsChain(rhsStr, lhsChain.basePath); okR && isScalarRootSplitChain(rhsChain) {
+					baseSQL, baseSrc := bindRootSplitChainBaseExprs(&lhsChain, dialect, isCore)
+					bindRootSplitChainBaseExprs(&rhsChain, dialect, isCore)
+					lhsChain.setOther = &rhsChain
+					tr := lhsChain.toTransform(subSpec.kind, "", 0)
+					return applySplitCharsChainTransform(baseSQL, tr, dialect), baseSrc + lhsChain.baseTag() + subSpec.tag, true
+				}
+			}
+		}
+	}
+	for _, critSpec := range []struct {
+		call string
+		kind string
+		tag  string
+	}{
+		{".exists(", "splitChainExistsCrit", ".exists"},
+		{".all(", "splitChainAll", ".all"},
+	} {
+		if prefix, crit, ok := parseCollectionCriteriaCall(p, critSpec.call); ok && strings.Contains(crit, "$this") {
+			if chain, okChain := parseSplitOrToCharsChain(prefix); okChain && isScalarRootSplitChain(chain) {
+				if _, okPred := buildElemWherePredicateSQL(crit, "x", "postgres", chain.isNumProj); okPred {
+					baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
+					tr := chain.toTransform(critSpec.kind, crit, 0)
+					return applySplitCharsChainTransform(baseSQL, tr, dialect), baseSrc + chain.baseTag() + critSpec.tag, true
+				}
+			}
+		}
+	}
+	if idx := strings.LastIndex(p, ".aggregate("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".aggregate(")-1) == len(p)-1 {
+		prefix := strings.TrimSpace(p[:idx])
+		args := splitTopLevelCommaArgs(p[idx+len(".aggregate(") : len(p)-1])
+		if len(args) >= 1 && len(args) <= 2 {
+			if chain, okChain := parseSplitOrToCharsChain(prefix); okChain && isScalarRootSplitChain(chain) {
+				aggExpr := strings.TrimSpace(args[0])
+				initVal := "0"
+				if len(args) == 2 {
+					initVal = strings.TrimSpace(args[1])
+				}
+				aggNorm := strings.ReplaceAll(aggExpr, " ", "")
+				isSupportedAgg := aggNorm == "$total+1" || aggNorm == "1+$total" ||
+					aggNorm == "$total+$this.length()" || aggNorm == "$this.length()+$total" ||
+					aggNorm == "$total+$this" || aggNorm == "$this+$total" ||
+					(strings.HasPrefix(initVal, "'") && strings.Contains(aggExpr, "$total") && strings.Contains(aggExpr, "$this"))
+				if isSupportedAgg {
+					baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
+					tr := chain.toTransform("splitChainAggregate", aggExpr, 0)
+					tr.aggInit = initVal
+					return applySplitCharsChainTransform(baseSQL, tr, dialect), baseSrc + chain.baseTag() + ".aggregate", true
+				}
+			}
+		}
+	}
+	return "", "", false
 }
 
 func applySpidxElemTransforms(colExpr string, transforms []spidxElemTransform, dialect string) string {
@@ -5233,6 +5563,9 @@ func spidxSetOperandSubquery(fhirPath, dialect string) (string, string) {
 
 func spidxZeroJSONCollectionColumnExpr(fhirPath, dialect string) (string, string) {
 	p := normalizePolymorphicFHIRPath(strings.TrimSpace(fhirPath))
+	if expr, src, ok := tryCompileRootSplitCharsCollectionExpr(p, dialect, false); ok {
+		return expr, src
+	}
 	if mods := parseSpidxCollectionModifiers(p); mods.hasAnyMods() {
 		if _, _, okRef := parseReferenceCollectionPath(mods.basePath); okRef || mods.hasSubqueryMods() || isSetOpFHIRPath(mods.basePath) {
 			subQ, subSrc := buildModifiedSpidxSubquery(mods, dialect)
@@ -6226,7 +6559,7 @@ func forEachElemCollectionSQL(tail, valExpr, sysExpr, dialect string) (string, b
 	return "", false
 }
 
-func dorisZeroJSONForEachCollectionColumnExprWithAlias(fhirPath, forEachPath string, aliasIdx int) (string, string) {
+func dorisZeroJSONForEachCollectionColumnExprWithAlias(fhirPath, forEachPath string, aliasIdx int, isCore bool) (string, string) {
 	p := strings.TrimSpace(fhirPath)
 	fe := strings.TrimSpace(forEachPath)
 	if fe != "" && aliasIdx > 0 {
@@ -6242,7 +6575,7 @@ func dorisZeroJSONForEachCollectionColumnExprWithAlias(fhirPath, forEachPath str
 			return sqlExpr, tokAlias + "[]"
 		}
 	}
-	return dorisZeroJSONCollectionColumnExpr(fhirPath)
+	return dorisZeroJSONCollectionColumnExprWithCore(fhirPath, isCore)
 }
 
 func spidxZeroJSONForEachCollectionColumnExprWithAlias(fhirPath, forEachPath string, aliasIdx int, dialect string) (string, string) {
@@ -6444,6 +6777,7 @@ func normalizePolymorphicFHIRPath(expr string) string {
 		}
 		searchFrom = closeIdx + 1
 	}
+	s = normalizeSplitCharsPipeUnion(s)
 	if strings.HasPrefix(s, "(") {
 		if closeIdx := findMatchingCloseParen(s, 0); closeIdx != -1 {
 			inner := s[1:closeIdx]
@@ -6553,6 +6887,9 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		basePath := strings.TrimSpace(p[:len(p)-len(".hasValue()")])
 		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
 		return fmt.Sprintf("(%s IS NOT NULL AND CAST(%s AS STRING) != '')", colExpr, colExpr), colSrc + ".hasValue"
+	}
+	if expr, src, ok := tryCompileRootSplitCharsScalarExpr(p, "doris", isCore); ok {
+		return expr, src
 	}
 	if idx := strings.LastIndex(p, ".aggregate("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".aggregate(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
@@ -6753,7 +7090,7 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
 		return fmt.Sprintf("TRIM(%s)", colExpr), colSrc + ".trim"
 	}
-	if idx := strings.LastIndex(p, ".join("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".join("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".join(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		rawSep := strings.Trim(strings.TrimSpace(p[idx+len(".join("):len(p)-1]), "'\"")
 		escapedSep := strings.ReplaceAll(rawSep, "'", "''")
@@ -6836,7 +7173,7 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		return dorisZeroJSONWhereExpr(p, isCore), "exists"
 	}
 	if strings.HasSuffix(p, ".sort()") || strings.HasSuffix(p, ".sortDesc()") || strings.HasSuffix(p, ".distinct()") || strings.HasSuffix(p, ".tail()") || (strings.Contains(p, ".skip(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".take(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".union(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".combine(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".intersect(") && strings.HasSuffix(p, ")")) || (strings.Contains(p, ".exclude(") && strings.HasSuffix(p, ")")) || isTrailingElemWherePath(p) {
-		return dorisZeroJSONCollectionColumnExpr(p)
+		return dorisZeroJSONCollectionColumnExprWithCore(p, isCore)
 	}
 	if (strings.Contains(p, ".startsWith(") || strings.Contains(p, ".endsWith(") || strings.Contains(p, ".contains(") || strings.Contains(p, ".matches(") || strings.Contains(p, ".matchesFull(")) && strings.HasSuffix(p, ")") {
 		return dorisZeroJSONWhereExpr(p, isCore), "predicate"
@@ -6971,7 +7308,7 @@ func dorisZeroJSONColumnExpr(fhirPath string, isCore bool) (string, string) {
 		colExpr, colSrc := dorisZeroJSONColumnExpr(basePath, isCore)
 		return fmt.Sprintf("(%s IS NOT NULL)", colExpr), colSrc + ".comparable"
 	}
-	if idx := strings.LastIndex(p, ".indexOf("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".indexOf("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".indexOf(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		rawSub := strings.Trim(strings.TrimSpace(p[idx+len(".indexOf("):len(p)-1]), "'\"")
 		escapedSub := strings.ReplaceAll(rawSub, "'", "''")
@@ -7135,6 +7472,11 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 			quotedVals = append(quotedVals, fmt.Sprintf("'%s'", strings.ReplaceAll(v, "'", "''")))
 		}
 		return fmt.Sprintf("%s IN (%s)", colExpr, strings.Join(quotedVals, ", "))
+	}
+	if isRootSplitCharsBooleanExpr(p) {
+		if expr, _, ok := tryCompileRootSplitCharsScalarExpr(p, "doris", isCore); ok {
+			return expr
+		}
 	}
 
 	codeCol := "r.primary_code"
@@ -7527,7 +7869,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 	}
 	_, _, _, isArithLHS := splitTopLevelArithmeticOp(lhs)
 
-	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".precision()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".toQuantity(") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") || strings.Contains(lhs, ".aggregate(") || strings.Contains(lhs, ".lowBoundary(") || strings.Contains(lhs, ".highBoundary(") {
+	if !strings.HasPrefix(strings.TrimSpace(rhs), "'") && (isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".precision()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".toQuantity(") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") || strings.Contains(lhs, ".aggregate(") || strings.Contains(lhs, ".select(") || strings.Contains(lhs, ".lowBoundary(") || strings.Contains(lhs, ".highBoundary(")) {
 		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
 			lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
 			sqlOp := op
@@ -7538,7 +7880,7 @@ func dorisZeroJSONWhereExpr(fhirPath string, isCore bool) string {
 		}
 	}
 	_, _, hasSubLHS := parseTrailingSubscriptIndex(lhs)
-	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasPrefix(strings.ToLower(lhs), "coalesce(") || strings.HasPrefix(strings.ToLower(lhs), "iif(") || strings.Contains(lhs, ".join(") || strings.HasSuffix(lhs, ".last()") || strings.HasSuffix(lhs, ".single()") || strings.Contains(lhs, ".sort(") || strings.Contains(lhs, ".sortDesc(") || strings.Contains(lhs, ".distinct()") || strings.Contains(lhs, ".skip(") || strings.Contains(lhs, ".take(") || strings.Contains(lhs, ".tail()") || strings.Contains(lhs, ".split(") || strings.Contains(lhs, ".union(") || strings.Contains(lhs, ".combine(") || strings.Contains(lhs, ".intersect(") || strings.Contains(lhs, ".exclude(") || strings.Contains(lhs, ".lower(") || strings.Contains(lhs, ".upper(") || strings.Contains(lhs, ".trim(") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") || strings.Contains(lhs, ".where(") || strings.Contains(lhs, ".select(") {
+	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasPrefix(strings.ToLower(lhs), "coalesce(") || strings.HasPrefix(strings.ToLower(lhs), "iif(") || strings.Contains(lhs, ".join(") || strings.HasSuffix(lhs, ".last()") || strings.HasSuffix(lhs, ".single()") || strings.Contains(lhs, ".sort(") || strings.Contains(lhs, ".sortDesc(") || strings.Contains(lhs, ".distinct()") || strings.Contains(lhs, ".skip(") || strings.Contains(lhs, ".take(") || strings.Contains(lhs, ".tail()") || strings.Contains(lhs, ".split(") || strings.Contains(lhs, ".toChars()") || strings.Contains(lhs, ".aggregate(") || strings.Contains(lhs, ".union(") || strings.Contains(lhs, ".combine(") || strings.Contains(lhs, ".intersect(") || strings.Contains(lhs, ".exclude(") || strings.Contains(lhs, ".lower(") || strings.Contains(lhs, ".upper(") || strings.Contains(lhs, ".trim(") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") || strings.Contains(lhs, ".where(") || strings.Contains(lhs, ".select(") {
 		lhsExpr, _ := dorisZeroJSONColumnExpr(lhs, isCore)
 		sqlOp := op
 		if sqlOp == "!=" {
@@ -7687,6 +8029,9 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		basePath := strings.TrimSpace(p[:len(p)-len(".hasValue()")])
 		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
 		return fmt.Sprintf("(%s IS NOT NULL AND CAST(%s AS TEXT) != '')", colExpr, colExpr), colSrc + ".hasValue"
+	}
+	if expr, src, ok := tryCompileRootSplitCharsScalarExpr(p, dialect, false); ok {
+		return expr, src
 	}
 	if idx := strings.LastIndex(p, ".aggregate("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".aggregate(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
@@ -7929,7 +8274,7 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
 		return fmt.Sprintf("TRIM(%s)", colExpr), colSrc + ".trim"
 	}
-	if idx := strings.LastIndex(p, ".join("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".join("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".join(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		rawSep := strings.Trim(strings.TrimSpace(p[idx+len(".join("):len(p)-1]), "'\"")
 		escapedSep := strings.ReplaceAll(rawSep, "'", "''")
@@ -8483,7 +8828,7 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
 		return fmt.Sprintf("(%s IS NOT NULL)", colExpr), colSrc + ".comparable"
 	}
-	if idx := strings.LastIndex(p, ".indexOf("); idx != -1 && strings.HasSuffix(p, ")") {
+	if idx := strings.LastIndex(p, ".indexOf("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".indexOf(")-1) == len(p)-1 {
 		basePath := strings.TrimSpace(p[:idx])
 		rawSub := strings.Trim(strings.TrimSpace(p[idx+len(".indexOf("):len(p)-1]), "'\"")
 		escapedSub := strings.ReplaceAll(rawSub, "'", "''")
@@ -8631,6 +8976,11 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 			quotedVals = append(quotedVals, fmt.Sprintf("'%s'", strings.ReplaceAll(v, "'", "''")))
 		}
 		return fmt.Sprintf("%s IN (%s)", colExpr, strings.Join(quotedVals, ", "))
+	}
+	if isRootSplitCharsBooleanExpr(p) {
+		if expr, _, ok := tryCompileRootSplitCharsScalarExpr(p, dialect, false); ok {
+			return expr
+		}
 	}
 
 	if strings.HasSuffix(p, ".isDistinct()") {
@@ -9019,7 +9369,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 	}
 	_, _, _, isArithLHS := splitTopLevelArithmeticOp(lhs)
 
-	if isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".precision()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".toQuantity(") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") || strings.Contains(lhs, ".aggregate(") || strings.Contains(lhs, ".lowBoundary(") || strings.Contains(lhs, ".highBoundary(") {
+	if !strings.HasPrefix(strings.TrimSpace(rhs), "'") && (isArithLHS || strings.HasSuffix(lhs, ".count()") || strings.HasSuffix(lhs, ".sum()") || strings.HasSuffix(lhs, ".avg()") || strings.HasSuffix(lhs, ".min()") || strings.HasSuffix(lhs, ".max()") || strings.HasSuffix(lhs, ".length()") || strings.HasSuffix(lhs, ".precision()") || strings.HasSuffix(lhs, ".toInteger()") || strings.HasSuffix(lhs, ".toDecimal()") || strings.Contains(lhs, ".toQuantity(") || strings.Contains(lhs, ".indexOf(") || strings.HasSuffix(lhs, ".abs()") || strings.HasSuffix(lhs, ".ceiling()") || strings.HasSuffix(lhs, ".floor()") || strings.Contains(lhs, ".round(") || strings.HasSuffix(lhs, ".sqrt()") || strings.HasSuffix(lhs, ".exp()") || strings.HasSuffix(lhs, ".ln()") || strings.Contains(lhs, ".log(") || strings.Contains(lhs, ".power(") || strings.HasSuffix(lhs, ".truncate()") || strings.Contains(lhs, ".aggregate(") || strings.Contains(lhs, ".select(") || strings.Contains(lhs, ".lowBoundary(") || strings.Contains(lhs, ".highBoundary(")) {
 		if _, err := strconv.ParseFloat(trimmedRHS, 64); err == nil {
 			lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, dialect)
 			sqlOp := op
@@ -9030,7 +9380,7 @@ func spidxZeroJSONWhereExprForDialect(fhirPath, dialect string) string {
 		}
 	}
 	_, _, hasSubLHS := parseTrailingSubscriptIndex(lhs)
-	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasPrefix(strings.ToLower(lhs), "coalesce(") || strings.HasPrefix(strings.ToLower(lhs), "iif(") || strings.Contains(lhs, ".join(") || strings.HasSuffix(lhs, ".last()") || strings.HasSuffix(lhs, ".single()") || strings.Contains(lhs, ".sort(") || strings.Contains(lhs, ".sortDesc(") || strings.Contains(lhs, ".distinct()") || strings.Contains(lhs, ".skip(") || strings.Contains(lhs, ".take(") || strings.Contains(lhs, ".tail()") || strings.Contains(lhs, ".split(") || strings.Contains(lhs, ".union(") || strings.Contains(lhs, ".combine(") || strings.Contains(lhs, ".intersect(") || strings.Contains(lhs, ".exclude(") || strings.Contains(lhs, ".lower(") || strings.Contains(lhs, ".upper(") || strings.Contains(lhs, ".trim(") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") || strings.Contains(lhs, ".where(") || strings.Contains(lhs, ".select(") {
+	if hasSubLHS || len(splitTopLevelConcatOp(lhs)) > 1 || strings.HasPrefix(strings.ToLower(lhs), "coalesce(") || strings.HasPrefix(strings.ToLower(lhs), "iif(") || strings.Contains(lhs, ".join(") || strings.HasSuffix(lhs, ".last()") || strings.HasSuffix(lhs, ".single()") || strings.Contains(lhs, ".sort(") || strings.Contains(lhs, ".sortDesc(") || strings.Contains(lhs, ".distinct()") || strings.Contains(lhs, ".skip(") || strings.Contains(lhs, ".take(") || strings.Contains(lhs, ".tail()") || strings.Contains(lhs, ".split(") || strings.Contains(lhs, ".toChars()") || strings.Contains(lhs, ".aggregate(") || strings.Contains(lhs, ".union(") || strings.Contains(lhs, ".combine(") || strings.Contains(lhs, ".intersect(") || strings.Contains(lhs, ".exclude(") || strings.Contains(lhs, ".lower(") || strings.Contains(lhs, ".upper(") || strings.Contains(lhs, ".trim(") || strings.HasSuffix(lhs, ".toString()") || strings.Contains(lhs, ".replace(") || strings.Contains(lhs, ".replaceMatches(") || strings.Contains(lhs, ".substring(") || strings.Contains(lhs, ".encode(") || strings.Contains(lhs, ".decode(") || strings.Contains(lhs, ".escape(") || strings.Contains(lhs, ".unescape(") || strings.Contains(lhs, ".where(") || strings.Contains(lhs, ".select(") {
 		lhsExpr, _ := spidxZeroJSONColumnExpr(lhs, dialect)
 		sqlOp := op
 		if sqlOp == "!=" {

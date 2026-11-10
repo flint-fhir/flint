@@ -7626,4 +7626,142 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	require.Equal(t, http.StatusOK, respFESAPCRunProto.StatusCode)
 	assert.Contains(t, respFESAPCRunProto.Header.Get("Content-Type"), "application/x-protobuf")
 	assert.NotEmpty(t, fesapcRunProtoBytes)
+
+	// 74. Root-Level (forEach == "") .split(sep) & .toChars() Chain Pushdown, Pipe Union (|), .aggregate() & collection: true Array Columns (Wave 119)
+	patRootSplitW119 := `{
+		"resourceType": "Patient",
+		"id": "proto-pat-w119",
+		"active": true,
+		"gender": "female",
+		"birthDate": "1985-04-12",
+		"name": [{"family": "RootSplit", "given": ["Alice"]}]
+	}`
+	reqPutPatW119, err := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Patient/proto-pat-w119", strings.NewReader(patRootSplitW119))
+	require.NoError(t, err)
+	reqPutPatW119.Header.Set("Content-Type", "application/fhir+json")
+	respPutPatW119, err := client.Do(reqPutPatW119)
+	require.NoError(t, err)
+	respPutPatW119.Body.Close()
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, respPutPatW119.StatusCode)
+
+	rootSplitToCharsChainCollVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "patient_root_split_tochars_chain_coll_v1",
+		"status": "active",
+		"resource": "Patient",
+		"where": [
+			{"path": "id = 'proto-pat-w119' and birthDate.split('-').where($this.length() = 4).exists() and birthDate.split('-').exists($this = '1985') and birthDate.split('-').all($this.length() >= 2) and birthDate.split('-').where($this = '9999').empty() and birthDate.split('-').isDistinct() and birthDate.split('-').where($this = '1985').subsetOf(birthDate.split('-')) and birthDate.split('-').select($this.length() >= 2).allTrue() and birthDate.split('-').aggregate($total + $this.length(), 0) = 8 and (id.split('-').where($this = 'w119') | birthDate.split('-').where($this = '1985')).count() = 2"}
+		],
+		"select": [
+			{
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "bd_where_join", "path": "birthDate.split('-').where($this.length() = 2).sort().join(':')"},
+					{"name": "bd_select_sum", "path": "birthDate.split('-').select($this.toInteger()).sum()"},
+					{"name": "bd_agg_len_sum", "path": "birthDate.split('-').aggregate($total + $this.length(), 0)"},
+					{"name": "bd_agg_join", "path": "birthDate.split('-').where($this.length() >= 2).sortDesc().aggregate(iif($total = '', $this, $total & ':' & $this), '')"},
+					{"name": "id_bd_pipe_join", "path": "(id.split('-').where($this = 'w119') | birthDate.split('-').where($this = '1985')).sort().join(':')"},
+					{"name": "id_chars_dist_cnt", "path": "id.toChars().distinct().aggregate($total + 1, 0)"},
+					{"name": "bd_subset", "path": "birthDate.split('-').where($this = '1985').subsetOf(birthDate.split('-'))"},
+					{"name": "bd_all_true", "path": "birthDate.split('-').select($this.length() >= 2).allTrue()"},
+					{"name": "bd_any_true", "path": "birthDate.split('-').select($this = '1985').anyTrue()"},
+					{"name": "bd_coll_arr", "path": "birthDate.split('-').where($this.length() = 2).sort()", "collection": true},
+					{"name": "id_coll_arr", "path": "id.split('-').where($this.length() >= 4).sort()", "collection": true}
+				]
+			}
+		]
+	}`
+
+	// Verify Doris $sql pushdown
+	reqRSCCDoris, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", strings.NewReader(rootSplitToCharsChainCollVD))
+	require.NoError(t, err)
+	reqRSCCDoris.Header.Set("Content-Type", "application/fhir+json")
+	respRSCCDoris, err := client.Do(reqRSCCDoris)
+	require.NoError(t, err)
+	rsccDorisSQL, _ := io.ReadAll(respRSCCDoris.Body)
+	respRSCCDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respRSCCDoris.StatusCode)
+	assert.Contains(t, string(rsccDorisSQL), "ARRAY_JOIN(ARRAY_SORT(ARRAY_FILTER(x -> CHAR_LENGTH(x) = 2, SPLIT_BY_STRING(r.effective_start, '-'))), ':') AS bd_where_join")
+	assert.Contains(t, string(rsccDorisSQL), "COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS BIGINT), SPLIT_BY_STRING(r.effective_start, '-'))), 0) AS bd_select_sum")
+	assert.Contains(t, string(rsccDorisSQL), "COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CHAR_LENGTH(x), SPLIT_BY_STRING(r.effective_start, '-'))), 0) AS bd_agg_len_sum")
+	assert.Contains(t, string(rsccDorisSQL), "ARRAY_JOIN(ARRAY_REVERSE_SORT(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 2, SPLIT_BY_STRING(r.effective_start, '-'))), ':') AS bd_agg_join")
+	assert.Contains(t, string(rsccDorisSQL), "ARRAY_JOIN(ARRAY_SORT(ARRAY_UNION(ARRAY_FILTER(x -> x = 'w119', SPLIT_BY_STRING(r.res_id, '-')), ARRAY_FILTER(x -> x = '1985', SPLIT_BY_STRING(r.effective_start, '-')))), ':') AS id_bd_pipe_join")
+	assert.Contains(t, string(rsccDorisSQL), "ARRAY_SIZE(ARRAY_DISTINCT(SPLIT_BY_STRING(r.res_id, ''))) AS id_chars_dist_cnt")
+	assert.Contains(t, string(rsccDorisSQL), "ARRAY_SORT(ARRAY_FILTER(x -> CHAR_LENGTH(x) = 2, SPLIT_BY_STRING(r.effective_start, '-'))) AS bd_coll_arr")
+	assert.Contains(t, string(rsccDorisSQL), "ARRAY_SORT(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 4, SPLIT_BY_STRING(r.res_id, '-'))) AS id_coll_arr")
+	assert.Contains(t, string(rsccDorisSQL), "ARRAY_EXISTS(x -> x = '1985', SPLIT_BY_STRING(r.effective_start, '-'))")
+	assert.Contains(t, string(rsccDorisSQL), "NOT ARRAY_EXISTS(x -> NOT (CHAR_LENGTH(x) >= 2), SPLIT_BY_STRING(r.effective_start, '-'))")
+	assert.Contains(t, string(rsccDorisSQL), "COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CHAR_LENGTH(x), SPLIT_BY_STRING(r.effective_start, '-'))), 0) = 8")
+
+	// Verify PostgreSQL $sql pushdown
+	reqRSCCPg, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", strings.NewReader(rootSplitToCharsChainCollVD))
+	require.NoError(t, err)
+	reqRSCCPg.Header.Set("Content-Type", "application/fhir+json")
+	respRSCCPg, err := client.Do(reqRSCCPg)
+	require.NoError(t, err)
+	rsccPgSQL, _ := io.ReadAll(respRSCCPg.Body)
+	respRSCCPg.Body.Close()
+	require.Equal(t, http.StatusOK, respRSCCPg.StatusCode)
+	assert.Contains(t, string(rsccPgSQL), "(SELECT COUNT(*) FROM (SELECT DISTINCT u FROM UNNEST(REGEXP_SPLIT_TO_ARRAY(r.res_id, '')) AS u) sub) AS id_chars_dist_cnt")
+	assert.Contains(t, string(rsccPgSQL), "(SELECT COALESCE(ARRAY_AGG(sub.u), ARRAY[]::text[]) FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(r.res_id, '-')) AS u WHERE CHAR_LENGTH(u) >= 4 ORDER BY u ASC) sub) AS id_coll_arr")
+	assert.Contains(t, string(rsccPgSQL), "SELECT u FROM UNNEST(STRING_TO_ARRAY(r.res_id, '-')) AS u WHERE u = 'w119' UNION SELECT u FROM UNNEST(STRING_TO_ARRAY((SELECT d.sp_low FROM spidx_date d")
+
+	// Verify SQLite $sql pushdown
+	reqRSCCSqlite, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", strings.NewReader(rootSplitToCharsChainCollVD))
+	require.NoError(t, err)
+	reqRSCCSqlite.Header.Set("Content-Type", "application/fhir+json")
+	respRSCCSqlite, err := client.Do(reqRSCCSqlite)
+	require.NoError(t, err)
+	rsccSqliteSQL, _ := io.ReadAll(respRSCCSqlite.Body)
+	respRSCCSqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respRSCCSqlite.StatusCode)
+	assert.Contains(t, string(rsccSqliteSQL), "COALESCE(SUM(LENGTH(sub.u)), 0)")
+	assert.Contains(t, string(rsccSqliteSQL), "(SELECT json_group_array(sub.u) FROM (SELECT j.value AS u FROM json_each(")
+
+	// Verify $run runtime evaluation
+	reqRSCCRun, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run", strings.NewReader(rootSplitToCharsChainCollVD))
+	require.NoError(t, err)
+	reqRSCCRun.Header.Set("Content-Type", "application/fhir+json")
+	respRSCCRun, err := client.Do(reqRSCCRun)
+	require.NoError(t, err)
+	rsccBytes, _ := io.ReadAll(respRSCCRun.Body)
+	respRSCCRun.Body.Close()
+	require.Equal(t, http.StatusOK, respRSCCRun.StatusCode)
+	assert.Contains(t, string(rsccBytes), `"rk":"proto-pat-w119"`)
+	assert.Contains(t, string(rsccBytes), `"bd_where_join":"04:12"`)
+	assert.Contains(t, string(rsccBytes), `"bd_select_sum":2001`)
+	assert.Contains(t, string(rsccBytes), `"bd_agg_len_sum":8`)
+	assert.Contains(t, string(rsccBytes), `"bd_agg_join":"1985:12:04"`)
+	assert.Contains(t, string(rsccBytes), `"id_bd_pipe_join":"1985:w119"`)
+	assert.Contains(t, string(rsccBytes), `"id_chars_dist_cnt":9`)
+	assert.Contains(t, string(rsccBytes), `"bd_subset":true`)
+	assert.Contains(t, string(rsccBytes), `"bd_all_true":true`)
+	assert.Contains(t, string(rsccBytes), `"bd_any_true":true`)
+	assert.Contains(t, string(rsccBytes), `"bd_coll_arr":["04","12"]`)
+	assert.Contains(t, string(rsccBytes), `"id_coll_arr":["proto","w119"]`)
+
+	// Verify binary Proto3 wire format on ViewDefinition/$sql and ViewDefinition/$run for Wave 119
+	reqRSCCSqlProto, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/x-protobuf", strings.NewReader(rootSplitToCharsChainCollVD))
+	require.NoError(t, err)
+	reqRSCCSqlProto.Header.Set("Content-Type", "application/fhir+json")
+	reqRSCCSqlProto.Header.Set("Accept", "application/x-protobuf")
+	respRSCCSqlProto, err := client.Do(reqRSCCSqlProto)
+	require.NoError(t, err)
+	rsccSqlProtoBytes, _ := io.ReadAll(respRSCCSqlProto.Body)
+	respRSCCSqlProto.Body.Close()
+	require.Equal(t, http.StatusOK, respRSCCSqlProto.StatusCode)
+	assert.Contains(t, respRSCCSqlProto.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.NotEmpty(t, rsccSqlProtoBytes)
+
+	reqRSCCRunProto, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run?_format=application/x-protobuf", strings.NewReader(rootSplitToCharsChainCollVD))
+	require.NoError(t, err)
+	reqRSCCRunProto.Header.Set("Content-Type", "application/fhir+json")
+	reqRSCCRunProto.Header.Set("Accept", "application/x-protobuf")
+	respRSCCRunProto, err := client.Do(reqRSCCRunProto)
+	require.NoError(t, err)
+	rsccRunProtoBytes, _ := io.ReadAll(respRSCCRunProto.Body)
+	respRSCCRunProto.Body.Close()
+	require.Equal(t, http.StatusOK, respRSCCRunProto.StatusCode)
+	assert.Contains(t, respRSCCRunProto.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.NotEmpty(t, rsccRunProtoBytes)
 }
