@@ -2116,7 +2116,11 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 
 	case "check":
 		if len(args) >= 1 {
-			if b, ok := singletonBool(evalFHIRPathExpr(current, ctx, args[0])); !ok || !b {
+			subCtx := ctx
+			if len(current) == 1 {
+				subCtx.thisItem = current[0]
+			}
+			if b, ok := singletonBool(evalFHIRPathExpr(current, subCtx, args[0])); !ok || !b {
 				return nil
 			}
 		}
