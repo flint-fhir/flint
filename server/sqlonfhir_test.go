@@ -7528,4 +7528,102 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	assert.Contains(t, string(fesobBytes), `"chars_union_sort":"1M"`)
 	assert.Contains(t, string(fesobBytes), `"chars_subset":true`)
 	assert.Contains(t, string(fesobBytes), `"chars_superset":true`)
+
+	// -------------------------------------------------------------------------
+	// 73. Wave 118: SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Split/ToChars .aggregate(aggregator [, init]) Pushdown, Pipe Union (|) Operator & forEach-Scoped collection: true Array Columns Pushdown
+	// -------------------------------------------------------------------------
+	feElemSplitAggregatePipeCollVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_foreach_elem_split_tochars_aggregate_pipe_coll_v1",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"forEach": "identifier",
+				"where": [
+					{"path": "value.split('-').aggregate($total + $this.length(), 0) = 7 and (value.split('-').where($this = 'MRN') | value.split('-').where($this = '1001')).count() = 2"}
+				],
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "split_agg_len_sum", "path": "value.split('-').aggregate($total + $this.length(), 0)"},
+					{"name": "split_agg_cnt", "path": "value.split('-').where($this.length() >= 3).aggregate($total + 1, 0)"},
+					{"name": "split_agg_join", "path": "value.split('-').where($this.length() >= 3).sort().aggregate(iif($total = '', $this, $total & ':' & $this), '')"},
+					{"name": "split_pipe_join", "path": "(value.split('-').where($this = 'MRN') | value.split('-').where($this = '1001')).sort().join(':')"},
+					{"name": "chars_agg_cnt", "path": "value.toChars().distinct().aggregate($total + 1, 0)"},
+					{"name": "split_coll_arr", "path": "value.split('-').where($this.length() >= 3).sort()", "collection": true}
+				]
+			}
+		]
+	}`
+
+	respFESAPCDoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitAggregatePipeCollVD))
+	require.NoError(t, err)
+	sqlFESAPCDorisBytes, _ := io.ReadAll(respFESAPCDoris.Body)
+	respFESAPCDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respFESAPCDoris.StatusCode, string(sqlFESAPCDorisBytes))
+	sqlFESAPCDoris := string(sqlFESAPCDorisBytes)
+	assert.Contains(t, sqlFESAPCDoris, "COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CHAR_LENGTH(x), SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))), 0) AS split_agg_len_sum")
+	assert.Contains(t, sqlFESAPCDoris, "ARRAY_SIZE(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 3, SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) AS split_agg_cnt")
+	assert.Contains(t, sqlFESAPCDoris, "ARRAY_JOIN(ARRAY_SORT(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 3, SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))), ':') AS split_agg_join")
+	assert.Contains(t, sqlFESAPCDoris, "ARRAY_JOIN(ARRAY_SORT(ARRAY_UNION(ARRAY_FILTER(x -> x = 'MRN', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), ARRAY_FILTER(x -> x = '1001', SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')))), ':') AS split_pipe_join")
+	assert.Contains(t, sqlFESAPCDoris, "ARRAY_SIZE(ARRAY_DISTINCT(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), ''))) AS chars_agg_cnt")
+	assert.Contains(t, sqlFESAPCDoris, "ARRAY_SORT(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 3, SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'))) AS split_coll_arr")
+
+	respFESAPCPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitAggregatePipeCollVD))
+	require.NoError(t, err)
+	sqlFESAPCPgBytes, _ := io.ReadAll(respFESAPCPg.Body)
+	respFESAPCPg.Body.Close()
+	require.Equal(t, http.StatusOK, respFESAPCPg.StatusCode, string(sqlFESAPCPgBytes))
+	sqlFESAPCPg := string(sqlFESAPCPgBytes)
+	assert.Contains(t, sqlFESAPCPg, "(SELECT COALESCE(SUM(CHAR_LENGTH(sub.u)), 0) FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u) sub) AS split_agg_len_sum")
+	assert.Contains(t, sqlFESAPCPg, "(SELECT COUNT(*) FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE CHAR_LENGTH(u) >= 3) sub) AS split_agg_cnt")
+	assert.Contains(t, sqlFESAPCPg, "(SELECT COALESCE(STRING_AGG(sub.u, ':'), '') FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE CHAR_LENGTH(u) >= 3 ORDER BY u ASC) sub) AS split_agg_join")
+	assert.Contains(t, sqlFESAPCPg, "(SELECT COALESCE(STRING_AGG(sub.u, ':'), '') FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = 'MRN' UNION SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE u = '1001' ORDER BY u ASC) sub) AS split_pipe_join")
+	assert.Contains(t, sqlFESAPCPg, "(SELECT COALESCE(ARRAY_AGG(sub.u), ARRAY[]::text[]) FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u WHERE CHAR_LENGTH(u) >= 3 ORDER BY u ASC) sub) AS split_coll_arr")
+
+	respFESAPCSqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitAggregatePipeCollVD))
+	require.NoError(t, err)
+	sqlFESAPCSqliteBytes, _ := io.ReadAll(respFESAPCSqlite.Body)
+	respFESAPCSqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respFESAPCSqlite.StatusCode, string(sqlFESAPCSqliteBytes))
+	sqlFESAPCSqlite := string(sqlFESAPCSqliteBytes)
+	assert.Contains(t, sqlFESAPCSqlite, "COALESCE(SUM(LENGTH(sub.u)), 0)")
+	assert.Contains(t, sqlFESAPCSqlite, "SELECT json_group_array(sub.u) FROM")
+
+	respFESAPCRun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(feElemSplitAggregatePipeCollVD))
+	require.NoError(t, err)
+	fesapcBytes, _ := io.ReadAll(respFESAPCRun.Body)
+	respFESAPCRun.Body.Close()
+	require.Equal(t, http.StatusOK, respFESAPCRun.StatusCode, string(fesapcBytes))
+	assert.Contains(t, string(fesapcBytes), `"split_agg_len_sum":7`)
+	assert.Contains(t, string(fesapcBytes), `"split_agg_cnt":2`)
+	assert.Contains(t, string(fesapcBytes), `"split_agg_join":"1001:MRN"`)
+	assert.Contains(t, string(fesapcBytes), `"split_pipe_join":"1001:MRN"`)
+	assert.Contains(t, string(fesapcBytes), `"chars_agg_cnt":6`)
+	assert.Contains(t, string(fesapcBytes), `"split_coll_arr":["1001","MRN"]`)
+
+	// Verify binary Proto3 wire format on ViewDefinition/$sql and ViewDefinition/$run for Wave 118
+	reqFESAPCSqlProto, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/x-protobuf", strings.NewReader(feElemSplitAggregatePipeCollVD))
+	require.NoError(t, err)
+	reqFESAPCSqlProto.Header.Set("Content-Type", "application/fhir+json")
+	reqFESAPCSqlProto.Header.Set("Accept", "application/x-protobuf")
+	respFESAPCSqlProto, err := client.Do(reqFESAPCSqlProto)
+	require.NoError(t, err)
+	fesapcSqlProtoBytes, _ := io.ReadAll(respFESAPCSqlProto.Body)
+	respFESAPCSqlProto.Body.Close()
+	require.Equal(t, http.StatusOK, respFESAPCSqlProto.StatusCode)
+	assert.Contains(t, respFESAPCSqlProto.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.NotEmpty(t, fesapcSqlProtoBytes)
+
+	reqFESAPCRunProto, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run?_format=application/x-protobuf", strings.NewReader(feElemSplitAggregatePipeCollVD))
+	require.NoError(t, err)
+	reqFESAPCRunProto.Header.Set("Content-Type", "application/fhir+json")
+	reqFESAPCRunProto.Header.Set("Accept", "application/x-protobuf")
+	respFESAPCRunProto, err := client.Do(reqFESAPCRunProto)
+	require.NoError(t, err)
+	fesapcRunProtoBytes, _ := io.ReadAll(respFESAPCRunProto.Body)
+	respFESAPCRunProto.Body.Close()
+	require.Equal(t, http.StatusOK, respFESAPCRunProto.StatusCode)
+	assert.Contains(t, respFESAPCRunProto.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.NotEmpty(t, fesapcRunProtoBytes)
 }

@@ -1935,7 +1935,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 			colFE, colAliasIdx := resolveColForEach(col, exprPath)
 			var sqlExpr, sourceCol string
 			if col.Collection {
-				sqlExpr, sourceCol = dorisZeroJSONCollectionColumnExpr(exprPath)
+				sqlExpr, sourceCol = dorisZeroJSONForEachCollectionColumnExprWithAlias(exprPath, colFE, colAliasIdx)
 			} else {
 				sqlExpr, sourceCol = dorisZeroJSONForEachColumnExprWithAlias(exprPath, colFE, colAliasIdx, isCore)
 			}
@@ -2035,7 +2035,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 					}
 					var sqlExpr string
 					if col.Collection {
-						sqlExpr, _ = dorisZeroJSONCollectionColumnExpr(exprPath)
+						sqlExpr, _ = dorisZeroJSONForEachCollectionColumnExprWithAlias(exprPath, colFE, colAliasIdx)
 					} else {
 						sqlExpr, _ = dorisZeroJSONForEachColumnExprWithAlias(exprPath, colFE, colAliasIdx, isCore)
 					}
@@ -2082,7 +2082,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 				colFE, colAliasIdx := resolveColForEach(col, exprPath)
 				var sqlExpr string
 				if col.Collection {
-					sqlExpr, _ = dorisZeroJSONCollectionColumnExpr(exprPath)
+					sqlExpr, _ = dorisZeroJSONForEachCollectionColumnExprWithAlias(exprPath, colFE, colAliasIdx)
 				} else {
 					sqlExpr, _ = dorisZeroJSONForEachColumnExprWithAlias(exprPath, colFE, colAliasIdx, isCore)
 				}
@@ -2115,7 +2115,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		colFE, colAliasIdx := resolveColForEach(col, exprPath)
 		var sqlExpr, sourceTbl string
 		if col.Collection {
-			sqlExpr, sourceTbl = spidxZeroJSONCollectionColumnExpr(exprPath, dialect)
+			sqlExpr, sourceTbl = spidxZeroJSONForEachCollectionColumnExprWithAlias(exprPath, colFE, colAliasIdx, dialect)
 		} else {
 			sqlExpr, sourceTbl = spidxZeroJSONForEachColumnExprWithAlias(exprPath, colFE, colAliasIdx, dialect)
 		}
@@ -2218,7 +2218,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 				}
 				var sqlExpr string
 				if col.Collection {
-					sqlExpr, _ = spidxZeroJSONCollectionColumnExpr(exprPath, dialect)
+					sqlExpr, _ = spidxZeroJSONForEachCollectionColumnExprWithAlias(exprPath, colFE, colAliasIdx, dialect)
 				} else {
 					sqlExpr, _ = spidxZeroJSONForEachColumnExprWithAlias(exprPath, colFE, colAliasIdx, dialect)
 				}
@@ -2264,7 +2264,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 			colFE, colAliasIdx := resolveColForEach(col, exprPath)
 			var sqlExpr string
 			if col.Collection {
-				sqlExpr, _ = spidxZeroJSONCollectionColumnExpr(exprPath, dialect)
+				sqlExpr, _ = spidxZeroJSONForEachCollectionColumnExprWithAlias(exprPath, colFE, colAliasIdx, dialect)
 			} else {
 				sqlExpr, _ = spidxZeroJSONForEachColumnExprWithAlias(exprPath, colFE, colAliasIdx, dialect)
 			}
@@ -2676,6 +2676,7 @@ type spidxElemTransform struct {
 	kind              string
 	arg1              string
 	arg2              string
+	aggInit           string
 	int1              int
 	int2              int
 	hasInt2           bool
@@ -2694,6 +2695,52 @@ type spidxElemTransform struct {
 	lhsChain          *splitCharsModChain
 	rhsChain          *splitCharsModChain
 	setOther          *splitCharsModChain
+}
+
+func hasSplitOrToCharsCall(s string) bool {
+	return strings.Contains(s, ".split(") || strings.Contains(s, ".toChars()")
+}
+
+func normalizeSplitCharsPipeUnion(expr string) string {
+	s := strings.TrimSpace(expr)
+	if !strings.Contains(s, "|") || !hasSplitOrToCharsCall(s) {
+		return s
+	}
+	if lhs, rhs, ok := splitTopLevelPipeUnion(s); ok && hasSplitOrToCharsCall(lhs) && hasSplitOrToCharsCall(rhs) {
+		return fmt.Sprintf("%s.union(%s)", stripOuterParens(normalizeSplitCharsPipeUnion(lhs)), stripOuterParens(normalizeSplitCharsPipeUnion(rhs)))
+	}
+	if len(s) >= 4 && s[0] == '(' {
+		closeIdx := findMatchingCloseParen(s, 0)
+		if closeIdx > 1 {
+			inner := stripOuterParens(strings.TrimSpace(s[1:closeIdx]))
+			if lhs, rhs, ok := splitTopLevelPipeUnion(inner); ok && hasSplitOrToCharsCall(lhs) && hasSplitOrToCharsCall(rhs) {
+				return fmt.Sprintf("%s.union(%s)%s", stripOuterParens(normalizeSplitCharsPipeUnion(lhs)), stripOuterParens(normalizeSplitCharsPipeUnion(rhs)), s[closeIdx+1:])
+			}
+			normInner := normalizeSplitCharsPipeUnion(inner)
+			if normInner != inner {
+				return normInner + s[closeIdx+1:]
+			}
+		}
+	}
+	return s
+}
+
+func extractAggregateStringJoinSep(aggExpr string) string {
+	s := strings.TrimSpace(aggExpr)
+	lower := strings.ToLower(s)
+	if strings.HasPrefix(lower, "iif(") && strings.HasSuffix(s, ")") {
+		args := splitTopLevelCommaArgs(s[4 : len(s)-1])
+		if len(args) == 3 {
+			s = strings.TrimSpace(args[2])
+		}
+	}
+	for _, pt := range splitTopLevelConcatOp(s) {
+		pt = strings.TrimSpace(pt)
+		if len(pt) >= 2 && pt[0] == '\'' && pt[len(pt)-1] == '\'' {
+			return strings.ReplaceAll(pt[1:len(pt)-1], `\'`, `'`)
+		}
+	}
+	return ""
 }
 
 type splitCharsModChain struct {
@@ -2758,6 +2805,7 @@ func (c splitCharsModChain) baseTag() string {
 }
 
 func parseCompatSplitOrToCharsChain(rhsStr, expectedBasePath string) (splitCharsModChain, bool) {
+	rhsStr = normalizeSplitCharsPipeUnion(stripOuterParens(strings.TrimSpace(rhsStr)))
 	if rhsChain, ok := parseSplitOrToCharsChain(rhsStr); ok && rhsChain.basePath == expectedBasePath {
 		return rhsChain, true
 	}
@@ -2781,7 +2829,7 @@ func parseCompatSplitOrToCharsChain(rhsStr, expectedBasePath string) (splitChars
 }
 
 func parseSplitOrToCharsChain(prefix string) (splitCharsModChain, bool) {
-	cur := strings.TrimSpace(prefix)
+	cur := normalizeSplitCharsPipeUnion(stripOuterParens(strings.TrimSpace(prefix)))
 	var chain splitCharsModChain
 	var midTags []string
 	for {
@@ -2870,6 +2918,7 @@ func parseSplitOrToCharsChain(prefix string) (splitCharsModChain, bool) {
 		}
 		break
 	}
+	cur = normalizeSplitCharsPipeUnion(stripOuterParens(cur))
 	for _, setSpec := range []struct {
 		call string
 		op   string
@@ -2933,7 +2982,7 @@ func (m spidxCollectionModifiers) hasAnyMods() bool {
 
 func isNumericTransformKind(kind string) bool {
 	switch kind {
-	case "length", "indexOf", "precision", "splitCount", "toCharsCount", "splitDistinctCount", "toCharsDistinctCount", "splitTailCount", "toCharsTailCount", "splitChainCount", "splitChainSum", "splitChainAvg", "lowBoundary", "highBoundary", "toInteger", "toDecimal", "toQuantity", "abs", "ceiling", "floor", "truncate", "round", "sqrt", "exp", "ln", "log", "power", "selectNumeric":
+	case "length", "indexOf", "precision", "splitCount", "toCharsCount", "splitDistinctCount", "toCharsDistinctCount", "splitTailCount", "toCharsTailCount", "splitChainCount", "splitChainSum", "splitChainAvg", "splitChainAggregate", "lowBoundary", "highBoundary", "toInteger", "toDecimal", "toQuantity", "abs", "ceiling", "floor", "truncate", "round", "sqrt", "exp", "ln", "log", "power", "selectNumeric":
 		return true
 	default:
 		return false
@@ -2955,6 +3004,9 @@ func (m spidxCollectionModifiers) isNumericElemTransform() bool {
 		tr := m.elemTransforms[i]
 		if tr.kind == "where" {
 			continue
+		}
+		if tr.kind == "splitChainAggregate" {
+			return !strings.HasPrefix(strings.TrimSpace(tr.aggInit), "'")
 		}
 		if tr.isNumProj && (tr.kind == "splitChainMin" || tr.kind == "splitChainMax" || tr.kind == "splitChainElem" || tr.kind == "splitChainLast") {
 			return true
@@ -3454,6 +3506,25 @@ func parseSpidxCollectionModifiers(fhirPath string) spidxCollectionModifiers {
 						cur = chain.basePath
 						continue
 					}
+				}
+			}
+		}
+		if idx := strings.LastIndex(cur, ".aggregate("); idx != -1 && strings.HasSuffix(cur, ")") && findMatchingCloseParen(cur, idx+len(".aggregate(")-1) == len(cur)-1 {
+			args := splitTopLevelCommaArgs(cur[idx+len(".aggregate(") : len(cur)-1])
+			if len(args) >= 1 {
+				prefix := strings.TrimSpace(cur[:idx])
+				if chain, okChain := parseSplitOrToCharsChain(prefix); okChain {
+					aggExpr := strings.TrimSpace(args[0])
+					initVal := "0"
+					if len(args) >= 2 && strings.TrimSpace(args[1]) != "" {
+						initVal = strings.TrimSpace(args[1])
+					}
+					tr := chain.toTransform("splitChainAggregate", aggExpr, 0)
+					tr.aggInit = initVal
+					mods.elemTransforms = append([]spidxElemTransform{tr}, mods.elemTransforms...)
+					tagParts = append([]string{chain.baseTag() + ".aggregate"}, tagParts...)
+					cur = chain.basePath
+					continue
 				}
 			}
 		}
@@ -3958,6 +4029,37 @@ func applySplitCharsChainTransform(expr string, tr spidxElemTransform, dialect s
 			return fmt.Sprintf("ARRAY_MIN(%s)", arrExpr)
 		case "splitChainMax":
 			return fmt.Sprintf("ARRAY_MAX(%s)", arrExpr)
+		case "splitChainAggregate":
+			aggNorm := strings.ReplaceAll(strings.TrimSpace(tr.arg2), " ", "")
+			initVal := strings.TrimSpace(tr.aggInit)
+			if initVal == "" {
+				initVal = "0"
+			}
+			if aggNorm == "$total+1" || aggNorm == "1+$total" {
+				if initVal != "0" {
+					return fmt.Sprintf("(ARRAY_SIZE(%s) + %s)", arrExpr, initVal)
+				}
+				return fmt.Sprintf("ARRAY_SIZE(%s)", arrExpr)
+			}
+			if aggNorm == "$total+$this.length()" || aggNorm == "$this.length()+$total" {
+				sumExpr := fmt.Sprintf("COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CHAR_LENGTH(x), %s)), 0)", arrExpr)
+				if initVal != "0" {
+					return fmt.Sprintf("(%s + %s)", sumExpr, initVal)
+				}
+				return sumExpr
+			}
+			if strings.HasPrefix(initVal, "'") {
+				joinSep := strings.ReplaceAll(extractAggregateStringJoinSep(tr.arg2), "'", "''")
+				return fmt.Sprintf("ARRAY_JOIN(%s, '%s')", arrExpr, joinSep)
+			}
+			sumExpr := fmt.Sprintf("COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CAST(x AS DOUBLE), %s)), 0)", arrExpr)
+			if tr.isNumProj {
+				sumExpr = fmt.Sprintf("COALESCE(ARRAY_SUM(%s), 0)", arrExpr)
+			}
+			if initVal != "0" {
+				return fmt.Sprintf("(%s + %s)", sumExpr, initVal)
+			}
+			return sumExpr
 		}
 	case "sqlite":
 		fromClause, _, orderClause, subQ := buildSpidxSplitChainSubquery(expr, tr, "sqlite")
@@ -4032,6 +4134,37 @@ func applySplitCharsChainTransform(expr string, tr spidxElemTransform, dialect s
 			return fmt.Sprintf("(SELECT MIN(sub.u) FROM (%s) sub)", subQ)
 		case "splitChainMax":
 			return fmt.Sprintf("(SELECT MAX(sub.u) FROM (%s) sub)", subQ)
+		case "splitChainAggregate":
+			aggNorm := strings.ReplaceAll(strings.TrimSpace(tr.arg2), " ", "")
+			initVal := strings.TrimSpace(tr.aggInit)
+			if initVal == "" {
+				initVal = "0"
+			}
+			if aggNorm == "$total+1" || aggNorm == "1+$total" {
+				if initVal != "0" {
+					return fmt.Sprintf("((SELECT COUNT(*) FROM (%s) sub) + %s)", subQ, initVal)
+				}
+				return fmt.Sprintf("(SELECT COUNT(*) FROM (%s) sub)", subQ)
+			}
+			if aggNorm == "$total+$this.length()" || aggNorm == "$this.length()+$total" {
+				sumExpr := fmt.Sprintf("(SELECT COALESCE(SUM(LENGTH(sub.u)), 0) FROM (%s) sub)", subQ)
+				if initVal != "0" {
+					return fmt.Sprintf("(%s + %s)", sumExpr, initVal)
+				}
+				return sumExpr
+			}
+			if strings.HasPrefix(initVal, "'") {
+				joinSep := strings.ReplaceAll(extractAggregateStringJoinSep(tr.arg2), "'", "''")
+				return fmt.Sprintf("(SELECT COALESCE(GROUP_CONCAT(sub.u, '%s'), '') FROM (%s) sub)", joinSep, subQ)
+			}
+			sumExpr := fmt.Sprintf("(SELECT COALESCE(SUM(CAST(sub.u AS REAL)), 0) FROM (%s) sub)", subQ)
+			if tr.isNumProj {
+				sumExpr = fmt.Sprintf("(SELECT COALESCE(SUM(sub.u), 0) FROM (%s) sub)", subQ)
+			}
+			if initVal != "0" {
+				return fmt.Sprintf("(%s + %s)", sumExpr, initVal)
+			}
+			return sumExpr
 		}
 	default:
 		fromClause, orderExpr, orderClause, subQ := buildSpidxSplitChainSubquery(expr, tr, "postgres")
@@ -4106,6 +4239,37 @@ func applySplitCharsChainTransform(expr string, tr spidxElemTransform, dialect s
 			return fmt.Sprintf("(SELECT MIN(sub.u) FROM (%s) sub)", subQ)
 		case "splitChainMax":
 			return fmt.Sprintf("(SELECT MAX(sub.u) FROM (%s) sub)", subQ)
+		case "splitChainAggregate":
+			aggNorm := strings.ReplaceAll(strings.TrimSpace(tr.arg2), " ", "")
+			initVal := strings.TrimSpace(tr.aggInit)
+			if initVal == "" {
+				initVal = "0"
+			}
+			if aggNorm == "$total+1" || aggNorm == "1+$total" {
+				if initVal != "0" {
+					return fmt.Sprintf("((SELECT COUNT(*) FROM (%s) sub) + %s)", subQ, initVal)
+				}
+				return fmt.Sprintf("(SELECT COUNT(*) FROM (%s) sub)", subQ)
+			}
+			if aggNorm == "$total+$this.length()" || aggNorm == "$this.length()+$total" {
+				sumExpr := fmt.Sprintf("(SELECT COALESCE(SUM(CHAR_LENGTH(sub.u)), 0) FROM (%s) sub)", subQ)
+				if initVal != "0" {
+					return fmt.Sprintf("(%s + %s)", sumExpr, initVal)
+				}
+				return sumExpr
+			}
+			if strings.HasPrefix(initVal, "'") {
+				joinSep := strings.ReplaceAll(extractAggregateStringJoinSep(tr.arg2), "'", "''")
+				return fmt.Sprintf("(SELECT COALESCE(STRING_AGG(sub.u, '%s'), '') FROM (%s) sub)", joinSep, subQ)
+			}
+			sumExpr := fmt.Sprintf("(SELECT COALESCE(SUM(CAST(sub.u AS DOUBLE PRECISION)), 0) FROM (%s) sub)", subQ)
+			if tr.isNumProj {
+				sumExpr = fmt.Sprintf("(SELECT COALESCE(SUM(sub.u), 0) FROM (%s) sub)", subQ)
+			}
+			if initVal != "0" {
+				return fmt.Sprintf("(%s + %s)", sumExpr, initVal)
+			}
+			return sumExpr
 		}
 	}
 	return expr
@@ -4233,7 +4397,7 @@ func applySpidxElemTransforms(colExpr string, transforms []spidxElemTransform, d
 			} else {
 				expr = fmt.Sprintf("(%s IS NOT NULL AND %s <> '')", expr, expr)
 			}
-		case "splitChainElem", "splitChainLast", "splitChainCount", "splitChainJoin", "splitChainIsDistinct", "splitChainExists", "splitChainEmpty", "splitChainExistsCrit", "splitChainAll", "splitChainAllTrue", "splitChainAnyTrue", "splitChainAllFalse", "splitChainAnyFalse", "splitChainSubsetOf", "splitChainSupersetOf", "splitChainSum", "splitChainAvg", "splitChainMin", "splitChainMax":
+		case "splitChainElem", "splitChainLast", "splitChainCount", "splitChainJoin", "splitChainIsDistinct", "splitChainExists", "splitChainEmpty", "splitChainExistsCrit", "splitChainAll", "splitChainAllTrue", "splitChainAnyTrue", "splitChainAllFalse", "splitChainAnyFalse", "splitChainSubsetOf", "splitChainSupersetOf", "splitChainSum", "splitChainAvg", "splitChainMin", "splitChainMax", "splitChainAggregate":
 			expr = applySplitCharsChainTransform(expr, tr, dialect)
 		case "splitIsDistinct":
 			escapedSep := strings.ReplaceAll(tr.arg1, "'", "''")
@@ -4607,7 +4771,7 @@ func splitTrailingElemMethodChain(expr string) (string, []spidxElemTransform, bo
 }
 
 func buildElemSelectExprSQL(proj, colExpr, dialect string) (string, bool, bool) {
-	p := stripOuterParens(strings.TrimSpace(stripDiagnosticFHIRPathCalls(proj)))
+	p := normalizeSplitCharsPipeUnion(stripOuterParens(strings.TrimSpace(stripDiagnosticFHIRPathCalls(proj))))
 	if p == "" {
 		return "", false, false
 	}
@@ -4766,7 +4930,7 @@ func buildElemSelectExprSQL(proj, colExpr, dialect string) (string, bool, bool) 
 }
 
 func buildElemWherePredicateSQL(crit, colExpr, dialect string, isNumeric bool) (string, bool) {
-	c := stripOuterParens(strings.TrimSpace(stripDiagnosticFHIRPathCalls(crit)))
+	c := normalizeSplitCharsPipeUnion(stripOuterParens(strings.TrimSpace(stripDiagnosticFHIRPathCalls(crit))))
 	if c == "" {
 		return "", false
 	}
@@ -5383,7 +5547,7 @@ func isAlreadyNumericForEachSQL(sqlExpr string) bool {
 }
 
 func forEachElemSelectSQL(tail, valExpr, sysExpr, dialect string) (string, bool) {
-	t := stripOuterParens(strings.TrimSpace(stripDiagnosticFHIRPathCalls(tail)))
+	t := normalizeSplitCharsPipeUnion(stripOuterParens(strings.TrimSpace(stripDiagnosticFHIRPathCalls(tail))))
 	if t == "" || t == "$this" || t == "value" || t == "family" || t == "given" || t == "code" || t == "text" || t == "display" {
 		return valExpr, true
 	}
@@ -5677,7 +5841,7 @@ func buildSpidxForEachJoinClauseWithAlias(forEachPath string, forEachOuter bool,
 }
 
 func forEachElemWhereSQL(rawExpr, forEachPath, valExpr, sysExpr, dialect string) (string, bool) {
-	c := stripOuterParens(strings.TrimSpace(stripDiagnosticFHIRPathCalls(rawExpr)))
+	c := normalizeSplitCharsPipeUnion(stripOuterParens(strings.TrimSpace(stripDiagnosticFHIRPathCalls(rawExpr))))
 	if c == "" {
 		return "", false
 	}
@@ -6015,6 +6179,96 @@ func spidxZeroJSONForEachColumnExprWithAlias(fhirPath, forEachPath string, alias
 		return valExpr, feTable
 	}
 	return spidxZeroJSONColumnExpr(fhirPath, dialect)
+}
+
+func forEachElemCollectionSQL(tail, valExpr, sysExpr, dialect string) (string, bool) {
+	t := normalizeSplitCharsPipeUnion(stripOuterParens(strings.TrimSpace(stripDiagnosticFHIRPathCalls(tail))))
+	if t == "" {
+		return "", false
+	}
+	if isPureRootResourceExpr(t) {
+		rootTail, _ := stripRootResourceEnvPrefix(t)
+		if dialect == "doris" {
+			sqlExpr, _ := dorisZeroJSONCollectionColumnExpr(rootTail)
+			return sqlExpr, true
+		}
+		sqlExpr, _ := spidxZeroJSONCollectionColumnExpr(rootTail, dialect)
+		return sqlExpr, true
+	}
+	if chain, okChain := parseSplitOrToCharsChain(t); okChain {
+		if baseSQL, okB := forEachElemSelectSQL(chain.basePath, valExpr, sysExpr, dialect); okB {
+			tr := chain.toTransform("splitChainArray", "", 0)
+			switch dialect {
+			case "doris":
+				return buildDorisSplitChainArray(baseSQL, tr), true
+			case "sqlite":
+				_, _, _, subQ := buildSpidxSplitChainSubquery(baseSQL, tr, "sqlite")
+				return fmt.Sprintf("(SELECT json_group_array(sub.u) FROM (%s) sub)", subQ), true
+			default:
+				if !chain.hasMods() {
+					if chain.isToChars {
+						return fmt.Sprintf("REGEXP_SPLIT_TO_ARRAY(%s, '')", baseSQL), true
+					}
+					escapedSep := strings.ReplaceAll(chain.splitSep, "'", "''")
+					return fmt.Sprintf("STRING_TO_ARRAY(%s, '%s')", baseSQL, escapedSep), true
+				}
+				_, _, _, subQ := buildSpidxSplitChainSubquery(baseSQL, tr, "postgres")
+				emptyArr := "ARRAY[]::text[]"
+				if chain.isNumProj {
+					emptyArr = "ARRAY[]::double precision[]"
+				} else if chain.isBoolProj {
+					emptyArr = "ARRAY[]::boolean[]"
+				}
+				return fmt.Sprintf("(SELECT COALESCE(ARRAY_AGG(sub.u), %s) FROM (%s) sub)", emptyArr, subQ), true
+			}
+		}
+	}
+	return "", false
+}
+
+func dorisZeroJSONForEachCollectionColumnExprWithAlias(fhirPath, forEachPath string, aliasIdx int) (string, string) {
+	p := strings.TrimSpace(fhirPath)
+	fe := strings.TrimSpace(forEachPath)
+	if fe != "" && aliasIdx > 0 {
+		_, tokAlias := forEachDorisAliases(aliasIdx)
+		valExpr, sysExpr := dorisForEachTokenExprsWithAlias(fe, aliasIdx)
+		tail := p
+		if p == fe {
+			tail = "$this"
+		} else if strings.HasPrefix(p, fe+".") {
+			tail = strings.TrimSpace(p[len(fe)+1:])
+		}
+		if sqlExpr, ok := forEachElemCollectionSQL(tail, valExpr, sysExpr, "doris"); ok {
+			return sqlExpr, tokAlias + "[]"
+		}
+	}
+	return dorisZeroJSONCollectionColumnExpr(fhirPath)
+}
+
+func spidxZeroJSONForEachCollectionColumnExprWithAlias(fhirPath, forEachPath string, aliasIdx int, dialect string) (string, string) {
+	p := strings.TrimSpace(fhirPath)
+	fe := strings.TrimSpace(forEachPath)
+	if fe != "" && aliasIdx > 0 {
+		feTable := "spidx_token"
+		if isModifiedForEachCollectionPath(fe) {
+			_, feTable = buildSpidxForEachSubquery(fe, dialect)
+		} else if _, okRef := isReferenceForEachPath(fe); okRef {
+			feTable = "spidx_reference"
+		} else if strings.HasPrefix(fe, "name") || fe == "given" || fe == "family" || strings.HasPrefix(fe, "address") {
+			feTable = "spidx_string"
+		}
+		valExpr, sysExpr := spidxForEachTokenExprsWithAlias(fe, dialect, aliasIdx)
+		tail := p
+		if p == fe {
+			tail = "$this"
+		} else if strings.HasPrefix(p, fe+".") {
+			tail = strings.TrimSpace(p[len(fe)+1:])
+		}
+		if sqlExpr, ok := forEachElemCollectionSQL(tail, valExpr, sysExpr, dialect); ok {
+			return sqlExpr, feTable + "[]"
+		}
+	}
+	return spidxZeroJSONCollectionColumnExpr(fhirPath, dialect)
 }
 
 func findMatchingCloseParen(s string, openIdx int) int {
