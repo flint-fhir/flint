@@ -7255,4 +7255,94 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	assert.Contains(t, string(fesmqtrBytes), `"tail_conv_qty":true`)
 	assert.Contains(t, string(fesmqtrBytes), `"today_len":10`)
 	assert.Contains(t, string(fesmqtrBytes), `"time_len":8`)
+
+	// 70. Wave 115: SQL-on-FHIR v2 forEach Element-Level Split/ToChars Slicing (.skip(N), .take(M)), Ordered/Distinct Indexing (.sort()/.sortDesc()/.distinct() + [idx]/.first()/.last()/.single()/.count()/.join()/.isDistinct()) & Diagnostic Pass-Through (.trace(), .check(), .defineVariable()) Pushdown
+	feElemSplitSliceOrdVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_foreach_elem_split_tochars_slicing_ordered_v1",
+		"status": "active",
+		"resource": "Patient",
+		"select": [
+			{
+				"forEach": "identifier",
+				"where": [
+					{"path": "value.split('-').sort().first() = '1001' and value.split('-').skip(1).take(1).isDistinct() and value.split('-').skip(1).take(1).count() = 1"}
+				],
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "split_sort_first", "path": "value.split('-').sort().first()"},
+					{"name": "split_sort_last", "path": "value.split('-').sort().last()"},
+					{"name": "split_sort_second", "path": "value.split('-').sort()[1]"},
+					{"name": "split_rev_first", "path": "value.split('-').sortDesc().first()"},
+					{"name": "split_skip_first", "path": "value.split('-').skip(1).first()"},
+					{"name": "split_slice_join", "path": "value.split('-').skip(1).take(1).join(':')"},
+					{"name": "split_slice_cnt", "path": "value.split('-').skip(1).take(1).count()"},
+					{"name": "split_dist_sort_join", "path": "value.split('-').distinct().sort().join(':')"},
+					{"name": "chars_slice_join", "path": "value.toChars().skip(4).take(4).join('')"},
+					{"name": "chars_sort_first", "path": "value.split('-')[0].toChars().sort().first()"},
+					{"name": "chars_sort_last", "path": "value.split('-')[0].toChars().sort().last()"},
+					{"name": "chars_sort_second", "path": "value.split('-')[0].toChars().sort()[1]"},
+					{"name": "chars_dist_sort", "path": "value.toChars().distinct().sort().join('')"},
+					{"name": "traced_val", "path": "value.trace('dbg').defineVariable('v').check($this.length() > 0)"}
+				]
+			}
+		]
+	}`
+
+	respFESSODoris, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitSliceOrdVD))
+	require.NoError(t, err)
+	sqlFESSODorisBytes, _ := io.ReadAll(respFESSODoris.Body)
+	respFESSODoris.Body.Close()
+	require.Equal(t, http.StatusOK, respFESSODoris.StatusCode, string(sqlFESSODorisBytes))
+	sqlFESSODoris := string(sqlFESSODorisBytes)
+	assert.Contains(t, sqlFESSODoris, "element_at(ARRAY_SORT(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), 1) AS split_sort_first")
+	assert.Contains(t, sqlFESSODoris, "element_at(ARRAY_SORT(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), -1) AS split_sort_last")
+	assert.Contains(t, sqlFESSODoris, "element_at(ARRAY_SORT(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-')), 2) AS split_sort_second")
+	assert.Contains(t, sqlFESSODoris, "ARRAY_JOIN(ARRAY_SLICE(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), 2, 1), ':') AS split_slice_join")
+	assert.Contains(t, sqlFESSODoris, "ARRAY_SIZE(ARRAY_SLICE(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), '-'), 2, 1)) AS split_slice_cnt")
+	assert.Contains(t, sqlFESSODoris, "ARRAY_JOIN(ARRAY_SLICE(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), ''), 5, 4), '') AS chars_slice_join")
+	assert.Contains(t, sqlFESSODoris, "ARRAY_JOIN(ARRAY_SORT(ARRAY_DISTINCT(SPLIT_BY_STRING(SPLIT_PART(fe_tok, '|', 2), ''))), '') AS chars_dist_sort")
+
+	respFESSOPg, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitSliceOrdVD))
+	require.NoError(t, err)
+	sqlFESSOPgBytes, _ := io.ReadAll(respFESSOPg.Body)
+	respFESSOPg.Body.Close()
+	require.Equal(t, http.StatusOK, respFESSOPg.StatusCode, string(sqlFESSOPgBytes))
+	sqlFESSOPg := string(sqlFESSOPgBytes)
+	assert.Contains(t, sqlFESSOPg, "(SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u ORDER BY u ASC LIMIT 1) AS split_sort_first")
+	assert.Contains(t, sqlFESSOPg, "(SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u ORDER BY u DESC LIMIT 1) AS split_sort_last")
+	assert.Contains(t, sqlFESSOPg, "(SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u ORDER BY u ASC LIMIT 1 OFFSET 1) AS split_sort_second")
+	assert.Contains(t, sqlFESSOPg, "(SELECT COALESCE(STRING_AGG(sub.u, ':'), '') FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u LIMIT 1 OFFSET 1) sub) AS split_slice_join")
+	assert.Contains(t, sqlFESSOPg, "(SELECT COUNT(*) FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(fe.sp_value, '-')) AS u LIMIT 1 OFFSET 1) sub) AS split_slice_cnt")
+	assert.Contains(t, sqlFESSOPg, "(SELECT COALESCE(STRING_AGG(sub.u, ''), '') FROM (SELECT u FROM UNNEST(REGEXP_SPLIT_TO_ARRAY(fe.sp_value, '')) AS u LIMIT 4 OFFSET 4) sub) AS chars_slice_join")
+
+	respFESSOSqlite, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", strings.NewReader(feElemSplitSliceOrdVD))
+	require.NoError(t, err)
+	sqlFESSOSqliteBytes, _ := io.ReadAll(respFESSOSqlite.Body)
+	respFESSOSqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respFESSOSqlite.StatusCode, string(sqlFESSOSqliteBytes))
+	sqlFESSOSqlite := string(sqlFESSOSqliteBytes)
+	assert.Contains(t, sqlFESSOSqlite, "ORDER BY u ASC LIMIT 1) AS split_sort_first")
+	assert.Contains(t, sqlFESSOSqlite, "LIMIT 1 OFFSET 1) sub) AS split_slice_join")
+	assert.Contains(t, sqlFESSOSqlite, "LIMIT 4 OFFSET 4) sub) AS chars_slice_join")
+
+	respFESSORun, err := client.Post(ts.URL+"/fhir/r4/proto/ViewDefinition/$run", "application/fhir+json", strings.NewReader(feElemSplitSliceOrdVD))
+	require.NoError(t, err)
+	fessorBytes, _ := io.ReadAll(respFESSORun.Body)
+	respFESSORun.Body.Close()
+	require.Equal(t, http.StatusOK, respFESSORun.StatusCode, string(fessorBytes))
+	assert.Contains(t, string(fessorBytes), `"split_sort_first":"1001"`)
+	assert.Contains(t, string(fessorBytes), `"split_sort_last":"MRN"`)
+	assert.Contains(t, string(fessorBytes), `"split_sort_second":"MRN"`)
+	assert.Contains(t, string(fessorBytes), `"split_rev_first":"MRN"`)
+	assert.Contains(t, string(fessorBytes), `"split_skip_first":"1001"`)
+	assert.Contains(t, string(fessorBytes), `"split_slice_join":"1001"`)
+	assert.Contains(t, string(fessorBytes), `"split_slice_cnt":1`)
+	assert.Contains(t, string(fessorBytes), `"split_dist_sort_join":"1001:MRN"`)
+	assert.Contains(t, string(fessorBytes), `"chars_slice_join":"1001"`)
+	assert.Contains(t, string(fessorBytes), `"chars_sort_first":"M"`)
+	assert.Contains(t, string(fessorBytes), `"chars_sort_last":"R"`)
+	assert.Contains(t, string(fessorBytes), `"chars_sort_second":"N"`)
+	assert.Contains(t, string(fessorBytes), `"chars_dist_sort":"-01MNR"`)
+	assert.Contains(t, string(fessorBytes), `"traced_val":"MRN-1001"`)
 }
