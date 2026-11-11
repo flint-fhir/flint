@@ -6540,6 +6540,62 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-54", suite10, "SQL-on-FHIR v2 Multi-Valued Root Collection Flattened .split(sep) & .toChars() Chain Pushdown, Cross-Collection Pipe Union (|), .aggregate() & Flattened collection: true Array Columns + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 multi-valued root collection flattened split/toChars chains, cross-collection pipe union (|), .aggregate(), flattened collection: true array columns & binary Proto3 $sql/$run verified")
 
+	// AN-55: SQL-on-FHIR v2 forEach & forEachOrNull Unnesting Over Flattened .split(sep) & .toChars() Chains, Cross-Collection Pipe Union (|), Element-Scoped collection: true Arrays + Binary Proto3 Wire
+	t0 = time.Now()
+	{
+		vdForEachSplitUnnest := []byte(`{
+			"resourceType": "ViewDefinition",
+			"name": "cert_pat_foreach_split_tochars_unnest_v1",
+			"status": "active",
+			"resource": "Patient",
+			"where": [
+				{"path": "id = 'cert-pat-1'"}
+			],
+			"select": [
+				{
+					"forEach": "(identifier.value.split('-').where($this.length() >= 3) | id.split('-').where($this = 'cert')).sort()",
+					"where": [
+						{"path": "$this.length() >= 3 and $this.toChars().exists($this != 'X')"}
+					],
+					"column": [
+						{"name": "rk", "path": "getResourceKey()"},
+						{"name": "fe_split_tok", "path": "$this"},
+						{"name": "fe_split_tag", "path": "$this.lower() & ':' & %resource.gender"},
+						{"name": "fe_split_char_cnt", "path": "$this.toChars().distinct().count()"},
+						{"name": "fe_split_chars", "path": "$this.toChars().sort()", "collection": true}
+					]
+				}
+			]
+		}`)
+		respFESUDoris, bFESUDoris, errFESUDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", vdForEachSplitUnnest, nil)
+		respFESUPg, bFESUPg, errFESUPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", vdForEachSplitUnnest, nil)
+		respFESUSqlite, bFESUSqlite, errFESUSqlite := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", vdForEachSplitUnnest, nil)
+		respFESURun, bFESURun, errFESURun := doReq(http.MethodPost, basePath+"/ViewDefinition/$run", "application/fhir+json", vdForEachSplitUnnest, nil)
+		respFESUSqlProto, bFESUSqlProto, errFESUSqlProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/x-protobuf", "application/fhir+json", vdForEachSplitUnnest, map[string]string{"Accept": "application/x-protobuf"})
+		respFESURunProto, bFESURunProto, errFESURunProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$run?_format=application/x-protobuf", "application/fhir+json", vdForEachSplitUnnest, map[string]string{"Accept": "application/x-protobuf"})
+		sFESUDoris := string(bFESUDoris)
+		sFESUPg := string(bFESUPg)
+		sFESUSqlite := string(bFESUSqlite)
+		sFESURun := string(bFESURun)
+
+		if errFESUDoris != nil || respFESUDoris.StatusCode != http.StatusOK || !strings.Contains(sFESUDoris, "LATERAL VIEW EXPLODE(ARRAY_SORT(ARRAY_UNION(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 3, ARRAY_FLATTEN(ARRAY_MAP(fe_el -> SPLIT_BY_STRING(fe_el, '-'), ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE 'identifier=|%', r.code_tokens))))), ARRAY_FILTER(x -> x = 'cert', SPLIT_BY_STRING(r.res_id, '-'))))) fe_tbl AS fe_tok") || !strings.Contains(sFESUDoris, "ARRAY_SIZE(ARRAY_DISTINCT(SPLIT_BY_STRING(fe_tok, ''))) AS fe_split_char_cnt") || !strings.Contains(sFESUDoris, "ARRAY_SORT(SPLIT_BY_STRING(fe_tok, '')) AS fe_split_chars") || !strings.Contains(sFESUDoris, "ARRAY_EXISTS(x -> x <> 'X', SPLIT_BY_STRING(fe_tok, ''))") {
+			err = fmt.Errorf("expected Doris $sql forEach split/toChars unnest pushdown, got status=%d sql=%s", respFESUDoris.StatusCode, sFESUDoris)
+		} else if errFESUPg != nil || respFESUPg.StatusCode != http.StatusOK || !strings.Contains(sFESUPg, "INNER JOIN LATERAL (SELECT sub.u AS sp_value FROM (") || !strings.Contains(sFESUPg, "(SELECT COALESCE(ARRAY_AGG(sub.u), ARRAY[]::text[]) FROM (SELECT u FROM UNNEST(REGEXP_SPLIT_TO_ARRAY(fe.sp_value, '')) AS u ORDER BY u ASC) sub) AS fe_split_chars") {
+			err = fmt.Errorf("expected PostgreSQL $sql forEach split/toChars unnest pushdown, got status=%d sql=%s", respFESUPg.StatusCode, sFESUPg)
+		} else if errFESUSqlite != nil || respFESUSqlite.StatusCode != http.StatusOK || !strings.Contains(sFESUSqlite, "INNER JOIN (SELECT sub.u AS sp_value FROM (") || !strings.Contains(sFESUSqlite, "SELECT json_group_array(sub.u) FROM") {
+			err = fmt.Errorf("expected SQLite $sql forEach split/toChars unnest pushdown, got status=%d sql=%s", respFESUSqlite.StatusCode, sFESUSqlite)
+		} else if errFESURun != nil || respFESURun.StatusCode != http.StatusOK || !strings.Contains(sFESURun, `"fe_split_tok":"CERT"`) || !strings.Contains(sFESURun, `"fe_split_tag":"mrn:female"`) || !strings.Contains(sFESURun, `"fe_split_char_cnt":3`) || !strings.Contains(sFESURun, `"fe_split_chars":["M","N","R"]`) || !strings.Contains(sFESURun, `"fe_split_chars":["c","e","r","t"]`) {
+			err = fmt.Errorf("expected $run forEach split/toChars unnest row evaluation, got status=%d body=%s", respFESURun.StatusCode, sFESURun)
+		} else if errFESUSqlProto != nil || respFESUSqlProto == nil || respFESUSqlProto.StatusCode != http.StatusOK || !strings.Contains(respFESUSqlProto.Header.Get("Content-Type"), "application/x-protobuf") || respFESUSqlProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bFESUSqlProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$sql?_format=application/x-protobuf, got %v", errFESUSqlProto)
+		} else if errFESURunProto != nil || respFESURunProto == nil || respFESURunProto.StatusCode != http.StatusOK || !strings.Contains(respFESURunProto.Header.Get("Content-Type"), "application/x-protobuf") || respFESURunProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bFESURunProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$run?_format=application/x-protobuf, got %v", errFESURunProto)
+		} else {
+			err = nil
+		}
+	}
+	record("AN-55", suite10, "SQL-on-FHIR v2 forEach & forEachOrNull Unnesting Over Flattened .split(sep) & .toChars() Chains, Cross-Collection Pipe Union (|), Element-Scoped collection: true Arrays + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 forEach/forEachOrNull unnesting over flattened split/toChars chains, cross-collection pipe union (|), element-scoped collection: true arrays & binary Proto3 $sql/$run verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

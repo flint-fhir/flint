@@ -7884,4 +7884,220 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	require.Equal(t, http.StatusOK, respMVSRunProto.StatusCode)
 	assert.Contains(t, respMVSRunProto.Header.Get("Content-Type"), "application/x-protobuf")
 	assert.NotEmpty(t, mvsRunProtoBytes)
+
+	// 76. Wave 121: SQL-on-FHIR v2 forEach & forEachOrNull Unnesting Over Flattened .split(sep) & .toChars() Chains,
+	// Cross-Collection Pipe Union (|), Nested Relative forEach Refinement, Element-Scoped collection: true Arrays & Binary Proto3 Wire
+	w121PatJSON := `{"resourceType":"Patient","id":"proto-pat-w121","active":true,"identifier":[{"system":"http://hospital.example.org/mrn","value":"MRN-100"},{"system":"http://hl7.org/fhir/sid/us-ssn","value":"SSN-250"}],"name":[{"family":"UnnestSplit","given":["Al","Bo"]}],"gender":"male","birthDate":"1990-06-15"}`
+	reqW121Put, err := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Patient/proto-pat-w121", strings.NewReader(w121PatJSON))
+	require.NoError(t, err)
+	reqW121Put.Header.Set("Content-Type", "application/fhir+json")
+	respW121Put, err := client.Do(reqW121Put)
+	require.NoError(t, err)
+	respW121Put.Body.Close()
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, respW121Put.StatusCode)
+
+	forEachSplitToCharsUnnestVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_foreach_split_tochars_unnest",
+		"status": "active",
+		"resource": "Patient",
+		"where": [
+			{"path": "id = 'proto-pat-w121'"}
+		],
+		"select": [
+			{
+				"forEach": "(identifier.value.split('-').where($this.matches('^[A-Z]+$')) | id.split('-').where($this = 'w121')).sort()",
+				"where": [
+					{"path": "$this.length() >= 3 and $this.toChars().exists($this != 'X')"}
+				],
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "tok", "path": "$this"},
+					{"name": "tok_tag", "path": "$this.lower() & ':' & %resource.gender"},
+					{"name": "tok_char_cnt", "path": "$this.toChars().distinct().count()"},
+					{"name": "tok_chars", "path": "$this.toChars().sort()", "collection": true}
+				]
+			}
+		]
+	}`
+
+	reqFESUDoris, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", strings.NewReader(forEachSplitToCharsUnnestVD))
+	require.NoError(t, err)
+	reqFESUDoris.Header.Set("Content-Type", "application/fhir+json")
+	respFESUDoris, err := client.Do(reqFESUDoris)
+	require.NoError(t, err)
+	fesuDorisSQL, _ := io.ReadAll(respFESUDoris.Body)
+	respFESUDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respFESUDoris.StatusCode)
+	assert.Contains(t, string(fesuDorisSQL), "LATERAL VIEW EXPLODE(ARRAY_SORT(ARRAY_UNION(")
+	assert.Contains(t, string(fesuDorisSQL), "ARRAY_FLATTEN(ARRAY_MAP(fe_el -> SPLIT_BY_STRING(fe_el, '-'), ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE 'identifier=|%', r.code_tokens))))")
+	assert.Contains(t, string(fesuDorisSQL), "ARRAY_SORT(SPLIT_BY_STRING(fe_tok, '')) AS tok_chars")
+	assert.Contains(t, string(fesuDorisSQL), "ARRAY_SIZE(ARRAY_DISTINCT(SPLIT_BY_STRING(fe_tok, ''))) AS tok_char_cnt")
+	assert.Contains(t, string(fesuDorisSQL), "ARRAY_EXISTS(x -> x <> 'X', SPLIT_BY_STRING(fe_tok, ''))")
+
+	reqFESUPg, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", strings.NewReader(forEachSplitToCharsUnnestVD))
+	require.NoError(t, err)
+	reqFESUPg.Header.Set("Content-Type", "application/fhir+json")
+	respFESUPg, err := client.Do(reqFESUPg)
+	require.NoError(t, err)
+	fesuPgSQL, _ := io.ReadAll(respFESUPg.Body)
+	respFESUPg.Body.Close()
+	require.Equal(t, http.StatusOK, respFESUPg.StatusCode)
+	assert.Contains(t, string(fesuPgSQL), "INNER JOIN LATERAL (SELECT sub.u AS sp_value FROM (")
+	assert.Contains(t, string(fesuPgSQL), ") base_el, LATERAL UNNEST(STRING_TO_ARRAY(base_el.sp_value, '-')) AS u")
+	assert.Contains(t, string(fesuPgSQL), "(SELECT COALESCE(ARRAY_AGG(sub.u), ARRAY[]::text[]) FROM (SELECT u FROM UNNEST(REGEXP_SPLIT_TO_ARRAY(fe.sp_value, '')) AS u ORDER BY u ASC) sub) AS tok_chars")
+
+	reqFESUSqlite, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", strings.NewReader(forEachSplitToCharsUnnestVD))
+	require.NoError(t, err)
+	reqFESUSqlite.Header.Set("Content-Type", "application/fhir+json")
+	respFESUSqlite, err := client.Do(reqFESUSqlite)
+	require.NoError(t, err)
+	fesuSqliteSQL, _ := io.ReadAll(respFESUSqlite.Body)
+	respFESUSqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respFESUSqlite.StatusCode)
+	assert.Contains(t, string(fesuSqliteSQL), "INNER JOIN (SELECT sub.u AS sp_value FROM (")
+	assert.Contains(t, string(fesuSqliteSQL), ") base_el, json_each(")
+	assert.Contains(t, string(fesuSqliteSQL), "(SELECT json_group_array(sub.u) FROM (")
+
+	reqFESURun, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run", strings.NewReader(forEachSplitToCharsUnnestVD))
+	require.NoError(t, err)
+	reqFESURun.Header.Set("Content-Type", "application/fhir+json")
+	respFESURun, err := client.Do(reqFESURun)
+	require.NoError(t, err)
+	fesuRunBytes, _ := io.ReadAll(respFESURun.Body)
+	respFESURun.Body.Close()
+	require.Equal(t, http.StatusOK, respFESURun.StatusCode)
+	assert.Contains(t, string(fesuRunBytes), `"tok":"MRN"`)
+	assert.Contains(t, string(fesuRunBytes), `"tok_tag":"mrn:male"`)
+	assert.Contains(t, string(fesuRunBytes), `"tok_char_cnt":3`)
+	assert.Contains(t, string(fesuRunBytes), `"tok_chars":["M","N","R"]`)
+	assert.Contains(t, string(fesuRunBytes), `"tok":"SSN"`)
+	assert.Contains(t, string(fesuRunBytes), `"tok_chars":["N","S","S"]`)
+	assert.Contains(t, string(fesuRunBytes), `"tok":"w121"`)
+	assert.Contains(t, string(fesuRunBytes), `"tok_tag":"w121:male"`)
+	assert.Contains(t, string(fesuRunBytes), `"tok_chars":["1","1","2","w"]`)
+
+	// Verify forEachOrNull outer unnesting over empty filtered split chain + nested relative forEach refinement
+	forEachOrNullEmptySplitVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_foreachornull_empty_split_unnest",
+		"status": "active",
+		"resource": "Patient",
+		"where": [
+			{"path": "id = 'proto-pat-w121'"}
+		],
+		"select": [
+			{
+				"forEachOrNull": "birthDate.split('-').where($this = '9999')",
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "tok_fallback", "path": "coalesce($this, 'NO_TOK')"},
+					{"name": "tok_chars", "path": "$this.toChars()", "collection": true}
+				]
+			}
+		]
+	}`
+
+	reqFEONSDoris, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", strings.NewReader(forEachOrNullEmptySplitVD))
+	require.NoError(t, err)
+	reqFEONSDoris.Header.Set("Content-Type", "application/fhir+json")
+	respFEONSDoris, err := client.Do(reqFEONSDoris)
+	require.NoError(t, err)
+	feonsDorisSQL, _ := io.ReadAll(respFEONSDoris.Body)
+	respFEONSDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respFEONSDoris.StatusCode)
+	assert.Contains(t, string(feonsDorisSQL), "LATERAL VIEW OUTER EXPLODE(ARRAY_FILTER(x -> x = '9999', SPLIT_BY_STRING(r.effective_start, '-'))) fe_tbl AS fe_tok")
+
+	reqFEONSPg, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", strings.NewReader(forEachOrNullEmptySplitVD))
+	require.NoError(t, err)
+	reqFEONSPg.Header.Set("Content-Type", "application/fhir+json")
+	respFEONSPg, err := client.Do(reqFEONSPg)
+	require.NoError(t, err)
+	feonsPgSQL, _ := io.ReadAll(respFEONSPg.Body)
+	respFEONSPg.Body.Close()
+	require.Equal(t, http.StatusOK, respFEONSPg.StatusCode)
+	assert.Contains(t, string(feonsPgSQL), "LEFT JOIN LATERAL (SELECT sub.u AS sp_value FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY((SELECT d.sp_low FROM spidx_date d WHERE d.tenant_id = r.tenant_id AND d.res_type = r.res_type AND d.res_id = r.res_id AND d.sp_name = 'birthdate' LIMIT 1), '-')) AS u WHERE u = '9999') sub) fe ON TRUE")
+
+	reqFEONSRun, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run", strings.NewReader(forEachOrNullEmptySplitVD))
+	require.NoError(t, err)
+	reqFEONSRun.Header.Set("Content-Type", "application/fhir+json")
+	respFEONSRun, err := client.Do(reqFEONSRun)
+	require.NoError(t, err)
+	feonsRunBytes, _ := io.ReadAll(respFEONSRun.Body)
+	respFEONSRun.Body.Close()
+	require.Equal(t, http.StatusOK, respFEONSRun.StatusCode)
+	assert.Contains(t, string(feonsRunBytes), `"rk":"proto-pat-w121"`)
+	assert.Contains(t, string(feonsRunBytes), `"tok_fallback":"NO_TOK"`)
+	assert.Contains(t, string(feonsRunBytes), `"tok_chars":[]`)
+
+	nestedForEachSplitVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_nested_foreach_split_unnest",
+		"status": "active",
+		"resource": "Patient",
+		"where": [
+			{"path": "id = 'proto-pat-w121'"}
+		],
+		"select": [
+			{
+				"forEach": "identifier",
+				"select": [
+					{
+						"forEach": "value.split('-').where($this.length() >= 3).sort()",
+						"column": [
+							{"name": "rk", "path": "getResourceKey()"},
+							{"name": "sub_tok", "path": "$this"}
+						]
+					}
+				]
+			}
+		]
+	}`
+
+	reqNFESDoris, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", strings.NewReader(nestedForEachSplitVD))
+	require.NoError(t, err)
+	reqNFESDoris.Header.Set("Content-Type", "application/fhir+json")
+	respNFESDoris, err := client.Do(reqNFESDoris)
+	require.NoError(t, err)
+	nfesDorisSQL, _ := io.ReadAll(respNFESDoris.Body)
+	respNFESDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respNFESDoris.StatusCode)
+	assert.Contains(t, string(nfesDorisSQL), "LATERAL VIEW EXPLODE(ARRAY_SORT(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 3, ARRAY_FLATTEN(ARRAY_MAP(fe_el -> SPLIT_BY_STRING(fe_el, '-'), ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE 'identifier=|%', r.code_tokens))))))) fe_tbl AS fe_tok")
+
+	reqNFESRun, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run", strings.NewReader(nestedForEachSplitVD))
+	require.NoError(t, err)
+	reqNFESRun.Header.Set("Content-Type", "application/fhir+json")
+	respNFESRun, err := client.Do(reqNFESRun)
+	require.NoError(t, err)
+	nfesRunBytes, _ := io.ReadAll(respNFESRun.Body)
+	respNFESRun.Body.Close()
+	require.Equal(t, http.StatusOK, respNFESRun.StatusCode)
+	assert.Contains(t, string(nfesRunBytes), `"sub_tok":"100"`)
+	assert.Contains(t, string(nfesRunBytes), `"sub_tok":"250"`)
+	assert.Contains(t, string(nfesRunBytes), `"sub_tok":"MRN"`)
+	assert.Contains(t, string(nfesRunBytes), `"sub_tok":"SSN"`)
+
+	reqFESUSqlProto, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/x-protobuf", strings.NewReader(forEachSplitToCharsUnnestVD))
+	require.NoError(t, err)
+	reqFESUSqlProto.Header.Set("Content-Type", "application/fhir+json")
+	reqFESUSqlProto.Header.Set("Accept", "application/x-protobuf")
+	respFESUSqlProto, err := client.Do(reqFESUSqlProto)
+	require.NoError(t, err)
+	fesuSqlProtoBytes, _ := io.ReadAll(respFESUSqlProto.Body)
+	respFESUSqlProto.Body.Close()
+	require.Equal(t, http.StatusOK, respFESUSqlProto.StatusCode)
+	assert.Contains(t, respFESUSqlProto.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.NotEmpty(t, fesuSqlProtoBytes)
+
+	reqFESURunProto, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run?_format=application/x-protobuf", strings.NewReader(forEachSplitToCharsUnnestVD))
+	require.NoError(t, err)
+	reqFESURunProto.Header.Set("Content-Type", "application/fhir+json")
+	reqFESURunProto.Header.Set("Accept", "application/x-protobuf")
+	respFESURunProto, err := client.Do(reqFESURunProto)
+	require.NoError(t, err)
+	fesuRunProtoBytes, _ := io.ReadAll(respFESURunProto.Body)
+	respFESURunProto.Body.Close()
+	require.Equal(t, http.StatusOK, respFESURunProto.StatusCode)
+	assert.Contains(t, respFESURunProto.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.NotEmpty(t, fesuRunProtoBytes)
 }
