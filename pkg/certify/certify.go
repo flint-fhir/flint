@@ -6429,6 +6429,61 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-52", suite10, "SQL-on-FHIR v2 forEach / forEachOrNull Element-Level Split/ToChars .aggregate(aggregator [, init]) Pushdown, Pipe Union (|) Operator & forEach-Scoped collection: true Array Columns Pushdown + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 forEach element split/toChars .aggregate(), pipe union (|), collection: true array columns & binary Proto3 $sql/$run verified")
 
+	// AN-53: SQL-on-FHIR v2 Root-Level (forEach == "") .split(sep) & .toChars() Chain Pushdown, Cross-Path Pipe Union (|), .aggregate() & Root collection: true Array Columns + Binary Proto3 Wire
+	t0 = time.Now()
+	{
+		vdRootSplitChainColl := []byte(`{
+			"resourceType": "ViewDefinition",
+			"name": "cert_pat_root_split_tochars_chain_coll_v1",
+			"status": "active",
+			"resource": "Patient",
+			"where": [
+				{"path": "id = 'cert-pat-1' and birthDate.split('-').exists($this = '1985') and birthDate.split('-').all($this.length() >= 2) and birthDate.split('-').where($this = '1985').subsetOf(birthDate.split('-')) and birthDate.split('-').select($this.length() >= 2).allTrue() and birthDate.split('-').aggregate($total + $this.length(), 0) = 8 and (id.split('-').where($this = 'cert') | birthDate.split('-').where($this = '1985')).count() = 2"}
+			],
+			"select": [
+				{
+					"column": [
+						{"name": "rk", "path": "getResourceKey()"},
+						{"name": "root_bd_agg_len", "path": "birthDate.split('-').aggregate($total + $this.length(), 0)"},
+						{"name": "root_bd_agg_join", "path": "birthDate.split('-').where($this.length() = 2).sort().aggregate(iif($total = '', $this, $total & ':' & $this), '')"},
+						{"name": "root_pipe_join", "path": "(id.split('-').where($this = 'cert') | birthDate.split('-').where($this = '1985')).sort().join(':')"},
+						{"name": "root_id_chars_cnt", "path": "id.toChars().distinct().aggregate($total + 1, 0)"},
+						{"name": "root_bd_subset", "path": "birthDate.split('-').where($this = '1985').subsetOf(birthDate.split('-'))"},
+						{"name": "root_bd_all_true", "path": "birthDate.split('-').select($this.length() >= 2).allTrue()"},
+						{"name": "root_id_coll_arr", "path": "id.split('-').where($this.length() >= 3).sort()", "collection": true}
+					]
+				}
+			]
+		}`)
+		respRSCCDoris, bRSCCDoris, errRSCCDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", vdRootSplitChainColl, nil)
+		respRSCCPg, bRSCCPg, errRSCCPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", vdRootSplitChainColl, nil)
+		respRSCCSqlite, bRSCCSqlite, errRSCCSqlite := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", vdRootSplitChainColl, nil)
+		respRSCCRun, bRSCCRun, errRSCCRun := doReq(http.MethodPost, basePath+"/ViewDefinition/$run", "application/fhir+json", vdRootSplitChainColl, nil)
+		respRSCCSqlProto, bRSCCSqlProto, errRSCCSqlProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/x-protobuf", "application/fhir+json", vdRootSplitChainColl, map[string]string{"Accept": "application/x-protobuf"})
+		respRSCCRunProto, bRSCCRunProto, errRSCCRunProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$run?_format=application/x-protobuf", "application/fhir+json", vdRootSplitChainColl, map[string]string{"Accept": "application/x-protobuf"})
+		sRSCCDoris := string(bRSCCDoris)
+		sRSCCPg := string(bRSCCPg)
+		sRSCCSqlite := string(bRSCCSqlite)
+		sRSCCRun := string(bRSCCRun)
+
+		if errRSCCDoris != nil || respRSCCDoris.StatusCode != http.StatusOK || !strings.Contains(sRSCCDoris, "COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CHAR_LENGTH(x), SPLIT_BY_STRING(r.effective_start, '-'))), 0) AS root_bd_agg_len") || !strings.Contains(sRSCCDoris, "ARRAY_JOIN(ARRAY_SORT(ARRAY_FILTER(x -> CHAR_LENGTH(x) = 2, SPLIT_BY_STRING(r.effective_start, '-'))), ':') AS root_bd_agg_join") || !strings.Contains(sRSCCDoris, "ARRAY_JOIN(ARRAY_SORT(ARRAY_UNION(ARRAY_FILTER(x -> x = 'cert', SPLIT_BY_STRING(r.res_id, '-')), ARRAY_FILTER(x -> x = '1985', SPLIT_BY_STRING(r.effective_start, '-')))), ':') AS root_pipe_join") || !strings.Contains(sRSCCDoris, "ARRAY_SIZE(ARRAY_DISTINCT(SPLIT_BY_STRING(r.res_id, ''))) AS root_id_chars_cnt") || !strings.Contains(sRSCCDoris, "ARRAY_SORT(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 3, SPLIT_BY_STRING(r.res_id, '-'))) AS root_id_coll_arr") {
+			err = fmt.Errorf("expected Doris $sql root split/toChars chain, pipe union & collection array pushdown, got status=%d sql=%s", respRSCCDoris.StatusCode, sRSCCDoris)
+		} else if errRSCCPg != nil || respRSCCPg.StatusCode != http.StatusOK || !strings.Contains(sRSCCPg, "(SELECT COUNT(*) FROM (SELECT DISTINCT u FROM UNNEST(REGEXP_SPLIT_TO_ARRAY(r.res_id, '')) AS u) sub) AS root_id_chars_cnt") || !strings.Contains(sRSCCPg, "(SELECT COALESCE(ARRAY_AGG(sub.u), ARRAY[]::text[]) FROM (SELECT u FROM UNNEST(STRING_TO_ARRAY(r.res_id, '-')) AS u WHERE CHAR_LENGTH(u) >= 3 ORDER BY u ASC) sub) AS root_id_coll_arr") {
+			err = fmt.Errorf("expected PostgreSQL $sql root split/toChars chain, pipe union & collection array pushdown, got status=%d sql=%s", respRSCCPg.StatusCode, sRSCCPg)
+		} else if errRSCCSqlite != nil || respRSCCSqlite.StatusCode != http.StatusOK || !strings.Contains(sRSCCSqlite, "COALESCE(SUM(LENGTH(sub.u)), 0)") || !strings.Contains(sRSCCSqlite, "SELECT json_group_array(sub.u) FROM") {
+			err = fmt.Errorf("expected SQLite $sql root split/toChars chain, pipe union & collection array pushdown, got status=%d sql=%s", respRSCCSqlite.StatusCode, sRSCCSqlite)
+		} else if errRSCCRun != nil || respRSCCRun.StatusCode != http.StatusOK || !strings.Contains(sRSCCRun, `"root_bd_agg_len":8`) || !strings.Contains(sRSCCRun, `"root_bd_agg_join":"04:12"`) || !strings.Contains(sRSCCRun, `"root_pipe_join":"1985:cert"`) || !strings.Contains(sRSCCRun, `"root_id_chars_cnt":8`) || !strings.Contains(sRSCCRun, `"root_bd_subset":true`) || !strings.Contains(sRSCCRun, `"root_bd_all_true":true`) || !strings.Contains(sRSCCRun, `"root_id_coll_arr":["cert","pat"]`) {
+			err = fmt.Errorf("expected $run root split/toChars chain, pipe union & collection array row evaluation, got status=%d body=%s", respRSCCRun.StatusCode, sRSCCRun)
+		} else if errRSCCSqlProto != nil || respRSCCSqlProto == nil || respRSCCSqlProto.StatusCode != http.StatusOK || !strings.Contains(respRSCCSqlProto.Header.Get("Content-Type"), "application/x-protobuf") || respRSCCSqlProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bRSCCSqlProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$sql?_format=application/x-protobuf, got %v", errRSCCSqlProto)
+		} else if errRSCCRunProto != nil || respRSCCRunProto == nil || respRSCCRunProto.StatusCode != http.StatusOK || !strings.Contains(respRSCCRunProto.Header.Get("Content-Type"), "application/x-protobuf") || respRSCCRunProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bRSCCRunProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$run?_format=application/x-protobuf, got %v", errRSCCRunProto)
+		} else {
+			err = nil
+		}
+	}
+	record("AN-53", suite10, "SQL-on-FHIR v2 Root-Level (forEach == \"\") .split(sep) & .toChars() Chain Pushdown, Cross-Path Pipe Union (|), .aggregate() & Root collection: true Array Columns + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 root-level split/toChars chains, cross-path pipe union (|), .aggregate(), root collection: true array columns & binary Proto3 $sql/$run verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}
