@@ -1,7 +1,13 @@
-// Flint FHIR Server
+// Command flintd runs the storage-agnostic Flint FHIR R4 API server over a
+// pluggable persistence backend (--store=postgres|sqlite|doris) and optional
+// analytical pushdown replica (--analytics-store=doris|sqlite|none).
 //
 // Usage:
 //
+//	# Zero-dependency embedded SQLite WAL mode:
+//	go run ./cmd/flintd --store=sqlite --sqlite-dsn=flint.db
+//
+//	# Production PostgreSQL OLTP mode:
 //	FLINT_POSTGRES_DSN="postgres://flint:flint@localhost:5432/flint?sslmode=disable" \
 //	  go run ./cmd/flintd
 package main
@@ -28,7 +34,7 @@ import (
 	"github.com/flint-fhir/flint/store/sqlite"
 )
 
-var version = "dev"
+var version = server.Version
 
 type cliOptions struct {
 	showVersion      bool

@@ -25,11 +25,18 @@ type ConformanceMatrixEntry struct {
 func ConformanceMatrix() []ConformanceMatrixEntry {
 	return []ConformanceMatrixEntry{
 		{
-			Category:      "Core Storage",
-			Capability:    "Proto3 Wire Binary Store (Zero JSONB) — All 146 FHIR R4 Resource Types",
-			Specification: "Google FHIR R4 Protobuf + 6 HAPI spidx_* Covering Tables",
+			Category:      "Decoupled API & Pluggable Storage",
+			Capability:    "Storage-Agnostic FHIR R4 API Layer (JSON, NDJSON, CSV/TSV & Binary Proto3 HTTP Wire) over Pluggable store.Store & store.AnalyticalStore Backends (PostgreSQL, Embedded SQLite WAL, Apache Doris MPP & Real-Time HybridStore)",
+			Specification: "Google FHIR R4 Protobuf + Pluggable Operational & Analytical Storage Plane",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/{resourceType}",
+		},
+		{
+			Category:      "SQL-on-FHIR v2 & Tabular Analytics",
+			Capability:    "ViewDefinition/$run (JSON, NDJSON, CSV, TSV), ViewDefinition/$export (Bulk Data v2) & Zero-JSON ViewDefinition/$sql Multi-Dialect Transpiler (postgres, sqlite, doris) with Nested forEach, unionAll & FHIRPath Scalar Unnesting",
+			Specification: "HL7 SQL-on-FHIR v2 IG",
+			Status:        "Verified",
+			Endpoint:      "/fhir/r4/{tenant}/ViewDefinition/$run",
 		},
 		{
 			Category:      "FHIR R4 CRUD, Versioning & Patch",
@@ -89,8 +96,8 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Conformance, Validation & Certification",
-			Capability:    "StructureDefinition & ValueSet Validation ($validate, 26 US Core v6.1.0 & v7.0.0 Profiles) & 50-Check Automated Certification ($certify)",
-			Specification: "HL7 FHIR R4 OperationDefinition/Resource-validate & TestReport",
+			Capability:    "StructureDefinition & ValueSet Validation ($validate, 26 US Core v6.1.0 & v7.0.0 Profiles), TestScript/$evaluate & 137-Check Automated Certification ($certify across 10 Suites)",
+			Specification: "HL7 FHIR R4 OperationDefinition/Resource-validate, TestScript & TestReport",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/$certify",
 		},
@@ -6119,9 +6126,9 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 	return map[string]any{
 		"openapi": "3.1.0",
 		"info": map[string]any{
-			"title":       "Flint FHIR R4 Server & Lakehouse API",
-			"version":     "0.1.0",
-			"description": "Proto-native HL7 FHIR R4 operational store (Zero JSONB in Postgres) with HAPI covering search indexes, Terminology Services ($expand, $validate-code, $lookup), FHIR Subscriptions (rest-hook), SMART on FHIR v2 authorization, HIPAA/ONC AuditEvent logging, Bulk Data ($export), and AutoMQ -> Iceberg -> SQLMesh lakehouse.",
+			"title":       "Flint FHIR R4 API & Interoperability Server",
+			"version":     Version,
+			"description": "Storage-agnostic HL7 FHIR R4 API & Interoperability Engine speaking FHIR JSON, NDJSON, CSV/TSV, and zero-JSON binary google/fhir Proto3 wire formats over pluggable store.Store & store.AnalyticalStore backends (PostgreSQL, Embedded SQLite WAL, Apache Doris MPP, and HybridStore), with SMART on FHIR v2 OAuth2/PKCE, 35+ National HL7 IGs, SQL-on-FHIR v2 ($run, $export, $sql), and 137-check automated conformance ($certify).",
 			"contact": map[string]any{
 				"name": "Flint FHIR Engineering",
 				"url":  "https://github.com/flint-fhir/flint",
@@ -6348,9 +6355,9 @@ const docsHTMLTemplate = `<!DOCTYPE html>
     <div class="brand">
       <h1>🔥 Flint FHIR R4 API &amp; SMART v2 Sandbox</h1>
       <span class="badge">FHIR R4 4.0.1</span>
-      <span class="badge">google/fhir Proto3 BYTEA (0 JSONB)</span>
-      <span class="badge">US Core $docref, $provenance &amp; $export</span>
-      <span class="badge">50-Check Certification ($certify)</span>
+      <span class="badge">google/fhir Proto3 Wire + Pluggable Store</span>
+      <span class="badge">US Core $docref, $provenance, SQL-on-FHIR v2 &amp; $export</span>
+      <span class="badge">137-Check Certification ($certify)</span>
     </div>
     <div class="controls" id="smart-token-minter">
       <input type="text" id="bearerToken" placeholder="SMART v2 Bearer JWT (or click Mint below)..." />
@@ -6540,8 +6547,8 @@ const docsHTMLTemplate = `<!DOCTYPE html>
         }, null, 2)
       },
       {
-        title: "10. 50-Check Automated Certification ($certify)",
-        desc: "Execute the 50-check FHIR R4, US Core, CQM, CDS Hooks, SDC, IPS, Da Vinci, $docref & Provenance suite.",
+        title: "10. 137-Check Automated Certification ($certify)",
+        desc: "Execute all 10 suites (137 checks) covering FHIR R4, US Core v6.1/v7.0, ONC (g)(10), SQL-on-FHIR v2, CQM, CDS Hooks, SDC, IPS, Da Vinci, 35+ National IGs & TestScript.",
         method: "GET",
         path: "/$certify",
         xProv: "",

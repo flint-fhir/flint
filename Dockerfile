@@ -11,7 +11,7 @@ RUN go mod download || (sleep 2 && go mod download) || (sleep 5 && go mod downlo
 COPY . .
 ARG TARGETOS=linux
 ARG TARGETARCH
-ARG VERSION=dev
+ARG VERSION=0.3.0
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/flintd ./cmd/flintd \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/seed ./cmd/seed \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/certify ./cmd/certify \
@@ -28,7 +28,7 @@ ENTRYPOINT ["/usr/local/bin/worker"]
 # Default target: Standalone Flint FHIR R4 Server (`flintd` + `seed` + `certify`)
 FROM alpine:3.21 AS flint
 LABEL org.opencontainers.image.title="Flint FHIR R4 Server" \
-      org.opencontainers.image.description="High-Performance Open Source FHIR R4 Server on PostgreSQL (linux/amd64, linux/arm64)" \
+      org.opencontainers.image.description="High-Performance Open Source FHIR R4 API Server with Pluggable Storage (PostgreSQL, SQLite, Apache Doris)" \
       org.opencontainers.image.source="https://github.com/flint-fhir/flint" \
       org.opencontainers.image.licenses="Apache-2.0"
 
