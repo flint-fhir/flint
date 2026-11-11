@@ -132,7 +132,7 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			func(string, http.Handler) error { return errors.New("should not serve") },
 		)
 		require.NoError(t, err)
-		assert.Equal(t, "flintd dev\n", out.String())
+		assert.Equal(t, "flintd "+server.Version+"\n", out.String())
 	})
 
 	t.Run("invalid tenant isolation returns error", func(t *testing.T) {

@@ -1,30 +1,41 @@
 const quickstartSnippets = {
-  compose: `# Start standalone Flint FHIR R4 Server + PostgreSQL 16 + seeded 29-resource US Core demo cohort
+  sqlite: `# Install pure-Go single binary (Go 1.26+, zero external DB or Docker required!)
+go install github.com/flint-fhir/flint/cmd/flintd@v0.3.0
+
+# Boot complete FHIR R4 API server over embedded SQLite WAL (or use :memory:)
+flintd --store=sqlite --sqlite-dsn=flint.db
+
+# Verify 137/137 automated conformance checks across 10 suites:
+curl -s http://localhost:8080/fhir/r4/demo/$certify | jq .result`,
+
+  compose: `# Start Flint FHIR R4 API + PostgreSQL 16 + seeded 29-resource US Core cohort
 curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/docker-compose.yml -o docker-compose.yml
 docker compose --profile seed up -d
 
-# Explore the live FHIR R4 API & 78-Check Conformance Suite:
+# Explore the live SMART v2 Sandbox & 137-Check Conformance Suite:
 open http://localhost:8080/fhir/r4/demo/$docs
 curl -s http://localhost:8080/fhir/r4/demo/$certify | jq .result`,
 
-  container: `# Run the multi-arch container (linux/amd64, linux/arm64) against any PostgreSQL 15+ database
+  container: `# Option A: PostgreSQL OLTP container (auto-migrates on boot)
 docker run --rm -p 8080:8080 \\
   -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \\
-  ghcr.io/flint-fhir/flint:latest
+  ghcr.io/flint-fhir/flint:0.3.0
 
-# Seed the US Core cohort & execute the 78-check conformance certification CLI
-docker run --rm --entrypoint /usr/local/bin/seed ghcr.io/flint-fhir/flint:latest -url http://host.docker.internal:8080 -tenant demo
-docker run --rm --entrypoint /usr/local/bin/certify ghcr.io/flint-fhir/flint:latest -url http://host.docker.internal:8080 -tenant demo`,
-
-  binary: `# Install single binary directly with Go 1.25+ (embeds all Atlas SQL migrations)
-go install github.com/flint-fhir/flint/cmd/flintd@latest
-
-FLINT_POSTGRES_DSN="postgres://flint:flint@localhost:5432/flint?sslmode=disable" \\
-FLINT_ADDR=":8080" \\
-  flintd`
+# Option B: Hybrid PostgreSQL OLTP + Real-Time Apache Doris MPP Analytics
+docker run --rm -p 8080:8080 \\
+  -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \\
+  -e FLINT_DORIS_DSN="root:@tcp(host.docker.internal:9030)/flint" \\
+  ghcr.io/flint-fhir/flint:0.3.0 --store=postgres --analytics-store=doris`
 };
 
 const igCatalog = [
+  {
+    title: "HL7 SQL-on-FHIR v2, Binary Proto3 Wire & Pluggable Storage",
+    domain: "Core & ONC",
+    desc: "Tabular ViewDefinition/$run (JSON, NDJSON, CSV, TSV), Bulk Data ViewDefinition/$export, zero-JSON ViewDefinition/$sql multi-dialect compiler (postgres, sqlite, doris), binary application/x-protobuf HTTP wire transport, and HybridStore $sync-analytics.",
+    ops: ["ViewDefinition/$run", "ViewDefinition/$export", "ViewDefinition/$sql", "POST /$sync-analytics"],
+    curl: "curl -s 'http://localhost:8080/fhir/r4/demo/ViewDefinition/patient-demographics/$sql?dialect=postgres' | jq ."
+  },
   {
     title: "HL7 US Core v6.1.0 & v7.0.0 (USCDI v3 & v4)",
     domain: "Core & ONC",
@@ -220,7 +231,7 @@ function setDomainFilter(domain) {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  selectQuickstartTab("compose");
+  selectQuickstartTab("sqlite");
   renderIGCatalog();
 
   const searchInput = document.getElementById("igSearchInput");

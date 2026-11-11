@@ -1,6 +1,6 @@
 # Contributing to Flint
 
-Thank you for your interest in contributing to **Flint**! Flint is an open-source, high-throughput FHIR R4 server built on Go, Protocol Buffers, and PostgreSQL.
+Thank you for your interest in contributing to **Flint**! Flint is an open-source, high-throughput FHIR R4 API & Interoperability engine written in Go on Protocol Buffers, strictly decoupling its clinical API layer (`server/`) from pluggable persistence & analytical backends (`store/postgres`, `store/sqlite`, `store/doris`, and `store.HybridStore`).
 
 Please take a moment to review this guide before submitting issues or pull requests.
 
@@ -18,7 +18,7 @@ Flint provides a hermetic development environment using **Nix flakes** and **dir
 
 ### Prerequisites
 
-* [Nix](https://nixos.org/download.html) with Flakes enabled (or Go 1.25+, Buf, and Docker)
+* [Nix](https://nixos.org/download.html) with Flakes enabled (or Go 1.26+, Buf, and Docker)
 * [direnv](https://direnv.net/) (recommended)
 * [Docker](https://www.docker.com/) (for k3d local cluster)
 
@@ -47,10 +47,20 @@ Flint provides a hermetic development environment using **Nix flakes** and **dir
 
 ## Local Development Stack
 
-By default, Flint uses `k3d` to run only PostgreSQL for the core FHIR R4 server:
+For zero-dependency local development (no Docker or external database needed), run `flintd` directly with the embedded SQLite WAL backend:
 
 ```bash
-# Spin up local cluster with Postgres only
+# Build core binaries and start flintd on embedded SQLite WAL (flint.db)
+task run-sqlite
+```
+
+For containerized PostgreSQL development, Flint uses `docker compose` or `k3d`:
+
+```bash
+# Option A: Standalone Docker Compose (Flint + Postgres + seeded US Core cohort)
+task compose-up
+
+# Option B: Spin up local k3d cluster with Postgres
 task dev
 
 # Inspect status of running pods

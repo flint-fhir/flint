@@ -1,11 +1,13 @@
-// Package store defines the pluggable persistence and analytical storage interfaces
-// for the Flint FHIR R4 server.
+// Package store defines the pluggable persistence and analytical storage boundary
+// between Flint's storage-agnostic FHIR R4 API layer (package server) and concrete
+// database engines.
 //
-// Flint supports two storage backends and a hybrid operational/analytical topology:
-//   - "postgres" (store/postgres): Transactional OLTP store using proto blobs + HAPI-style spidx_* B-tree tables.
-//   - "doris"    (store/doris):    Zero-JSON Apache Doris Unique Key Merge-on-Write (MoW) columnar + inverted-index store.
-//   - Hybrid mode:                 PostgreSQL for sub-millisecond OLTP writes paired with Apache Doris as AnalyticalStore
-//     for Bulk $export, Observation/$stats, and population cohort analytics.
+// Flint supports three operational Store implementations and dual-plane HybridStore topologies:
+//   - "postgres" (store/postgres): Transactional ACID OLTP store with schema-per-tenant isolation, Proto3 BYTEA, and 6 HAPI-style spidx_* B-tree tables.
+//   - "sqlite"   (store/sqlite):   Zero-dependency embedded pure-Go SQLite WAL operational & analytical store (:memory: or single file).
+//   - "doris"    (store/doris):    Zero-JSON Apache Doris Unique Key Merge-on-Write (MoW) MPP columnar + inverted-index store.
+//   - HybridStore (store/hybrid.go): Pairs any operational primary (e.g. PostgreSQL) with a real-time replicated AnalyticalStore
+//     (Apache Doris or SQLite) for Bulk $export, Observation/$stats, and population cohort analytics.
 package store
 
 import (
@@ -135,8 +137,9 @@ type (
 	ExportJobRecord             = postgres.ExportJobRecord
 )
 
-// Store defines the operational persistence contract for the Flint FHIR R4 server.
-// Both *postgres.Store and *doris.Store implement this interface.
+// Store defines the operational persistence contract for the Flint FHIR R4 API layer.
+// Concrete implementations live in store/postgres, store/sqlite, and store/doris,
+// and store.HybridStore composes an operational Store with an AnalyticalStore replica.
 type Store interface {
 	Ping(ctx context.Context) error
 
@@ -245,9 +248,10 @@ type ObservationStatsResult struct {
 }
 
 // AnalyticalStore is an optional capability interface for columnar/OLAP storage backends
-// (such as Apache Doris). When a Store implements AnalyticalStore — or when a separate
-// AnalyticalStore is wired into the Server alongside Postgres — Flint routes bulk export,
-// cohort counts, and statistical aggregations to the analytical engine.
+// (implemented by *doris.Store and *sqlite.Store). When a Store implements AnalyticalStore —
+// or when a separate AnalyticalStore replica is paired via HybridStore alongside an OLTP
+// primary such as PostgreSQL — Flint routes bulk export, cohort counts, and statistical
+// aggregations to the analytical engine.
 type AnalyticalStore interface {
 	BackendName() string
 	EvaluateObservationStats(ctx context.Context, params ObservationStatsParams) (*ObservationStatsResult, error)

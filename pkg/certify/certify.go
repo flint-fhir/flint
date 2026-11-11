@@ -1,8 +1,8 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
-// (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, and 35+ National HL7 Implementation Guide
-// conformance & certification runner. It executes 10 structured test suites (123 checks) against
-// a target Flint server and produces both a standard FHIR R4 TestReport resource
-// and a human-readable scorecard.
+// (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, HL7 SQL-on-FHIR v2, and 35+ National HL7
+// Implementation Guide conformance & certification runner. It executes 10 structured test suites
+// (137 checks) over HTTP against any Flint storage topology (PostgreSQL, SQLite, Apache Doris,
+// or HybridStore) and produces both a standard FHIR R4 TestReport resource and a scorecard.
 package certify
 
 import (
@@ -142,7 +142,7 @@ type Config struct {
 	SeedBundle  []byte
 }
 
-// Run executes all 5 certification suites against the configured Flint server.
+// Run executes all 10 certification suites (137 checks) against the configured Flint server.
 func Run(ctx context.Context, cfg Config) (*Report, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
 	if baseURL == "" {
