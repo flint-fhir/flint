@@ -5740,6 +5740,10 @@ func isModifiedForEachCollectionPath(forEachPath string) bool {
 	if p == "" {
 		return false
 	}
+	normP := normalizeSplitCharsPipeUnion(stripOuterParens(p))
+	if chain, ok := parseSplitOrToCharsChain(normP); ok && isRootSplitChain(chain) {
+		return true
+	}
 	if mods := parseSpidxCollectionModifiers(p); mods.hasAnyMods() || isSetOpFHIRPath(mods.basePath) {
 		return true
 	}
@@ -5754,23 +5758,20 @@ func isModifiedForEachCollectionPath(forEachPath string) bool {
 
 func buildSpidxForEachSubquery(forEachPath, dialect string) (string, string) {
 	p := normalizePolymorphicFHIRPath(strings.TrimSpace(forEachPath))
-	if idx := strings.LastIndex(p, ".split("); idx != -1 && strings.HasSuffix(p, ")") && !strings.Contains(p[idx+len(".split("):len(p)-1], ").") {
-		basePath := strings.TrimSpace(p[:idx])
-		rawSep := strings.Trim(strings.TrimSpace(p[idx+len(".split("):len(p)-1]), "'\"")
-		escapedSep := strings.ReplaceAll(rawSep, "'", "''")
-		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
-		if dialect == "sqlite" {
-			return fmt.Sprintf("SELECT j.value AS sp_value FROM json_each(json_array(%s)) j", colExpr), colSrc + ".split"
+	normP := normalizeSplitCharsPipeUnion(stripOuterParens(p))
+	if chain, ok := parseSplitOrToCharsChain(normP); ok && isRootSplitChain(chain) {
+		if !chain.hasMods() && isScalarRootSplitChain(chain) && dialect != "sqlite" {
+			colExpr, colSrc := spidxZeroJSONColumnExpr(chain.basePath, dialect)
+			if chain.isToChars {
+				return fmt.Sprintf("SELECT u AS sp_value FROM UNNEST(REGEXP_SPLIT_TO_ARRAY(%s, '')) AS u", colExpr), colSrc + ".toChars"
+			}
+			escapedSep := strings.ReplaceAll(chain.splitSep, "'", "''")
+			return fmt.Sprintf("SELECT u AS sp_value FROM UNNEST(STRING_TO_ARRAY(%s, '%s')) AS u", colExpr, escapedSep), colSrc + ".split"
 		}
-		return fmt.Sprintf("SELECT u AS sp_value FROM UNNEST(STRING_TO_ARRAY(%s, '%s')) AS u", colExpr, escapedSep), colSrc + ".split"
-	}
-	if strings.HasSuffix(p, ".toChars()") {
-		basePath := strings.TrimSpace(p[:len(p)-len(".toChars()")])
-		colExpr, colSrc := spidxZeroJSONColumnExpr(basePath, dialect)
-		if dialect == "sqlite" {
-			return fmt.Sprintf("SELECT j.value AS sp_value FROM json_each(json_array(%s)) j", colExpr), colSrc + ".toChars"
-		}
-		return fmt.Sprintf("SELECT u AS sp_value FROM UNNEST(REGEXP_SPLIT_TO_ARRAY(%s, '')) AS u", colExpr), colSrc + ".toChars"
+		baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, false)
+		tr := chain.toTransform("splitChainArray", "", 0)
+		_, _, _, subQ := buildSpidxSplitChainSubquery(baseSQL, tr, dialect)
+		return fmt.Sprintf("SELECT sub.u AS sp_value FROM (%s) sub", subQ), baseSrc + chain.baseTag()
 	}
 	mods := parseSpidxCollectionModifiers(p)
 	return buildModifiedSpidxSubquery(mods, dialect)
@@ -5946,6 +5947,9 @@ func isAlreadyNumericForEachSQL(sqlExpr string) bool {
 
 func forEachElemSelectSQL(tail, valExpr, sysExpr, dialect string) (string, bool) {
 	t := normalizeSplitCharsPipeUnion(stripOuterParens(strings.TrimSpace(stripDiagnosticFHIRPathCalls(tail))))
+	if strings.HasPrefix(t, "split(") || strings.HasPrefix(t, "toChars()") {
+		t = "$this." + t
+	}
 	if t == "" || t == "$this" || t == "value" || t == "family" || t == "given" || t == "code" || t == "text" || t == "display" {
 		return valExpr, true
 	}
@@ -6314,6 +6318,9 @@ func forEachElemWhereSQL(rawExpr, forEachPath, valExpr, sysExpr, dialect string)
 			c = "$this" + c[len(fe):]
 		}
 	}
+	if strings.HasPrefix(c, "split(") || strings.HasPrefix(c, "toChars()") {
+		c = "$this." + c
+	}
 
 	if targetType, rest, okRefKey := parseForEachGetReferenceKey(c); okRefKey {
 		keyExpr := valExpr
@@ -6583,6 +6590,9 @@ func forEachElemCollectionSQL(tail, valExpr, sysExpr, dialect string) (string, b
 	t := normalizeSplitCharsPipeUnion(stripOuterParens(strings.TrimSpace(stripDiagnosticFHIRPathCalls(tail))))
 	if t == "" {
 		return "", false
+	}
+	if strings.HasPrefix(t, "split(") || strings.HasPrefix(t, "toChars()") {
+		t = "$this." + t
 	}
 	if isPureRootResourceExpr(t) {
 		rootTail, _ := stripRootResourceEnvPrefix(t)
