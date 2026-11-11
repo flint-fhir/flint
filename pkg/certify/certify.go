@@ -6484,6 +6484,62 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	record("AN-53", suite10, "SQL-on-FHIR v2 Root-Level (forEach == \"\") .split(sep) & .toChars() Chain Pushdown, Cross-Path Pipe Union (|), .aggregate() & Root collection: true Array Columns + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 root-level split/toChars chains, cross-path pipe union (|), .aggregate(), root collection: true array columns & binary Proto3 $sql/$run verified")
 
+	// AN-54: SQL-on-FHIR v2 Multi-Valued Root Collection Flattened .split(sep) & .toChars() Chain Pushdown, Cross-Collection Pipe Union (|), .aggregate() & Flattened collection: true Array Columns + Binary Proto3 Wire
+	t0 = time.Now()
+	{
+		vdMultiValCollSplit := []byte(`{
+			"resourceType": "ViewDefinition",
+			"name": "cert_pat_multival_coll_split_tochars_flatten_v1",
+			"status": "active",
+			"resource": "Patient",
+			"where": [
+				{"path": "id = 'cert-pat-1' and identifier.value.split('-').exists($this = 'MRN') and identifier.value.split('-').all($this.length() >= 1) and identifier.value.split('-').where($this = 'MRN').subsetOf(identifier.value.split('-')) and identifier.value.split('-').select($this.length() >= 1).allTrue() and identifier.value.split('-').aggregate($total + $this.length(), 0) = 8 and (identifier.value.split('-').where($this = 'MRN') | id.split('-').where($this = 'cert')).count() = 2"}
+			],
+			"select": [
+				{
+					"column": [
+						{"name": "rk", "path": "getResourceKey()"},
+						{"name": "mv_id_agg_len", "path": "identifier.value.split('-').aggregate($total + $this.length(), 0)"},
+						{"name": "mv_id_agg_join", "path": "identifier.value.split('-').where($this.length() >= 3).sort().aggregate(iif($total = '', $this, $total & ':' & $this), '')"},
+						{"name": "mv_cross_pipe_join", "path": "(identifier.value.split('-').where($this = 'MRN') | id.split('-').where($this = 'cert')).sort().join(':')"},
+						{"name": "mv_given_chars_cnt", "path": "name.given.toChars().distinct().aggregate($total + 1, 0)"},
+						{"name": "mv_id_subset", "path": "identifier.value.split('-').where($this = 'MRN').subsetOf(identifier.value.split('-'))"},
+						{"name": "mv_id_all_true", "path": "identifier.value.split('-').select($this.length() >= 1).allTrue()"},
+						{"name": "mv_id_tok_coll", "path": "identifier.value.split('-').where($this.length() >= 3).sort()", "collection": true},
+						{"name": "mv_given_chars_coll", "path": "name.given.toChars().sort()", "collection": true}
+					]
+				}
+			]
+		}`)
+		respMVSDoris, bMVSDoris, errMVSDoris := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=doris&_format=application/sql", "application/fhir+json", vdMultiValCollSplit, nil)
+		respMVSPg, bMVSPg, errMVSPg := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/sql", "application/fhir+json", vdMultiValCollSplit, nil)
+		respMVSSqlite, bMVSSqlite, errMVSSqlite := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", "application/fhir+json", vdMultiValCollSplit, nil)
+		respMVSRun, bMVSRun, errMVSRun := doReq(http.MethodPost, basePath+"/ViewDefinition/$run", "application/fhir+json", vdMultiValCollSplit, nil)
+		respMVSSqlProto, bMVSSqlProto, errMVSSqlProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$sql?dialect=postgres&_format=application/x-protobuf", "application/fhir+json", vdMultiValCollSplit, map[string]string{"Accept": "application/x-protobuf"})
+		respMVSRunProto, bMVSRunProto, errMVSRunProto := doReq(http.MethodPost, basePath+"/ViewDefinition/$run?_format=application/x-protobuf", "application/fhir+json", vdMultiValCollSplit, map[string]string{"Accept": "application/x-protobuf"})
+		sMVSDoris := string(bMVSDoris)
+		sMVSPg := string(bMVSPg)
+		sMVSSqlite := string(bMVSSqlite)
+		sMVSRun := string(bMVSRun)
+
+		if errMVSDoris != nil || respMVSDoris.StatusCode != http.StatusOK || !strings.Contains(sMVSDoris, "COALESCE(ARRAY_SUM(ARRAY_MAP(x -> CHAR_LENGTH(x), ARRAY_FLATTEN(ARRAY_MAP(fe_el -> SPLIT_BY_STRING(fe_el, '-'), ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE 'identifier=|%', r.code_tokens)))))), 0) AS mv_id_agg_len") || !strings.Contains(sMVSDoris, "ARRAY_JOIN(ARRAY_SORT(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 3, ARRAY_FLATTEN(ARRAY_MAP(fe_el -> SPLIT_BY_STRING(fe_el, '-'), ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE 'identifier=|%', r.code_tokens)))))), ':') AS mv_id_agg_join") || !strings.Contains(sMVSDoris, "ARRAY_SIZE(ARRAY_DISTINCT(ARRAY_FLATTEN(ARRAY_MAP(fe_el -> SPLIT_BY_STRING(fe_el, ''), ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)))))) AS mv_given_chars_cnt") || !strings.Contains(sMVSDoris, "ARRAY_SORT(ARRAY_FILTER(x -> CHAR_LENGTH(x) >= 3, ARRAY_FLATTEN(ARRAY_MAP(fe_el -> SPLIT_BY_STRING(fe_el, '-'), ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE 'identifier=|%', r.code_tokens)))))) AS mv_id_tok_coll") {
+			err = fmt.Errorf("expected Doris $sql multi-valued root collection flattened split/toChars pushdown, got status=%d sql=%s", respMVSDoris.StatusCode, sMVSDoris)
+		} else if errMVSPg != nil || respMVSPg.StatusCode != http.StatusOK || !strings.Contains(sMVSPg, ") base_el, LATERAL UNNEST(STRING_TO_ARRAY(base_el.sp_value, '-')) AS u") || !strings.Contains(sMVSPg, ") base_el, LATERAL UNNEST(REGEXP_SPLIT_TO_ARRAY(base_el.sp_value, '')) AS u) sub) AS mv_given_chars_cnt") {
+			err = fmt.Errorf("expected PostgreSQL $sql multi-valued root collection flattened split/toChars pushdown, got status=%d sql=%s", respMVSPg.StatusCode, sMVSPg)
+		} else if errMVSSqlite != nil || respMVSSqlite.StatusCode != http.StatusOK || !strings.Contains(sMVSSqlite, ") base_el, json_each(") || !strings.Contains(sMVSSqlite, "SELECT json_group_array(sub.u) FROM") {
+			err = fmt.Errorf("expected SQLite $sql multi-valued root collection flattened split/toChars pushdown, got status=%d sql=%s", respMVSSqlite.StatusCode, sMVSSqlite)
+		} else if errMVSRun != nil || respMVSRun.StatusCode != http.StatusOK || !strings.Contains(sMVSRun, `"mv_id_agg_len":8`) || !strings.Contains(sMVSRun, `"mv_id_agg_join":"CERT:MRN"`) || !strings.Contains(sMVSRun, `"mv_cross_pipe_join":"MRN:cert"`) || !strings.Contains(sMVSRun, `"mv_given_chars_cnt":8`) || !strings.Contains(sMVSRun, `"mv_id_subset":true`) || !strings.Contains(sMVSRun, `"mv_id_all_true":true`) || !strings.Contains(sMVSRun, `"mv_id_tok_coll":["CERT","MRN"]`) || !strings.Contains(sMVSRun, `"mv_given_chars_coll":["A","M","a","c","e","e","i","i","l","r"]`) {
+			err = fmt.Errorf("expected $run multi-valued root collection flattened split/toChars evaluation, got status=%d body=%s", respMVSRun.StatusCode, sMVSRun)
+		} else if errMVSSqlProto != nil || respMVSSqlProto == nil || respMVSSqlProto.StatusCode != http.StatusOK || !strings.Contains(respMVSSqlProto.Header.Get("Content-Type"), "application/x-protobuf") || respMVSSqlProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bMVSSqlProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$sql?_format=application/x-protobuf, got %v", errMVSSqlProto)
+		} else if errMVSRunProto != nil || respMVSRunProto == nil || respMVSRunProto.StatusCode != http.StatusOK || !strings.Contains(respMVSRunProto.Header.Get("Content-Type"), "application/x-protobuf") || respMVSRunProto.Header.Get("X-Flint-Wire-Format") != "google.fhir.r4.proto3" || len(bMVSRunProto) == 0 {
+			err = fmt.Errorf("expected binary proto3 200 OK from POST /ViewDefinition/$run?_format=application/x-protobuf, got %v", errMVSRunProto)
+		} else {
+			err = nil
+		}
+	}
+	record("AN-54", suite10, "SQL-on-FHIR v2 Multi-Valued Root Collection Flattened .split(sep) & .toChars() Chain Pushdown, Cross-Collection Pipe Union (|), .aggregate() & Flattened collection: true Array Columns + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 multi-valued root collection flattened split/toChars chains, cross-collection pipe union (|), .aggregate(), flattened collection: true array columns & binary Proto3 $sql/$run verified")
+
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)
 	}

@@ -2703,6 +2703,7 @@ type spidxElemTransform struct {
 	rhsChain          *splitCharsModChain
 	setOther          *splitCharsModChain
 	overrideExpr      string
+	overrideCollExpr  string
 }
 
 func hasSplitOrToCharsCall(s string) bool {
@@ -2772,6 +2773,7 @@ type splitCharsModChain struct {
 	rhsChain          *splitCharsModChain
 	setOther          *splitCharsModChain
 	overrideExpr      string
+	overrideCollExpr  string
 	tagMiddle         string
 }
 
@@ -2801,6 +2803,7 @@ func (c splitCharsModChain) toTransform(kind, arg2 string, int1 int) spidxElemTr
 		rhsChain:          c.rhsChain,
 		setOther:          c.setOther,
 		overrideExpr:      c.overrideExpr,
+		overrideCollExpr:  c.overrideCollExpr,
 	}
 }
 
@@ -2817,7 +2820,7 @@ func (c splitCharsModChain) baseTag() string {
 func parseCompatSplitOrToCharsChain(rhsStr, expectedBasePath string) (splitCharsModChain, bool) {
 	rhsStr = normalizeSplitCharsPipeUnion(stripOuterParens(strings.TrimSpace(rhsStr)))
 	if rhsChain, ok := parseSplitOrToCharsChain(rhsStr); ok {
-		if rhsChain.basePath == expectedBasePath || (isScalarRootSplitBasePath(expectedBasePath) && isScalarRootSplitChain(rhsChain)) {
+		if rhsChain.basePath == expectedBasePath || (isRootSplitBasePath(expectedBasePath) && isRootSplitChain(rhsChain)) {
 			return rhsChain, true
 		}
 	}
@@ -3741,9 +3744,16 @@ func buildDorisSplitChainArray(expr string, tr spidxElemTransform) string {
 		}
 	} else {
 		escapedSep := strings.ReplaceAll(tr.arg1, "'", "''")
-		arrExpr = fmt.Sprintf("SPLIT_BY_STRING(%s, '%s')", expr, escapedSep)
-		if tr.isToChars {
-			arrExpr = fmt.Sprintf("SPLIT_BY_STRING(%s, '')", expr)
+		if tr.overrideCollExpr != "" {
+			arrExpr = fmt.Sprintf("ARRAY_FLATTEN(ARRAY_MAP(fe_el -> SPLIT_BY_STRING(fe_el, '%s'), %s))", escapedSep, tr.overrideCollExpr)
+			if tr.isToChars {
+				arrExpr = fmt.Sprintf("ARRAY_FLATTEN(ARRAY_MAP(fe_el -> SPLIT_BY_STRING(fe_el, ''), %s))", tr.overrideCollExpr)
+			}
+		} else {
+			arrExpr = fmt.Sprintf("SPLIT_BY_STRING(%s, '%s')", expr, escapedSep)
+			if tr.isToChars {
+				arrExpr = fmt.Sprintf("SPLIT_BY_STRING(%s, '')", expr)
+			}
 		}
 	}
 	applySelect := func(inArr string) string {
@@ -3880,9 +3890,13 @@ func buildSpidxSplitChainSubquery(expr string, tr spidxElemTransform, dialect st
 		return fromClause, orderExpr, orderClause, subQ
 	}
 	if dialect == "sqlite" {
+		elemSrc := expr
+		if tr.overrideCollExpr != "" {
+			elemSrc = "base_el.sp_value"
+		}
 		rawElem := "j.value"
 		if tr.isToChars {
-			rawElem = fmt.Sprintf("SUBSTR(%s, j.value, 1)", expr)
+			rawElem = fmt.Sprintf("SUBSTR(%s, j.value, 1)", elemSrc)
 		}
 		uExpr := rawElem
 		if tr.selectProj != "" {
@@ -3906,14 +3920,27 @@ func buildSpidxSplitChainSubquery(expr string, tr spidxElemTransform, dialect st
 				whereSQL = predSQL
 			}
 		}
-		fromClause = fmt.Sprintf("SELECT %s%s AS u FROM json_each('[\"' || REPLACE(%s, '%s', '\",\"') || '\"]') j", distinctKw, uExpr, expr, escapedSep)
-		if whereSQL != "" {
-			fromClause += " WHERE " + whereSQL
-		}
-		if tr.isToChars {
-			fromClause = fmt.Sprintf("SELECT %s%s AS u FROM json_each(json_array(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)) j WHERE j.value <= LENGTH(%s)", distinctKw, uExpr, expr)
+		if tr.overrideCollExpr != "" {
+			fromClause = fmt.Sprintf("SELECT %s%s AS u FROM (%s) base_el, json_each('[\"' || REPLACE(base_el.sp_value, '%s', '\",\"') || '\"]') j", distinctKw, uExpr, tr.overrideCollExpr, escapedSep)
 			if whereSQL != "" {
-				fromClause += " AND " + whereSQL
+				fromClause += " WHERE " + whereSQL
+			}
+			if tr.isToChars {
+				fromClause = fmt.Sprintf("SELECT %s%s AS u FROM (%s) base_el, json_each(json_array(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)) j WHERE j.value <= LENGTH(base_el.sp_value)", distinctKw, uExpr, tr.overrideCollExpr)
+				if whereSQL != "" {
+					fromClause += " AND " + whereSQL
+				}
+			}
+		} else {
+			fromClause = fmt.Sprintf("SELECT %s%s AS u FROM json_each('[\"' || REPLACE(%s, '%s', '\",\"') || '\"]') j", distinctKw, uExpr, expr, escapedSep)
+			if whereSQL != "" {
+				fromClause += " WHERE " + whereSQL
+			}
+			if tr.isToChars {
+				fromClause = fmt.Sprintf("SELECT %s%s AS u FROM json_each(json_array(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)) j WHERE j.value <= LENGTH(%s)", distinctKw, uExpr, expr)
+				if whereSQL != "" {
+					fromClause += " AND " + whereSQL
+				}
 			}
 		}
 		orderExpr = "u"
@@ -3931,9 +3958,13 @@ func buildSpidxSplitChainSubquery(expr string, tr spidxElemTransform, dialect st
 		subQ = fromClause + orderClause + limitOffset
 		return fromClause, orderExpr, orderClause, subQ
 	}
-	unnestArr := fmt.Sprintf("STRING_TO_ARRAY(%s, '%s')", expr, escapedSep)
+	elemSrc := expr
+	if tr.overrideCollExpr != "" {
+		elemSrc = "base_el.sp_value"
+	}
+	unnestArr := fmt.Sprintf("STRING_TO_ARRAY(%s, '%s')", elemSrc, escapedSep)
 	if tr.isToChars {
-		unnestArr = fmt.Sprintf("REGEXP_SPLIT_TO_ARRAY(%s, '')", expr)
+		unnestArr = fmt.Sprintf("REGEXP_SPLIT_TO_ARRAY(%s, '')", elemSrc)
 	}
 	uSel := "u"
 	orderExpr = "u"
@@ -3960,7 +3991,11 @@ func buildSpidxSplitChainSubquery(expr string, tr spidxElemTransform, dialect st
 			whereClause = " WHERE " + predSQL
 		}
 	}
-	fromClause = fmt.Sprintf("SELECT %s%s FROM UNNEST(%s) AS u%s", distinctKw, uSel, unnestArr, whereClause)
+	if tr.overrideCollExpr != "" {
+		fromClause = fmt.Sprintf("SELECT %s%s FROM (%s) base_el, LATERAL UNNEST(%s) AS u%s", distinctKw, uSel, tr.overrideCollExpr, unnestArr, whereClause)
+	} else {
+		fromClause = fmt.Sprintf("SELECT %s%s FROM UNNEST(%s) AS u%s", distinctKw, uSel, unnestArr, whereClause)
+	}
 	if tr.sortDir != "" {
 		orderClause = " ORDER BY " + orderExpr + " " + tr.sortDir
 	}
@@ -4331,6 +4366,7 @@ func isScalarRootSplitBasePath(basePath string) bool {
 	case "id", "getResourceKey()",
 		"birthDate", "effectiveDateTime", "effectivePeriod.start", "effectivePeriod.end", "onsetDateTime", "abatementDateTime", "authoredOn", "issued",
 		"gender", "status", "intent", "priority", "actuality",
+		"code.coding.code", "code.coding.system",
 		"valueQuantity.unit", "valueQuantity.code", "valueQuantity.system",
 		"component.valueQuantity.unit", "component.valueQuantity.code", "component.valueQuantity.system",
 		"subject.getReferenceKey('Patient')", "subject.getReferenceKey()",
@@ -4349,6 +4385,25 @@ func isScalarRootSplitChain(c splitCharsModChain) bool {
 	return isScalarRootSplitBasePath(c.basePath)
 }
 
+func isRootSplitBasePath(basePath string) bool {
+	p := normalizePolymorphicFHIRPath(stripOuterParens(strings.TrimSpace(basePath)))
+	if p == "" || p == "$this" || strings.HasPrefix(p, "$this.") || p == "x" || strings.HasPrefix(p, "x.") {
+		return false
+	}
+	switch p {
+	case "value", "system", "reference", "type", "text", "display":
+		return false
+	}
+	return true
+}
+
+func isRootSplitChain(c splitCharsModChain) bool {
+	if c.setOp != "" && c.lhsChain != nil && c.rhsChain != nil {
+		return isRootSplitChain(*c.lhsChain) && isRootSplitChain(*c.rhsChain)
+	}
+	return isRootSplitBasePath(c.basePath)
+}
+
 func bindRootSplitChainBaseExprs(c *splitCharsModChain, dialect string, isCore bool) (string, string) {
 	if c == nil {
 		return "", ""
@@ -4361,20 +4416,30 @@ func bindRootSplitChainBaseExprs(c *splitCharsModChain, dialect string, isCore b
 		bindRootSplitChainBaseExprs(c.rhsChain, dialect, isCore)
 		return lhsSQL, lhsSrc
 	}
-	var sqlExpr, srcTag string
-	if dialect == "doris" {
-		sqlExpr, srcTag = dorisZeroJSONColumnExpr(c.basePath, isCore)
-	} else {
-		sqlExpr, srcTag = spidxZeroJSONColumnExpr(c.basePath, dialect)
+	if isScalarRootSplitBasePath(c.basePath) {
+		var sqlExpr, srcTag string
+		if dialect == "doris" {
+			sqlExpr, srcTag = dorisZeroJSONColumnExpr(c.basePath, isCore)
+		} else {
+			sqlExpr, srcTag = spidxZeroJSONColumnExpr(c.basePath, dialect)
+		}
+		c.overrideExpr = sqlExpr
+		return sqlExpr, srcTag
 	}
-	c.overrideExpr = sqlExpr
-	return sqlExpr, srcTag
+	if dialect == "doris" {
+		collSQL, collSrc := dorisZeroJSONCollectionColumnExprWithCore(c.basePath, isCore)
+		c.overrideCollExpr = collSQL
+		return collSQL, strings.TrimSuffix(collSrc, "[]")
+	}
+	subSQL, subSrc := spidxSetOperandSubquery(c.basePath, dialect)
+	c.overrideCollExpr = subSQL
+	return subSQL, subSrc
 }
 
 func tryCompileRootSplitCharsCollectionExpr(fhirPath, dialect string, isCore bool) (string, string, bool) {
 	p := normalizeSplitCharsPipeUnion(normalizePolymorphicFHIRPath(stripOuterParens(strings.TrimSpace(fhirPath))))
 	chain, ok := parseSplitOrToCharsChain(p)
-	if !ok || !chain.hasMods() || !isScalarRootSplitChain(chain) {
+	if !ok || !isRootSplitChain(chain) || (!chain.hasMods() && isScalarRootSplitChain(chain)) {
 		return "", "", false
 	}
 	baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
@@ -4421,13 +4486,13 @@ func isRootSplitCharsBooleanExpr(fhirPath string) bool {
 	for _, suf := range []string{".first()", ".last()", ".single()"} {
 		if strings.HasSuffix(p, suf) {
 			prefix := strings.TrimSpace(p[:len(p)-len(suf)])
-			if chain, ok := parseSplitOrToCharsChain(prefix); ok && chain.isBoolProj && isScalarRootSplitChain(chain) {
+			if chain, ok := parseSplitOrToCharsChain(prefix); ok && chain.isBoolProj && isRootSplitChain(chain) {
 				return true
 			}
 		}
 	}
 	if basePath, _, okSub := parseTrailingSubscriptIndex(p); okSub {
-		if chain, ok := parseSplitOrToCharsChain(basePath); ok && chain.isBoolProj && isScalarRootSplitChain(chain) {
+		if chain, ok := parseSplitOrToCharsChain(basePath); ok && chain.isBoolProj && isRootSplitChain(chain) {
 			return true
 		}
 	}
@@ -4440,7 +4505,7 @@ func tryCompileRootSplitCharsScalarExpr(fhirPath, dialect string, isCore bool) (
 		return "", "", false
 	}
 	if basePath, subIdx, okSub := parseTrailingSubscriptIndex(p); okSub {
-		if chain, ok := parseSplitOrToCharsChain(basePath); ok && chain.hasMods() && isScalarRootSplitChain(chain) {
+		if chain, ok := parseSplitOrToCharsChain(basePath); ok && (chain.hasMods() || !isScalarRootSplitChain(chain)) && isRootSplitChain(chain) {
 			baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
 			tr := chain.toTransform("splitChainElem", "", subIdx)
 			return applySplitCharsChainTransform(baseSQL, tr, dialect), fmt.Sprintf("%s%s[%d]", baseSrc, chain.baseTag(), subIdx), true
@@ -4448,9 +4513,9 @@ func tryCompileRootSplitCharsScalarExpr(fhirPath, dialect string, isCore bool) (
 	}
 	if strings.HasSuffix(p, ".first()") {
 		prefix := strings.TrimSpace(p[:len(p)-len(".first()")])
-		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || (chain.isToChars && dialect != "doris")) && isScalarRootSplitChain(chain) {
+		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || !isScalarRootSplitChain(chain) || (chain.isToChars && dialect != "doris")) && isRootSplitChain(chain) {
 			baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
-			if !chain.hasMods() && chain.isToChars {
+			if !chain.hasMods() && isScalarRootSplitChain(chain) && chain.isToChars {
 				return fmt.Sprintf("SUBSTR(%s, 1, 1)", baseSQL), baseSrc + ".toChars.first", true
 			}
 			tr := chain.toTransform("splitChainElem", "", 0)
@@ -4459,9 +4524,9 @@ func tryCompileRootSplitCharsScalarExpr(fhirPath, dialect string, isCore bool) (
 	}
 	if strings.HasSuffix(p, ".single()") {
 		prefix := strings.TrimSpace(p[:len(p)-len(".single()")])
-		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || dialect != "doris") && isScalarRootSplitChain(chain) {
+		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || !isScalarRootSplitChain(chain) || dialect != "doris") && isRootSplitChain(chain) {
 			baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
-			if !chain.hasMods() {
+			if !chain.hasMods() && isScalarRootSplitChain(chain) {
 				if chain.isToChars {
 					return fmt.Sprintf("SUBSTR(%s, 1, 1)", baseSQL), baseSrc + ".toChars.single", true
 				}
@@ -4477,9 +4542,9 @@ func tryCompileRootSplitCharsScalarExpr(fhirPath, dialect string, isCore bool) (
 	}
 	if strings.HasSuffix(p, ".last()") {
 		prefix := strings.TrimSpace(p[:len(p)-len(".last()")])
-		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || (chain.isToChars && dialect != "doris")) && isScalarRootSplitChain(chain) {
+		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || !isScalarRootSplitChain(chain) || (chain.isToChars && dialect != "doris")) && isRootSplitChain(chain) {
 			baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
-			if !chain.hasMods() && chain.isToChars {
+			if !chain.hasMods() && isScalarRootSplitChain(chain) && chain.isToChars {
 				if dialect == "sqlite" {
 					return fmt.Sprintf("SUBSTR(%s, -1, 1)", baseSQL), baseSrc + ".toChars.last", true
 				}
@@ -4491,9 +4556,9 @@ func tryCompileRootSplitCharsScalarExpr(fhirPath, dialect string, isCore bool) (
 	}
 	if strings.HasSuffix(p, ".count()") {
 		prefix := strings.TrimSpace(p[:len(p)-len(".count()")])
-		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || (chain.isToChars && dialect != "doris")) && isScalarRootSplitChain(chain) {
+		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || !isScalarRootSplitChain(chain) || (chain.isToChars && dialect != "doris")) && isRootSplitChain(chain) {
 			baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
-			if !chain.hasMods() && chain.isToChars {
+			if !chain.hasMods() && isScalarRootSplitChain(chain) && chain.isToChars {
 				if dialect == "sqlite" {
 					return fmt.Sprintf("COALESCE(LENGTH(%s), 0)", baseSQL), baseSrc + ".toChars.count", true
 				}
@@ -4506,7 +4571,7 @@ func tryCompileRootSplitCharsScalarExpr(fhirPath, dialect string, isCore bool) (
 	if idx := strings.LastIndex(p, ".join("); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(".join(")-1) == len(p)-1 {
 		prefix := strings.TrimSpace(p[:idx])
 		joinSep := strings.Trim(strings.TrimSpace(p[idx+len(".join("):len(p)-1]), "'\"")
-		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || (chain.isToChars && dialect != "doris")) && isScalarRootSplitChain(chain) {
+		if chain, ok := parseSplitOrToCharsChain(prefix); ok && (chain.hasMods() || !isScalarRootSplitChain(chain) || (chain.isToChars && dialect != "doris")) && isRootSplitChain(chain) {
 			baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
 			tr := chain.toTransform("splitChainJoin", joinSep, 0)
 			return applySplitCharsChainTransform(baseSQL, tr, dialect), baseSrc + chain.baseTag() + ".join", true
@@ -4531,7 +4596,7 @@ func tryCompileRootSplitCharsScalarExpr(fhirPath, dialect string, isCore bool) (
 	} {
 		if strings.HasSuffix(p, spec.suffix) {
 			prefix := strings.TrimSpace(p[:len(p)-len(spec.suffix)])
-			if chain, ok := parseSplitOrToCharsChain(prefix); ok && isScalarRootSplitChain(chain) {
+			if chain, ok := parseSplitOrToCharsChain(prefix); ok && isRootSplitChain(chain) {
 				baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
 				tr := chain.toTransform(spec.kind, "", 0)
 				return applySplitCharsChainTransform(baseSQL, tr, dialect), baseSrc + chain.baseTag() + spec.tag, true
@@ -4549,8 +4614,8 @@ func tryCompileRootSplitCharsScalarExpr(fhirPath, dialect string, isCore bool) (
 		if idx := strings.LastIndex(p, subSpec.call); idx != -1 && strings.HasSuffix(p, ")") && findMatchingCloseParen(p, idx+len(subSpec.call)-1) == len(p)-1 {
 			lhsPrefix := strings.TrimSpace(p[:idx])
 			rhsStr := strings.TrimSpace(p[idx+len(subSpec.call) : len(p)-1])
-			if lhsChain, okL := parseSplitOrToCharsChain(lhsPrefix); okL && isScalarRootSplitChain(lhsChain) {
-				if rhsChain, okR := parseCompatSplitOrToCharsChain(rhsStr, lhsChain.basePath); okR && isScalarRootSplitChain(rhsChain) {
+			if lhsChain, okL := parseSplitOrToCharsChain(lhsPrefix); okL && isRootSplitChain(lhsChain) {
+				if rhsChain, okR := parseCompatSplitOrToCharsChain(rhsStr, lhsChain.basePath); okR && isRootSplitChain(rhsChain) {
 					baseSQL, baseSrc := bindRootSplitChainBaseExprs(&lhsChain, dialect, isCore)
 					bindRootSplitChainBaseExprs(&rhsChain, dialect, isCore)
 					lhsChain.setOther = &rhsChain
@@ -4569,7 +4634,7 @@ func tryCompileRootSplitCharsScalarExpr(fhirPath, dialect string, isCore bool) (
 		{".all(", "splitChainAll", ".all"},
 	} {
 		if prefix, crit, ok := parseCollectionCriteriaCall(p, critSpec.call); ok && strings.Contains(crit, "$this") {
-			if chain, okChain := parseSplitOrToCharsChain(prefix); okChain && isScalarRootSplitChain(chain) {
+			if chain, okChain := parseSplitOrToCharsChain(prefix); okChain && isRootSplitChain(chain) {
 				if _, okPred := buildElemWherePredicateSQL(crit, "x", "postgres", chain.isNumProj); okPred {
 					baseSQL, baseSrc := bindRootSplitChainBaseExprs(&chain, dialect, isCore)
 					tr := chain.toTransform(critSpec.kind, crit, 0)
@@ -4582,7 +4647,7 @@ func tryCompileRootSplitCharsScalarExpr(fhirPath, dialect string, isCore bool) (
 		prefix := strings.TrimSpace(p[:idx])
 		args := splitTopLevelCommaArgs(p[idx+len(".aggregate(") : len(p)-1])
 		if len(args) >= 1 && len(args) <= 2 {
-			if chain, okChain := parseSplitOrToCharsChain(prefix); okChain && isScalarRootSplitChain(chain) {
+			if chain, okChain := parseSplitOrToCharsChain(prefix); okChain && isRootSplitChain(chain) {
 				aggExpr := strings.TrimSpace(args[0])
 				initVal := "0"
 				if len(args) == 2 {

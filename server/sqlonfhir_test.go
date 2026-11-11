@@ -7764,4 +7764,124 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	require.Equal(t, http.StatusOK, respRSCCRunProto.StatusCode)
 	assert.Contains(t, respRSCCRunProto.Header.Get("Content-Type"), "application/x-protobuf")
 	assert.NotEmpty(t, rsccRunProtoBytes)
+
+	// 75. Wave 120: SQL-on-FHIR v2 Multi-Valued Root Collection Flattened .split(sep) & .toChars() Chain Pushdown,
+	// Cross-Collection & Mixed Scalar/Collection Pipe Union (|), .aggregate(), Root collection: true Flattened Array Columns & Binary Proto3 Wire
+	w120PatJSON := `{"resourceType":"Patient","id":"proto-pat-w120","active":true,"identifier":[{"system":"http://hospital.example.org/mrn","value":"MRN-100"},{"system":"http://hl7.org/fhir/sid/us-ssn","value":"SSN-250"}],"name":[{"family":"MultiSplit","given":["Al","Bo"]}],"gender":"male","birthDate":"1990-06-15"}`
+	reqW120Put, err := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/proto/Patient/proto-pat-w120", strings.NewReader(w120PatJSON))
+	require.NoError(t, err)
+	reqW120Put.Header.Set("Content-Type", "application/fhir+json")
+	respW120Put, err := client.Do(reqW120Put)
+	require.NoError(t, err)
+	respW120Put.Body.Close()
+	require.Contains(t, []int{http.StatusOK, http.StatusCreated}, respW120Put.StatusCode)
+
+	multiValCollSplitToCharsVD := `{
+		"resourceType": "ViewDefinition",
+		"name": "pat_multival_coll_split_tochars_flatten",
+		"status": "active",
+		"resource": "Patient",
+		"where": [
+			{"path": "id = 'proto-pat-w120' and identifier.value.split('-').exists($this = 'MRN') and identifier.value.split('-').all($this.length() = 3) and identifier.value.split('-').where($this = 'MRN').subsetOf(identifier.value.split('-')) and identifier.value.split('-').select($this.length() = 3).allTrue() and identifier.value.split('-').aggregate($total + $this.length(), 0) = 12 and (identifier.value.split('-').where($this = 'MRN') | id.split('-').where($this = 'w120')).count() = 2"}
+		],
+		"select": [
+			{
+				"column": [
+					{"name": "rk", "path": "getResourceKey()"},
+					{"name": "id_tok_join", "path": "identifier.value.split('-').sort().join(':')"},
+					{"name": "id_num_sum", "path": "identifier.value.split('-').where($this.matches('^[0-9]+$')).select($this.toInteger()).sum()"},
+					{"name": "id_agg_len", "path": "identifier.value.split('-').aggregate($total + $this.length(), 0)"},
+					{"name": "id_agg_join", "path": "identifier.value.split('-').where($this.matches('^[A-Z]+$')).sort().aggregate(iif($total = '', $this, $total & ':' & $this), '')"},
+					{"name": "cross_pipe_join", "path": "(identifier.value.split('-').where($this = 'MRN') | id.split('-').where($this = 'w120')).sort().join(':')"},
+					{"name": "given_chars_cnt", "path": "name.given.toChars().distinct().aggregate($total + 1, 0)"},
+					{"name": "id_tok_subset", "path": "identifier.value.split('-').where($this = 'MRN').subsetOf(identifier.value.split('-'))"},
+					{"name": "id_tok_all_true", "path": "identifier.value.split('-').select($this.length() = 3).allTrue()"},
+					{"name": "id_tok_coll", "path": "identifier.value.split('-').where($this.matches('^[A-Z]+$')).sort()", "collection": true},
+					{"name": "given_chars_coll", "path": "name.given.toChars().sort()", "collection": true},
+					{"name": "given_chars_raw", "path": "name.given.toChars()", "collection": true}
+				]
+			}
+		]
+	}`
+
+	reqMVSDoris, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/sql", strings.NewReader(multiValCollSplitToCharsVD))
+	require.NoError(t, err)
+	reqMVSDoris.Header.Set("Content-Type", "application/fhir+json")
+	respMVSDoris, err := client.Do(reqMVSDoris)
+	require.NoError(t, err)
+	mvsDorisSQL, _ := io.ReadAll(respMVSDoris.Body)
+	respMVSDoris.Body.Close()
+	require.Equal(t, http.StatusOK, respMVSDoris.StatusCode)
+	assert.Contains(t, string(mvsDorisSQL), "ARRAY_FLATTEN(ARRAY_MAP(fe_el -> SPLIT_BY_STRING(fe_el, '-'), ARRAY_MAP(x -> SPLIT_PART(x, '|', 2), ARRAY_FILTER(x -> x LIKE 'identifier=|%', r.code_tokens))))")
+	assert.Contains(t, string(mvsDorisSQL), "ARRAY_FLATTEN(ARRAY_MAP(fe_el -> SPLIT_BY_STRING(fe_el, ''), ARRAY_MAP(x -> SPLIT_PART(x, '=', 2), ARRAY_FILTER(x -> x LIKE 'given=%', r.string_tokens)))) AS given_chars_raw")
+	assert.Contains(t, string(mvsDorisSQL), "AS cross_pipe_join")
+	assert.Contains(t, string(mvsDorisSQL), "AS id_tok_coll")
+
+	reqMVSPg, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=postgres&_format=application/sql", strings.NewReader(multiValCollSplitToCharsVD))
+	require.NoError(t, err)
+	reqMVSPg.Header.Set("Content-Type", "application/fhir+json")
+	respMVSPg, err := client.Do(reqMVSPg)
+	require.NoError(t, err)
+	mvsPgSQL, _ := io.ReadAll(respMVSPg.Body)
+	respMVSPg.Body.Close()
+	require.Equal(t, http.StatusOK, respMVSPg.StatusCode)
+	assert.Contains(t, string(mvsPgSQL), ") base_el, LATERAL UNNEST(STRING_TO_ARRAY(base_el.sp_value, '-')) AS u")
+	assert.Contains(t, string(mvsPgSQL), ") base_el, LATERAL UNNEST(REGEXP_SPLIT_TO_ARRAY(base_el.sp_value, '')) AS u")
+	assert.Contains(t, string(mvsPgSQL), "ARRAY_AGG(sub.u), ARRAY[]::text[]")
+
+	reqMVSSqlite, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=sqlite&_format=application/sql", strings.NewReader(multiValCollSplitToCharsVD))
+	require.NoError(t, err)
+	reqMVSSqlite.Header.Set("Content-Type", "application/fhir+json")
+	respMVSSqlite, err := client.Do(reqMVSSqlite)
+	require.NoError(t, err)
+	mvsSqliteSQL, _ := io.ReadAll(respMVSSqlite.Body)
+	respMVSSqlite.Body.Close()
+	require.Equal(t, http.StatusOK, respMVSSqlite.StatusCode)
+	assert.Contains(t, string(mvsSqliteSQL), ") base_el, json_each(")
+	assert.Contains(t, string(mvsSqliteSQL), "SELECT json_group_array(sub.u) FROM")
+
+	reqMVSRun, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run", strings.NewReader(multiValCollSplitToCharsVD))
+	require.NoError(t, err)
+	reqMVSRun.Header.Set("Content-Type", "application/fhir+json")
+	respMVSRun, err := client.Do(reqMVSRun)
+	require.NoError(t, err)
+	mvsRunBytes, _ := io.ReadAll(respMVSRun.Body)
+	respMVSRun.Body.Close()
+	require.Equal(t, http.StatusOK, respMVSRun.StatusCode)
+	assert.Contains(t, string(mvsRunBytes), `"rk":"proto-pat-w120"`)
+	assert.Contains(t, string(mvsRunBytes), `"id_tok_join":"100:250:MRN:SSN"`)
+	assert.Contains(t, string(mvsRunBytes), `"id_num_sum":350`)
+	assert.Contains(t, string(mvsRunBytes), `"id_agg_len":12`)
+	assert.Contains(t, string(mvsRunBytes), `"id_agg_join":"MRN:SSN"`)
+	assert.Contains(t, string(mvsRunBytes), `"cross_pipe_join":"MRN:w120"`)
+	assert.Contains(t, string(mvsRunBytes), `"given_chars_cnt":4`)
+	assert.Contains(t, string(mvsRunBytes), `"id_tok_subset":true`)
+	assert.Contains(t, string(mvsRunBytes), `"id_tok_all_true":true`)
+	assert.Contains(t, string(mvsRunBytes), `"id_tok_coll":["MRN","SSN"]`)
+	assert.Contains(t, string(mvsRunBytes), `"given_chars_coll":["A","B","l","o"]`)
+	assert.Contains(t, string(mvsRunBytes), `"given_chars_raw":["A","l","B","o"]`)
+
+	reqMVSSqlProto, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$sql?dialect=doris&_format=application/x-protobuf", strings.NewReader(multiValCollSplitToCharsVD))
+	require.NoError(t, err)
+	reqMVSSqlProto.Header.Set("Content-Type", "application/fhir+json")
+	reqMVSSqlProto.Header.Set("Accept", "application/x-protobuf")
+	respMVSSqlProto, err := client.Do(reqMVSSqlProto)
+	require.NoError(t, err)
+	mvsSqlProtoBytes, _ := io.ReadAll(respMVSSqlProto.Body)
+	respMVSSqlProto.Body.Close()
+	require.Equal(t, http.StatusOK, respMVSSqlProto.StatusCode)
+	assert.Contains(t, respMVSSqlProto.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.NotEmpty(t, mvsSqlProtoBytes)
+
+	reqMVSRunProto, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/proto/ViewDefinition/$run?_format=application/x-protobuf", strings.NewReader(multiValCollSplitToCharsVD))
+	require.NoError(t, err)
+	reqMVSRunProto.Header.Set("Content-Type", "application/fhir+json")
+	reqMVSRunProto.Header.Set("Accept", "application/x-protobuf")
+	respMVSRunProto, err := client.Do(reqMVSRunProto)
+	require.NoError(t, err)
+	mvsRunProtoBytes, _ := io.ReadAll(respMVSRunProto.Body)
+	respMVSRunProto.Body.Close()
+	require.Equal(t, http.StatusOK, respMVSRunProto.StatusCode)
+	assert.Contains(t, respMVSRunProto.Header.Get("Content-Type"), "application/x-protobuf")
+	assert.NotEmpty(t, mvsRunProtoBytes)
 }
