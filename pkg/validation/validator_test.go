@@ -593,5 +593,45 @@ func TestValidationEngine_StrictUnknownAndTypes(t *testing.T) {
 		if badBundle.IsValid() {
 			t.Fatal("expected bdl-3 violation on collection Bundle with entry.request")
 		}
+
+		// CapabilityStatement fhirVersion "4.0.1" (via E_FhirOriginalCode) must pass with 0 issues,
+		// while R5-only CapabilityStatement.rest.resource.conditionalPatch must be rejected.
+		goodCS := strictEngine.ValidateJSON("CapabilityStatement", []byte(`{
+			"resourceType": "CapabilityStatement",
+			"status": "active",
+			"date": "2026-01-15",
+			"kind": "instance",
+			"fhirVersion": "4.0.1",
+			"format": ["json", "application/fhir+json"],
+			"rest": [{
+				"mode": "server",
+				"resource": [{
+					"type": "Patient",
+					"conditionalCreate": true,
+					"conditionalRead": "full-support",
+					"conditionalUpdate": true,
+					"conditionalDelete": "single"
+				}]
+			}]
+		}`))
+		if !goodCS.IsValid() || len(goodCS.Issues) != 0 {
+			t.Fatalf("expected FHIR R4 CapabilityStatement with fhirVersion 4.0.1 to pass with 0 issues, got %+v", goodCS.Issues)
+		}
+
+		badCS := strictEngine.ValidateJSON("CapabilityStatement", []byte(`{
+			"resourceType": "CapabilityStatement",
+			"status": "active",
+			"date": "2026-01-15",
+			"kind": "instance",
+			"fhirVersion": "4.0.1",
+			"format": ["json"],
+			"rest": [{
+				"mode": "server",
+				"resource": [{"type": "Patient", "conditionalPatch": true}]
+			}]
+		}`))
+		if badCS.IsValid() {
+			t.Fatal("expected R5-only conditionalPatch on R4 CapabilityStatement.rest.resource to fail validation")
+		}
 	})
 }

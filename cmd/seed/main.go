@@ -239,6 +239,16 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			"telecom": []map[string]any{
 				{"system": "email", "value": "eleanor.vance@cardiology.example.org", "use": "work"},
 			},
+			"address": []map[string]any{
+				{
+					"use":        "work",
+					"line":       []string{"100 Health Plaza, Suite 300"},
+					"city":       "Boston",
+					"state":      "MA",
+					"postalCode": "02115",
+					"country":    "US",
+				},
+			},
 		}),
 		putEntry("Practitioner/prac-primary-2", map[string]any{
 			"resourceType": "Practitioner",
@@ -253,6 +263,16 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			},
 			"telecom": []map[string]any{
 				{"system": "email", "value": "marcus.chen@primarycare.example.org", "use": "work"},
+			},
+			"address": []map[string]any{
+				{
+					"use":        "work",
+					"line":       []string{"100 Health Plaza, Suite 110"},
+					"city":       "Boston",
+					"state":      "MA",
+					"postalCode": "02115",
+					"country":    "US",
+				},
 			},
 		}),
 
@@ -426,6 +446,18 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 						"unit":   "mmHg",
 						"system": "http://unitsofmeasure.org",
 						"code":   "mm[Hg]",
+					},
+				},
+				{
+					"code": map[string]any{
+						"coding": []map[string]any{
+							{"system": "http://loinc.org", "code": "8478-0", "display": "Mean blood pressure"},
+						},
+					},
+					"dataAbsentReason": map[string]any{
+						"coding": []map[string]any{
+							{"system": "http://terminology.hl7.org/CodeSystem/data-absent-reason", "code": "unknown", "display": "Unknown"},
+						},
 					},
 				},
 			},
@@ -710,6 +742,11 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 				"reference": "Encounter/enc-robert-001",
 			},
 			"onsetDateTime": "2020-03-15T00:00:00Z",
+			"_recordedDate": map[string]any{
+				"extension": []map[string]any{
+					{"url": "http://hl7.org/fhir/StructureDefinition/data-absent-reason", "valueCode": "unknown"},
+				},
+			},
 		}),
 		putEntry("Observation/obs-robert-hba1c", map[string]any{
 			"resourceType": "Observation",
@@ -886,6 +923,18 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			},
 			"period": map[string]any{
 				"start": "2026-03-01T11:00:00Z",
+				"_end": map[string]any{
+					"extension": []map[string]any{
+						{"url": "http://hl7.org/fhir/StructureDefinition/data-absent-reason", "valueCode": "unknown"},
+					},
+				},
+			},
+			"reasonCode": []map[string]any{
+				{
+					"extension": []map[string]any{
+						{"url": "http://hl7.org/fhir/StructureDefinition/data-absent-reason", "valueCode": "unknown"},
+					},
+				},
 			},
 		}),
 		putEntry("Observation/obs-elena-hr", map[string]any{

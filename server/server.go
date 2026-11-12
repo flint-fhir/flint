@@ -6140,7 +6140,6 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			"conditionalCreate": true,
 			"conditionalRead":   "full-support",
 			"conditionalUpdate": true,
-			"conditionalPatch":  true,
 			"conditionalDelete": "single",
 			"interaction":       interactions,
 			"searchParam":       sp,
@@ -6622,7 +6621,6 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 		"conditionalCreate": true,
 		"conditionalRead":   "full-support",
 		"conditionalUpdate": true,
-		"conditionalPatch":  true,
 		"conditionalDelete": "single",
 		"interaction":       interactions,
 		"operation": []map[string]string{
@@ -6712,7 +6710,6 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			"conditionalCreate": true,
 			"conditionalRead":   "full-support",
 			"conditionalUpdate": true,
-			"conditionalPatch":  true,
 			"conditionalDelete": "single",
 			"interaction":       interactions,
 			"searchParam":       sp,

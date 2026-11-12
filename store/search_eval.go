@@ -160,47 +160,56 @@ func MatchDateParam(idx *SearchIndexes, spName string, op DateOp) bool {
 func MatchDateRange(spLow, spHigh time.Time, op DateOp) bool {
 	low := op.Value
 	high := op.High
-	if high.IsZero() || high.Before(low) {
+	if high.IsZero() && low.Hour() == 0 && low.Minute() == 0 && low.Second() == 0 && low.Nanosecond() == 0 {
 		high = low.Add(24 * time.Hour)
+	} else if high.IsZero() || high.Before(low) {
+		high = low
 	}
 	if spHigh.IsZero() || spHigh.Before(spLow) {
 		spHigh = spLow
 	}
 
 	switch op.Prefix {
-	case "", "eq":
-		// Overlap between [spLow, spHigh] and [low, high)
-		if spHigh.Equal(spLow) {
-			return !spLow.Before(low) && spLow.Before(high)
+	case "lt", "eb":
+		return spHigh.Before(low)
+	case "le":
+		if high.After(low) {
+			return spLow.Before(high)
 		}
-		return !spLow.After(high.Add(-time.Nanosecond)) && !spHigh.Before(low)
-	case "ne":
-		if spHigh.Equal(spLow) {
-			return spLow.Before(low) || !spLow.Before(high)
-		}
-		return spHigh.Before(low) || !spLow.Before(high)
+		return !spLow.After(low)
 	case "gt":
-		return !spHigh.Before(high)
-	case "lt":
-		return spLow.Before(low)
+		if high.After(low) {
+			return !spHigh.Before(high)
+		}
+		return spHigh.After(low)
+	case "sa":
+		if high.After(low) {
+			return !spLow.Before(high)
+		}
+		return spLow.After(low)
 	case "ge":
 		return !spHigh.Before(low)
-	case "le":
-		return spLow.Before(high)
-	case "sa":
-		return !spLow.Before(high)
-	case "eb":
-		return spHigh.Before(low)
-	case "ap":
-		span := high.Sub(low)
-		if span < 24*time.Hour {
-			span = 24 * time.Hour
+	case "ne":
+		if high.After(low) {
+			return spHigh.Before(low) || !spLow.Before(high)
 		}
-		apLow := low.Add(-span)
-		apHigh := high.Add(span)
+		return spHigh.Before(low) || spLow.After(low)
+	case "ap":
+		effHigh := high
+		if !effHigh.After(low) {
+			effHigh = low
+		}
+		span := effHigh.Sub(low)
+		distFromNow := time.Since(low).Abs()
+		margin := max(span/10, distFromNow/10, 30*24*time.Hour)
+		apLow := low.Add(-margin)
+		apHigh := effHigh.Add(margin)
 		return !spLow.After(apHigh) && !spHigh.Before(apLow)
-	default:
-		return !spLow.Before(low) && spLow.Before(high)
+	default: // "", "eq"
+		if high.After(low) {
+			return spLow.Before(high) && !spHigh.Before(low)
+		}
+		return !spLow.After(low) && !spHigh.Before(low)
 	}
 }
 

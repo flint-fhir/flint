@@ -185,6 +185,56 @@ func TestEvaluateAdvancedSearchParams_AllFeatures(t *testing.T) {
 		}
 	}
 
+	// 1b. Exact RFC3339 point-timestamp parity (spLow == spHigh == op.Value == op.High)
+	exactPointView := store.IndexedResourceView{
+		TenantID:    "t1",
+		ResType:     "Observation",
+		ResID:       "obs-point",
+		ResVersion:  1,
+		LastUpdated: t0,
+		Indexes: &store.SearchIndexes{
+			Dates: []store.SpidxDate{
+				{SpName: "date", SpLow: t0, SpHigh: t0},
+			},
+		},
+	}
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{"2025-03-15T12:00:00Z", true},
+		{"eq2025-03-15T12:00:00Z", true},
+		{"eq2025-03-15T12:00:01Z", false},
+		{"ne2025-03-15T12:00:00Z", false},
+		{"ne2025-03-15T12:00:01Z", true},
+		{"le2025-03-15T12:00:00Z", true},
+		{"le2025-03-15T11:59:59Z", false},
+		{"ge2025-03-15T12:00:00Z", true},
+		{"ge2025-03-15T12:00:01Z", false},
+		{"gt2025-03-15T12:00:00Z", false},
+		{"gt2025-03-15T11:59:59Z", true},
+		{"lt2025-03-15T12:00:00Z", false},
+		{"lt2025-03-15T12:00:01Z", true},
+		{"sa2025-03-15T12:00:00Z", false},
+		{"sa2025-03-15T11:59:59Z", true},
+		{"eb2025-03-15T12:00:00Z", false},
+		{"eb2025-03-15T12:00:01Z", true},
+		{"ap2025-03-15T12:00:00Z", true},
+	} {
+		dOp, err := store.ParseDateOp(tc.raw)
+		if err != nil {
+			t.Fatalf("ParseDateOp(%q): %v", tc.raw, err)
+		}
+		got := store.EvaluateAdvancedSearchParams(exactPointView, store.SearchParams{
+			TenantID:    "t1",
+			Dates:       map[string]store.DateOp{"date": dOp},
+			DateFilters: map[string][]store.DateOp{"date": {dOp}},
+		}, lookup, listTenant)
+		if got != tc.want {
+			t.Errorf("Exact timestamp Date %q: got %v, want %v", tc.raw, got, tc.want)
+		}
+	}
+
 	mustQty := func(raw string) store.QuantityOp {
 		q, err := store.ParseQuantityOp(raw)
 		if err != nil {
