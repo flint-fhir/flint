@@ -14,13 +14,16 @@ require 'net/http'
 require 'uri'
 
 ENV['NO_DB'] = 'false'
+ENV['ASYNC_JOBS'] = 'false'
 ENV['INFERNO_DISABLE_TLS_TEST'] ||= 'true'
 ENV['FHIR_RESOURCE_VALIDATOR_URL'] ||= 'http://127.0.0.1:14568'
 
 FileUtils.mkdir_p(File.join(__dir__, 'data'))
+$LOAD_PATH.unshift(File.join(__dir__, 'lib')) unless $LOAD_PATH.include?(File.join(__dir__, 'lib'))
 
 require 'inferno'
-Inferno::Application.start(:executor)
+Inferno::Application.finalize!
+require 'flint_inferno_headless' if Inferno::Repositories::TestSuites.new.all.empty?
 
 flint_base_url = ENV.fetch('FLINT_BASE_URL', 'http://127.0.0.1:18080').chomp('/')
 flint_tenant   = ENV.fetch('FLINT_TENANT', 'demo')

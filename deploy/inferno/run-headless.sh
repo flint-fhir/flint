@@ -42,7 +42,7 @@ TOKEN_RESP="$(curl -fsS -X POST "${TOKEN_URL}" \
 ACCESS_TOKEN="$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("access_token")' <<< "${TOKEN_RESP}")"
 
 if [[ -z "${INFERNO_PATIENT_IDS:-}" ]]; then
-  PAT_Check="$(curl -fsS -H "Authorization: Bearer ${ACCESS_TOKEN}" "${FLINT_FHIR_URL}/Patient/pat-alice-001" || true)"
+  PAT_Check="$(curl -fs -H "Authorization: Bearer ${ACCESS_TOKEN}" "${FLINT_FHIR_URL}/Patient/pat-alice-001" || true)"
   if [[ -z "${PAT_Check}" ]] || ! grep -q '"pat-alice-001"' <<< "${PAT_Check}"; then
     echo "==> Seeding 29-resource US Core v6.1.0 & v7.0.0 clinical cohort into tenant '${FLINT_TENANT}'"
     if [[ -x "${REPO_ROOT}/bin/seed" ]]; then
@@ -80,10 +80,11 @@ if [[ -z "${FHIR_RESOURCE_VALIDATOR_URL:-}" ]]; then
 fi
 
 echo "==> Running Inferno SQLite schema migrations"
-INFERNO_DB="${HEADLESS_DIR}/data/inferno_ci.db" bundle exec inferno migrate >/dev/null
+INFERNO_DB="${HEADLESS_DIR}/data/inferno_ci.db" ASYNC_JOBS="false" bundle exec inferno migrate >/dev/null
 
 echo "==> Executing official HL7 Inferno suites against ${FLINT_FHIR_URL}"
 INFERNO_DB="${HEADLESS_DIR}/data/inferno_ci.db" \
+ASYNC_JOBS="false" \
 INFERNO_DISABLE_TLS_TEST="true" \
 FLINT_BASE_URL="${FLINT_BASE_URL}" \
 FLINT_TENANT="${FLINT_TENANT}" \
