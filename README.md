@@ -2,6 +2,7 @@
 
 [![Release](https://img.shields.io/badge/Release-v0.3.0-f97316)](CHANGELOG.md)
 [![CI](https://github.com/flint-fhir/flint/actions/workflows/ci.yml/badge.svg)](https://github.com/flint-fhir/flint/actions/workflows/ci.yml)
+[![HL7 Inferno](https://github.com/flint-fhir/flint/actions/workflows/inferno.yml/badge.svg)](https://github.com/flint-fhir/flint/actions/workflows/inferno.yml)
 [![Conformance](https://img.shields.io/badge/%24certify-137%2F137%20Checks-22c55e)](pkg/certify/certify.go)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](go.mod)
 [![FHIR R4](https://img.shields.io/badge/FHIR-R4.0.1-firebrick)](https://hl7.org/fhir/R4/)
@@ -512,6 +513,15 @@ Flint leverages [Hegel](https://hegel.dev) (`hegel.dev/go/hegel`) for type-drive
 * **Conditional Create (`If-None-Exist`) Invariance**: Verifies search criteria query string parsing and deterministic round-trip matching.
 * **AuditEvent Classification & Serialization Invariance**: Verifies HTTP status-to-outcome partitioning (`0`, `4`, `8`) and round-trip FHIR R4 `AuditEvent` serialization across generated inputs.
 * **No-Panic Invariance**: Fuzzes parsers with arbitrary inputs and unicode sequences to guarantee zero crashes or hangs.
+
+### Official External HL7 Conformance Suites
+
+Alongside generative Hegel tests and the built-in 137-check `$certify` suite, every commit is verified against upstream HL7 conformance vectors and official HL7 Inferno test kits:
+
+* **Official `FHIR/sql-on-fhir-v2` Test Vectors (`server/testdata/sql-on-fhir-v2`)**: 100% pass across all **22 official suites (144/144 test cases)** on `ViewDefinition/$run` plus live SQL execution equivalence of `ViewDefinition/$sql` on embedded SQLite and PostgreSQL.
+* **Official HL7 FHIRPath R4 `tests-fhir-r4.xml` Corpus (`server/testdata/fhirpath-r4`)**: Executes the full **1,050+ runtime HL7 FHIRPath R4 specification vectors** (navigation, polymorphic `.ofType()`/`.as()`/`.is()`, temporal arithmetic & boundaries, UCUM quantities, math, regex, aggregates, and three-valued logic).
+* **Synthea R4 US Core Multi-Topology Parity**: Verifies identical `Bundle` transaction ingestion, chained/reverse-chained/compartment search, `Patient/$everything`, `Observation/$stats`, `ViewDefinition/$run`, and `$export` across all **5 runtime topologies** (`postgres`, file-backed `modernc.org/sqlite` WAL, `doris`, `hybrid-postgres+doris`, and `hybrid-postgres+sqlite`).
+* **Headless HL7 Inferno CI ([`.github/workflows/inferno.yml`](.github/workflows/inferno.yml), [`deploy/inferno/`](deploy/inferno/))**: Runs official **`us_core_test_kit` (`us_core_v610`)**, **`smart_app_launch_test_kit` (`smart_stu2` Backend Services)**, and **`bulk_data_test_kit` (`bulk_data_v200`)** against live `flintd` across both `--store=postgres` and `--store=sqlite` (`task certify-inferno-headless`).
 
 ---
 

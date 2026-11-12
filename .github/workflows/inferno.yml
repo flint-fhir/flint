@@ -1,0 +1,104 @@
+name: HL7 Inferno Conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  inferno:
+    name: HL7 Inferno (US Core v6.1.0 + SMART STU2 + Bulk Data v2.0.0) [${{ matrix.store }}]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [postgres, sqlite]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: flint
+          POSTGRES_USER: flint
+          POSTGRES_PASSWORD: flint
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SQLite development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsqlite3-dev
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Cache HL7 Inferno Ruby gems
+        uses: actions/cache@v4
+        with:
+          path: deploy/inferno/headless/vendor/bundle
+          key: ${{ runner.os }}-inferno-gems-${{ hashFiles('deploy/inferno/headless/Gemfile') }}
+          restore-keys: |
+            ${{ runner.os }}-inferno-gems-
+
+      - name: Install HL7 Inferno Ruby gems
+        working-directory: deploy/inferno/headless
+        run: |
+          bundle config set --local path 'vendor/bundle'
+          bundle install --jobs 4 --retry 3
+
+      - name: Build flintd and US Core cohort seeder
+        run: |
+          mkdir -p bin
+          go build -o bin/flintd ./cmd/flintd
+          go build -o bin/seed ./cmd/seed
+
+      - name: Run HL7 Inferno Headless Suites against flintd (${{ matrix.store }})
+        env:
+          FLINT_POSTGRES_DSN: "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
+          FLINT_ADDR: "127.0.0.1:18080"
+          FLINT_SMART_ENFORCE_DEV_AUTH: "true"
+          FLINT_BASE_URL: "http://127.0.0.1:18080"
+          FLINT_TENANT: "demo"
+          INFERNO_ARTIFACTS_DIR: "${{ github.workspace }}/artifacts/inferno-${{ matrix.store }}"
+        run: |
+          mkdir -p "${INFERNO_ARTIFACTS_DIR}"
+          if [ "${{ matrix.store }}" = "sqlite" ]; then
+            ./bin/flintd --store=sqlite --sqlite-dsn=/tmp/flint-inferno.db > "${INFERNO_ARTIFACTS_DIR}/flintd.log" 2>&1 &
+          else
+            ./bin/flintd --store=postgres > "${INFERNO_ARTIFACTS_DIR}/flintd.log" 2>&1 &
+          fi
+          FLINTD_PID=$!
+          trap 'kill "${FLINTD_PID}" 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 40); do
+            if curl -fsS "http://127.0.0.1:18080/readyz" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.5
+          done
+          curl -fsS "http://127.0.0.1:18080/readyz"
+
+          bash deploy/inferno/run-headless.sh
+
+      - name: Upload HL7 Inferno Conformance Reports (${{ matrix.store }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inferno-conformance-${{ matrix.store }}
+          path: artifacts/inferno-${{ matrix.store }}/
+          retention-days: 14

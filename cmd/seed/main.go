@@ -239,6 +239,16 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			"telecom": []map[string]any{
 				{"system": "email", "value": "eleanor.vance@cardiology.example.org", "use": "work"},
 			},
+			"address": []map[string]any{
+				{
+					"use":        "work",
+					"line":       []string{"100 Health Plaza, Suite 300"},
+					"city":       "Boston",
+					"state":      "MA",
+					"postalCode": "02115",
+					"country":    "US",
+				},
+			},
 		}),
 		putEntry("Practitioner/prac-primary-2", map[string]any{
 			"resourceType": "Practitioner",
@@ -253,6 +263,16 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			},
 			"telecom": []map[string]any{
 				{"system": "email", "value": "marcus.chen@primarycare.example.org", "use": "work"},
+			},
+			"address": []map[string]any{
+				{
+					"use":        "work",
+					"line":       []string{"100 Health Plaza, Suite 110"},
+					"city":       "Boston",
+					"state":      "MA",
+					"postalCode": "02115",
+					"country":    "US",
+				},
 			},
 		}),
 
@@ -286,6 +306,13 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			"class": map[string]any{
 				"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
 				"code":   "AMB",
+			},
+			"type": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://snomed.info/sct", "code": "185349003", "display": "Encounter for check up"},
+					},
+				},
 			},
 			"subject": map[string]any{
 				"reference": "Patient/pat-alice-001",
@@ -321,6 +348,13 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 					{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"},
 				},
 			},
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/condition-category", "code": "problem-list-item", "display": "Problem List Item"},
+					},
+				},
+			},
 			"code": map[string]any{
 				"coding": []map[string]any{
 					{"system": "http://snomed.info/sct", "code": "38341003", "display": "Essential hypertension"},
@@ -338,6 +372,13 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			"resourceType": "Observation",
 			"id":           "obs-alice-hr",
 			"status":       "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"},
+					},
+				},
+			},
 			"code": map[string]any{
 				"coding": []map[string]any{
 					{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"},
@@ -361,6 +402,13 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			"resourceType": "Observation",
 			"id":           "obs-alice-bp",
 			"status":       "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"},
+					},
+				},
+			},
 			"code": map[string]any{
 				"coding": []map[string]any{
 					{"system": "http://loinc.org", "code": "85354-9", "display": "Blood pressure panel"},
@@ -398,6 +446,18 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 						"unit":   "mmHg",
 						"system": "http://unitsofmeasure.org",
 						"code":   "mm[Hg]",
+					},
+				},
+				{
+					"code": map[string]any{
+						"coding": []map[string]any{
+							{"system": "http://loinc.org", "code": "8478-0", "display": "Mean blood pressure"},
+						},
+					},
+					"dataAbsentReason": map[string]any{
+						"coding": []map[string]any{
+							{"system": "http://terminology.hl7.org/CodeSystem/data-absent-reason", "code": "unknown", "display": "Unknown"},
+						},
 					},
 				},
 			},
@@ -630,6 +690,13 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 				"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
 				"code":   "IMP",
 			},
+			"type": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://snomed.info/sct", "code": "32485007", "display": "Hospital admission"},
+					},
+				},
+			},
 			"subject": map[string]any{
 				"reference": "Patient/pat-robert-002",
 			},
@@ -656,6 +723,13 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 					{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"},
 				},
 			},
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/condition-category", "code": "encounter-diagnosis", "display": "Encounter Diagnosis"},
+					},
+				},
+			},
 			"code": map[string]any{
 				"coding": []map[string]any{
 					{"system": "http://snomed.info/sct", "code": "44054006", "display": "Type 2 diabetes mellitus"},
@@ -668,11 +742,23 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 				"reference": "Encounter/enc-robert-001",
 			},
 			"onsetDateTime": "2020-03-15T00:00:00Z",
+			"_recordedDate": map[string]any{
+				"extension": []map[string]any{
+					{"url": "http://hl7.org/fhir/StructureDefinition/data-absent-reason", "valueCode": "unknown"},
+				},
+			},
 		}),
 		putEntry("Observation/obs-robert-hba1c", map[string]any{
 			"resourceType": "Observation",
 			"id":           "obs-robert-hba1c",
 			"status":       "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory", "display": "Laboratory"},
+					},
+				},
+			},
 			"code": map[string]any{
 				"coding": []map[string]any{
 					{"system": "http://loinc.org", "code": "4548-4", "display": "Hemoglobin A1c/Hemoglobin.total in Blood"},
@@ -696,6 +782,13 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			"resourceType": "Observation",
 			"id":           "obs-robert-wt",
 			"status":       "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"},
+					},
+				},
+			},
 			"code": map[string]any{
 				"coding": []map[string]any{
 					{"system": "http://loinc.org", "code": "29463-7", "display": "Body weight"},
@@ -813,6 +906,13 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 				"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
 				"code":   "AMB",
 			},
+			"type": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://snomed.info/sct", "code": "185349003", "display": "Encounter for check up"},
+					},
+				},
+			},
 			"subject": map[string]any{
 				"reference": "Patient/pat-elena-003",
 			},
@@ -823,12 +923,31 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			},
 			"period": map[string]any{
 				"start": "2026-03-01T11:00:00Z",
+				"_end": map[string]any{
+					"extension": []map[string]any{
+						{"url": "http://hl7.org/fhir/StructureDefinition/data-absent-reason", "valueCode": "unknown"},
+					},
+				},
+			},
+			"reasonCode": []map[string]any{
+				{
+					"extension": []map[string]any{
+						{"url": "http://hl7.org/fhir/StructureDefinition/data-absent-reason", "valueCode": "unknown"},
+					},
+				},
 			},
 		}),
 		putEntry("Observation/obs-elena-hr", map[string]any{
 			"resourceType": "Observation",
 			"id":           "obs-elena-hr",
 			"status":       "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"},
+					},
+				},
+			},
 			"code": map[string]any{
 				"coding": []map[string]any{
 					{"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"},

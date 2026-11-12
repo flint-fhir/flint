@@ -1,0 +1,19 @@
+{
+  "resourceType": "Appointment",
+  "id": "examplereq",
+  "identifier": [
+    {
+      "system": "http://example.org/sampleappointment-identifier",
+      "value": "123"
+    }
+  ],
+  "status": "proposed",
+  "participant": [
+    {
+      "actor": {
+        "reference": "Patient/example"
+      },
+      "status": "needs-action"
+    }
+  ]
+}

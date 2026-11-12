@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	_ "modernc.org/sqlite"
 
 	"github.com/flint-fhir/flint/store"
 	"github.com/flint-fhir/flint/store/sqlite"
@@ -717,4 +719,156 @@ func TestSQLiteStore_LoadFromDB_RoundTripHydration(t *testing.T) {
 	job, err := ss.GetExportJob(ctx, "t1", "job-hydrated")
 	require.NoError(t, err)
 	assert.Equal(t, "pat-1", job.PatientID)
+}
+
+func TestSQLiteStore_RealModerncFileWAL_PersistenceAndReload(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "flint-real-wal.db")
+
+	db1, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	db1.SetMaxOpenConns(1)
+
+	require.NoError(t, sqlite.RunMigrations(ctx, db1, sqlite.JournalWAL))
+
+	var journalMode string
+	require.NoError(t, db1.QueryRowContext(ctx, "PRAGMA journal_mode;").Scan(&journalMode))
+	assert.Equal(t, "wal", strings.ToLower(journalMode))
+
+	ss1 := sqlite.New(db1, sqlite.WithJournalMode(sqlite.JournalWAL), sqlite.WithDSN(dbPath))
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+
+	_, err = ss1.WriteResourceWithMeta(ctx, store.ResourceInput{
+		TenantID:      "tenant-wal",
+		ResType:       "Patient",
+		ResID:         "pat-real-1",
+		ResourceProto: []byte{0x0a, 0x0a, 'p', 'a', 't', '-', 'r', 'e', 'a', 'l', '-', '1'},
+		SearchIndexes: &store.SearchIndexes{
+			Strings: []store.SpidxString{
+				{TenantID: "tenant-wal", ResType: "Patient", ResID: "pat-real-1", SpName: "family", SpValue: "Lovelace"},
+			},
+			Tokens: []store.SpidxToken{
+				{TenantID: "tenant-wal", ResType: "Patient", ResID: "pat-real-1", SpName: "gender", SpValue: "female"},
+			},
+			Dates: []store.SpidxDate{
+				{TenantID: "tenant-wal", ResType: "Patient", ResID: "pat-real-1", SpName: "birthdate", SpLow: now, SpHigh: now},
+			},
+			URIs: []store.SpidxURI{
+				{TenantID: "tenant-wal", ResType: "Patient", ResID: "pat-real-1", SpName: "_profile", SpValue: "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Update Patient to v2 to exercise ON CONFLICT DO UPDATE + history table
+	_, err = ss1.WriteResourceWithMeta(ctx, store.ResourceInput{
+		TenantID:        "tenant-wal",
+		ResType:         "Patient",
+		ResID:           "pat-real-1",
+		ExpectedVersion: 1,
+		ResourceProto:   []byte{0x0a, 0x0a, 'p', 'a', 't', '-', 'r', 'e', 'a', 'l', '-', '2'},
+		SearchIndexes: &store.SearchIndexes{
+			Strings: []store.SpidxString{
+				{TenantID: "tenant-wal", ResType: "Patient", ResID: "pat-real-1", SpName: "family", SpValue: "Byron"},
+			},
+			Tokens: []store.SpidxToken{
+				{TenantID: "tenant-wal", ResType: "Patient", ResID: "pat-real-1", SpName: "gender", SpValue: "female"},
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	// Write linked Observation with quantity + reference indexes
+	require.NoError(t, ss1.WriteResource(ctx, store.ResourceInput{
+		TenantID:      "tenant-wal",
+		ResType:       "Observation",
+		ResID:         "obs-real-1",
+		ResourceProto: []byte{0x0a, 0x0a, 'o', 'b', 's', '-', 'r', 'e', 'a', 'l', '-', '1'},
+		SearchIndexes: &store.SearchIndexes{
+			Tokens: []store.SpidxToken{
+				{TenantID: "tenant-wal", ResType: "Observation", ResID: "obs-real-1", SpName: "code", SpSystem: "http://loinc.org", SpValue: "8480-6"},
+			},
+			References: []store.SpidxReference{
+				{TenantID: "tenant-wal", ResType: "Observation", ResID: "obs-real-1", SpName: "patient", TargetType: "Patient", TargetID: "pat-real-1"},
+			},
+			Quantities: []store.SpidxQuantity{
+				{TenantID: "tenant-wal", ResType: "Observation", ResID: "obs-real-1", SpName: "value-quantity", SpSystem: "http://unitsofmeasure.org", SpCode: "mm[Hg]", SpValue: 118.5},
+			},
+		},
+	}))
+
+	// Write and soft-delete a Condition to verify tombstone persistence
+	require.NoError(t, ss1.WriteResource(ctx, store.ResourceInput{
+		TenantID:      "tenant-wal",
+		ResType:       "Condition",
+		ResID:         "cond-del-1",
+		ResourceProto: nil, // also verifies nil slice -> non-null BLOB binding
+	}))
+	_, err = ss1.DeleteResourceWithMeta(ctx, "tenant-wal", "Condition", "cond-del-1")
+	require.NoError(t, err)
+
+	// Write AuditEvent and ExportJob
+	require.NoError(t, ss1.WriteAuditEvent(ctx, store.AuditRecord{
+		TenantID: "tenant-wal", AuditID: "aud-wal-1", Action: "C", SubtypeCode: "create", Outcome: "0", EntityType: "Patient", EntityID: "pat-real-1",
+	}))
+	require.NoError(t, ss1.SaveExportJob(ctx, store.ExportJobRecord{
+		ID: "job-wal-1", TenantID: "tenant-wal", PatientID: "pat-real-1", RequestURL: "http://localhost/export",
+	}))
+
+	// Verify real SQL rows exist in WITHOUT ROWID + spidx_* tables before closing
+	var sqlCount int
+	require.NoError(t, db1.QueryRowContext(ctx, "SELECT COUNT(*) FROM fhir_resource WHERE tenant_id = ? AND is_deleted = 0", "tenant-wal").Scan(&sqlCount))
+	assert.Equal(t, 2, sqlCount)
+
+	require.NoError(t, db1.Close())
+
+	// Reopen a brand-new SQLite handle and Store, run LoadFromDB, and assert full state hydration
+	db2, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer db2.Close()
+	db2.SetMaxOpenConns(1)
+
+	ss2 := sqlite.New(db2, sqlite.WithJournalMode(sqlite.JournalWAL), sqlite.WithDSN(dbPath))
+	require.NoError(t, ss2.LoadFromDB(ctx))
+
+	patRec, err := ss2.ReadResourceWithMeta(ctx, "tenant-wal", "Patient", "pat-real-1")
+	require.NoError(t, err)
+	assert.Equal(t, 2, patRec.ResVersion)
+	assert.Equal(t, []byte{0x0a, 0x0a, 'p', 'a', 't', '-', 'r', 'e', 'a', 'l', '-', '2'}, patRec.ResourceProto)
+
+	patV1, err := ss2.ReadResourceVersion(ctx, "tenant-wal", "Patient", "pat-real-1", 1)
+	require.NoError(t, err)
+	assert.Equal(t, 1, patV1.ResVersion)
+
+	_, err = ss2.ReadResourceWithMeta(ctx, "tenant-wal", "Condition", "cond-del-1")
+	assert.ErrorIs(t, err, store.ErrResourceDeleted)
+
+	sr, err := ss2.Search(ctx, store.SearchParams{
+		TenantID: "tenant-wal",
+		ResType:  "Patient",
+		Strings:  map[string]string{"family": "Byron"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, sr.Total)
+
+	belongs, err := ss2.BelongsToPatientCompartment(ctx, "tenant-wal", "Observation", "obs-real-1", "pat-real-1")
+	require.NoError(t, err)
+	assert.True(t, belongs)
+
+	stats, err := ss2.EvaluateObservationStats(ctx, store.ObservationStatsParams{
+		TenantID:  "tenant-wal",
+		PatientID: "pat-real-1",
+		Code:      "8480-6",
+	})
+	require.NoError(t, err)
+	require.Len(t, stats.Series, 1)
+	assert.InDelta(t, 118.5, stats.Series[0].Average, 0.001)
+
+	aud, err := ss2.ReadAuditEvent(ctx, "tenant-wal", "aud-wal-1")
+	require.NoError(t, err)
+	assert.Equal(t, "C", aud.Action)
+
+	job, err := ss2.GetExportJob(ctx, "tenant-wal", "job-wal-1")
+	require.NoError(t, err)
+	assert.Equal(t, "pat-real-1", job.PatientID)
 }

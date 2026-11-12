@@ -260,10 +260,15 @@ func (s *Store) writeUnlocked(ctx context.Context, input store.ResourceInput) (*
 	s.history[key] = append(s.history[key], rec)
 	s.mu.Unlock()
 
+	protoBlob := entry.resourceProto
+	if protoBlob == nil {
+		protoBlob = []byte{}
+	}
+
 	upsertStmt := `INSERT INTO fhir_resource (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, idempotency_key, resource_proto) VALUES (?, ?, ?, ?, 0, ?, ?, ?) ON CONFLICT (tenant_id, res_type, res_id) DO UPDATE SET res_version = excluded.res_version, is_deleted = 0, last_updated = excluded.last_updated, idempotency_key = excluded.idempotency_key, resource_proto = excluded.resource_proto`
 	if err := s.execSQLite(ctx, upsertStmt,
 		entry.tenantID, entry.resType, entry.resID, entry.resVersion,
-		entry.lastUpdated.Format(time.RFC3339Nano), entry.idempotencyKey, entry.resourceProto,
+		entry.lastUpdated.Format(time.RFC3339Nano), entry.idempotencyKey, protoBlob,
 	); err != nil {
 		return nil, fmt.Errorf("sqlite upsert resource: %w", err)
 	}
@@ -271,7 +276,7 @@ func (s *Store) writeUnlocked(ctx context.Context, input store.ResourceInput) (*
 	histStmt := `INSERT INTO fhir_resource_history (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto) VALUES (?, ?, ?, ?, 0, ?, ?)`
 	if err := s.execSQLite(ctx, histStmt,
 		entry.tenantID, entry.resType, entry.resID, entry.resVersion,
-		entry.lastUpdated.Format(time.RFC3339Nano), entry.resourceProto,
+		entry.lastUpdated.Format(time.RFC3339Nano), protoBlob,
 	); err != nil {
 		return nil, fmt.Errorf("sqlite insert history: %w", err)
 	}

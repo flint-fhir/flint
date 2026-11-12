@@ -43,3 +43,10 @@ analytics/logs/
 logs/
 __pycache__/
 
+# Headless HL7 Inferno runtime SQLite & reports
+artifacts/
+deploy/inferno/headless/data/
+deploy/inferno/headless/.bundle/
+deploy/inferno/headless/vendor/
+
+

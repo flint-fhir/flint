@@ -18,6 +18,7 @@ import (
 	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store/sqlite"
 )
 
 func TestCohortTransactionBundle_ValidatesAllResources(t *testing.T) {
@@ -193,5 +194,86 @@ func TestSeedRun_EndToEndIntegration(t *testing.T) {
 
 	var evBundle map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&evBundle))
+	assert.Equal(t, 15, int(evBundle["total"].(float64)))
+}
+
+func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
+	sqStore := sqlite.New(nil)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srv := server.New(sqStore, logger)
+	server.RegisterDefaultResourceTypes(srv)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	var buf bytes.Buffer
+	require.NoError(t, Run(t.Context(), Config{
+		BaseURL:    ts.URL,
+		Tenant:     "demo",
+		HTTPClient: ts.Client(),
+		Out:        &buf,
+	}))
+	assert.Contains(t, buf.String(), `Seeded 29 FHIR R4 resources (all 13 US Core v6.1.0 & v7.0.0 profiles) into tenant "demo"`)
+
+	engine := validation.NewEngine(validation.DefaultOptions())
+
+	getRaw := func(path string) []byte {
+		t.Helper()
+		resp, err := http.Get(ts.URL + path)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+		require.Equal(t, http.StatusOK, resp.StatusCode, "GET %s", path)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		return body
+	}
+
+	// 1. CapabilityStatement (/metadata) must pass strict FHIR R4 validation with 0 issues
+	metaBytes := getRaw("/fhir/r4/demo/metadata")
+	metaOutcome := engine.ValidateJSON("CapabilityStatement", metaBytes)
+	assert.True(t, metaOutcome.IsValid() && len(metaOutcome.Issues) == 0, "expected /metadata CapabilityStatement to have 0 validation issues: %+v", metaOutcome.Issues)
+	assert.NotContains(t, string(metaBytes), `"conditionalPatch"`)
+
+	// 2. Practitioner.address MustSupport round-trip
+	pracBytes := getRaw("/fhir/r4/demo/Practitioner/prac-cardiology-1")
+	assert.Contains(t, string(pracBytes), `"postalCode":"02115"`)
+	assert.Contains(t, string(pracBytes), `"country":"US"`)
+	pracOutcome := engine.ValidateJSONWithProfiles("Practitioner", pracBytes, []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitioner"}, "")
+	assert.True(t, pracOutcome.IsValid(), "Practitioner US Core validation failed: %+v", pracOutcome.Issues)
+
+	// 3. DataAbsentReason CodeSystem round-trip on Blood Pressure component
+	bpBytes := getRaw("/fhir/r4/demo/Observation/obs-alice-bp")
+	assert.Contains(t, string(bpBytes), `"http://terminology.hl7.org/CodeSystem/data-absent-reason"`)
+	assert.Contains(t, string(bpBytes), `"unknown"`)
+	bpOutcome := engine.ValidateJSONWithProfiles("Observation", bpBytes, []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-blood-pressure"}, "")
+	assert.True(t, bpOutcome.IsValid(), "Blood Pressure US Core validation failed: %+v", bpOutcome.Issues)
+
+	// 4. DataAbsentReason Extension round-trip on primitive and complex elements
+	condBytes := getRaw("/fhir/r4/demo/Condition/cond-robert-t2d")
+	assert.Contains(t, string(condBytes), `"http://hl7.org/fhir/StructureDefinition/data-absent-reason"`)
+	condOutcome := engine.ValidateJSONWithProfiles("Condition", condBytes, []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-encounter-diagnosis"}, "")
+	assert.True(t, condOutcome.IsValid(), "Condition US Core validation failed: %+v", condOutcome.Issues)
+
+	encBytes := getRaw("/fhir/r4/demo/Encounter/enc-elena-001")
+	assert.Contains(t, string(encBytes), `"http://hl7.org/fhir/StructureDefinition/data-absent-reason"`)
+	assert.Contains(t, string(encBytes), `"reasonCode"`)
+	encOutcome := engine.ValidateJSONWithProfiles("Encounter", encBytes, []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-encounter"}, "")
+	assert.True(t, encOutcome.IsValid(), "Encounter US Core validation failed: %+v", encOutcome.Issues)
+
+	// 5. Exact RFC3339 timestamp searches on SQLite (midnight + non-midnight)
+	for _, query := range []string{
+		"/fhir/r4/demo/Condition?patient=Patient/pat-alice-001&onset-date=2024-06-01T00:00:00Z",
+		"/fhir/r4/demo/Observation?patient=Patient/pat-alice-001&code=http://loinc.org|85354-9&date=2026-01-15T09:16:00Z",
+	} {
+		searchBytes := getRaw(query)
+		var b map[string]any
+		require.NoError(t, json.Unmarshal(searchBytes, &b))
+		assert.Equal(t, 1, int(b["total"].(float64)), "expected exact timestamp search %s to return 1 resource", query)
+	}
+
+	// 6. Patient/$everything for Alice remains 15 resources
+	evBytes := getRaw("/fhir/r4/demo/Patient/pat-alice-001/$everything")
+	var evBundle map[string]any
+	require.NoError(t, json.Unmarshal(evBytes, &evBundle))
 	assert.Equal(t, 15, int(evBundle["total"].(float64)))
 }

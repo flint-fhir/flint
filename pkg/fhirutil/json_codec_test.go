@@ -539,6 +539,7 @@ func TestBundleAndContainedResourceRegistry_And_RoundTrip(t *testing.T) {
 
 	denormCapJSON, err := fhirutil.DenormalizeProtoJSONToFHIRJSON(capDesc, "CapabilityStatement", capWire, 1, lastUpdated)
 	require.NoError(t, err)
+	assert.Contains(t, string(denormCapJSON), `"4.0.1"`)
 	assert.Contains(t, string(denormCapJSON), `"Patient"`)
 	assert.Contains(t, string(denormCapJSON), `"CarePlan"`)
 	assert.Contains(t, string(denormCapJSON), `"ExplanationOfBenefit"`)
@@ -546,4 +547,38 @@ func TestBundleAndContainedResourceRegistry_And_RoundTrip(t *testing.T) {
 	capMap, err := fhirutil.ProtoBytesToFHIRMap(capDesc, "CapabilityStatement", capWire, 1, lastUpdated)
 	require.NoError(t, err)
 	assert.Equal(t, "CapabilityStatement", capMap["resourceType"])
+	assert.Equal(t, "4.0.1", capMap["fhirVersion"])
+
+	// Standalone and combined FHIR primitive extensions (_recordedDate, _birthDate, _given)
+	rawPrimExt := []byte(`{
+		"resourceType": "Patient",
+		"id": "pat-prim-ext",
+		"gender": "female",
+		"_gender": {
+			"id": "gender-ext-1",
+			"extension": [{"url": "http://example.org/fhir/StructureDefinition/gender-note", "valueString": "verified"}]
+		},
+		"_birthDate": {
+			"extension": [{"url": "http://hl7.org/fhir/StructureDefinition/data-absent-reason", "valueCode": "unknown"}]
+		},
+		"name": [{
+			"family": "Rostova",
+			"given": ["Elena", null],
+			"_given": [null, {"extension": [{"url": "http://hl7.org/fhir/StructureDefinition/data-absent-reason", "valueCode": "masked"}]}]
+		}]
+	}`)
+	patDesc := (&patpb.Patient{}).ProtoReflect().Descriptor()
+	normPrim, err := fhirutil.NormalizeFHIRJSONToProtoJSON(patDesc, rawPrimExt)
+	require.NoError(t, err)
+	patMsg := &patpb.Patient{}
+	require.NoError(t, (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(normPrim, patMsg))
+	patWire, err := proto.Marshal(patMsg)
+	require.NoError(t, err)
+
+	denormPrimMap, err := fhirutil.ProtoBytesToFHIRMap(patDesc, "Patient", patWire, 1, lastUpdated)
+	require.NoError(t, err)
+	assert.Equal(t, "female", denormPrimMap["gender"])
+	assert.NotNil(t, denormPrimMap["_gender"])
+	assert.Nil(t, denormPrimMap["birthDate"], "absent primitive value with DataAbsentReason must not emit birthDate")
+	assert.NotNil(t, denormPrimMap["_birthDate"], "standalone _birthDate DataAbsentReason extension must survive proto round-trip")
 }

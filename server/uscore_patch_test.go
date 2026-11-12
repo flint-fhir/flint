@@ -21,6 +21,7 @@ import (
 	authv1 "github.com/flint-fhir/flint/gen/go/flint/auth/v1"
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
+	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store/postgres"
 )
@@ -1358,11 +1359,14 @@ func TestWave8FHIRPathPatchAndConditionalOps(t *testing.T) {
 		t.Fatalf("expected 200 OK from /metadata, got %d", metaRec.Code)
 	}
 	metaStr := metaRec.Body.String()
-	if !strings.Contains(metaStr, `"conditionalPatch":true`) {
-		t.Errorf("expected CapabilityStatement to declare conditionalPatch:true")
+	if strings.Contains(metaStr, `"conditionalPatch"`) {
+		t.Errorf("expected FHIR R4 CapabilityStatement NOT to include R5-only conditionalPatch field")
 	}
 	if !strings.Contains(metaStr, `"application/fhir+json"`) {
 		t.Errorf("expected CapabilityStatement patchFormat to include application/fhir+json")
+	}
+	if metaOutcome := validation.NewEngine(validation.DefaultOptions()).ValidateJSON("CapabilityStatement", metaRec.Body.Bytes()); !metaOutcome.IsValid() || len(metaOutcome.Issues) != 0 {
+		t.Errorf("expected /metadata CapabilityStatement to pass FHIR R4 validation with 0 issues, got %+v", metaOutcome.Issues)
 	}
 
 	oaReq := httptest.NewRequest(http.MethodGet, "/fhir/r4/t1/openapi.json", nil)

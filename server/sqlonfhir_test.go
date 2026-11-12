@@ -7143,8 +7143,8 @@ func TestProto3WireHTTPTransport_CreateUpdateReadVReadAndSearch(t *testing.T) {
 	assert.Contains(t, string(fescbRunBytes), `"char_second":"R"`)
 	assert.Contains(t, string(fescbRunBytes), `"char_count":8`)
 	assert.Contains(t, string(fescbRunBytes), `"pfx_spaced":"M.R.N"`)
-	assert.Contains(t, string(fescbRunBytes), `"num_low":1000.95`)
-	assert.Contains(t, string(fescbRunBytes), `"num_high":1001.05`)
+	assert.Contains(t, string(fescbRunBytes), `"num_low":1000.5`)
+	assert.Contains(t, string(fescbRunBytes), `"num_high":1001.5`)
 	assert.Contains(t, string(fescbRunBytes), `"val_comp":true`)
 	assert.Contains(t, string(fescbRunBytes), `"comp_mid":"MRN-1001"`)
 

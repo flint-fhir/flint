@@ -12,6 +12,8 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
+
+	annotationspb "github.com/google/fhir/go/proto/google/fhir/proto/annotations_go_proto"
 )
 
 // NormalizeFHIRJSONToProtoJSON normalizes incoming FHIR JSON (supporting both standard
@@ -226,7 +228,29 @@ func normalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) {
 
 	for _, key := range keys {
 		val, exists := m[key]
-		if !exists || strings.HasPrefix(key, "_") || key == "resourceType" || val == nil {
+		if !exists || key == "resourceType" || val == nil {
+			continue
+		}
+		if strings.HasPrefix(key, "_") {
+			baseKey := key[1:]
+			if baseKey == "" {
+				continue
+			}
+			if baseVal, hasBase := m[baseKey]; hasBase && baseVal != nil {
+				// Handled alongside m[baseKey] below.
+				continue
+			}
+			// Standalone FHIR primitive extension ("_field" when "field" value is omitted, e.g. DataAbsentReason).
+			if extMap, ok := val.(map[string]any); ok {
+				if fd := findFieldDescriptor(fields, baseKey); fd != nil && fd.Kind() == protoreflect.MessageKind && !fd.IsList() {
+					normalizeMessageMap(fd.Message(), extMap)
+					delete(m, key)
+					delete(m, baseKey)
+					m[fd.JSONName()] = extMap
+				} else if fd == nil && normalizeChoiceField(fields, m, baseKey, extMap) {
+					delete(m, key)
+				}
+			}
 			continue
 		}
 
@@ -250,15 +274,31 @@ func normalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) {
 			if !ok {
 				continue
 			}
+			rawExtArr, _ := m["_"+key].([]any)
 			for i, elem := range arr {
-				arr[i] = normalizeSingleValue(msgDesc, elem, nil)
+				var elemExt map[string]any
+				if i < len(rawExtArr) {
+					elemExt, _ = rawExtArr[i].(map[string]any)
+				}
+				if elemExt != nil {
+					normalizeMessageMap(msgDesc, elemExt)
+				}
+				if elem == nil && elemExt != nil {
+					arr[i] = elemExt
+				} else {
+					arr[i] = normalizeSingleValue(msgDesc, elem, elemExt)
+				}
 			}
 			delete(m, key)
+			if rawExtArr != nil {
+				delete(m, "_"+key)
+			}
 			m[targetKey] = arr
 		} else {
 			var extMap map[string]any
 			if rawExt, ok := m["_"+key].(map[string]any); ok {
 				extMap = rawExt
+				normalizeMessageMap(msgDesc, extMap)
 			}
 			normalized := normalizeSingleValue(msgDesc, val, extMap)
 			delete(m, key)
@@ -509,16 +549,50 @@ func denormalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) 
 			if !ok {
 				continue
 			}
+			if isPrimitiveWrapperDescriptor(msgDesc) {
+				var extArr []any
+				hasAnyExt := false
+				for i, elem := range arr {
+					primVal, extOut, hasPrim := denormalizePrimitiveWrapper(msgDesc, elem)
+					if hasPrim {
+						arr[i] = primVal
+					} else {
+						arr[i] = nil
+					}
+					if len(extOut) > 0 {
+						hasAnyExt = true
+						extArr = append(extArr, extOut)
+					} else {
+						extArr = append(extArr, nil)
+					}
+				}
+				m[key] = arr
+				if hasAnyExt {
+					m["_"+key] = extArr
+				}
+				continue
+			}
 			for i, elem := range arr {
 				arr[i] = denormalizeSingleValue(msgDesc, elem)
 			}
 			m[key] = arr
 		} else {
-			denormVal := denormalizeSingleValue(msgDesc, val)
 			outKey := key
 			if string(fd.Name()) == "class_value" {
 				outKey = "class"
 			}
+			if isPrimitiveWrapperDescriptor(msgDesc) {
+				primVal, extOut, hasPrim := denormalizePrimitiveWrapper(msgDesc, val)
+				delete(m, key)
+				if hasPrim {
+					m[outKey] = primVal
+				}
+				if len(extOut) > 0 {
+					m["_"+outKey] = extOut
+				}
+				continue
+			}
+			denormVal := denormalizeSingleValue(msgDesc, val)
 			delete(m, key)
 			m[outKey] = denormVal
 		}
@@ -686,6 +760,13 @@ func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any
 							}
 						}
 					}
+					if ev := valFD.Enum().Values().ByName(protoreflect.Name(s)); ev != nil {
+						if evOpts := ev.Options(); evOpts != nil && proto.HasExtension(evOpts, annotationspb.E_FhirOriginalCode) {
+							if orig, okOrig := proto.GetExtension(evOpts, annotationspb.E_FhirOriginalCode).(string); okOrig && orig != "" {
+								return orig
+							}
+						}
+					}
 					return strings.ToLower(strings.ReplaceAll(s, "_", "-"))
 				}
 			}
@@ -800,6 +881,93 @@ func findFieldDescriptor(fields protoreflect.FieldDescriptors, jsonKey string) p
 	return nil
 }
 
+func isPrimitiveWrapperDescriptor(md protoreflect.MessageDescriptor) bool {
+	if md == nil {
+		return false
+	}
+	fullName := string(md.FullName())
+	if !strings.HasPrefix(fullName, "google.fhir.r4.core.") {
+		return false
+	}
+	if isTemporalMessage(fullName) {
+		return true
+	}
+	valFD := md.Fields().ByName("value")
+	if valFD == nil || valFD.Kind() == protoreflect.MessageKind {
+		return false
+	}
+	fields := md.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		switch string(fields.Get(i).Name()) {
+		case "value", "id", "extension":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func denormalizePrimitiveWrapper(msgDesc protoreflect.MessageDescriptor, val any) (any, map[string]any, bool) {
+	vMap, ok := val.(map[string]any)
+	if !ok {
+		return val, nil, val != nil
+	}
+
+	var extOut map[string]any
+	if rawID, hasID := vMap["id"]; hasID && rawID != nil {
+		extOut = make(map[string]any)
+		if idFD := msgDesc.Fields().ByName("id"); idFD != nil && idFD.Kind() == protoreflect.MessageKind {
+			extOut["id"] = denormalizeSingleValue(idFD.Message(), rawID)
+		} else {
+			extOut["id"] = rawID
+		}
+	}
+	if rawExt, hasExt := vMap["extension"].([]any); hasExt && len(rawExt) > 0 {
+		if extOut == nil {
+			extOut = make(map[string]any)
+		}
+		extFD := msgDesc.Fields().ByName("extension")
+		denormExts := make([]any, len(rawExt))
+		for i, item := range rawExt {
+			if extFD != nil && extFD.Kind() == protoreflect.MessageKind {
+				denormExts[i] = denormalizeSingleValue(extFD.Message(), item)
+			} else {
+				denormExts[i] = item
+			}
+		}
+		extOut["extension"] = denormExts
+	}
+
+	stripped := make(map[string]any, len(vMap))
+	for k, v := range vMap {
+		if k == "id" || k == "extension" {
+			continue
+		}
+		stripped[k] = v
+	}
+
+	fullName := string(msgDesc.FullName())
+	if isTemporalMessage(fullName) {
+		if formatted := formatProtoTemporalToISO(stripped); formatted != "" {
+			return formatted, extOut, true
+		}
+		return nil, extOut, false
+	}
+
+	valFD := msgDesc.Fields().ByName("value")
+	if valFD != nil && valFD.Kind() != protoreflect.MessageKind {
+		if _, hasVal := stripped["value"]; hasVal {
+			return denormalizeSingleValue(msgDesc, stripped), extOut, true
+		}
+		if len(stripped) == 0 && len(extOut) == 0 && valFD.Kind() == protoreflect.BoolKind {
+			return false, nil, true
+		}
+		return nil, extOut, false
+	}
+
+	return denormalizeSingleValue(msgDesc, stripped), extOut, len(stripped) > 0
+}
+
 func resolveEnumValueString(ed protoreflect.EnumDescriptor, s string) (string, bool) {
 	trimmed := strings.TrimSpace(s)
 	if trimmed == "" {
@@ -817,6 +985,11 @@ func resolveEnumValueString(ed protoreflect.EnumDescriptor, s string) (string, b
 	for i := 0; i < vals.Len(); i++ {
 		ev := vals.Get(i)
 		evName := string(ev.Name())
+		if evOpts := ev.Options(); evOpts != nil && proto.HasExtension(evOpts, annotationspb.E_FhirOriginalCode) {
+			if orig, okOrig := proto.GetExtension(evOpts, annotationspb.E_FhirOriginalCode).(string); okOrig && strings.EqualFold(orig, trimmed) {
+				return evName, true
+			}
+		}
 		if strings.EqualFold(strings.ReplaceAll(evName, "_", ""), compactTarget) {
 			return evName, true
 		}

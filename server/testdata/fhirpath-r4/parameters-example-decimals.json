@@ -1,0 +1,22 @@
+{
+  "resourceType": "Parameters",
+  "id": "example-decimals",
+  "parameter": [
+    {
+      "name": "p0",
+      "valueDecimal": 9.5e2
+    },
+    {
+      "name": "p1",
+      "valueDecimal": 1.5e-3
+    },
+    {
+      "name": "p2",
+      "valueDecimal": -9.5e2
+    },
+    {
+      "name": "p3",
+      "valueDecimal": 1.5e2
+    }
+  ]
+}

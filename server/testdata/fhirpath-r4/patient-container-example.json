@@ -1,0 +1,14 @@
+{
+  "resourceType": "Patient",
+  "id": "container-example",
+  "contained": [
+    {
+      "resourceType": "Organization",
+      "id": "1",
+      "name": "Clinical Lab"
+    }
+  ],
+  "managingOrganization": {
+    "reference": "#1"
+  }
+}

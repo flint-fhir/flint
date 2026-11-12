@@ -95,6 +95,7 @@ type Server struct {
 	subStats                   map[string]*subscriptionDeliveryStats
 	disallowPrivateWebhooks    bool
 	clientJWKs                 map[string]auth.JWK
+	clientJWKSets              map[string]auth.JWKSet
 	requireRegisteredClientJWK bool
 	routerOnce                 sync.Once
 	internalRouter             http.Handler
@@ -133,6 +134,7 @@ func New(st store.Store, logger *slog.Logger) *Server {
 		refreshTokens:   make(map[string]refreshTokenEntry),
 		revokedTokens:   make(map[string]time.Time),
 		clientJWKs:      make(map[string]auth.JWK),
+		clientJWKSets:   make(map[string]auth.JWKSet),
 		validator:       valEngine,
 		auditRecorder:   auditRec,
 		exportJobs:      make(map[string]*exportJob),
@@ -253,6 +255,14 @@ func (s *Server) SetTokenValidator(v auth.TokenValidator) {
 	s.tokenValidator = v
 }
 
+// EnableDevTokenEnforcement requires valid SMART on FHIR bearer tokens issued by Flint's
+// built-in OAuth2 server on all non-public FHIR endpoints (without requiring an external IdP).
+func (s *Server) EnableDevTokenEnforcement() {
+	if s.devAuth != nil {
+		s.tokenValidator = s.devAuth
+	}
+}
+
 // RegisterResourceType registers a proto message type for a FHIR resource type.
 // This allows the server to unmarshal proto bytes and convert to JSON.
 func (s *Server) RegisterResourceType(resType string, msg proto.Message) {
@@ -296,6 +306,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /oauth2/token", s.handleOAuthToken)
 	mux.HandleFunc("POST /oauth2/introspect", s.handleOAuthIntrospect)
 	mux.HandleFunc("POST /oauth2/revoke", s.handleOAuthRevoke)
+	mux.HandleFunc("POST /oauth2/register", s.handleOAuthRegister)
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCConfig)
 	mux.HandleFunc("GET /.well-known/udap", s.handleUDAPDiscoveryWave54)
@@ -6129,7 +6140,6 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			"conditionalCreate": true,
 			"conditionalRead":   "full-support",
 			"conditionalUpdate": true,
-			"conditionalPatch":  true,
 			"conditionalDelete": "single",
 			"interaction":       interactions,
 			"searchParam":       sp,
@@ -6611,7 +6621,6 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 		"conditionalCreate": true,
 		"conditionalRead":   "full-support",
 		"conditionalUpdate": true,
-		"conditionalPatch":  true,
 		"conditionalDelete": "single",
 		"interaction":       interactions,
 		"operation": []map[string]string{
@@ -6701,7 +6710,6 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			"conditionalCreate": true,
 			"conditionalRead":   "full-support",
 			"conditionalUpdate": true,
-			"conditionalPatch":  true,
 			"conditionalDelete": "single",
 			"interaction":       interactions,
 			"searchParam":       sp,

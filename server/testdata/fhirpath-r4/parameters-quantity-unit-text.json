@@ -1,0 +1,22 @@
+{
+  "resourceType": "Parameters",
+  "id": "quantity-unit-text",
+  "parameter": [
+    {
+      "name": "p0",
+      "valueQuantity": {
+        "value": 1,
+        "unit": "mg"
+      }
+    },
+    {
+      "name": "p1",
+      "valueQuantity": {
+        "value": 2,
+        "unit": "mg",
+        "system": "http://unitsofmeasure.org",
+        "code": "mg"
+      }
+    }
+  ]
+}

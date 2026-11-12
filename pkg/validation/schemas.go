@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 
+	annotationspb "github.com/google/fhir/go/proto/google/fhir/proto/annotations_go_proto"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/flint-fhir/flint/pkg/fhirutil"
@@ -315,6 +317,15 @@ func deriveProtoSchemaDetails(md protoreflect.MessageDescriptor) protoSchemaDeta
 					kebab := strings.ReplaceAll(rawName, "_", "-")
 					codes[kebab] = true
 					codes[rawName] = true
+					if after, ok := strings.CutPrefix(rawName, "v_"); ok {
+						codes[strings.ReplaceAll(after, "_", ".")] = true
+					}
+					if evOpts := ev.Options(); evOpts != nil && proto.HasExtension(evOpts, annotationspb.E_FhirOriginalCode) {
+						if orig, ok := proto.GetExtension(evOpts, annotationspb.E_FhirOriginalCode).(string); ok && orig != "" {
+							codes[orig] = true
+							codes[strings.ToLower(orig)] = true
+						}
+					}
 				}
 				if len(codes) > 0 {
 					det.codeBindings[jsonName] = codes
