@@ -83,64 +83,81 @@ def register_jwks_with_flint!(flint_base_url, client_id)
   puts "Registered #{keys.size} Inferno public signing keys for client_id=#{client_id}"
 end
 
+def find_group_in_suite(root_runnable, target_suffix)
+  target = target_suffix.to_s
+  queue = Array(root_runnable.groups).dup
+  until queue.empty?
+    g = queue.shift
+    gid = g.id.to_s
+    sid = g.respond_to?(:short_id) ? g.short_id.to_s : ''
+    if gid == target || gid.end_with?("-#{target}") || gid.end_with?("_#{target}") || gid.include?(target) || sid == target
+      return g
+    end
+
+    queue.concat(Array(g.groups))
+  end
+  nil
+end
+
 def execute_inferno_target(label:, suite_id:, group_suffix: nil, suite_options: {}, inputs: {}, artifacts_dir:)
   suites_repo   = Inferno::Repositories::TestSuites.new
-  groups_repo   = Inferno::Repositories::TestGroups.new
+  tests_repo    = Inferno::Repositories::Tests.new
   sessions_repo = Inferno::Repositories::TestSessions.new
   data_repo     = Inferno::Repositories::SessionData.new
   runs_repo     = Inferno::Repositories::TestRuns.new
+  messages_repo = Inferno::Repositories::Messages.new
 
   suite = suites_repo.find(suite_id)
   raise "Inferno suite '#{suite_id}' is not registered" if suite.nil?
 
-  runnable = if group_suffix.nil?
-               suite
-             else
-               groups_repo.all.find do |g|
-                 g.suite&.id == suite.id && (
-                   g.id.to_s == group_suffix.to_s ||
-                   g.id.to_s.end_with?("-#{group_suffix}") ||
-                   g.short_id.to_s == group_suffix.to_s
-                 )
-               end
-             end
-  raise "Group '#{group_suffix}' not found in suite '#{suite_id}'" if runnable.nil?
-
-  opt_objs = suite_options.map do |k, v|
-    Inferno::DSL::SuiteOption.new(id: k.to_sym, value: v.to_s)
+  runnable = group_suffix.nil? ? suite : find_group_in_suite(suite, group_suffix)
+  if runnable.nil?
+    top_groups = Array(suite.groups).map { |g| "#{g.id} (#{g.title})" }.join(', ')
+    raise "Group '#{group_suffix}' not found in suite '#{suite_id}'. Available top-level groups: #{top_groups}"
   end
-  test_session = sessions_repo.create(
-    test_suite_id: suite.id,
-    suite_options: opt_objs
-  )
+
+  test_session = begin
+    sessions_repo.create(
+      test_suite_id: suite.id,
+      suite_options: suite_options.map { |k, v| { id: k.to_sym, value: v.to_s } }
+    )
+  rescue StandardError
+    sessions_repo.create(
+      test_suite_id: suite.id,
+      suite_options: suite_options.map { |k, v| Inferno::DSL::SuiteOption.new(id: k.to_sym, value: v.to_s) }
+    )
+  end
 
   available = runnable.available_inputs
-  persisted_inputs = []
+  available_list = available.is_a?(Hash) ? available.values : Array(available)
+  puts "\n>>> Preparing #{label} (#{runnable.id}) [inputs: #{available_list.map { |ri| "#{ri.name}:#{ri.type}" }.join(', ')}]"
+
   inputs.each do |k, v|
-    matched = available.find { |_, ri| ri.name.to_s == k.to_s }&.last
-    if matched
-      data_repo.save(
-        test_session_id: test_session.id,
-        name: matched.name,
-        value: v,
-        type: matched.type
-      )
-      persisted_inputs << { name: matched.name, value: v }
-    else
-      persisted_inputs << { name: k.to_s, value: v }
+    matched = available_list.find { |ri| ri.name.to_s == k.to_s }
+    next unless matched
+
+    val_to_save = v
+    if matched.type.to_s == 'oauth_credentials' && v.is_a?(String) && !v.strip.start_with?('{')
+      val_to_save = JSON.generate({ access_token: v })
     end
+
+    data_repo.save(
+      test_session_id: test_session.id,
+      name: matched.name,
+      value: val_to_save,
+      type: matched.type
+    )
   end
 
   runnable_key = runnable < Inferno::TestSuite ? :test_suite_id : :test_group_id
   test_run = runs_repo.create(
     test_session_id: test_session.id,
     runnable_key => runnable.id,
-    inputs: persisted_inputs,
     status: 'queued'
   )
 
   started_at = Time.now
-  puts "\n>>> Running #{label} (#{runnable.id}) ..."
+  puts ">>> Running #{label} (#{runnable.id}) ..."
   Inferno::Jobs.perform(Inferno::Jobs::ExecuteTestRun, test_run.id, force_synchronous: true)
   elapsed_s = (Time.now - started_at).round(2)
 
@@ -150,11 +167,24 @@ def execute_inferno_target(label:, suite_id:, group_suffix: nil, suite_options: 
   counts = Hash.new(0)
   leaf_results.each { |r| counts[r.result.to_s] += 1 }
 
+  resolve_messages = lambda do |res_obj|
+    msgs = Array(res_obj.respond_to?(:messages) ? res_obj.messages : nil)
+    if msgs.empty? && messages_repo.respond_to?(:messages_for_result)
+      msgs = Array(messages_repo.messages_for_result(res_obj.id))
+    end
+    msgs
+  end
+
+  resolve_test_entity = lambda do |res_obj|
+    (res_obj.respond_to?(:runnable) && res_obj.runnable) || tests_repo.find(res_obj.test_id)
+  end
+
   failures = leaf_results.select { |r| %w[fail error wait cancel].include?(r.result.to_s) }
   failures.each do |f|
-    title = f.runnable&.title || f.test_id
+    ent = resolve_test_entity.call(f)
+    title = ent&.title || f.test_id
     warn "  [#{f.result.upcase}] #{f.test_id} (#{title}): #{f.result_message}"
-    Array(f.messages).each do |m|
+    resolve_messages.call(f).each do |m|
       warn "    (#{m.type}) #{m.message}"
     end
   end
@@ -175,13 +205,14 @@ def execute_inferno_target(label:, suite_id:, group_suffix: nil, suite_options: 
       cancel: counts['cancel']
     },
     tests: leaf_results.map do |r|
+      ent = resolve_test_entity.call(r)
       {
         test_id: r.test_id,
-        short_id: r.runnable&.short_id,
-        title: r.runnable&.title,
+        short_id: ent&.short_id,
+        title: ent&.title,
         result: r.result,
         result_message: r.result_message,
-        messages: Array(r.messages).map { |m| { type: m.type, message: m.message } }
+        messages: resolve_messages.call(r).map { |m| { type: m.type, message: m.message } }
       }
     end
   }
@@ -233,10 +264,16 @@ runs = []
 runs << execute_inferno_target(
   label: 'smart_stu2',
   suite_id: 'smart_stu2',
-  group_suffix: 'smart_backend_services',
+  group_suffix: 'backend_services',
   inputs: {
     url: flint_fhir_url,
-    backend_services_smart_auth_info: backend_auth_json
+    backend_services_smart_auth_info: backend_auth_json,
+    smart_auth_info: backend_auth_json,
+    backend_services_client_id: client_id,
+    client_id: client_id,
+    backend_services_requested_scope: 'system/*.rs',
+    requested_scopes: 'system/*.rs',
+    encryption_algorithm: 'ES384'
   },
   artifacts_dir: artifacts_dir
 )
@@ -246,10 +283,18 @@ runs << execute_inferno_target(
   suite_id: 'bulk_data_v200',
   group_suffix: nil,
   inputs: {
+    url: flint_fhir_url,
     bulk_server_url: flint_fhir_url,
     group_id: group_id,
     bulk_timeout: '60',
-    smart_auth_info: bulk_auth_json
+    smart_auth_info: bulk_auth_json,
+    backend_services_auth_info: bulk_auth_json,
+    backend_services_smart_auth_info: bulk_auth_json,
+    bearer_token: access_token,
+    backend_services_client_id: client_id,
+    client_id: client_id,
+    encryption_algorithm: 'ES384',
+    backend_services_requested_scope: 'system/*.read'
   },
   artifacts_dir: artifacts_dir
 )
@@ -257,14 +302,15 @@ runs << execute_inferno_target(
 runs << execute_inferno_target(
   label: 'us_core_v610',
   suite_id: 'us_core_v610',
-  group_suffix: 'us_core_v610_fhir_api',
+  group_suffix: 'fhir_api',
   suite_options: {
     smart_app_launch_version: 'smart_app_launch_2'
   },
   inputs: {
     url: flint_fhir_url,
     patient_ids: patient_ids,
-    smart_auth_info: us_core_auth_json
+    smart_auth_info: us_core_auth_json,
+    smart_credentials: access_token
   },
   artifacts_dir: artifacts_dir
 )
