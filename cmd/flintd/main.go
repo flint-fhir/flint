@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	_ "github.com/lib/pq"
+	_ "modernc.org/sqlite"
 
 	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/pkg/auth"
@@ -51,7 +52,7 @@ func main() {
 		os.Getenv,
 		os.Stdout,
 		logger,
-		func(dsn string) (*sql.DB, error) { return sql.Open("postgres", dsn) },
+		sql.Open,
 		http.ListenAndServe,
 	)
 	if err != nil {
@@ -113,6 +114,10 @@ func buildStoreOptions(isolationMode postgres.TenantIsolationMode, getenv func(s
 func configureAuth(srv *server.Server, logger *slog.Logger, getenv func(string) string) error {
 	oidcIssuer := getenv("FLINT_OIDC_ISSUER")
 	if oidcIssuer == "" {
+		if strings.EqualFold(strings.TrimSpace(getenv("FLINT_SMART_ENFORCE_DEV_AUTH")), "true") {
+			srv.EnableDevTokenEnforcement()
+			logger.Info("Built-in SMART v2 OAuth2 bearer enforcement enabled")
+		}
 		return nil
 	}
 	oidcAudience := getenv("FLINT_OIDC_AUDIENCE")
@@ -158,14 +163,14 @@ func configureAuth(srv *server.Server, logger *slog.Logger, getenv func(string) 
 	return nil
 }
 
-func openDorisStore(getenv func(string) string, openDB func(dsn string) (*sql.DB, error)) (*doris.Store, *sql.DB, error) {
+func openDorisStore(getenv func(string) string, openDB func(driverName, dsn string) (*sql.DB, error)) (*doris.Store, *sql.DB, error) {
 	groupCommit, err := doris.ParseGroupCommitMode(getenv("FLINT_DORIS_GROUP_COMMIT"))
 	if err != nil {
 		return nil, nil, err
 	}
 	var dorisDB *sql.DB
 	if dorisDSN := strings.TrimSpace(getenv("FLINT_DORIS_DSN")); dorisDSN != "" {
-		dorisDB, err = openDB(dorisDSN)
+		dorisDB, err = openDB("mysql", dorisDSN)
 		if err != nil {
 			return nil, nil, fmt.Errorf("open doris db: %w", err)
 		}
@@ -192,7 +197,7 @@ func openDorisStore(getenv func(string) string, openDB func(dsn string) (*sql.DB
 	return ds, dorisDB, nil
 }
 
-func openSQLiteStore(cliDSN string, getenv func(string) string, openDB func(dsn string) (*sql.DB, error)) (*sqlite.Store, *sql.DB, error) {
+func openSQLiteStore(cliDSN string, getenv func(string) string, openDB func(driverName, dsn string) (*sql.DB, error)) (*sqlite.Store, *sql.DB, error) {
 	journalMode, err := sqlite.ParseJournalMode(getenv("FLINT_SQLITE_JOURNAL_MODE"))
 	if err != nil {
 		return nil, nil, err
@@ -203,10 +208,11 @@ func openSQLiteStore(cliDSN string, getenv func(string) string, openDB func(dsn 
 	}
 	var sqliteDB *sql.DB
 	if sqliteDSN != "" && sqliteDSN != ":memory:" {
-		sqliteDB, err = openDB(sqliteDSN)
+		sqliteDB, err = openDB("sqlite", sqliteDSN)
 		if err != nil {
 			return nil, nil, fmt.Errorf("open sqlite db: %w", err)
 		}
+		sqliteDB.SetMaxOpenConns(1)
 		if err := sqliteDB.Ping(); err != nil {
 			_ = sqliteDB.Close()
 			return nil, nil, fmt.Errorf("ping sqlite db: %w", err)
@@ -235,7 +241,7 @@ func run(
 	getenv func(string) string,
 	out io.Writer,
 	logger *slog.Logger,
-	openDB func(dsn string) (*sql.DB, error),
+	openDB func(driverName, dsn string) (*sql.DB, error),
 	serve func(addr string, handler http.Handler) error,
 ) error {
 	cliOpts, err := parseCLIOptions(args, out)
@@ -306,7 +312,7 @@ func run(
 			dsn = "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
 		}
 
-		db, err := openDB(dsn)
+		db, err := openDB("postgres", dsn)
 		if err != nil {
 			return fmt.Errorf("open db: %w", err)
 		}

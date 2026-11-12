@@ -1,0 +1,22 @@
+{
+  "resourceType": "Parameters",
+  "id": "example-types",
+  "parameter": [
+    {
+      "name": "p0",
+      "valueString": "hello"
+    },
+    {
+      "name": "p1",
+      "valueInteger": 42
+    },
+    {
+      "name": "p2",
+      "valueUuid": "urn:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
+    },
+    {
+      "name": "p3",
+      "valueDecimal": 3.14
+    }
+  ]
+}

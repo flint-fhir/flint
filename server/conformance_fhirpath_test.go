@@ -217,7 +217,9 @@ func TestHL7FHIRPathR4SpecificationConformanceSuite(t *testing.T) {
 		{"Projection/DistinctCount", "Patient", "pat-fp-1", "Patient.name.given.distinct().count()", []any{int64(3)}},
 		{"Projection/IsDistinctFalse", "Patient", "pat-fp-1", "Patient.name.given.isDistinct()", []any{false}},
 		{"Projection/IsDistinctTrue", "Patient", "pat-fp-1", "Patient.name.given.distinct().isDistinct()", []any{true}},
-		{"Projection/OfTypeString", "Patient", "pat-fp-1", "Patient.gender.ofType(string)", []any{"female"}},
+		{"Projection/OfTypeString", "Patient", "pat-fp-1", "Patient.name[0].family.ofType(string)", []any{"Lin"}},
+		{"Projection/OfTypeCodeExact", "Patient", "pat-fp-1", "Patient.gender.ofType(code)", []any{"female"}},
+		{"Projection/OfTypeStringEmptyOnCode", "Patient", "pat-fp-1", "Patient.gender.ofType(string)", nil},
 		{"Projection/OfTypeIntegerEmptyOnString", "Patient", "pat-fp-1", "Patient.gender.ofType(integer)", nil},
 		{"Projection/RepeatContact", "Patient", "pat-fp-1", "Patient.repeat(contact).name.family", []any{"Lin"}},
 
@@ -312,7 +314,9 @@ func TestHL7FHIRPathR4SpecificationConformanceSuite(t *testing.T) {
 		{"Convert/HasValueTrue", "Patient", "pat-fp-1", "Patient.gender.hasValue()", []any{true}},
 		{"Convert/HasValueFalseOnEmpty", "Patient", "pat-fp-1", "Patient.photo.hasValue()", []any{false}},
 		{"Convert/IsStringTrue", "Patient", "pat-fp-1", "Patient.gender is string", []any{true}},
-		{"Convert/AsString", "Patient", "pat-fp-1", "(Patient.gender as string)", []any{"female"}},
+		{"Convert/AsString", "Patient", "pat-fp-1", "(Patient.name[0].family as string)", []any{"Lin"}},
+		{"Convert/AsCodeExact", "Patient", "pat-fp-1", "(Patient.gender as code)", []any{"female"}},
+		{"Convert/AsStringEmptyOnCode", "Patient", "pat-fp-1", "(Patient.gender as string)", nil},
 
 		// 10. FHIR R4 Extensions, Environment Variables & Contained Reference Resolution
 		{"FHIR/ExtensionByURL", "Patient", "pat-fp-1", "Patient.extension('http://hl7.org/fhir/StructureDefinition/patient-mothersMaidenName').valueString", []any{"Chen"}},

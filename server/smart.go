@@ -26,6 +26,8 @@ type SMARTConfig struct {
 	IntrospectionEndpoint string `json:"introspection_endpoint,omitempty"`
 	// RevocationEndpoint is the OAuth2 RFC 7009 token revocation URL
 	RevocationEndpoint string `json:"revocation_endpoint,omitempty"`
+	// RegistrationEndpoint is the OAuth2 RFC 7591 dynamic client registration URL
+	RegistrationEndpoint string `json:"registration_endpoint,omitempty"`
 	// JWKSURI is the JSON Web Key Set URL
 	JWKSURI string `json:"jwks_uri,omitempty"`
 	// Issuer is the FHIR server base URL
@@ -66,6 +68,17 @@ func (s *Server) RegisterOAuthClientJWK(clientID string, jwk auth.JWK) {
 		s.clientJWKs = make(map[string]auth.JWK)
 	}
 	s.clientJWKs[strings.TrimSpace(clientID)] = jwk
+}
+
+// RegisterOAuthClientJWKSet registers a trusted RFC 7517 JWKSet (containing one or more
+// RSA/EC public signing keys) for a SMART Backend Services client_id.
+func (s *Server) RegisterOAuthClientJWKSet(clientID string, jwks auth.JWKSet) {
+	s.oauthMu.Lock()
+	defer s.oauthMu.Unlock()
+	if s.clientJWKSets == nil {
+		s.clientJWKSets = make(map[string]auth.JWKSet)
+	}
+	s.clientJWKSets[strings.TrimSpace(clientID)] = jwks
 }
 
 // SetRequireRegisteredClientJWK configures whether private_key_jwt client_credentials
@@ -257,6 +270,7 @@ func (s *Server) resolveSMARTConfig(r *http.Request) SMARTConfig {
 		TokenEndpoint:         baseOrigin + "/oauth2/token",
 		IntrospectionEndpoint: baseOrigin + "/oauth2/introspect",
 		RevocationEndpoint:    baseOrigin + "/oauth2/revoke",
+		RegistrationEndpoint:  baseOrigin + "/oauth2/register",
 		JWKSURI:               baseOrigin + "/fhir/r4/" + tenant + "/.well-known/jwks.json",
 	}
 	if s.smartConfig == nil {
@@ -278,6 +292,9 @@ func (s *Server) resolveSMARTConfig(r *http.Request) SMARTConfig {
 	if out.RevocationEndpoint == "" {
 		out.RevocationEndpoint = defaultCfg.RevocationEndpoint
 	}
+	if out.RegistrationEndpoint == "" {
+		out.RegistrationEndpoint = defaultCfg.RegistrationEndpoint
+	}
 	if out.JWKSURI == "" {
 		out.JWKSURI = defaultCfg.JWKSURI
 	}
@@ -296,6 +313,7 @@ func (s *Server) handleSMARTConfig(w http.ResponseWriter, r *http.Request) {
 		"token_endpoint":         cfg.TokenEndpoint,
 		"introspection_endpoint": cfg.IntrospectionEndpoint,
 		"revocation_endpoint":    cfg.RevocationEndpoint,
+		"registration_endpoint":  cfg.RegistrationEndpoint,
 		"token_endpoint_auth_methods_supported": []string{
 			"client_secret_basic",
 			"client_secret_post",
@@ -304,6 +322,7 @@ func (s *Server) handleSMARTConfig(w http.ResponseWriter, r *http.Request) {
 		"token_endpoint_auth_signing_alg_values_supported": []string{
 			"RS256",
 			"RS384",
+			"ES256",
 			"ES384",
 		},
 		"grant_types_supported": []string{
@@ -670,11 +689,30 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.oauthMu.Lock()
+			regJWKSet, hasRegJWKSet := s.clientJWKSets[iss]
 			regJWK, hasRegJWK := s.clientJWKs[iss]
 			requireReg := s.requireRegisteredClientJWK
 			s.oauthMu.Unlock()
 
-			if hasRegJWK {
+			if hasRegJWKSet {
+				verified := false
+				if jwk, err := regJWKSet.FindKey(parsed.Header.Kid); err == nil {
+					if pubKey, pkErr := jwk.PublicKey(); pkErr == nil && parsed.VerifySignature(pubKey) == nil {
+						verified = true
+					}
+				} else if parsed.Header.Kid == "" {
+					for i := range regJWKSet.Keys {
+						if pubKey, pkErr := regJWKSet.Keys[i].PublicKey(); pkErr == nil && parsed.VerifySignature(pubKey) == nil {
+							verified = true
+							break
+						}
+					}
+				}
+				if !verified {
+					writeOAuthError(w, http.StatusBadRequest, "invalid_client", "client_assertion signature verification failed against registered client JWKS")
+					return
+				}
+			} else if hasRegJWK {
 				pubKey, err := regJWK.PublicKey()
 				if err != nil {
 					writeOAuthError(w, http.StatusBadRequest, "invalid_client", "invalid registered JWK for client: "+err.Error())
@@ -919,4 +957,55 @@ func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
 		"error":             code,
 		"error_description": desc,
 	})
+}
+
+// handleOAuthRegister implements RFC 7591 OAuth 2.0 Dynamic Client Registration
+// (POST /oauth2/register) for registering SMART Backend Services public JWKS.
+func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ClientID                string      `json:"client_id"`
+		ClientName              string      `json:"client_name"`
+		TokenEndpointAuthMethod string      `json:"token_endpoint_auth_method"`
+		GrantTypes              []string    `json:"grant_types"`
+		Scope                   string      `json:"scope"`
+		JWKS                    auth.JWKSet `json:"jwks"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "malformed JSON client registration request")
+		return
+	}
+	clientID := strings.TrimSpace(req.ClientID)
+	if clientID == "" {
+		clientID = "flint-client-" + uuid.NewString()
+	}
+	if len(req.JWKS.Keys) > 0 {
+		for i := range req.JWKS.Keys {
+			if _, err := req.JWKS.Keys[i].PublicKey(); err != nil {
+				writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "invalid JWK in jwks.keys: "+err.Error())
+				return
+			}
+		}
+		s.RegisterOAuthClientJWKSet(clientID, req.JWKS)
+	}
+	authMethod := strings.TrimSpace(req.TokenEndpointAuthMethod)
+	if authMethod == "" {
+		authMethod = "private_key_jwt"
+	}
+	grantTypes := req.GrantTypes
+	if len(grantTypes) == 0 {
+		grantTypes = []string{"client_credentials", "authorization_code", "refresh_token"}
+	}
+	resp := map[string]any{
+		"client_id":                  clientID,
+		"client_id_issued_at":        time.Now().Unix(),
+		"client_name":                req.ClientName,
+		"token_endpoint_auth_method": authMethod,
+		"grant_types":                grantTypes,
+		"scope":                      req.Scope,
+		"jwks":                       req.JWKS,
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(resp)
 }

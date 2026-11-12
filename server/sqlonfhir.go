@@ -35,15 +35,26 @@ type sqlOnFHIRViewDefinition struct {
 }
 
 type sqlOnFHIRConstant struct {
-	Name          string   `json:"name"`
-	ValueString   *string  `json:"valueString,omitempty"`
-	ValueCode     *string  `json:"valueCode,omitempty"`
-	ValueURI      *string  `json:"valueUri,omitempty"`
-	ValueDate     *string  `json:"valueDate,omitempty"`
-	ValueDateTime *string  `json:"valueDateTime,omitempty"`
-	ValueInteger  *int     `json:"valueInteger,omitempty"`
-	ValueDecimal  *float64 `json:"valueDecimal,omitempty"`
-	ValueBoolean  *bool    `json:"valueBoolean,omitempty"`
+	Name              string   `json:"name"`
+	ValueBase64Binary *string  `json:"valueBase64Binary,omitempty"`
+	ValueBoolean      *bool    `json:"valueBoolean,omitempty"`
+	ValueCanonical    *string  `json:"valueCanonical,omitempty"`
+	ValueCode         *string  `json:"valueCode,omitempty"`
+	ValueDate         *string  `json:"valueDate,omitempty"`
+	ValueDateTime     *string  `json:"valueDateTime,omitempty"`
+	ValueDecimal      *float64 `json:"valueDecimal,omitempty"`
+	ValueID           *string  `json:"valueId,omitempty"`
+	ValueInstant      *string  `json:"valueInstant,omitempty"`
+	ValueInteger      *int     `json:"valueInteger,omitempty"`
+	ValueInteger64    any      `json:"valueInteger64,omitempty"`
+	ValueOID          *string  `json:"valueOid,omitempty"`
+	ValuePositiveInt  *int     `json:"valuePositiveInt,omitempty"`
+	ValueString       *string  `json:"valueString,omitempty"`
+	ValueTime         *string  `json:"valueTime,omitempty"`
+	ValueUnsignedInt  *int     `json:"valueUnsignedInt,omitempty"`
+	ValueURI          *string  `json:"valueUri,omitempty"`
+	ValueURL          *string  `json:"valueUrl,omitempty"`
+	ValueUUID         *string  `json:"valueUuid,omitempty"`
 }
 
 type sqlOnFHIRWhere struct {
@@ -56,6 +67,7 @@ type sqlOnFHIRSelect struct {
 	Select        []sqlOnFHIRSelect `json:"select,omitempty"`
 	ForEach       string            `json:"forEach,omitempty"`
 	ForEachOrNull string            `json:"forEachOrNull,omitempty"`
+	Repeat        []string          `json:"repeat,omitempty"`
 	Where         []sqlOnFHIRWhere  `json:"where,omitempty"`
 	UnionAll      []sqlOnFHIRSelect `json:"unionAll,omitempty"`
 }
@@ -245,6 +257,16 @@ func parseViewSelectsFromSlice(raw []any) []sqlOnFHIRSelect {
 		var sel sqlOnFHIRSelect
 		sel.ForEach, _ = sm["forEach"].(string)
 		sel.ForEachOrNull, _ = sm["forEachOrNull"].(string)
+		if rawRep, hasRep := sm["repeat"]; hasRep {
+			if repArr, ok := rawRep.([]any); ok {
+				sel.Repeat = make([]string, 0, len(repArr))
+				for _, r := range repArr {
+					if rs, okS := r.(string); okS {
+						sel.Repeat = append(sel.Repeat, rs)
+					}
+				}
+			}
+		}
 		if rawCols, ok := sm["column"].([]any); ok {
 			for _, rc := range rawCols {
 				cm, ok := rc.(map[string]any)
@@ -531,6 +553,95 @@ func (s *Server) handleViewDefinitionCRUD(w http.ResponseWriter, r *http.Request
 	}
 }
 
+var knownSQLOnFHIREnvVars = map[string]bool{
+	"resource":     true,
+	"rootResource": true,
+	"context":      true,
+	"rowIndex":     true,
+	"ucum":         true,
+	"sct":          true,
+	"loinc":        true,
+}
+
+func validateViewFHIRPathExpr(rawExpr string, constMap map[string]string) error {
+	s := strings.TrimSpace(rawExpr)
+	if s == "" {
+		return fmt.Errorf("FHIRPath expression cannot be empty")
+	}
+	inQuote := byte(0)
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if inQuote != 0 {
+			if ch == inQuote && !isEscapedAt(s, i) {
+				inQuote = 0
+			}
+			continue
+		}
+		if ch == '\'' || ch == '"' || ch == '`' {
+			inQuote = ch
+			continue
+		}
+		if ch == '%' {
+			if i+1 >= len(s) {
+				return fmt.Errorf("invalid trailing '%%' in FHIRPath expression %q", rawExpr)
+			}
+			if s[i+1] == '`' {
+				end := i + 2
+				for end < len(s) && s[end] != '`' {
+					end++
+				}
+				if end >= len(s) {
+					return fmt.Errorf("unterminated delimited environment variable in %q", rawExpr)
+				}
+				name := s[i+2 : end]
+				if constMap["%"+name] == "" && !knownSQLOnFHIREnvVars[name] && !strings.HasPrefix(name, "vs-") && !strings.HasPrefix(name, "ext-") {
+					return fmt.Errorf("undefined ViewDefinition constant %%%s", name)
+				}
+				i = end
+				continue
+			}
+			c1 := s[i+1]
+			isIdentStart := (c1 >= 'a' && c1 <= 'z') || (c1 >= 'A' && c1 <= 'Z') || c1 == '_'
+			if !isIdentStart {
+				return fmt.Errorf("invalid environment variable syntax in %q", rawExpr)
+			}
+			end := i + 2
+			for end < len(s) {
+				ce := s[end]
+				if (ce >= 'a' && ce <= 'z') || (ce >= 'A' && ce <= 'Z') || (ce >= '0' && ce <= '9') || ce == '_' {
+					end++
+				} else {
+					break
+				}
+			}
+			name := s[i+1 : end]
+			// Check hyphenated %vs-* / %ext-* as well
+			extEnd := end
+			if (name == "vs" || name == "ext") && extEnd < len(s) && s[extEnd] == '-' {
+				for extEnd < len(s) {
+					ce := s[extEnd]
+					if (ce >= 'a' && ce <= 'z') || (ce >= 'A' && ce <= 'Z') || (ce >= '0' && ce <= '9') || ce == '_' || ce == '-' {
+						extEnd++
+					} else {
+						break
+					}
+				}
+				i = extEnd - 1
+				continue
+			}
+			if constMap["%"+name] == "" && !knownSQLOnFHIREnvVars[name] {
+				return fmt.Errorf("undefined ViewDefinition constant %%%s", name)
+			}
+			i = end - 1
+		}
+	}
+	sub := substituteViewConstants(s, constMap)
+	if _, err := validateAndCleanFHIRPath(sub); err != nil {
+		return err
+	}
+	return nil
+}
+
 func validateViewDefinition(vd sqlOnFHIRViewDefinition) error {
 	if strings.TrimSpace(vd.Resource) == "" {
 		return fmt.Errorf("ViewDefinition.resource is required")
@@ -538,24 +649,152 @@ func validateViewDefinition(vd sqlOnFHIRViewDefinition) error {
 	if len(vd.Select) == 0 {
 		return fmt.Errorf("ViewDefinition.select must contain at least one select clause")
 	}
-	cols := collectViewDefinitionColumns(vd.Select)
+	seenConst := make(map[string]bool, len(vd.Constant))
+	for _, c := range vd.Constant {
+		cName := strings.TrimSpace(c.Name)
+		if cName == "" {
+			return fmt.Errorf("ViewDefinition.constant.name is required")
+		}
+		if seenConst[cName] {
+			return fmt.Errorf("duplicate ViewDefinition.constant.name %q", cName)
+		}
+		seenConst[cName] = true
+		if _, ok := c.fhirPathLiteral(); !ok {
+			return fmt.Errorf("ViewDefinition.constant %q must define a value[x]", cName)
+		}
+	}
+	constMap := buildViewConstantReplacements(vd.Constant)
+	for _, w := range vd.Where {
+		if err := validateViewFHIRPathExpr(w.Path, constMap); err != nil {
+			return fmt.Errorf("invalid ViewDefinition.where: %w", err)
+		}
+	}
+	cols, err := validateViewSelectSlice(vd.Select, constMap)
+	if err != nil {
+		return err
+	}
 	if len(cols) == 0 {
 		return fmt.Errorf("ViewDefinition must declare at least one column")
 	}
-	seen := make(map[string]bool, len(cols))
-	for _, c := range cols {
+	return nil
+}
+
+func validateViewSelectSlice(sels []sqlOnFHIRSelect, constMap map[string]string) ([]string, error) {
+	var allCols []string
+	seen := make(map[string]bool)
+	for _, sel := range sels {
+		sCols, err := validateViewSingleSelect(sel, constMap)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range sCols {
+			if seen[c] {
+				return nil, fmt.Errorf("duplicate ViewDefinition column name %q", c)
+			}
+			seen[c] = true
+			allCols = append(allCols, c)
+		}
+	}
+	return allCols, nil
+}
+
+func validateViewSingleSelect(sel sqlOnFHIRSelect, constMap map[string]string) ([]string, error) {
+	iterCount := 0
+	if strings.TrimSpace(sel.ForEach) != "" {
+		iterCount++
+		if err := validateViewFHIRPathExpr(sel.ForEach, constMap); err != nil {
+			return nil, fmt.Errorf("invalid select.forEach: %w", err)
+		}
+	}
+	if strings.TrimSpace(sel.ForEachOrNull) != "" {
+		iterCount++
+		if err := validateViewFHIRPathExpr(sel.ForEachOrNull, constMap); err != nil {
+			return nil, fmt.Errorf("invalid select.forEachOrNull: %w", err)
+		}
+	}
+	if sel.Repeat != nil {
+		iterCount++
+		if len(sel.Repeat) == 0 {
+			return nil, fmt.Errorf("select.repeat must contain at least one FHIRPath expression")
+		}
+		for _, rp := range sel.Repeat {
+			if err := validateViewFHIRPathExpr(rp, constMap); err != nil {
+				return nil, fmt.Errorf("invalid select.repeat path: %w", err)
+			}
+		}
+	}
+	if iterCount > 1 {
+		return nil, fmt.Errorf("select clause may specify at most one of forEach, forEachOrNull, or repeat")
+	}
+	for _, w := range sel.Where {
+		if err := validateViewFHIRPathExpr(w.Path, constMap); err != nil {
+			return nil, fmt.Errorf("invalid select.where: %w", err)
+		}
+	}
+	if len(sel.Column) == 0 && len(sel.Select) == 0 && len(sel.UnionAll) == 0 {
+		return nil, fmt.Errorf("select clause must contain at least one of column, select, or unionAll")
+	}
+
+	var cols []string
+	seen := make(map[string]bool)
+	for _, c := range sel.Column {
 		if strings.TrimSpace(c.Name) == "" {
-			return fmt.Errorf("ViewDefinition column name is required")
+			return nil, fmt.Errorf("ViewDefinition column name is required")
 		}
 		if strings.TrimSpace(c.Path) == "" {
-			return fmt.Errorf("ViewDefinition column %q path is required", c.Name)
+			return nil, fmt.Errorf("ViewDefinition column %q path is required", c.Name)
+		}
+		if err := validateViewFHIRPathExpr(c.Path, constMap); err != nil {
+			return nil, fmt.Errorf("invalid column %q path: %w", c.Name, err)
 		}
 		if seen[c.Name] {
-			return fmt.Errorf("duplicate ViewDefinition column name %q", c.Name)
+			return nil, fmt.Errorf("duplicate ViewDefinition column name %q", c.Name)
 		}
 		seen[c.Name] = true
+		cols = append(cols, c.Name)
 	}
-	return nil
+	if len(sel.Select) > 0 {
+		subCols, err := validateViewSelectSlice(sel.Select, constMap)
+		if err != nil {
+			return nil, err
+		}
+		for _, sc := range subCols {
+			if seen[sc] {
+				return nil, fmt.Errorf("duplicate ViewDefinition column name %q", sc)
+			}
+			seen[sc] = true
+			cols = append(cols, sc)
+		}
+	}
+	if len(sel.UnionAll) > 0 {
+		var expected []string
+		for i, branch := range sel.UnionAll {
+			bCols, err := validateViewSingleSelect(branch, constMap)
+			if err != nil {
+				return nil, err
+			}
+			if i == 0 {
+				expected = bCols
+			} else {
+				if len(bCols) != len(expected) {
+					return nil, fmt.Errorf("unionAll branch %d declares %d columns, expected %d", i, len(bCols), len(expected))
+				}
+				for j := range expected {
+					if bCols[j] != expected[j] {
+						return nil, fmt.Errorf("unionAll branch %d column %d is %q, expected %q", i, j, bCols[j], expected[j])
+					}
+				}
+			}
+		}
+		for _, uc := range expected {
+			if seen[uc] {
+				return nil, fmt.Errorf("duplicate ViewDefinition column name %q", uc)
+			}
+			seen[uc] = true
+			cols = append(cols, uc)
+		}
+	}
+	return cols, nil
 }
 
 func collectViewDefinitionColumns(selects []sqlOnFHIRSelect) []sqlOnFHIRColumn {
@@ -572,6 +811,9 @@ func collectViewDefinitionColumnsWithPrefix(selects []sqlOnFHIRSelect, initPrefi
 			fe := strings.TrimSpace(sel.ForEach)
 			if fe == "" {
 				fe = strings.TrimSpace(sel.ForEachOrNull)
+			}
+			if fe == "" && len(sel.Repeat) == 1 {
+				fe = strings.TrimSpace(sel.Repeat[0])
 			}
 			if fe != "" {
 				curPrefix = qualifyForEachColumnPath(prefix, fe)
@@ -925,14 +1167,80 @@ func extractViewUnionBranchSpecs(selects []sqlOnFHIRSelect) []viewUnionBranchSpe
 }
 
 type viewRunOptions struct {
-	viewDef     sqlOnFHIRViewDefinition
-	format      string
-	dialect     string
-	limit       int
-	patientID   string
-	groupID     string
-	since       *time.Time
-	includeHdrs bool
+	viewDef            sqlOnFHIRViewDefinition
+	format             string
+	dialect            string
+	limit              int
+	patientID          string
+	groupID            string
+	since              *time.Time
+	includeHdrs        bool
+	hasInlineResources bool
+	inlineResources    []map[string]any
+}
+
+func unmarshalFHIRMapPreservingNumbers(raw []byte) (map[string]any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var root map[string]any
+	if err := dec.Decode(&root); err != nil {
+		return nil, err
+	}
+	normalizeJSONNumbersInMap(root)
+	return root, nil
+}
+
+func normalizeJSONNumbersInMap(m map[string]any) {
+	if m == nil {
+		return
+	}
+	type decMeta struct {
+		key  string
+		text string
+	}
+	var metas []decMeta
+	for k, v := range m {
+		switch tv := v.(type) {
+		case json.Number:
+			s := tv.String()
+			fv, err := tv.Float64()
+			if err != nil {
+				continue
+			}
+			m[k] = fv
+			if strings.ContainsAny(s, ".eE") && !strings.HasPrefix(k, "_") {
+				metas = append(metas, decMeta{key: k, text: s})
+			}
+		case map[string]any:
+			normalizeJSONNumbersInMap(tv)
+		case []any:
+			normalizeJSONNumbersInSlice(tv)
+		}
+	}
+	for _, dm := range metas {
+		metaKey := "_" + dm.key
+		pm, ok := m[metaKey].(map[string]any)
+		if !ok || pm == nil {
+			pm = make(map[string]any, 1)
+			m[metaKey] = pm
+		}
+		pm["_decimalText"] = dm.text
+	}
+}
+
+func normalizeJSONNumbersInSlice(s []any) {
+	for i, v := range s {
+		switch tv := v.(type) {
+		case json.Number:
+			if fv, err := tv.Float64(); err == nil {
+				s[i] = fv
+			}
+		case map[string]any:
+			normalizeJSONNumbersInMap(tv)
+		case []any:
+			normalizeJSONNumbersInSlice(tv)
+		}
+	}
 }
 
 func (s *Server) parseViewRunRequest(r *http.Request, defaultFormat string) (viewRunOptions, int, error) {
@@ -987,12 +1295,14 @@ func (s *Server) parseViewRunRequest(r *http.Request, defaultFormat string) (vie
 				return opts, http.StatusBadRequest, fmt.Errorf("invalid JSON payload: %v", err)
 			}
 			switch probe.ResourceType {
-			case "ViewDefinition":
+			case "ViewDefinition", "":
 				var vd sqlOnFHIRViewDefinition
 				if err := json.Unmarshal(trimmed, &vd); err != nil {
 					return opts, http.StatusBadRequest, fmt.Errorf("invalid ViewDefinition JSON: %v", err)
 				}
-				parsedVD = &vd
+				if probe.ResourceType == "ViewDefinition" || vd.Resource != "" || len(vd.Select) > 0 || len(vd.Where) > 0 || len(vd.Constant) > 0 || (instanceID == "" && viewRef == "") {
+					parsedVD = &vd
+				}
 			case "Parameters":
 				var params struct {
 					Parameter []struct {
@@ -1083,6 +1393,15 @@ func (s *Server) parseViewRunRequest(r *http.Request, defaultFormat string) (vie
 						if p.ValueBoolean != nil {
 							opts.includeHdrs = *p.ValueBoolean
 						}
+					case "resource":
+						if len(p.Resource) > 0 {
+							opts.hasInlineResources = true
+							rm, uErr := unmarshalFHIRMapPreservingNumbers(p.Resource)
+							if uErr != nil {
+								return opts, http.StatusBadRequest, fmt.Errorf("invalid inline resource parameter: %v", uErr)
+							}
+							opts.inlineResources = append(opts.inlineResources, rm)
+						}
 					}
 				}
 			default:
@@ -1157,41 +1476,10 @@ func (s *Server) executeViewDefinition(w http.ResponseWriter, r *http.Request, d
 	}
 
 	targetType := strings.TrimSpace(opts.viewDef.Resource)
-	if _, ok := s.protoRegistry[targetType]; !ok {
+	_, inProtoRegistry := s.protoRegistry[targetType]
+	if !opts.hasInlineResources && !inProtoRegistry {
 		writeValidateErrorOutcome(w, r, http.StatusUnprocessableEntity, "not-supported", fmt.Sprintf("unsupported ViewDefinition target resource type %q", targetType))
 		return
-	}
-
-	exportParams := store.ExportParams{
-		TenantID:      tenant,
-		ResourceTypes: []string{targetType},
-		Since:         opts.since,
-	}
-	if opts.patientID != "" {
-		patID := opts.patientID
-		if slash := strings.LastIndexByte(patID, '/'); slash != -1 {
-			patID = patID[slash+1:]
-		}
-		exportParams.PatientID = patID
-	}
-	if opts.groupID != "" {
-		grpID := opts.groupID
-		if slash := strings.LastIndexByte(grpID, '/'); slash != -1 {
-			grpID = grpID[slash+1:]
-		}
-		grpRes, err := s.store.GroupEverything(r.Context(), store.GroupEverythingParams{
-			TenantID: tenant,
-			GroupID:  grpID,
-		})
-		if err == nil && grpRes != nil {
-			var patIDs []string
-			for _, m := range grpRes.Matches {
-				if m.ResType == "Patient" {
-					patIDs = append(patIDs, m.ResID)
-				}
-			}
-			exportParams.PatientIDs = patIDs
-		}
 	}
 
 	constMap := buildViewConstantReplacements(opts.viewDef.Constant)
@@ -1202,29 +1490,84 @@ func (s *Server) executeViewDefinition(w http.ResponseWriter, r *http.Request, d
 	}
 
 	var rows []map[string]any
-	err = s.streamExportResources(r.Context(), exportParams, func(sr store.SearchResult) error {
-		if opts.limit > 0 && len(rows) >= opts.limit {
-			return nil
-		}
-		root, err := s.protoToFHIRMapWithMeta(sr.ResType, sr.ResourceProto, sr.ResVersion, sr.LastUpdated)
-		if err != nil {
-			return nil
-		}
-		resRows, evalErr := evaluateViewDefinitionOnResource(root, opts.viewDef, constMap)
-		if evalErr != nil {
-			return evalErr
-		}
-		for _, row := range resRows {
-			rows = append(rows, row)
+	if opts.hasInlineResources {
+		for _, root := range opts.inlineResources {
 			if opts.limit > 0 && len(rows) >= opts.limit {
 				break
 			}
+			rt, _ := root["resourceType"].(string)
+			if rt != targetType {
+				continue
+			}
+			resRows, evalErr := evaluateViewDefinitionOnResource(root, opts.viewDef, constMap)
+			if evalErr != nil {
+				writeOperationOutcome(w, http.StatusUnprocessableEntity, "business-rule", evalErr.Error())
+				return
+			}
+			for _, row := range resRows {
+				rows = append(rows, row)
+				if opts.limit > 0 && len(rows) >= opts.limit {
+					break
+				}
+			}
 		}
-		return nil
-	})
-	if err != nil {
-		writeOperationOutcome(w, http.StatusUnprocessableEntity, "business-rule", err.Error())
-		return
+	} else {
+		exportParams := store.ExportParams{
+			TenantID:      tenant,
+			ResourceTypes: []string{targetType},
+			Since:         opts.since,
+		}
+		if opts.patientID != "" {
+			patID := opts.patientID
+			if slash := strings.LastIndexByte(patID, '/'); slash != -1 {
+				patID = patID[slash+1:]
+			}
+			exportParams.PatientID = patID
+		}
+		if opts.groupID != "" {
+			grpID := opts.groupID
+			if slash := strings.LastIndexByte(grpID, '/'); slash != -1 {
+				grpID = grpID[slash+1:]
+			}
+			grpRes, gErr := s.store.GroupEverything(r.Context(), store.GroupEverythingParams{
+				TenantID: tenant,
+				GroupID:  grpID,
+			})
+			if gErr == nil && grpRes != nil {
+				var patIDs []string
+				for _, m := range grpRes.Matches {
+					if m.ResType == "Patient" {
+						patIDs = append(patIDs, m.ResID)
+					}
+				}
+				exportParams.PatientIDs = patIDs
+			}
+		}
+
+		err = s.streamExportResources(r.Context(), exportParams, func(sr store.SearchResult) error {
+			if opts.limit > 0 && len(rows) >= opts.limit {
+				return nil
+			}
+			root, pErr := s.protoToFHIRMapWithMeta(sr.ResType, sr.ResourceProto, sr.ResVersion, sr.LastUpdated)
+			if pErr != nil {
+				return nil
+			}
+			resRows, evalErr := evaluateViewDefinitionOnResource(root, opts.viewDef, constMap)
+			if evalErr != nil {
+				return evalErr
+			}
+			for _, row := range resRows {
+				rows = append(rows, row)
+				if opts.limit > 0 && len(rows) >= opts.limit {
+					break
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			writeOperationOutcome(w, http.StatusUnprocessableEntity, "business-rule", err.Error())
+			return
+		}
 	}
 
 	w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
@@ -1234,8 +1577,10 @@ func (s *Server) executeViewDefinition(w http.ResponseWriter, r *http.Request, d
 			w.Header().Set("X-Flint-Analytical-Backend", backend)
 		}
 	}
-	if sqlRes, sqlErr := s.transpileViewDefinitionToZeroJSONSQL(tenant, opts); sqlErr == nil && sqlRes.sql != "" {
-		w.Header().Set("X-Flint-Generated-SQL", strings.Join(strings.Fields(sqlRes.sql), " "))
+	if inProtoRegistry {
+		if sqlRes, sqlErr := s.transpileViewDefinitionToZeroJSONSQL(tenant, opts); sqlErr == nil && sqlRes.sql != "" {
+			w.Header().Set("X-Flint-Generated-SQL", strings.Join(strings.Fields(sqlRes.sql), " "))
+		}
 	}
 
 	fmtLower := strings.ToLower(strings.TrimSpace(opts.format))
@@ -1346,6 +1691,96 @@ func (s *Server) executeViewDefinition(w http.ResponseWriter, r *http.Request, d
 	}
 }
 
+func quoteFHIRPathStringConst(s string) string {
+	return "'" + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), "'", `\'`) + "'"
+}
+
+func (c sqlOnFHIRConstant) fhirPathLiteral() (string, bool) {
+	switch {
+	case c.ValueString != nil:
+		return quoteFHIRPathStringConst(*c.ValueString), true
+	case c.ValueCode != nil:
+		return quoteFHIRPathStringConst(*c.ValueCode), true
+	case c.ValueBase64Binary != nil:
+		return quoteFHIRPathStringConst(*c.ValueBase64Binary), true
+	case c.ValueCanonical != nil:
+		return quoteFHIRPathStringConst(*c.ValueCanonical), true
+	case c.ValueID != nil:
+		return quoteFHIRPathStringConst(*c.ValueID), true
+	case c.ValueOID != nil:
+		return quoteFHIRPathStringConst(*c.ValueOID), true
+	case c.ValueURI != nil:
+		return quoteFHIRPathStringConst(*c.ValueURI), true
+	case c.ValueURL != nil:
+		return quoteFHIRPathStringConst(*c.ValueURL), true
+	case c.ValueUUID != nil:
+		return quoteFHIRPathStringConst(*c.ValueUUID), true
+	case c.ValueDate != nil:
+		d := strings.TrimPrefix(strings.TrimSpace(*c.ValueDate), "@")
+		return "@" + d, true
+	case c.ValueDateTime != nil:
+		dt := strings.TrimPrefix(strings.TrimSpace(*c.ValueDateTime), "@")
+		if !strings.Contains(dt, "T") {
+			dt += "T"
+		}
+		return "@" + dt, true
+	case c.ValueInstant != nil:
+		inst := strings.TrimPrefix(strings.TrimSpace(*c.ValueInstant), "@")
+		return "@" + inst, true
+	case c.ValueTime != nil:
+		tm := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(*c.ValueTime), "@"), "T")
+		return "@T" + tm, true
+	case c.ValueInteger != nil:
+		return strconv.Itoa(*c.ValueInteger), true
+	case c.ValuePositiveInt != nil:
+		return strconv.Itoa(*c.ValuePositiveInt), true
+	case c.ValueUnsignedInt != nil:
+		return strconv.Itoa(*c.ValueUnsignedInt), true
+	case c.ValueInteger64 != nil:
+		switch v := c.ValueInteger64.(type) {
+		case string:
+			if strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v), true
+			}
+		case float64:
+			return strconv.FormatInt(int64(v), 10), true
+		case int64:
+			return strconv.FormatInt(v, 10), true
+		case int:
+			return strconv.Itoa(v), true
+		case json.Number:
+			return v.String(), true
+		}
+	case c.ValueDecimal != nil:
+		s := strconv.FormatFloat(*c.ValueDecimal, 'f', -1, 64)
+		if !strings.Contains(s, ".") {
+			s += ".0"
+		}
+		return s, true
+	case c.ValueBoolean != nil:
+		if *c.ValueBoolean {
+			return "true", true
+		}
+		return "false", true
+	}
+	return "", false
+}
+
+func (c sqlOnFHIRConstant) sqlLiteral() (string, bool) {
+	switch {
+	case c.ValueDate != nil:
+		return quoteFHIRPathStringConst(*c.ValueDate), true
+	case c.ValueDateTime != nil:
+		return quoteFHIRPathStringConst(*c.ValueDateTime), true
+	case c.ValueInstant != nil:
+		return quoteFHIRPathStringConst(*c.ValueInstant), true
+	case c.ValueTime != nil:
+		return quoteFHIRPathStringConst(*c.ValueTime), true
+	default:
+		return c.fhirPathLiteral()
+	}
+}
+
 func buildViewConstantReplacements(constants []sqlOnFHIRConstant) map[string]string {
 	out := map[string]string{
 		"%ucum":  "'http://unitsofmeasure.org'",
@@ -1357,30 +1792,25 @@ func buildViewConstantReplacements(constants []sqlOnFHIRConstant) map[string]str
 		if name == "" {
 			continue
 		}
-		var lit string
-		switch {
-		case c.ValueString != nil:
-			lit = "'" + strings.ReplaceAll(*c.ValueString, "'", "\\'") + "'"
-		case c.ValueCode != nil:
-			lit = "'" + strings.ReplaceAll(*c.ValueCode, "'", "\\'") + "'"
-		case c.ValueURI != nil:
-			lit = "'" + strings.ReplaceAll(*c.ValueURI, "'", "\\'") + "'"
-		case c.ValueDate != nil:
-			lit = "'" + strings.ReplaceAll(*c.ValueDate, "'", "\\'") + "'"
-		case c.ValueDateTime != nil:
-			lit = "'" + strings.ReplaceAll(*c.ValueDateTime, "'", "\\'") + "'"
-		case c.ValueInteger != nil:
-			lit = strconv.Itoa(*c.ValueInteger)
-		case c.ValueDecimal != nil:
-			lit = strconv.FormatFloat(*c.ValueDecimal, 'f', -1, 64)
-		case c.ValueBoolean != nil:
-			if *c.ValueBoolean {
-				lit = "true"
-			} else {
-				lit = "false"
-			}
+		if lit, ok := c.fhirPathLiteral(); ok && lit != "" {
+			out["%"+name] = lit
 		}
-		if lit != "" {
+	}
+	return out
+}
+
+func buildViewSQLConstantReplacements(constants []sqlOnFHIRConstant) map[string]string {
+	out := map[string]string{
+		"%ucum":  "'http://unitsofmeasure.org'",
+		"%sct":   "'http://snomed.info/sct'",
+		"%loinc": "'http://loinc.org'",
+	}
+	for _, c := range constants {
+		name := strings.TrimSpace(c.Name)
+		if name == "" {
+			continue
+		}
+		if lit, ok := c.sqlLiteral(); ok && lit != "" {
 			out["%"+name] = lit
 		}
 	}
@@ -1391,18 +1821,61 @@ func substituteViewConstants(expr string, constMap map[string]string) string {
 	if len(constMap) == 0 || !strings.Contains(expr, "%") {
 		return expr
 	}
-	// Replace longest constant names first to avoid prefix collisions
-	keys := make([]string, 0, len(constMap))
-	for k := range constMap {
-		keys = append(keys, k)
+	var b strings.Builder
+	b.Grow(len(expr) + 16)
+	inQuote := byte(0)
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		if inQuote != 0 {
+			b.WriteByte(ch)
+			if ch == inQuote && !isEscapedAt(expr, i) {
+				inQuote = 0
+			}
+			continue
+		}
+		if ch == '\'' || ch == '"' || ch == '`' {
+			inQuote = ch
+			b.WriteByte(ch)
+			continue
+		}
+		if ch == '%' && i+1 < len(expr) {
+			if expr[i+1] == '`' {
+				end := i + 2
+				for end < len(expr) && expr[end] != '`' {
+					end++
+				}
+				if end < len(expr) {
+					name := expr[i+2 : end]
+					if rep, ok := constMap["%"+name]; ok {
+						b.WriteString(rep)
+						i = end
+						continue
+					}
+				}
+			} else {
+				c1 := expr[i+1]
+				if (c1 >= 'a' && c1 <= 'z') || (c1 >= 'A' && c1 <= 'Z') || c1 == '_' {
+					end := i + 2
+					for end < len(expr) {
+						ce := expr[end]
+						if (ce >= 'a' && ce <= 'z') || (ce >= 'A' && ce <= 'Z') || (ce >= '0' && ce <= '9') || ce == '_' {
+							end++
+						} else {
+							break
+						}
+					}
+					key := expr[i:end]
+					if rep, ok := constMap[key]; ok {
+						b.WriteString(rep)
+						i = end - 1
+						continue
+					}
+				}
+			}
+		}
+		b.WriteByte(ch)
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		return len(keys[i]) > len(keys[j])
-	})
-	for _, k := range keys {
-		expr = strings.ReplaceAll(expr, k, constMap[k])
-	}
-	return expr
+	return b.String()
 }
 
 func evaluateViewDefinitionOnResource(root map[string]any, vd sqlOnFHIRViewDefinition, constMap map[string]string) ([]map[string]any, error) {
@@ -1411,6 +1884,7 @@ func evaluateViewDefinitionOnResource(root map[string]any, vd sqlOnFHIRViewDefin
 		thisItem: root,
 		index:    0,
 		total:    1,
+		rowIndex: 0,
 	}
 	for _, w := range vd.Where {
 		path := substituteViewConstants(strings.TrimSpace(w.Path), constMap)
@@ -1418,18 +1892,21 @@ func evaluateViewDefinitionOnResource(root map[string]any, vd sqlOnFHIRViewDefin
 			continue
 		}
 		vals := evalFHIRPathExpr([]any{root}, ctx, path)
-		b, ok := singletonBool(vals)
-		if !ok || !b {
+		b, err := strictWhereBool(vals)
+		if err != nil {
+			return nil, err
+		}
+		if !b {
 			return nil, nil
 		}
 	}
-	return evaluateSelectList(root, root, vd.Select, constMap)
+	return evaluateSelectList(root, root, vd.Select, constMap, 0)
 }
 
-func evaluateSelectList(root map[string]any, focus any, selects []sqlOnFHIRSelect, constMap map[string]string) ([]map[string]any, error) {
+func evaluateSelectList(root map[string]any, focus any, selects []sqlOnFHIRSelect, constMap map[string]string, enclosingRowIdx int) ([]map[string]any, error) {
 	acc := []map[string]any{{}}
 	for _, sel := range selects {
-		selRows, err := evaluateSingleSelect(root, focus, sel, constMap)
+		selRows, err := evaluateSingleSelect(root, focus, sel, constMap, enclosingRowIdx)
 		if err != nil {
 			return nil, err
 		}
@@ -1441,40 +1918,121 @@ func evaluateSelectList(root map[string]any, focus any, selects []sqlOnFHIRSelec
 	return acc, nil
 }
 
-func evaluateSingleSelect(root map[string]any, focus any, sel sqlOnFHIRSelect, constMap map[string]string) ([]map[string]any, error) {
-	var focusItems []any
+type viewFocusEntry struct {
+	item   any
+	rowIdx int
+}
+
+func evalRepeatDirectiveItems(root map[string]any, startFocus any, repeatPaths []string, constMap map[string]string, enclosingRowIdx int) []any {
+	var out []any
+	var dfs func(node any, depth int)
+	dfs = func(node any, depth int) {
+		if node == nil || depth > 64 {
+			return
+		}
+		for _, rawRP := range repeatPaths {
+			rp := substituteViewConstants(strings.TrimSpace(rawRP), constMap)
+			if rp == "" {
+				continue
+			}
+			var children []any
+			if stripped, isRoot := stripRootResourceEnvPrefix(rp); isRoot {
+				children = evalFHIRPathExpr([]any{root}, fhirPathContext{root: root, thisItem: root, index: 0, total: 1, rowIndex: enclosingRowIdx}, stripped)
+			} else {
+				children = evalFHIRPathExpr([]any{node}, fhirPathContext{root: root, thisItem: node, index: 0, total: 1, rowIndex: enclosingRowIdx}, rp)
+			}
+			for _, ch := range children {
+				if ch == nil {
+					continue
+				}
+				out = append(out, ch)
+				dfs(ch, depth+1)
+			}
+		}
+	}
+	dfs(startFocus, 0)
+	return out
+}
+
+func unwrapViewColumnSlice(items []any) []any {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(items))
+	for _, it := range items {
+		if tv, ok := it.(fhirTypedValue); ok && tv.fhirType == "System.Quantity" {
+			if m, okM := tv.val.(map[string]any); okM {
+				if v, exists := m["value"]; exists && v != nil {
+					out = append(out, v)
+					continue
+				}
+			}
+		}
+		u := unwrapFHIRTyped(it)
+		if u != nil {
+			out = append(out, u)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func evaluateSingleSelect(root map[string]any, focus any, sel sqlOnFHIRSelect, constMap map[string]string, enclosingRowIdx int) ([]map[string]any, error) {
+	var entries []viewFocusEntry
 	isForEachOrNull := false
 
 	switch {
 	case strings.TrimSpace(sel.ForEach) != "":
 		expr := substituteViewConstants(strings.TrimSpace(sel.ForEach), constMap)
+		var focusItems []any
 		if stripped, isRootFE := stripRootResourceEnvPrefix(expr); isRootFE {
-			focusItems = evalFHIRPathExpr([]any{root}, fhirPathContext{root: root, thisItem: root, index: 0, total: 1}, stripped)
+			focusItems = evalFHIRPathExpr([]any{root}, fhirPathContext{root: root, thisItem: root, index: 0, total: 1, rowIndex: enclosingRowIdx}, stripped)
 		} else {
-			focusItems = evalFHIRPathExpr([]any{focus}, fhirPathContext{root: root, thisItem: focus, index: 0, total: 1}, expr)
+			focusItems = evalFHIRPathExpr([]any{focus}, fhirPathContext{root: root, thisItem: focus, index: 0, total: 1, rowIndex: enclosingRowIdx}, expr)
 		}
 		if len(focusItems) == 0 {
 			return nil, nil
 		}
+		entries = make([]viewFocusEntry, len(focusItems))
+		for i, it := range focusItems {
+			entries[i] = viewFocusEntry{item: it, rowIdx: i}
+		}
 	case strings.TrimSpace(sel.ForEachOrNull) != "":
 		isForEachOrNull = true
 		expr := substituteViewConstants(strings.TrimSpace(sel.ForEachOrNull), constMap)
+		var focusItems []any
 		if stripped, isRootFE := stripRootResourceEnvPrefix(expr); isRootFE {
-			focusItems = evalFHIRPathExpr([]any{root}, fhirPathContext{root: root, thisItem: root, index: 0, total: 1}, stripped)
+			focusItems = evalFHIRPathExpr([]any{root}, fhirPathContext{root: root, thisItem: root, index: 0, total: 1, rowIndex: enclosingRowIdx}, stripped)
 		} else {
-			focusItems = evalFHIRPathExpr([]any{focus}, fhirPathContext{root: root, thisItem: focus, index: 0, total: 1}, expr)
+			focusItems = evalFHIRPathExpr([]any{focus}, fhirPathContext{root: root, thisItem: focus, index: 0, total: 1, rowIndex: enclosingRowIdx}, expr)
 		}
 		if len(focusItems) == 0 {
-			focusItems = []any{nil}
+			entries = []viewFocusEntry{{item: nil, rowIdx: 0}}
+		} else {
+			entries = make([]viewFocusEntry, len(focusItems))
+			for i, it := range focusItems {
+				entries[i] = viewFocusEntry{item: it, rowIdx: i}
+			}
+		}
+	case len(sel.Repeat) > 0:
+		focusItems := evalRepeatDirectiveItems(root, focus, sel.Repeat, constMap, enclosingRowIdx)
+		if len(focusItems) == 0 {
+			return nil, nil
+		}
+		entries = make([]viewFocusEntry, len(focusItems))
+		for i, it := range focusItems {
+			entries[i] = viewFocusEntry{item: it, rowIdx: i}
 		}
 	default:
-		focusItems = []any{focus}
+		entries = []viewFocusEntry{{item: focus, rowIdx: enclosingRowIdx}}
 	}
 
 	if len(sel.Where) > 0 {
-		var filtered []any
-		for _, item := range focusItems {
-			if item == nil && isForEachOrNull {
+		var filtered []viewFocusEntry
+		for _, entry := range entries {
+			if entry.item == nil && isForEachOrNull {
 				continue
 			}
 			keep := true
@@ -1483,30 +2041,35 @@ func evaluateSingleSelect(root map[string]any, focus any, sel sqlOnFHIRSelect, c
 				if wPath == "" {
 					continue
 				}
-				vals := evalFHIRPathExpr([]any{item}, fhirPathContext{root: root, thisItem: item, index: 0, total: 1}, wPath)
-				b, ok := singletonBool(vals)
-				if !ok || !b {
+				vals := evalFHIRPathExpr([]any{entry.item}, fhirPathContext{root: root, thisItem: entry.item, index: 0, total: 1, rowIndex: entry.rowIdx}, wPath)
+				b, err := strictWhereBool(vals)
+				if err != nil {
+					return nil, err
+				}
+				if !b {
 					keep = false
 					break
 				}
 			}
 			if keep {
-				filtered = append(filtered, item)
+				filtered = append(filtered, entry)
 			}
 		}
 		if len(filtered) == 0 {
 			if isForEachOrNull {
-				focusItems = []any{nil}
+				entries = []viewFocusEntry{{item: nil, rowIdx: 0}}
 			} else {
 				return nil, nil
 			}
 		} else {
-			focusItems = filtered
+			entries = filtered
 		}
 	}
 
 	var out []map[string]any
-	for _, item := range focusItems {
+	for _, entry := range entries {
+		item := entry.item
+		curRowIdx := entry.rowIdx
 		itemRows := []map[string]any{{}}
 
 		if len(sel.Column) > 0 {
@@ -1514,8 +2077,8 @@ func evaluateSingleSelect(root map[string]any, focus any, sel sqlOnFHIRSelect, c
 			for _, col := range sel.Column {
 				expr := substituteViewConstants(strings.TrimSpace(col.Path), constMap)
 				if item == nil && isForEachOrNull {
-					if isRootScopedColumnPath(expr) {
-						vals := evalFHIRPathExpr([]any{root}, fhirPathContext{root: root, thisItem: root, index: 0, total: 1}, expr)
+					if isRootScopedColumnPath(expr) || expr == "%rowIndex" {
+						vals := unwrapViewColumnSlice(evalFHIRPathExpr([]any{root}, fhirPathContext{root: root, thisItem: root, index: 0, total: 1, rowIndex: curRowIdx}, expr))
 						if len(vals) > 0 {
 							colRow[col.Name] = vals[0]
 						} else {
@@ -1525,7 +2088,7 @@ func evaluateSingleSelect(root map[string]any, focus any, sel sqlOnFHIRSelect, c
 					}
 					lowerExpr := strings.ToLower(stripOuterParens(expr))
 					if strings.HasPrefix(lowerExpr, "coalesce(") || strings.HasPrefix(lowerExpr, "iif(") {
-						vals := evalFHIRPathExpr(nil, fhirPathContext{root: root, thisItem: nil, index: 0, total: 0}, expr)
+						vals := unwrapViewColumnSlice(evalFHIRPathExpr(nil, fhirPathContext{root: root, thisItem: nil, index: 0, total: 0, rowIndex: curRowIdx}, expr))
 						if len(vals) > 0 {
 							colRow[col.Name] = vals[0]
 						} else {
@@ -1540,9 +2103,9 @@ func evaluateSingleSelect(root map[string]any, focus any, sel sqlOnFHIRSelect, c
 					}
 					continue
 				}
-				vals := evalFHIRPathExpr([]any{item}, fhirPathContext{root: root, thisItem: item, index: 0, total: 1}, expr)
+				vals := unwrapViewColumnSlice(evalFHIRPathExpr([]any{item}, fhirPathContext{root: root, thisItem: item, index: 0, total: 1, rowIndex: curRowIdx}, expr))
 				if len(vals) == 0 && expr == "id" && root != nil {
-					vals = evalFHIRPathExpr([]any{root}, fhirPathContext{root: root, thisItem: root, index: 0, total: 1}, expr)
+					vals = unwrapViewColumnSlice(evalFHIRPathExpr([]any{root}, fhirPathContext{root: root, thisItem: root, index: 0, total: 1, rowIndex: curRowIdx}, expr))
 				}
 				if col.Collection {
 					if vals == nil {
@@ -1576,7 +2139,7 @@ func evaluateSingleSelect(root map[string]any, focus any, sel sqlOnFHIRSelect, c
 				}
 				itemRows = cartesianMergeRows(itemRows, []map[string]any{nullNested})
 			} else {
-				nestedRows, err := evaluateSelectList(root, item, sel.Select, constMap)
+				nestedRows, err := evaluateSelectList(root, item, sel.Select, constMap, curRowIdx)
 				if err != nil {
 					return nil, err
 				}
@@ -1602,7 +2165,7 @@ func evaluateSingleSelect(root map[string]any, focus any, sel sqlOnFHIRSelect, c
 				unionRows = []map[string]any{nullUnion}
 			} else {
 				for _, branch := range sel.UnionAll {
-					branchRows, err := evaluateSingleSelect(root, item, branch, constMap)
+					branchRows, err := evaluateSingleSelect(root, item, branch, constMap, curRowIdx)
 					if err != nil {
 						return nil, err
 					}
@@ -1882,7 +2445,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 		return zeroJSONTranspiledSQL{}, fmt.Errorf("unsupported SQL dialect %q (valid: doris, postgres, sqlite)", dialect)
 	}
 
-	constMap := buildViewConstantReplacements(opts.viewDef.Constant)
+	constMap := buildViewSQLConstantReplacements(opts.viewDef.Constant)
 	forEachSpecs, columns, rootSelectWherePaths := extractViewForEachSpecsAndColumns(opts.viewDef.Select)
 	for i := range forEachSpecs {
 		forEachSpecs[i].forEachPath = substituteViewConstants(strings.TrimSpace(forEachSpecs[i].forEachPath), constMap)
@@ -8951,8 +9514,18 @@ func spidxZeroJSONColumnExpr(fhirPath, dialect string) (string, string) {
 		return "(SELECT t.sp_system FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'code' LIMIT 1)", "spidx_token"
 	case "valueQuantity.value", "component.valueQuantity.value":
 		return "(SELECT q.sp_value FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1)", "spidx_quantity"
-	case "valueQuantity.code", "valueQuantity.unit", "component.valueQuantity.code", "component.valueQuantity.unit":
-		return "(SELECT q.sp_code FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' LIMIT 1)", "spidx_quantity"
+	case "valueQuantity.code", "component.valueQuantity.code":
+		ordCol := "q.ctid ASC"
+		if dialect == "sqlite" {
+			ordCol = "q.rowid ASC"
+		}
+		return fmt.Sprintf("(SELECT q.sp_code FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' ORDER BY %s LIMIT 1)", ordCol), "spidx_quantity"
+	case "valueQuantity.unit", "component.valueQuantity.unit":
+		ordCol := "q.ctid DESC"
+		if dialect == "sqlite" {
+			ordCol = "q.rowid DESC"
+		}
+		return fmt.Sprintf("(SELECT q.sp_code FROM spidx_quantity q WHERE q.tenant_id = r.tenant_id AND q.res_type = r.res_type AND q.res_id = r.res_id AND q.sp_name = 'value-quantity' ORDER BY %s LIMIT 1)", ordCol), "spidx_quantity"
 	case "valueCodeableConcept.coding.code.first()", "valueCodeableConcept.coding.code":
 		return "(SELECT t.sp_value FROM spidx_token t WHERE t.tenant_id = r.tenant_id AND t.res_type = r.res_type AND t.res_id = r.res_id AND t.sp_name = 'value-concept' LIMIT 1)", "spidx_token"
 	case "effectiveDateTime", "effectivePeriod.start", "onsetDateTime", "birthDate", "authoredOn":

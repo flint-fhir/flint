@@ -34,7 +34,7 @@ jobs:
         env:
           FLINT_TEST_POSTGRES_DSN: "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
         run: |
-          go test -v -race -cover ./... | tee test-coverage.log
+          go test -v -race -timeout 20m -cover ./... | tee test-coverage.log
           awk '
             /^ok[[:space:]]+github\.com\/flint-fhir\/flint\// && $2 !~ /\/gen\// {
               pkg = $2
@@ -66,27 +66,39 @@ jobs:
           go test ./server -run '^$' -fuzz=FuzzPatchEngines -fuzztime=2s
           go test ./server -run '^$' -fuzz=FuzzValidationAndDynamicExtraction -fuzztime=2s
 
-      - name: Live Server Binary, US Core Seeder & 82-Check $certify E2E Gate
+      - name: Live Server Binary, US Core Seeder & 137-Check $certify E2E Gate (Postgres, SQLite WAL & Hybrid)
         env:
           FLINT_POSTGRES_DSN: "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
-          FLINT_ADDR: "127.0.0.1:18080"
         run: |
           mkdir -p bin
           go build -o bin/flintd ./cmd/flintd
           go build -o bin/seed ./cmd/seed
           go build -o bin/certify ./cmd/certify
-          ./bin/flintd > flintd-ci.log 2>&1 &
-          FLINTD_PID=$!
-          trap "kill ${FLINTD_PID} 2>/dev/null || true" EXIT
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:18080/readyz >/dev/null 2>&1; then
-              break
-            fi
-            sleep 0.5
-          done
-          curl -fsS http://127.0.0.1:18080/readyz
-          ./bin/seed -url http://127.0.0.1:18080 -tenant demo
-          ./bin/certify -url http://127.0.0.1:18080 -tenant demo -out certify-report.json
+
+          run_e2e_topology() {
+            local name="$1"
+            local port="$2"
+            local tenant="$3"
+            shift 3
+            echo "=== Live E2E Certification Topology: ${name} (127.0.0.1:${port}, tenant=${tenant}) ==="
+            FLINT_ADDR="127.0.0.1:${port}" ./bin/flintd "$@" > "flintd-${name}.log" 2>&1 &
+            local pid=$!
+            for i in $(seq 1 30); do
+              if curl -fsS "http://127.0.0.1:${port}/readyz" >/dev/null 2>&1; then
+                break
+              fi
+              sleep 0.5
+            done
+            curl -fsS "http://127.0.0.1:${port}/readyz"
+            ./bin/seed -url "http://127.0.0.1:${port}" -tenant "${tenant}"
+            ./bin/certify -url "http://127.0.0.1:${port}" -tenant "${tenant}" -out "certify-report-${name}.json"
+            kill "${pid}" 2>/dev/null || true
+            wait "${pid}" 2>/dev/null || true
+          }
+
+          run_e2e_topology "postgres" "18080" "demo"
+          run_e2e_topology "sqlite-wal" "18081" "demo" --store=sqlite --sqlite-dsn=/tmp/flint-ci.db
+          run_e2e_topology "hybrid-pg-sqlite" "18082" "demo-hybrid" --store=postgres --analytics-store=sqlite --sqlite-dsn=/tmp/flint-ci-olap.db
 
   lint:
     runs-on: ubuntu-latest

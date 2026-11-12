@@ -57,7 +57,7 @@ tasks:
   test:
     desc: Run all Go tests (Postgres integration tests need FLINT_TEST_POSTGRES_DSN)
     cmds:
-      - FLINT_TEST_POSTGRES_DSN="{{.PG_DSN}}" go test -race ./... -v -count=1
+      - FLINT_TEST_POSTGRES_DSN="{{.PG_DSN}}" go test -race -timeout 20m ./... -v -count=1
 
   test-unit:
     desc: Run unit tests only (no Postgres needed)
@@ -119,6 +119,12 @@ tasks:
       - docker compose -f deploy/inferno/docker-compose.yml up -d
       - echo "🔥 HL7 Inferno US Core v6.1.0 Test Kit running at http://localhost:4567"
       - echo "   Target FHIR Endpoint → http://host.docker.internal:8080/fhir/r4/demo"
+
+  certify-inferno-headless:
+    desc: Run official HL7 Inferno Ruby suites (US Core v6.1.0, SMART STU2, Bulk Data v2.0.0) headlessly against Flint (no Docker required)
+    deps: [build]
+    cmds:
+      - bash deploy/inferno/run-headless.sh
 
   bench-store:
     desc: Run load test against Postgres operational store directly

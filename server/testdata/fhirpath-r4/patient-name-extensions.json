@@ -1,0 +1,23 @@
+{
+  "resourceType": "Patient",
+  "id": "name-extensions",
+  "name": [
+    {
+      "given": [
+        null,
+        "Peter"
+      ],
+      "_given": [
+        {
+          "extension": [
+            {
+              "url": "http://hl7.org/fhir/StructureDefinition/data-absent-reason",
+              "valueCode": "unknown"
+            }
+          ]
+        },
+        null
+      ]
+    }
+  ]
+}

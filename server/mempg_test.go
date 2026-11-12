@@ -1354,6 +1354,34 @@ func (s *memPGStore) inCompartment(tenant, focalType, focalID string, r *memResR
 			return true
 		}
 	}
+	if focalType == "Patient" {
+		switch r.resType {
+		case "Organization", "Practitioner", "PractitionerRole", "Location", "Medication", "HealthcareService", "Endpoint", "Substance":
+			for _, rfClin := range s.refs {
+				if rfClin.TenantID != tenant || rfClin.ResType == "Group" || rfClin.TargetType != r.resType || rfClin.TargetID != r.resID {
+					continue
+				}
+				for _, rfPat := range s.refs {
+					if rfPat.TenantID == tenant && rfPat.ResType == rfClin.ResType && rfPat.ResID == rfClin.ResID &&
+						rfPat.TargetID == focalID && (rfPat.TargetType == "Patient" || rfPat.TargetType == "") {
+						return true
+					}
+				}
+			}
+		case "Provenance":
+			for _, rfProv := range s.refs {
+				if rfProv.TenantID != tenant || rfProv.ResType != "Provenance" || rfProv.ResID != r.resID || rfProv.SpName != "target" {
+					continue
+				}
+				for _, rfPat := range s.refs {
+					if rfPat.TenantID == tenant && rfPat.ResType == rfProv.TargetType && rfPat.ResID == rfProv.TargetID &&
+						rfPat.ResType != "Group" && rfPat.TargetID == focalID && (rfPat.TargetType == "Patient" || rfPat.TargetType == "") {
+						return true
+					}
+				}
+			}
+		}
+	}
 	return false
 }
 

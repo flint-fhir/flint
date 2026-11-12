@@ -1983,6 +1983,12 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusBadRequest, "required", "$fhirpath requires an expression parameter")
 		return
 	}
+	var errSyntax error
+	expr, errSyntax = validateAndCleanFHIRPath(expr)
+	if errSyntax != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid FHIRPath expression: %v", errSyntax))
+		return
+	}
 
 	targetMap := inlineResource
 	if targetMap == nil {
@@ -2129,12 +2135,12 @@ func splitFHIRPathSegments(expr string) []string {
 		ch := expr[i]
 		if inQuote != 0 {
 			cur.WriteByte(ch)
-			if ch == inQuote && (i == 0 || expr[i-1] != '\\') {
+			if ch == inQuote && !isEscapedAt(expr, i) {
 				inQuote = 0
 			}
 			continue
 		}
-		if ch == '\'' || ch == '"' {
+		if ch == '\'' || ch == '"' || ch == '`' {
 			inQuote = ch
 			cur.WriteByte(ch)
 			continue
@@ -2150,11 +2156,13 @@ func splitFHIRPathSegments(expr string) []string {
 			cur.WriteByte(ch)
 		case '.':
 			if depth == 0 {
-				if i+1 < len(expr) && expr[i+1] >= '0' && expr[i+1] <= '9' && isAllDigits(cur.String()) {
+				curTrim := strings.TrimSpace(cur.String())
+				if i+1 < len(expr) && expr[i+1] >= '0' && expr[i+1] <= '9' &&
+					(isAllDigits(curTrim) || (strings.HasPrefix(curTrim, "@") && !strings.ContainsAny(curTrim, " \t)"))) {
 					cur.WriteByte(ch)
 					continue
 				}
-				if s := strings.TrimSpace(cur.String()); s != "" {
+				if s := curTrim; s != "" {
 					segs = append(segs, s)
 				}
 				cur.Reset()

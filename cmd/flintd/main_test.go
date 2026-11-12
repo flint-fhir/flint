@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -115,6 +117,10 @@ func TestBuildStoreOptionsAndConfigureAuth(t *testing.T) {
 	// No OIDC issuer configured branch
 	delete(env, "FLINT_OIDC_ISSUER")
 	require.NoError(t, configureAuth(srv, logger, getenv))
+
+	// Built-in SMART v2 OAuth2 bearer enforcement branch
+	env["FLINT_SMART_ENFORCE_DEV_AUTH"] = "true"
+	require.NoError(t, configureAuth(srv, logger, getenv))
 }
 
 func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
@@ -128,7 +134,7 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			func(string) string { return "" },
 			&out,
 			logger,
-			func(string) (*sql.DB, error) { return nil, errors.New("should not open db") },
+			func(string, string) (*sql.DB, error) { return nil, errors.New("should not open db") },
 			func(string, http.Handler) error { return errors.New("should not serve") },
 		)
 		require.NoError(t, err)
@@ -141,7 +147,7 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			func(string) string { return "" },
 			io.Discard,
 			logger,
-			func(string) (*sql.DB, error) { return nil, nil },
+			func(string, string) (*sql.DB, error) { return nil, nil },
 			func(string, http.Handler) error { return nil },
 		)
 		require.ErrorContains(t, err, "invalid tenant isolation mode")
@@ -153,7 +159,7 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			func(string) string { return "" },
 			io.Discard,
 			logger,
-			func(string) (*sql.DB, error) { return nil, errors.New("open failed") },
+			func(string, string) (*sql.DB, error) { return nil, errors.New("open failed") },
 			func(string, http.Handler) error { return nil },
 		)
 		require.ErrorContains(t, err, "open db")
@@ -163,7 +169,7 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			func(string) string { return "" },
 			io.Discard,
 			logger,
-			func(string) (*sql.DB, error) { return sql.Open("flintd_stub_ping_err", "") },
+			func(string, string) (*sql.DB, error) { return sql.Open("flintd_stub_ping_err", "") },
 			func(string, http.Handler) error { return nil },
 		)
 		require.ErrorContains(t, err, "ping db")
@@ -173,7 +179,7 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			func(string) string { return "" },
 			io.Discard,
 			logger,
-			func(string) (*sql.DB, error) { return sql.Open("flintd_stub_mig_err", "") },
+			func(string, string) (*sql.DB, error) { return sql.Open("flintd_stub_mig_err", "") },
 			func(string, http.Handler) error { return nil },
 		)
 		require.ErrorContains(t, err, "run migrations")
@@ -197,7 +203,7 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			func(k string) string { return env[k] },
 			io.Discard,
 			logger,
-			func(string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
+			func(string, string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
 			func(addr string, h http.Handler) error {
 				boundAddr = addr
 				capturedHandler = h
@@ -235,7 +241,7 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			},
 			io.Discard,
 			logger,
-			func(string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
+			func(string, string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
 			func(_ string, h http.Handler) error {
 				capturedHandler = h
 				return nil
@@ -250,7 +256,7 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			func(string) string { return "" },
 			io.Discard,
 			logger,
-			func(string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
+			func(string, string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
 			func(_ string, _ http.Handler) error { return nil },
 		)
 		require.NoError(t, err)
@@ -266,7 +272,7 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			},
 			io.Discard,
 			logger,
-			func(string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
+			func(string, string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
 			func(_ string, _ http.Handler) error { return nil },
 		)
 		require.NoError(t, err)
@@ -277,7 +283,7 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			func(string) string { return "" },
 			io.Discard,
 			logger,
-			func(string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
+			func(string, string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
 			func(_ string, _ http.Handler) error { return nil },
 		)
 		require.NoError(t, err)
@@ -288,7 +294,7 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			func(string) string { return "" },
 			io.Discard,
 			logger,
-			func(string) (*sql.DB, error) { return nil, nil },
+			func(string, string) (*sql.DB, error) { return nil, nil },
 			func(string, http.Handler) error { return nil },
 		)
 		require.ErrorContains(t, err, "invalid store backend")
@@ -298,9 +304,59 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			func(string) string { return "" },
 			io.Discard,
 			logger,
-			func(string) (*sql.DB, error) { return nil, nil },
+			func(string, string) (*sql.DB, error) { return nil, nil },
 			func(string, http.Handler) error { return nil },
 		)
 		require.ErrorContains(t, err, "invalid analytics backend")
+	})
+
+	t.Run("real modernc sqlite file-backed store startup, HTTP CRUD, and WAL reload", func(t *testing.T) {
+		dbFile := filepath.Join(t.TempDir(), "flint-e2e.db")
+
+		// Session 1: boot with real sql.Open("sqlite", dbFile), create Patient over HTTP
+		err := run(
+			[]string{"-store", "sqlite", "-sqlite-dsn", dbFile},
+			func(string) string { return "" },
+			io.Discard,
+			logger,
+			sql.Open,
+			func(_ string, h http.Handler) error {
+				req := httptest.NewRequest(
+					http.MethodPut,
+					"/fhir/r4/demo/Patient/pat-wal-1",
+					strings.NewReader(`{"resourceType":"Patient","id":"pat-wal-1","active":true,"name":[{"family":"hopper","given":["grace"]}]}`),
+				)
+				req.Header.Set("Content-Type", "application/fhir+json")
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+				return nil
+			},
+		)
+		require.NoError(t, err)
+
+		// Session 2: reboot against the exact same dbFile and verify LoadFromDB hydrated Patient/pat-wal-1
+		err = run(
+			[]string{"-store", "sqlite", "-sqlite-dsn", dbFile},
+			func(string) string { return "" },
+			io.Discard,
+			logger,
+			sql.Open,
+			func(_ string, h http.Handler) error {
+				req := httptest.NewRequest(http.MethodGet, "/fhir/r4/demo/Patient/pat-wal-1", nil)
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), `"hopper"`)
+
+				reqSearch := httptest.NewRequest(http.MethodGet, "/fhir/r4/demo/Patient?family=hopper", nil)
+				recSearch := httptest.NewRecorder()
+				h.ServeHTTP(recSearch, reqSearch)
+				require.Equal(t, http.StatusOK, recSearch.Code, recSearch.Body.String())
+				assert.Contains(t, recSearch.Body.String(), `"total":1`)
+				return nil
+			},
+		)
+		require.NoError(t, err)
 	})
 }

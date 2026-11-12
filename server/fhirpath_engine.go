@@ -1,16 +1,18 @@
 package server
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"html"
 	"math"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 type fhirPathContext struct {
@@ -18,15 +20,453 @@ type fhirPathContext struct {
 	thisItem    any
 	index       int
 	total       int
+	rowIndex    int
 	aggTotal    []any
 	hasAggTotal bool
+	execErr     *error
 }
 
-// evalFHIRPath evaluates a full HL7 FHIRPath R4 (http://hl7.org/fhirpath/N1/) expression
-// against a root FHIR resource map.
+func (c fhirPathContext) setExecErr(msg string) {
+	if c.execErr != nil && *c.execErr == nil {
+		*c.execErr = fmt.Errorf("FHIRPath execution error: %s", msg)
+	}
+}
+
+// fhirTypedValue preserves FHIR choice/primitive type metadata, exact decimal scale,
+// and JSON "_element" primitive extensions during intermediate FHIRPath evaluation.
+type fhirTypedValue struct {
+	val      any
+	fhirType string
+	decText  string
+	primMeta map[string]any
+}
+
+// FHIRPathValue represents a typed evaluation result from EvalFHIRPathTyped.
+type FHIRPathValue struct {
+	Value    any
+	FHIRType string
+	DecText  string
+}
+
+func unwrapFHIRTyped(v any) any {
+	for {
+		tv, ok := v.(fhirTypedValue)
+		if !ok {
+			return v
+		}
+		v = tv.val
+	}
+}
+
+func unwrapFHIRSlice(items []any) []any {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(items))
+	for _, it := range items {
+		u := unwrapFHIRTyped(it)
+		if u != nil {
+			out = append(out, u)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func isEscapedAt(s string, pos int) bool {
+	bs := 0
+	for j := pos - 1; j >= 0 && s[j] == '\\'; j-- {
+		bs++
+	}
+	return bs%2 == 1
+}
+
+func isHexDigit(b byte) bool {
+	return (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F')
+}
+
+func unescapeFHIRPathString(raw string) (string, error) {
+	var b strings.Builder
+	b.Grow(len(raw))
+	for i := 0; i < len(raw); i++ {
+		if raw[i] != '\\' {
+			b.WriteByte(raw[i])
+			continue
+		}
+		if i+1 >= len(raw) {
+			return "", fmt.Errorf("trailing backslash in string literal")
+		}
+		i++
+		switch raw[i] {
+		case '\'', '"', '`', '\\', '/':
+			b.WriteByte(raw[i])
+		case 'r':
+			b.WriteByte('\r')
+		case 'n':
+			b.WriteByte('\n')
+		case 't':
+			b.WriteByte('\t')
+		case 'f':
+			b.WriteByte('\f')
+		case 'u':
+			if i+4 >= len(raw) || !isHexDigit(raw[i+1]) || !isHexDigit(raw[i+2]) || !isHexDigit(raw[i+3]) || !isHexDigit(raw[i+4]) {
+				return "", fmt.Errorf("invalid unicode escape in string literal")
+			}
+			cp, err := strconv.ParseUint(raw[i+1:i+5], 16, 32)
+			if err != nil || !utf8.ValidRune(rune(cp)) {
+				return "", fmt.Errorf("invalid unicode code point in string literal")
+			}
+			b.WriteRune(rune(cp))
+			i += 4
+		default:
+			b.WriteByte(raw[i])
+		}
+	}
+	return b.String(), nil
+}
+
+func unwrapBacktickIdent(seg string) string {
+	s := strings.TrimSpace(seg)
+	if len(s) >= 2 && s[0] == '`' && s[len(s)-1] == '`' {
+		if unescaped, err := unescapeFHIRPathString(s[1 : len(s)-1]); err == nil {
+			return unescaped
+		}
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+func validateAndCleanFHIRPath(expr string) (string, error) {
+	var out strings.Builder
+	out.Grow(len(expr))
+	inQuote := byte(0)
+	parenDepth := 0
+	bracketDepth := 0
+	braceDepth := 0
+
+	for i := 0; i < len(expr); i++ {
+		ch := expr[i]
+		if inQuote != 0 {
+			out.WriteByte(ch)
+			if ch == '\\' && (inQuote == '\'' || inQuote == '`') {
+				if i+1 >= len(expr) {
+					return "", fmt.Errorf("unterminated escape sequence")
+				}
+				if expr[i+1] == 'u' {
+					if i+5 >= len(expr) || !isHexDigit(expr[i+2]) || !isHexDigit(expr[i+3]) || !isHexDigit(expr[i+4]) || !isHexDigit(expr[i+5]) {
+						return "", fmt.Errorf("invalid \\uXXXX escape sequence")
+					}
+				}
+			}
+			if ch == inQuote && !isEscapedAt(expr, i) {
+				inQuote = 0
+			}
+			continue
+		}
+		if ch == '\'' || ch == '"' || ch == '`' {
+			inQuote = ch
+			out.WriteByte(ch)
+			continue
+		}
+		if ch == '/' && i+1 < len(expr) && expr[i+1] == '/' {
+			i += 2
+			for i < len(expr) && expr[i] != '\n' {
+				i++
+			}
+			out.WriteByte(' ')
+			continue
+		}
+		if ch == '/' && i+1 < len(expr) && expr[i+1] == '*' {
+			end := strings.Index(expr[i+2:], "*/")
+			if end == -1 {
+				return "", fmt.Errorf("unclosed block comment")
+			}
+			i += 2 + end + 1
+			out.WriteByte(' ')
+			continue
+		}
+		switch ch {
+		case '(':
+			parenDepth++
+		case ')':
+			parenDepth--
+			if parenDepth < 0 {
+				return "", fmt.Errorf("unmatched ')'")
+			}
+		case '[':
+			bracketDepth++
+		case ']':
+			bracketDepth--
+			if bracketDepth < 0 {
+				return "", fmt.Errorf("unmatched ']'")
+			}
+		case '{':
+			braceDepth++
+		case '}':
+			braceDepth--
+			if braceDepth < 0 {
+				return "", fmt.Errorf("unmatched '}'")
+			}
+		case ';', '?':
+			return "", fmt.Errorf("unexpected character %q in FHIRPath expression", ch)
+		}
+		out.WriteByte(ch)
+	}
+	if inQuote != 0 {
+		return "", fmt.Errorf("unterminated literal %q", inQuote)
+	}
+	if parenDepth != 0 || bracketDepth != 0 || braceDepth != 0 {
+		return "", fmt.Errorf("unbalanced delimiters in FHIRPath expression")
+	}
+
+	cleaned := strings.TrimSpace(out.String())
+	if cleaned == "" {
+		return "", fmt.Errorf("empty FHIRPath expression")
+	}
+	if strings.HasPrefix(cleaned, ".") || strings.HasSuffix(cleaned, ".") {
+		return "", fmt.Errorf("leading or trailing '.' in FHIRPath expression")
+	}
+	if strings.HasPrefix(cleaned, "@@") {
+		return "", fmt.Errorf("invalid '@' literal in FHIRPath expression")
+	}
+	switch cleaned[0] {
+	case '*', '/', '=', '!', '~', '<', '>', '|', '&', ',':
+		return "", fmt.Errorf("unexpected leading operator %q", cleaned[0])
+	}
+	if isOperatorTrailing(cleaned) {
+		return "", fmt.Errorf("trailing operator in FHIRPath expression")
+	}
+	lowerCleaned := strings.ToLower(cleaned)
+	for _, kw := range []string{" is", " as"} {
+		if strings.HasSuffix(lowerCleaned, kw) {
+			return "", fmt.Errorf("trailing type operator in FHIRPath expression")
+		}
+	}
+	inQ := byte(0)
+	for i := 0; i < len(cleaned); i++ {
+		c := cleaned[i]
+		if inQ != 0 {
+			if c == inQ && !isEscapedAt(cleaned, i) {
+				inQ = 0
+			}
+			continue
+		}
+		if c == '\'' || c == '"' || c == '`' {
+			inQ = c
+			continue
+		}
+		if c == '.' && i+1 < len(cleaned) && cleaned[i+1] == '.' {
+			return "", fmt.Errorf("invalid '..' in FHIRPath expression")
+		}
+		if c == '/' && i+1 < len(cleaned) && cleaned[i+1] == '*' {
+			return "", fmt.Errorf("invalid '/*' sequence")
+		}
+		if c == '*' && i+1 < len(cleaned) && cleaned[i+1] == '/' {
+			return "", fmt.Errorf("unmatched '*/' comment close")
+		}
+	}
+	return cleaned, nil
+}
+
+// UnmarshalFHIRJSONPreservingNumbers decodes a FHIR JSON object into a map[string]any
+// while preserving exact decimal/exponent lexical representations (e.g. 9.5e2, 1.500)
+// in companion "_<field>._decimalText" metadata for FHIRPath precision/boundary operations.
+func UnmarshalFHIRJSONPreservingNumbers(raw []byte) (map[string]any, error) {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var decoded any
+	if err := dec.Decode(&decoded); err != nil {
+		return nil, err
+	}
+	m, ok := normalizeFHIRJSONValue(decoded).(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("expected JSON object at root")
+	}
+	return m, nil
+}
+
+func normalizeFHIRJSONValue(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, elem := range val {
+			if jn, isNum := elem.(json.Number); isNum {
+				rawText := jn.String()
+				fv, err := jn.Float64()
+				if err == nil {
+					out[k] = fv
+					if strings.ContainsAny(rawText, ".eE") && !strings.HasPrefix(k, "_") {
+						metaKey := "_" + k
+						pm, okPM := val[metaKey].(map[string]any)
+						var newPM map[string]any
+						if okPM {
+							if normPM, okN := normalizeFHIRJSONValue(pm).(map[string]any); okN {
+								newPM = normPM
+							}
+						}
+						if newPM == nil {
+							newPM = map[string]any{}
+						}
+						newPM["_decimalText"] = rawText
+						out[metaKey] = newPM
+					}
+					continue
+				}
+			}
+			if strings.HasPrefix(k, "_") {
+				if existing, already := out[k].(map[string]any); already {
+					if normPM, okN := normalizeFHIRJSONValue(elem).(map[string]any); okN {
+						for mk, mv := range normPM {
+							if _, exists := existing[mk]; !exists {
+								existing[mk] = mv
+							}
+						}
+					}
+					continue
+				}
+			}
+			out[k] = normalizeFHIRJSONValue(elem)
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, elem := range val {
+			if jn, isNum := elem.(json.Number); isNum {
+				if fv, err := jn.Float64(); err == nil {
+					out[i] = fv
+					continue
+				}
+			}
+			out[i] = normalizeFHIRJSONValue(elem)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+// EvalFHIRPathPredicate evaluates a FHIRPath R4 expression as a boolean predicate
+// using FHIRPath Singleton Evaluation of Collections (§6.1):
+// empty -> false, single boolean -> value, single non-boolean -> true, >1 items -> error.
+func EvalFHIRPathPredicate(root map[string]any, focus []any, expr string) (bool, error) {
+	vals, err := EvalFHIRPathTypedWithFocus(root, focus, expr)
+	if err != nil {
+		return false, err
+	}
+	if len(vals) == 0 {
+		return false, nil
+	}
+	if len(vals) > 1 {
+		return false, fmt.Errorf("predicate expression returned %d items (singleton expected)", len(vals))
+	}
+	if b, ok := vals[0].Value.(bool); ok {
+		return b, nil
+	}
+	return true, nil
+}
+
+// EvalFHIRPathTyped evaluates a FHIRPath R4 expression and returns typed results
+// (preserving primitive choice types, temporal types, Quantities, and exact decimal scale).
+func EvalFHIRPathTyped(root map[string]any, expr string) ([]FHIRPathValue, error) {
+	return EvalFHIRPathTypedWithFocus(root, nil, expr)
+}
+
+// EvalFHIRPathTypedWithContextExpr evaluates contextExpr (if non-empty) against root to obtain
+// the initial typed focus collection, and then evaluates expr against that focus.
+func EvalFHIRPathTypedWithContextExpr(root map[string]any, contextExpr, expr string) ([]FHIRPathValue, error) {
+	if strings.TrimSpace(contextExpr) == "" {
+		return EvalFHIRPathTypedWithFocus(root, nil, expr)
+	}
+	cleanedCtx, err := validateAndCleanFHIRPath(contextExpr)
+	if err != nil {
+		return nil, err
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	var ctxExecErr error
+	baseCtx := fhirPathContext{root: root, thisItem: root, index: 0, total: 1, execErr: &ctxExecErr}
+	focus := evalFHIRPathExpr([]any{root}, baseCtx, cleanedCtx)
+	if ctxExecErr != nil {
+		return nil, ctxExecErr
+	}
+	if len(focus) == 0 {
+		cleaned, err := validateAndCleanFHIRPath(expr)
+		if err != nil {
+			return nil, err
+		}
+		_ = cleaned
+		return nil, nil
+	}
+	return EvalFHIRPathTypedWithFocus(root, focus, expr)
+}
+
+// EvalFHIRPathTypedWithFocus evaluates a FHIRPath R4 expression with an optional explicit focus collection.
+func EvalFHIRPathTypedWithFocus(root map[string]any, focus []any, expr string) ([]FHIRPathValue, error) {
+	cleaned, err := validateAndCleanFHIRPath(expr)
+	if err != nil {
+		return nil, err
+	}
+	if root == nil {
+		root = map[string]any{}
+	}
+	startInput := focus
+	var thisItem any = root
+	if len(startInput) == 0 {
+		startInput = []any{root}
+	} else {
+		thisItem = startInput[0]
+	}
+	var execErr error
+	ctx := fhirPathContext{
+		root:     root,
+		thisItem: thisItem,
+		index:    0,
+		total:    len(startInput),
+		execErr:  &execErr,
+	}
+	raw := evalFHIRPathExpr(startInput, ctx, cleaned)
+	if execErr != nil {
+		return nil, execErr
+	}
+	var out []FHIRPathValue
+	for _, it := range raw {
+		if tv, ok := it.(fhirTypedValue); ok {
+			u := unwrapFHIRTyped(tv.val)
+			if u == nil {
+				continue
+			}
+			ft := normalizeExportedFHIRType(tv.fhirType, u)
+			dt := tv.decText
+			if ft == "Quantity" {
+				if qStr, okQ := formatQuantityString(it); okQ && dt == "" {
+					dt = qStr
+				}
+			}
+			out = append(out, FHIRPathValue{
+				Value:    u,
+				FHIRType: ft,
+				DecText:  dt,
+			})
+			continue
+		}
+		if it == nil {
+			continue
+		}
+		out = append(out, FHIRPathValue{
+			Value:    it,
+			FHIRType: inferGoValueFHIRType(it),
+		})
+	}
+	return out, nil
+}
+
+// evalFHIRPath evaluates a full HL7 FHIRPath R4 expression against a root FHIR resource map.
 func evalFHIRPath(root map[string]any, expr string) []any {
-	expr = strings.TrimSpace(expr)
-	if expr == "" || root == nil {
+	cleaned, err := validateAndCleanFHIRPath(expr)
+	if err != nil || cleaned == "" || root == nil {
 		return nil
 	}
 	ctx := fhirPathContext{
@@ -35,7 +475,7 @@ func evalFHIRPath(root map[string]any, expr string) []any {
 		index:    0,
 		total:    1,
 	}
-	return evalFHIRPathExpr([]any{root}, ctx, expr)
+	return unwrapFHIRSlice(evalFHIRPathExpr([]any{root}, ctx, cleaned))
 }
 
 func evalFHIRPathExpr(input []any, ctx fhirPathContext, expr string) []any {
@@ -47,16 +487,16 @@ func evalFHIRPathExpr(input []any, ctx fhirPathContext, expr string) []any {
 		return evalFHIRPathExpr(input, ctx, expr[1:len(expr)-1])
 	}
 
-	// 1. implies (lowest precedence, right-to-left)
+	// 1. implies (lowest precedence)
 	if lhs, _, rhs, ok := splitTopLevelKeywordOp(expr, []string{"implies"}); ok {
 		lVals := evalFHIRPathExpr(input, ctx, lhs)
+		lBool, lHas := fhirPathSingletonBool(lVals)
+		if lHas && !lBool {
+			return []any{true}
+		}
 		rVals := evalFHIRPathExpr(input, ctx, rhs)
-		lBool, lHas := singletonBool(lVals)
-		rBool, rHas := singletonBool(rVals)
+		rBool, rHas := fhirPathSingletonBool(rVals)
 		if lHas {
-			if !lBool {
-				return []any{true}
-			}
 			if rHas {
 				return []any{rBool}
 			}
@@ -71,9 +511,12 @@ func evalFHIRPathExpr(input []any, ctx fhirPathContext, expr string) []any {
 	// 2. or, xor (three-valued logic per FHIRPath R4 §6.5)
 	if lhs, op, rhs, ok := splitTopLevelKeywordOp(expr, []string{"or", "xor"}); ok {
 		lVals := evalFHIRPathExpr(input, ctx, lhs)
+		lBool, lHas := fhirPathSingletonBool(lVals)
+		if op == "or" && lHas && lBool {
+			return []any{true}
+		}
 		rVals := evalFHIRPathExpr(input, ctx, rhs)
-		lBool, lHas := singletonBool(lVals)
-		rBool, rHas := singletonBool(rVals)
+		rBool, rHas := fhirPathSingletonBool(rVals)
 		if op == "or" {
 			if (lHas && lBool) || (rHas && rBool) {
 				return []any{true}
@@ -83,7 +526,6 @@ func evalFHIRPathExpr(input []any, ctx fhirPathContext, expr string) []any {
 			}
 			return nil
 		}
-		// xor
 		if lHas && rHas {
 			return []any{lBool != rBool}
 		}
@@ -93,9 +535,12 @@ func evalFHIRPathExpr(input []any, ctx fhirPathContext, expr string) []any {
 	// 3. and (three-valued logic per FHIRPath R4 §6.5)
 	if lhs, _, rhs, ok := splitTopLevelKeywordOp(expr, []string{"and"}); ok {
 		lVals := evalFHIRPathExpr(input, ctx, lhs)
+		lBool, lHas := fhirPathSingletonBool(lVals)
+		if lHas && !lBool {
+			return []any{false}
+		}
 		rVals := evalFHIRPathExpr(input, ctx, rhs)
-		lBool, lHas := singletonBool(lVals)
-		rBool, rHas := singletonBool(rVals)
+		rBool, rHas := fhirPathSingletonBool(rVals)
 		if (lHas && !lBool) || (rHas && !rBool) {
 			return []any{false}
 		}
@@ -110,99 +555,127 @@ func evalFHIRPathExpr(input []any, ctx fhirPathContext, expr string) []any {
 		lVals := evalFHIRPathExpr(input, ctx, lhs)
 		rVals := evalFHIRPathExpr(input, ctx, rhs)
 		if op == "in" {
-			if len(lVals) == 0 {
+			if len(lVals) != 1 {
 				return nil
 			}
 			if len(rVals) == 0 {
 				return []any{false}
 			}
 			for _, rv := range rVals {
-				if fhirPathEqual(lVals[0], rv) {
+				if eq, okEq := fhirPathEqualTri(lVals[0], rv); okEq && eq {
 					return []any{true}
 				}
 			}
 			return []any{false}
 		}
-		// contains
-		if len(rVals) == 0 {
+		if len(rVals) != 1 {
 			return nil
 		}
 		if len(lVals) == 0 {
 			return []any{false}
 		}
 		for _, lv := range lVals {
-			if fhirPathEqual(lv, rVals[0]) {
+			if eq, okEq := fhirPathEqualTri(lv, rVals[0]); okEq && eq {
 				return []any{true}
 			}
 		}
 		return []any{false}
 	}
 
-	// 5. Equality / Equivalence / Comparison: !=, !~, >=, <=, =, ~, >, <
-	if lhs, op, rhs, ok := splitTopLevelSymbolOp(expr, []string{"!=", "!~", ">=", "<=", "=", "~", ">", "<"}); ok {
+	// 5. Equality / Equivalence: !=, !~, =, ~ (looser than <, <=, >, >= per FHIRPath R4 §6.1)
+	if lhs, op, rhs, ok := splitTopLevelSymbolOp(expr, []string{"!=", "!~", "=", "~"}); ok {
 		lVals := evalFHIRPathExpr(input, ctx, lhs)
 		rVals := evalFHIRPathExpr(input, ctx, rhs)
-		return evalFHIRPathComparison(lVals, op, rVals)
+		return evalFHIRPathComparison(ctx, lVals, op, rVals)
 	}
 
-	// 6. Union operator: |
+	// 6. Ordering Comparison: >=, <=, >, <
+	if lhs, op, rhs, ok := splitTopLevelSymbolOp(expr, []string{">=", "<=", ">", "<"}); ok {
+		lVals := evalFHIRPathExpr(input, ctx, lhs)
+		rVals := evalFHIRPathExpr(input, ctx, rhs)
+		return evalFHIRPathComparison(ctx, lVals, op, rVals)
+	}
+
+	// 7. Union operator: |
 	if lhs, _, rhs, ok := splitTopLevelSymbolOp(expr, []string{"|"}); ok {
 		lVals := evalFHIRPathExpr(input, ctx, lhs)
 		rVals := evalFHIRPathExpr(input, ctx, rhs)
 		return fhirPathDistinct(append(append([]any{}, lVals...), rVals...))
 	}
 
-	// 7. Additive operators: +, -, &
+	// 8. Type operators: is, as (tighter than |, looser than +/-/& per FHIRPath R4 §6.1)
+	if lhs, op, rhs, ok := splitTopLevelKeywordOp(expr, []string{"is", "as"}); ok {
+		typeSpec := cleanTypeSpecifier(rhs)
+		if !isKnownFHIRPathTypeName(typeSpec) {
+			ctx.setExecErr(fmt.Sprintf("unknown type specifier %q in %q operator", typeSpec, op))
+			return nil
+		}
+		lVals := evalFHIRPathExpr(input, ctx, lhs)
+		if len(lVals) > 1 {
+			ctx.setExecErr(fmt.Sprintf("%q operator requires singleton input collection", op))
+			return nil
+		}
+		if op == "is" {
+			if len(lVals) == 0 {
+				return nil
+			}
+			return []any{fhirPathMatchesType(lVals[0], typeSpec)}
+		}
+		if len(lVals) == 1 && fhirPathMatchesExactOrResourceType(lVals[0], typeSpec) {
+			return lVals
+		}
+		return nil
+	}
+
+	// 9. Additive operators: +, -, &
 	if lhs, op, rhs, ok := splitTopLevelAdditiveOp(expr); ok {
 		lVals := evalFHIRPathExpr(input, ctx, lhs)
 		rVals := evalFHIRPathExpr(input, ctx, rhs)
-		return evalFHIRPathAdditive(lVals, op, rVals)
+		return evalFHIRPathAdditive(ctx, lVals, op, rVals)
 	}
 
-	// 8. Multiplicative operators: *, /, div, mod
+	// 10. Multiplicative operators: *, /, div, mod
 	if lhs, op, rhs, ok := splitTopLevelMultiplicativeOp(expr); ok {
 		lVals := evalFHIRPathExpr(input, ctx, lhs)
 		rVals := evalFHIRPathExpr(input, ctx, rhs)
 		return evalFHIRPathMultiplicative(lVals, op, rVals)
 	}
 
-	// 9. Type operators: is, as
-	if lhs, op, rhs, ok := splitTopLevelKeywordOp(expr, []string{"is", "as"}); ok {
-		lVals := evalFHIRPathExpr(input, ctx, lhs)
-		typeName := strings.Trim(strings.TrimSpace(rhs), "'\"")
-		if op == "is" {
-			if len(lVals) == 0 {
-				return nil
-			}
-			return []any{fhirPathMatchesType(lVals[0], typeName)}
-		}
-		// as
-		if len(lVals) == 1 && fhirPathMatchesType(lVals[0], typeName) {
-			return lVals
-		}
-		return nil
-	}
-
-	// 10. Unary + / -
+	// 11. Unary - / +
 	if strings.HasPrefix(expr, "-") && len(expr) > 1 {
 		sub := evalFHIRPathExpr(input, ctx, expr[1:])
+		if len(sub) > 1 {
+			ctx.setExecErr("unary '-' requires a singleton numeric operand")
+			return nil
+		}
 		if len(sub) == 1 {
-			switch v := sub[0].(type) {
-			case int:
-				return []any{-v}
-			case int64:
-				return []any{-v}
-			case float64:
-				return []any{-v}
+			res := negateFHIRPathValue(sub[0])
+			if res == nil {
+				ctx.setExecErr("unary '-' is not valid for non-numeric operand")
 			}
+			return res
 		}
 		return nil
 	}
 	if strings.HasPrefix(expr, "+") && len(expr) > 1 {
-		return evalFHIRPathExpr(input, ctx, expr[1:])
+		sub := evalFHIRPathExpr(input, ctx, expr[1:])
+		if len(sub) > 1 {
+			ctx.setExecErr("unary '+' requires a singleton numeric operand")
+			return nil
+		}
+		if len(sub) == 1 {
+			if _, okF := toFloat(sub[0]); !okF {
+				if _, okQ := extractQuantityInfo(sub[0]); !okQ {
+					ctx.setExecErr("unary '+' is not valid for non-numeric operand")
+					return nil
+				}
+			}
+			return sub
+		}
+		return nil
 	}
 
-	// 11. Path / Function / Literal chain
+	// 12. Path / Function / Literal chain
 	return evalFHIRPathChain(input, ctx, expr)
 }
 
@@ -215,12 +688,12 @@ func hasOuterParens(expr string) bool {
 	for i := 0; i < len(expr); i++ {
 		ch := expr[i]
 		if inQuote != 0 {
-			if ch == inQuote && (i == 0 || expr[i-1] != '\\') {
+			if ch == inQuote && !isEscapedAt(expr, i) {
 				inQuote = 0
 			}
 			continue
 		}
-		if ch == '\'' || ch == '"' {
+		if ch == '\'' || ch == '"' || ch == '`' {
 			inQuote = ch
 			continue
 		}
@@ -238,7 +711,7 @@ func hasOuterParens(expr string) bool {
 }
 
 func isWordBoundaryChar(b byte) bool {
-	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '(' || b == ')' || b == '[' || b == ']' || b == '\'' || b == '"'
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '(' || b == ')' || b == '[' || b == ']' || b == '\'' || b == '"' || b == '`'
 }
 
 func splitTopLevelKeywordOp(expr string, keywords []string) (string, string, string, bool) {
@@ -250,12 +723,12 @@ func splitTopLevelKeywordOp(expr string, keywords []string) (string, string, str
 	for i := 0; i < len(expr); i++ {
 		ch := expr[i]
 		if inQuote != 0 {
-			if ch == inQuote && (i == 0 || expr[i-1] != '\\') {
+			if ch == inQuote && !isEscapedAt(expr, i) {
 				inQuote = 0
 			}
 			continue
 		}
-		if ch == '\'' || ch == '"' {
+		if ch == '\'' || ch == '"' || ch == '`' {
 			inQuote = ch
 			continue
 		}
@@ -272,11 +745,9 @@ func splitTopLevelKeywordOp(expr string, keywords []string) (string, string, str
 					if i+len(kw) < len(expr) && strings.EqualFold(expr[i:i+len(kw)], kw) {
 						prev := expr[i-1]
 						next := expr[i+len(kw)]
-						// Require whitespace before and after keyword operator (or paren boundary with space on at least one side)
-						prevSpace := prev == ' ' || prev == '\t' || prev == '\n' || prev == ')'
-						nextSpace := next == ' ' || next == '\t' || next == '\n' || (next == '(' && kw != "contains" && kw != "in")
+						prevSpace := prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' || prev == ')'
+						nextSpace := next == ' ' || next == '\t' || next == '\n' || next == '\r' || (next == '(' && kw != "contains" && kw != "in")
 						if prevSpace && nextSpace && isWordBoundaryChar(prev) && isWordBoundaryChar(next) {
-							// Make sure it's not preceded by '.' (like .contains(...))
 							trimmedLeft := strings.TrimSpace(expr[:i])
 							if trimmedLeft != "" && !strings.HasSuffix(trimmedLeft, ".") {
 								lastPos = i
@@ -303,12 +774,12 @@ func splitTopLevelSymbolOp(expr string, ops []string) (string, string, string, b
 	for i := 0; i < len(expr); i++ {
 		ch := expr[i]
 		if inQuote != 0 {
-			if ch == inQuote && (i == 0 || expr[i-1] != '\\') {
+			if ch == inQuote && !isEscapedAt(expr, i) {
 				inQuote = 0
 			}
 			continue
 		}
-		if ch == '\'' || ch == '"' {
+		if ch == '\'' || ch == '"' || ch == '`' {
 			inQuote = ch
 			continue
 		}
@@ -321,6 +792,22 @@ func splitTopLevelSymbolOp(expr string, ops []string) (string, string, string, b
 			}
 		default:
 			if depth == 0 && i > 0 {
+				if (ch == '=' || ch == '~') && (expr[i-1] == '!' || expr[i-1] == '<' || expr[i-1] == '>') {
+					continue
+				}
+				if (ch == '<' || ch == '>') && i+1 < len(expr) && expr[i+1] == '=' {
+					matched := false
+					for _, op := range ops {
+						if op == expr[i:i+2] {
+							matched = true
+							break
+						}
+					}
+					if !matched {
+						i++
+						continue
+					}
+				}
 				for _, op := range ops {
 					if strings.HasPrefix(expr[i:], op) {
 						lhs := strings.TrimSpace(expr[:i])
@@ -349,16 +836,35 @@ func isOperatorTrailing(s string) bool {
 	}
 	last := s[len(s)-1]
 	switch last {
-	case '=', '!', '<', '>', '+', '-', '*', '/', '&', '|', '(', '[', ',':
+	case '=', '!', '<', '>', '+', '-', '*', '/', '&', '|', '(', '[', ',', '~':
 		return true
 	}
 	lower := strings.ToLower(s)
-	for _, kw := range []string{" and", " or", " xor", " implies", " div", " mod", " in", " contains"} {
+	for _, kw := range []string{" and", " or", " xor", " implies", " div", " mod", " in", " contains", " is", " as"} {
 		if strings.HasSuffix(lower, kw) {
 			return true
 		}
 	}
 	return false
+}
+
+func isInsideAtTemporalLiteral(expr string, pos int) bool {
+	if pos <= 0 || pos+1 >= len(expr) {
+		return false
+	}
+	if expr[pos+1] < '0' || expr[pos+1] > '9' {
+		return false
+	}
+	j := pos - 1
+	for j >= 0 {
+		b := expr[j]
+		if (b >= '0' && b <= '9') || b == 'T' || b == ':' || b == '.' || b == '-' {
+			j--
+			continue
+		}
+		break
+	}
+	return j >= 0 && expr[j] == '@'
 }
 
 func splitTopLevelAdditiveOp(expr string) (string, string, string, bool) {
@@ -370,12 +876,12 @@ func splitTopLevelAdditiveOp(expr string) (string, string, string, bool) {
 	for i := 0; i < len(expr); i++ {
 		ch := expr[i]
 		if inQuote != 0 {
-			if ch == inQuote && (i == 0 || expr[i-1] != '\\') {
+			if ch == inQuote && !isEscapedAt(expr, i) {
 				inQuote = 0
 			}
 			continue
 		}
-		if ch == '\'' || ch == '"' {
+		if ch == '\'' || ch == '"' || ch == '`' {
 			inQuote = ch
 			continue
 		}
@@ -393,9 +899,7 @@ func splitTopLevelAdditiveOp(expr string) (string, string, string, bool) {
 				if rhs == "" || isOperatorTrailing(lhs) {
 					continue
 				}
-				// Avoid splitting inside @date literals like @2026-01-01
-				trimmedLHS := strings.TrimSpace(lhs)
-				if ch == '-' && strings.HasPrefix(trimmedLHS, "@") && !strings.ContainsAny(trimmedLHS, " \t)") {
+				if (ch == '+' || ch == '-') && isInsideAtTemporalLiteral(expr, i) {
 					continue
 				}
 				lastPos = i
@@ -418,12 +922,12 @@ func splitTopLevelMultiplicativeOp(expr string) (string, string, string, bool) {
 	for i := 0; i < len(expr); i++ {
 		ch := expr[i]
 		if inQuote != 0 {
-			if ch == inQuote && (i == 0 || expr[i-1] != '\\') {
+			if ch == inQuote && !isEscapedAt(expr, i) {
 				inQuote = 0
 			}
 			continue
 		}
-		if ch == '\'' || ch == '"' {
+		if ch == '\'' || ch == '"' || ch == '`' {
 			inQuote = ch
 			continue
 		}
@@ -449,7 +953,8 @@ func splitTopLevelMultiplicativeOp(expr string) (string, string, string, bool) {
 					if i+len(kw) < len(expr) && strings.EqualFold(expr[i:i+len(kw)], kw) {
 						prev := expr[i-1]
 						next := expr[i+len(kw)]
-						if (prev == ' ' || prev == '\t' || prev == ')') && (next == ' ' || next == '\t' || next == '(') {
+						if (prev == ' ' || prev == '\t' || prev == '\n' || prev == '\r' || prev == ')') &&
+							(next == ' ' || next == '\t' || next == '\n' || next == '\r' || next == '(') {
 							trimmedLeft := strings.TrimSpace(expr[:i])
 							if trimmedLeft != "" && !strings.HasSuffix(trimmedLeft, ".") {
 								lastPos = i
@@ -477,7 +982,6 @@ func evalFHIRPathChain(input []any, ctx fhirPathContext, expr string) []any {
 	for idx, rawSeg := range segs {
 		baseSeg, indexExprs := splitSegmentIndexers(rawSeg)
 		if idx == 0 {
-			// Check if baseSeg is a literal, environment variable, parenthesized expression, or resourceType
 			if litVals, isLit := evalFHIRPathPrimaryLiteral(baseSeg, input, ctx); isLit {
 				current = litVals
 				for _, ie := range indexExprs {
@@ -485,11 +989,10 @@ func evalFHIRPathChain(input []any, ctx fhirPathContext, expr string) []any {
 				}
 				continue
 			}
-			if rt, _ := ctx.root["resourceType"].(string); rt != "" && strings.EqualFold(baseSeg, rt) {
-				if len(indexExprs) > 0 {
-					for _, ie := range indexExprs {
-						current = applyFHIRPathIndexer(current, input, ctx, ie)
-					}
+			unwrappedFirst := unwrapBacktickIdent(baseSeg)
+			if rt, _ := ctx.root["resourceType"].(string); rt != "" && unwrappedFirst == rt {
+				for _, ie := range indexExprs {
+					current = applyFHIRPathIndexer(current, input, ctx, ie)
 				}
 				continue
 			}
@@ -513,12 +1016,12 @@ func splitSegmentIndexers(seg string) (string, []string) {
 	for i := 0; i < len(seg); i++ {
 		ch := seg[i]
 		if inQuote != 0 {
-			if ch == inQuote && (i == 0 || seg[i-1] != '\\') {
+			if ch == inQuote && !isEscapedAt(seg, i) {
 				inQuote = 0
 			}
 			continue
 		}
-		if ch == '\'' || ch == '"' {
+		if ch == '\'' || ch == '"' || ch == '`' {
 			inQuote = ch
 			continue
 		}
@@ -554,12 +1057,12 @@ foundBracket:
 		for i := 0; i < len(rest); i++ {
 			c := rest[i]
 			if q != 0 {
-				if c == q && (i == 0 || rest[i-1] != '\\') {
+				if c == q && !isEscapedAt(rest, i) {
 					q = 0
 				}
 				continue
 			}
-			if c == '\'' || c == '"' {
+			if c == '\'' || c == '"' || c == '`' {
 				q = c
 				continue
 			}
@@ -594,6 +1097,8 @@ func applyFHIRPathIndexer(current []any, scopeInput []any, ctx fhirPathContext, 
 	return []any{current[idx]}
 }
 
+var reValidTimeLiteral = regexp.MustCompile(`^T\d{2}(:\d{2}(:\d{2}(\.\d+)?)?)?$`)
+
 func evalFHIRPathPrimaryLiteral(seg string, input []any, ctx fhirPathContext) ([]any, bool) {
 	seg = strings.TrimSpace(seg)
 	if seg == "{}" || strings.EqualFold(seg, "null") {
@@ -602,24 +1107,37 @@ func evalFHIRPathPrimaryLiteral(seg string, input []any, ctx fhirPathContext) ([
 	if hasOuterParens(seg) {
 		return evalFHIRPathExpr(input, ctx, seg[1:len(seg)-1]), true
 	}
-	if strings.EqualFold(seg, "true") {
+	if seg == "true" {
 		return []any{true}, true
 	}
-	if strings.EqualFold(seg, "false") {
+	if seg == "false" {
 		return []any{false}, true
 	}
 	if (strings.HasPrefix(seg, "'") && strings.HasSuffix(seg, "'")) ||
 		(strings.HasPrefix(seg, "\"") && strings.HasSuffix(seg, "\"")) {
 		if len(seg) >= 2 {
-			unquoted := seg[1 : len(seg)-1]
-			unquoted = strings.ReplaceAll(unquoted, `\'`, `'`)
-			unquoted = strings.ReplaceAll(unquoted, `\"`, `"`)
-			unquoted = strings.ReplaceAll(unquoted, `\\`, `\`)
+			unquoted, err := unescapeFHIRPathString(seg[1 : len(seg)-1])
+			if err != nil {
+				return nil, true
+			}
 			return []any{unquoted}, true
 		}
 	}
 	if strings.HasPrefix(seg, "@") && len(seg) > 1 {
-		return []any{strings.TrimPrefix(seg, "@")}, true
+		body := strings.TrimPrefix(seg, "@")
+		if strings.HasPrefix(body, "T") {
+			if !reValidTimeLiteral.MatchString(body) {
+				ctx.setExecErr(fmt.Sprintf("invalid FHIRPath Time literal %q (timezone offset not allowed on Time)", seg))
+				return nil, true
+			}
+			tStr := strings.TrimPrefix(body, "T")
+			return []any{fhirTypedValue{val: tStr, fhirType: "System.Time", decText: body}}, true
+		}
+		if strings.Contains(body, "T") {
+			norm := strings.TrimSuffix(body, "T")
+			return []any{fhirTypedValue{val: norm, fhirType: "System.DateTime", decText: body}}, true
+		}
+		return []any{fhirTypedValue{val: body, fhirType: "System.Date", decText: body}}, true
 	}
 	switch seg {
 	case "$this":
@@ -639,6 +1157,8 @@ func evalFHIRPathPrimaryLiteral(seg string, input []any, ctx fhirPathContext) ([
 			return []any{ctx.root}, true
 		}
 		return nil, true
+	case "%rowIndex":
+		return []any{ctx.rowIndex}, true
 	case "%ucum":
 		return []any{"http://unitsofmeasure.org"}, true
 	case "%sct":
@@ -646,11 +1166,27 @@ func evalFHIRPathPrimaryLiteral(seg string, input []any, ctx fhirPathContext) ([
 	case "%loinc":
 		return []any{"http://loinc.org"}, true
 	}
-	if iv, err := strconv.Atoi(seg); err == nil {
-		return []any{iv}, true
+	if strings.HasPrefix(seg, "%") && len(seg) > 1 {
+		envName := unwrapBacktickIdent(seg[1:])
+		if strings.HasPrefix(envName, "vs-") {
+			return []any{"http://hl7.org/fhir/ValueSet/" + strings.TrimPrefix(envName, "vs-")}, true
+		}
+		if strings.HasPrefix(envName, "ext-") {
+			return []any{"http://hl7.org/fhir/StructureDefinition/" + strings.TrimPrefix(envName, "ext-")}, true
+		}
 	}
-	if fv, err := strconv.ParseFloat(seg, 64); err == nil {
-		return []any{fv}, true
+	if qv, okQ := parseQuantityLiteral(seg); okQ {
+		return []any{qv}, true
+	}
+	if !strings.ContainsAny(seg, ".eE ") {
+		if iv, err := strconv.ParseInt(seg, 10, 64); err == nil {
+			return []any{int(iv)}, true
+		}
+	}
+	if strings.Contains(seg, ".") && !strings.ContainsAny(seg, " \t'") {
+		if fv, err := strconv.ParseFloat(seg, 64); err == nil {
+			return []any{fhirTypedValue{val: fv, fhirType: "System.Decimal", decText: seg}}, true
+		}
 	}
 	return nil, false
 }
@@ -683,12 +1219,12 @@ func parseFunctionCall(seg string) (string, []string, bool) {
 		ch := inner[i]
 		if inQuote != 0 {
 			cur.WriteByte(ch)
-			if ch == inQuote && (i == 0 || inner[i-1] != '\\') {
+			if ch == inQuote && !isEscapedAt(inner, i) {
 				inQuote = 0
 			}
 			continue
 		}
-		if ch == '\'' || ch == '"' {
+		if ch == '\'' || ch == '"' || ch == '`' {
 			inQuote = ch
 			cur.WriteByte(ch)
 			continue
@@ -722,48 +1258,32 @@ func evalFHIRPathStep(current []any, scopeInput []any, ctx fhirPathContext, seg 
 		return evalFHIRPathFunction(current, scopeInput, ctx, fnName, args)
 	}
 
+	field := unwrapBacktickIdent(seg)
 	var next []any
 	for _, it := range current {
+		if tv, isTV := it.(fhirTypedValue); isTV {
+			if (field == "extension" || field == "id") && tv.primMeta != nil {
+				if mv, ok := tv.primMeta[field]; ok && mv != nil {
+					if arr, isArr := mv.([]any); isArr {
+						next = append(next, arr...)
+					} else if field == "id" {
+						next = append(next, fhirTypedValue{val: mv, fhirType: "id"})
+					} else {
+						next = append(next, mv)
+					}
+					continue
+				}
+			}
+			if m, okM := tv.val.(map[string]any); okM {
+				next = append(next, stepMapField(m, field)...)
+			}
+			continue
+		}
 		m, ok := it.(map[string]any)
 		if !ok {
 			continue
 		}
-		if v, exists := m[seg]; exists {
-			if arr, isArr := v.([]any); isArr {
-				next = append(next, arr...)
-			} else if v != nil {
-				next = append(next, v)
-			}
-			continue
-		}
-		if seg == "type" {
-			if refStr, okRef := m["reference"].(string); okRef && strings.Contains(refStr, "/") && !strings.HasPrefix(refStr, "urn:") {
-				parts := strings.Split(strings.TrimSpace(refStr), "/")
-				if len(parts) >= 2 && parts[len(parts)-2] != "" {
-					next = append(next, parts[len(parts)-2])
-					continue
-				}
-			}
-		}
-		// Polymorphic choice[x] resolution: e.g., "value" -> valueQuantity, valueString, etc., or "effective" -> effectiveDateTime
-		prefix := seg
-		matchedChoice := false
-		for k, v := range m {
-			if strings.HasPrefix(k, prefix) && len(k) > len(prefix) && v != nil {
-				nextChar := k[len(prefix)]
-				if nextChar >= 'A' && nextChar <= 'Z' {
-					if arr, isArr := v.([]any); isArr {
-						next = append(next, arr...)
-					} else {
-						next = append(next, v)
-					}
-					matchedChoice = true
-				}
-			}
-		}
-		if matchedChoice {
-			continue
-		}
+		next = append(next, stepMapField(m, field)...)
 	}
 	return next
 }
@@ -775,9 +1295,12 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 			return []any{len(current) > 0}
 		}
 		for i, it := range current {
-			subCtx := fhirPathContext{root: ctx.root, thisItem: it, index: i, total: len(current)}
+			subCtx := ctx
+			subCtx.thisItem = it
+			subCtx.index = i
+			subCtx.total = len(current)
 			vals := evalFHIRPathExpr([]any{it}, subCtx, args[0])
-			if b, ok := singletonBool(vals); ok && b {
+			if b, ok := fhirPathSingletonBool(vals); ok && b {
 				return []any{true}
 			}
 		}
@@ -791,9 +1314,12 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 			return []any{true}
 		}
 		for i, it := range current {
-			subCtx := fhirPathContext{root: ctx.root, thisItem: it, index: i, total: len(current)}
+			subCtx := ctx
+			subCtx.thisItem = it
+			subCtx.index = i
+			subCtx.total = len(current)
 			vals := evalFHIRPathExpr([]any{it}, subCtx, args[0])
-			if b, ok := singletonBool(vals); !ok || !b {
+			if b, ok := fhirPathSingletonBool(vals); !ok || !b {
 				return []any{false}
 			}
 		}
@@ -801,8 +1327,12 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 
 	case "alltrue":
 		for _, it := range current {
-			b, ok := it.(bool)
-			if !ok || !b {
+			b, ok := unwrapFHIRTyped(it).(bool)
+			if !ok {
+				ctx.setExecErr("allTrue() requires all input items to be Boolean")
+				return nil
+			}
+			if !b {
 				return []any{false}
 			}
 		}
@@ -810,7 +1340,12 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 
 	case "anytrue":
 		for _, it := range current {
-			if b, ok := it.(bool); ok && b {
+			b, ok := unwrapFHIRTyped(it).(bool)
+			if !ok {
+				ctx.setExecErr("anyTrue() requires all input items to be Boolean")
+				return nil
+			}
+			if b {
 				return []any{true}
 			}
 		}
@@ -818,8 +1353,12 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 
 	case "allfalse":
 		for _, it := range current {
-			b, ok := it.(bool)
-			if !ok || b {
+			b, ok := unwrapFHIRTyped(it).(bool)
+			if !ok {
+				ctx.setExecErr("allFalse() requires all input items to be Boolean")
+				return nil
+			}
+			if b {
 				return []any{false}
 			}
 		}
@@ -827,7 +1366,12 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 
 	case "anyfalse":
 		for _, it := range current {
-			if b, ok := it.(bool); ok && !b {
+			b, ok := unwrapFHIRTyped(it).(bool)
+			if !ok {
+				ctx.setExecErr("anyFalse() requires all input items to be Boolean")
+				return nil
+			}
+			if !b {
 				return []any{true}
 			}
 		}
@@ -886,9 +1430,12 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		var filtered []any
 		for i, it := range current {
-			subCtx := fhirPathContext{root: ctx.root, thisItem: it, index: i, total: len(current)}
+			subCtx := ctx
+			subCtx.thisItem = it
+			subCtx.index = i
+			subCtx.total = len(current)
 			vals := evalFHIRPathExpr([]any{it}, subCtx, args[0])
-			if b, ok := singletonBool(vals); ok && b {
+			if b, ok := fhirPathSingletonBool(vals); ok && b {
 				filtered = append(filtered, it)
 			}
 		}
@@ -900,7 +1447,10 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		var projected []any
 		for i, it := range current {
-			subCtx := fhirPathContext{root: ctx.root, thisItem: it, index: i, total: len(current)}
+			subCtx := ctx
+			subCtx.thisItem = it
+			subCtx.index = i
+			subCtx.total = len(current)
 			vals := evalFHIRPathExpr([]any{it}, subCtx, args[0])
 			projected = append(projected, vals...)
 		}
@@ -915,7 +1465,10 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		for len(queue) > 0 {
 			it := queue[0]
 			queue = queue[1:]
-			subCtx := fhirPathContext{root: ctx.root, thisItem: it, index: 0, total: 1}
+			subCtx := ctx
+			subCtx.thisItem = it
+			subCtx.index = 0
+			subCtx.total = 1
 			children := evalFHIRPathExpr([]any{it}, subCtx, args[0])
 			for _, ch := range children {
 				already := false
@@ -933,22 +1486,128 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		return result
 
+	case "children":
+		var out []any
+		for _, it := range current {
+			out = append(out, fhirElementChildren(it)...)
+		}
+		return out
+
+	case "descendants":
+		var out []any
+		for _, it := range current {
+			out = append(out, fhirElementDescendants(it)...)
+		}
+		return out
+
+	case "type":
+		var out []any
+		for _, it := range current {
+			ns, name := fhirPathTypeInfo(it)
+			if ns != "" && name != "" {
+				out = append(out, map[string]any{"namespace": ns, "name": name})
+			}
+		}
+		return out
+
+	case "is":
+		if len(args) != 1 {
+			return nil
+		}
+		typeSpec := cleanTypeSpecifier(args[0])
+		if !isKnownFHIRPathTypeName(typeSpec) {
+			ctx.setExecErr(fmt.Sprintf("unknown type specifier %q in is()", typeSpec))
+			return nil
+		}
+		if len(current) > 1 {
+			ctx.setExecErr("is() requires singleton or empty input collection")
+			return nil
+		}
+		if len(current) == 0 {
+			return nil
+		}
+		return []any{fhirPathMatchesType(current[0], typeSpec)}
+
+	case "as":
+		if len(args) != 1 {
+			return nil
+		}
+		typeSpec := cleanTypeSpecifier(args[0])
+		if !isKnownFHIRPathTypeName(typeSpec) {
+			ctx.setExecErr(fmt.Sprintf("unknown type specifier %q in as()", typeSpec))
+			return nil
+		}
+		if len(current) > 1 {
+			ctx.setExecErr("as() requires singleton or empty input collection")
+			return nil
+		}
+		if len(current) == 1 && fhirPathMatchesExactOrResourceType(current[0], typeSpec) {
+			return current
+		}
+		return nil
+
 	case "oftype":
 		if len(args) != 1 {
 			return nil
 		}
-		typeName := strings.Trim(args[0], "'\"")
+		typeSpec := cleanTypeSpecifier(args[0])
+		if !isKnownFHIRPathTypeName(typeSpec) {
+			ctx.setExecErr(fmt.Sprintf("unknown type specifier %q in ofType()", typeSpec))
+			return nil
+		}
 		var matched []any
 		for _, it := range current {
-			if fhirPathMatchesType(it, typeName) {
+			if fhirPathMatchesExactOrResourceType(it, typeSpec) {
 				matched = append(matched, it)
 			}
 		}
 		return matched
 
+	case "conformsto":
+		if len(args) != 1 || len(current) != 1 {
+			if len(current) > 1 {
+				ctx.setExecErr("conformsTo() requires singleton input")
+			}
+			return nil
+		}
+		uVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
+		if len(uVals) != 1 {
+			return nil
+		}
+		profURL, ok := unwrapFHIRTyped(uVals[0]).(string)
+		if !ok || !strings.HasPrefix(profURL, "http://hl7.org/fhir/StructureDefinition/") {
+			ctx.setExecErr(fmt.Sprintf("unknown StructureDefinition profile URL %q in conformsTo()", profURL))
+			return nil
+		}
+		targetType := strings.TrimPrefix(profURL, "http://hl7.org/fhir/StructureDefinition/")
+		if idx := strings.IndexByte(targetType, '|'); idx != -1 {
+			targetType = targetType[:idx]
+		}
+		if m, okM := unwrapFHIRTyped(current[0]).(map[string]any); okM {
+			if rt, _ := m["resourceType"].(string); rt != "" {
+				if rt == targetType || targetType == "Resource" || targetType == "DomainResource" {
+					return []any{true}
+				}
+				if meta, okMeta := m["meta"].(map[string]any); okMeta {
+					if profs, okP := meta["profile"].([]any); okP {
+						for _, p := range profs {
+							if ps, _ := p.(string); ps == profURL {
+								return []any{true}
+							}
+						}
+					}
+				}
+				return []any{false}
+			}
+		}
+		return nil
+
 	case "single":
 		if len(current) == 1 {
 			return current
+		}
+		if len(current) > 1 {
+			ctx.setExecErr(fmt.Sprintf("single() expected at most 1 item, got %d", len(current)))
 		}
 		return nil
 
@@ -1061,12 +1720,30 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if len(args) < 2 {
 			return nil
 		}
-		condVals := evalFHIRPathExpr(current, ctx, args[0])
-		if b, ok := singletonBool(condVals); ok && b {
-			return evalFHIRPathExpr(current, ctx, args[1])
+		if len(current) > 1 {
+			ctx.setExecErr("iif() cannot be invoked on a collection with more than 1 item")
+			return nil
+		}
+		subCtx := ctx
+		if len(current) == 1 {
+			subCtx.thisItem = current[0]
+		}
+		condVals := evalFHIRPathExpr(current, subCtx, args[0])
+		if len(condVals) > 1 {
+			ctx.setExecErr("iif() criterion evaluated to more than 1 item")
+			return nil
+		}
+		if len(condVals) == 1 {
+			b, ok := unwrapFHIRTyped(condVals[0]).(bool)
+			if !ok {
+				return nil
+			}
+			if b {
+				return evalFHIRPathExpr(current, subCtx, args[1])
+			}
 		}
 		if len(args) >= 3 {
-			return evalFHIRPathExpr(current, ctx, args[2])
+			return evalFHIRPathExpr(current, subCtx, args[2])
 		}
 		return nil
 
@@ -1075,10 +1752,11 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 			vals := evalFHIRPathExpr(current, ctx, strings.TrimSpace(rawArg))
 			var nonEmpty []any
 			for _, v := range vals {
-				if v == nil {
+				u := unwrapFHIRTyped(v)
+				if u == nil {
 					continue
 				}
-				if s, isStr := v.(string); isStr && s == "" {
+				if s, isStr := u.(string); isStr && s == "" {
 					continue
 				}
 				nonEmpty = append(nonEmpty, v)
@@ -1090,19 +1768,28 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return nil
 
 	case "not":
-		if len(current) != 1 {
+		if len(current) == 0 {
 			return nil
 		}
-		if b, ok := current[0].(bool); ok {
-			return []any{!b}
+		if len(current) > 1 {
+			ctx.setExecErr("not() cannot be invoked on a collection with more than 1 item")
+			return nil
 		}
-		return nil
+		b, ok := fhirPathSingletonBool(current)
+		if !ok {
+			return nil
+		}
+		return []any{!b}
 
 	case "hasvalue":
 		if len(current) != 1 || current[0] == nil {
 			return []any{false}
 		}
-		switch v := current[0].(type) {
+		u := unwrapFHIRTyped(current[0])
+		if u == nil {
+			return []any{false}
+		}
+		switch v := u.(type) {
 		case string:
 			return []any{v != ""}
 		case bool, int, int64, float64:
@@ -1112,16 +1799,13 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 
 	case "tostring":
-		if len(current) == 0 {
+		if len(current) != 1 {
 			return nil
 		}
-		var out []any
-		for _, item := range current {
-			if s, ok := toStringConv(item); ok {
-				out = append(out, s)
-			}
+		if s, ok := toStringConv(current[0]); ok {
+			return []any{s}
 		}
-		return out
+		return nil
 
 	case "convertstostring":
 		if len(current) != 1 {
@@ -1131,16 +1815,13 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return []any{ok}
 
 	case "tointeger":
-		if len(current) == 0 {
+		if len(current) != 1 {
 			return nil
 		}
-		var out []any
-		for _, item := range current {
-			if iv, ok := toIntegerConv(item); ok {
-				out = append(out, iv)
-			}
+		if iv, ok := toIntegerConv(current[0]); ok {
+			return []any{iv}
 		}
-		return out
+		return nil
 
 	case "convertstointeger":
 		if len(current) != 1 {
@@ -1150,22 +1831,19 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return []any{ok}
 
 	case "todecimal":
-		if len(current) == 0 {
+		if len(current) != 1 {
 			return nil
 		}
-		var out []any
-		for _, item := range current {
-			if fv, ok := toDecimalConv(item); ok {
-				out = append(out, fv)
-			}
+		if tv, ok := toDecimalTypedConv(current[0]); ok {
+			return []any{tv}
 		}
-		return out
+		return nil
 
 	case "convertstodecimal":
 		if len(current) != 1 {
 			return nil
 		}
-		_, ok := toDecimalConv(current[0])
+		_, ok := toDecimalTypedConv(current[0])
 		return []any{ok}
 
 	case "toboolean":
@@ -1184,129 +1862,193 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		_, ok := toBooleanConv(current[0])
 		return []any{ok}
 
-	case "todate", "todatetime", "totime":
+	case "todate":
 		if len(current) != 1 {
 			return nil
 		}
-		if s, ok := toStringConv(current[0]); ok && strings.TrimSpace(s) != "" {
-			return []any{strings.TrimPrefix(strings.TrimSpace(s), "@")}
+		if tv, ok := toDateConv(current[0]); ok {
+			return []any{tv}
 		}
 		return nil
 
-	case "convertstodate", "convertstodatetime", "convertstotime":
+	case "convertstodate":
 		if len(current) != 1 {
 			return nil
 		}
-		s, ok := toStringConv(current[0])
-		return []any{ok && strings.TrimSpace(s) != ""}
+		_, ok := toDateConv(current[0])
+		return []any{ok}
 
-	case "toquantity":
-		if len(current) == 0 {
+	case "todatetime":
+		if len(current) != 1 {
 			return nil
 		}
-		var out []any
-		for _, item := range current {
-			if m, isMap := item.(map[string]any); isMap {
-				if v, hasV := m["value"]; hasV {
-					if fv, ok := toDecimalConv(v); ok {
-						out = append(out, fv)
-					}
-				}
-				continue
-			}
-			if fv, ok := toDecimalConv(item); ok {
-				out = append(out, fv)
+		if tv, ok := toDateTimeConv(current[0]); ok {
+			return []any{tv}
+		}
+		return nil
+
+	case "convertstodatetime":
+		if len(current) != 1 {
+			return nil
+		}
+		_, ok := toDateTimeConv(current[0])
+		return []any{ok}
+
+	case "totime":
+		if len(current) != 1 {
+			return nil
+		}
+		if tv, ok := toTimeConv(current[0]); ok {
+			return []any{tv}
+		}
+		return nil
+
+	case "convertstotime":
+		if len(current) != 1 {
+			return nil
+		}
+		_, ok := toTimeConv(current[0])
+		return []any{ok}
+
+	case "toquantity":
+		if len(current) != 1 {
+			return nil
+		}
+		var targetUnit string
+		if len(args) == 1 {
+			uVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
+			if len(uVals) == 1 {
+				targetUnit, _ = unwrapFHIRTyped(uVals[0]).(string)
 			}
 		}
-		return out
+		if qv, ok := toQuantityConv(current[0], targetUnit); ok {
+			return []any{qv}
+		}
+		return nil
 
 	case "convertstoquantity":
 		if len(current) != 1 {
 			return nil
 		}
-		if m, isMap := current[0].(map[string]any); isMap {
-			_, hasV := m["value"]
-			return []any{hasV}
+		var targetUnit string
+		if len(args) == 1 {
+			uVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
+			if len(uVals) == 1 {
+				targetUnit, _ = unwrapFHIRTyped(uVals[0]).(string)
+			}
 		}
-		_, ok := toDecimalConv(current[0])
+		_, ok := toQuantityConv(current[0], targetUnit)
 		return []any{ok}
 
 	case "precision":
-		if len(current) == 0 {
+		if len(current) != 1 {
 			return nil
 		}
-		var out []any
-		for _, item := range current {
-			if s, ok := toStringConv(item); ok && s != "" {
-				out = append(out, len([]rune(s)))
-			}
+		if p, ok := evalPrecision(current[0]); ok {
+			return []any{p}
 		}
-		return out
+		return nil
 
 	case "lowboundary", "highboundary":
-		if len(current) == 0 {
+		if len(current) != 1 {
 			return nil
 		}
-		precArg := ""
+		hasPrec := false
+		prec := -1
 		if len(args) >= 1 {
-			precArg = strings.TrimSpace(args[0])
-		}
-		halfStep, _ := strconv.ParseFloat(decimalBoundaryHalfStep(precArg), 64)
-		isLow := strings.EqualFold(fnName, "lowboundary")
-		var out []any
-		for _, item := range current {
-			if fv, ok := toDecimalConv(item); ok {
-				var res float64
-				if isLow {
-					res = math.Round((fv-halfStep)*1e9) / 1e9
-				} else {
-					res = math.Round((fv+halfStep)*1e9) / 1e9
-				}
-				out = append(out, res)
-			} else if s, ok := item.(string); ok && s != "" {
-				out = append(out, s)
+			pVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
+			if len(pVals) != 1 {
+				return nil
 			}
+			p, ok := toInt(pVals[0])
+			if !ok {
+				return nil
+			}
+			hasPrec = true
+			prec = p
 		}
-		return out
+		if bv, ok := evalBoundary(current[0], strings.EqualFold(fnName, "lowboundary"), hasPrec, prec); ok {
+			return []any{bv}
+		}
+		return nil
 
 	case "comparable":
-		if len(current) != 1 || current[0] == nil {
+		if len(current) != 1 || len(args) != 1 {
+			return nil
+		}
+		oVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
+		if len(oVals) != 1 {
+			return nil
+		}
+		if okComp, valid := quantitiesComparable(current[0], oVals[0]); valid {
+			return []any{okComp}
+		}
+		_, isQ1 := extractQuantityInfo(current[0])
+		_, isQ2 := extractQuantityInfo(oVals[0])
+		if isQ1 || isQ2 {
 			return []any{false}
 		}
-		if s, ok := current[0].(string); ok {
-			return []any{strings.TrimSpace(s) != ""}
+		if tv1, ok1 := current[0].(fhirTypedValue); ok1 && isTemporalFHIRType(tv1.fhirType) {
+			if tv2, ok2 := oVals[0].(fhirTypedValue); ok2 && isTemporalFHIRType(tv2.fhirType) {
+				return []any{tv1.fhirType == tv2.fhirType}
+			}
+			return []any{false}
 		}
-		return []any{true}
+		if tv2, ok2 := oVals[0].(fhirTypedValue); ok2 && isTemporalFHIRType(tv2.fhirType) {
+			return []any{false}
+		}
+		u1 := unwrapFHIRTyped(current[0])
+		u2 := unwrapFHIRTyped(oVals[0])
+		switch v1 := u1.(type) {
+		case string:
+			v2, ok := u2.(string)
+			return []any{ok && v1 != "" && v2 != ""}
+		case int, int64, float64:
+			switch u2.(type) {
+			case int, int64, float64:
+				return []any{true}
+			default:
+				return []any{false}
+			}
+		case bool:
+			_, ok := u2.(bool)
+			return []any{ok}
+		default:
+			return []any{false}
+		}
 
 	// String Functions
 	case "indexof":
-		if len(current) == 0 || len(args) != 1 {
+		if len(current) != 1 || len(args) != 1 {
+			return nil
+		}
+		s, okS := unwrapFHIRTyped(current[0]).(string)
+		if !okS {
 			return nil
 		}
 		subVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
 		if len(subVals) != 1 {
 			return nil
 		}
-		sub, ok := subVals[0].(string)
+		sub, ok := unwrapFHIRTyped(subVals[0]).(string)
 		if !ok {
 			return nil
 		}
-		var out []any
-		for _, item := range current {
-			s, okS := item.(string)
-			if !okS {
-				continue
-			}
-			if sub == "" {
-				out = append(out, 0)
-			} else {
-				out = append(out, strings.Index(s, sub))
-			}
+		if sub == "" {
+			return []any{0}
 		}
-		return out
+		byteIdx := strings.Index(s, sub)
+		if byteIdx < 0 {
+			return []any{-1}
+		}
+		return []any{utf8.RuneCountInString(s[:byteIdx])}
 
 	case "substring":
-		if len(current) == 0 || len(args) < 1 {
+		if len(current) != 1 || len(args) < 1 {
+			return nil
+		}
+		s, okS := unwrapFHIRTyped(current[0]).(string)
+		if !okS {
 			return nil
 		}
 		startVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
@@ -1317,47 +2059,38 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if !ok || start < 0 {
 			return nil
 		}
-		hasLen := false
-		length := 0
+		runes := []rune(s)
+		if start >= len(runes) {
+			return nil
+		}
 		if len(args) >= 2 {
 			lenVals := evalFHIRPathExpr(scopeInput, ctx, args[1])
-			if len(lenVals) != 1 {
+			if len(lenVals) == 0 {
+				return []any{string(runes[start:])}
+			}
+			if len(lenVals) > 1 {
 				return nil
 			}
 			l, okL := toInt(lenVals[0])
-			if !okL || l < 0 {
+			if !okL {
 				return nil
 			}
-			hasLen = true
-			length = l
+			if l <= 0 {
+				return []any{""}
+			}
+			end := len(runes)
+			if l < end-start {
+				end = start + l
+			}
+			return []any{string(runes[start:end])}
 		}
-		var out []any
-		for _, item := range current {
-			s, okS := item.(string)
-			if !okS {
-				continue
-			}
-			runes := []rune(s)
-			if start >= len(runes) {
-				continue
-			}
-			if hasLen {
-				end := start + length
-				if end > len(runes) {
-					end = len(runes)
-				}
-				out = append(out, string(runes[start:end]))
-			} else {
-				out = append(out, string(runes[start:]))
-			}
-		}
-		return out
+		return []any{string(runes[start:])}
 
 	case "startswith":
 		if len(current) != 1 || len(args) != 1 {
 			return nil
 		}
-		s, ok := current[0].(string)
+		s, ok := unwrapFHIRTyped(current[0]).(string)
 		if !ok {
 			return nil
 		}
@@ -1365,7 +2098,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if len(pVals) != 1 {
 			return nil
 		}
-		p, ok := pVals[0].(string)
+		p, ok := unwrapFHIRTyped(pVals[0]).(string)
 		if !ok {
 			return nil
 		}
@@ -1375,7 +2108,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if len(current) != 1 || len(args) != 1 {
 			return nil
 		}
-		s, ok := current[0].(string)
+		s, ok := unwrapFHIRTyped(current[0]).(string)
 		if !ok {
 			return nil
 		}
@@ -1383,7 +2116,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if len(sVals) != 1 {
 			return nil
 		}
-		suf, ok := sVals[0].(string)
+		suf, ok := unwrapFHIRTyped(sVals[0]).(string)
 		if !ok {
 			return nil
 		}
@@ -1393,7 +2126,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if len(current) != 1 || len(args) != 1 {
 			return nil
 		}
-		s, ok := current[0].(string)
+		s, ok := unwrapFHIRTyped(current[0]).(string)
 		if !ok {
 			return nil
 		}
@@ -1401,7 +2134,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if len(cVals) != 1 {
 			return nil
 		}
-		sub, ok := cVals[0].(string)
+		sub, ok := unwrapFHIRTyped(cVals[0]).(string)
 		if !ok {
 			return nil
 		}
@@ -1413,7 +2146,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		var out []any
 		for _, item := range current {
-			if s, ok := item.(string); ok {
+			if s, ok := unwrapFHIRTyped(item).(string); ok {
 				out = append(out, strings.ToUpper(s))
 			}
 		}
@@ -1425,7 +2158,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		var out []any
 		for _, item := range current {
-			if s, ok := item.(string); ok {
+			if s, ok := unwrapFHIRTyped(item).(string); ok {
 				out = append(out, strings.ToLower(s))
 			}
 		}
@@ -1437,7 +2170,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		var out []any
 		for _, item := range current {
-			if s, ok := item.(string); ok {
+			if s, ok := unwrapFHIRTyped(item).(string); ok {
 				out = append(out, strings.TrimSpace(s))
 			}
 		}
@@ -1452,14 +2185,14 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if len(pVals) != 1 || len(rVals) != 1 {
 			return nil
 		}
-		pat, ok1 := pVals[0].(string)
-		rep, ok2 := rVals[0].(string)
+		pat, ok1 := unwrapFHIRTyped(pVals[0]).(string)
+		rep, ok2 := unwrapFHIRTyped(rVals[0]).(string)
 		if !ok1 || !ok2 {
 			return nil
 		}
 		var out []any
 		for _, item := range current {
-			if s, ok := item.(string); ok {
+			if s, ok := unwrapFHIRTyped(item).(string); ok {
 				out = append(out, strings.ReplaceAll(s, pat, rep))
 			}
 		}
@@ -1469,7 +2202,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if len(current) != 1 || len(args) != 1 {
 			return nil
 		}
-		s, ok := current[0].(string)
+		s, ok := unwrapFHIRTyped(current[0]).(string)
 		if !ok {
 			return nil
 		}
@@ -1477,17 +2210,14 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if len(rVals) != 1 {
 			return nil
 		}
-		pat, ok := rVals[0].(string)
+		pat, ok := unwrapFHIRTyped(rVals[0]).(string)
 		if !ok {
 			return nil
 		}
 		if strings.EqualFold(fnName, "matchesfull") {
-			if !strings.HasPrefix(pat, "^") {
-				pat = "^" + pat
-			}
-			if !strings.HasSuffix(pat, "$") {
-				pat = pat + "$"
-			}
+			pat = "(?s)^(?:" + pat + ")$"
+		} else {
+			pat = "(?s)" + pat
 		}
 		re, err := regexp.Compile(pat)
 		if err != nil {
@@ -1504,18 +2234,27 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if len(pVals) != 1 || len(rVals) != 1 {
 			return nil
 		}
-		pat, ok1 := pVals[0].(string)
-		rep, ok2 := rVals[0].(string)
+		pat, ok1 := unwrapFHIRTyped(pVals[0]).(string)
+		rep, ok2 := unwrapFHIRTyped(rVals[0]).(string)
 		if !ok1 || !ok2 {
 			return nil
 		}
-		re, err := regexp.Compile(pat)
+		if pat == "" {
+			var out []any
+			for _, item := range current {
+				if s, ok := unwrapFHIRTyped(item).(string); ok {
+					out = append(out, s)
+				}
+			}
+			return out
+		}
+		re, err := regexp.Compile("(?s)" + pat)
 		if err != nil {
 			return nil
 		}
 		var out []any
 		for _, item := range current {
-			if s, ok := item.(string); ok {
+			if s, ok := unwrapFHIRTyped(item).(string); ok {
 				out = append(out, re.ReplaceAllString(s, rep))
 			}
 		}
@@ -1527,7 +2266,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		var out []any
 		for _, item := range current {
-			if s, ok := item.(string); ok {
+			if s, ok := unwrapFHIRTyped(item).(string); ok {
 				out = append(out, len([]rune(s)))
 			}
 		}
@@ -1539,7 +2278,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		var out []any
 		for _, item := range current {
-			if s, ok := item.(string); ok {
+			if s, ok := unwrapFHIRTyped(item).(string); ok {
 				for _, r := range s {
 					out = append(out, string(r))
 				}
@@ -1555,13 +2294,13 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if len(sepVals) != 1 {
 			return nil
 		}
-		sep, ok := sepVals[0].(string)
+		sep, ok := unwrapFHIRTyped(sepVals[0]).(string)
 		if !ok {
 			return nil
 		}
 		var out []any
 		for _, item := range current {
-			if s, ok := item.(string); ok {
+			if s, ok := unwrapFHIRTyped(item).(string); ok {
 				for _, p := range strings.Split(s, sep) {
 					out = append(out, p)
 				}
@@ -1570,51 +2309,40 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return out
 
 	case "join":
+		if len(current) == 0 {
+			return nil
+		}
 		sep := ""
 		if len(args) == 1 {
 			sepVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
 			if len(sepVals) == 1 {
-				if sv, ok := sepVals[0].(string); ok {
+				if sv, ok := unwrapFHIRTyped(sepVals[0]).(string); ok {
 					sep = sv
 				}
 			}
 		}
 		var strs []string
 		for _, it := range current {
-			if s, ok := it.(string); ok {
+			if s, ok := unwrapFHIRTyped(it).(string); ok {
 				strs = append(strs, s)
 			} else if s, ok := toStringConv(it); ok {
 				strs = append(strs, s)
 			}
 		}
+		if len(strs) == 0 {
+			return nil
+		}
 		return []any{strings.Join(strs, sep)}
 
-	// Math Functions (supports both singleton and element-wise collection evaluation)
+	// Math Functions
 	case "abs":
 		if len(current) == 0 {
 			return nil
 		}
 		var out []any
 		for _, item := range current {
-			switch v := item.(type) {
-			case int:
-				if v < 0 {
-					out = append(out, -v)
-				} else {
-					out = append(out, v)
-				}
-			case int64:
-				if v < 0 {
-					out = append(out, -v)
-				} else {
-					out = append(out, v)
-				}
-			case float64:
-				out = append(out, math.Abs(v))
-			default:
-				if fv, ok := toFloat(item); ok {
-					out = append(out, math.Abs(fv))
-				}
+			if av, ok := absFHIRPathValue(item); ok {
+				out = append(out, av)
 			}
 		}
 		return out
@@ -1659,16 +2387,17 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if len(current) == 0 {
 			return nil
 		}
-		hasPrecision := false
 		precision := 0
 		if len(args) == 1 {
 			pVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
-			if len(pVals) == 1 {
-				if p, ok := toInt(pVals[0]); ok && p >= 0 {
-					hasPrecision = true
-					precision = p
-				}
+			if len(pVals) != 1 {
+				return nil
 			}
+			p, ok := toInt(pVals[0])
+			if !ok || p < 0 {
+				return nil
+			}
+			precision = p
 		}
 		var out []any
 		for _, item := range current {
@@ -1676,12 +2405,13 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 			if !ok {
 				continue
 			}
-			if hasPrecision {
-				pow := math.Pow(10, float64(precision))
-				out = append(out, math.Round(fv*pow)/pow)
-			} else {
-				out = append(out, int(math.Round(fv)))
-			}
+			pow := math.Pow(10, float64(precision))
+			rounded := math.Round(fv*pow) / pow
+			out = append(out, fhirTypedValue{
+				val:      rounded,
+				fhirType: "System.Decimal",
+				decText:  strconv.FormatFloat(rounded, 'f', precision, 64),
+			})
 		}
 		return out
 
@@ -1692,7 +2422,8 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		var out []any
 		for _, item := range current {
 			if fv, ok := toFloat(item); ok && fv >= 0 {
-				out = append(out, math.Sqrt(fv))
+				res := math.Sqrt(fv)
+				out = append(out, fhirTypedValue{val: res, fhirType: "System.Decimal"})
 			}
 		}
 		return out
@@ -1704,7 +2435,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		var out []any
 		for _, item := range current {
 			if fv, ok := toFloat(item); ok {
-				out = append(out, math.Exp(fv))
+				out = append(out, fhirTypedValue{val: math.Exp(fv), fhirType: "System.Decimal"})
 			}
 		}
 		return out
@@ -1716,7 +2447,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		var out []any
 		for _, item := range current {
 			if fv, ok := toFloat(item); ok && fv > 0 {
-				out = append(out, math.Log(fv))
+				out = append(out, fhirTypedValue{val: math.Log(fv), fhirType: "System.Decimal"})
 			}
 		}
 		return out
@@ -1736,7 +2467,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		var out []any
 		for _, item := range current {
 			if fv, ok := toFloat(item); ok && fv > 0 {
-				out = append(out, math.Log(fv)/math.Log(base))
+				out = append(out, fhirTypedValue{val: math.Log(fv) / math.Log(base), fhirType: "System.Decimal"})
 			}
 		}
 		return out
@@ -1753,7 +2484,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if !ok {
 			return nil
 		}
-		expInt, isInt2 := toInt(eVals[0])
+		expInt, isInt2 := toIntStrict(eVals[0])
 		var out []any
 		for _, item := range current {
 			fv, ok := toFloat(item)
@@ -1764,10 +2495,10 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 			if math.IsNaN(res) || math.IsInf(res, 0) {
 				continue
 			}
-			if _, isInt1 := toInt(item); isInt1 && isInt2 && expInt >= 0 {
+			if _, isInt1 := toIntStrict(item); isInt1 && isInt2 && expInt >= 0 {
 				out = append(out, int(math.Round(res)))
 			} else {
-				out = append(out, res)
+				out = append(out, fhirTypedValue{val: res, fhirType: "System.Decimal"})
 			}
 		}
 		return out
@@ -1779,13 +2510,13 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		fVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
 		format := strings.ToLower(strings.Trim(args[0], "'\""))
 		if len(fVals) == 1 {
-			if fs, ok := fVals[0].(string); ok {
+			if fs, ok := unwrapFHIRTyped(fVals[0]).(string); ok {
 				format = strings.ToLower(fs)
 			}
 		}
 		var out []any
 		for _, item := range current {
-			s, ok := item.(string)
+			s, ok := unwrapFHIRTyped(item).(string)
 			if !ok {
 				continue
 			}
@@ -1807,13 +2538,13 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		fVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
 		format := strings.ToLower(strings.Trim(args[0], "'\""))
 		if len(fVals) == 1 {
-			if fs, ok := fVals[0].(string); ok {
+			if fs, ok := unwrapFHIRTyped(fVals[0]).(string); ok {
 				format = strings.ToLower(fs)
 			}
 		}
 		var out []any
 		for _, item := range current {
-			s, ok := item.(string)
+			s, ok := unwrapFHIRTyped(item).(string)
 			if !ok {
 				continue
 			}
@@ -1841,13 +2572,13 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		fVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
 		format := strings.ToLower(strings.Trim(args[0], "'\""))
 		if len(fVals) == 1 {
-			if fs, ok := fVals[0].(string); ok {
+			if fs, ok := unwrapFHIRTyped(fVals[0]).(string); ok {
 				format = strings.ToLower(fs)
 			}
 		}
 		var out []any
 		for _, item := range current {
-			s, ok := item.(string)
+			s, ok := unwrapFHIRTyped(item).(string)
 			if !ok {
 				continue
 			}
@@ -1857,7 +2588,9 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 				escaped = strings.ReplaceAll(escaped, `"`, `\"`)
 				out = append(out, escaped)
 			default:
-				out = append(out, html.EscapeString(s))
+				escHTML := strings.ReplaceAll(html.EscapeString(s), "&#34;", "&quot;")
+				escHTML = strings.ReplaceAll(escHTML, "&#39;", "&apos;")
+				out = append(out, escHTML)
 			}
 		}
 		return out
@@ -1869,21 +2602,19 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		fVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
 		format := strings.ToLower(strings.Trim(args[0], "'\""))
 		if len(fVals) == 1 {
-			if fs, ok := fVals[0].(string); ok {
+			if fs, ok := unwrapFHIRTyped(fVals[0]).(string); ok {
 				format = strings.ToLower(fs)
 			}
 		}
 		var out []any
 		for _, item := range current {
-			s, ok := item.(string)
+			s, ok := unwrapFHIRTyped(item).(string)
 			if !ok {
 				continue
 			}
 			switch format {
 			case "json":
-				unescaped := strings.ReplaceAll(s, `\"`, `"`)
-				unescaped = strings.ReplaceAll(unescaped, `\\`, `\`)
-				out = append(out, unescaped)
+				out = append(out, unescapeJSONFragment(s))
 			default:
 				out = append(out, html.UnescapeString(s))
 			}
@@ -1894,29 +2625,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		if len(current) <= 1 {
 			return current
 		}
-		desc := strings.EqualFold(fnName, "sortdesc")
-		if len(args) == 1 && strings.EqualFold(strings.Trim(args[0], "'\""), "desc") {
-			desc = true
-		}
-		sorted := make([]any, len(current))
-		copy(sorted, current)
-		sort.SliceStable(sorted, func(i, j int) bool {
-			f1, ok1 := toFloat(sorted[i])
-			f2, ok2 := toFloat(sorted[j])
-			if ok1 && ok2 {
-				if desc {
-					return f1 > f2
-				}
-				return f1 < f2
-			}
-			s1 := fmt.Sprintf("%v", sorted[i])
-			s2 := fmt.Sprintf("%v", sorted[j])
-			if desc {
-				return s1 > s2
-			}
-			return s1 < s2
-		})
-		return sorted
+		return evalSortCollection(current, ctx, fnName, args)
 
 	case "sum":
 		if len(current) == 0 {
@@ -1925,7 +2634,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		sum := 0.0
 		allInt := true
 		for _, item := range current {
-			if _, isI := toInt(item); !isI {
+			if _, isI := toIntStrict(item); !isI {
 				allInt = false
 			}
 			if fv, ok := toFloat(item); ok {
@@ -1960,13 +2669,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		best := current[0]
 		for _, item := range current[1:] {
-			f1, ok1 := toFloat(item)
-			f2, ok2 := toFloat(best)
-			if ok1 && ok2 {
-				if f1 < f2 {
-					best = item
-				}
-			} else if fmt.Sprintf("%v", item) < fmt.Sprintf("%v", best) {
+			if compareScalarForSort(item, best) < 0 {
 				best = item
 			}
 		}
@@ -1978,13 +2681,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		best := current[0]
 		for _, item := range current[1:] {
-			f1, ok1 := toFloat(item)
-			f2, ok2 := toFloat(best)
-			if ok1 && ok2 {
-				if f1 > f2 {
-					best = item
-				}
-			} else if fmt.Sprintf("%v", item) > fmt.Sprintf("%v", best) {
+			if compareScalarForSort(item, best) > 0 {
 				best = item
 			}
 		}
@@ -1997,18 +2694,14 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		var total []any
 		if len(args) >= 2 {
 			total = evalFHIRPathExpr(scopeInput, ctx, args[1])
-		} else if strings.Contains(args[0], "+") {
-			total = []any{0}
 		}
 		for i, it := range current {
-			subCtx := fhirPathContext{
-				root:        ctx.root,
-				thisItem:    it,
-				index:       i,
-				total:       len(current),
-				aggTotal:    total,
-				hasAggTotal: true,
-			}
+			subCtx := ctx
+			subCtx.thisItem = it
+			subCtx.index = i
+			subCtx.total = len(current)
+			subCtx.aggTotal = total
+			subCtx.hasAggTotal = true
 			total = evalFHIRPathExpr([]any{it}, subCtx, args[0])
 		}
 		return total
@@ -2021,20 +2714,29 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		uVals := evalFHIRPathExpr(scopeInput, ctx, args[0])
 		extURL := strings.Trim(args[0], "'\"")
 		if len(uVals) == 1 {
-			if s, ok := uVals[0].(string); ok {
+			if s, ok := unwrapFHIRTyped(uVals[0]).(string); ok {
 				extURL = s
 			}
 		}
 		var matched []any
 		for _, it := range current {
-			if m, ok := it.(map[string]any); ok {
-				if exts, ok := m["extension"].([]any); ok {
-					for _, e := range exts {
-						if em, ok := e.(map[string]any); ok {
-							if u, _ := em["url"].(string); u == extURL {
-								matched = append(matched, em)
-							}
-						}
+			var extSlice []any
+			if tv, isTV := it.(fhirTypedValue); isTV {
+				if tv.primMeta != nil {
+					extSlice, _ = tv.primMeta["extension"].([]any)
+				}
+				if len(extSlice) == 0 {
+					if m, okM := tv.val.(map[string]any); okM {
+						extSlice, _ = m["extension"].([]any)
+					}
+				}
+			} else if m, ok := it.(map[string]any); ok {
+				extSlice, _ = m["extension"].([]any)
+			}
+			for _, e := range extSlice {
+				if em, ok := e.(map[string]any); ok {
+					if u, _ := em["url"].(string); u == extURL {
+						matched = append(matched, em)
 					}
 				}
 			}
@@ -2045,7 +2747,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		var resolved []any
 		for _, it := range current {
 			refStr := ""
-			switch v := it.(type) {
+			switch v := unwrapFHIRTyped(it).(type) {
 			case string:
 				refStr = v
 			case map[string]any:
@@ -2078,7 +2780,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		}
 		var keys []any
 		for _, it := range items {
-			if m, ok := it.(map[string]any); ok {
+			if m, ok := unwrapFHIRTyped(it).(map[string]any); ok {
 				if id, ok := m["id"].(string); ok && strings.TrimSpace(id) != "" {
 					keys = append(keys, strings.TrimSpace(id))
 				}
@@ -2100,7 +2802,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		for _, it := range current {
 			refStr := ""
 			refType := ""
-			switch v := it.(type) {
+			switch v := unwrapFHIRTyped(it).(type) {
 			case string:
 				refStr = strings.TrimSpace(v)
 			case map[string]any:
@@ -2131,13 +2833,14 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return keys
 
 	case "today":
-		return []any{time.Now().UTC().Format("2006-01-02")}
+		return []any{fhirTypedValue{val: time.Now().UTC().Format("2006-01-02"), fhirType: "System.Date"}}
 
 	case "now":
-		return []any{time.Now().UTC().Format(time.RFC3339)}
+		return []any{fhirTypedValue{val: time.Now().UTC().Format(time.RFC3339), fhirType: "System.DateTime"}}
 
 	case "timeofday":
-		return []any{time.Now().UTC().Format("15:04:05")}
+		tStr := time.Now().UTC().Format("15:04:05")
+		return []any{fhirTypedValue{val: tStr, fhirType: "System.Time", decText: "T" + tStr}}
 
 	case "trace", "definevariable":
 		return current
@@ -2148,7 +2851,7 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 			if len(current) == 1 {
 				subCtx.thisItem = current[0]
 			}
-			if b, ok := singletonBool(evalFHIRPathExpr(current, subCtx, args[0])); !ok || !b {
+			if b, ok := fhirPathSingletonBool(evalFHIRPathExpr(current, subCtx, args[0])); !ok || !b {
 				return nil
 			}
 		}
@@ -2156,444 +2859,4 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 	}
 
 	return nil
-}
-
-func evalFHIRPathComparison(lVals []any, op string, rVals []any) []any {
-	switch op {
-	case "=":
-		if len(lVals) == 0 || len(rVals) == 0 {
-			return nil
-		}
-		if len(lVals) != len(rVals) {
-			return []any{false}
-		}
-		for i := range lVals {
-			if !fhirPathEqual(lVals[i], rVals[i]) {
-				return []any{false}
-			}
-		}
-		return []any{true}
-
-	case "!=":
-		if len(lVals) == 0 || len(rVals) == 0 {
-			return nil
-		}
-		if len(lVals) != len(rVals) {
-			return []any{true}
-		}
-		for i := range lVals {
-			if !fhirPathEqual(lVals[i], rVals[i]) {
-				return []any{true}
-			}
-		}
-		return []any{false}
-
-	case "~":
-		if len(lVals) == 0 && len(rVals) == 0 {
-			return []any{true}
-		}
-		if len(lVals) != len(rVals) {
-			return []any{false}
-		}
-		for i := range lVals {
-			if !fhirPathEquivalent(lVals[i], rVals[i]) {
-				return []any{false}
-			}
-		}
-		return []any{true}
-
-	case "!~":
-		eq := evalFHIRPathComparison(lVals, "~", rVals)
-		if b, ok := singletonBool(eq); ok {
-			return []any{!b}
-		}
-		return []any{true}
-
-	case ">", ">=", "<", "<=":
-		if len(lVals) == 0 || len(rVals) == 0 {
-			return nil
-		}
-		for _, lv := range lVals {
-			for _, rv := range rVals {
-				if lf, ok1 := toFloat(lv); ok1 {
-					if rf, ok2 := toFloat(rv); ok2 {
-						switch op {
-						case ">":
-							if lf > rf {
-								return []any{true}
-							}
-						case ">=":
-							if lf >= rf {
-								return []any{true}
-							}
-						case "<":
-							if lf < rf {
-								return []any{true}
-							}
-						case "<=":
-							if lf <= rf {
-								return []any{true}
-							}
-						}
-					}
-				}
-				if ls, ok1 := lv.(string); ok1 {
-					if rs, ok2 := rv.(string); ok2 {
-						switch op {
-						case ">":
-							if ls > rs {
-								return []any{true}
-							}
-						case ">=":
-							if ls >= rs {
-								return []any{true}
-							}
-						case "<":
-							if ls < rs {
-								return []any{true}
-							}
-						case "<=":
-							if ls <= rs {
-								return []any{true}
-							}
-						}
-					}
-				}
-			}
-		}
-		return []any{false}
-	}
-	return nil
-}
-
-func evalFHIRPathAdditive(lVals []any, op string, rVals []any) []any {
-	if op == "&" {
-		ls := ""
-		if len(lVals) == 1 {
-			if s, ok := lVals[0].(string); ok {
-				ls = s
-			} else if s, ok := toStringConv(lVals[0]); ok {
-				ls = s
-			}
-		}
-		rs := ""
-		if len(rVals) == 1 {
-			if s, ok := rVals[0].(string); ok {
-				rs = s
-			} else if s, ok := toStringConv(rVals[0]); ok {
-				rs = s
-			}
-		}
-		return []any{ls + rs}
-	}
-	if len(lVals) != 1 || len(rVals) != 1 {
-		return nil
-	}
-	if op == "+" {
-		if ls, ok1 := lVals[0].(string); ok1 {
-			if rs, ok2 := rVals[0].(string); ok2 {
-				return []any{ls + rs}
-			}
-		}
-	}
-	li, lokInt := toInt(lVals[0])
-	ri, rokInt := toInt(rVals[0])
-	if lokInt && rokInt {
-		if op == "+" {
-			return []any{li + ri}
-		}
-		return []any{li - ri}
-	}
-	lf, lok := toFloat(lVals[0])
-	rf, rok := toFloat(rVals[0])
-	if lok && rok {
-		if op == "+" {
-			return []any{lf + rf}
-		}
-		return []any{lf - rf}
-	}
-	return nil
-}
-
-func evalFHIRPathMultiplicative(lVals []any, op string, rVals []any) []any {
-	if len(lVals) != 1 || len(rVals) != 1 {
-		return nil
-	}
-	li, lokInt := toInt(lVals[0])
-	ri, rokInt := toInt(rVals[0])
-	lf, lok := toFloat(lVals[0])
-	rf, rok := toFloat(rVals[0])
-	if !lok || !rok {
-		return nil
-	}
-	switch op {
-	case "*":
-		if lokInt && rokInt {
-			return []any{li * ri}
-		}
-		return []any{lf * rf}
-	case "/":
-		if rf == 0 {
-			return nil
-		}
-		return []any{lf / rf}
-	case "div":
-		if rf == 0 {
-			return nil
-		}
-		return []any{int(math.Trunc(lf / rf))}
-	case "mod":
-		if rf == 0 {
-			return nil
-		}
-		if lokInt && rokInt {
-			return []any{li % ri}
-		}
-		return []any{math.Mod(lf, rf)}
-	}
-	return nil
-}
-
-func singletonBool(vals []any) (bool, bool) {
-	if len(vals) != 1 {
-		return false, false
-	}
-	b, ok := vals[0].(bool)
-	return b, ok
-}
-
-func toInt(v any) (int, bool) {
-	switch val := v.(type) {
-	case int:
-		return val, true
-	case int64:
-		return int(val), true
-	case float64:
-		if val == float64(int(val)) {
-			return int(val), true
-		}
-	}
-	return 0, false
-}
-
-func toFloat(v any) (float64, bool) {
-	switch val := v.(type) {
-	case int:
-		return float64(val), true
-	case int64:
-		return float64(val), true
-	case float64:
-		return val, true
-	}
-	return 0, false
-}
-
-func toStringConv(v any) (string, bool) {
-	switch val := v.(type) {
-	case string:
-		return val, true
-	case bool:
-		if val {
-			return "true", true
-		}
-		return "false", true
-	case int:
-		return strconv.Itoa(val), true
-	case int64:
-		return strconv.FormatInt(val, 10), true
-	case float64:
-		return strconv.FormatFloat(val, 'f', -1, 64), true
-	}
-	return "", false
-}
-
-func toIntegerConv(v any) (int, bool) {
-	switch val := v.(type) {
-	case int:
-		return val, true
-	case int64:
-		return int(val), true
-	case float64:
-		if val == float64(int(val)) {
-			return int(val), true
-		}
-	case bool:
-		if val {
-			return 1, true
-		}
-		return 0, true
-	case string:
-		iv, err := strconv.Atoi(strings.TrimSpace(val))
-		if err == nil {
-			return iv, true
-		}
-	}
-	return 0, false
-}
-
-func toDecimalConv(v any) (float64, bool) {
-	switch val := v.(type) {
-	case int:
-		return float64(val), true
-	case int64:
-		return float64(val), true
-	case float64:
-		return val, true
-	case bool:
-		if val {
-			return 1.0, true
-		}
-		return 0.0, true
-	case string:
-		fv, err := strconv.ParseFloat(strings.TrimSpace(val), 64)
-		if err == nil {
-			return fv, true
-		}
-	}
-	return 0, false
-}
-
-func toBooleanConv(v any) (bool, bool) {
-	switch val := v.(type) {
-	case bool:
-		return val, true
-	case int:
-		if val == 1 {
-			return true, true
-		}
-		if val == 0 {
-			return false, true
-		}
-	case int64:
-		if val == 1 {
-			return true, true
-		}
-		if val == 0 {
-			return false, true
-		}
-	case float64:
-		if val == 1.0 {
-			return true, true
-		}
-		if val == 0.0 {
-			return false, true
-		}
-	case string:
-		switch strings.ToLower(strings.TrimSpace(val)) {
-		case "true", "t", "yes", "y", "1", "1.0":
-			return true, true
-		case "false", "f", "no", "n", "0", "0.0":
-			return false, true
-		}
-	}
-	return false, false
-}
-
-func fhirPathEqual(a, b any) bool {
-	if af, ok1 := toFloat(a); ok1 {
-		if bf, ok2 := toFloat(b); ok2 {
-			return af == bf
-		}
-		return false
-	}
-	if as, ok1 := a.(string); ok1 {
-		if bs, ok2 := b.(string); ok2 {
-			return as == bs
-		}
-		return false
-	}
-	if ab, ok1 := a.(bool); ok1 {
-		if bb, ok2 := b.(bool); ok2 {
-			return ab == bb
-		}
-		return false
-	}
-	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
-}
-
-func fhirPathEquivalent(a, b any) bool {
-	if as, ok1 := a.(string); ok1 {
-		if bs, ok2 := b.(string); ok2 {
-			normA := strings.Join(strings.Fields(strings.ToLower(as)), " ")
-			normB := strings.Join(strings.Fields(strings.ToLower(bs)), " ")
-			return normA == normB
-		}
-		return false
-	}
-	if af, ok1 := toFloat(a); ok1 {
-		if bf, ok2 := toFloat(b); ok2 {
-			return math.Abs(af-bf) < 1e-6
-		}
-		return false
-	}
-	return fhirPathEqual(a, b)
-}
-
-func fhirPathDistinct(items []any) []any {
-	var out []any
-	for _, it := range items {
-		seen := false
-		for _, ex := range out {
-			if fhirPathEqual(ex, it) {
-				seen = true
-				break
-			}
-		}
-		if !seen {
-			out = append(out, it)
-		}
-	}
-	return out
-}
-
-func fhirPathMatchesType(v any, typeName string) bool {
-	tn := strings.ToLower(strings.TrimPrefix(strings.TrimPrefix(typeName, "FHIR."), "System."))
-	switch val := v.(type) {
-	case string:
-		return tn == "string" || tn == "code" || tn == "id" || tn == "uri" || tn == "url" || tn == "canonical" || tn == "markdown" || tn == "date" || tn == "datetime" || tn == "instant" || tn == "time"
-	case bool:
-		return tn == "boolean"
-	case int, int64:
-		return tn == "integer" || tn == "positiveint" || tn == "unsignedint"
-	case float64:
-		if val == float64(int64(val)) {
-			return tn == "integer" || tn == "decimal"
-		}
-		return tn == "decimal"
-	case map[string]any:
-		if rt, _ := val["resourceType"].(string); rt != "" {
-			return strings.EqualFold(rt, tn) || tn == "resource" || tn == "domainresource"
-		}
-		switch tn {
-		case "quantity":
-			_, hasVal := val["value"]
-			_, hasUnit := val["unit"]
-			_, hasCode := val["code"]
-			return hasVal && (hasUnit || hasCode)
-		case "codeableconcept":
-			_, hasCoding := val["coding"]
-			_, hasText := val["text"]
-			return hasCoding || hasText
-		case "coding":
-			_, hasSys := val["system"]
-			_, hasCode := val["code"]
-			return hasSys || hasCode
-		case "period":
-			_, hasStart := val["start"]
-			_, hasEnd := val["end"]
-			return hasStart || hasEnd
-		case "identifier":
-			_, hasSys := val["system"]
-			_, hasVal := val["value"]
-			return hasSys || hasVal
-		case "humanname":
-			_, hasFam := val["family"]
-			_, hasGiv := val["given"]
-			return hasFam || hasGiv
-		case "reference":
-			_, hasRef := val["reference"]
-			return hasRef
-		}
-	}
-	return false
 }
