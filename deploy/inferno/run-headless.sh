@@ -80,6 +80,7 @@ if [[ -z "${FHIR_RESOURCE_VALIDATOR_URL:-}" ]]; then
 fi
 
 echo "==> Running Inferno SQLite schema migrations"
+rm -f "${HEADLESS_DIR}/data/inferno_ci.db" "${HEADLESS_DIR}/data/inferno_ci.db-shm" "${HEADLESS_DIR}/data/inferno_ci.db-wal"
 INFERNO_DB="${HEADLESS_DIR}/data/inferno_ci.db" ASYNC_JOBS="false" bundle exec inferno migrate >/dev/null
 
 echo "==> Executing official HL7 Inferno suites against ${FLINT_FHIR_URL}"

@@ -12,6 +12,7 @@
 
 require 'json'
 require 'net/http'
+require 'securerandom'
 require 'uri'
 require 'webrick'
 
@@ -121,7 +122,8 @@ server.mount_proc '/validate' do |req, res|
   if payload.is_a?(Hash) && payload.key?('filesToValidate')
     ctx = payload['validationContext'] || payload['cliContext'] || {}
     profiles = Array(ctx['profiles'])
-    session_id = payload['sessionId'].to_s.empty? ? 'flint-validator-session' : payload['sessionId'].to_s
+    session_id = (payload['sessionId'] || ctx['sessionId']).to_s.strip
+    session_id = SecureRandom.uuid if session_id.empty?
     files = Array(payload['filesToValidate'])
 
     outcomes = files.map do |file|
