@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Headless HL7 Inferno Conformance Runner (US Core v6.1.0 + SMART STU2 + Bulk Data v2.0.0)
+# Headless HL7 Inferno Conformance Runner (US Core v6.1.0 & v7.0.0 + HL7 IPA v1.0.0 + SMART STU2 + Bulk Data v2.0.0)
 #
 # Runs official HL7 Inferno Ruby test suites directly against a live Flint server
 # without requiring Docker, Redis, Sidekiq, or a 2 GB Java validator container.
@@ -44,7 +44,7 @@ ACCESS_TOKEN="$(ruby -rjson -e 'puts JSON.parse(STDIN.read).fetch("access_token"
 if [[ -z "${INFERNO_PATIENT_IDS:-}" ]]; then
   PAT_Check="$(curl -fs -H "Authorization: Bearer ${ACCESS_TOKEN}" "${FLINT_FHIR_URL}/Patient/pat-alice-001" || true)"
   if [[ -z "${PAT_Check}" ]] || ! grep -q '"pat-alice-001"' <<< "${PAT_Check}"; then
-    echo "==> Seeding 29-resource US Core v6.1.0 & v7.0.0 clinical cohort into tenant '${FLINT_TENANT}'"
+    echo "==> Seeding 62-resource US Core v6.1.0/v7.0.0 & HL7 IPA clinical cohort into tenant '${FLINT_TENANT}'"
     if [[ -x "${REPO_ROOT}/bin/seed" ]]; then
       "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${FLINT_TENANT}" -token "${ACCESS_TOKEN}"
     else
@@ -57,7 +57,7 @@ fi
 cd "${HEADLESS_DIR}"
 
 if ! bundle check >/dev/null 2>&1; then
-  echo "==> Installing HL7 Inferno Ruby gems (inferno_core, us_core_test_kit, smart_app_launch_test_kit, bulk_data_test_kit)"
+  echo "==> Installing HL7 Inferno Ruby gems (inferno_core, us_core_test_kit, ipa_test_kit, smart_app_launch_test_kit, bulk_data_test_kit)"
   bundle install --jobs 4 --retry 3
 fi
 

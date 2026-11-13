@@ -38,11 +38,12 @@ import (
 var version = server.Version
 
 type cliOptions struct {
-	showVersion      bool
-	tenantIsolation  string
-	storeBackend     string
-	analyticsBackend string
-	sqliteDSN        string
+	showVersion          bool
+	tenantIsolation      string
+	storeBackend         string
+	analyticsBackend     string
+	sqliteDSN            string
+	referentialIntegrity string
 }
 
 func main() {
@@ -74,6 +75,7 @@ func parseCLIOptions(args []string, errOut io.Writer) (cliOptions, error) {
 	fs.StringVar(&opts.storeBackend, "store", "", "Primary operational store backend: 'postgres' (default), 'doris' (Apache Doris MoW), or 'sqlite' (embedded SQLite WAL)")
 	fs.StringVar(&opts.analyticsBackend, "analytics-store", "", "Optional analytical store backend: 'doris', 'sqlite', or 'none' (enables hybrid OLTP + OLAP mode)")
 	fs.StringVar(&opts.sqliteDSN, "sqlite-dsn", "", "SQLite file path or URI when --store=sqlite (e.g. 'flint.db' or ':memory:')")
+	fs.StringVar(&opts.referentialIntegrity, "referential-integrity", "", "Referential integrity policy: 'lenient' (default) or 'strict' (enforces target existence on write and inbound reference conflict on delete)")
 	if err := fs.Parse(args); err != nil {
 		return cliOptions{}, err
 	}
@@ -271,6 +273,15 @@ func run(
 		return fmt.Errorf("invalid analytics backend: %w", err)
 	}
 
+	rawRefIntegrity := strings.TrimSpace(cliOpts.referentialIntegrity)
+	if rawRefIntegrity == "" {
+		rawRefIntegrity = strings.TrimSpace(getenv("FLINT_REFERENTIAL_INTEGRITY"))
+	}
+	refIntegrityMode, err := server.ParseReferentialIntegrityMode(rawRefIntegrity)
+	if err != nil {
+		return fmt.Errorf("invalid referential integrity mode: %w", err)
+	}
+
 	var primaryStore store.Store
 	var analyticalStore store.AnalyticalStore
 
@@ -356,6 +367,7 @@ func run(
 	}
 
 	srv := server.New(primaryStore, logger)
+	srv.SetReferentialIntegrity(refIntegrityMode)
 	if analyticalStore != nil {
 		srv.SetAnalyticalStore(analyticalStore)
 	}

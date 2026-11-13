@@ -86,6 +86,17 @@ func (e *Engine) RegisterStructureDefinition(sdMap map[string]any) {
 	}
 }
 
+// RegisterStructureDefinitionJSON parses and registers a custom HL7 FHIR R4
+// StructureDefinition JSON document for runtime profile validation.
+func (e *Engine) RegisterStructureDefinitionJSON(rawJSON []byte) error {
+	var sdMap map[string]any
+	if err := json.Unmarshal(rawJSON, &sdMap); err != nil {
+		return fmt.Errorf("unmarshal StructureDefinition JSON: %w", err)
+	}
+	e.RegisterStructureDefinition(sdMap)
+	return nil
+}
+
 func (e *Engine) lookupCustomStructureDefinition(profile string) (map[string]any, bool) {
 	e.customMu.RLock()
 	defer e.customMu.RUnlock()
@@ -643,18 +654,22 @@ func (e *Engine) ValidateResourceWithProfiles(expectedResType string, resMap map
 		if pipeIdx := strings.IndexByte(rawProf, '|'); pipeIdx != -1 {
 			baseProf = strings.TrimSpace(rawProf[:pipeIdx])
 		}
-		if after, ok := strings.CutPrefix(baseProf, "http://hl7.org/fhir/StructureDefinition/"); ok {
-			targetRT := strings.TrimSpace(after)
-			if targetRT != "" && targetRT != "Resource" && targetRT != "DomainResource" && targetRT != resTypeStr {
-				outcome.AddError(CodeInvariant,
-					fmt.Sprintf("Resource of type %q does not conform to profile %q (expected resourceType %q)", resTypeStr, rawProf, targetRT),
-					resTypeStr+".resourceType")
-			}
-			continue
-		}
-
 		spec, known := usCoreProfileSpecs[baseProf]
 		if !known {
+			if after, ok := strings.CutPrefix(baseProf, "http://hl7.org/fhir/StructureDefinition/"); ok {
+				targetRT := strings.TrimSpace(after)
+				if targetRT == "" || targetRT == "Resource" || targetRT == "DomainResource" {
+					continue
+				}
+				if _, isBaseRT := e.schemas[targetRT]; isBaseRT {
+					if targetRT != resTypeStr {
+						outcome.AddError(CodeInvariant,
+							fmt.Sprintf("Resource of type %q does not conform to profile %q (expected resourceType %q)", resTypeStr, rawProf, targetRT),
+							resTypeStr+".resourceType")
+					}
+					continue
+				}
+			}
 			if sdMap, ok := e.lookupCustomStructureDefinition(baseProf); ok {
 				if !metaProfileSeen[baseProf] {
 					e.validateAgainstCustomStructureDefinition(rawProf, sdMap, resTypeStr, resMap, outcome)
@@ -688,6 +703,9 @@ func (e *Engine) ValidateResourceWithProfiles(expectedResType string, resMap map
 
 		if spec.CustomCheck != nil {
 			spec.CustomCheck(resTypeStr, resMap, outcome)
+		}
+		if sdMap, ok := e.lookupCustomStructureDefinition(baseProf); ok && !metaProfileSeen[baseProf] {
+			e.validateAgainstCustomStructureDefinition(rawProf, sdMap, resTypeStr, resMap, outcome)
 		}
 	}
 
@@ -853,16 +871,20 @@ var usCoreProfileSpecs = map[string]usCoreProfileSpec{
 			}
 		},
 	},
-	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-vital-signs":            vitalSignsSpec("us-core-vital-signs", nil),
-	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-heart-rate":             vitalSignsSpec("us-core-heart-rate", nil),
-	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-respiratory-rate":       vitalSignsSpec("us-core-respiratory-rate", nil),
-	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-temperature":       vitalSignsSpec("us-core-body-temperature", nil),
-	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-weight":            vitalSignsSpec("us-core-body-weight", nil),
-	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-height":            vitalSignsSpec("us-core-body-height", nil),
-	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-bmi":                    vitalSignsSpec("us-core-bmi", nil),
-	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pulse-oximetry":         vitalSignsSpec("us-core-pulse-oximetry", nil),
-	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-blood-pressure":         vitalSignsSpec("us-core-blood-pressure", checkBloodPressureComponents),
-	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-average-blood-pressure": vitalSignsSpec("us-core-average-blood-pressure", checkBloodPressureComponents),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-vital-signs":                                               vitalSignsSpec("us-core-vital-signs", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-heart-rate":                                                vitalSignsSpec("us-core-heart-rate", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-respiratory-rate":                                          vitalSignsSpec("us-core-respiratory-rate", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-temperature":                                          vitalSignsSpec("us-core-body-temperature", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-weight":                                               vitalSignsSpec("us-core-body-weight", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-height":                                               vitalSignsSpec("us-core-body-height", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-head-circumference":                                        vitalSignsSpec("us-core-head-circumference", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-bmi":                                                       vitalSignsSpec("us-core-bmi", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pulse-oximetry":                                            vitalSignsSpec("us-core-pulse-oximetry", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pediatric-weight-for-height":                               vitalSignsSpec("us-core-pediatric-weight-for-height", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pediatric-bmi-for-age":                                     vitalSignsSpec("us-core-pediatric-bmi-for-age", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pediatric-head-occipital-frontal-circumference-percentile": vitalSignsSpec("us-core-pediatric-head-occipital-frontal-circumference-percentile", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-blood-pressure":                                            vitalSignsSpec("us-core-blood-pressure", checkBloodPressureComponents),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-average-blood-pressure":                                    vitalSignsSpec("us-core-average-blood-pressure", checkBloodPressureComponents),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab": {
 		Slug:           "us-core-observation-lab",
 		ResourceType:   "Observation",
@@ -904,6 +926,36 @@ var usCoreProfileSpecs = map[string]usCoreProfileSpec{
 		Slug:           "us-core-observation-clinical-result",
 		ResourceType:   "Observation",
 		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-sdoh-assessment": {
+		Slug:           "us-core-observation-sdoh-assessment",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-occupation": {
+		Slug:           "us-core-observation-occupation",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-pregnancyintent": {
+		Slug:           "us-core-observation-pregnancyintent",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject", "effective[x]", "value[x]|dataAbsentReason"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-pregnancystatus": {
+		Slug:           "us-core-observation-pregnancystatus",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject", "effective[x]", "value[x]|dataAbsentReason"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-sexual-orientation": {
+		Slug:           "us-core-observation-sexual-orientation",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject", "value[x]|dataAbsentReason"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-adi-documentreference": {
+		Slug:           "us-core-adi-documentreference",
+		ResourceType:   "DocumentReference",
+		RequiredFields: []string{"status", "type", "category", "subject", "content"},
 	},
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns": conditionProfileSpec("us-core-condition-problems-health-concerns"),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-encounter-diagnosis":      conditionProfileSpec("us-core-condition-encounter-diagnosis"),
@@ -1033,6 +1085,70 @@ var usCoreProfileSpecs = map[string]usCoreProfileSpec{
 		Slug:           "us-core-location",
 		ResourceType:   "Location",
 		RequiredFields: []string{"name"},
+	},
+	// Base FHIR R4 vital-signs profiles (referenced by HL7 IPA v1.0.0 & US Core)
+	"http://hl7.org/fhir/StructureDefinition/vitalsigns": vitalSignsSpec("vitalsigns", nil),
+	"http://hl7.org/fhir/StructureDefinition/bp":         vitalSignsSpec("bp", checkBloodPressureComponents),
+	"http://hl7.org/fhir/StructureDefinition/bodyweight": vitalSignsSpec("bodyweight", nil),
+	"http://hl7.org/fhir/StructureDefinition/bodyheight": vitalSignsSpec("bodyheight", nil),
+	"http://hl7.org/fhir/StructureDefinition/bodytemp":   vitalSignsSpec("bodytemp", nil),
+	"http://hl7.org/fhir/StructureDefinition/heartrate":  vitalSignsSpec("heartrate", nil),
+	"http://hl7.org/fhir/StructureDefinition/resprate":   vitalSignsSpec("resprate", nil),
+	"http://hl7.org/fhir/StructureDefinition/bmi":        vitalSignsSpec("bmi", nil),
+	"http://hl7.org/fhir/StructureDefinition/oxygensat":  vitalSignsSpec("oxygensat", nil),
+	"http://hl7.org/fhir/StructureDefinition/headcircum": vitalSignsSpec("headcircum", nil),
+	// HL7 International Patient Access (IPA) v1.0.0 profiles
+	"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-patient": {
+		Slug:           "ipa-patient",
+		ResourceType:   "Patient",
+		RequiredFields: []string{"identifier"},
+	},
+	"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-allergyintolerance": {
+		Slug:           "ipa-allergyintolerance",
+		ResourceType:   "AllergyIntolerance",
+		RequiredFields: []string{"code", "patient"},
+	},
+	"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-condition":         conditionProfileSpec("ipa-condition"),
+	"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-problem-list-item": conditionProfileSpec("ipa-problem-list-item"),
+	"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-documentreference": {
+		Slug:           "ipa-documentreference",
+		ResourceType:   "DocumentReference",
+		RequiredFields: []string{"status", "type", "subject", "content"},
+	},
+	"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-immunization": {
+		Slug:           "ipa-immunization",
+		ResourceType:   "Immunization",
+		RequiredFields: []string{"status", "vaccineCode", "patient", "occurrence[x]"},
+	},
+	"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-medication": {
+		Slug:           "ipa-medication",
+		ResourceType:   "Medication",
+		RequiredFields: []string{"code"},
+	},
+	"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-medicationrequest": {
+		Slug:           "ipa-medicationrequest",
+		ResourceType:   "MedicationRequest",
+		RequiredFields: []string{"status", "intent", "medication[x]", "subject"},
+	},
+	"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-medicationstatement": {
+		Slug:           "ipa-medicationstatement",
+		ResourceType:   "MedicationStatement",
+		RequiredFields: []string{"status", "medication[x]", "subject"},
+	},
+	"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-observation": {
+		Slug:           "ipa-observation",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-practitioner": {
+		Slug:           "ipa-practitioner",
+		ResourceType:   "Practitioner",
+		RequiredFields: []string{"name"},
+	},
+	"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-practitionerrole": {
+		Slug:           "ipa-practitionerrole",
+		ResourceType:   "PractitionerRole",
+		RequiredFields: []string{"practitioner|organization|code|specialty"},
 	},
 }
 
@@ -1340,113 +1456,7 @@ func (e *Engine) validateAgainstCustomStructureDefinition(rawProf string, sdMap 
 		appendElements("snapshot")
 	}
 
-	seenConstraints := make(map[string]bool)
-	for _, elemMap := range elements {
-		elemPath := strings.TrimSpace(extractStringOrWrapped(elemMap["path"]))
-		if elemPath == "" {
-			elemPath = resTypeStr
-		}
-		sliceName := strings.TrimSpace(extractStringOrWrapped(elemMap["sliceName"]))
-
-		// 1. Evaluate custom FHIRPath constraints declared on this element
-		if constraints, ok := elemMap["constraint"].([]any); ok && e.fhirPathEval != nil {
-			for _, cItem := range constraints {
-				cMap, ok := cItem.(map[string]any)
-				if !ok {
-					continue
-				}
-				key := strings.TrimSpace(extractStringOrWrapped(cMap["key"]))
-				if ignoredBaseConstraintKeys[key] {
-					continue
-				}
-				expr := strings.TrimSpace(extractStringOrWrapped(cMap["expression"]))
-				if expr == "" {
-					continue
-				}
-				dedupKey := elemPath + "|" + key + "|" + expr
-				if seenConstraints[dedupKey] {
-					continue
-				}
-				seenConstraints[dedupKey] = true
-
-				human := strings.TrimSpace(extractStringOrWrapped(cMap["human"]))
-				if human == "" {
-					human = fmt.Sprintf("FHIRPath constraint %q (%s) failed", key, expr)
-				}
-				severity := strings.ToLower(strings.TrimSpace(extractStringOrWrapped(cMap["severity"])))
-
-				evalExpr := expr
-				if after, ok := strings.CutPrefix(elemPath, resTypeStr+"."); ok && after != "" {
-					// If expression isn't already rooted at resourceType or child path, scope or check existence
-					if !hasUSCoreRequiredElement(resMap, after) {
-						continue
-					}
-				}
-				results := e.fhirPathEval(resMap, evalExpr)
-				if !fhirPathResultTruthy(results) {
-					msg := fmt.Sprintf("Profile %s constraint %s failed: %s (expression: %s)", rawProf, key, human, expr)
-					if severity == "warning" {
-						outcome.AddWarning(CodeInvariant, msg, elemPath)
-					} else {
-						outcome.AddError(CodeInvariant, msg, elemPath)
-					}
-				}
-			}
-		}
-
-		// 2. Enforce direct child cardinality (min >= 1, max == "0") and fixed[x] values
-		relPath, isChild := strings.CutPrefix(elemPath, resTypeStr+".")
-		if !isChild || relPath == "" {
-			continue
-		}
-
-		minCard := extractMinCardinality(elemMap["min"])
-		maxCard := strings.TrimSpace(extractStringOrWrapped(elemMap["max"]))
-
-		// Handle extension slice requirements (e.g., Patient.extension:mySlice with fixedUri or type.profile)
-		if relPath == "extension" && sliceName != "" {
-			reqExtURL := extractExtensionSliceURL(elemMap)
-			if minCard >= 1 && reqExtURL != "" {
-				if !resourceHasExtensionURL(resMap, reqExtURL) {
-					outcome.AddError(CodeRequired,
-						fmt.Sprintf("Profile %q requires extension slice %q (%s) on %s", rawProf, sliceName, reqExtURL, resTypeStr),
-						elemPath)
-				}
-			}
-			continue
-		}
-
-		if sliceName != "" || strings.Contains(relPath, ".") {
-			continue
-		}
-
-		if minCard >= 1 && !hasUSCoreRequiredElement(resMap, relPath) {
-			exprField := strings.TrimSuffix(relPath, "[x]")
-			outcome.AddError(CodeRequired,
-				fmt.Sprintf("Profile %q requires element %q (min=%d) on %s", rawProf, relPath, minCard, resTypeStr),
-				resTypeStr+"."+exprField)
-		}
-
-		if maxCard == "0" && hasUSCoreRequiredElement(resMap, relPath) {
-			exprField := strings.TrimSuffix(relPath, "[x]")
-			outcome.AddError(CodeStructure,
-				fmt.Sprintf("Profile %q prohibits element %q (max=0) on %s", rawProf, relPath, resTypeStr),
-				resTypeStr+"."+exprField)
-		}
-
-		for _, fixedKey := range []string{"fixedCode", "fixedString", "fixedUri", "fixedCanonical"} {
-			if expectedFixed := strings.TrimSpace(extractStringOrWrapped(elemMap[fixedKey])); expectedFixed != "" {
-				if actualVal, exists := resMap[relPath]; exists && actualVal != nil {
-					actualStr := strings.TrimSpace(extractStringOrWrapped(actualVal))
-					if actualStr != expectedFixed {
-						outcome.AddError(CodeValue,
-							fmt.Sprintf("Profile %q requires %s=%q (got %q)", rawProf, elemPath, expectedFixed, actualStr),
-							elemPath)
-					}
-				}
-			}
-		}
-	}
+	e.evaluateStructureDefinitionElements(rawProf, resTypeStr, resMap, elements, outcome)
 }
 
 func extractMinCardinality(v any) int {
@@ -1497,21 +1507,4 @@ func extractExtensionSliceURL(elemMap map[string]any) string {
 		}
 	}
 	return ""
-}
-
-func resourceHasExtensionURL(resMap map[string]any, targetURL string) bool {
-	exts, ok := resMap["extension"].([]any)
-	if !ok {
-		return false
-	}
-	for _, item := range exts {
-		em, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		if strings.TrimSpace(extractStringOrWrapped(em["url"])) == targetURL {
-			return true
-		}
-	}
-	return false
 }

@@ -3,10 +3,12 @@
 
 # Headless HL7 Inferno execution harness for Flint CI.
 #
-# Runs three official HL7 Inferno test kits synchronously in-process (SQLite, no Redis/Sidekiq):
+# Runs five official HL7 Inferno test suites synchronously in-process (SQLite, no Redis/Sidekiq):
 #   1. SMART App Launch STU2 (`smart_stu2` -> Backend Services & Discovery)
 #   2. FHIR Bulk Data Access v2.0.0 (`bulk_data_v200` -> SMART Backend Services + Group/Patient/System $export)
-#   3. US Core Server v6.1.0 (`us_core_v610` -> CapabilityStatement + US Core v6.1.0 FHIR API clinical profiles)
+#   3. US Core Server v6.1.0 (`us_core_v610` -> CapabilityStatement + all 26 US Core v6.1.0 FHIR API clinical profiles)
+#   4. US Core Server v7.0.0 (`us_core_v700` -> CapabilityStatement + all 26 US Core v7.0.0 / USCDI v4 FHIR API clinical profiles)
+#   5. HL7 International Patient Access v1.0.0 (`ipa_v100` -> CapabilityStatement + IPA FHIR API clinical profiles)
 
 require 'fileutils'
 require 'json'
@@ -99,7 +101,7 @@ def find_group_in_suite(root_runnable, target_suffix)
   nil
 end
 
-def execute_inferno_target(label:, suite_id:, group_suffix: nil, suite_options: {}, inputs: {}, artifacts_dir:)
+def execute_inferno_target(label:, suite_id:, group_suffix: nil, runnables: nil, suite_options: {}, inputs: {}, artifacts_dir:)
   suites_repo   = Inferno::Repositories::TestSuites.new
   tests_repo    = Inferno::Repositories::Tests.new
   sessions_repo = Inferno::Repositories::TestSessions.new
@@ -110,59 +112,89 @@ def execute_inferno_target(label:, suite_id:, group_suffix: nil, suite_options: 
   suite = suites_repo.find(suite_id)
   raise "Inferno suite '#{suite_id}' is not registered" if suite.nil?
 
-  runnable = group_suffix.nil? ? suite : find_group_in_suite(suite, group_suffix)
-  if runnable.nil?
-    top_groups = Array(suite.groups).map { |g| "#{g.id} (#{g.title})" }.join(', ')
-    raise "Group '#{group_suffix}' not found in suite '#{suite_id}'. Available top-level groups: #{top_groups}"
-  end
+  target_runnables = if !runnables.nil?
+                       Array(runnables)
+                     elsif group_suffix.nil?
+                       [suite]
+                     else
+                       found = find_group_in_suite(suite, group_suffix)
+                       if found.nil?
+                         top_groups = Array(suite.groups).map { |g| "#{g.id} (#{g.title})" }.join(', ')
+                         raise "Group '#{group_suffix}' not found in suite '#{suite_id}'. Available top-level groups: #{top_groups}"
+                       end
+                       [found]
+                     end
+  raise "No target runnables resolved for suite '#{suite_id}'" if target_runnables.empty?
+
+  declared_opt_ids = Array(suite.respond_to?(:suite_options) ? suite.suite_options : nil).map { |o| o.id.to_sym }
+  filtered_options = if declared_opt_ids.empty?
+                       suite_options
+                     else
+                       suite_options.select { |k, _| declared_opt_ids.include?(k.to_sym) }
+                     end
 
   test_session = begin
     sessions_repo.create(
       test_suite_id: suite.id,
-      suite_options: suite_options.map { |k, v| { id: k.to_sym, value: v.to_s } }
+      suite_options: filtered_options.map { |k, v| { id: k.to_sym, value: v.to_s } }
     )
   rescue StandardError
     sessions_repo.create(
       test_suite_id: suite.id,
-      suite_options: suite_options.map { |k, v| Inferno::DSL::SuiteOption.new(id: k.to_sym, value: v.to_s) }
+      suite_options: filtered_options.map { |k, v| Inferno::DSL::SuiteOption.new(id: k.to_sym, value: v.to_s) }
     )
   end
-
-  available = runnable.available_inputs
-  available_list = available.is_a?(Hash) ? available.values : Array(available)
-  puts "\n>>> Preparing #{label} (#{runnable.id}) [inputs: #{available_list.map { |ri| "#{ri.name}:#{ri.type}" }.join(', ')}]"
-
-  inputs.each do |k, v|
-    matched = available_list.find { |ri| ri.name.to_s == k.to_s }
-    next unless matched
-
-    val_to_save = v
-    if matched.type.to_s == 'oauth_credentials' && v.is_a?(String) && !v.strip.start_with?('{')
-      val_to_save = JSON.generate({ access_token: v })
-    end
-
-    data_repo.save(
-      test_session_id: test_session.id,
-      name: matched.name,
-      value: val_to_save,
-      type: matched.type
-    )
-  end
-
-  runnable_key = runnable < Inferno::TestSuite ? :test_suite_id : :test_group_id
-  test_run = runs_repo.create(
-    test_session_id: test_session.id,
-    runnable_key => runnable.id,
-    status: 'queued'
-  )
 
   started_at = Time.now
-  puts ">>> Running #{label} (#{runnable.id}) ..."
-  Inferno::Jobs.perform(Inferno::Jobs::ExecuteTestRun, test_run.id, force_synchronous: true)
-  elapsed_s = (Time.now - started_at).round(2)
+  leaf_results = []
 
-  results = runs_repo.results_for_test_run(test_run.id)
-  leaf_results = results.select { |r| !r.test_id.nil? && !r.test_id.to_s.empty? }
+  target_runnables.each_with_index do |runnable, idx|
+    available = runnable.available_inputs
+    available_list = available.is_a?(Hash) ? available.values : Array(available)
+    puts "\n>>> Preparing #{label} [#{idx + 1}/#{target_runnables.size}] (#{runnable.id}) [inputs: #{available_list.map { |ri| "#{ri.name}:#{ri.type}" }.join(', ')}]"
+
+    inputs.each do |k, v|
+      matched = available_list.find { |ri| ri.name.to_s == k.to_s }
+      next unless matched
+
+      if idx.positive?
+        existing = begin
+          data_repo.load(test_session_id: test_session.id, name: matched.name)
+        rescue StandardError
+          nil
+        end
+        next unless existing.nil? || existing.to_s.strip.empty?
+      end
+
+      val_to_save = v
+      if matched.type.to_s == 'oauth_credentials' && v.is_a?(String) && !v.strip.start_with?('{')
+        val_to_save = JSON.generate({ access_token: v })
+      end
+
+      data_repo.save(
+        test_session_id: test_session.id,
+        name: matched.name,
+        value: val_to_save,
+        type: matched.type
+      )
+    end
+
+    runnable_key = runnable < Inferno::TestSuite ? :test_suite_id : :test_group_id
+    test_run = runs_repo.create(
+      test_session_id: test_session.id,
+      runnable_key => runnable.id,
+      status: 'queued'
+    )
+
+    puts ">>> Running #{label} (#{runnable.id}) ..."
+    Inferno::Jobs.perform(Inferno::Jobs::ExecuteTestRun, test_run.id, force_synchronous: true)
+
+    results = runs_repo.results_for_test_run(test_run.id)
+    leaf_results.concat(results.select { |r| !r.test_id.nil? && !r.test_id.to_s.empty? })
+  end
+
+  elapsed_s = (Time.now - started_at).round(2)
+  runnable_summary_id = target_runnables.size == 1 ? target_runnables.first.id : target_runnables.map(&:id).join(',')
 
   counts = Hash.new(0)
   leaf_results.each { |r| counts[r.result.to_s] += 1 }
@@ -192,7 +224,7 @@ def execute_inferno_target(label:, suite_id:, group_suffix: nil, suite_options: 
   artifact_payload = {
     label: label,
     suite_id: suite.id,
-    runnable_id: runnable.id,
+    runnable_id: runnable_summary_id,
     elapsed_seconds: elapsed_s,
     counts: {
       total_leaf_tests: leaf_results.size,
@@ -314,6 +346,52 @@ runs << execute_inferno_target(
   },
   artifacts_dir: artifacts_dir
 )
+
+if Inferno::Repositories::TestSuites.new.find('us_core_v700')
+  runs << execute_inferno_target(
+    label: 'us_core_v700',
+    suite_id: 'us_core_v700',
+    group_suffix: 'fhir_api',
+    suite_options: {
+      smart_app_launch_version: 'smart_app_launch_2'
+    },
+    inputs: {
+      url: flint_fhir_url,
+      patient_ids: patient_ids,
+      smart_auth_info: us_core_auth_json,
+      smart_credentials: access_token
+    },
+    artifacts_dir: artifacts_dir
+  )
+end
+
+ipa_suite = Inferno::Repositories::TestSuites.new.all.find do |s|
+  s.id.to_s == 'ipa_v100' || s.id.to_s.start_with?('ipa')
+end
+if ipa_suite && ENV['INFERNO_SKIP_IPA'] != 'true'
+  ipa_api_groups = Array(ipa_suite.groups).reject do |g|
+    ident = "#{g.id} #{g.title}".downcase
+    ident.include?('smart') || ident.include?('launch')
+  end
+  runs << execute_inferno_target(
+    label: ipa_suite.id.to_s,
+    suite_id: ipa_suite.id.to_s,
+    runnables: ipa_api_groups,
+    suite_options: {
+      smart_app_launch_version: 'smart_app_launch_2'
+    },
+    inputs: {
+      url: flint_fhir_url,
+      patient_id: patient_ids.split(',').first.to_s.strip,
+      patient_ids: patient_ids,
+      smart_auth_info: us_core_auth_json,
+      smart_credentials: access_token,
+      access_token: access_token,
+      bearer_token: access_token
+    },
+    artifacts_dir: artifacts_dir
+  )
+end
 
 summary = {
   generated_at: Time.now.utc.iso8601,

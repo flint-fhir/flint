@@ -1910,6 +1910,9 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 	resType := strings.TrimSpace(r.PathValue("resourceType"))
 	resID := strings.TrimSpace(r.PathValue("id"))
 	expr := strings.TrimSpace(r.URL.Query().Get("expression"))
+	evalMode := strings.TrimSpace(r.URL.Query().Get("mode"))
+	contextExpr := strings.TrimSpace(r.URL.Query().Get("context"))
+	contextType := strings.TrimSpace(r.URL.Query().Get("contextType"))
 	if refParam := strings.TrimSpace(r.URL.Query().Get("resource")); refParam != "" && resID == "" {
 		if parts := strings.SplitN(refParam, "/", 2); len(parts) == 2 {
 			resType = strings.TrimSpace(parts[0])
@@ -1946,6 +1949,18 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 						case "expression":
 							if expr == "" {
 								expr = extractParamString(pm)
+							}
+						case "mode":
+							if evalMode == "" {
+								evalMode = extractParamString(pm)
+							}
+						case "context":
+							if contextExpr == "" {
+								contextExpr = extractParamString(pm)
+							}
+						case "contextType":
+							if contextType == "" {
+								contextType = extractParamString(pm)
 							}
 						case "resource", "subject", "patient", "input":
 							if rm, ok := pm["resource"].(map[string]any); ok && len(rm) > 0 {
@@ -2030,6 +2045,13 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 		targetMap, errDec = s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 		if errDec != nil {
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to decode resource for $fhirpath")
+			return
+		}
+	}
+
+	if strings.EqualFold(evalMode, "strict") || strings.EqualFold(evalMode, "semantic") {
+		if errSem := ValidateFHIRPathSemantics(targetMap, contextExpr, contextType, expr); errSem != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", errSem.Error())
 			return
 		}
 	}
@@ -4317,6 +4339,7 @@ func (s *Server) handleCapabilityStatementImplements(w http.ResponseWriter, r *h
 		if clientCap == nil {
 			switch strings.ToLower(strings.TrimSpace(canonicalParam)) {
 			case "http://hl7.org/fhir/us/core/capabilitystatement/us-core-server",
+				"http://hl7.org/fhir/uv/ipa/capabilitystatement/ipa-server",
 				"http://hl7.org/fhir/uv/bulkdata/capabilitystatement/bulk-data",
 				"http://hl7.org/fhir/capabilitystatement/base":
 				clientCap = map[string]any{

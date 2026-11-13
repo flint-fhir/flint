@@ -50,6 +50,7 @@ type fhirPathXMLTest struct {
 
 type fhirPathXMLExpr struct {
 	Invalid string `xml:"invalid,attr"`
+	Mode    string `xml:"mode,attr"`
 	Body    string `xml:",chardata"`
 }
 
@@ -118,13 +119,23 @@ func TestOfficialFHIRPathR4ComplianceSuite(t *testing.T) {
 				}
 				t.Run(tcName, func(t *testing.T) {
 					inv := strings.TrimSpace(tc.Expression.Invalid)
-					if inv == "semantic" {
-						skippedSemantic++
-						t.Skip("static semantic type-check test (not runtime evaluation)")
-					}
-
 					root := loadFixture(t, tc.InputFile)
 					expr := tc.Expression.Body
+
+					if inv == "semantic" {
+						semErr := server.ValidateFHIRPathSemantics(root, tc.Context, tc.ContextType, expr)
+						require.Error(t, semErr, "expected static semantic error for expression: %s", expr)
+						_, strictErr := server.EvalFHIRPathStrict(root, tc.Context, tc.ContextType, expr)
+						require.Error(t, strictErr, "expected EvalFHIRPathStrict error for expression: %s", expr)
+						totalExecuted++
+
+						if verifiedHTTPEndpoint < 30 {
+							verifiedHTTPEndpoint++
+							httpStatus := postLiveFHIRPathStrictEndpoint(t, ts.URL, root, tc.Context, tc.ContextType, expr)
+							assert.Equal(t, http.StatusBadRequest, httpStatus, "HTTP /$fhirpath?mode=strict semantic error status for %s", expr)
+						}
+						return
+					}
 
 					if inv == "syntax" || inv == "true" || inv == "execution" {
 						_, evalErr := server.EvalFHIRPathTypedWithContextExpr(root, tc.Context, expr)
@@ -139,6 +150,10 @@ func TestOfficialFHIRPathR4ComplianceSuite(t *testing.T) {
 						}
 						return
 					}
+
+					// Validate static FHIRPath R4 semantics on every valid official HL7 expression too!
+					semErr := server.ValidateFHIRPathSemantics(root, tc.Context, tc.ContextType, expr)
+					require.NoError(t, semErr, "unexpected static semantic error for valid expression: %s", expr)
 
 					isPred := strings.EqualFold(strings.TrimSpace(tc.Predicate), "true")
 					if isPred {
@@ -171,9 +186,36 @@ func TestOfficialFHIRPathR4ComplianceSuite(t *testing.T) {
 		})
 	}
 
-	t.Logf("Official HL7 FHIRPath R4 Conformance: %d runtime tests passed (skipped %d static-semantic, %d custom Java-RI extensions; %d HTTP /$fhirpath negative checks)",
+	t.Logf("Official HL7 FHIRPath R4 Conformance: %d runtime & semantic tests passed (skipped %d static-semantic, %d custom Java-RI extensions; %d HTTP /$fhirpath negative checks)",
 		totalExecuted, skippedSemantic, skippedCustom, verifiedHTTPEndpoint)
-	require.GreaterOrEqual(t, totalExecuted, 800)
+	require.Equal(t, 0, skippedSemantic, "all official HL7 FHIRPath R4 semantic tests must execute with zero skips")
+	require.GreaterOrEqual(t, totalExecuted, 825)
+}
+
+func postLiveFHIRPathStrictEndpoint(t *testing.T, baseURL string, resource map[string]any, contextExpr, contextType, expr string) int {
+	t.Helper()
+	params := []map[string]any{
+		{"name": "resource", "resource": resource},
+		{"name": "expression", "valueString": expr},
+		{"name": "mode", "valueString": "strict"},
+	}
+	if strings.TrimSpace(contextExpr) != "" {
+		params = append(params, map[string]any{"name": "context", "valueString": contextExpr})
+	}
+	if strings.TrimSpace(contextType) != "" {
+		params = append(params, map[string]any{"name": "contextType", "valueString": contextType})
+	}
+	payload := map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    params,
+	}
+	b, err := json.Marshal(payload)
+	require.NoError(t, err)
+	resp, err := http.Post(baseURL+"/fhir/r4/default/$fhirpath", "application/fhir+json", bytes.NewReader(b))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+	return resp.StatusCode
 }
 
 func postLiveFHIRPathEndpoint(t *testing.T, baseURL string, resource map[string]any, expr string) int {

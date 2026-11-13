@@ -688,6 +688,7 @@ var (
 		"_count": true, "_offset": true, "_include": true, "_revinclude": true,
 		"_summary": true, "_total": true, "_elements": true, "_contained": true,
 		"_containedType": true, "_format": true, "_pretty": true, "_filter": true,
+		"_cascade": true,
 	}
 )
 

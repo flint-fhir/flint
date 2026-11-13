@@ -694,12 +694,18 @@ func extractReferenceIndex(idx *SearchIndexes, tenantID, resType, resID string, 
 			if parts := strings.SplitN(raw, "/", 2); len(parts) == 2 {
 				targetType = parts[0]
 				targetID = parts[1]
+				if histIdx := strings.Index(targetID, "/_history/"); histIdx != -1 {
+					targetID = targetID[:histIdx]
+				}
 				return false
 			}
 		}
 		if strings.HasSuffix(name, "_id") && fd.Kind() == protoreflect.MessageKind {
 			idVal := extractWrappedString(v.Message())
 			if idVal != "" {
+				if histIdx := strings.Index(idVal, "/_history/"); histIdx != -1 {
+					idVal = idVal[:histIdx]
+				}
 				targetType = snakeToPascal(strings.TrimSuffix(name, "_id"))
 				targetID = idVal
 				return false
