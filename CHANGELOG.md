@@ -5,6 +5,34 @@ All notable changes to **Flint** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-11-13
+
+### Added
+
+- **HL7 FHIR R4 NPM (`.tgz`) Implementation Guide Package Loader (`pkg/igloader`, `server/ig_ops.go`)**:
+  - Added pure-Go `.tgz` / `package/` HL7 NPM archive loader (`pkg/igloader`) with streaming decompression caps, path-traversal/symlink rejection, `fhirVersions` compatibility checks (`4.0.x`), SHA-256 package digests, and native Go fuzzing (`FuzzLoadTGZBytes`).
+  - Added startup CLI flags (`--ig-package`, `--ig-load-examples`) and environment variables (`FLINT_IG_PACKAGES`, `FLINT_IG_LOAD_EXAMPLES`, `FLINT_IG_TENANT`, `FLINT_ALLOW_LOCAL_IG_PATH_INSTALL`) to boot `flintd` with pre-installed national, specialty, or custom enterprise IGs.
+  - Added runtime HTTP operations (`POST /fhir/r4/{tenant}/$install-ig`, `POST /fhir/r4/{tenant}/$load-ig`, `GET /fhir/r4/{tenant}/$igs`) with automatic `StructureDefinition` validator registration, `CodeSystem`/`ValueSet` terminology indexing, `PlanDefinition`/`ActivityDefinition`/`Library`/`Questionnaire`/`Measure` artifact persistence, custom `SearchParameter` compilation & optional historical `$reindex`, live `CapabilityStatement.implementationGuide` / `rest.resource.supportedProfile` advertisement, and ASTM E2147 `AuditEvent` recording.
+  - Added exact versioned `url|version` `StructureDefinition` profile resolution and `strength: "required"` `ElementDefinition.binding` `ValueSet` membership enforcement during `$validate` and profile-constrained writes.
+- **Full FHIR R4 Structural, FHIRPath Semantic & Referential Integrity Conformance**:
+  - Added compile-time FHIRPath R4 AST semantic type-checking (`ValidateSemantics`) enforcing `StructureDefinition` element existence and operator compatibility prior to runtime evaluation.
+  - Added `StructureDefinition` element slicing & discriminator validation (`value`, `pattern`, `type`, `profile`, `exists`, plus `slicing.rules = "closed"` rejection and per-slice `min`/`max` cardinality enforcement).
+  - Added strict referential integrity mode (`--referential-integrity=strict` / `FLINT_REFERENTIAL_INTEGRITY=strict`) rejecting dangling local references on write (`422 Unprocessable Entity`), enforcing intra-transaction `Bundle` reference ordering, and blocking deletes of inbound-referenced targets (`409 Conflict`) unless `?_cascade=delete` is requested.
+  - Expanded headless **HL7 Inferno Conformance CI** ([`.github/workflows/inferno.yml`](.github/workflows/inferno.yml), [`deploy/inferno/headless/run_suites.rb`](deploy/inferno/headless/run_suites.rb)) to execute **US Core Server v7.0.0** (USCDI v4 — all 26 profiles) and **HL7 International Patient Access (IPA) v1.0.0** alongside US Core v6.1.0, SMART App Launch STU2, and Bulk Data v2.0.0 on both PostgreSQL and SQLite.
+- **Pure-Go Embedded SDK, Homebrew Tap & Zero-Dependency POSIX Installer**:
+  - Added [`examples/embedded-sqlite/`](examples/embedded-sqlite/) demonstrating `CGO_ENABLED=0` library embedding of `server.Server` + `store/sqlite` inside standard `net/http` Go applications (verified in CI).
+  - Added SHA-256 verified POSIX `install.sh` installer and automated multi-arch (`darwin/arm64`, `darwin/amd64`, `linux/arm64`, `linux/amd64`) GitHub Release archive & Homebrew tap (`flint-fhir/tap/flint`) publishing in [`.github/workflows/release.yml`](.github/workflows/release.yml).
+
+### Changed
+
+- **Physical Decoupling of Storage Domain & Search Extractors (`store/`, `gen/go/searchidx/`)**:
+  - Relocated all backend-neutral domain models, search parameter parsers, compartment definitions, and `proto2type`-generated search index extractors out of `store/postgres` into `store/` and `gen/go/searchidx/`, eliminating cross-backend package imports from `server/`, `store/sqlite/`, and `store/doris/`.
+- Synchronized runtime version reporting (`0.4.0`) across `flintd --version`, `CapabilityStatement.software.version`, OpenAPI 3.1.0 `info.version`, `Dockerfile`, `analytics/pyproject.toml`, `README.md`, and `site/`.
+
+### Fixed
+
+- Enforced mean systolic (`96608-5`) and mean diastolic (`96609-3`) LOINC component code validation on `us-core-average-blood-pressure` `Observation` resources.
+
 ## [0.3.0] - 2026-11-11
 
 ### Added

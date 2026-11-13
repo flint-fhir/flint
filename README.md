@@ -1,6 +1,6 @@
 # Flint — Decoupled FHIR R4 API & Pluggable Clinical Storage Engine
 
-[![Release](https://img.shields.io/badge/Release-v0.3.0-f97316)](CHANGELOG.md)
+[![Release](https://img.shields.io/badge/Release-v0.4.0-f97316)](CHANGELOG.md)
 [![CI](https://github.com/flint-fhir/flint/actions/workflows/ci.yml/badge.svg)](https://github.com/flint-fhir/flint/actions/workflows/ci.yml)
 [![HL7 Inferno](https://github.com/flint-fhir/flint/actions/workflows/inferno.yml/badge.svg)](https://github.com/flint-fhir/flint/actions/workflows/inferno.yml)
 [![Conformance](https://img.shields.io/badge/%24certify-137%2F137%20Checks-22c55e)](pkg/certify/certify.go)
@@ -10,9 +10,9 @@
 [![Website](https://img.shields.io/badge/Website-flint--fhir.github.io-f97316?logo=github)](https://flint-fhir.github.io/flint/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-**Flint** (`v0.3.0`) is an open-source, high-throughput **HL7 FHIR R4 API and clinical interoperability engine** written in Go. Flint strictly separates its **storage-agnostic FHIR R4 API & Clinical Layer** ([`server/`](server/), [`pkg/`](pkg/)) from its **Pluggable Persistence & Analytical Plane** ([`store/`](store/)):
+**Flint** (`v0.4.0`) is an open-source, high-throughput **HL7 FHIR R4 API and clinical interoperability engine** written in Go. Flint strictly separates its **storage-agnostic FHIR R4 API & Clinical Layer** ([`server/`](server/), [`pkg/`](pkg/)) from its **Pluggable Persistence & Analytical Plane** ([`store/`](store/)):
 
-1. **Storage-Agnostic FHIR R4 API Layer (`server/`)**: Speaks both standard FHIR JSON/NDJSON/CSV/TSV and **zero-JSON binary `google/fhir` Proto3 over HTTP** (`application/x-protobuf`, `application/fhir+protobuf`). Owns SMART on FHIR v2 OAuth2/PKCE/Backend Services/UDAP, ASTM E2147 `AuditEvent` logging, `StructureDefinition`/`ValueSet`/FHIRPath R4 validation, ACID `Bundle` coordination, UCUM unit normalization, **35+ National HL7 Implementation Guides (130+ `$` operations)**, **HL7 SQL-on-FHIR v2 (`ViewDefinition/$run`, `$export`, and multi-dialect `$sql` compiler)**, `TestScript/$evaluate`, and a built-in **137-check `$certify` conformance harness**—with zero SQL dialect or database driver coupling.
+1. **Storage-Agnostic FHIR R4 API Layer (`server/`)**: Speaks both standard FHIR JSON/NDJSON/CSV/TSV and **zero-JSON binary `google/fhir` Proto3 over HTTP** (`application/x-protobuf`, `application/fhir+protobuf`). Owns SMART on FHIR v2 OAuth2/PKCE/Backend Services/UDAP, ASTM E2147 `AuditEvent` logging, `StructureDefinition`/`ValueSet`/FHIRPath R4 validation (including slicing discriminators & semantic type-checking), startup/runtime **HL7 FHIR NPM (`.tgz`) IG package loading** (`--ig-package`, `POST /$install-ig`), ACID `Bundle` coordination, UCUM unit normalization, **35+ National HL7 Implementation Guides (130+ `$` operations)**, **HL7 SQL-on-FHIR v2 (`ViewDefinition/$run`, `$export`, and multi-dialect `$sql` compiler)**, `TestScript/$evaluate`, and a built-in **137-check `$certify` conformance harness**—with zero SQL dialect or database driver coupling.
 2. **Pluggable Storage & Analytical Plane (`store.Store` + `store.AnalyticalStore`)**: Run the exact same `flintd` binary over **PostgreSQL 15+** (ACID OLTP + physical schema-per-tenant isolation), **Embedded SQLite WAL** (pure-Go `CGO_ENABLED=0`, zero external dependencies, `:memory:` or single file), **Apache Doris MPP** (Unique Key Merge-on-Write columnar + inverted indexes), or **Real-Time Hybrid OLTP + OLAP (`store.HybridStore`)** (`--store=postgres --analytics-store=doris|sqlite`) with **100% API and certification parity**.
 
 All 146 FHIR R4 domain models and search index extractors are compiled directly from `google/fhir` Protocol Buffers using [proto2type](https://github.com/protocgen/proto2type) — **zero JSON/JSONB/VARIANT blobs are stored in any backend**.
@@ -25,7 +25,7 @@ All 146 FHIR R4 domain models and search index extractors are compiled directly 
 
 Traditional FHIR servers (e.g. HAPI FHIR, Medplum) entangle HTTP/clinical semantics directly with database-specific `JSONB` queries, incurring heavy runtime parsing overhead and locking deployments to a single database:
 
-| Dimension | Traditional FHIR Servers | Flint (`v0.3.0`) |
+| Dimension | Traditional FHIR Servers | Flint (`v0.4.0`) |
 |:----------|:-------------------------|:-----------------|
 | **Architectural Boundary** | HTTP handlers coupled to RDBMS-specific JSONB SQL (`->>`, `@>`) | **Strict two-plane split**: storage-agnostic FHIR R4 API (`server/`) over narrow `store.Store` & `store.AnalyticalStore` Go interfaces |
 | **Wire & At-Rest Format** | Text JSON over HTTP + heavy `JSONB` table sprawl | **JSON + Binary Proto3 HTTP wire** & **100% Zero-JSON Proto3 storage** (**16× wire reduction**, 124B vs ~2KB) |
@@ -160,7 +160,7 @@ brew install flint-fhir/tap/flint
 curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/install.sh | sh
 
 # C) Install from source with Go 1.26+ (CGO_ENABLED=0)
-CGO_ENABLED=0 go install github.com/flint-fhir/flint/cmd/flintd@v0.3.0
+CGO_ENABLED=0 go install github.com/flint-fhir/flint/cmd/flintd@v0.4.0
 
 # Start flintd backed by embedded SQLite WAL (use :memory: for ephemeral sandboxes)
 flintd --store=sqlite --sqlite-dsn=flint.db
@@ -206,7 +206,7 @@ docker compose --profile seed up -d
 Once running, open:
 * **Interactive SMART v2 Sandbox & Clinical Recipe Runner (`$docs`)**: [http://localhost:8080/fhir/r4/demo/$docs](http://localhost:8080/fhir/r4/demo/$docs)
 * **Live 137-Check Conformance `TestReport` (`$certify`)**: [http://localhost:8080/fhir/r4/demo/$certify](http://localhost:8080/fhir/r4/demo/$certify)
-* **Proto-Compiled OpenAPI 3.1.0 Spec (`v0.3.0`)**: [http://localhost:8080/fhir/r4/demo/openapi.json](http://localhost:8080/fhir/r4/demo/openapi.json)
+* **Proto-Compiled OpenAPI 3.1.0 Spec (`v0.4.0`)**: [http://localhost:8080/fhir/r4/demo/openapi.json](http://localhost:8080/fhir/r4/demo/openapi.json)
 
 ### Option 3: Container Image (`ghcr.io/flint-fhir/flint`)
 
@@ -215,18 +215,18 @@ Run the prebuilt multi-arch container (`linux/amd64`, `linux/arm64`) over SQLite
 ```bash
 # A) Zero-dependency container with embedded SQLite WAL
 docker run --rm -p 8080:8080 \
-  ghcr.io/flint-fhir/flint:0.3.0 --store=sqlite --sqlite-dsn=/tmp/flint.db
+  ghcr.io/flint-fhir/flint:0.4.0 --store=sqlite --sqlite-dsn=/tmp/flint.db
 
 # B) Production PostgreSQL OLTP (auto-applies embedded migrations on startup)
 docker run --rm -p 8080:8080 \
   -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \
-  ghcr.io/flint-fhir/flint:0.3.0
+  ghcr.io/flint-fhir/flint:0.4.0
 
 # C) Hybrid OLTP (PostgreSQL) + MPP OLAP (Apache Doris)
 docker run --rm -p 8080:8080 \
   -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \
   -e FLINT_DORIS_DSN="root:@tcp(host.docker.internal:9030)/flint" \
-  ghcr.io/flint-fhir/flint:0.3.0 --store=postgres --analytics-store=doris
+  ghcr.io/flint-fhir/flint:0.4.0 --store=postgres --analytics-store=doris
 ```
 
 Seed the US Core `"demo"` cohort or run the 137-check certification CLI using the same container image:
@@ -234,16 +234,16 @@ Seed the US Core `"demo"` cohort or run the 137-check certification CLI using th
 ```bash
 # Seed the 62-resource US Core v6.1.0 & v7.0.0 + HL7 IPA cohort into tenant "demo"
 docker run --rm --entrypoint /usr/local/bin/seed \
-  ghcr.io/flint-fhir/flint:0.3.0 -url http://host.docker.internal:8080 -tenant demo
+  ghcr.io/flint-fhir/flint:0.4.0 -url http://host.docker.internal:8080 -tenant demo
 
 # Run the 137-check conformance certification suite (10 suites)
 docker run --rm --entrypoint /usr/local/bin/certify \
-  ghcr.io/flint-fhir/flint:0.3.0 -url http://host.docker.internal:8080 -tenant demo
+  ghcr.io/flint-fhir/flint:0.4.0 -url http://host.docker.internal:8080 -tenant demo
 ```
 
 ### Runtime Configuration (`flintd` CLI Flags & Environment Variables)
 
-CLI flags: `--version`, `--store=postgres|sqlite|doris`, `--analytics-store=doris|sqlite|none`, `--sqlite-dsn=flint.db|:memory:`, `--tenant-isolation=schema|shared`, `--referential-integrity=lenient|strict`.
+CLI flags: `--version`, `--store=postgres|sqlite|doris`, `--analytics-store=doris|sqlite|none`, `--sqlite-dsn=flint.db|:memory:`, `--tenant-isolation=schema|shared`, `--referential-integrity=lenient|strict`, `--ig-package=<path>`, `--ig-load-examples`.
 
 | Environment Variable | Default | Backend / Scope | Description |
 |:---------------------|:--------|:----------------|:------------|
@@ -615,18 +615,21 @@ flint/
 │   ├── inferno/          # Official HL7 Inferno US Core Test Kit Docker Compose (task certify-inferno)
 │   ├── k3d/              # Local k3d cluster configuration
 │   └── k8s/              # Kubernetes manifests (Core: postgres.yaml, flintd.yaml; Add-Ons: worker, temporal, automq, garage, iceberg-rest)
+├── examples/
+│   └── embedded-sqlite/  # Pure-Go CGO_ENABLED=0 embedded SQLite library SDK example
 ├── fhir/r4/              # Machine-readable HL7 FHIR R4 SearchParameter definitions
 ├── gen/go/
 │   ├── flint/auth/v1/    # Protobuf-generated security context and discovery types
-│   └── store/postgres/   # proto2type generated search index extractors
+│   └── searchidx/        # proto2type generated backend-neutral search index extractors
 ├── pkg/
 │   ├── audit/            # HIPAA/ONC FHIR R4 AuditEvent classification, serialization & recorders
 │   ├── auth/             # TokenValidator, SMART v2, OIDC/Zitadel, and Hegel property tests
 │   ├── cdc/              # Generic, zero-dependency CDC Publisher interface & in-memory sink
 │   ├── certify/          # 137-check FHIR R4 / US Core / ONC (g)(10) / National IG / TestScript / SQL-on-FHIR v2 conformance engine
 │   ├── fhirutil/         # Bidirectional flat FHIR R4 JSON <-> google/fhir protojson codec & OpenAPI schema compiler
+│   ├── igloader/         # Pure-Go HL7 FHIR R4 NPM (.tgz) Implementation Guide package loader
 │   ├── ucum/             # Canonical UCUM clinical unit conversion engine
-│   └── validation/       # FHIR StructureDefinition, ValueSet, cardinality & FHIRPath R4 validator
+│   └── validation/       # FHIR StructureDefinition, slicing, ValueSet, cardinality & FHIRPath R4 validator
 ├── proto/
 │   ├── flint/auth/v1/    # Canonical Protobuf schemas for auth & security context
 │   └── google/fhir/      # Vendored google/fhir R4 protocol buffers
@@ -641,7 +644,8 @@ flint/
 ├── automq/               # [Add-On] Franz-go Kafka/AutoMQ CDC adapter implementing pkg/cdc.Publisher
 ├── ingest/               # [Add-On] Temporal IngestFHIRBundle workflow & activities
 ├── analytics/            # [Add-On] SQLMesh clinical dimensional lakehouse models & DuckDB unit tests
-├── CHANGELOG.md          # Release history (v0.1.0 -> v0.3.0)
+├── install.sh            # Zero-dependency SHA-256 verified POSIX binary installer
+├── CHANGELOG.md          # Release history (v0.1.0 -> v0.4.0)
 ├── flake.nix             # Hermetic Nix development environment (Go 1.26, Buf, Atlas, golangci-lint)
 ├── lefthook.yml          # Git pre-commit & pre-push hooks
 └── Taskfile.yaml         # Project workflow automation tasks

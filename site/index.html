@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Flint v0.3.0 — Decoupled FHIR R4 API &amp; Pluggable Storage Engine in Go</title>
-  <meta name="description" content="Open-source HL7 FHIR R4 API &amp; Interoperability engine in Go. Strictly decoupled clinical API layer (JSON + Binary Proto3 wire, SMART v2, SQL-on-FHIR v2, 35+ HL7 IGs, 137/137 $certify) over pluggable PostgreSQL, embedded SQLite WAL, Apache Doris MPP, and HybridStore backends." />
+  <title>Flint v0.4.0 — Decoupled FHIR R4 API &amp; Pluggable Storage Engine in Go</title>
+  <meta name="description" content="Open-source HL7 FHIR R4 API &amp; Interoperability engine in Go. Strictly decoupled clinical API layer (JSON + Binary Proto3 wire, SMART v2, SQL-on-FHIR v2, .tgz IG Package Loader, 35+ HL7 IGs, 137/137 $certify) over pluggable PostgreSQL, embedded SQLite WAL, Apache Doris MPP, and HybridStore backends." />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -12,7 +12,7 @@
     <div class="nav-inner">
       <a class="brand" href="#">
         <span>🔥 Flint</span>
-        <span class="brand-pill">v0.3.0 · FHIR R4.0.1</span>
+        <span class="brand-pill">v0.4.0 · FHIR R4.0.1</span>
       </a>
       <nav class="nav-links" aria-label="Primary Navigation">
         <a href="#quickstart">Quickstart</a>
@@ -195,7 +195,7 @@
 
       <div tabindex="0" role="region" aria-labelledby="conformance-table-caption" class="table-wrapper">
         <table style="--label-2: 'Capabilities &amp; Operations'; --label-3: 'Specifications'; --label-4: 'Primary Endpoint'; --label-5: 'Status';">
-          <caption id="conformance-table-caption">Flint v0.3.0 FHIR R4 Conformance Matrix (137/137 Checks across 10 Suites)</caption>
+          <caption id="conformance-table-caption">Flint v0.4.0 FHIR R4 Conformance Matrix (137/137 Checks across 10 Suites)</caption>
           <thead>
             <tr>
               <th>Category</th>
@@ -211,6 +211,13 @@
               <td>All 146 FHIR R4 types over JSON, NDJSON, CSV/TSV &amp; binary <code>application/x-protobuf</code> wire; pluggable <code>postgres</code>, <code>sqlite</code>, <code>doris</code> &amp; <code>HybridStore</code></td>
               <td>HL7 FHIR R4.0.1 + Google FHIR Proto3</td>
               <td><code>/fhir/r4/{tenant}/{resourceType}</code></td>
+              <td>✅ Verified</td>
+            </tr>
+            <tr>
+              <th>HL7 NPM (.tgz) IG Package Loader</th>
+              <td>Startup (<code>--ig-package</code>) &amp; runtime <code>$install-ig</code>, <code>$load-ig</code>, <code>$igs</code> with versioned <code>url|version</code> profile slicing/binding validation, <code>ValueSet</code> indexing &amp; custom <code>SearchParameter</code> <code>$reindex</code></td>
+              <td>HL7 FHIR NPM Package Spec, US Core v6.1/v7.0 &amp; IPA v1.0</td>
+              <td><code>/fhir/r4/{tenant}/$install-ig</code></td>
               <td>✅ Verified</td>
             </tr>
             <tr>
@@ -323,7 +330,7 @@
   <footer class="site-footer">
     <div class="container footer-inner">
       <div>
-        <strong>🔥 Flint FHIR R4 Server (v0.3.0)</strong> — Open-Source Decoupled FHIR R4 API &amp; Pluggable Storage Engine (Apache 2.0 License)
+        <strong>🔥 Flint FHIR R4 Server (v0.4.0)</strong> — Open-Source Decoupled FHIR R4 API &amp; Pluggable Storage Engine (Apache 2.0 License)
       </div>
       <div>
         <a href="https://github.com/flint-fhir/flint" target="_blank" rel="noopener">GitHub</a> ·
