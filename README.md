@@ -620,7 +620,7 @@ flint/
 ├── fhir/r4/              # Machine-readable HL7 FHIR R4 SearchParameter definitions
 ├── gen/go/
 │   ├── flint/auth/v1/    # Protobuf-generated security context and discovery types
-│   └── store/extract/    # proto2type generated backend-neutral search index extractors
+│   └── searchidx/        # proto2type generated backend-neutral search index extractors
 ├── pkg/
 │   ├── audit/            # HIPAA/ONC FHIR R4 AuditEvent classification, serialization & recorders
 │   ├── auth/             # TokenValidator, SMART v2, OIDC/Zitadel, and Hegel property tests

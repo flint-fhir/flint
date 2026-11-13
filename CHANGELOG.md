@@ -25,8 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Physical Decoupling of Storage Domain & Search Extractors (`store/`, `gen/go/store/extract/`)**:
-  - Relocated all backend-neutral domain models, search parameter parsers, compartment definitions, and `proto2type`-generated search index extractors out of `store/postgres` into `store/` and `gen/go/store/extract/`, eliminating cross-backend package imports from `server/`, `store/sqlite/`, and `store/doris/`.
+- **Physical Decoupling of Storage Domain & Search Extractors (`store/`, `gen/go/searchidx/`)**:
+  - Relocated all backend-neutral domain models, search parameter parsers, compartment definitions, and `proto2type`-generated search index extractors out of `store/postgres` into `store/` and `gen/go/searchidx/`, eliminating cross-backend package imports from `server/`, `store/sqlite/`, and `store/doris/`.
 - Synchronized runtime version reporting (`0.4.0`) across `flintd --version`, `CapabilityStatement.software.version`, OpenAPI 3.1.0 `info.version`, `Dockerfile`, `analytics/pyproject.toml`, `README.md`, and `site/`.
 
 ### Fixed
