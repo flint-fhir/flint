@@ -5,7 +5,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/install.sh | sh
 #
 # Environment overrides:
-#   FLINT_VERSION      Release tag to install (e.g. "v0.3.0"; defaults to latest GitHub release)
+#   FLINT_VERSION      Release tag to install (e.g. "v0.4.0"; defaults to latest GitHub release)
 #   FLINT_INSTALL_DIR  Destination directory for flintd, seed, and certify
 #   FLINT_REPO         GitHub owner/repo (default: "flint-fhir/flint")
 #   FLINT_BASE_URL     Release asset base URL override (for mirrors / air-gapped testing)

@@ -11,7 +11,7 @@ RUN go mod download || (sleep 2 && go mod download) || (sleep 5 && go mod downlo
 COPY . .
 ARG TARGETOS=linux
 ARG TARGETARCH
-ARG VERSION=0.3.0
+ARG VERSION=0.4.0
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/flintd ./cmd/flintd \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/seed ./cmd/seed \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/certify ./cmd/certify \

@@ -1,6 +1,8 @@
 const quickstartSnippets = {
-  sqlite: `# Install pure-Go single binary (Go 1.26+, zero external DB or Docker required!)
-go install github.com/flint-fhir/flint/cmd/flintd@v0.3.0
+  sqlite: `# Install via Homebrew, POSIX installer, or pure-Go single binary (zero Docker/DB required!)
+brew install flint-fhir/tap/flint
+# or: curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/install.sh | sh
+# or: CGO_ENABLED=0 go install github.com/flint-fhir/flint/cmd/flintd@v0.4.0
 
 # Boot complete FHIR R4 API server over embedded SQLite WAL (or use :memory:)
 flintd --store=sqlite --sqlite-dsn=flint.db
@@ -8,7 +10,7 @@ flintd --store=sqlite --sqlite-dsn=flint.db
 # Verify 137/137 automated conformance checks across 10 suites:
 curl -s http://localhost:8080/fhir/r4/demo/$certify | jq .result`,
 
-  compose: `# Start Flint FHIR R4 API + PostgreSQL 16 + seeded 29-resource US Core cohort
+  compose: `# Start Flint FHIR R4 API + PostgreSQL 16 + seeded 62-resource US Core v6/v7 & IPA cohort
 curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/docker-compose.yml -o docker-compose.yml
 docker compose --profile seed up -d
 
@@ -19,16 +21,23 @@ curl -s http://localhost:8080/fhir/r4/demo/$certify | jq .result`,
   container: `# Option A: PostgreSQL OLTP container (auto-migrates on boot)
 docker run --rm -p 8080:8080 \\
   -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \\
-  ghcr.io/flint-fhir/flint:0.3.0
+  ghcr.io/flint-fhir/flint:0.4.0
 
 # Option B: Hybrid PostgreSQL OLTP + Real-Time Apache Doris MPP Analytics
 docker run --rm -p 8080:8080 \\
   -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \\
   -e FLINT_DORIS_DSN="root:@tcp(host.docker.internal:9030)/flint" \\
-  ghcr.io/flint-fhir/flint:0.3.0 --store=postgres --analytics-store=doris`
+  ghcr.io/flint-fhir/flint:0.4.0 --store=postgres --analytics-store=doris`
 };
 
 const igCatalog = [
+  {
+    title: "HL7 FHIR R4 NPM (.tgz) Implementation Guide Package Loader",
+    domain: "Core & ONC",
+    desc: "Startup (--ig-package) and runtime (POST /$install-ig, POST /$load-ig, GET /$igs) HL7 NPM archive ingestion with automatic StructureDefinition slicing/binding validation, ValueSet/CodeSystem indexing, custom SearchParameter $reindex, and live CapabilityStatement advertisement.",
+    ops: ["POST /$install-ig", "POST /$load-ig", "GET /$igs", "--ig-package"],
+    curl: "curl -s 'http://localhost:8080/fhir/r4/demo/$igs' | jq ."
+  },
   {
     title: "HL7 SQL-on-FHIR v2, Binary Proto3 Wire & Pluggable Storage",
     domain: "Core & ONC",
