@@ -92,8 +92,55 @@ jobs:
               rm -rf "dist/${pkg}"
             done
           done
+          cp install.sh dist/install.sh
           cd dist
           sha256sum *.tar.gz > checksums.txt
+
+          VER_CLEAN="${VERSION#v}"
+          SHA_DARWIN_ARM64="$(awk -v f="flint_${VERSION}_darwin_arm64.tar.gz" '$2 == f { print $1 }' checksums.txt)"
+          SHA_DARWIN_AMD64="$(awk -v f="flint_${VERSION}_darwin_amd64.tar.gz" '$2 == f { print $1 }' checksums.txt)"
+          SHA_LINUX_ARM64="$(awk -v f="flint_${VERSION}_linux_arm64.tar.gz" '$2 == f { print $1 }' checksums.txt)"
+          SHA_LINUX_AMD64="$(awk -v f="flint_${VERSION}_linux_amd64.tar.gz" '$2 == f { print $1 }' checksums.txt)"
+
+          cat > flint.rb <<EOF
+          class Flint < Formula
+            desc "Decoupled HL7 FHIR R4 API & pluggable clinical storage engine"
+            homepage "https://github.com/flint-fhir/flint"
+            version "${VER_CLEAN}"
+            license "Apache-2.0"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/flint-fhir/flint/releases/download/${VERSION}/flint_${VERSION}_darwin_arm64.tar.gz"
+                sha256 "${SHA_DARWIN_ARM64}"
+              else
+                url "https://github.com/flint-fhir/flint/releases/download/${VERSION}/flint_${VERSION}_darwin_amd64.tar.gz"
+                sha256 "${SHA_DARWIN_AMD64}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/flint-fhir/flint/releases/download/${VERSION}/flint_${VERSION}_linux_arm64.tar.gz"
+                sha256 "${SHA_LINUX_ARM64}"
+              else
+                url "https://github.com/flint-fhir/flint/releases/download/${VERSION}/flint_${VERSION}_linux_amd64.tar.gz"
+                sha256 "${SHA_LINUX_AMD64}"
+              end
+            end
+
+            def install
+              bin.install "flintd"
+              bin.install "seed" => "flint-seed"
+              bin.install "certify" => "flint-certify"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/flintd --version")
+            end
+          end
+          EOF
+          sed -i 's/^          //' flint.rb
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -102,3 +149,23 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/checksums.txt
+            dist/flint.rb
+            dist/install.sh
+
+      - name: Publish Homebrew Formula to flint-fhir/homebrew-tap
+        if: env.HOMEBREW_TAP_TOKEN != ''
+        env:
+          VERSION: ${{ github.ref_name }}
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/flint-fhir/homebrew-tap.git" /tmp/homebrew-tap
+          mkdir -p /tmp/homebrew-tap/Formula
+          cp dist/flint.rb /tmp/homebrew-tap/Formula/flint.rb
+          cd /tmp/homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/flint.rb
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(formula): flint ${VERSION}"
+            git push origin HEAD:main
+          fi

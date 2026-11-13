@@ -147,15 +147,40 @@ Flint implements full search index extraction, transactional persistence, SMART 
 
 `flintd` is a **single, self-contained pure-Go binary (`CGO_ENABLED=0`) and multi-arch OCI container** that embeds all SQL schema migrations for PostgreSQL, SQLite, and Apache Doris.
 
-### Option 1: Zero-Dependency Single Binary (Embedded SQLite WAL — No Docker Needed)
+### Option 1: Zero-Dependency Single Binary (Homebrew, Installer, or `go install` — No Docker Needed)
 
-Install with Go 1.26+ or download a prebuilt binary from [GitHub Releases](https://github.com/flint-fhir/flint/releases) and launch a complete FHIR R4 server with zero external services:
+Install `flintd` on macOS or Linux via Homebrew, the one-line POSIX installer (SHA-256 verified against `checksums.txt`), `go install`, or [GitHub Releases](https://github.com/flint-fhir/flint/releases), and launch a complete FHIR R4 server with zero external services:
 
 ```bash
-go install github.com/flint-fhir/flint/cmd/flintd@v0.3.0
+# A) Homebrew (macOS & Linux — installs flintd, flint-seed, flint-certify)
+brew install flint-fhir/tap/flint
+
+# B) One-line POSIX installer (macOS & Linux amd64/arm64, SHA-256 verified)
+curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/install.sh | sh
+
+# C) Install from source with Go 1.26+ (CGO_ENABLED=0)
+CGO_ENABLED=0 go install github.com/flint-fhir/flint/cmd/flintd@v0.3.0
 
 # Start flintd backed by embedded SQLite WAL (use :memory: for ephemeral sandboxes)
 flintd --store=sqlite --sqlite-dsn=flint.db
+```
+
+### Option 1B: Embed Flint as a Pure-Go Library (`CGO_ENABLED=0` SDK)
+
+Because `server/` depends only on `store.Store` and `store.AnalyticalStore`, you can mount a complete FHIR R4, US Core v6.1.0/v7.0.0, HL7 IPA v1.0.0, SMART v2, and SQL-on-FHIR v2 server inside any standard Go `net/http` service, CLI, or desktop clinical app with `CGO_ENABLED=0` (see [`examples/embedded-sqlite/`](examples/embedded-sqlite/)):
+
+```go
+db, _ := sql.Open("sqlite", "clinical.db")
+_ = sqlite.RunMigrations(ctx, db, sqlite.JournalWAL)
+sqStore := sqlite.New(db, sqlite.WithJournalMode(sqlite.JournalWAL), sqlite.WithDSN("clinical.db"))
+_ = sqStore.LoadFromDB(ctx)
+
+srv := server.New(sqStore, logger)
+srv.SetAnalyticalStore(sqStore)
+srv.SetReferentialIntegrity(server.ReferentialIntegrityStrict)
+server.RegisterDefaultResourceTypes(srv)
+
+http.ListenAndServe("127.0.0.1:8080", srv.Handler())
 ```
 
 ### Option 2: Docker Compose (PostgreSQL 16 + FHIR Server + Seeded US Core Cohort)

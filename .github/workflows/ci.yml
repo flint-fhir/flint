@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
 
 jobs:
   test:
@@ -57,6 +56,13 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      - name: Pure-Go Embedded SDK & Installer Gate (CGO_ENABLED=0)
+        run: |
+          CGO_ENABLED=0 go test -v -cover ./examples/...
+          mkdir -p bin
+          CGO_ENABLED=0 go build -o bin/embedded-sqlite ./examples/embedded-sqlite
+          sh -n install.sh
 
       - name: Go Native Fuzzing Gate (Search, _filter, FHIRPath, Patch & Validator)
         run: |
