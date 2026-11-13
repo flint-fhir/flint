@@ -9,7 +9,7 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/pkg/validation"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 // ConformanceMatrixEntry describes a verified capability in the Flint FHIR R4 Conformance Matrix.
@@ -478,7 +478,7 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 }
 
 func mergeCustomSearchParams(rt string, sp []map[string]string) []map[string]string {
-	custom := postgres.CustomSearchParamsForType(rt)
+	custom := store.CustomSearchParamsForType(rt)
 	if len(custom) == 0 {
 		return sp
 	}
@@ -5740,7 +5740,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			},
 		}
 
-		if postgres.IsCompartmentType(rt) {
+		if store.IsCompartmentType(rt) {
 			paths["/"+rt+"/{id}/*"] = map[string]any{
 				"get": map[string]any{
 					"tags":        []string{rt},
@@ -5772,7 +5772,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 			}
 		}
 
-		if postgres.IsPatientCompartmentResourceType(rt) {
+		if store.IsPatientCompartmentResourceType(rt) {
 			compParams := append([]map[string]any{
 				{"name": "id", "in": "path", "required": true, "description": "Patient logical ID", "schema": map[string]any{"type": "string"}},
 			}, queryParams...)

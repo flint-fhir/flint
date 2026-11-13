@@ -1,4 +1,4 @@
-package postgres
+package store
 
 import (
 	"fmt"
@@ -281,7 +281,7 @@ func ParseChainedParam(key, value string) (*ChainedParam, bool) {
 	if targetParamRaw == "" {
 		return nil, false
 	}
-	targetParam, targetMod := splitParamModifier(targetParamRaw)
+	targetParam, targetMod := SplitParamModifier(targetParamRaw)
 	if strings.TrimSpace(targetParam) == "" {
 		return nil, false
 	}
@@ -396,7 +396,7 @@ func ParseHasParam(key, value string) (*HasParam, bool, error) {
 		}, true, nil
 	}
 
-	searchBase, searchMod := splitParamModifier(searchParam)
+	searchBase, searchMod := SplitParamModifier(searchParam)
 	if searchMod == "of-type" {
 		for part := range strings.SplitSeq(value, ",") {
 			if err := validateOfTypeValue(key, part); err != nil {
@@ -1017,7 +1017,7 @@ func ParseFilterExpr(raw string) (FilterExpr, error) {
 			return FilterExpr{}, fmt.Errorf("empty comparison value for %s %s in _filter", paramTok.val, op)
 		}
 
-		baseParam, _ := splitParamModifier(paramTok.val)
+		baseParam, _ := SplitParamModifier(paramTok.val)
 		if strings.Contains(paramTok.val, ".") {
 			if ch, ok := ParseChainedParam(paramTok.val, valStr); ok && ch != nil {
 				baseParam = ch.TargetParam
@@ -1062,7 +1062,7 @@ func IsKnownSearchParam(key string) bool {
 	if strings.HasPrefix(key, "_has:") {
 		return true
 	}
-	base, mod := splitParamModifier(key)
+	base, mod := SplitParamModifier(key)
 	if strings.HasPrefix(base, "_") {
 		return knownControlUnderscoreParams[base] || isSearchableUnderscoreParam(key)
 	}
@@ -1097,7 +1097,7 @@ func IsKnownSearchParam(key string) bool {
 // isSearchableUnderscoreParam returns true for standard FHIR R4 Resource.meta search
 // parameters (_profile, _tag, _security, _source, and any modifier variants such as :missing, :not, :below, :above).
 func isSearchableUnderscoreParam(key string) bool {
-	base, _ := splitParamModifier(key)
+	base, _ := SplitParamModifier(key)
 	switch base {
 	case "_profile", "_tag", "_security", "_source":
 		return true
@@ -1106,9 +1106,9 @@ func isSearchableUnderscoreParam(key string) bool {
 	}
 }
 
-// splitParamModifier splits a search parameter key into its base parameter name
+// SplitParamModifier splits a search parameter key into its base parameter name
 // and optional modifier (e.g. "name:exact" -> "name", "exact"; "status:not" -> "status", "not").
-func splitParamModifier(key string) (string, string) {
+func SplitParamModifier(key string) (string, string) {
 	if idx := strings.IndexByte(key, ':'); idx != -1 {
 		return key[:idx], key[idx+1:]
 	}
@@ -1215,7 +1215,7 @@ func ValidateSearchQuery(q url.Values) error {
 		if (strings.HasPrefix(key, "_") && !isSearchableUnderscoreParam(key)) || len(values) == 0 {
 			continue
 		}
-		baseKey, mod := splitParamModifier(key)
+		baseKey, mod := SplitParamModifier(key)
 		for _, val := range values {
 			if mod == "missing" {
 				lower := strings.ToLower(strings.TrimSpace(val))
@@ -1448,7 +1448,7 @@ func BuildSearchParamsFromQuery(tenant, resType string, q url.Values) SearchPara
 			continue
 		}
 
-		baseKey, mod := splitParamModifier(key)
+		baseKey, mod := SplitParamModifier(key)
 		if mod == "missing" {
 			params.Missing[baseKey] = strings.EqualFold(strings.TrimSpace(value), "true")
 			continue

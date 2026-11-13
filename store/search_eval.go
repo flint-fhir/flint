@@ -5,8 +5,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/flint-fhir/flint/store/postgres"
 )
 
 // IndexedResourceView provides a uniform, zero-copy view of an indexed FHIR resource
@@ -400,43 +398,29 @@ func MatchSingleQuantity(q SpidxQuantity, op QuantityOp) bool {
 }
 
 // SearchParamCategory returns the primary search parameter category ("string", "token", "date", "quantity", "reference", "uri")
-// for a FHIR R4 search parameter name.
+// for a FHIR R4 search parameter name (including runtime-registered custom SearchParameters).
 func SearchParamCategory(spName string) string {
 	base, mod, _ := strings.Cut(spName, ":")
 	if mod == "text" {
 		return "string"
 	}
-	switch base {
-	case "_lastUpdated", "birthdate", "date", "onset-date", "authoredon", "authored", "issued", "last-date",
-		"collected", "period", "recorded", "created", "indexed", "target-date", "start-date",
-		"occurrence", "whenhandedover", "whenprepared", "value-date":
+	if base == "_lastUpdated" {
 		return "date"
-	case "value-quantity", "component-value-quantity", "combo-value-quantity":
-		return "quantity"
-	case "family", "given", "name", "address", "address-city", "address-state",
-		"address-postalcode", "address-country", "phonetic", "lot-number", "series",
-		"title", "description", "udi-carrier", "device-name", "value-string":
-		return "string"
-	case "organization", "general-practitioner", "subject", "patient", "beneficiary", "encounter",
-		"performer", "asserter", "recorder", "participant", "requester", "medication",
-		"intended-dispenser", "intended-performer", "based-on", "location", "part-of", "partof",
-		"reason-reference", "result", "results-interpreter", "specimen", "collector", "media",
-		"manufacturer", "reaction", "endpoint", "instantiates-canonical", "target", "agent",
-		"author", "custodian", "payor", "subscriber", "practitioner", "device", "questionnaire",
-		"source", "care-team", "goal", "focus", "owner", "for", "actor", "item", "member",
-		"entity", "service-provider":
-		return "reference"
-	case "url", "system", "source-uri", "target-uri", "instantiates-uri", "definition", "_profile", "_source":
+	}
+	customSearchParamMu.RLock()
+	defer customSearchParamMu.RUnlock()
+	switch {
+	case knownURISearchParams[base]:
 		return "uri"
-	case "identifier", "gender", "active", "email", "phone", "telecom", "language",
-		"deceased", "status", "code", "component-code", "combo-code", "category", "type",
-		"class", "clinical-status", "verification-status", "lifecycle-status", "docstatus",
-		"mode", "intent", "priority", "criticality", "severity", "manifestation", "route",
-		"reason-code", "conclusion", "vaccine-code", "status-reason", "target-disease",
-		"intended-performertype", "performer-type", "address-use", "telecom-use", "accession",
-		"bodysite", "specialty", "role", "relationship", "subscriber-id", "value-concept",
-		"component-value-concept", "combo-value-concept", "race", "ethnicity", "birthsex",
-		"marital-status", "_tag", "_security":
+	case knownStringSearchParams[base]:
+		return "string"
+	case knownDateSearchParams[base]:
+		return "date"
+	case knownQuantitySearchParams[base]:
+		return "quantity"
+	case knownRefSearchParams[base]:
+		return "reference"
+	case knownTokenSearchParams[base]:
 		return "token"
 	default:
 		return ""
@@ -1350,7 +1334,7 @@ func MatchCompartment(
 	compType, compID string,
 	listTenant TenantResourcesFunc,
 ) bool {
-	canonType := postgres.CanonicalCompartmentType(compType)
+	canonType := CanonicalCompartmentType(compType)
 	if canonType == "" {
 		return true
 	}

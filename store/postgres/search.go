@@ -12,142 +12,14 @@ import (
 	"unicode"
 
 	"github.com/lib/pq"
-)
 
-// MaxSearchCount is the maximum number of resources returned in a single search page.
-const MaxSearchCount = 1000
+	"github.com/flint-fhir/flint/store"
+)
 
 type queryExecer interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
-
-// SearchResult is a single resource matching a search query.
-type SearchResult struct {
-	ResType       string
-	ResID         string
-	ResVersion    int
-	LastUpdated   time.Time
-	ResourceProto []byte
-}
-
-// SearchResults contains the primary matched resources, resolved included resources,
-// and the total match count.
-type SearchResults struct {
-	Matches  []SearchResult
-	Includes []SearchResult
-	Total    int
-}
-
-// PatientEverythingParams specifies parameters for the FHIR R4 Patient/$everything operation.
-type PatientEverythingParams struct {
-	TenantID      string
-	PatientID     string
-	ResourceTypes []string   // Optional _type filter (e.g. ["Observation", "Condition"])
-	Since         *time.Time // Optional _since filter on last_updated
-	Until         *time.Time // Optional _until filter on last_updated
-	Start         *time.Time // Optional start clinical care-date filter on spidx_date
-	End           *time.Time // Optional end clinical care-date filter on spidx_date
-	Count         int
-	Offset        int
-}
-
-// EncounterEverythingParams specifies parameters for the FHIR R4 Encounter/$everything operation.
-type EncounterEverythingParams struct {
-	TenantID      string
-	EncounterID   string
-	ResourceTypes []string   // Optional _type filter (e.g. ["Observation", "Condition"])
-	Since         *time.Time // Optional _since filter on last_updated
-	Until         *time.Time // Optional _until filter on last_updated
-	Start         *time.Time // Optional start clinical care-date filter on spidx_date
-	End           *time.Time // Optional end clinical care-date filter on spidx_date
-	Count         int
-	Offset        int
-}
-
-// GroupEverythingParams specifies parameters for the FHIR R4 Group/$everything operation.
-type GroupEverythingParams struct {
-	TenantID      string
-	GroupID       string
-	PatientIDs    []string   // Resolved active member Patient IDs
-	AllPatients   bool       // True for built-in Group/all or Group/all-patients
-	EmptyCohort   bool       // True when Group has 0 active Patient members
-	ResourceTypes []string   // Optional _type filter (e.g. ["Patient", "Observation"])
-	Since         *time.Time // Optional _since filter on last_updated
-	Until         *time.Time // Optional _until filter on last_updated
-	Start         *time.Time // Optional start clinical care-date filter on spidx_date
-	End           *time.Time // Optional end clinical care-date filter on spidx_date
-	Count         int
-	Offset        int
-}
-
-// SearchParams holds parsed FHIR search parameters for a query.
-type SearchParams struct {
-	TenantID                 string
-	ResType                  string
-	ResTypes                 []string                        // Optional _type filter for system-level multi-type search (e.g. ["Patient", "Observation"])
-	ID                       string                          // Optional _id filter (supports comma-separated multipleOr)
-	LastUpdated              []DateOp                        // Optional _lastUpdated filter(s) (e.g. ge + le range)
-	Strings                  map[string]string               // sp_name → value (prefix, :exact, or :contains)
-	StringFilters            map[string][]string             // sp_name → multipleAnd values (each may be comma-separated multipleOr)
-	Tokens                   map[string]string               // sp_name → value (exact, system|value, or :not)
-	TokenFilters             map[string][]string             // sp_name → multipleAnd values (each may be comma-separated multipleOr)
-	Dates                    map[string]DateOp               // sp_name → first date operation
-	DateFilters              map[string][]DateOp             // sp_name → all date operations (e.g. ge + le range)
-	Quantities               map[string]QuantityOp           // sp_name → first quantity operation
-	QuantityFilters          map[string][]QuantityOp         // sp_name → all quantity operations (e.g. ge + le range)
-	References               map[string]string               // sp_name → targetType/targetId
-	ReferenceFilters         map[string][]string             // sp_name → multipleAnd values (each may be comma-separated multipleOr)
-	URIs                     map[string]string               // sp_name → URI value (exact, :below, or :above)
-	URIFilters               map[string][]string             // sp_name → multipleAnd values (each may be comma-separated multipleOr)
-	Missing                  map[string]bool                 // sp_name → :missing=true/false
-	Chained                  []ChainedParam                  // chained search parameters (e.g. patient.name=Smith)
-	Has                      []HasParam                      // reverse-chained search parameters (e.g. _has:Observation:patient:code=8867-4)
-	List                     []string                        // _list cohort membership filters (e.g. _list=list-1)
-	Content                  []string                        // _content full-text search terms across indexed strings/tokens/id
-	Text                     []string                        // _text narrative search terms across text.div (_text index)
-	Filters                  []FilterExpr                    // _filter boolean search expression ASTs (§3.1.1.3.1)
-	CompositeTokenQuantities [][]CompositeTokenQuantityParam // token$quantity composite filters (e.g. code-value-quantity, component-code-value-quantity)
-	CompositeTokenTokens     [][]CompositeTokenTokenParam    // token$token composite filters (e.g. code-value-concept, component-code-value-concept)
-	CompositeTokenDates      [][]CompositeTokenDateParam     // token$date composite filters (e.g. code-value-date)
-	CompositeTokenStrings    [][]CompositeTokenStringParam   // token$string composite filters (e.g. code-value-string)
-	Includes                 []IncludeParam                  // _include parameters
-	RevIncludes              []IncludeParam                  // _revinclude parameters
-	Sort                     []SortSpec                      // _sort specifications
-	Summary                  string                          // _summary mode (true, text, data, count, false)
-	Elements                 []string                        // _elements projection fields
-	TotalMode                string                          // _total mode (none, estimate, accurate)
-	CompartmentType          string                          // Optional FHIR R4 compartment type (Patient, Encounter, Practitioner, RelatedPerson, Device)
-	CompartmentID            string                          // Optional FHIR R4 compartment resource ID
-	ExpectedVersion          int                             // Optional If-Match expected version for conditional write/delete
-	Count                    int                             // _count (default 20, max 1000)
-	Offset                   int                             // _offset (default 0)
-}
-
-// CanonicalCompartmentType returns the canonical HL7 FHIR R4 compartment resource type
-// ("Patient", "Encounter", "Practitioner", "RelatedPerson", or "Device"), or "" if s is not a compartment type.
-func CanonicalCompartmentType(s string) string {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "patient":
-		return "Patient"
-	case "encounter":
-		return "Encounter"
-	case "practitioner":
-		return "Practitioner"
-	case "relatedperson":
-		return "RelatedPerson"
-	case "device":
-		return "Device"
-	default:
-		return ""
-	}
-}
-
-// IsCompartmentType returns true if s is one of the 5 HL7 FHIR R4 compartment types
-// (Patient, Encounter, Practitioner, RelatedPerson, Device).
-func IsCompartmentType(s string) bool {
-	return CanonicalCompartmentType(s) != ""
 }
 
 // Search executes a FHIR search query using the covering spidx_* tables.
@@ -227,7 +99,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		}
 	}
 	for spKey, filterVals := range stringFilters {
-		baseName, modifier := splitParamModifier(spKey)
+		baseName, modifier := store.SplitParamModifier(spKey)
 		for _, rawVal := range filterVals {
 			var orConds []string
 			joinIdx++
@@ -278,7 +150,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		}
 	}
 	for spKey, filterVals := range tokenFilters {
-		baseName, modifier := splitParamModifier(spKey)
+		baseName, modifier := store.SplitParamModifier(spKey)
 		spColName := baseName
 		if modifier == "of-type" {
 			spColName = baseName + ":of-type"
@@ -310,7 +182,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 					} else if code == "" {
 						orConds = append(orConds, fmt.Sprintf("(%s.sp_system = $%d)", alias, len(args)+1))
 						args = append(args, sys)
-					} else if isEnumTokenParam(baseName) {
+					} else if store.IsEnumTokenParam(baseName) {
 						normVal := strings.ToLower(strings.ReplaceAll(code, "_", "-"))
 						upperVal := strings.ToUpper(strings.ReplaceAll(code, "-", "_"))
 						orConds = append(orConds, fmt.Sprintf("((%s.sp_system = $%d OR %s.sp_system = '') AND %s.sp_value IN ($%d, $%d, $%d))",
@@ -320,7 +192,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 						orConds = append(orConds, fmt.Sprintf("(%s.sp_system = $%d AND %s.sp_value = $%d)", alias, len(args)+1, alias, len(args)+2))
 						args = append(args, sys, code)
 					}
-				} else if isEnumTokenParam(baseName) {
+				} else if store.IsEnumTokenParam(baseName) {
 					normVal := strings.ToLower(strings.ReplaceAll(item, "_", "-"))
 					upperVal := strings.ToUpper(strings.ReplaceAll(item, "-", "_"))
 					orConds = append(orConds, fmt.Sprintf("(%s.sp_value IN ($%d, $%d, $%d))", alias, len(args)+1, len(args)+2, len(args)+3))
@@ -412,7 +284,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		}
 	}
 	for spKey, filterVals := range referenceFilters {
-		baseName, modType := splitParamModifier(spKey)
+		baseName, modType := store.SplitParamModifier(spKey)
 		if strings.EqualFold(modType, "identifier") {
 			for _, rawVal := range filterVals {
 				joinIdx++
@@ -507,7 +379,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 		}
 	}
 	for spKey, filterVals := range uriFilters {
-		baseName, modifier := splitParamModifier(spKey)
+		baseName, modifier := store.SplitParamModifier(spKey)
 		for _, rawVal := range filterVals {
 			joinIdx++
 			uAlias := fmt.Sprintf("u%d", joinIdx)
@@ -560,25 +432,26 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 			hops = []ChainedHop{{RefParam: chained.RefParam, TargetType: chained.TargetType}}
 		}
 
-		targetParam, targetMod := splitParamModifier(chained.TargetParam)
+		targetParam, targetMod := store.SplitParamModifier(chained.TargetParam)
 		if chained.TargetModifier != "" {
 			targetMod = chained.TargetModifier
 		}
 
 		paramType := chained.ParamType
 		if paramType == "" {
+			cat := store.SearchParamCategory(targetParam)
 			switch {
 			case targetParam == "_id":
 				paramType = "id"
-			case knownStringSearchParams[targetParam]:
+			case cat == "string":
 				paramType = "string"
-			case knownDateSearchParams[targetParam]:
+			case cat == "date":
 				paramType = "date"
-			case knownQuantitySearchParams[targetParam]:
+			case cat == "quantity":
 				paramType = "quantity"
-			case knownRefSearchParams[targetParam]:
+			case cat == "reference":
 				paramType = "reference"
-			case knownURISearchParams[targetParam] || ((targetMod == "below" || targetMod == "above") && !knownTokenSearchParams[targetParam] && !strings.Contains(chained.Value, "|")):
+			case cat == "uri" || ((targetMod == "below" || targetMod == "above") && cat != "token" && !strings.Contains(chained.Value, "|")):
 				paramType = "uri"
 			default:
 				paramType = "token"
@@ -696,7 +569,7 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 						orConds = append(orConds, fmt.Sprintf("(%s.sp_system = $%d AND %s.sp_value = $%d)", targetAlias, len(args)+1, targetAlias, len(args)+2))
 						args = append(args, sys, code)
 					}
-				} else if isEnumTokenParam(targetParam) {
+				} else if store.IsEnumTokenParam(targetParam) {
 					normVal := strings.ToLower(strings.ReplaceAll(item, "_", "-"))
 					upperVal := strings.ToUpper(strings.ReplaceAll(item, "-", "_"))
 					orConds = append(orConds, fmt.Sprintf("(%s.sp_value IN ($%d, $%d, $%d))", targetAlias, len(args)+1, len(args)+2, len(args)+3))
@@ -1198,12 +1071,13 @@ func buildSortOrderClause(sorts []SortSpec, startIdx int) (string, []any) {
 			dir = "DESC"
 			agg = "MAX"
 		}
+		cat := store.SearchParamCategory(s.Param)
 		switch {
 		case s.Param == "_id":
 			parts = append(parts, "r.res_id "+dir)
 		case s.Param == "_lastUpdated":
 			parts = append(parts, "r.last_updated "+dir)
-		case knownDateSearchParams[s.Param]:
+		case cat == "date":
 			col := "sp_low"
 			if s.Desc {
 				col = "sp_high"
@@ -1214,28 +1088,28 @@ func buildSortOrderClause(sorts []SortSpec, startIdx int) (string, []any) {
 				"(SELECT %s(sd.%s) FROM spidx_date sd WHERE sd.tenant_id = r.tenant_id AND sd.res_type = r.res_type AND sd.res_id = r.res_id AND sd.sp_name = $%d) %s NULLS LAST",
 				agg, col, idx, dir,
 			))
-		case knownQuantitySearchParams[s.Param]:
+		case cat == "quantity":
 			idx := startIdx + len(args) + 1
 			args = append(args, s.Param)
 			parts = append(parts, fmt.Sprintf(
 				"(SELECT %s(sq.sp_value) FROM spidx_quantity sq WHERE sq.tenant_id = r.tenant_id AND sq.res_type = r.res_type AND sq.res_id = r.res_id AND sq.sp_name = $%d) %s NULLS LAST",
 				agg, idx, dir,
 			))
-		case knownStringSearchParams[s.Param]:
+		case cat == "string":
 			idx := startIdx + len(args) + 1
 			args = append(args, s.Param)
 			parts = append(parts, fmt.Sprintf(
 				"(SELECT %s(ss.sp_value) FROM spidx_string ss WHERE ss.tenant_id = r.tenant_id AND ss.res_type = r.res_type AND ss.res_id = r.res_id AND ss.sp_name = $%d) %s NULLS LAST",
 				agg, idx, dir,
 			))
-		case knownRefSearchParams[s.Param]:
+		case cat == "reference":
 			idx := startIdx + len(args) + 1
 			args = append(args, s.Param)
 			parts = append(parts, fmt.Sprintf(
 				"(SELECT %s(sr.target_id) FROM spidx_reference sr WHERE sr.tenant_id = r.tenant_id AND sr.res_type = r.res_type AND sr.res_id = r.res_id AND sr.sp_name = $%d) %s NULLS LAST",
 				agg, idx, dir,
 			))
-		case knownURISearchParams[s.Param]:
+		case cat == "uri":
 			idx := startIdx + len(args) + 1
 			args = append(args, s.Param)
 			parts = append(parts, fmt.Sprintf(
@@ -1302,16 +1176,17 @@ func buildHasExistsConditionWithAlias(hp HasParam, parentAlias string, depth int
 
 	paramType := hp.ParamType
 	if paramType == "" {
+		hpCat := store.SearchParamCategory(hp.SearchParam)
 		switch {
 		case hp.SearchParam == "_id":
 			paramType = "id"
-		case knownStringSearchParams[hp.SearchParam]:
+		case hpCat == "string":
 			paramType = "string"
-		case knownDateSearchParams[hp.SearchParam]:
+		case hpCat == "date":
 			paramType = "date"
-		case knownQuantitySearchParams[hp.SearchParam]:
+		case hpCat == "quantity":
 			paramType = "quantity"
-		case knownRefSearchParams[hp.SearchParam]:
+		case hpCat == "reference":
 			paramType = "reference"
 		default:
 			paramType = "token"
@@ -1332,10 +1207,10 @@ func buildHasExistsConditionWithAlias(hp HasParam, parentAlias string, depth int
 		), args
 	}
 
-	searchBase, searchMod := splitParamModifier(hp.SearchParam)
+	searchBase, searchMod := store.SplitParamModifier(hp.SearchParam)
 	spIdx := startIdx + 3
 	spColVal := searchBase
-	if searchMod == "text" && !knownStringSearchParams[searchBase] {
+	if searchMod == "text" && store.SearchParamCategory(searchBase) != "string" {
 		spColVal = searchBase + ":text"
 	} else if searchMod == "of-type" {
 		spColVal = searchBase + ":of-type"
@@ -1439,7 +1314,7 @@ func buildHasExistsConditionWithAlias(hp HasParam, parentAlias string, depth int
 					orConds = append(orConds, fmt.Sprintf("(%s.sp_system = $%d AND %s.sp_value = $%d)", hspAlias, currIdx+1, hspAlias, currIdx+2))
 					args = append(args, sys, code)
 				}
-			} else if isEnumTokenParam(searchBase) {
+			} else if store.IsEnumTokenParam(searchBase) {
 				normVal := strings.ToLower(strings.ReplaceAll(item, "_", "-"))
 				upperVal := strings.ToUpper(strings.ReplaceAll(item, "-", "_"))
 				orConds = append(orConds, fmt.Sprintf("(%s.sp_value IN ($%d, $%d, $%d))", hspAlias, currIdx+1, currIdx+2, currIdx+3))
@@ -2096,7 +1971,7 @@ func buildFilterLeafCondition(expr FilterExpr, startIdx int) (string, []any) {
 func buildFilterLeafConditionWithAlias(expr FilterExpr, resTypeExpr, resIDExpr string, startIdx int) (string, []any) {
 	op := strings.ToLower(strings.TrimSpace(expr.Op))
 	val := strings.TrimSpace(expr.Value)
-	baseName, modifier := splitParamModifier(expr.Param)
+	baseName, modifier := store.SplitParamModifier(expr.Param)
 
 	if op == "pr" {
 		present := strings.EqualFold(val, "true")
@@ -2172,7 +2047,8 @@ func buildFilterLeafConditionWithAlias(expr FilterExpr, resTypeExpr, resIDExpr s
 		return cond, tArgs
 	}
 
-	if knownDateSearchParams[baseName] {
+	baseCat := store.SearchParamCategory(baseName)
+	if baseCat == "date" {
 		dOp, err := ParseDateOp(val)
 		if err != nil {
 			return "", nil
@@ -2196,7 +2072,7 @@ func buildFilterLeafConditionWithAlias(expr FilterExpr, resTypeExpr, resIDExpr s
 		), args
 	}
 
-	if knownQuantitySearchParams[baseName] {
+	if baseCat == "quantity" {
 		qOp, err := ParseQuantityOp(val)
 		if err != nil {
 			return "", nil
@@ -2220,7 +2096,7 @@ func buildFilterLeafConditionWithAlias(expr FilterExpr, resTypeExpr, resIDExpr s
 		), args
 	}
 
-	if knownStringSearchParams[baseName] || modifier == "text" {
+	if baseCat == "string" || modifier == "text" {
 		var args []any
 		var spNameCond string
 		if modifier == "text" {
@@ -2272,7 +2148,7 @@ func buildFilterLeafConditionWithAlias(expr FilterExpr, resTypeExpr, resIDExpr s
 		return existsSQL, args
 	}
 
-	if knownRefSearchParams[baseName] {
+	if baseCat == "reference" {
 		spIdx := startIdx + 1
 		args := []any{baseName}
 		var orConds []string
@@ -2305,7 +2181,7 @@ func buildFilterLeafConditionWithAlias(expr FilterExpr, resTypeExpr, resIDExpr s
 		return existsSQL, args
 	}
 
-	if knownURISearchParams[baseName] {
+	if baseCat == "uri" {
 		spIdx := startIdx + 1
 		args := []any{baseName}
 		var uConds []string
@@ -2416,7 +2292,7 @@ func buildFilterLeafConditionWithAlias(expr FilterExpr, resTypeExpr, resIDExpr s
 			} else if code == "" {
 				orConds = append(orConds, fmt.Sprintf("(ft.sp_system = $%d)", currIdx+1))
 				args = append(args, sys)
-			} else if isEnumTokenParam(baseName) {
+			} else if store.IsEnumTokenParam(baseName) {
 				normVal := strings.ToLower(strings.ReplaceAll(code, "_", "-"))
 				upperVal := strings.ToUpper(strings.ReplaceAll(code, "-", "_"))
 				orConds = append(orConds, fmt.Sprintf("((ft.sp_system = $%d OR ft.sp_system = '') AND ft.sp_value IN ($%d, $%d, $%d))",
@@ -2426,7 +2302,7 @@ func buildFilterLeafConditionWithAlias(expr FilterExpr, resTypeExpr, resIDExpr s
 				orConds = append(orConds, fmt.Sprintf("(ft.sp_system = $%d AND ft.sp_value = $%d)", currIdx+1, currIdx+2))
 				args = append(args, sys, code)
 			}
-		} else if isEnumTokenParam(baseName) {
+		} else if store.IsEnumTokenParam(baseName) {
 			normVal := strings.ToLower(strings.ReplaceAll(item, "_", "-"))
 			upperVal := strings.ToUpper(strings.ReplaceAll(item, "-", "_"))
 			orConds = append(orConds, fmt.Sprintf("(ft.sp_value IN ($%d, $%d, $%d))", currIdx+1, currIdx+2, currIdx+3))
@@ -3105,83 +2981,6 @@ func buildEverythingClinicalDateCond(start, end *time.Time, startArgIdx int) (st
 	return cond, args
 }
 
-var patientCompartmentTypes = map[string]bool{
-	"Account":                     true,
-	"AdverseEvent":                true,
-	"AllergyIntolerance":          true,
-	"Appointment":                 true,
-	"AppointmentResponse":         true,
-	"AuditEvent":                  true,
-	"Basic":                       true,
-	"BodyStructure":               true,
-	"CarePlan":                    true,
-	"CareTeam":                    true,
-	"ChargeItem":                  true,
-	"Claim":                       true,
-	"ClaimResponse":               true,
-	"ClinicalImpression":          true,
-	"Communication":               true,
-	"CommunicationRequest":        true,
-	"Composition":                 true,
-	"Condition":                   true,
-	"Consent":                     true,
-	"Coverage":                    true,
-	"CoverageEligibilityRequest":  true,
-	"CoverageEligibilityResponse": true,
-	"DetectedIssue":               true,
-	"Device":                      true,
-	"DeviceRequest":               true,
-	"DeviceUseStatement":          true,
-	"DiagnosticReport":            true,
-	"DocumentManifest":            true,
-	"DocumentReference":           true,
-	"Encounter":                   true,
-	"EnrollmentRequest":           true,
-	"EpisodeOfCare":               true,
-	"ExplanationOfBenefit":        true,
-	"FamilyMemberHistory":         true,
-	"Flag":                        true,
-	"Goal":                        true,
-	"ImagingStudy":                true,
-	"Immunization":                true,
-	"ImmunizationEvaluation":      true,
-	"ImmunizationRecommendation":  true,
-	"Invoice":                     true,
-	"List":                        true,
-	"MeasureReport":               true,
-	"Media":                       true,
-	"MedicationAdministration":    true,
-	"MedicationDispense":          true,
-	"MedicationRequest":           true,
-	"MedicationStatement":         true,
-	"MolecularSequence":           true,
-	"NutritionOrder":              true,
-	"Observation":                 true,
-	"PaymentNotice":               true,
-	"PaymentReconciliation":       true,
-	"Person":                      true,
-	"Procedure":                   true,
-	"Provenance":                  true,
-	"QuestionnaireResponse":       true,
-	"RelatedPerson":               true,
-	"RequestGroup":                true,
-	"ResearchSubject":             true,
-	"RiskAssessment":              true,
-	"Schedule":                    true,
-	"ServiceRequest":              true,
-	"Specimen":                    true,
-	"SupplyDelivery":              true,
-	"SupplyRequest":               true,
-	"Task":                        true,
-	"VisionPrescription":          true,
-}
-
-// IsPatientCompartmentResourceType returns true if the resource type is a clinical
-// resource scoped to the HL7 FHIR R4 Patient compartment (CompartmentDefinition-patient).
-func IsPatientCompartmentResourceType(resType string) bool {
-	return patientCompartmentTypes[resType]
-}
-
 // BelongsToPatientCompartment checks whether an existing resource in Postgres belongs
 // to the given patientID's compartment. If the resource does not exist in fhir_resource,
 // it returns (true, nil) so the caller can proceed to normal 404 or create-on-update handling.
@@ -3238,32 +3037,6 @@ func (s *Store) BelongsToPatientCompartment(ctx context.Context, tenantID, resTy
 		return false, err
 	}
 	return inCompartment, nil
-}
-
-// IndexesBelongToPatientCompartment verifies whether the extracted SearchIndexes of an incoming
-// resource link it to the expected patientID compartment.
-func IndexesBelongToPatientCompartment(resType, resID string, idx *SearchIndexes, patientID string) bool {
-	if strings.EqualFold(resType, "Patient") {
-		return resID == "" || resID == patientID
-	}
-	if !IsPatientCompartmentResourceType(resType) {
-		return true
-	}
-	if idx == nil {
-		return false
-	}
-	matchedOwnPatient := false
-	for _, ref := range idx.References {
-		if ref.TargetType == "Patient" || ref.TargetType == "" || ref.SpName == "patient" || ref.SpName == "subject" {
-			if ref.TargetID != "" && ref.TargetID != patientID {
-				return false
-			}
-			if ref.TargetID == patientID {
-				matchedOwnPatient = true
-			}
-		}
-	}
-	return matchedOwnPatient
 }
 
 // uriHierarchyAncestors computes all hierarchical ancestor URI strings for the FHIR :above modifier.
@@ -3323,35 +3096,22 @@ func missingTablesForParam(spName string) []string {
 	case "questionnaire", "instantiates-canonical":
 		return []string{"spidx_reference", "spidx_uri", "spidx_token"}
 	}
-	switch {
-	case knownURISearchParams[spName]:
+	switch store.SearchParamCategory(spName) {
+	case "uri":
 		return []string{"spidx_uri", "spidx_token"}
-	case knownStringSearchParams[spName]:
+	case "string":
 		return []string{"spidx_string"}
-	case knownDateSearchParams[spName]:
+	case "date":
 		return []string{"spidx_date"}
-	case knownQuantitySearchParams[spName]:
+	case "quantity":
 		return []string{"spidx_quantity"}
-	case knownRefSearchParams[spName]:
+	case "reference":
 		return []string{"spidx_reference"}
-	case knownTokenSearchParams[spName]:
+	case "token":
 		return []string{"spidx_token"}
 	default:
 		return []string{"spidx_token", "spidx_string", "spidx_date", "spidx_quantity", "spidx_reference", "spidx_uri"}
 	}
-}
-
-// PatientMatchCandidateParams specifies index-backed pre-filtering parameters
-// for Patient/$match and Patient/$member-match candidate retrieval.
-type PatientMatchCandidateParams struct {
-	TenantID            string
-	RestrictedPatientID string   // Optional: restricts to a single Patient ID when patient-scoped
-	ExtraCandidateIDs   []string // Optional: additional candidate Patient IDs (e.g. from matched Coverage beneficiaries)
-	Identifiers         []string // Optional: identifier values (case-insensitive)
-	Families            []string // Optional: normalized lowercase family names
-	Givens              []string // Optional: normalized lowercase given names (matched by prefix)
-	BirthDate           string   // Optional: YYYY-MM-DD birthDate
-	Limit               int
 }
 
 // SearchPatientMatchCandidates pre-filters Patient resources in SQL using spidx_token (identifier),
@@ -3464,135 +3224,6 @@ func (s *Store) SearchPatientMatchCandidates(ctx context.Context, params Patient
 		return nil, err
 	}
 	return matches, nil
-}
-
-// GraphLink represents a FHIR R4 GraphDefinition.link element.
-type GraphLink struct {
-	Path        string        `json:"path,omitempty"`
-	SliceName   string        `json:"sliceName,omitempty"`
-	Min         int           `json:"min,omitempty"`
-	Max         string        `json:"max,omitempty"`
-	Description string        `json:"description,omitempty"`
-	Target      []GraphTarget `json:"target,omitempty"`
-}
-
-// GraphTarget represents a FHIR R4 GraphDefinition.link.target element.
-type GraphTarget struct {
-	Type   string      `json:"type,omitempty"`
-	Params string      `json:"params,omitempty"`
-	Link   []GraphLink `json:"link,omitempty"`
-}
-
-// ResourceGraphParams specifies parameters for the FHIR R4 Resource/$graph operation.
-type ResourceGraphParams struct {
-	TenantID     string
-	ResourceType string
-	ResourceID   string
-	Links        []GraphLink // Optional GraphDefinition.link tree; if empty, uses DefaultGraphLinksForResource
-}
-
-// DefaultGraphLinksForResource returns the built-in US Core / FHIR R4 clinical GraphDefinition links
-// for the given starting resource type when no explicit GraphDefinition.link list is provided.
-func DefaultGraphLinksForResource(resType string) []GraphLink {
-	switch resType {
-	case "Patient":
-		return []GraphLink{
-			{
-				Path: "Patient.managingOrganization",
-				Target: []GraphTarget{
-					{Type: "Organization"},
-				},
-			},
-			{
-				Path: "Patient.generalPractitioner",
-				Target: []GraphTarget{
-					{Type: "Practitioner"},
-					{Type: "Organization"},
-				},
-			},
-			{
-				Target: []GraphTarget{
-					{
-						Type:   "Encounter",
-						Params: "patient={ref}",
-						Link: []GraphLink{
-							{
-								Path: "Encounter.participant.individual",
-								Target: []GraphTarget{
-									{Type: "Practitioner"},
-								},
-							},
-							{
-								Path: "Encounter.location.location",
-								Target: []GraphTarget{
-									{Type: "Location"},
-								},
-							},
-							{
-								Path: "Encounter.serviceProvider",
-								Target: []GraphTarget{
-									{Type: "Organization"},
-								},
-							},
-						},
-					},
-					{
-						Type:   "DiagnosticReport",
-						Params: "patient={ref}",
-						Link: []GraphLink{
-							{
-								Path: "DiagnosticReport.result",
-								Target: []GraphTarget{
-									{Type: "Observation"},
-								},
-							},
-						},
-					},
-					{
-						Type:   "Observation",
-						Params: "patient={ref}",
-						Link: []GraphLink{
-							{
-								Path: "Observation.specimen",
-								Target: []GraphTarget{
-									{Type: "Specimen"},
-								},
-							},
-						},
-					},
-					{
-						Params: "*={ref}",
-					},
-				},
-			},
-		}
-	case "Encounter":
-		return []GraphLink{
-			{
-				Target: []GraphTarget{
-					{
-						Params: "",
-					},
-					{
-						Params: "*={ref}",
-					},
-				},
-			},
-		}
-	default:
-		return []GraphLink{
-			{
-				Target: []GraphTarget{
-					{
-						Params: "",
-					},
-					{
-						Params: "*={ref}",
-					},
-				},
-			},
-		}
-	}
 }
 
 // ResourceGraph executes a FHIR R4 Resource/$graph traversal starting at (ResourceType, ResourceID)
@@ -3861,19 +3492,6 @@ func camelToKebab(s string) string {
 		}
 	}
 	return b.String()
-}
-
-// MetaCodingPair represents a distinct system|code pair from _tag or _security.
-type MetaCodingPair struct {
-	System string
-	Code   string
-}
-
-// AggregatedMeta contains distinct profiles, tags, and security labels across active resources.
-type AggregatedMeta struct {
-	Profiles []string
-	Tags     []MetaCodingPair
-	Security []MetaCodingPair
 }
 
 // AggregateMeta queries distinct _profile, _tag, and _security entries across all active

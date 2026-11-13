@@ -8,7 +8,7 @@ import (
 	"hegel.dev/go/hegel"
 
 	"github.com/flint-fhir/flint/pkg/audit"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 func TestProperty_OutcomeClassificationInvariance(t *testing.T) {
@@ -57,7 +57,7 @@ func TestProperty_InteractionClassificationAndFHIRSerialization(t *testing.T) {
 		}
 
 		outcome, desc := audit.ClassifyHTTPOutcome(status)
-		fhirRes := audit.ToFHIRResource(postgres.AuditRecord{
+		fhirRes := audit.ToFHIRResource(store.AuditRecord{
 			TenantID:      tenant,
 			AuditID:       "prop-audit-1",
 			Recorded:      time.Now().UTC(),
@@ -92,7 +92,7 @@ func TestProperty_ClassifyNeverPanicsOnArbitraryFuzz(t *testing.T) {
 		parts := strings.Split(strings.Trim(rawPath, "/"), "/")
 		act, sub, eType, eID, eVer := audit.ClassifyHTTPInteraction(method, parts, status)
 		out, desc := audit.ClassifyHTTPOutcome(status)
-		_ = audit.ToFHIRResource(postgres.AuditRecord{
+		_ = audit.ToFHIRResource(store.AuditRecord{
 			AuditID:       "fuzz",
 			Action:        act,
 			SubtypeCode:   sub,

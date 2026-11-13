@@ -10,7 +10,7 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/pkg/validation"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 const fuzzCanonicalPatientJSON = `{
@@ -129,15 +129,15 @@ func FuzzValidationAndDynamicExtraction(f *testing.F) {
 	descriptors := fhirutil.AllR4ResourceDescriptors()
 	patMD := descriptors["Patient"]
 	obsMD := descriptors["Observation"]
-	patExtractor := postgres.NewDynamicResourceExtractor("Patient", patMD)
-	obsExtractor := postgres.NewDynamicResourceExtractor("Observation", obsMD)
+	patExtractor := store.NewDynamicResourceExtractor("Patient", patMD)
+	obsExtractor := store.NewDynamicResourceExtractor("Observation", obsMD)
 
 	f.Fuzz(func(t *testing.T, rawJSON string) {
 		payload := []byte(rawJSON)
 		for _, spec := range []struct {
 			resType   string
 			md        func()
-			extractor postgres.IndexExtractorFunc
+			extractor store.IndexExtractorFunc
 		}{
 			{resType: "Patient", extractor: patExtractor},
 			{resType: "Observation", extractor: obsExtractor},

@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/flint-fhir/flint/pkg/auth"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 type subscriptionEventRecord struct {
@@ -234,7 +234,7 @@ func (s *Server) validateSubscriptionCriteria(criteria string) error {
 		if err != nil {
 			return fmt.Errorf("invalid subscription criteria query %q: %w", criteria, err)
 		}
-		if err := postgres.ValidateSearchQuery(vals); err != nil {
+		if err := store.ValidateSearchQuery(vals); err != nil {
 			return fmt.Errorf("invalid subscription criteria %q: %w", criteria, err)
 		}
 	}
@@ -247,7 +247,7 @@ func subscriptionIsExpired(subMap map[string]any, now time.Time) bool {
 	if endRaw == "" {
 		return false
 	}
-	dOp, err := postgres.ParseDateOp(endRaw)
+	dOp, err := store.ParseDateOp(endRaw)
 	if err != nil {
 		return false
 	}
@@ -283,12 +283,12 @@ func normalizeSubscriptionOnWrite(resType string, rawJSON []byte) []byte {
 
 // dispatchSubscriptions evaluates active FHIR R4 Subscriptions in tenant against
 // a newly created or updated resource and dispatches rest-hook notifications asynchronously.
-func (s *Server) dispatchSubscriptions(ctx context.Context, tenant, resType, resID string, resourceProto []byte, resVersion int, lastUpdated time.Time, idx *postgres.SearchIndexes) {
+func (s *Server) dispatchSubscriptions(ctx context.Context, tenant, resType, resID string, resourceProto []byte, resVersion int, lastUpdated time.Time, idx *store.SearchIndexes) {
 	if s.store == nil || resType == "Subscription" || resType == "AuditEvent" {
 		return
 	}
 
-	sr, err := s.store.Search(ctx, postgres.SearchParams{
+	sr, err := s.store.Search(ctx, store.SearchParams{
 		TenantID: tenant,
 		ResType:  "Subscription",
 		Tokens:   map[string]string{"status": "active"},
@@ -398,7 +398,7 @@ func (s *Server) dispatchSubscriptions(ctx context.Context, tenant, resType, res
 	}
 }
 
-func subscriptionMatchesResourceWithMeta(criteria, resType, resID string, lastUpdated time.Time, idx *postgres.SearchIndexes) bool {
+func subscriptionMatchesResourceWithMeta(criteria, resType, resID string, lastUpdated time.Time, idx *store.SearchIndexes) bool {
 	criteria = strings.TrimSpace(criteria)
 	if criteria == "" {
 		return false
@@ -419,7 +419,7 @@ func subscriptionMatchesResourceWithMeta(criteria, resType, resID string, lastUp
 	if err != nil {
 		return false
 	}
-	sp := postgres.BuildSearchParamsFromQuery("", resType, vals)
+	sp := store.BuildSearchParamsFromQuery("", resType, vals)
 
 	if sp.ID != "" {
 		matchedID := false
@@ -447,7 +447,7 @@ func subscriptionMatchesResourceWithMeta(criteria, resType, resID string, lastUp
 	}
 
 	if idx == nil {
-		idx = &postgres.SearchIndexes{}
+		idx = &store.SearchIndexes{}
 	}
 
 	// 1. Missing (:missing=true/false)
@@ -592,9 +592,9 @@ func subscriptionMatchesResourceWithMeta(criteria, resType, resID string, lastUp
 	// 5. Date filters (supports eq, ne, lt, eb, le, gt, sa, ge, ap and multi-bound ranges)
 	dateFilters := sp.DateFilters
 	if len(dateFilters) == 0 && len(sp.Dates) > 0 {
-		dateFilters = make(map[string][]postgres.DateOp, len(sp.Dates))
+		dateFilters = make(map[string][]store.DateOp, len(sp.Dates))
 		for k, v := range sp.Dates {
-			dateFilters[k] = []postgres.DateOp{v}
+			dateFilters[k] = []store.DateOp{v}
 		}
 	}
 	for spName, ops := range dateFilters {
@@ -626,9 +626,9 @@ func subscriptionMatchesResourceWithMeta(criteria, resType, resID string, lastUp
 	// 6. Quantity filters (supports eq, ne, lt, le, gt, ge + system/code and multi-bound ranges)
 	quantityFilters := sp.QuantityFilters
 	if len(quantityFilters) == 0 && len(sp.Quantities) > 0 {
-		quantityFilters = make(map[string][]postgres.QuantityOp, len(sp.Quantities))
+		quantityFilters = make(map[string][]store.QuantityOp, len(sp.Quantities))
 		for k, v := range sp.Quantities {
-			quantityFilters[k] = []postgres.QuantityOp{v}
+			quantityFilters[k] = []store.QuantityOp{v}
 		}
 	}
 	for spName, ops := range quantityFilters {
@@ -741,7 +741,7 @@ func splitSubParamModifier(spKey string) (string, string) {
 	return spKey, ""
 }
 
-func subscriptionIdxHasParam(idx *postgres.SearchIndexes, spName string) bool {
+func subscriptionIdxHasParam(idx *store.SearchIndexes, spName string) bool {
 	if idx == nil {
 		return false
 	}
@@ -778,7 +778,7 @@ func subscriptionIdxHasParam(idx *postgres.SearchIndexes, spName string) bool {
 	return false
 }
 
-func matchSubscriptionToken(tokens []postgres.SpidxToken, baseName, want string) bool {
+func matchSubscriptionToken(tokens []store.SpidxToken, baseName, want string) bool {
 	wantSys := ""
 	wantCode := want
 	hasPipe := false
@@ -812,7 +812,7 @@ func matchSubscriptionToken(tokens []postgres.SpidxToken, baseName, want string)
 	return false
 }
 
-func matchSubscriptionDateOp(spLow, spHigh time.Time, op postgres.DateOp) bool {
+func matchSubscriptionDateOp(spLow, spHigh time.Time, op store.DateOp) bool {
 	low := op.Value
 	high := op.High
 	if high.IsZero() || !high.After(low) {
@@ -854,7 +854,7 @@ func matchSubscriptionDateOp(spLow, spHigh time.Time, op postgres.DateOp) bool {
 	}
 }
 
-func matchSubscriptionQuantityOp(qt postgres.SpidxQuantity, op postgres.QuantityOp) bool {
+func matchSubscriptionQuantityOp(qt store.SpidxQuantity, op store.QuantityOp) bool {
 	if op.System != "" && qt.SpSystem != op.System {
 		return false
 	}
@@ -877,7 +877,7 @@ func matchSubscriptionQuantityOp(qt postgres.SpidxQuantity, op postgres.Quantity
 	}
 }
 
-func matchSubscriptionCompositeTokenQuantity(idx *postgres.SearchIndexes, cp postgres.CompositeTokenQuantityParam) bool {
+func matchSubscriptionCompositeTokenQuantity(idx *store.SearchIndexes, cp store.CompositeTokenQuantityParam) bool {
 	matchComp := func() bool {
 		compKey := "comp-cvq:" + cp.TokenCode
 		if cp.TokenSystem != "" {
@@ -1086,7 +1086,7 @@ func (s *Server) handleSubscriptionStatus(w http.ResponseWriter, r *http.Request
 				fmt.Sprintf("Subscription/%s not found", subID))
 			return
 		}
-		if errors.Is(err, postgres.ErrResourceDeleted) {
+		if errors.Is(err, store.ErrResourceDeleted) {
 			writeOperationOutcome(w, http.StatusGone, "deleted",
 				fmt.Sprintf("Subscription/%s has been deleted", subID))
 			return
@@ -1104,7 +1104,7 @@ func (s *Server) handleSubscriptionStatus(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+	sr, err := s.store.Search(r.Context(), store.SearchParams{
 		TenantID: tenant,
 		ResType:  "Subscription",
 		Count:    100,
@@ -1361,7 +1361,7 @@ func (s *Server) handleSubscriptionEvents(w http.ResponseWriter, r *http.Request
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Subscription/%s not found", subID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("Subscription/%s has been deleted", subID))
 		return
 	}

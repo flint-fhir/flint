@@ -26,7 +26,7 @@ import (
 	automq "github.com/flint-fhir/flint/pkg/cdc"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/pkg/validation"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 type importJob struct {
@@ -415,7 +415,7 @@ func (s *Server) importSingleNDJSONResource(ctx context.Context, tenant, expecte
 		return "", "", fmt.Errorf("marshal %s proto: %v", resType, err)
 	}
 
-	var idx *postgres.SearchIndexes
+	var idx *store.SearchIndexes
 	if extractor, ok := s.extractors[resType]; ok {
 		idx, _ = extractor(tenant, resID, protoBytes)
 	}
@@ -423,7 +423,7 @@ func (s *Server) importSingleNDJSONResource(ctx context.Context, tenant, expecte
 		s.enrichProvenancePatientIndex(ctx, tenant, resID, idx)
 	}
 
-	rec, err := s.store.WriteResourceWithMeta(ctx, postgres.ResourceInput{
+	rec, err := s.store.WriteResourceWithMeta(ctx, store.ResourceInput{
 		TenantID:      tenant,
 		ResType:       resType,
 		ResID:         resID,
@@ -577,7 +577,7 @@ func (s *Server) handlePatientPurge(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patientID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("Patient/%s has already been deleted", patientID))
 		return
 	}
@@ -634,7 +634,7 @@ func (s *Server) handleExpunge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	q := r.URL.Query()
-	params := postgres.ExpungeParams{
+	params := store.ExpungeParams{
 		TenantID:                tenant,
 		ResType:                 resType,
 		ResID:                   resID,
@@ -820,11 +820,11 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("%s/%s not found", resType, resID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) && toVerStr == "" {
+	if errors.Is(err, store.ErrResourceDeleted) && toVerStr == "" {
 		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("%s/%s has been deleted", resType, resID))
 		return
 	}
-	if err != nil && !errors.Is(err, postgres.ErrResourceDeleted) {
+	if err != nil && !errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read resource for $diff")
 		return
 	}
@@ -854,7 +854,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("%s/%s/_history/%d not found", resType, resID, fromVer))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted",
 			fmt.Sprintf("%s/%s/_history/%d was a deletion", resType, resID, fromVer))
 		return
@@ -870,7 +870,7 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("%s/%s/_history/%d not found", resType, resID, toVer))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted",
 			fmt.Sprintf("%s/%s/_history/%d was a deletion", resType, resID, toVer))
 		return

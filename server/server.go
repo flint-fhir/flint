@@ -56,7 +56,6 @@ import (
 	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/store"
-	"github.com/flint-fhir/flint/store/postgres"
 )
 
 // Version is the semantic version of the Flint FHIR R4 API & Interoperability engine.
@@ -73,7 +72,7 @@ type Server struct {
 	// protoRegistry maps FHIR resource type names to proto message descriptors.
 	// Used to unmarshal proto bytes back to proto messages for JSON conversion.
 	protoRegistry              map[string]protoreflect.MessageDescriptor
-	extractors                 map[string]postgres.IndexExtractorFunc
+	extractors                 map[string]store.IndexExtractorFunc
 	smartConfig                *SMARTConfig
 	tokenValidator             auth.TokenValidator
 	devAuth                    *auth.MockTokenValidator
@@ -128,7 +127,7 @@ func New(st store.Store, logger *slog.Logger) *Server {
 		analyticalStore: analytical,
 		logger:          logger,
 		protoRegistry:   make(map[string]protoreflect.MessageDescriptor),
-		extractors:      postgres.DefaultIndexExtractors(),
+		extractors:      store.DefaultIndexExtractors(),
 		devAuth:         devAuth,
 		oauthCodes:      make(map[string]authCodeEntry),
 		refreshTokens:   make(map[string]refreshTokenEntry),
@@ -270,7 +269,7 @@ func (s *Server) RegisterResourceType(resType string, msg proto.Message) {
 }
 
 // RegisterIndexExtractor registers a search index extractor function for a resource type.
-func (s *Server) RegisterIndexExtractor(resType string, fn postgres.IndexExtractorFunc) {
+func (s *Server) RegisterIndexExtractor(resType string, fn store.IndexExtractorFunc) {
 	s.extractors[resType] = fn
 }
 
@@ -2681,9 +2680,9 @@ func (s *Server) buildFHIRRouter() http.Handler {
 						}
 					}
 				}
-				if isGetOrHead && postgres.IsCompartmentType(parts[3]) && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" {
+				if isGetOrHead && store.IsCompartmentType(parts[3]) && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" {
 					r.SetPathValue("tenant", parts[2])
-					r.SetPathValue("compartmentType", postgres.CanonicalCompartmentType(parts[3]))
+					r.SetPathValue("compartmentType", store.CanonicalCompartmentType(parts[3]))
 					r.SetPathValue("compartmentId", parts[4])
 					r.SetPathValue("patientId", parts[4])
 					r.SetPathValue("resourceType", parts[5])
@@ -2692,9 +2691,9 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				}
 			}
 			if len(parts) == 7 && parts[0] == "fhir" && parts[1] == "r4" {
-				if r.Method == http.MethodPost && postgres.IsCompartmentType(parts[3]) && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" && parts[6] == "_search" {
+				if r.Method == http.MethodPost && store.IsCompartmentType(parts[3]) && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" && parts[6] == "_search" {
 					r.SetPathValue("tenant", parts[2])
-					r.SetPathValue("compartmentType", postgres.CanonicalCompartmentType(parts[3]))
+					r.SetPathValue("compartmentType", store.CanonicalCompartmentType(parts[3]))
 					r.SetPathValue("compartmentId", parts[4])
 					r.SetPathValue("patientId", parts[4])
 					r.SetPathValue("resourceType", parts[5])
@@ -2721,9 +2720,9 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("%s/%s not found", resType, resID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		if rec != nil && rec.ResVersion > 0 {
-			w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+			w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 		}
 		writeOperationOutcome(w, http.StatusGone, "deleted",
 			fmt.Sprintf("%s/%s has been deleted", resType, resID))
@@ -2761,7 +2760,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", protoCT)
 		w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
 		w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
-		w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+		w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 		w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 		if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
 			return
@@ -2783,7 +2782,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		}
 		projected := applySummaryOrElements(resourceMap, summary, elements)
 		if okProto, _ := wantsProtoResponse(r); okProto {
-			w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+			w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 			w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 			if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
 				return
@@ -2818,7 +2817,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 								}
 							}
 							w.Header().Set("Content-Type", ctTrim)
-							w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+							w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 							w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 							if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
 								return
@@ -2842,7 +2841,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+	w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 	if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
 		return
@@ -2870,7 +2869,7 @@ func checkConditionalReadNotModified(w http.ResponseWriter, r *http.Request, ver
 					w.WriteHeader(http.StatusNotModified)
 					return true
 				}
-				if v, err := postgres.ParseETagVersion(cand); err == nil && v == version {
+				if v, err := store.ParseETagVersion(cand); err == nil && v == version {
 					w.WriteHeader(http.StatusNotModified)
 					return true
 				}
@@ -2932,9 +2931,9 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("%s/%s/_history/%d not found", resType, resID, version))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		if rec != nil && rec.ResVersion > 0 {
-			w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+			w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 		}
 		writeOperationOutcome(w, http.StatusGone, "deleted",
 			fmt.Sprintf("%s/%s/_history/%d was a deletion", resType, resID, version))
@@ -2972,7 +2971,7 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", protoCT)
 		w.Header().Set("X-Flint-Wire-Format", "google.fhir.r4.proto3")
 		w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
-		w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+		w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 		w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 		if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
 			return
@@ -2994,7 +2993,7 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 		}
 		projected := applySummaryOrElements(resourceMap, summary, elements)
 		if okProto, _ := wantsProtoResponse(r); okProto {
-			w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+			w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 			w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 			if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
 				return
@@ -3029,7 +3028,7 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 								}
 							}
 							w.Header().Set("Content-Type", ctTrim)
-							w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+							w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 							w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 							if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
 								return
@@ -3053,7 +3052,7 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+	w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 	if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
 		return
@@ -3075,7 +3074,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 	count := 100
 	offset := 0
 	var since *time.Time
-	var atOps []postgres.DateOp
+	var atOps []store.DateOp
 	var listIDs []string
 	summary := strings.TrimSpace(q.Get("_summary"))
 	switch summary {
@@ -3113,7 +3112,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		offset = n
 	}
 	if sinceRaw := strings.TrimSpace(q.Get("_since")); sinceRaw != "" {
-		dOp, err := postgres.ParseDateOp(sinceRaw)
+		dOp, err := store.ParseDateOp(sinceRaw)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid _since parameter %q: %v", sinceRaw, err))
@@ -3128,7 +3127,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 			if trimmed == "" {
 				continue
 			}
-			dOp, err := postgres.ParseDateOp(trimmed)
+			dOp, err := store.ParseDateOp(trimmed)
 			if err != nil {
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 					fmt.Sprintf("invalid _at parameter %q: %v", trimmed, err))
@@ -3153,7 +3152,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	records, total, err := s.store.ListHistoryWithParams(r.Context(), postgres.HistoryParams{
+	records, total, err := s.store.ListHistoryWithParams(r.Context(), store.HistoryParams{
 		TenantID: tenant,
 		ResType:  resType,
 		ResID:    resID,
@@ -3183,7 +3182,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		} else {
 			patientRestricted := auth.IsPatientRestricted(secCtx)
 			allowedPatientID := cleanID(secCtx.GetPatientId())
-			filtered := make([]postgres.ResourceRecord, 0, len(records))
+			filtered := make([]store.ResourceRecord, 0, len(records))
 			for _, rec := range records {
 				rt := rec.ResType
 				if rt == "" {
@@ -3197,10 +3196,10 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 						if cleanID(rec.ResID) != allowedPatientID {
 							continue
 						}
-					} else if postgres.IsPatientCompartmentResourceType(rt) {
+					} else if store.IsPatientCompartmentResourceType(rt) {
 						if extractor, ok := s.extractors[rt]; ok && len(rec.ResourceProto) > 0 {
 							idx, err := extractor(tenant, rec.ResID, rec.ResourceProto)
-							if err != nil || !postgres.IndexesBelongToPatientCompartment(rt, rec.ResID, idx, allowedPatientID) {
+							if err != nil || !store.IndexesBelongToPatientCompartment(rt, rec.ResID, idx, allowedPatientID) {
 								continue
 							}
 						} else if s.store != nil {
@@ -3310,7 +3309,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 				"response": map[string]any{
 					"status":       status,
 					"location":     fmt.Sprintf("%s/%s/_history/%d", rt, rid, rec.ResVersion),
-					"etag":         postgres.FormatETag(rec.ResVersion),
+					"etag":         store.FormatETag(rec.ResVersion),
 					"lastModified": rec.LastUpdated.UTC().Format(time.RFC3339),
 				},
 			}
@@ -3428,7 +3427,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	s.syncSearchParameterOnWrite(resType, resID, body)
 
 	// Extract search indexes if available
-	var idx *postgres.SearchIndexes
+	var idx *store.SearchIndexes
 	if extractor, ok := s.extractors[resType]; ok {
 		var extractErr error
 		idx, extractErr = extractor(tenant, resID, protoBytes)
@@ -3444,8 +3443,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Enforce patient compartment isolation on incoming resource payload
 	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
-		if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
-			if !postgres.IndexesBelongToPatientCompartment(resType, resID, idx, cleanID(secCtx.GetPatientId())) {
+		if strings.EqualFold(resType, "Patient") || store.IsPatientCompartmentResourceType(resType) {
+			if !store.IndexesBelongToPatientCompartment(resType, resID, idx, cleanID(secCtx.GetPatientId())) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 					fmt.Sprintf("patient-scoped token (%s) cannot create %s outside patient compartment",
 						secCtx.GetPatientId(), resType))
@@ -3454,7 +3453,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	input := postgres.ResourceInput{
+	input := store.ResourceInput{
 		TenantID:      tenant,
 		ResType:       resType,
 		ResID:         resID,
@@ -3465,7 +3464,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Evaluate Conditional Create (If-None-Exist header) atomically per FHIR R4 3.1.0.5.1
 	if ifNoneExist := strings.TrimSpace(r.Header.Get("If-None-Exist")); ifNoneExist != "" && s.store != nil {
-		condParams, err := postgres.ParseIfNoneExist(tenant, resType, ifNoneExist)
+		condParams, err := store.ParseIfNoneExist(tenant, resType, ifNoneExist)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
 			return
@@ -3478,11 +3477,11 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 
 		rec, created, err := s.store.ConditionalCreateResource(r.Context(), input, condParams)
-		if errors.Is(err, postgres.ErrPreconditionFailed) {
+		if errors.Is(err, store.ErrPreconditionFailed) {
 			writeOperationOutcome(w, http.StatusPreconditionFailed, "duplicate", err.Error())
 			return
 		}
-		if errors.Is(err, postgres.ErrResourceAlreadyExists) {
+		if errors.Is(err, store.ErrResourceAlreadyExists) {
 			writeOperationOutcome(w, http.StatusConflict, "duplicate", err.Error())
 			return
 		}
@@ -3503,7 +3502,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			s.recordAutoProvenance(r, w, tenant, resType, rec.ResID, rec.ResVersion, idx, provSpec)
 		}
 		w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, rec.ResID))
-		w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+		w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 		w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 		status := http.StatusOK
 		if created {
@@ -3515,7 +3514,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Store in Postgres (CreateOnly = true ensures POST does not overwrite existing active resources)
 	rec, err := s.store.WriteResourceWithMeta(r.Context(), input)
-	if errors.Is(err, postgres.ErrResourceAlreadyExists) {
+	if errors.Is(err, store.ErrResourceAlreadyExists) {
 		writeOperationOutcome(w, http.StatusConflict, "duplicate", err.Error())
 		return
 	}
@@ -3537,12 +3536,12 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Return the serialized resource (or Prefer representation/minimal/OperationOutcome) with 201 Created, Location, ETag, and Last-Modified
 	w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, resID))
-	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+	w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 	s.writeResourceWriteResponse(w, r, http.StatusCreated, md, resType, resID, rec.ResVersion, rec.LastUpdated, rec.ResourceProto, body)
 }
 
-func validateAndScopeIfNoneExistForPatient(condParams *postgres.SearchParams, resType, allowedPatientID, rawPatientID string) error {
+func validateAndScopeIfNoneExistForPatient(condParams *store.SearchParams, resType, allowedPatientID, rawPatientID string) error {
 	if allowedPatientID == "" {
 		return fmt.Errorf("patient-scoped token is missing required patient_id claim")
 	}
@@ -3557,7 +3556,7 @@ func validateAndScopeIfNoneExistForPatient(condParams *postgres.SearchParams, re
 		condParams.ID = allowedPatientID
 		return nil
 	}
-	if postgres.IsPatientCompartmentResourceType(resType) {
+	if store.IsPatientCompartmentResourceType(resType) {
 		if condParams.References == nil {
 			condParams.References = make(map[string]string)
 		}
@@ -3615,7 +3614,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	expectedVersion := 0
 	if ifMatch := strings.TrimSpace(r.Header.Get("If-Match")); ifMatch != "" {
-		v, err := postgres.ParseETagVersion(ifMatch)
+		v, err := store.ParseETagVersion(ifMatch)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid If-Match header %q", ifMatch))
@@ -3696,7 +3695,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	s.syncSearchParameterOnWrite(resType, resID, body)
 
-	var idx *postgres.SearchIndexes
+	var idx *store.SearchIndexes
 	if extractor, ok := s.extractors[resType]; ok {
 		var extractErr error
 		idx, extractErr = extractor(tenant, resID, protoBytes)
@@ -3712,8 +3711,8 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	// Enforce patient compartment isolation on incoming resource payload
 	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
-		if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
-			if !postgres.IndexesBelongToPatientCompartment(resType, resID, idx, cleanID(secCtx.GetPatientId())) {
+		if strings.EqualFold(resType, "Patient") || store.IsPatientCompartmentResourceType(resType) {
+			if !store.IndexesBelongToPatientCompartment(resType, resID, idx, cleanID(secCtx.GetPatientId())) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 					fmt.Sprintf("patient-scoped token (%s) cannot update %s/%s outside patient compartment",
 						secCtx.GetPatientId(), resType, resID))
@@ -3722,7 +3721,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rec, err := s.store.WriteResourceWithMeta(r.Context(), postgres.ResourceInput{
+	rec, err := s.store.WriteResourceWithMeta(r.Context(), store.ResourceInput{
 		TenantID:        tenant,
 		ResType:         resType,
 		ResID:           resID,
@@ -3730,7 +3729,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		SearchIndexes:   idx,
 		ExpectedVersion: expectedVersion,
 	})
-	if errors.Is(err, postgres.ErrVersionConflict) {
+	if errors.Is(err, store.ErrVersionConflict) {
 		writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", err.Error())
 		return
 	}
@@ -3750,7 +3749,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	s.dispatchSubscriptions(r.Context(), tenant, resType, resID, protoBytes, rec.ResVersion, rec.LastUpdated, idx)
 	s.recordAutoProvenance(r, w, tenant, resType, resID, rec.ResVersion, idx, provSpec)
 
-	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+	w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 	status := http.StatusOK
 	if rec.Created {
@@ -3769,7 +3768,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	expectedVersion := 0
 	if ifMatch := strings.TrimSpace(r.Header.Get("If-Match")); ifMatch != "" {
-		v, err := postgres.ParseETagVersion(ifMatch)
+		v, err := store.ParseETagVersion(ifMatch)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid If-Match header %q", ifMatch))
@@ -3779,7 +3778,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rec, err := s.store.DeleteResourceWithExpectedVersion(r.Context(), tenant, resType, resID, expectedVersion)
-	if errors.Is(err, postgres.ErrVersionConflict) {
+	if errors.Is(err, store.ErrVersionConflict) {
 		writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", err.Error())
 		return
 	}
@@ -3790,7 +3789,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	if rec != nil && rec.ResVersion > 0 {
 		s.syncSearchParameterOnDelete(resType, resID)
-		w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+		w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 		s.publishCDC(r.Context(), automq.Message{
 			TenantID: tenant,
 			ResType:  resType,
@@ -4039,7 +4038,7 @@ func appendProtoBundleLinks(bundleMsg protoreflect.Message, links []map[string]s
 
 // buildProtoSearchSetBundle constructs a binary google.fhir.r4.core.Bundle (searchset) directly
 // from stored ResourceProto wire bytes using protoreflect without any JSON or map[string]any conversion.
-func (s *Server) buildProtoSearchSetBundle(sr *postgres.SearchResults, params postgres.SearchParams, links []map[string]string) ([]byte, error) {
+func (s *Server) buildProtoSearchSetBundle(sr *store.SearchResults, params store.SearchParams, links []map[string]string) ([]byte, error) {
 	bundleDesc := fhirutil.BundleDescriptor()
 	if bundleDesc == nil {
 		return nil, fmt.Errorf("bundle descriptor not available")
@@ -4080,7 +4079,7 @@ func (s *Server) buildProtoSearchSetBundle(sr *postgres.SearchResults, params po
 
 // buildProtoHistoryBundle constructs a binary google.fhir.r4.core.Bundle (history) directly
 // from stored ResourceProto wire bytes using protoreflect without any JSON or map[string]any conversion.
-func (s *Server) buildProtoHistoryBundle(resType, resID string, records []postgres.ResourceRecord, total int, links []map[string]string, summary string) ([]byte, error) {
+func (s *Server) buildProtoHistoryBundle(resType, resID string, records []store.ResourceRecord, total int, links []map[string]string, summary string) ([]byte, error) {
 	bundleDesc := fhirutil.BundleDescriptor()
 	if bundleDesc == nil {
 		return nil, fmt.Errorf("bundle descriptor not available")
@@ -4123,7 +4122,7 @@ func (s *Server) buildProtoHistoryBundle(resType, resID string, records []postgr
 					respMsg := entryMsg.Mutable(respFD).Message()
 					setProtoStringWrapper(respMsg, "status", status)
 					setProtoStringWrapper(respMsg, "location", fmt.Sprintf("%s/%s/_history/%d", rt, rid, rec.ResVersion))
-					setProtoStringWrapper(respMsg, "etag", postgres.FormatETag(rec.ResVersion))
+					setProtoStringWrapper(respMsg, "etag", store.FormatETag(rec.ResVersion))
 					setProtoInstantField(respMsg, "last_modified", rec.LastUpdated)
 				}
 				if !rec.IsDeleted && len(rec.ResourceProto) > 0 {
@@ -4397,7 +4396,7 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("%s/%s not found", resType, resID))
 			return
 		}
-		if errors.Is(err, postgres.ErrResourceDeleted) {
+		if errors.Is(err, store.ErrResourceDeleted) {
 			writeValidateErrorOutcome(w, r, http.StatusGone, "deleted",
 				fmt.Sprintf("%s/%s has been deleted", resType, resID))
 			return
@@ -4495,7 +4494,7 @@ func (s *Server) handleSearchAuditEvents(w http.ResponseWriter, r *http.Request)
 	tenant := r.PathValue("tenant")
 	q := r.URL.Query()
 
-	params := postgres.AuditQueryParams{
+	params := store.AuditQueryParams{
 		TenantID:     tenant,
 		Action:       q.Get("action"),
 		SubtypeCode:  q.Get("subtype"),
@@ -4542,7 +4541,7 @@ func (s *Server) handleSearchAuditEvents(w http.ResponseWriter, r *http.Request)
 		params.Offset = n
 	}
 
-	var records []postgres.AuditRecord
+	var records []store.AuditRecord
 	var total int
 	if s.auditRecorder != nil {
 		var err error
@@ -4579,11 +4578,11 @@ func (s *Server) handleSearchAuditEvents(w http.ResponseWriter, r *http.Request)
 // per HIPAA 45 CFR §164.312(b) and ONC §170.315(d)(2)/(d)(3) tamper-evident audit log verification.
 func (s *Server) handleAuditVerifyIntegrity(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
-	var records []postgres.AuditRecord
+	var records []store.AuditRecord
 	var total int
 	if s.auditRecorder != nil {
 		var err error
-		records, total, err = s.auditRecorder.Query(r.Context(), postgres.AuditQueryParams{
+		records, total, err = s.auditRecorder.Query(r.Context(), store.AuditQueryParams{
 			TenantID: tenant,
 			Count:    1000,
 		})
@@ -4820,12 +4819,12 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 				fmt.Sprintf("invalid query in _typeFilter %q", tf))
 			return
 		}
-		if err := postgres.ValidateSearchQuery(qVals); err != nil {
+		if err := store.ValidateSearchQuery(qVals); err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid _typeFilter %q: %v", tf, err))
 			return
 		}
-		sp := postgres.BuildSearchParamsFromQuery(tenant, rt, qVals)
+		sp := store.BuildSearchParamsFromQuery(tenant, rt, qVals)
 		sp.Count = 10000
 		parsedTypeFilters = append(parsedTypeFilters, exportTypeFilter{
 			resType: rt,
@@ -4909,7 +4908,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 
 	var sinceTime *time.Time
 	if sinceRaw != "" {
-		dOp, err := postgres.ParseDateOp(sinceRaw)
+		dOp, err := store.ParseDateOp(sinceRaw)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid _since parameter %q: %v", sinceRaw, err))
@@ -4921,7 +4920,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 
 	var untilTime *time.Time
 	if untilRaw != "" {
-		dOp, err := postgres.ParseDateOp(untilRaw)
+		dOp, err := store.ParseDateOp(untilRaw)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid _until parameter %q: %v", untilRaw, err))
@@ -4941,7 +4940,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 
 	var startTime *time.Time
 	if startRaw != "" {
-		dOp, err := postgres.ParseDateOp(startRaw)
+		dOp, err := store.ParseDateOp(startRaw)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid start parameter %q: %v", startRaw, err))
@@ -4953,7 +4952,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 
 	var endTime *time.Time
 	if endRaw != "" {
-		dOp, err := postgres.ParseDateOp(endRaw)
+		dOp, err := store.ParseDateOp(endRaw)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid end parameter %q: %v", endRaw, err))
@@ -4992,7 +4991,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		offset = n
 	}
 
-	var sr *postgres.SearchResults
+	var sr *store.SearchResults
 	var err error
 	targetLabel := "Patient"
 	if strings.EqualFold(resType, "Group") {
@@ -5003,7 +5002,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 				fmt.Sprintf("Group/%s not found", resID))
 			return
 		}
-		if errors.Is(gErr, postgres.ErrResourceDeleted) {
+		if errors.Is(gErr, store.ErrResourceDeleted) {
 			writeOperationOutcome(w, http.StatusGone, "deleted",
 				fmt.Sprintf("Group/%s has been deleted", resID))
 			return
@@ -5013,7 +5012,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to assemble Group/$everything")
 			return
 		}
-		sr, err = s.store.GroupEverything(r.Context(), postgres.GroupEverythingParams{
+		sr, err = s.store.GroupEverything(r.Context(), store.GroupEverythingParams{
 			TenantID:      tenant,
 			GroupID:       resID,
 			PatientIDs:    groupPatIDs,
@@ -5029,7 +5028,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		})
 	} else if strings.EqualFold(resType, "Encounter") {
 		targetLabel = "Encounter"
-		sr, err = s.store.EncounterEverything(r.Context(), postgres.EncounterEverythingParams{
+		sr, err = s.store.EncounterEverything(r.Context(), store.EncounterEverythingParams{
 			TenantID:      tenant,
 			EncounterID:   resID,
 			ResourceTypes: resourceTypes,
@@ -5041,7 +5040,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 			Offset:        offset,
 		})
 	} else {
-		sr, err = s.store.PatientEverything(r.Context(), postgres.PatientEverythingParams{
+		sr, err = s.store.PatientEverything(r.Context(), store.PatientEverythingParams{
 			TenantID:      tenant,
 			PatientID:     resID,
 			ResourceTypes: resourceTypes,
@@ -5058,7 +5057,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 			fmt.Sprintf("%s/%s not found", targetLabel, resID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted",
 			fmt.Sprintf("%s/%s has been deleted", targetLabel, resID))
 		return
@@ -5079,7 +5078,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		}
 		removed := 0
 		if len(sr.Matches) > 0 {
-			filteredMatches := make([]postgres.SearchResult, 0, len(sr.Matches))
+			filteredMatches := make([]store.SearchResult, 0, len(sr.Matches))
 			for _, m := range sr.Matches {
 				if matchesExportTypeFilter(typeFilterAllowed, m.ResType, m.ResID) {
 					filteredMatches = append(filteredMatches, m)
@@ -5090,7 +5089,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 			sr.Matches = filteredMatches
 		}
 		if len(sr.Includes) > 0 {
-			filteredIncludes := make([]postgres.SearchResult, 0, len(sr.Includes))
+			filteredIncludes := make([]store.SearchResult, 0, len(sr.Includes))
 			for _, inc := range sr.Includes {
 				if matchesExportTypeFilter(typeFilterAllowed, inc.ResType, inc.ResID) {
 					filteredIncludes = append(filteredIncludes, inc)
@@ -5113,7 +5112,7 @@ func (s *Server) handlePatientEverything(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	s.writeSearchSetBundleWithOpts(w, r, sr, postgres.SearchParams{
+	s.writeSearchSetBundleWithOpts(w, r, sr, store.SearchParams{
 		Count:    count,
 		Offset:   offset,
 		ResType:  "$everything",
@@ -5180,7 +5179,7 @@ func (s *Server) resourceSatisfiesScopeConstraints(tenant, resType, resID string
 // across all 5 FHIR R4 compartments (Patient, Encounter, Practitioner, RelatedPerson, Device),
 // including wildcard multi-type compartment search (/{compartmentType}/{compartmentId}/*).
 func (s *Server) handleCompartmentSearch(w http.ResponseWriter, r *http.Request) {
-	compType := postgres.CanonicalCompartmentType(r.PathValue("compartmentType"))
+	compType := store.CanonicalCompartmentType(r.PathValue("compartmentType"))
 	if compType == "" {
 		compType = "Patient"
 	}
@@ -5239,13 +5238,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := postgres.ValidateSearchQuery(q); err != nil {
+	if err := store.ValidateSearchQuery(q); err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
 
-	params := postgres.BuildSearchParamsFromQuery(tenant, resType, q)
-	if compType := postgres.CanonicalCompartmentType(r.PathValue("compartmentType")); compType != "" && compType != "Patient" {
+	params := store.BuildSearchParamsFromQuery(tenant, resType, q)
+	if compType := store.CanonicalCompartmentType(r.PathValue("compartmentType")); compType != "" && compType != "Patient" {
 		params.CompartmentType = compType
 		params.CompartmentID = cleanID(r.PathValue("compartmentId"))
 	}
@@ -5283,7 +5282,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		for _, ch := range params.Chained {
 			hops := ch.Hops
 			if len(hops) == 0 && ch.TargetType != "" {
-				hops = []postgres.ChainedHop{{RefParam: ch.RefParam, TargetType: ch.TargetType}}
+				hops = []store.ChainedHop{{RefParam: ch.RefParam, TargetType: ch.TargetType}}
 			}
 			for _, hop := range hops {
 				if hop.TargetType != "" && !auth.Allows(secCtx, hop.TargetType, auth.ActionRead) && !auth.Allows(secCtx, hop.TargetType, auth.ActionSearch) {
@@ -5351,7 +5350,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				params.ID = allowedPatientID
-			} else if postgres.IsPatientCompartmentResourceType(resType) {
+			} else if store.IsPatientCompartmentResourceType(resType) {
 				if params.References == nil {
 					params.References = make(map[string]string)
 				}
@@ -5397,13 +5396,13 @@ func (s *Server) handleSystemSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := postgres.ValidateSearchQuery(q); err != nil {
+	if err := store.ValidateSearchQuery(q); err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
 
-	params := postgres.BuildSearchParamsFromQuery(tenant, "", q)
-	if compType := postgres.CanonicalCompartmentType(r.PathValue("compartmentType")); compType != "" {
+	params := store.BuildSearchParamsFromQuery(tenant, "", q)
+	if compType := store.CanonicalCompartmentType(r.PathValue("compartmentType")); compType != "" {
 		params.CompartmentType = compType
 		params.CompartmentID = cleanID(r.PathValue("compartmentId"))
 	}
@@ -5438,7 +5437,7 @@ func (s *Server) handleSystemSearch(w http.ResponseWriter, r *http.Request) {
 						fmt.Sprintf("insufficient scope for system search on %s", rt))
 					return
 				}
-				if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(rt, "Patient") && !postgres.IsPatientCompartmentResourceType(rt) {
+				if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(rt, "Patient") && !store.IsPatientCompartmentResourceType(rt) {
 					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 						fmt.Sprintf("patient-scoped token (%s) cannot search non-compartment resource %s",
 							secCtx.GetPatientId(), rt))
@@ -5451,7 +5450,7 @@ func (s *Server) handleSystemSearch(w http.ResponseWriter, r *http.Request) {
 				if _, ok := s.protoRegistry[rt]; !ok {
 					continue
 				}
-				if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(rt, "Patient") && !postgres.IsPatientCompartmentResourceType(rt) {
+				if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(rt, "Patient") && !store.IsPatientCompartmentResourceType(rt) {
 					continue
 				}
 				if auth.Allows(secCtx, rt, auth.ActionSearch) || auth.Allows(secCtx, rt, auth.ActionRead) {
@@ -5575,7 +5574,7 @@ func evaluateSearchPreferHandling(w http.ResponseWriter, r *http.Request, q url.
 	}
 	var unknownKeys []string
 	for k := range q {
-		if !postgres.IsKnownSearchParam(k) {
+		if !store.IsKnownSearchParam(k) {
 			unknownKeys = append(unknownKeys, k)
 		}
 	}
@@ -5615,13 +5614,13 @@ func (s *Server) resourceAllowedByGranularScope(secCtx *auth.SecurityContext, te
 	return false
 }
 
-func (s *Server) filterAuthorizedIncludes(r *http.Request, tenant string, secCtx *auth.SecurityContext, includes []postgres.SearchResult) []postgres.SearchResult {
+func (s *Server) filterAuthorizedIncludes(r *http.Request, tenant string, secCtx *auth.SecurityContext, includes []store.SearchResult) []store.SearchResult {
 	if secCtx == nil || len(includes) == 0 {
 		return includes
 	}
 	patientRestricted := auth.IsPatientRestricted(secCtx)
 	allowedPatientID := cleanID(secCtx.GetPatientId())
-	filtered := make([]postgres.SearchResult, 0, len(includes))
+	filtered := make([]store.SearchResult, 0, len(includes))
 
 	for _, inc := range includes {
 		if !s.resourceAllowedByGranularScope(secCtx, tenant, inc.ResType, inc.ResID, inc.ResourceProto) {
@@ -5632,10 +5631,10 @@ func (s *Server) filterAuthorizedIncludes(r *http.Request, tenant string, secCtx
 				if cleanID(inc.ResID) != allowedPatientID {
 					continue
 				}
-			} else if postgres.IsPatientCompartmentResourceType(inc.ResType) {
+			} else if store.IsPatientCompartmentResourceType(inc.ResType) {
 				if extractor, ok := s.extractors[inc.ResType]; ok && len(inc.ResourceProto) > 0 {
 					idx, err := extractor(tenant, inc.ResID, inc.ResourceProto)
-					if err != nil || !postgres.IndexesBelongToPatientCompartment(inc.ResType, inc.ResID, idx, allowedPatientID) {
+					if err != nil || !store.IndexesBelongToPatientCompartment(inc.ResType, inc.ResID, idx, allowedPatientID) {
 						if inc.ResType == "Provenance" && s.store != nil {
 							belongs, bErr := s.store.BelongsToPatientCompartment(r.Context(), tenant, inc.ResType, inc.ResID, allowedPatientID)
 							if bErr != nil || !belongs {
@@ -5658,7 +5657,7 @@ func (s *Server) filterAuthorizedIncludes(r *http.Request, tenant string, secCtx
 	return filtered
 }
 
-func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Request, sr *postgres.SearchResults, params postgres.SearchParams, ignoredParams ...string) {
+func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Request, sr *store.SearchResults, params store.SearchParams, ignoredParams ...string) {
 	needsProjection := (params.Summary != "" && params.Summary != "false" && params.Summary != "count") || len(params.Elements) > 0
 	if okProto, protoCT := wantsProtoResponse(r); okProto && !needsProjection && len(ignoredParams) == 0 {
 		var links []map[string]string
@@ -5759,7 +5758,7 @@ func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Req
 	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }
 
-func (s *Server) buildSearchBundleLinks(r *http.Request, sr *postgres.SearchResults, params postgres.SearchParams) []map[string]string {
+func (s *Server) buildSearchBundleLinks(r *http.Request, sr *store.SearchResults, params store.SearchParams) []map[string]string {
 	basePath := strings.TrimSuffix(r.URL.Path, "/_search")
 	baseURL := requestBaseURL(r) + basePath
 	q := mergedSearchQuery(r)
@@ -5872,7 +5871,7 @@ var fhirSummaryElements = map[string]bool{
 	"occurrenceDateTime":        true,
 }
 
-func checkFilterExprChainedScopes(secCtx *auth.SecurityContext, expr postgres.FilterExpr) string {
+func checkFilterExprChainedScopes(secCtx *auth.SecurityContext, expr store.FilterExpr) string {
 	switch expr.Kind {
 	case "and", "or", "not":
 		for _, child := range expr.Children {
@@ -5882,7 +5881,7 @@ func checkFilterExprChainedScopes(secCtx *auth.SecurityContext, expr postgres.Fi
 		}
 	case "param":
 		if strings.Contains(expr.Param, ".") {
-			if ch, ok := postgres.ParseChainedParam(expr.Param, expr.Value); ok {
+			if ch, ok := store.ParseChainedParam(expr.Param, expr.Value); ok {
 				for _, hop := range ch.Hops {
 					if hop.TargetType != "" && !auth.Allows(secCtx, hop.TargetType, auth.ActionRead) && !auth.Allows(secCtx, hop.TargetType, auth.ActionSearch) {
 						return hop.TargetType

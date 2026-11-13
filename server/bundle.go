@@ -21,7 +21,7 @@ import (
 	"github.com/flint-fhir/flint/pkg/auth"
 	automq "github.com/flint-fhir/flint/pkg/cdc"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 // bundleRequest is the JSON structure of a FHIR Bundle.
@@ -89,7 +89,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 
 	isTransaction := bundle.Type == "transaction"
 	preferReturn := parsePreferReturn(r)
-	ops := make([]postgres.BundleOperation, 0, len(bundle.Entry))
+	ops := make([]store.BundleOperation, 0, len(bundle.Entry))
 	opEntryIdx := make([]int, 0, len(bundle.Entry))
 	txGetIndices := make([]int, 0)
 	responseEntries := make([]map[string]any, len(bundle.Entry))
@@ -200,7 +200,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if strings.TrimSpace(entry.Request.IfMatch) != "" {
-				v, err := postgres.ParseETagVersion(entry.Request.IfMatch)
+				v, err := store.ParseETagVersion(entry.Request.IfMatch)
 				if err != nil {
 					if isTransaction {
 						writeOperationOutcome(w, http.StatusBadRequest, "invalid",
@@ -351,7 +351,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
-			if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
+			if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(resType, "Patient") && !store.IsPatientCompartmentResourceType(resType) {
 				msg := fmt.Sprintf("entry[%d]: patient-scoped token (%s) cannot %s non-compartment resource %s", i, secCtx.GetPatientId(), method, resType)
 				if isTransaction {
 					writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
@@ -363,9 +363,9 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Parse Conditional PUT / Conditional PATCH / Conditional DELETE when urlQuery is present
-		var entryCondParams *postgres.SearchParams
+		var entryCondParams *store.SearchParams
 		if urlQuery != "" && (method == "PUT" || method == "PATCH" || method == "DELETE") && s.store != nil {
-			condParams, err := postgres.ParseIfNoneExist(tenant, resType, urlQuery)
+			condParams, err := store.ParseIfNoneExist(tenant, resType, urlQuery)
 			if err != nil {
 				if isTransaction {
 					writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("entry[%d]: %v", i, err))
@@ -486,7 +486,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				responseEntries[i] = bundleErrorResponse(http.StatusNotFound, msg)
 				continue
 			}
-			if errors.Is(err, postgres.ErrResourceDeleted) {
+			if errors.Is(err, store.ErrResourceDeleted) {
 				msg := fmt.Sprintf("entry[%d]: %s/%s has been deleted", i, resType, resID)
 				if isTransaction {
 					writeOperationOutcome(w, http.StatusGone, "deleted", msg)
@@ -614,9 +614,9 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		// Handle DELETE
 		if method == "DELETE" {
 			if isTransaction && entryCondParams != nil {
-				ops = append(ops, postgres.BundleOperation{
+				ops = append(ops, store.BundleOperation{
 					Method: "DELETE",
-					Input: postgres.ResourceInput{
+					Input: store.ResourceInput{
 						TenantID:        tenant,
 						ResType:         resType,
 						ExpectedVersion: expectedVersion,
@@ -673,9 +673,9 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if isTransaction {
-				ops = append(ops, postgres.BundleOperation{
+				ops = append(ops, store.BundleOperation{
 					Method: "DELETE",
-					Input: postgres.ResourceInput{
+					Input: store.ResourceInput{
 						TenantID:        tenant,
 						ResType:         resType,
 						ResID:           resID,
@@ -688,7 +688,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 
 			// Batch mode: execute immediately
 			delRec, err := s.store.DeleteResourceWithExpectedVersion(r.Context(), tenant, resType, resID, expectedVersion)
-			if errors.Is(err, postgres.ErrVersionConflict) {
+			if errors.Is(err, store.ErrVersionConflict) {
 				responseEntries[i] = bundleErrorResponse(http.StatusPreconditionFailed, err.Error())
 				continue
 			}
@@ -702,7 +702,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 			if delRec != nil && delRec.ResVersion > 0 {
 				s.syncSearchParameterOnDelete(resType, resID)
-				respMap["etag"] = postgres.FormatETag(delRec.ResVersion)
+				respMap["etag"] = store.FormatETag(delRec.ResVersion)
 				s.publishCDC(r.Context(), automq.Message{
 					TenantID: tenant,
 					ResType:  resType,
@@ -814,7 +814,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 
 		s.syncSearchParameterOnWrite(resType, resID, entry.Resource)
 
-		var idx *postgres.SearchIndexes
+		var idx *store.SearchIndexes
 		if extractor, ok := s.extractors[resType]; ok {
 			var extractErr error
 			idx, extractErr = extractor(tenant, resID, protoBytes)
@@ -833,7 +833,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		// Enforce patient compartment isolation on existing target (PUT) and incoming payload (POST/PUT)
 		if hasSecCtx && auth.IsPatientRestricted(secCtx) {
 			allowedPatientID := cleanID(secCtx.GetPatientId())
-			if method == "PUT" && (strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType)) && s.store != nil {
+			if method == "PUT" && (strings.EqualFold(resType, "Patient") || store.IsPatientCompartmentResourceType(resType)) && s.store != nil {
 				exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), tenant, resType, resID, allowedPatientID)
 				if err != nil {
 					if isTransaction {
@@ -854,8 +854,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 			}
-			if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
-				if !postgres.IndexesBelongToPatientCompartment(resType, resID, idx, allowedPatientID) {
+			if strings.EqualFold(resType, "Patient") || store.IsPatientCompartmentResourceType(resType) {
+				if !store.IndexesBelongToPatientCompartment(resType, resID, idx, allowedPatientID) {
 					msg := fmt.Sprintf("entry[%d]: patient-scoped token (%s) cannot write %s/%s outside patient compartment",
 						i, secCtx.GetPatientId(), resType, resID)
 					if isTransaction {
@@ -868,9 +868,9 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		var condParams *postgres.SearchParams
+		var condParams *store.SearchParams
 		if method == "POST" && entry.Request != nil && strings.TrimSpace(entry.Request.IfNoneExist) != "" {
-			parsed, err := postgres.ParseIfNoneExist(tenant, resType, entry.Request.IfNoneExist)
+			parsed, err := store.ParseIfNoneExist(tenant, resType, entry.Request.IfNoneExist)
 			if err != nil {
 				if isTransaction {
 					writeOperationOutcome(w, http.StatusBadRequest, "invalid",
@@ -896,7 +896,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			condParams = &parsed
 		}
 
-		input := postgres.ResourceInput{
+		input := store.ResourceInput{
 			TenantID:        tenant,
 			ResType:         resType,
 			ResID:           resID,
@@ -907,7 +907,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if isTransaction {
-			bundleOp := postgres.BundleOperation{
+			bundleOp := store.BundleOperation{
 				Method:            method,
 				Input:             input,
 				IfNoneExist:       condParams,
@@ -919,32 +919,32 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				capturedResType := resType
 				capturedExpectedVersion := expectedVersion
 				capturedMsg := proto.Clone(msg).(*dynamicpb.Message)
-				bundleOp.BuildWriteInput = func(matchedID string, isExisting bool) (postgres.ResourceInput, error) {
+				bundleOp.BuildWriteInput = func(matchedID string, isExisting bool) (store.ResourceInput, error) {
 					targetID := capturedResID
 					if isExisting {
 						if capturedBodyID != "" && capturedBodyID != matchedID {
-							return postgres.ResourceInput{}, fmt.Errorf("%w: body id %q != matched id %q", errConditionalIDMismatch, capturedBodyID, matchedID)
+							return store.ResourceInput{}, fmt.Errorf("%w: body id %q != matched id %q", errConditionalIDMismatch, capturedBodyID, matchedID)
 						}
 						targetID = matchedID
 					}
 					setProtoResourceID(capturedMsg, targetID)
 					pBytes, mErr := proto.Marshal(capturedMsg)
 					if mErr != nil {
-						return postgres.ResourceInput{}, mErr
+						return store.ResourceInput{}, mErr
 					}
-					var pIdx *postgres.SearchIndexes
+					var pIdx *store.SearchIndexes
 					if extractor, ok := s.extractors[capturedResType]; ok {
 						pIdx, _ = extractor(tenant, targetID, pBytes)
 					}
 					if hasSecCtx && auth.IsPatientRestricted(secCtx) {
 						allowedPat := cleanID(secCtx.GetPatientId())
-						if strings.EqualFold(capturedResType, "Patient") || postgres.IsPatientCompartmentResourceType(capturedResType) {
-							if !postgres.IndexesBelongToPatientCompartment(capturedResType, targetID, pIdx, allowedPat) {
-								return postgres.ResourceInput{}, fmt.Errorf("%w: %s/%s", errForbiddenCompartment, capturedResType, targetID)
+						if strings.EqualFold(capturedResType, "Patient") || store.IsPatientCompartmentResourceType(capturedResType) {
+							if !store.IndexesBelongToPatientCompartment(capturedResType, targetID, pIdx, allowedPat) {
+								return store.ResourceInput{}, fmt.Errorf("%w: %s/%s", errForbiddenCompartment, capturedResType, targetID)
 							}
 						}
 					}
-					return postgres.ResourceInput{
+					return store.ResourceInput{
 						TenantID:        tenant,
 						ResType:         capturedResType,
 						ResID:           targetID,
@@ -962,11 +962,11 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		// Batch mode: execute entry independently
 		if condParams != nil && s.store != nil {
 			rec, created, err := s.store.ConditionalCreateResource(r.Context(), input, *condParams)
-			if errors.Is(err, postgres.ErrPreconditionFailed) {
+			if errors.Is(err, store.ErrPreconditionFailed) {
 				responseEntries[i] = bundleErrorResponse(http.StatusPreconditionFailed, err.Error())
 				continue
 			}
-			if errors.Is(err, postgres.ErrResourceAlreadyExists) {
+			if errors.Is(err, store.ErrResourceAlreadyExists) {
 				responseEntries[i] = bundleErrorResponse(http.StatusConflict, err.Error())
 				continue
 			}
@@ -994,11 +994,11 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 
 		if s.store != nil {
 			rec, err := s.store.WriteResourceWithMeta(r.Context(), input)
-			if errors.Is(err, postgres.ErrVersionConflict) {
+			if errors.Is(err, store.ErrVersionConflict) {
 				responseEntries[i] = bundleErrorResponse(http.StatusPreconditionFailed, err.Error())
 				continue
 			}
-			if errors.Is(err, postgres.ErrResourceAlreadyExists) {
+			if errors.Is(err, store.ErrResourceAlreadyExists) {
 				responseEntries[i] = bundleErrorResponse(http.StatusConflict, err.Error())
 				continue
 			}
@@ -1025,11 +1025,11 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 	// Execute all operations atomically in a single SQL transaction for transaction Bundles
 	if isTransaction && len(ops) > 0 && s.store != nil {
 		results, err := s.store.ExecuteTransactionBundle(r.Context(), ops)
-		if errors.Is(err, postgres.ErrVersionConflict) || errors.Is(err, postgres.ErrPreconditionFailed) {
+		if errors.Is(err, store.ErrVersionConflict) || errors.Is(err, store.ErrPreconditionFailed) {
 			writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", err.Error())
 			return
 		}
-		if errors.Is(err, postgres.ErrResourceAlreadyExists) {
+		if errors.Is(err, store.ErrResourceAlreadyExists) {
 			writeOperationOutcome(w, http.StatusConflict, "duplicate", err.Error())
 			return
 		}
@@ -1056,7 +1056,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					"status": "204 No Content",
 				}
 				if res.Record != nil && res.Record.ResVersion > 0 {
-					respMap["etag"] = postgres.FormatETag(res.Record.ResVersion)
+					respMap["etag"] = store.FormatETag(res.Record.ResVersion)
 					delID := res.ResID
 					if delID == "" {
 						delID = op.Input.ResID
@@ -1251,7 +1251,7 @@ func (s *Server) buildBundleWriteEntry(preferReturn, tenant, resType, resID stri
 		"location": fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, resID),
 	}
 	if version > 0 {
-		respMap["etag"] = postgres.FormatETag(version)
+		respMap["etag"] = store.FormatETag(version)
 	}
 	if !lastUpdated.IsZero() {
 		respMap["lastModified"] = lastUpdated.UTC().Format(time.RFC3339)
@@ -1388,7 +1388,7 @@ func (s *Server) executeBundleGetEntry(r *http.Request, tenant string, entryReq 
 type inBundleIndexedResource struct {
 	resType string
 	resID   string
-	idx     *postgres.SearchIndexes
+	idx     *store.SearchIndexes
 }
 
 // resolveConditionalReferencesInJSON resolves FHIR R4 conditional references (§3.1.0.7.2, e.g.
@@ -1427,7 +1427,7 @@ func (s *Server) resolveConditionalReferencesInJSON(
 						if _, registered := s.protoRegistry[targetType]; !registered {
 							return http.StatusBadRequest, fmt.Errorf("conditional reference target resource type %q is not registered", targetType)
 						}
-						condParams, err := postgres.ParseIfNoneExist(tenant, targetType, queryStr)
+						condParams, err := store.ParseIfNoneExist(tenant, targetType, queryStr)
 						if err != nil {
 							return http.StatusBadRequest, fmt.Errorf("invalid conditional reference %q: %w", trimmed, err)
 						}
@@ -1499,7 +1499,7 @@ func (s *Server) resolveConditionalReferencesInJSON(
 	return marshaled, http.StatusOK, nil
 }
 
-func matchesInBundleSearchIndexes(ib inBundleIndexedResource, condParams postgres.SearchParams) bool {
+func matchesInBundleSearchIndexes(ib inBundleIndexedResource, condParams store.SearchParams) bool {
 	if !strings.EqualFold(ib.resType, condParams.ResType) {
 		return false
 	}

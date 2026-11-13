@@ -20,7 +20,7 @@ import (
 	"github.com/flint-fhir/flint/pkg/auth"
 	automq "github.com/flint-fhir/flint/pkg/cdc"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 type patientDemographics struct {
@@ -344,7 +344,7 @@ func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
 			candIdentifiers = append(candIdentifiers, idKey.code)
 		}
 	}
-	candParams := postgres.PatientMatchCandidateParams{
+	candParams := store.PatientMatchCandidateParams{
 		TenantID:    tenant,
 		Identifiers: candIdentifiers,
 		Families:    targetDemo.families,
@@ -368,7 +368,7 @@ func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
 		score    float64
 		grade    string
 		resource map[string]any
-		rec      postgres.SearchResult
+		rec      store.SearchResult
 	}
 	var matches []scoredCandidate
 
@@ -491,7 +491,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("%s/%s not found", resType, resID))
 			return
 		}
-		if errors.Is(err, postgres.ErrResourceDeleted) {
+		if errors.Is(err, store.ErrResourceDeleted) {
 			writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("%s/%s has been deleted", resType, resID))
 			return
 		}
@@ -548,7 +548,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 			if !auth.Allows(secCtx, rt, auth.ActionRead) && !auth.Allows(secCtx, rt, auth.ActionSearch) {
 				continue
 			}
-			if patientRestricted && !strings.EqualFold(rt, "Patient") && !postgres.IsPatientCompartmentResourceType(rt) {
+			if patientRestricted && !strings.EqualFold(rt, "Patient") && !store.IsPatientCompartmentResourceType(rt) {
 				continue
 			}
 		}
@@ -558,7 +558,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 				profiles = append(profiles, prof)
 			}
 		}
-		sp := postgres.SearchParams{
+		sp := store.SearchParams{
 			TenantID: tenant,
 			ResType:  rt,
 			Count:    100,
@@ -566,7 +566,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		if patientRestricted && allowedPatientID != "" {
 			if strings.EqualFold(rt, "Patient") {
 				sp.ID = allowedPatientID
-			} else if postgres.IsPatientCompartmentResourceType(rt) {
+			} else if store.IsPatientCompartmentResourceType(rt) {
 				sp.References = map[string]string{"patient": "Patient/" + allowedPatientID}
 				sp.ReferenceFilters = map[string][]string{"patient": {"Patient/" + allowedPatientID}}
 			}
@@ -704,7 +704,7 @@ func (s *Server) mutateInstanceMeta(w http.ResponseWriter, r *http.Request, isDe
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("%s/%s not found", resType, resID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("%s/%s has been deleted", resType, resID))
 		return
 	}
@@ -765,7 +765,7 @@ func (s *Server) mutateInstanceMeta(w http.ResponseWriter, r *http.Request, isDe
 		return
 	}
 
-	var idx *postgres.SearchIndexes
+	var idx *store.SearchIndexes
 	if extractor, hasExtractor := s.extractors[resType]; hasExtractor {
 		idx, _ = extractor(tenant, resID, protoBytes)
 	}
@@ -773,7 +773,7 @@ func (s *Server) mutateInstanceMeta(w http.ResponseWriter, r *http.Request, isDe
 		s.enrichProvenancePatientIndex(r.Context(), tenant, resID, idx)
 	}
 
-	newRec, err := s.store.WriteResourceWithMeta(r.Context(), postgres.ResourceInput{
+	newRec, err := s.store.WriteResourceWithMeta(r.Context(), store.ResourceInput{
 		TenantID:      tenant,
 		ResType:       resType,
 		ResID:         resID,
@@ -803,7 +803,7 @@ func (s *Server) mutateInstanceMeta(w http.ResponseWriter, r *http.Request, isDe
 		finalMeta = curMeta
 	}
 
-	w.Header().Set("ETag", postgres.FormatETag(newRec.ResVersion))
+	w.Header().Set("ETag", store.FormatETag(newRec.ResVersion))
 	w.Header().Set("Last-Modified", newRec.LastUpdated.UTC().Format(http.TimeFormat))
 	s.writeMetaParametersResponse(w, r, finalMeta)
 }
@@ -986,13 +986,13 @@ func (s *Server) writeMetaParametersResponse(w http.ResponseWriter, r *http.Requ
 }
 
 type parsedGraphDefinition struct {
-	ResourceType string               `json:"resourceType"`
-	ID           string               `json:"id,omitempty"`
-	URL          string               `json:"url,omitempty"`
-	Name         string               `json:"name,omitempty"`
-	Status       string               `json:"status,omitempty"`
-	Start        string               `json:"start,omitempty"`
-	Link         []postgres.GraphLink `json:"link,omitempty"`
+	ResourceType string            `json:"resourceType"`
+	ID           string            `json:"id,omitempty"`
+	URL          string            `json:"url,omitempty"`
+	Name         string            `json:"name,omitempty"`
+	Status       string            `json:"status,omitempty"`
+	Start        string            `json:"start,omitempty"`
+	Link         []store.GraphLink `json:"link,omitempty"`
 }
 
 // handleResourceGraph handles GET/POST /fhir/r4/{tenant}/{resourceType}/{id}/$graph,
@@ -1119,7 +1119,7 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var startType string
-	var links []postgres.GraphLink
+	var links []store.GraphLink
 
 	if strings.EqualFold(resType, "GraphDefinition") {
 		if graphRef == "" && inlineGraph == nil && resID != "" {
@@ -1205,7 +1205,7 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 		resType = targetType
 		resID = targetID
 		if len(links) == 0 {
-			links = postgres.DefaultGraphLinksForResource(resType)
+			links = store.DefaultGraphLinksForResource(resType)
 		}
 	} else {
 		if inlineGraph != nil {
@@ -1226,7 +1226,7 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 			startType = strings.TrimSpace(gd.Start)
 			links = gd.Link
 		} else {
-			links = postgres.DefaultGraphLinksForResource(resType)
+			links = store.DefaultGraphLinksForResource(resType)
 		}
 	}
 
@@ -1236,7 +1236,7 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sr, err := s.store.ResourceGraph(r.Context(), postgres.ResourceGraphParams{
+	sr, err := s.store.ResourceGraph(r.Context(), store.ResourceGraphParams{
 		TenantID:     tenant,
 		ResourceType: resType,
 		ResourceID:   resID,
@@ -1247,7 +1247,7 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("%s/%s not found", resType, resID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted",
 			fmt.Sprintf("%s/%s has been deleted", resType, resID))
 		return
@@ -1317,18 +1317,18 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func parseGraphLinksFromSlice(rawLinks any) []postgres.GraphLink {
+func parseGraphLinksFromSlice(rawLinks any) []store.GraphLink {
 	arr, ok := rawLinks.([]any)
 	if !ok || len(arr) == 0 {
 		return nil
 	}
-	links := make([]postgres.GraphLink, 0, len(arr))
+	links := make([]store.GraphLink, 0, len(arr))
 	for _, rawItem := range arr {
 		lm, ok := rawItem.(map[string]any)
 		if !ok {
 			continue
 		}
-		gl := postgres.GraphLink{
+		gl := store.GraphLink{
 			Path:        stringField(lm, "path"),
 			SliceName:   stringField(lm, "sliceName"),
 			Max:         stringField(lm, "max"),
@@ -1343,7 +1343,7 @@ func parseGraphLinksFromSlice(rawLinks any) []postgres.GraphLink {
 				if !ok {
 					continue
 				}
-				gl.Target = append(gl.Target, postgres.GraphTarget{
+				gl.Target = append(gl.Target, store.GraphTarget{
 					Type:   stringField(tm, "type"),
 					Params: stringField(tm, "params"),
 					Link:   parseGraphLinksFromSlice(tm["link"]),
@@ -1381,7 +1381,7 @@ func (s *Server) resolveStoredOrBuiltinGraphDefinition(r *http.Request, tenant, 
 			}
 		}
 
-		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, err := s.store.Search(r.Context(), store.SearchParams{
 			TenantID: tenant,
 			ResType:  "GraphDefinition",
 			URIs:     map[string]string{"url": graphRef},
@@ -1395,7 +1395,7 @@ func (s *Server) resolveStoredOrBuiltinGraphDefinition(r *http.Request, tenant, 
 			}
 		}
 
-		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, err := s.store.Search(r.Context(), store.SearchParams{
 			TenantID: tenant,
 			ResType:  "GraphDefinition",
 			Strings:  map[string]string{"name:exact": strings.ToLower(graphRef)},
@@ -1409,7 +1409,7 @@ func (s *Server) resolveStoredOrBuiltinGraphDefinition(r *http.Request, tenant, 
 			}
 		}
 
-		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, err := s.store.Search(r.Context(), store.SearchParams{
 			TenantID: tenant,
 			ResType:  "GraphDefinition",
 			Count:    50,
@@ -1434,7 +1434,7 @@ func (s *Server) resolveStoredOrBuiltinGraphDefinition(r *http.Request, tenant, 
 			ResourceType: "GraphDefinition",
 			ID:           "default",
 			Start:        resType,
-			Link:         postgres.DefaultGraphLinksForResource(resType),
+			Link:         store.DefaultGraphLinksForResource(resType),
 		}, true, nil
 	case "us-core-patient-care-graph", "us-core-patient-careteam", "patient-care-graph", "patient-summary",
 		"http://hl7.org/fhir/us/core/graphdefinition/us-core-patient-care-graph",
@@ -1443,21 +1443,21 @@ func (s *Server) resolveStoredOrBuiltinGraphDefinition(r *http.Request, tenant, 
 			ResourceType: "GraphDefinition",
 			ID:           "us-core-patient-care-graph",
 			Start:        "Patient",
-			Link:         postgres.DefaultGraphLinksForResource("Patient"),
+			Link:         store.DefaultGraphLinksForResource("Patient"),
 		}, true, nil
 	case "encounter-care-graph", "http://flint-fhir.org/fhir/graphdefinition/encounter-care-graph":
 		return &parsedGraphDefinition{
 			ResourceType: "GraphDefinition",
 			ID:           "encounter-care-graph",
 			Start:        "Encounter",
-			Link:         postgres.DefaultGraphLinksForResource("Encounter"),
+			Link:         store.DefaultGraphLinksForResource("Encounter"),
 		}, true, nil
 	case "diagnostic-report-graph", "http://flint-fhir.org/fhir/graphdefinition/diagnostic-report-graph":
 		return &parsedGraphDefinition{
 			ResourceType: "GraphDefinition",
 			ID:           "diagnostic-report-graph",
 			Start:        "DiagnosticReport",
-			Link:         postgres.DefaultGraphLinksForResource("DiagnosticReport"),
+			Link:         store.DefaultGraphLinksForResource("DiagnosticReport"),
 		}, true, nil
 	default:
 		return nil, false, nil

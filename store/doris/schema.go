@@ -212,43 +212,12 @@ func ExtractRow(input store.ResourceInput, version int, lastUpdated time.Time, i
 // USCoreResourceTypes lists the 13 core US Core FHIR R4 resource types defined in buf.gen.yaml
 // that receive both dedicated physical LIST partitions in fhir_resource and strongly-typed
 // zero-blob projection tables (fhir_patient, fhir_observation, etc.) in Apache Doris.
-var USCoreResourceTypes = []string{
-	"Patient",
-	"Encounter",
-	"Observation",
-	"Condition",
-	"Practitioner",
-	"MedicationRequest",
-	"AllergyIntolerance",
-	"Procedure",
-	"DiagnosticReport",
-	"Immunization",
-	"Organization",
-	"Specimen",
-	"Location",
-}
-
-var usCoreTableNames = map[string]string{
-	"patient":            "fhir_patient",
-	"encounter":          "fhir_encounter",
-	"observation":        "fhir_observation",
-	"condition":          "fhir_condition",
-	"practitioner":       "fhir_practitioner",
-	"medicationrequest":  "fhir_medication_request",
-	"allergyintolerance": "fhir_allergy_intolerance",
-	"procedure":          "fhir_procedure",
-	"diagnosticreport":   "fhir_diagnostic_report",
-	"immunization":       "fhir_immunization",
-	"organization":       "fhir_organization",
-	"specimen":           "fhir_specimen",
-	"location":           "fhir_location",
-}
+var USCoreResourceTypes = store.USCoreResourceTypes
 
 // CoreResourceTableName returns the strongly-typed Apache Doris table name (e.g. "fhir_observation")
 // for a US Core FHIR R4 resource type, or ("", false) for long-tail resource types.
 func CoreResourceTableName(resType string) (string, bool) {
-	tbl, ok := usCoreTableNames[strings.ToLower(strings.TrimSpace(resType))]
-	return tbl, ok
+	return store.CoreResourceTableName(resType)
 }
 
 // GenerateResourceTableDDL generates the Zero-JSON Apache Doris Unique Key Merge-on-Write (MoW)

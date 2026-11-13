@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 var (
@@ -96,12 +96,12 @@ type memPGStore struct {
 	mu            sync.RWMutex
 	resources     map[string]*memResRecord
 	history       []memResRecord
-	strings       []postgres.SpidxString
-	tokens        []postgres.SpidxToken
-	dates         []postgres.SpidxDate
-	refs          []postgres.SpidxReference
-	quants        []postgres.SpidxQuantity
-	uris          []postgres.SpidxURI
+	strings       []store.SpidxString
+	tokens        []store.SpidxToken
+	dates         []store.SpidxDate
+	refs          []store.SpidxReference
+	quants        []store.SpidxQuantity
+	uris          []store.SpidxURI
 	exportJobs    map[string]*memExportJobRec
 	authCodes     map[string][]driver.Value
 	refreshTokens map[string][]driver.Value
@@ -144,12 +144,12 @@ type memPGTx struct {
 	store     *memPGStore
 	resources map[string]*memResRecord
 	history   []memResRecord
-	strings   []postgres.SpidxString
-	tokens    []postgres.SpidxToken
-	dates     []postgres.SpidxDate
-	refs      []postgres.SpidxReference
-	quants    []postgres.SpidxQuantity
-	uris      []postgres.SpidxURI
+	strings   []store.SpidxString
+	tokens    []store.SpidxToken
+	dates     []store.SpidxDate
+	refs      []store.SpidxReference
+	quants    []store.SpidxQuantity
+	uris      []store.SpidxURI
 	done      bool
 }
 
@@ -168,12 +168,12 @@ func (s *memPGStore) beginTx() *memPGTx {
 		store:     s,
 		resources: resSnap,
 		history:   append([]memResRecord(nil), s.history...),
-		strings:   append([]postgres.SpidxString(nil), s.strings...),
-		tokens:    append([]postgres.SpidxToken(nil), s.tokens...),
-		dates:     append([]postgres.SpidxDate(nil), s.dates...),
-		refs:      append([]postgres.SpidxReference(nil), s.refs...),
-		quants:    append([]postgres.SpidxQuantity(nil), s.quants...),
-		uris:      append([]postgres.SpidxURI(nil), s.uris...),
+		strings:   append([]store.SpidxString(nil), s.strings...),
+		tokens:    append([]store.SpidxToken(nil), s.tokens...),
+		dates:     append([]store.SpidxDate(nil), s.dates...),
+		refs:      append([]store.SpidxReference(nil), s.refs...),
+		quants:    append([]store.SpidxQuantity(nil), s.quants...),
+		uris:      append([]store.SpidxURI(nil), s.uris...),
 	}
 }
 
@@ -473,7 +473,7 @@ func (c *memPGConn) ExecContext(_ context.Context, query string, args []driver.N
 
 	case strings.HasPrefix(q, "INSERT INTO spidx_string"):
 		for i := 0; i+4 < len(args); i += 5 {
-			s.strings = append(s.strings, postgres.SpidxString{
+			s.strings = append(s.strings, store.SpidxString{
 				TenantID: nvStr(args, i),
 				ResType:  nvStr(args, i+1),
 				ResID:    nvStr(args, i+2),
@@ -485,7 +485,7 @@ func (c *memPGConn) ExecContext(_ context.Context, query string, args []driver.N
 
 	case strings.HasPrefix(q, "INSERT INTO spidx_token"):
 		for i := 0; i+5 < len(args); i += 6 {
-			s.tokens = append(s.tokens, postgres.SpidxToken{
+			s.tokens = append(s.tokens, store.SpidxToken{
 				TenantID: nvStr(args, i),
 				ResType:  nvStr(args, i+1),
 				ResID:    nvStr(args, i+2),
@@ -498,7 +498,7 @@ func (c *memPGConn) ExecContext(_ context.Context, query string, args []driver.N
 
 	case strings.HasPrefix(q, "INSERT INTO spidx_date"):
 		for i := 0; i+5 < len(args); i += 6 {
-			s.dates = append(s.dates, postgres.SpidxDate{
+			s.dates = append(s.dates, store.SpidxDate{
 				TenantID: nvStr(args, i),
 				ResType:  nvStr(args, i+1),
 				ResID:    nvStr(args, i+2),
@@ -511,7 +511,7 @@ func (c *memPGConn) ExecContext(_ context.Context, query string, args []driver.N
 
 	case strings.HasPrefix(q, "INSERT INTO spidx_reference"):
 		for i := 0; i+5 < len(args); i += 6 {
-			s.refs = append(s.refs, postgres.SpidxReference{
+			s.refs = append(s.refs, store.SpidxReference{
 				TenantID:   nvStr(args, i),
 				ResType:    nvStr(args, i+1),
 				ResID:      nvStr(args, i+2),
@@ -524,7 +524,7 @@ func (c *memPGConn) ExecContext(_ context.Context, query string, args []driver.N
 
 	case strings.HasPrefix(q, "INSERT INTO spidx_quantity"):
 		for i := 0; i+6 < len(args); i += 7 {
-			s.quants = append(s.quants, postgres.SpidxQuantity{
+			s.quants = append(s.quants, store.SpidxQuantity{
 				TenantID: nvStr(args, i),
 				ResType:  nvStr(args, i+1),
 				ResID:    nvStr(args, i+2),
@@ -538,7 +538,7 @@ func (c *memPGConn) ExecContext(_ context.Context, query string, args []driver.N
 
 	case strings.HasPrefix(q, "INSERT INTO spidx_uri"):
 		for i := 0; i+4 < len(args); i += 5 {
-			s.uris = append(s.uris, postgres.SpidxURI{
+			s.uris = append(s.uris, store.SpidxURI{
 				TenantID: nvStr(args, i),
 				ResType:  nvStr(args, i+1),
 				ResID:    nvStr(args, i+2),
@@ -1459,7 +1459,7 @@ func (s *memPGStore) matchesJoinsAndWhere(r *memResRecord, q string, args []driv
 		joinSection = joinSection[:idx]
 	}
 
-	chainedRefs := make(map[string][]postgres.SpidxReference)
+	chainedRefs := make(map[string][]store.SpidxReference)
 
 	parts := strings.Split(joinSection, "JOIN ")
 	for _, part := range parts {
@@ -1478,7 +1478,7 @@ func (s *memPGStore) matchesJoinsAndWhere(r *memResRecord, q string, args []driv
 					tIdx, _ := strconv.Atoi(tm[1])
 					wantTargetType = nvStr(args, tIdx-1)
 				}
-				var matchedRefs []postgres.SpidxReference
+				var matchedRefs []store.SpidxReference
 				if pm := reCtgLinkCrf.FindStringSubmatch(line); len(pm) == 2 {
 					parentRefs := chainedRefs[pm[1]]
 					for _, prf := range parentRefs {

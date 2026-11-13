@@ -16,7 +16,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/flint-fhir/flint/store"
-	"github.com/flint-fhir/flint/store/doris"
 )
 
 // sqlOnFHIRViewDefinition represents an HL7 SQL-on-FHIR v2 ViewDefinition resource
@@ -2486,7 +2485,7 @@ func (s *Server) transpileViewDefinitionToZeroJSONSQL(tenant string, opts viewRu
 	}
 
 	if dialect == "doris" {
-		coreTable, isCore := doris.CoreResourceTableName(resType)
+		coreTable, isCore := store.CoreResourceTableName(resType)
 		targetTable := "fhir_resource"
 		if isCore {
 			targetTable = coreTable

@@ -1,4 +1,4 @@
-package postgres_test
+package searchidx_test
 
 import (
 	"testing"
@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/flint-fhir/flint/gen/go/store/postgres"
+	"github.com/flint-fhir/flint/gen/go/searchidx"
 )
 
 func TestExtractPatientIndexes(t *testing.T) {
@@ -45,7 +45,7 @@ func TestExtractPatientIndexes(t *testing.T) {
 		},
 	}
 
-	idx := postgres.ExtractPatientIndexes("tenant-hca", patient)
+	idx := searchidx.ExtractPatientIndexes("tenant-hca", patient)
 	require.NotNil(t, idx)
 
 	// Verify family / given
@@ -111,7 +111,7 @@ func TestExtractConditionIndexes(t *testing.T) {
 		},
 	}
 
-	idx := postgres.ExtractConditionIndexes("tenant-hca", cond)
+	idx := searchidx.ExtractConditionIndexes("tenant-hca", cond)
 	require.NotNil(t, idx)
 
 	// Verify code token
@@ -124,7 +124,7 @@ func TestExtractConditionIndexes(t *testing.T) {
 	assert.Contains(t, codes, "44054006")
 
 	// Verify onset date
-	var onsetDates []postgres.SpidxDate
+	var onsetDates []searchidx.SpidxDate
 	for _, d := range idx.Dates {
 		if d.SpName == "onset-date" {
 			onsetDates = append(onsetDates, d)
@@ -134,7 +134,7 @@ func TestExtractConditionIndexes(t *testing.T) {
 	assert.Equal(t, time.UnixMicro(1609459200000000).UTC(), onsetDates[0].SpLow)
 
 	// Verify patient / subject reference
-	var subjectRefs []postgres.SpidxReference
+	var subjectRefs []searchidx.SpidxReference
 	for _, ref := range idx.References {
 		if ref.SpName == "subject" || ref.SpName == "patient" {
 			subjectRefs = append(subjectRefs, ref)
@@ -162,7 +162,7 @@ func TestExtractEncounterIndexes(t *testing.T) {
 		},
 	}
 
-	idx := postgres.ExtractEncounterIndexes("tenant-hca", enc)
+	idx := searchidx.ExtractEncounterIndexes("tenant-hca", enc)
 	require.NotNil(t, idx)
 
 	// Verify class token
@@ -175,7 +175,7 @@ func TestExtractEncounterIndexes(t *testing.T) {
 	assert.Contains(t, classValues, "AMB")
 
 	// Verify period date
-	var periodDates []postgres.SpidxDate
+	var periodDates []searchidx.SpidxDate
 	for _, d := range idx.Dates {
 		if d.SpName == "date" {
 			periodDates = append(periodDates, d)
@@ -209,7 +209,7 @@ func TestExtractObservationIndexes(t *testing.T) {
 		},
 	}
 
-	idx := postgres.ExtractObservationIndexes("tenant-hca", obs)
+	idx := searchidx.ExtractObservationIndexes("tenant-hca", obs)
 	require.NotNil(t, idx)
 
 	// Verify code token
@@ -222,7 +222,7 @@ func TestExtractObservationIndexes(t *testing.T) {
 	assert.Contains(t, codes, "8867-4")
 
 	// Verify effective date
-	var dates []postgres.SpidxDate
+	var dates []searchidx.SpidxDate
 	for _, d := range idx.Dates {
 		if d.SpName == "date" {
 			dates = append(dates, d)
@@ -244,7 +244,7 @@ func TestExtractPractitionerIndexes(t *testing.T) {
 		},
 	}
 
-	idx := postgres.ExtractPractitionerIndexes("tenant-hca", prac)
+	idx := searchidx.ExtractPractitionerIndexes("tenant-hca", prac)
 	require.NotNil(t, idx)
 
 	var families, givens []string

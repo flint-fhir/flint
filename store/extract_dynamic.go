@@ -1,10 +1,11 @@
-package postgres
+package store
 
 import (
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -1922,4 +1923,19 @@ func extractFragmentReferencesFromMessage(
 		}
 		return true
 	})
+}
+
+func camelToKebab(s string) string {
+	var b strings.Builder
+	for i, r := range s {
+		if unicode.IsUpper(r) {
+			if i > 0 {
+				b.WriteByte('-')
+			}
+			b.WriteRune(unicode.ToLower(r))
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }

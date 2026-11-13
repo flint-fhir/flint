@@ -403,7 +403,7 @@ func runStoreLoad(ctx context.Context, cfg Config, m *Metrics) {
 	}
 	defer cleanup()
 
-	extractors := postgres.DefaultIndexExtractors()
+	extractors := store.DefaultIndexExtractors()
 
 	// Pre-create protos
 	patProto, _ := proto.Marshal(&patpb.Patient{})
@@ -424,16 +424,16 @@ func runStoreLoad(ctx context.Context, cfg Config, m *Metrics) {
 			defer wg.Done()
 			for seq := range jobs {
 				bundleID := fmt.Sprintf("bench-b-%d", seq)
-				inputs := make([]postgres.ResourceInput, cfg.BundleSize)
+				inputs := make([]store.ResourceInput, cfg.BundleSize)
 				for i := 0; i < cfg.BundleSize; i++ {
 					rt := types[i%len(types)]
 					resID := fmt.Sprintf("bench-%s-%d-%d", rt, seq, i)
 					pBytes := protos[i%len(protos)]
-					var idx *postgres.SearchIndexes
+					var idx *store.SearchIndexes
 					if ext, ok := extractors[rt]; ok {
 						idx, _ = ext(cfg.Tenant, resID, pBytes)
 					}
-					inputs[i] = postgres.ResourceInput{
+					inputs[i] = store.ResourceInput{
 						TenantID:       cfg.Tenant,
 						ResType:        rt,
 						ResID:          resID,

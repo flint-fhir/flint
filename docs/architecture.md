@@ -127,6 +127,14 @@ When no `AnalyticalStore` is configured (`--analytics-store=none`), `server.Serv
 - Every committed operational mutation (`WriteResourceWithMeta`, `DeleteResource`, `Conditional*`, `ExecuteTransactionBundle`) is synchronously or group-commit replicated to the analytical store.
 - `POST /fhir/r4/{tenant}/$sync-analytics` backfills existing primary resources into the analytical replica idempotently and reports `X-Flint-Analytics-Backend` headers on OLAP-accelerated responses.
 
+### 4.4 Physical Package Decoupling & CI Import Guard (`store/architecture_test.go`)
+
+Flint enforces physical Go package decoupling across the repository:
+
+- **Driver-Free Domain & Search Extraction (`store/`, `gen/go/searchidx`)**: All neutral operational/search domain types ([`store/types.go`](../store/types.go)), `proto2type`-generated search index extractors (`gen/go/searchidx`), dynamic `protoreflect` extractors ([`store/extract_dynamic.go`](../store/extract_dynamic.go)), and FHIR R4 search query parsers ([`store/search_parse.go`](../store/search_parse.go)) live in `store/` with **zero `database/sql` or database driver imports**.
+- **Pure Leaf Storage Adapters (`store/postgres`, `store/sqlite`, `store/doris`)**: Each storage adapter depends downward on `store` and never imports a sibling backend.
+- **Automated CI Enforcement**: [`TestArchitecture_ZeroCrossBackendImports`](../store/architecture_test.go) inspects `go list -Deps` in CI to guarantee `server/`, `pkg/*`, `ingest/activity`, and `store/` remain free of backend/driver coupling and no cross-backend imports can regress.
+
 ---
 
 ## 5. Plane 2: Pluggable Storage Topologies & When to Choose Each

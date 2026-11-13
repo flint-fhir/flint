@@ -5,8 +5,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
-
-	"github.com/flint-fhir/flint/store/postgres"
 )
 
 // Compile-time interface assertions.
@@ -46,7 +44,7 @@ func NewHybridStore(primary Store, replica Store) *HybridStore {
 		primary:    primary,
 		replica:    replica,
 		analytical: analytical,
-		extractors: postgres.DefaultIndexExtractors(),
+		extractors: DefaultIndexExtractors(),
 	}
 }
 

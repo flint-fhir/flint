@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 // FHIR R4 AuditEventAction codes (http://hl7.org/fhir/audit-event-action).
@@ -34,17 +34,17 @@ const (
 
 // Recorder persists and queries security audit records.
 type Recorder interface {
-	Record(ctx context.Context, rec postgres.AuditRecord) error
-	Read(ctx context.Context, tenantID, auditID string) (*postgres.AuditRecord, error)
-	Query(ctx context.Context, params postgres.AuditQueryParams) ([]postgres.AuditRecord, int, error)
+	Record(ctx context.Context, rec store.AuditRecord) error
+	Read(ctx context.Context, tenantID, auditID string) (*store.AuditRecord, error)
+	Query(ctx context.Context, params store.AuditQueryParams) ([]store.AuditRecord, int, error)
 }
 
 // AuditStore is the persistence interface required by StoreRecorder.
 // Both *postgres.Store and *doris.Store implement AuditStore.
 type AuditStore interface {
-	WriteAuditEvent(ctx context.Context, rec postgres.AuditRecord) error
-	ReadAuditEvent(ctx context.Context, tenantID, auditID string) (*postgres.AuditRecord, error)
-	QueryAuditEvents(ctx context.Context, params postgres.AuditQueryParams) ([]postgres.AuditRecord, int, error)
+	WriteAuditEvent(ctx context.Context, rec store.AuditRecord) error
+	ReadAuditEvent(ctx context.Context, tenantID, auditID string) (*store.AuditRecord, error)
+	QueryAuditEvents(ctx context.Context, params store.AuditQueryParams) ([]store.AuditRecord, int, error)
 }
 
 // StoreRecorder backs Recorder with an operational store (PostgreSQL or Apache Doris).
@@ -57,15 +57,15 @@ func NewStoreRecorder(store AuditStore) *StoreRecorder {
 	return &StoreRecorder{store: store}
 }
 
-func (r *StoreRecorder) Record(ctx context.Context, rec postgres.AuditRecord) error {
+func (r *StoreRecorder) Record(ctx context.Context, rec store.AuditRecord) error {
 	return r.store.WriteAuditEvent(ctx, rec)
 }
 
-func (r *StoreRecorder) Read(ctx context.Context, tenantID, auditID string) (*postgres.AuditRecord, error) {
+func (r *StoreRecorder) Read(ctx context.Context, tenantID, auditID string) (*store.AuditRecord, error) {
 	return r.store.ReadAuditEvent(ctx, tenantID, auditID)
 }
 
-func (r *StoreRecorder) Query(ctx context.Context, params postgres.AuditQueryParams) ([]postgres.AuditRecord, int, error) {
+func (r *StoreRecorder) Query(ctx context.Context, params store.AuditQueryParams) ([]store.AuditRecord, int, error) {
 	return r.store.QueryAuditEvents(ctx, params)
 }
 
@@ -73,7 +73,7 @@ func (r *StoreRecorder) Query(ctx context.Context, params postgres.AuditQueryPar
 // without a backing database (e.g., unit and auth-layer tests).
 type MemoryRecorder struct {
 	mu      sync.RWMutex
-	records []postgres.AuditRecord
+	records []store.AuditRecord
 }
 
 // NewMemoryRecorder creates an in-memory audit recorder.
@@ -81,7 +81,7 @@ func NewMemoryRecorder() *MemoryRecorder {
 	return &MemoryRecorder{}
 }
 
-func (m *MemoryRecorder) Record(_ context.Context, rec postgres.AuditRecord) error {
+func (m *MemoryRecorder) Record(_ context.Context, rec store.AuditRecord) error {
 	if rec.Recorded.IsZero() {
 		rec.Recorded = time.Now().UTC()
 	}
@@ -94,7 +94,7 @@ func (m *MemoryRecorder) Record(_ context.Context, rec postgres.AuditRecord) err
 	return nil
 }
 
-func (m *MemoryRecorder) Read(_ context.Context, tenantID, auditID string) (*postgres.AuditRecord, error) {
+func (m *MemoryRecorder) Read(_ context.Context, tenantID, auditID string) (*store.AuditRecord, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	for i := len(m.records) - 1; i >= 0; i-- {
@@ -107,11 +107,11 @@ func (m *MemoryRecorder) Read(_ context.Context, tenantID, auditID string) (*pos
 	return nil, fmt.Errorf("audit event %s/%s not found", tenantID, auditID)
 }
 
-func (m *MemoryRecorder) Query(_ context.Context, params postgres.AuditQueryParams) ([]postgres.AuditRecord, int, error) {
+func (m *MemoryRecorder) Query(_ context.Context, params store.AuditQueryParams) ([]store.AuditRecord, int, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	var matched []postgres.AuditRecord
+	var matched []store.AuditRecord
 	// Iterate in reverse so newest records come first.
 	for i := len(m.records) - 1; i >= 0; i-- {
 		rec := m.records[i]
@@ -288,7 +288,7 @@ func ClassifyHTTPOutcome(statusCode int) (outcome, desc string) {
 }
 
 // ToFHIRResource converts a persisted AuditRecord into a standard HL7 FHIR R4 AuditEvent JSON map.
-func ToFHIRResource(rec postgres.AuditRecord) map[string]any {
+func ToFHIRResource(rec store.AuditRecord) map[string]any {
 	recordedStr := rec.Recorded.UTC().Format(time.RFC3339)
 	subject := rec.AgentSubject
 	if subject == "" {
@@ -446,7 +446,7 @@ func ValidatePurposeOfUse(raw string) (code, display string, ok bool) {
 
 // ComputeRecordDigest computes the deterministic SHA-256 hex digest of an AuditRecord
 // per HIPAA 45 CFR §164.312(b) and ONC §170.315(d)(2)/(d)(3) tamper-evident audit requirements.
-func ComputeRecordDigest(rec postgres.AuditRecord) string {
+func ComputeRecordDigest(rec store.AuditRecord) string {
 	canonical := strings.Join([]string{
 		rec.TenantID,
 		rec.AuditID,
@@ -469,7 +469,7 @@ func ComputeRecordDigest(rec postgres.AuditRecord) string {
 }
 
 // ComputeAuditChainDigest links a record's SHA-256 digest with the previous chain digest.
-func ComputeAuditChainDigest(prevHash string, rec postgres.AuditRecord) string {
+func ComputeAuditChainDigest(prevHash string, rec store.AuditRecord) string {
 	recDigest := ComputeRecordDigest(rec)
 	sum := sha256.Sum256([]byte(prevHash + "|" + recDigest))
 	return hex.EncodeToString(sum[:])
@@ -478,7 +478,7 @@ func ComputeAuditChainDigest(prevHash string, rec postgres.AuditRecord) string {
 // VerifyAuditChain computes and verifies the chronological SHA-256 hash chain over a slice
 // of AuditRecords (which may be passed newest-first as returned by Query, and are ordered
 // oldest-first before chaining).
-func VerifyAuditChain(records []postgres.AuditRecord) (chainHead string, verifiedCount int, entries []map[string]any, valid bool) {
+func VerifyAuditChain(records []store.AuditRecord) (chainHead string, verifiedCount int, entries []map[string]any, valid bool) {
 	prevHash := strings.Repeat("0", 64)
 	if len(records) == 0 {
 		return prevHash, 0, nil, true

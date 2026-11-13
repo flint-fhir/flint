@@ -13,7 +13,7 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/audit"
 	"github.com/flint-fhir/flint/pkg/auth"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 	"github.com/google/uuid"
 )
 
@@ -213,7 +213,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 										secCtx.GetPatientId(), id))
 								return
 							}
-							if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+							if !strings.EqualFold(resType, "Patient") && store.IsPatientCompartmentResourceType(resType) && s.store != nil {
 								exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
 								if err != nil {
 									writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
@@ -240,15 +240,15 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								fmt.Sprintf("insufficient scope for %s on %s", parts[4], resType))
 							return
 						}
-						if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
+						if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(resType, "Patient") && !store.IsPatientCompartmentResourceType(resType) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("patient-scoped token (%s) cannot read %s of non-compartment resource %s",
 									secCtx.GetPatientId(), parts[4], resType))
 							return
 						}
-					} else if len(parts) == 6 && postgres.IsCompartmentType(resType) && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" {
+					} else if len(parts) == 6 && store.IsCompartmentType(resType) && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" {
 						// Compartment search: GET /{tenant}/{compartmentType}/{compartmentId}/{targetType}
-						compType := postgres.CanonicalCompartmentType(resType)
+						compType := store.CanonicalCompartmentType(resType)
 						compID := parts[4]
 						targetType := parts[5]
 						if auth.IsPatientRestricted(secCtx) {
@@ -258,7 +258,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 										secCtx.GetPatientId(), compID))
 								return
 							}
-							if !strings.EqualFold(compType, "Patient") && postgres.IsPatientCompartmentResourceType(compType) && s.store != nil {
+							if !strings.EqualFold(compType, "Patient") && store.IsPatientCompartmentResourceType(compType) && s.store != nil {
 								exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, compType, compID, secCtx.GetPatientId())
 								if err != nil {
 									writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
@@ -308,7 +308,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 										secCtx.GetPatientId(), id))
 								return
 							}
-							if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+							if !strings.EqualFold(resType, "Patient") && store.IsPatientCompartmentResourceType(resType) && s.store != nil {
 								_, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
 								if err != nil {
 									s.logger.Error("patient compartment check failed", "error", err, "type", resType, "id", id)
@@ -499,7 +499,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 										secCtx.GetPatientId(), id))
 								return
 							}
-							if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+							if !strings.EqualFold(resType, "Patient") && store.IsPatientCompartmentResourceType(resType) && s.store != nil {
 								exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
 								if err != nil {
 									writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
@@ -533,7 +533,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 										secCtx.GetPatientId(), id))
 								return
 							}
-							if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+							if !strings.EqualFold(resType, "Patient") && store.IsPatientCompartmentResourceType(resType) && s.store != nil {
 								exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
 								if err != nil {
 									writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
@@ -547,9 +547,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								}
 							}
 						}
-					} else if len(parts) == 7 && postgres.IsCompartmentType(resType) && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" && parts[6] == "_search" {
+					} else if len(parts) == 7 && store.IsCompartmentType(resType) && !strings.HasPrefix(parts[5], "$") && parts[5] != "_history" && parts[6] == "_search" {
 						// POST-based compartment search: POST /{tenant}/{compartmentType}/{compartmentId}/{targetType}/_search
-						compType := postgres.CanonicalCompartmentType(resType)
+						compType := store.CanonicalCompartmentType(resType)
 						compID := parts[4]
 						targetType := parts[5]
 						if auth.IsPatientRestricted(secCtx) {
@@ -559,7 +559,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 										secCtx.GetPatientId(), compID))
 								return
 							}
-							if !strings.EqualFold(compType, "Patient") && postgres.IsPatientCompartmentResourceType(compType) && s.store != nil {
+							if !strings.EqualFold(compType, "Patient") && store.IsPatientCompartmentResourceType(compType) && s.store != nil {
 								exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, compType, compID, secCtx.GetPatientId())
 								if err != nil {
 									writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
@@ -649,7 +649,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 											secCtx.GetPatientId(), id))
 									return
 								}
-								if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+								if !strings.EqualFold(resType, "Patient") && store.IsPatientCompartmentResourceType(resType) && s.store != nil {
 									exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
 									if err != nil {
 										writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
@@ -678,7 +678,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								fmt.Sprintf("insufficient scope for create on %s", resType))
 							return
 						}
-						if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
+						if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(resType, "Patient") && !store.IsPatientCompartmentResourceType(resType) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("patient-scoped token (%s) cannot create non-compartment resource %s",
 									secCtx.GetPatientId(), resType))
@@ -693,7 +693,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						return
 					}
 					if auth.IsPatientRestricted(secCtx) {
-						if !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
+						if !strings.EqualFold(resType, "Patient") && !store.IsPatientCompartmentResourceType(resType) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("patient-scoped token (%s) cannot update non-compartment resource %s",
 									secCtx.GetPatientId(), resType))
@@ -707,7 +707,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 										secCtx.GetPatientId(), id))
 								return
 							}
-							if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+							if !strings.EqualFold(resType, "Patient") && store.IsPatientCompartmentResourceType(resType) && s.store != nil {
 								exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
 								if err != nil {
 									s.logger.Error("patient compartment check on PUT/PATCH failed", "error", err, "type", resType, "id", id)
@@ -731,7 +731,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						return
 					}
 					if auth.IsPatientRestricted(secCtx) {
-						if !strings.EqualFold(resType, "Patient") && !postgres.IsPatientCompartmentResourceType(resType) {
+						if !strings.EqualFold(resType, "Patient") && !store.IsPatientCompartmentResourceType(resType) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("patient-scoped token (%s) cannot delete non-compartment resource %s",
 									secCtx.GetPatientId(), resType))
@@ -745,7 +745,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 										secCtx.GetPatientId(), id))
 								return
 							}
-							if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) && s.store != nil {
+							if !strings.EqualFold(resType, "Patient") && store.IsPatientCompartmentResourceType(resType) && s.store != nil {
 								_, allowed, err := s.checkExistingResourceCompartment(r.Context(), reqTenant, resType, id, secCtx.GetPatientId())
 								if err != nil {
 									s.logger.Error("patient compartment check on DELETE failed", "error", err, "type", resType, "id", id)
@@ -868,7 +868,7 @@ func (s *Server) checkExistingResourceCompartment(ctx context.Context, tenant, r
 	if strings.EqualFold(resType, "Patient") {
 		return true, cleanID(resID) == patientID, nil
 	}
-	if !postgres.IsPatientCompartmentResourceType(resType) {
+	if !store.IsPatientCompartmentResourceType(resType) {
 		return true, true, nil
 	}
 	if s.store == nil {
@@ -885,7 +885,7 @@ func (s *Server) checkExistingResourceCompartment(ctx context.Context, tenant, r
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, false, nil
 	}
-	if err != nil && !errors.Is(err, postgres.ErrResourceDeleted) {
+	if err != nil && !errors.Is(err, store.ErrResourceDeleted) {
 		return false, false, err
 	}
 	if rec != nil && !rec.IsDeleted {
@@ -899,7 +899,7 @@ func (s *Server) checkExistingResourceCompartment(ctx context.Context, tenant, r
 		for _, h := range history {
 			if len(h.ResourceProto) > 0 {
 				if idx, err := extractor(tenant, resID, h.ResourceProto); err == nil {
-					if postgres.IndexesBelongToPatientCompartment(resType, resID, idx, patientID) {
+					if store.IndexesBelongToPatientCompartment(resType, resID, idx, patientID) {
 						return true, true, nil
 					}
 					return true, false, nil
@@ -999,7 +999,7 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 
 		if entityVersion == "" {
 			if etag := arw.Header().Get("ETag"); etag != "" {
-				if v, err := postgres.ParseETagVersion(etag); err == nil && v > 0 {
+				if v, err := store.ParseETagVersion(etag); err == nil && v > 0 {
 					entityVersion = strconv.Itoa(v)
 				}
 			}
@@ -1022,13 +1022,13 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 				patientID = cleanID(sub)
 			}
 		}
-		if patientID == "" && postgres.IsPatientCompartmentResourceType(entityType) && entityID != "" {
+		if patientID == "" && store.IsPatientCompartmentResourceType(entityType) && entityID != "" {
 			patientID = s.resolveClinicalResourcePatientID(r.Context(), tenantID, entityType, entityID)
 		}
 
 		outcomeCode, outcomeDesc := audit.ClassifyHTTPOutcome(arw.statusCode)
 
-		rec := postgres.AuditRecord{
+		rec := store.AuditRecord{
 			TenantID:      tenantID,
 			AuditID:       uuid.NewString(),
 			Recorded:      time.Now().UTC(),
@@ -1063,7 +1063,7 @@ func setAuditPatientID(ctx context.Context, patientID string) {
 	}
 }
 
-func extractPatientIDFromIndexes(resType, resID string, idx *postgres.SearchIndexes) string {
+func extractPatientIDFromIndexes(resType, resID string, idx *store.SearchIndexes) string {
 	if strings.EqualFold(resType, "Patient") {
 		return cleanID(resID)
 	}
@@ -1079,7 +1079,7 @@ func extractPatientIDFromIndexes(resType, resID string, idx *postgres.SearchInde
 }
 
 func (s *Server) resolveClinicalResourcePatientID(ctx context.Context, tenant, resType, resID string) string {
-	if s.store == nil || !postgres.IsPatientCompartmentResourceType(resType) {
+	if s.store == nil || !store.IsPatientCompartmentResourceType(resType) {
 		return ""
 	}
 	extractor, hasExtractor := s.extractors[resType]

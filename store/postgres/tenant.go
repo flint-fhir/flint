@@ -3,23 +3,11 @@ package postgres
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"io/fs"
 	"regexp"
 	"sort"
 	"strings"
-)
-
-var (
-	// ErrNoTenant is returned when a tenant-scoped database operation is invoked with an empty tenant ID.
-	ErrNoTenant = errors.New("postgres: no tenant specified")
-
-	// ErrInvalidTenantSlug is returned when a tenant slug fails identifier validation.
-	ErrInvalidTenantSlug = errors.New("postgres: invalid tenant slug format")
-
-	// ErrCrossTenantBatch is returned when a batch or bundle transaction spans multiple tenants.
-	ErrCrossTenantBatch = errors.New("postgres: cross-tenant operations are not permitted in a single transaction")
 )
 
 const (

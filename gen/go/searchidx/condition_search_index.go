@@ -3,7 +3,7 @@
 // backend: postgres
 // mode: search_index
 
-package postgres
+package searchidx
 
 import (
 	condition_go_proto "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/condition_go_proto"

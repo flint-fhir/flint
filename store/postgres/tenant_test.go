@@ -216,3 +216,27 @@ func TestSchemaPerTenant_PhysicalIsolation(t *testing.T) {
 		t.Errorf("WriteBatch cross-tenant error = %v, want ErrCrossTenantBatch", err)
 	}
 }
+
+func TestTenantIsolationConfiguration(t *testing.T) {
+	mode, err := postgres.ParseTenantIsolationMode("schema-per-tenant")
+	if err != nil || mode != postgres.TenantIsolationSchema {
+		t.Fatalf("ParseTenantIsolationMode(schema-per-tenant) = %q, %v", mode, err)
+	}
+
+	schemaName, err := postgres.TenantSchemaName("HCA-West-01")
+	if err != nil || schemaName != "tenant_hca_west_01" {
+		t.Fatalf("TenantSchemaName = %q, %v; want tenant_hca_west_01", schemaName, err)
+	}
+	if _, err := postgres.TenantSchemaName("   "); err == nil {
+		t.Fatalf("expected error for blank TenantSchemaName")
+	}
+
+	st := postgres.New(nil, postgres.WithTenantIsolation(postgres.TenantIsolationSchema))
+	if st.TenantIsolation() != postgres.TenantIsolationSchema {
+		t.Fatalf("expected TenantIsolationSchema, got %q", st.TenantIsolation())
+	}
+	st.SetTenantIsolation(postgres.TenantIsolationShared)
+	if st.TenantIsolation() != postgres.TenantIsolationShared {
+		t.Fatalf("expected TenantIsolationShared, got %q", st.TenantIsolation())
+	}
+}

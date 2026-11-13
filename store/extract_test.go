@@ -1,4 +1,4 @@
-package postgres_test
+package store_test
 
 import (
 	"testing"
@@ -28,11 +28,11 @@ import (
 	specpb "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/specimen_go_proto"
 
 	"github.com/flint-fhir/flint/pkg/fhirutil"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 func TestDefaultIndexExtractors(t *testing.T) {
-	extractors := postgres.DefaultIndexExtractors()
+	extractors := store.DefaultIndexExtractors()
 	require.NotNil(t, extractors)
 	for _, rt := range fhirutil.USCoreResourceTypes() {
 		assert.Contains(t, extractors, rt, "expected US Core resource type %s in DefaultIndexExtractors", rt)
@@ -61,7 +61,7 @@ func TestExtractPatient(t *testing.T) {
 	bytes, err := proto.Marshal(pat)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractPatient("tenant-1", "pat-100", bytes)
+	idx, err := store.ExtractPatient("tenant-1", "pat-100", bytes)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 
@@ -94,7 +94,7 @@ func TestExtractPatient_FallbackResID(t *testing.T) {
 	bytes, err := proto.Marshal(pat)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractPatient("tenant-1", "fallback-id", bytes)
+	idx, err := store.ExtractPatient("tenant-1", "fallback-id", bytes)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 	require.NotEmpty(t, idx.Tokens)
@@ -102,7 +102,7 @@ func TestExtractPatient_FallbackResID(t *testing.T) {
 }
 
 func TestExtractPatient_InvalidBytes(t *testing.T) {
-	_, err := postgres.ExtractPatient("tenant-1", "p1", []byte("invalid-proto"))
+	_, err := store.ExtractPatient("tenant-1", "p1", []byte("invalid-proto"))
 	require.Error(t, err)
 }
 
@@ -133,7 +133,7 @@ func TestExtractCondition(t *testing.T) {
 	bytes, err := proto.Marshal(cond)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractCondition("tenant-1", "cond-100", bytes)
+	idx, err := store.ExtractCondition("tenant-1", "cond-100", bytes)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 
@@ -168,7 +168,7 @@ func TestExtractEncounter(t *testing.T) {
 	bytes, err := proto.Marshal(enc)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractEncounter("tenant-1", "enc-100", bytes)
+	idx, err := store.ExtractEncounter("tenant-1", "enc-100", bytes)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 
@@ -243,7 +243,7 @@ func TestExtractObservation(t *testing.T) {
 	bytes, err := proto.Marshal(obs)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractObservation("tenant-1", "obs-100", bytes)
+	idx, err := store.ExtractObservation("tenant-1", "obs-100", bytes)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 
@@ -306,7 +306,7 @@ func TestExtractPractitioner(t *testing.T) {
 	bytes, err := proto.Marshal(prac)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractPractitioner("tenant-1", "prac-100", bytes)
+	idx, err := store.ExtractPractitioner("tenant-1", "prac-100", bytes)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 
@@ -350,7 +350,7 @@ func TestExtractMedicationRequest(t *testing.T) {
 	b, err := proto.Marshal(mr)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractMedicationRequest("tenant-1", "mr-100", b)
+	idx, err := store.ExtractMedicationRequest("tenant-1", "mr-100", b)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 
@@ -404,7 +404,7 @@ func TestExtractAllergyIntolerance(t *testing.T) {
 	b, err := proto.Marshal(ai)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractAllergyIntolerance("tenant-1", "allergy-100", b)
+	idx, err := store.ExtractAllergyIntolerance("tenant-1", "allergy-100", b)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 
@@ -459,7 +459,7 @@ func TestExtractProcedure(t *testing.T) {
 	b, err := proto.Marshal(proc)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractProcedure("tenant-1", "proc-100", b)
+	idx, err := store.ExtractProcedure("tenant-1", "proc-100", b)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 	assert.NotEmpty(t, idx.Tokens)
@@ -496,7 +496,7 @@ func TestExtractDiagnosticReport(t *testing.T) {
 	b, err := proto.Marshal(dr)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractDiagnosticReport("tenant-1", "dr-100", b)
+	idx, err := store.ExtractDiagnosticReport("tenant-1", "dr-100", b)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 
@@ -534,7 +534,7 @@ func TestExtractImmunization(t *testing.T) {
 	b, err := proto.Marshal(imm)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractImmunization("tenant-1", "imm-100", b)
+	idx, err := store.ExtractImmunization("tenant-1", "imm-100", b)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 
@@ -557,7 +557,7 @@ func TestExtractOrganization(t *testing.T) {
 	b, err := proto.Marshal(org)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractOrganization("tenant-1", "org-100", b)
+	idx, err := store.ExtractOrganization("tenant-1", "org-100", b)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 
@@ -601,7 +601,7 @@ func TestExtractSpecimen(t *testing.T) {
 	b, err := proto.Marshal(spec)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractSpecimen("tenant-1", "spec-100", b)
+	idx, err := store.ExtractSpecimen("tenant-1", "spec-100", b)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 
@@ -649,7 +649,7 @@ func TestExtractLocation(t *testing.T) {
 	b, err := proto.Marshal(loc)
 	require.NoError(t, err)
 
-	idx, err := postgres.ExtractLocation("tenant-1", "loc-100", b)
+	idx, err := store.ExtractLocation("tenant-1", "loc-100", b)
 	require.NoError(t, err)
 	require.NotNil(t, idx)
 
@@ -691,7 +691,7 @@ func jsonToProtoBytes(t *testing.T, md protoreflect.MessageDescriptor, rawJSON [
 }
 
 func TestDynamicResourceExtractor_USCoreAndR4Resources(t *testing.T) {
-	extractors := postgres.DefaultIndexExtractors()
+	extractors := store.DefaultIndexExtractors()
 	descriptors := fhirutil.AllR4ResourceDescriptors()
 
 	t.Run("DocumentReference dynamic extraction", func(t *testing.T) {

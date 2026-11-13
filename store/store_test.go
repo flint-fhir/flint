@@ -7,9 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/flint-fhir/flint/store"
-	"github.com/flint-fhir/flint/store/doris"
-	"github.com/flint-fhir/flint/store/postgres"
 )
+
+type stubStore struct {
+	store.Store
+}
 
 func TestParseBackendType(t *testing.T) {
 	b, err := store.ParseBackendType("")
@@ -64,14 +66,10 @@ func TestParseOptionalBackendType(t *testing.T) {
 func TestIsNil(t *testing.T) {
 	assert.True(t, store.IsNil(nil))
 
-	var typedNilPG *postgres.Store
-	var ifacePG store.Store = typedNilPG
-	assert.True(t, store.IsNil(ifacePG))
+	var typedNil *stubStore
+	var iface store.Store = typedNil
+	assert.True(t, store.IsNil(iface))
 
-	var typedNilDoris *doris.Store
-	var ifaceDoris store.Store = typedNilDoris
-	assert.True(t, store.IsNil(ifaceDoris))
-
-	ds := doris.New(nil)
-	assert.False(t, store.IsNil(ds))
+	nonNil := &stubStore{}
+	assert.False(t, store.IsNil(nonNil))
 }
