@@ -566,5 +566,23 @@ func TestStructureDefinitionImplicitDiscriminatorsAndEdgeCases(t *testing.T) {
 		}`)
 		outIPA := eng.ValidateJSONWithProfiles("MedicationStatement", ipaMedStmt, []string{"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-medicationstatement|1.0.0"}, "")
 		assert.True(t, outIPA.IsValid() && len(outIPA.Issues) == 0, "unexpected IPA issues: %+v", outIPA.Issues)
+
+		avgBP := []byte(`{
+			"resourceType": "Observation",
+			"status": "final",
+			"category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}]}],
+			"code": {"coding": [{"system": "http://loinc.org", "code": "96607-7"}]},
+			"subject": {"reference": "Patient/pat-1"},
+			"effectiveDateTime": "2026-01-15T09:17:00Z",
+			"component": [
+				{"code": {"coding": [{"system": "http://loinc.org", "code": "96608-5"}]}, "valueQuantity": {"value": 132, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}},
+				{"code": {"coding": [{"system": "http://loinc.org", "code": "96609-3"}]}, "valueQuantity": {"value": 82, "unit": "mmHg", "system": "http://unitsofmeasure.org", "code": "mm[Hg]"}}
+			]
+		}`)
+		outAvgBP := eng.ValidateJSONWithProfiles("Observation", avgBP, []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-average-blood-pressure|7.0.0"}, "")
+		assert.True(t, outAvgBP.IsValid() && len(outAvgBP.Issues) == 0, "unexpected us-core-average-blood-pressure issues: %+v", outAvgBP.Issues)
+
+		badAvgBP := eng.ValidateJSONWithProfiles("Observation", headCirc, []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-average-blood-pressure|7.0.0"}, "")
+		assert.False(t, badAvgBP.IsValid())
 	})
 }

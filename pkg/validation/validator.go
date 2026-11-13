@@ -884,7 +884,7 @@ var usCoreProfileSpecs = map[string]usCoreProfileSpec{
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pediatric-bmi-for-age":                                     vitalSignsSpec("us-core-pediatric-bmi-for-age", nil),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pediatric-head-occipital-frontal-circumference-percentile": vitalSignsSpec("us-core-pediatric-head-occipital-frontal-circumference-percentile", nil),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-blood-pressure":                                            vitalSignsSpec("us-core-blood-pressure", checkBloodPressureComponents),
-	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-average-blood-pressure":                                    vitalSignsSpec("us-core-average-blood-pressure", checkBloodPressureComponents),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-average-blood-pressure":                                    vitalSignsSpec("us-core-average-blood-pressure", checkAverageBloodPressureComponents),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab": {
 		Slug:           "us-core-observation-lab",
 		ResourceType:   "Observation",
@@ -1197,6 +1197,37 @@ func checkBloodPressureComponents(resType string, resMap map[string]any, outcome
 	if !hasSystolic || !hasDiastolic {
 		outcome.AddError(CodeRequired,
 			"US Core blood pressure profile requires both systolic (8480-6) and diastolic (8462-4) components",
+			"Observation.component")
+	}
+}
+
+func checkAverageBloodPressureComponents(resType string, resMap map[string]any, outcome *Outcome) {
+	comps, ok := resMap["component"].([]any)
+	if !ok || len(comps) == 0 {
+		outcome.AddError(CodeRequired,
+			"US Core average blood pressure profile requires mean systolic (96608-5) and mean diastolic (96609-3) components",
+			"Observation.component")
+		return
+	}
+	hasMeanSystolic := false
+	hasMeanDiastolic := false
+	for _, c := range comps {
+		cm, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, code := range extractCodesFromElement(cm["code"]) {
+			switch code {
+			case "96608-5":
+				hasMeanSystolic = true
+			case "96609-3":
+				hasMeanDiastolic = true
+			}
+		}
+	}
+	if !hasMeanSystolic || !hasMeanDiastolic {
+		outcome.AddError(CodeRequired,
+			"US Core average blood pressure profile requires both mean systolic (96608-5) and mean diastolic (96609-3) components",
 			"Observation.component")
 	}
 }
