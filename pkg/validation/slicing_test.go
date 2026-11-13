@@ -585,4 +585,87 @@ func TestStructureDefinitionImplicitDiscriminatorsAndEdgeCases(t *testing.T) {
 		badAvgBP := eng.ValidateJSONWithProfiles("Observation", headCirc, []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-average-blood-pressure|7.0.0"}, "")
 		assert.False(t, badAvgBP.IsValid())
 	})
+
+	t.Run("versioned canonical StructureDefinitions and required ValueSet bindings", func(t *testing.T) {
+		vEng := validation.NewEngine(validation.DefaultOptions())
+		vEng.SetValueSetValidator(func(vsCanonical, system, code string) (bool, bool) {
+			if vsCanonical == "http://example.org/fhir/ValueSet/allowed-obs-codes|1.0.0" {
+				return true, system == "http://example.org/cs" && (code == "GOOD-1" || code == "GOOD-2")
+			}
+			return false, false
+		})
+
+		// Register v1.0.0 (requires birthDate) and v2.0.0 (requires gender + required ValueSet on extension)
+		require.NoError(t, vEng.RegisterStructureDefinitionJSON([]byte(`{
+			"resourceType": "StructureDefinition",
+			"id": "ver-pat-v1",
+			"url": "http://example.org/fhir/StructureDefinition/ver-pat",
+			"version": "1.0.0",
+			"type": "Patient",
+			"differential": {
+				"element": [
+					{"path": "Patient.birthDate", "min": 1}
+				]
+			}
+		}`)))
+		require.NoError(t, vEng.RegisterStructureDefinitionJSON([]byte(`{
+			"resourceType": "StructureDefinition",
+			"id": "ver-pat-v2",
+			"url": "http://example.org/fhir/StructureDefinition/ver-pat",
+			"version": "2.0.0",
+			"type": "Patient",
+			"differential": {
+				"element": [
+					{"path": "Patient.gender", "min": 1}
+				]
+			}
+		}`)))
+		require.NoError(t, vEng.RegisterStructureDefinitionJSON([]byte(`{
+			"resourceType": "StructureDefinition",
+			"id": "bound-obs",
+			"url": "http://example.org/fhir/StructureDefinition/bound-obs",
+			"version": "1.0.0",
+			"type": "Observation",
+			"differential": {
+				"element": [
+					{
+						"path": "Observation.code",
+						"min": 1,
+						"binding": {
+							"strength": "required",
+							"valueSet": "http://example.org/fhir/ValueSet/allowed-obs-codes|1.0.0"
+						}
+					}
+				]
+			}
+		}`)))
+
+		// Validate explicitly against v1.0.0 vs v2.0.0 vs unversioned (latest = v2.0.0) vs unknown version 9.9.9
+		patWithBirthOnly := []byte(`{"resourceType": "Patient", "birthDate": "1990-01-01"}`)
+		assert.True(t, vEng.ValidateJSONWithProfiles("Patient", patWithBirthOnly, []string{"http://example.org/fhir/StructureDefinition/ver-pat|1.0.0"}, "").IsValid())
+		assert.False(t, vEng.ValidateJSONWithProfiles("Patient", patWithBirthOnly, []string{"http://example.org/fhir/StructureDefinition/ver-pat|2.0.0"}, "").IsValid())
+		assert.False(t, vEng.ValidateJSONWithProfiles("Patient", patWithBirthOnly, []string{"http://example.org/fhir/StructureDefinition/ver-pat"}, "").IsValid())
+
+		outUnknownVer := vEng.ValidateJSONWithProfiles("Patient", patWithBirthOnly, []string{"http://example.org/fhir/StructureDefinition/ver-pat|9.9.9"}, "")
+		assert.True(t, outUnknownVer.IsValid()) // emits warning CodeNotSupported
+		assert.NotEmpty(t, outUnknownVer.Issues)
+
+		// Validate required ValueSet binding on Observation.code
+		goodObs := []byte(`{
+			"resourceType": "Observation",
+			"meta": {"profile": ["http://example.org/fhir/StructureDefinition/bound-obs|1.0.0"]},
+			"status": "final",
+			"code": {"coding": [{"system": "http://example.org/cs", "code": "GOOD-1"}]}
+		}`)
+		assert.True(t, vEng.ValidateJSON("Observation", goodObs).IsValid())
+
+		badObs := []byte(`{
+			"resourceType": "Observation",
+			"meta": {"profile": ["http://example.org/fhir/StructureDefinition/bound-obs|1.0.0"]},
+			"status": "final",
+			"code": {"coding": [{"system": "http://example.org/cs", "code": "BAD-999"}]}
+		}`)
+		badOut := vEng.ValidateJSON("Observation", badObs)
+		assert.False(t, badOut.IsValid())
+	})
 }

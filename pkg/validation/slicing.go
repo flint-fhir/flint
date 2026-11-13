@@ -838,7 +838,7 @@ func (e *Engine) itemMatchesSlice(item any, slice *sdSliceDef, spec sdSlicingSpe
 	return true
 }
 
-func validateElementConstraintsOnContainer(rawProf string, baseExprPath string, relPath string, elemMap map[string]any, container any, outcome *Outcome) {
+func (e *Engine) validateElementConstraintsOnContainer(rawProf string, baseExprPath string, relPath string, elemMap map[string]any, container any, outcome *Outcome) {
 	containers, leafSeg := resolveParentContainersFromAny(container, relPath)
 	if len(containers) == 0 {
 		return
@@ -848,7 +848,15 @@ func validateElementConstraintsOnContainer(rawProf string, baseExprPath string, 
 	maxCard, hasMax := parseMaxCardinality(elemMap["max"])
 	fixedKey, fixedVal, hasFixed := extractFixedConstraint(elemMap)
 	patKey, patVal, hasPat := extractPatternConstraint(elemMap)
+	reqBindingVS := extractRequiredBindingValueSet(elemMap)
 	exprField := strings.TrimSuffix(relPath, "[x]")
+
+	var vsCheck func(vsCanonical, system, code string) (bool, bool)
+	if reqBindingVS != "" && e != nil && e.opts.EnforceValueSets {
+		e.customMu.RLock()
+		vsCheck = e.valueSetValidator
+		e.customMu.RUnlock()
+	}
 
 	for _, parent := range containers {
 		vals := stepContainerField(parent, leafSeg)
@@ -887,6 +895,91 @@ func validateElementConstraintsOnContainer(rawProf string, baseExprPath string, 
 						baseExprPath+"."+exprField)
 				}
 			}
+		}
+		if vsCheck != nil {
+			for _, v := range vals {
+				validateElementRequiredBinding(rawProf, baseExprPath+"."+exprField, reqBindingVS, v, vsCheck, outcome)
+			}
+		}
+	}
+}
+
+func extractRequiredBindingValueSet(elemMap map[string]any) string {
+	bMap, ok := elemMap["binding"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	strength := strings.ToLower(strings.TrimSpace(extractStringOrWrapped(bMap["strength"])))
+	if strength != "required" {
+		return ""
+	}
+	return strings.TrimSpace(extractStringOrWrapped(bMap["valueSet"]))
+}
+
+func validateElementRequiredBinding(
+	rawProf, fullPath, vsCanonical string,
+	rawVal any,
+	vsCheck func(vsCanonical, system, code string) (bool, bool),
+	outcome *Outcome,
+) {
+	if cw, ok := rawVal.(sdChoiceInstance); ok {
+		rawVal = cw.value
+	}
+	switch v := rawVal.(type) {
+	case string:
+		code := strings.TrimSpace(v)
+		if code == "" {
+			return
+		}
+		if known, valid := vsCheck(vsCanonical, "", code); known && !valid {
+			outcome.AddError(CodeInvalid,
+				fmt.Sprintf("Profile %q requires %s code %q to belong to ValueSet %q", rawProf, fullPath, code, vsCanonical),
+				fullPath)
+		}
+	case map[string]any:
+		// Check CodeableConcept (coding[]) vs single Coding (system + code)
+		if codings, hasCodings := v["coding"].([]any); hasCodings {
+			anyKnown := false
+			anyValid := false
+			var badCode string
+			for _, item := range codings {
+				cm, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				sys := strings.TrimSpace(extractStringOrWrapped(cm["system"]))
+				code := strings.TrimSpace(extractStringOrWrapped(cm["code"]))
+				if code == "" {
+					continue
+				}
+				known, valid := vsCheck(vsCanonical, sys, code)
+				if known {
+					anyKnown = true
+					if valid {
+						anyValid = true
+						break
+					}
+					if badCode == "" {
+						badCode = code
+					}
+				}
+			}
+			if anyKnown && !anyValid {
+				outcome.AddError(CodeInvalid,
+					fmt.Sprintf("Profile %q requires %s coding (%q) to belong to ValueSet %q", rawProf, fullPath, badCode, vsCanonical),
+					fullPath)
+			}
+			return
+		}
+		code := strings.TrimSpace(extractStringOrWrapped(v["code"]))
+		if code == "" {
+			return
+		}
+		sys := strings.TrimSpace(extractStringOrWrapped(v["system"]))
+		if known, valid := vsCheck(vsCanonical, sys, code); known && !valid {
+			outcome.AddError(CodeInvalid,
+				fmt.Sprintf("Profile %q requires %s coding %q to belong to ValueSet %q", rawProf, fullPath, code, vsCanonical),
+				fullPath)
 		}
 	}
 }
@@ -1048,7 +1141,7 @@ func (e *Engine) evaluateStructureDefinitionElements(rawProf string, resTypeStr 
 		if !isChild || relPath == "" {
 			continue
 		}
-		validateElementConstraintsOnContainer(rawProf, resTypeStr, relPath, elemMap, resMap, outcome)
+		e.validateElementConstraintsOnContainer(rawProf, resTypeStr, relPath, elemMap, resMap, outcome)
 	}
 
 	// 2. Validate all sliced elements (discriminators, slice min/max, slice children, closed/openAtEnd/ordered rules)
@@ -1098,7 +1191,7 @@ func (e *Engine) evaluateStructureDefinitionElements(rawProf string, resTypeStr 
 							}
 						}
 						for childRel, childElem := range sd.children {
-							validateElementConstraintsOnContainer(rawProf, sliceExprPrefix, childRel, childElem, item, outcome)
+							e.validateElementConstraintsOnContainer(rawProf, sliceExprPrefix, childRel, childElem, item, outcome)
 						}
 					}
 				}

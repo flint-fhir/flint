@@ -6123,6 +6123,44 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		}
 	}
 
+	paths["/$install-ig"] = map[string]any{
+		"post": map[string]any{
+			"tags":        []string{"ImplementationGuide", "System"},
+			"summary":     "Install one or more HL7 FHIR R4 NPM (.tgz) Implementation Guide packages ($install-ig)",
+			"operationId": "systemInstallIG",
+			"parameters": []map[string]any{
+				{"name": "loadExamples", "in": "query", "required": false, "schema": map[string]any{"type": "boolean"}},
+				{"name": "reindex", "in": "query", "required": false, "schema": map[string]any{"type": "boolean"}},
+				{"name": "persist", "in": "query", "required": false, "schema": map[string]any{"type": "boolean"}},
+			},
+			"responses": map[string]any{
+				"200": map[string]any{"description": "FHIR Parameters summarizing installed IG packages, artifact counts, persisted resources, and reindexed resources"},
+			},
+		},
+	}
+
+	paths["/$load-ig"] = map[string]any{
+		"post": map[string]any{
+			"tags":        []string{"ImplementationGuide", "System"},
+			"summary":     "Alias for $install-ig to install HL7 FHIR R4 NPM (.tgz) Implementation Guide packages ($load-ig)",
+			"operationId": "systemLoadIG",
+			"responses": map[string]any{
+				"200": map[string]any{"description": "FHIR Parameters summarizing installed IG packages"},
+			},
+		},
+	}
+
+	paths["/$igs"] = map[string]any{
+		"get": map[string]any{
+			"tags":        []string{"ImplementationGuide", "System"},
+			"summary":     "List installed HL7 FHIR R4 Implementation Guide packages and registered conformance artifact counts ($igs)",
+			"operationId": "systemListIGs",
+			"responses": map[string]any{
+				"200": map[string]any{"description": "FHIR Parameters listing installed IG packages"},
+			},
+		},
+	}
+
 	return map[string]any{
 		"openapi": "3.1.0",
 		"info": map[string]any{

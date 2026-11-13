@@ -159,7 +159,14 @@ func (m *MemoryRecorder) Query(_ context.Context, params store.AuditQueryParams)
 // to FHIR R4 AuditEventAction (C, R, U, D, E), restful-interaction subtype code,
 // and target entity metadata.
 func ClassifyHTTPInteraction(method string, parts []string, statusCode int) (action, subtype, entityType, entityID, entityVersion string) {
-	// Expected path shape: ["fhir", "r4", "{tenant}", ...]
+	// Expected path shape: ["fhir", "r4", "{tenant}", ...] or system-level ["fhir", "r4", "$op"]
+	if len(parts) == 3 && strings.HasPrefix(parts[2], "$") {
+		op := strings.TrimPrefix(parts[2], "$")
+		if op == "install-ig" || op == "load-ig" || op == "igs" {
+			return ActionExecute, op, "ImplementationGuide", "", ""
+		}
+		return ActionExecute, op, "System", "", ""
+	}
 	if len(parts) == 3 {
 		switch method {
 		case http.MethodPost:
@@ -173,6 +180,9 @@ func ClassifyHTTPInteraction(method string, parts []string, statusCode int) (act
 	}
 
 	resType := parts[3]
+	if resType == "$install-ig" || resType == "$load-ig" || resType == "$igs" {
+		return ActionExecute, strings.TrimPrefix(resType, "$"), "ImplementationGuide", "", ""
+	}
 	if len(parts) == 4 && resType == "_search" && method == http.MethodPost {
 		return ActionExecute, "search-system", "System", "", ""
 	}

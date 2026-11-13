@@ -37,6 +37,24 @@ import (
 
 var version = server.Version
 
+type stringListFlag []string
+
+func (f *stringListFlag) String() string {
+	if f == nil {
+		return ""
+	}
+	return strings.Join(*f, ",")
+}
+
+func (f *stringListFlag) Set(val string) error {
+	for part := range strings.SplitSeq(val, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			*f = append(*f, trimmed)
+		}
+	}
+	return nil
+}
+
 type cliOptions struct {
 	showVersion          bool
 	tenantIsolation      string
@@ -44,6 +62,8 @@ type cliOptions struct {
 	analyticsBackend     string
 	sqliteDSN            string
 	referentialIntegrity string
+	igPackages           stringListFlag
+	igLoadExamples       bool
 }
 
 func main() {
@@ -76,6 +96,8 @@ func parseCLIOptions(args []string, errOut io.Writer) (cliOptions, error) {
 	fs.StringVar(&opts.analyticsBackend, "analytics-store", "", "Optional analytical store backend: 'doris', 'sqlite', or 'none' (enables hybrid OLTP + OLAP mode)")
 	fs.StringVar(&opts.sqliteDSN, "sqlite-dsn", "", "SQLite file path or URI when --store=sqlite (e.g. 'flint.db' or ':memory:')")
 	fs.StringVar(&opts.referentialIntegrity, "referential-integrity", "", "Referential integrity policy: 'lenient' (default) or 'strict' (enforces target existence on write and inbound reference conflict on delete)")
+	fs.Var(&opts.igPackages, "ig-package", "Path to an HL7 FHIR R4 NPM (.tgz) archive, unpacked IG directory, or directory of .tgz packages (repeatable or comma-separated)")
+	fs.BoolVar(&opts.igLoadExamples, "ig-load-examples", false, "Also load and persist clinical example resources from --ig-package archives")
 	if err := fs.Parse(args); err != nil {
 		return cliOptions{}, err
 	}
@@ -98,6 +120,19 @@ func parseBrokers(rawBrokers string) []string {
 		}
 	}
 	return brokers
+}
+
+func resolveIGConfig(cliOpts cliOptions, getenv func(string) string) ([]string, bool) {
+	paths := append([]string(nil), cliOpts.igPackages...)
+	if envPaths := strings.TrimSpace(getenv("FLINT_IG_PACKAGES")); envPaths != "" {
+		for p := range strings.SplitSeq(envPaths, ",") {
+			if trimmed := strings.TrimSpace(p); trimmed != "" {
+				paths = append(paths, trimmed)
+			}
+		}
+	}
+	loadExamples := cliOpts.igLoadExamples || strings.EqualFold(strings.TrimSpace(getenv("FLINT_IG_LOAD_EXAMPLES")), "true")
+	return paths, loadExamples
 }
 
 func buildStoreOptions(isolationMode postgres.TenantIsolationMode, getenv func(string) string) []postgres.Option {
@@ -374,6 +409,26 @@ func run(
 
 	// Register all supported US Core / USCDI v3 FHIR R4 resource types
 	server.RegisterDefaultResourceTypes(srv)
+
+	if strings.EqualFold(strings.TrimSpace(getenv("FLINT_ALLOW_LOCAL_IG_PATH_INSTALL")), "true") {
+		srv.SetAllowLocalIGPathInstall(true)
+	}
+
+	if igPaths, loadExamples := resolveIGConfig(cliOpts, getenv); len(igPaths) > 0 {
+		igTenant := strings.TrimSpace(getenv("FLINT_IG_TENANT"))
+		if igTenant == "" {
+			igTenant = "default"
+		}
+		summaries, err := srv.LoadIGPaths(context.Background(), igPaths, server.InstallIGOptions{
+			Tenant:       igTenant,
+			Persist:      !store.IsNil(primaryStore),
+			LoadExamples: loadExamples,
+		})
+		if err != nil {
+			return fmt.Errorf("load ig packages: %w", err)
+		}
+		logger.Info("startup FHIR Implementation Guide packages loaded", "count", len(summaries), "tenant", igTenant)
+	}
 
 	// Optional AutoMQ / Kafka CDC producer configuration
 	if brokers := parseBrokers(getenv("FLINT_AUTOMQ_BROKERS")); len(brokers) > 0 {

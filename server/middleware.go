@@ -91,6 +91,30 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// System-level operations without explicit tenant segment: /fhir/r4/$install-ig, /fhir/r4/$load-ig, /fhir/r4/$igs
+		if len(parts) == 3 && (parts[2] == "$install-ig" || parts[2] == "$load-ig" || parts[2] == "$igs") {
+			if secCtx.GetTenantId() != "" && secCtx.GetTenantId() != "default" {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("token tenant %s cannot access system-level operation %s", secCtx.GetTenantId(), parts[2]))
+				return
+			}
+			if parts[2] == "$igs" {
+				if !isAdminIGReadAllowed(secCtx) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient SMART scope for $igs")
+					return
+				}
+			} else {
+				if !isAdminIGWriteAllowed(secCtx) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+						"insufficient SMART scope for $install-ig (requires system or user ImplementationGuide write scope)")
+					return
+				}
+			}
+			ctx := auth.WithSecurityContext(r.Context(), secCtx)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
 		reqTenant := parts[2]
 
 		// Enforce tenant boundary if token is bound to a specific tenant
@@ -226,6 +250,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 									return
 								}
 							}
+						}
+					} else if resType == "$igs" || resType == "$install-ig" || resType == "$load-ig" {
+						if !isAdminIGReadAllowed(secCtx) && !isAdminIGWriteAllowed(secCtx) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient SMART scope for "+resType)
+							return
 						}
 					} else if resType == "_history" || resType == "$meta" {
 						// System-level history or $meta: GET /{tenant}/_history or GET /{tenant}/$meta
@@ -629,6 +658,17 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						}
 					} else if resType == "$reindex" || (len(parts) == 5 && parts[4] == "$reindex") || (len(parts) == 6 && parts[5] == "$reindex") {
 						// Detailed SMART scope checks are enforced in handleReindex.
+					} else if resType == "$install-ig" || resType == "$load-ig" {
+						if !isAdminIGWriteAllowed(secCtx) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								"insufficient SMART scope for $install-ig (requires system or user ImplementationGuide write scope)")
+							return
+						}
+					} else if resType == "$igs" {
+						if !isAdminIGReadAllowed(secCtx) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient SMART scope for $igs")
+							return
+						}
 					} else if resType == "$diff" || (len(parts) == 5 && parts[4] == "$diff") || (len(parts) == 6 && parts[5] == "$diff") {
 						if resType == "$diff" {
 							if len(secCtx.GetScopes()) == 0 {
@@ -973,6 +1013,9 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(arw, r.WithContext(ctx))
 
 		tenantID := parts[2]
+		if strings.HasPrefix(tenantID, "$") {
+			tenantID = "default"
+		}
 		actionCode, subtypeCode, entityType, entityID, entityVersion := audit.ClassifyHTTPInteraction(
 			r.Method,
 			parts,

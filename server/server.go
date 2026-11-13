@@ -97,6 +97,9 @@ type Server struct {
 	clientJWKSets              map[string]auth.JWKSet
 	requireRegisteredClientJWK bool
 	referentialIntegrity       atomic.Int32
+	igMu                       sync.RWMutex
+	igState                    *igRegistryState
+	allowLocalIGPaths          bool
 	routerOnce                 sync.Once
 	internalRouter             http.Handler
 	metrics                    *serverMetrics
@@ -122,7 +125,7 @@ func New(st store.Store, logger *slog.Logger) *Server {
 	devAuth, _ := auth.NewMockTokenValidator("", "")
 	valEngine := validation.NewEngine(validation.DefaultOptions())
 	valEngine.SetFHIRPathEvaluator(evalFHIRPath)
-	return &Server{
+	srv := &Server{
 		primaryStore:    st,
 		store:           st,
 		analyticalStore: analytical,
@@ -141,6 +144,8 @@ func New(st store.Store, logger *slog.Logger) *Server {
 		subSem:          make(chan struct{}, 32),
 		metrics:         newServerMetrics(),
 	}
+	valEngine.SetValueSetValidator(srv.validateCodeAgainstKnownValueSet)
+	return srv
 }
 
 // Store returns the configured operational store.Store.
@@ -245,6 +250,7 @@ func (s *Server) AuditRecorder() audit.Recorder {
 func (s *Server) SetValidator(v validation.Validator) {
 	if eng, ok := v.(*validation.Engine); ok && eng != nil {
 		eng.SetFHIRPathEvaluator(evalFHIRPath)
+		eng.SetValueSetValidator(s.validateCodeAgainstKnownValueSet)
 	}
 	s.validator = v
 }
@@ -358,6 +364,18 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$certify", s.handleCertify)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$sync-analytics", s.handleSyncAnalytics)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$sync-analytics", s.handleSyncAnalytics)
+	mux.HandleFunc("GET /fhir/r4/$install-ig", s.handleInstallIG)
+	mux.HandleFunc("POST /fhir/r4/$install-ig", s.handleInstallIG)
+	mux.HandleFunc("GET /fhir/r4/$load-ig", s.handleInstallIG)
+	mux.HandleFunc("POST /fhir/r4/$load-ig", s.handleInstallIG)
+	mux.HandleFunc("GET /fhir/r4/$igs", s.handleListIGs)
+	mux.HandleFunc("POST /fhir/r4/$igs", s.handleListIGs)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$install-ig", s.handleInstallIG)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$install-ig", s.handleInstallIG)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$load-ig", s.handleInstallIG)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$load-ig", s.handleInstallIG)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$igs", s.handleListIGs)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$igs", s.handleListIGs)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$run", s.handleViewDefinitionRun)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$run", s.handleViewDefinitionRun)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$sql", s.handleViewDefinitionSQL)
@@ -6221,10 +6239,16 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			sp = defaultSearchParams
 		}
 		sp = mergeCustomSearchParams(rt, sp)
+		supportedProfs := usCoreSupportedProfiles(rt)
+		if igProfs := s.igSupportedProfilesForType(rt); len(igProfs) > 0 {
+			for _, p := range igProfs {
+				supportedProfs = appendUniqueString(supportedProfs, p)
+			}
+		}
 		entry := map[string]any{
 			"type":              rt,
 			"profile":           "http://hl7.org/fhir/StructureDefinition/" + rt,
-			"supportedProfile":  usCoreSupportedProfiles(rt),
+			"supportedProfile":  supportedProfs,
 			"versioning":        "versioned-update",
 			"readHistory":       true,
 			"updateCreate":      true,
@@ -7407,6 +7431,44 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 		}
 		resEntries = append(resEntries, entry)
 	}
+	s.igMu.RLock()
+	var extraIGTypes []string
+	if s.igState != nil {
+		for rt := range s.igState.supportedProfiles {
+			if !seenTypes[rt] {
+				if _, registered := s.protoRegistry[rt]; registered {
+					extraIGTypes = append(extraIGTypes, rt)
+				}
+			}
+		}
+	}
+	s.igMu.RUnlock()
+	if len(extraIGTypes) > 0 {
+		sort.Strings(extraIGTypes)
+		for _, rt := range extraIGTypes {
+			seenTypes[rt] = true
+			sp := spDefs[rt]
+			if len(sp) == 0 {
+				sp = defaultSearchParams
+			}
+			sp = mergeCustomSearchParams(rt, sp)
+			resEntries = append(resEntries, map[string]any{
+				"type":              rt,
+				"profile":           "http://hl7.org/fhir/StructureDefinition/" + rt,
+				"supportedProfile":  s.igSupportedProfilesForType(rt),
+				"versioning":        "versioned-update",
+				"readHistory":       true,
+				"updateCreate":      true,
+				"conditionalCreate": true,
+				"conditionalRead":   "full-support",
+				"conditionalUpdate": true,
+				"conditionalDelete": "single",
+				"referencePolicy":   refPolicy,
+				"interaction":       interactions,
+				"searchParam":       sp,
+			})
+		}
+	}
 	resEntries = append(resEntries, map[string]any{
 		"type":              "ViewDefinition",
 		"profile":           "http://hl7.org/fhir/uv/sql-on-fhir/StructureDefinition/ViewDefinition",
@@ -7969,9 +8031,21 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 						"name":       "sync-analytics",
 						"definition": "http://flint.fhir.org/OperationDefinition/System-sync-analytics",
 					},
+					{
+						"name":       "install-ig",
+						"definition": "http://flint.fhir.org/OperationDefinition/System-install-ig",
+					},
+					{
+						"name":       "igs",
+						"definition": "http://flint.fhir.org/OperationDefinition/System-igs",
+					},
 				},
 			},
 		},
+	}
+
+	if igs := s.igImplementationGuideCanonicals(); len(igs) > 0 {
+		cap["implementationGuide"] = igs
 	}
 
 	return cap

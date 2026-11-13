@@ -4337,6 +4337,9 @@ func (s *Server) handleCapabilityStatementImplements(w http.ResponseWriter, r *h
 			}
 		}
 		if clientCap == nil {
+			clientCap = s.lookupIGCapabilityStatement(canonicalParam)
+		}
+		if clientCap == nil {
 			switch strings.ToLower(strings.TrimSpace(canonicalParam)) {
 			case "http://hl7.org/fhir/us/core/capabilitystatement/us-core-server",
 				"http://hl7.org/fhir/uv/ipa/capabilitystatement/ipa-server",
@@ -4550,6 +4553,10 @@ func (s *Server) handleStructureDefinitionSnapshot(w http.ResponseWriter, r *htt
 				}
 			}
 		}
+	}
+
+	if sdMap == nil && (pathID != "" || urlParam != "") {
+		sdMap = s.lookupIGStructureDefinition(pathID, urlParam)
 	}
 
 	// Determine target resourceType from sdMap, pathID, or urlParam

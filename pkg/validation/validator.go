@@ -42,11 +42,12 @@ func DefaultOptions() Options {
 
 // Engine implements the Validator interface.
 type Engine struct {
-	schemas        map[string]ResourceSchema
-	opts           Options
-	customMu       sync.RWMutex
-	customProfiles map[string]map[string]any
-	fhirPathEval   func(root map[string]any, expr string) []any
+	schemas           map[string]ResourceSchema
+	opts              Options
+	customMu          sync.RWMutex
+	customProfiles    map[string]map[string]any
+	fhirPathEval      func(root map[string]any, expr string) []any
+	valueSetValidator func(vsCanonical, system, code string) (knownVS bool, valid bool)
 }
 
 // NewEngine creates a new validation engine with default Big 5 schemas.
@@ -66,8 +67,17 @@ func (e *Engine) SetFHIRPathEvaluator(fn func(root map[string]any, expr string) 
 	e.fhirPathEval = fn
 }
 
+// SetValueSetValidator configures an optional terminology resolver used to enforce
+// StructureDefinition ElementDefinition.binding (strength=="required") against
+// IG-loaded, stored, or built-in ValueSets.
+func (e *Engine) SetValueSetValidator(fn func(vsCanonical, system, code string) (knownVS bool, valid bool)) {
+	e.customMu.Lock()
+	defer e.customMu.Unlock()
+	e.valueSetValidator = fn
+}
+
 // RegisterStructureDefinition registers a custom HL7 FHIR R4 StructureDefinition
-// resource map (by canonical url and/or id) for runtime profile validation.
+// resource map (by canonical url, versioned url|version, and/or id) for runtime profile validation.
 func (e *Engine) RegisterStructureDefinition(sdMap map[string]any) {
 	if e == nil || sdMap == nil {
 		return
@@ -77,8 +87,13 @@ func (e *Engine) RegisterStructureDefinition(sdMap map[string]any) {
 	if e.customProfiles == nil {
 		e.customProfiles = make(map[string]map[string]any)
 	}
-	if u := strings.TrimSpace(extractStringOrWrapped(sdMap["url"])); u != "" {
+	u := strings.TrimSpace(extractStringOrWrapped(sdMap["url"]))
+	ver := strings.TrimSpace(extractStringOrWrapped(sdMap["version"]))
+	if u != "" {
 		e.customProfiles[u] = sdMap
+		if ver != "" && !strings.Contains(u, "|") {
+			e.customProfiles[u+"|"+ver] = sdMap
+		}
 	}
 	if id := strings.TrimSpace(extractStringOrWrapped(sdMap["id"])); id != "" {
 		e.customProfiles["StructureDefinition/"+id] = sdMap
@@ -98,13 +113,32 @@ func (e *Engine) RegisterStructureDefinitionJSON(rawJSON []byte) error {
 }
 
 func (e *Engine) lookupCustomStructureDefinition(profile string) (map[string]any, bool) {
+	if e == nil {
+		return nil, false
+	}
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		return nil, false
+	}
 	e.customMu.RLock()
 	defer e.customMu.RUnlock()
 	if e.customProfiles == nil {
 		return nil, false
 	}
-	sd, ok := e.customProfiles[strings.TrimSpace(profile)]
-	return sd, ok
+	if sd, ok := e.customProfiles[profile]; ok {
+		return sd, true
+	}
+	if pipeIdx := strings.IndexByte(profile, '|'); pipeIdx != -1 {
+		baseProf := strings.TrimSpace(profile[:pipeIdx])
+		reqVer := strings.TrimSpace(profile[pipeIdx+1:])
+		if sd, ok := e.customProfiles[baseProf]; ok {
+			sdVer := strings.TrimSpace(extractStringOrWrapped(sd["version"]))
+			if sdVer == "" || sdVer == reqVer {
+				return sd, true
+			}
+		}
+	}
+	return nil, false
 }
 
 // RegisterSchema registers or overrides a ResourceSchema in the engine.
@@ -230,11 +264,7 @@ func (e *Engine) ValidateResource(expectedResType string, resMap map[string]any)
 				if rawProf == "" {
 					continue
 				}
-				baseProf := rawProf
-				if pipeIdx := strings.IndexByte(rawProf, '|'); pipeIdx != -1 {
-					baseProf = strings.TrimSpace(rawProf[:pipeIdx])
-				}
-				if sdMap, ok := e.lookupCustomStructureDefinition(baseProf); ok {
+				if sdMap, ok := e.lookupCustomStructureDefinition(rawProf); ok {
 					e.validateAgainstCustomStructureDefinition(rawProf, sdMap, resTypeStr, resMap, outcome)
 				}
 			}
@@ -638,11 +668,7 @@ func (e *Engine) ValidateResourceWithProfiles(expectedResType string, resMap map
 			for _, item := range profArr {
 				rawMetaProf := strings.TrimSpace(extractStringOrWrapped(item))
 				if rawMetaProf != "" {
-					baseMetaProf := rawMetaProf
-					if pipeIdx := strings.IndexByte(rawMetaProf, '|'); pipeIdx != -1 {
-						baseMetaProf = strings.TrimSpace(rawMetaProf[:pipeIdx])
-					}
-					metaProfileSeen[baseMetaProf] = true
+					metaProfileSeen[rawMetaProf] = true
 					addProf(rawMetaProf)
 				}
 			}
@@ -670,8 +696,8 @@ func (e *Engine) ValidateResourceWithProfiles(expectedResType string, resMap map
 					continue
 				}
 			}
-			if sdMap, ok := e.lookupCustomStructureDefinition(baseProf); ok {
-				if !metaProfileSeen[baseProf] {
+			if sdMap, ok := e.lookupCustomStructureDefinition(rawProf); ok {
+				if !metaProfileSeen[rawProf] {
 					e.validateAgainstCustomStructureDefinition(rawProf, sdMap, resTypeStr, resMap, outcome)
 				}
 				continue
@@ -704,7 +730,7 @@ func (e *Engine) ValidateResourceWithProfiles(expectedResType string, resMap map
 		if spec.CustomCheck != nil {
 			spec.CustomCheck(resTypeStr, resMap, outcome)
 		}
-		if sdMap, ok := e.lookupCustomStructureDefinition(baseProf); ok && !metaProfileSeen[baseProf] {
+		if sdMap, ok := e.lookupCustomStructureDefinition(rawProf); ok && !metaProfileSeen[rawProf] {
 			e.validateAgainstCustomStructureDefinition(rawProf, sdMap, resTypeStr, resMap, outcome)
 		}
 	}

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -10,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -397,4 +400,131 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 		)
 		require.NoError(t, err)
 	})
+
+	t.Run("startup --ig-package and FLINT_IG_PACKAGES loading with examples and error handling", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		tgzPath := filepath.Join(tmpDir, "acme.cardio-1.0.0.tgz")
+		writeTestIGArchive(t, tgzPath, map[string]string{
+			"package/package.json": `{
+				"name": "acme.cardio.r4",
+				"version": "1.0.0",
+				"canonical": "http://acme.org/fhir/ig/cardio",
+				"fhirVersions": ["4.0.1"],
+				"title": "Acme Cardiology IG"
+			}`,
+			"package/StructureDefinition-acme-patient.json": `{
+				"resourceType": "StructureDefinition",
+				"id": "acme-patient",
+				"url": "http://acme.org/fhir/ig/cardio/StructureDefinition/acme-patient",
+				"version": "1.0.0",
+				"name": "AcmePatient",
+				"status": "active",
+				"kind": "resource",
+				"abstract": false,
+				"type": "Patient",
+				"baseDefinition": "http://hl7.org/fhir/StructureDefinition/Patient",
+				"derivation": "constraint"
+			}`,
+			"package/examples/Patient-ig-example-pat-1.json": `{
+				"resourceType": "Patient",
+				"id": "ig-example-pat-1",
+				"active": true,
+				"name": [{"family": "lovelace", "given": ["ada"]}]
+			}`,
+		})
+
+		err := run(
+			[]string{
+				"-store", "sqlite",
+				"-sqlite-dsn", ":memory:",
+				"-ig-package", tgzPath,
+				"-ig-load-examples",
+			},
+			func(k string) string {
+				switch k {
+				case "FLINT_ALLOW_LOCAL_IG_PATH_INSTALL":
+					return "true"
+				case "FLINT_IG_TENANT":
+					return "default"
+				default:
+					return ""
+				}
+			},
+			io.Discard,
+			logger,
+			sql.Open,
+			func(_ string, h http.Handler) error {
+				reqIGs := httptest.NewRequest(http.MethodGet, "/fhir/r4/$igs", nil)
+				recIGs := httptest.NewRecorder()
+				h.ServeHTTP(recIGs, reqIGs)
+				require.Equal(t, http.StatusOK, recIGs.Code, recIGs.Body.String())
+				assert.Contains(t, recIGs.Body.String(), `"acme.cardio.r4"`)
+				assert.Contains(t, recIGs.Body.String(), `"http://acme.org/fhir/ig/cardio"`)
+
+				reqMeta := httptest.NewRequest(http.MethodGet, "/fhir/r4/default/metadata", nil)
+				recMeta := httptest.NewRecorder()
+				h.ServeHTTP(recMeta, reqMeta)
+				require.Equal(t, http.StatusOK, recMeta.Code, recMeta.Body.String())
+				assert.Contains(t, recMeta.Body.String(), `"http://acme.org/fhir/ig/cardio/StructureDefinition/acme-patient"`)
+
+				reqEx := httptest.NewRequest(http.MethodGet, "/fhir/r4/default/Patient/ig-example-pat-1", nil)
+				recEx := httptest.NewRecorder()
+				h.ServeHTTP(recEx, reqEx)
+				require.Equal(t, http.StatusOK, recEx.Code, recEx.Body.String())
+				assert.Contains(t, recEx.Body.String(), `"lovelace"`)
+				return nil
+			},
+		)
+		require.NoError(t, err)
+
+		// Verify FLINT_IG_PACKAGES + FLINT_IG_LOAD_EXAMPLES env resolution and stringListFlag formatting
+		var sl stringListFlag
+		assert.Equal(t, "", (*stringListFlag)(nil).String())
+		require.NoError(t, sl.Set("a.tgz, b.tgz"))
+		assert.Equal(t, "a.tgz,b.tgz", sl.String())
+		paths, loadEx := resolveIGConfig(cliOptions{igPackages: sl}, func(k string) string {
+			switch k {
+			case "FLINT_IG_PACKAGES":
+				return "c.tgz , d.tgz"
+			case "FLINT_IG_LOAD_EXAMPLES":
+				return "true"
+			default:
+				return ""
+			}
+		})
+		assert.Equal(t, []string{"a.tgz", "b.tgz", "c.tgz", "d.tgz"}, paths)
+		assert.True(t, loadEx)
+
+		// Startup fails cleanly if a configured IG package path does not exist
+		err = run(
+			[]string{"-store", "sqlite", "-sqlite-dsn", ":memory:", "-ig-package", filepath.Join(tmpDir, "missing.tgz")},
+			func(string) string { return "" },
+			io.Discard,
+			logger,
+			sql.Open,
+			func(string, http.Handler) error { return nil },
+		)
+		require.ErrorContains(t, err, "load ig packages")
+	})
+}
+
+func writeTestIGArchive(t *testing.T, outPath string, files map[string]string) {
+	t.Helper()
+	var buf bytes.Buffer
+	gzw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gzw)
+	for name, content := range files {
+		raw := []byte(content)
+		require.NoError(t, tw.WriteHeader(&tar.Header{
+			Name:     name,
+			Typeflag: tar.TypeReg,
+			Mode:     0o644,
+			Size:     int64(len(raw)),
+		}))
+		_, err := tw.Write(raw)
+		require.NoError(t, err)
+	}
+	require.NoError(t, tw.Close())
+	require.NoError(t, gzw.Close())
+	require.NoError(t, os.WriteFile(outPath, buf.Bytes(), 0o600))
 }
