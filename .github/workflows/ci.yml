@@ -64,8 +64,9 @@ jobs:
           CGO_ENABLED=0 go build -o bin/embedded-sqlite ./examples/embedded-sqlite
           sh -n install.sh
 
-      - name: Go Native Fuzzing Gate (Search, _filter, FHIRPath, Patch & Validator)
+      - name: Go Native Fuzzing Gate (Search, _filter, FHIRPath, Patch, Validator & IG Loader)
         run: |
+          go test ./pkg/igloader -run '^$' -fuzz=FuzzLoadTGZBytes -fuzztime=2s
           go test ./store -run '^$' -fuzz=FuzzParseFilterExpr -fuzztime=2s
           go test ./store -run '^$' -fuzz=FuzzSearchQueryAndIfNoneExist -fuzztime=2s
           go test ./server -run '^$' -fuzz=FuzzFHIRPathR4Engine -fuzztime=2s

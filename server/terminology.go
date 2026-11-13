@@ -330,6 +330,8 @@ func (s *Server) resolveValueSetConceptsWithDepth(ctx context.Context, tenant, v
 			if m, err := s.protoToFHIRMapWithMeta("ValueSet", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
 				vsMap = m
 			}
+		} else if igVS := s.lookupIGValueSet(vsID, vsURL); igVS != nil {
+			vsMap = igVS
 		} else {
 			for _, candURL := range []string{"http://hl7.org/fhir/ValueSet/" + vsID, "http://hl7.org/fhir/us/core/ValueSet/" + vsID} {
 				if _, ok := builtInValueSetToCodeSystem[candURL]; ok {
@@ -342,26 +344,40 @@ func (s *Server) resolveValueSetConceptsWithDepth(ctx context.Context, tenant, v
 			}
 		}
 	} else if vsURL != "" && s.store != nil {
+		lookupURL := vsURL
+		reqVersion := ""
+		if pipe := strings.IndexByte(lookupURL, '|'); pipe != -1 {
+			reqVersion = strings.TrimSpace(lookupURL[pipe+1:])
+			lookupURL = strings.TrimSpace(lookupURL[:pipe])
+		}
 		sr, err := s.store.Search(ctx, store.SearchParams{
 			TenantID: tenant,
 			ResType:  "ValueSet",
-			URIs:     map[string]string{"url": vsURL},
-			Count:    1,
+			URIs:     map[string]string{"url": lookupURL},
+			Count:    5,
 		})
 		if err != nil || len(sr.Matches) == 0 {
 			sr, err = s.store.Search(ctx, store.SearchParams{
 				TenantID: tenant,
 				ResType:  "ValueSet",
-				Tokens:   map[string]string{"url": vsURL},
-				Count:    1,
+				Tokens:   map[string]string{"url": lookupURL},
+				Count:    5,
 			})
 		}
 		if err == nil && len(sr.Matches) > 0 {
-			res := sr.Matches[0]
-			if m, err := s.protoToFHIRMapWithMeta("ValueSet", res.ResourceProto, res.ResVersion, res.LastUpdated); err == nil {
-				vsMap = m
+			for _, res := range sr.Matches {
+				if m, convErr := s.protoToFHIRMapWithMeta("ValueSet", res.ResourceProto, res.ResVersion, res.LastUpdated); convErr == nil {
+					mv, _ := m["version"].(string)
+					if reqVersion == "" || strings.TrimSpace(mv) == "" || strings.TrimSpace(mv) == reqVersion {
+						vsMap = m
+						break
+					}
+				}
 			}
 		}
+	}
+	if vsMap == nil {
+		vsMap = s.lookupIGValueSet(vsID, vsURL)
 	}
 
 	if vsMap != nil {
@@ -660,6 +676,8 @@ func (s *Server) resolveCodeSystemConceptsWithInline(ctx context.Context, tenant
 			if m, err := s.protoToFHIRMapWithMeta("CodeSystem", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
 				csMap = m
 			}
+		} else if igCS := s.lookupIGCodeSystem(csID, csURL); igCS != nil {
+			csMap = igCS
 		} else {
 			builtInByID := map[string]string{
 				"administrative-gender":       "http://hl7.org/fhir/administrative-gender",
@@ -680,26 +698,40 @@ func (s *Server) resolveCodeSystemConceptsWithInline(ctx context.Context, tenant
 			}
 		}
 	} else if csURL != "" && s.store != nil {
+		lookupURL := csURL
+		reqVersion := ""
+		if pipe := strings.IndexByte(lookupURL, '|'); pipe != -1 {
+			reqVersion = strings.TrimSpace(lookupURL[pipe+1:])
+			lookupURL = strings.TrimSpace(lookupURL[:pipe])
+		}
 		sr, err := s.store.Search(ctx, store.SearchParams{
 			TenantID: tenant,
 			ResType:  "CodeSystem",
-			URIs:     map[string]string{"url": csURL},
-			Count:    1,
+			URIs:     map[string]string{"url": lookupURL},
+			Count:    5,
 		})
 		if err != nil || len(sr.Matches) == 0 {
 			sr, err = s.store.Search(ctx, store.SearchParams{
 				TenantID: tenant,
 				ResType:  "CodeSystem",
-				Tokens:   map[string]string{"url": csURL},
-				Count:    1,
+				Tokens:   map[string]string{"url": lookupURL},
+				Count:    5,
 			})
 		}
 		if err == nil && len(sr.Matches) > 0 {
-			res := sr.Matches[0]
-			if m, err := s.protoToFHIRMapWithMeta("CodeSystem", res.ResourceProto, res.ResVersion, res.LastUpdated); err == nil {
-				csMap = m
+			for _, res := range sr.Matches {
+				if m, convErr := s.protoToFHIRMapWithMeta("CodeSystem", res.ResourceProto, res.ResVersion, res.LastUpdated); convErr == nil {
+					mv, _ := m["version"].(string)
+					if reqVersion == "" || strings.TrimSpace(mv) == "" || strings.TrimSpace(mv) == reqVersion {
+						csMap = m
+						break
+					}
+				}
 			}
 		}
+	}
+	if csMap == nil {
+		csMap = s.lookupIGCodeSystem(csID, csURL)
 	}
 
 	if csMap != nil {
@@ -1306,6 +1338,36 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 	} else if cmID != "" && s.store != nil {
 		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "ConceptMap", cmID)
 		if err != nil {
+			if igMaps, explicit := s.lookupIGConceptMaps(cmID, ""); explicit && len(igMaps) > 0 {
+				for _, cmMap := range igMaps {
+					candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
+				}
+				foundExplicitMap = true
+			} else {
+				builtInCMByID := map[string]string{
+					"loinc-to-snomed":    "http://hl7.org/fhir/ConceptMap/cm-loinc-to-snomed",
+					"cm-loinc-to-snomed": "http://hl7.org/fhir/ConceptMap/cm-loinc-to-snomed",
+					"snomed-to-icd10":    "http://hl7.org/fhir/ConceptMap/cm-snomed-to-icd10",
+					"cm-snomed-to-icd10": "http://hl7.org/fhir/ConceptMap/cm-snomed-to-icd10",
+				}
+				if bURL, ok := builtInCMByID[strings.ToLower(strings.TrimSpace(cmID))]; ok {
+					cmURL = bURL
+				} else {
+					writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("ConceptMap/%s not found", cmID))
+					return
+				}
+			}
+		} else if cmMap, err := s.protoToFHIRMapWithMeta("ConceptMap", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
+			candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
+			foundExplicitMap = true
+		}
+	} else if cmID != "" && s.store == nil {
+		if igMaps, explicit := s.lookupIGConceptMaps(cmID, ""); explicit && len(igMaps) > 0 {
+			for _, cmMap := range igMaps {
+				candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
+			}
+			foundExplicitMap = true
+		} else {
 			builtInCMByID := map[string]string{
 				"loinc-to-snomed":    "http://hl7.org/fhir/ConceptMap/cm-loinc-to-snomed",
 				"cm-loinc-to-snomed": "http://hl7.org/fhir/ConceptMap/cm-loinc-to-snomed",
@@ -1318,36 +1380,57 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 				writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("ConceptMap/%s not found", cmID))
 				return
 			}
-		} else if cmMap, err := s.protoToFHIRMapWithMeta("ConceptMap", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
-			candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
-			foundExplicitMap = true
 		}
 	} else if cmURL != "" && s.store != nil {
+		lookupURL := cmURL
+		reqVersion := ""
+		if pipe := strings.IndexByte(lookupURL, '|'); pipe != -1 {
+			reqVersion = strings.TrimSpace(lookupURL[pipe+1:])
+			lookupURL = strings.TrimSpace(lookupURL[:pipe])
+		}
 		sr, err := s.store.Search(r.Context(), store.SearchParams{
 			TenantID: tenant,
 			ResType:  "ConceptMap",
-			URIs:     map[string]string{"url": cmURL},
+			URIs:     map[string]string{"url": lookupURL},
 			Count:    10,
 		})
 		if err != nil || len(sr.Matches) == 0 {
 			sr, err = s.store.Search(r.Context(), store.SearchParams{
 				TenantID: tenant,
 				ResType:  "ConceptMap",
-				Tokens:   map[string]string{"url": cmURL},
+				Tokens:   map[string]string{"url": lookupURL},
 				Count:    10,
 			})
 		}
 		if err == nil && len(sr.Matches) > 0 {
 			for _, m := range sr.Matches {
 				if cmMap, err := s.protoToFHIRMapWithMeta("ConceptMap", m.ResourceProto, m.ResVersion, m.LastUpdated); err == nil {
-					candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
-					foundExplicitMap = true
+					mv, _ := cmMap["version"].(string)
+					if reqVersion == "" || strings.TrimSpace(mv) == "" || strings.TrimSpace(mv) == reqVersion {
+						candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
+						foundExplicitMap = true
+					}
 				}
 			}
 		}
 	}
+	if !foundExplicitMap && cmURL != "" {
+		if igMaps, explicit := s.lookupIGConceptMaps("", cmURL); explicit && len(igMaps) > 0 {
+			for _, cmMap := range igMaps {
+				candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
+			}
+			foundExplicitMap = true
+		}
+	}
 
 	if !foundExplicitMap {
+		if cmURL == "" {
+			if igMaps, _ := s.lookupIGConceptMaps("", ""); len(igMaps) > 0 {
+				for _, cmMap := range igMaps {
+					candidateEntries = append(candidateEntries, extractEntriesFromConceptMapJSON(cmMap)...)
+				}
+			}
+		}
 		// Also include any stored ConceptMaps in the tenant when translating by system/targetsystem,
 		// pre-filtering via spidx_uri (source-uri / target-uri) when available.
 		if cmURL == "" && s.store != nil {
