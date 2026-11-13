@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store/postgres"
@@ -36,7 +37,7 @@ func TestCohortTransactionBundle_ValidatesAllResources(t *testing.T) {
 	require.NoError(t, json.Unmarshal(bundleBytes, &bundle))
 	assert.Equal(t, "Bundle", bundle.ResourceType)
 	assert.Equal(t, "transaction", bundle.Type)
-	assert.Len(t, bundle.Entry, 29)
+	assert.Len(t, bundle.Entry, 62)
 
 	engine := validation.NewEngine(validation.DefaultOptions())
 	seenTypes := make(map[string]bool)
@@ -50,7 +51,11 @@ func TestCohortTransactionBundle_ValidatesAllResources(t *testing.T) {
 		outcome := engine.ValidateJSON("", entry.Resource)
 		assert.True(t, outcome.IsValid(), "expected seeded resource %s to pass FHIR R4 validation: %v", entry.FullURL, outcome.Issues)
 	}
-	assert.Len(t, seenTypes, 13, "expected all 13 US Core v6.1.0 & v7.0.0 resource types in seed bundle")
+	assert.Len(t, seenTypes, 27, "expected all 26 US Core v6.1.0 & v7.0.0 resource types + MedicationStatement (HL7 IPA) in seed bundle")
+	for _, rt := range fhirutil.USCoreResourceTypes() {
+		assert.True(t, seenTypes[rt], "missing US Core resource type %s in seed cohort", rt)
+	}
+	assert.True(t, seenTypes["MedicationStatement"], "missing HL7 IPA MedicationStatement in seed cohort")
 }
 
 func TestSeedRun_UnitHTTP(t *testing.T) {
@@ -67,7 +72,7 @@ func TestSeedRun_UnitHTTP(t *testing.T) {
 		var b map[string]any
 		require.NoError(t, json.Unmarshal(body, &b))
 		entries := b["entry"].([]any)
-		assert.Len(t, entries, 29)
+		assert.Len(t, entries, 62)
 
 		respEntries := make([]map[string]any, len(entries))
 		for i, rawEntry := range entries {
@@ -101,7 +106,7 @@ func TestSeedRun_UnitHTTP(t *testing.T) {
 		Out:         &buf,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, buf.String(), `Seeded 29 FHIR R4 resources (all 13 US Core v6.1.0 & v7.0.0 profiles) into tenant "demo"`)
+	assert.Contains(t, buf.String(), `Seeded 62 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "demo"`)
 	assert.Contains(t, buf.String(), "Practitioner/prac-cardiology-1")
 	assert.Contains(t, buf.String(), "Patient/pat-alice-001/$everything")
 }
@@ -184,9 +189,9 @@ func TestSeedRun_EndToEndIntegration(t *testing.T) {
 		Out:        &buf,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, buf.String(), `Seeded 29 FHIR R4 resources (all 13 US Core v6.1.0 & v7.0.0 profiles) into tenant "test-seed"`)
+	assert.Contains(t, buf.String(), `Seeded 62 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "test-seed"`)
 
-	// Verify Patient/$everything for Alice returns Patient + Practitioner + Organization + Location + Encounter + Condition + 4 Observations + MedicationRequest + AllergyIntolerance + Procedure + Specimen + DiagnosticReport (15 resources)
+	// Verify Patient/$everything for Alice returns full longitudinal chart across all linked US Core & IPA profiles
 	resp, err := http.Get(ts.URL + "/fhir/r4/test-seed/Patient/pat-alice-001/$everything")
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -194,7 +199,7 @@ func TestSeedRun_EndToEndIntegration(t *testing.T) {
 
 	var evBundle map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&evBundle))
-	assert.Equal(t, 15, int(evBundle["total"].(float64)))
+	assert.Equal(t, 47, int(evBundle["total"].(float64)))
 }
 
 func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
@@ -202,6 +207,7 @@ func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	srv := server.New(sqStore, logger)
 	server.RegisterDefaultResourceTypes(srv)
+	srv.SetReferentialIntegrity(server.ReferentialIntegrityStrict)
 
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
@@ -213,7 +219,7 @@ func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
 		HTTPClient: ts.Client(),
 		Out:        &buf,
 	}))
-	assert.Contains(t, buf.String(), `Seeded 29 FHIR R4 resources (all 13 US Core v6.1.0 & v7.0.0 profiles) into tenant "demo"`)
+	assert.Contains(t, buf.String(), `Seeded 62 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "demo"`)
 
 	engine := validation.NewEngine(validation.DefaultOptions())
 
@@ -271,9 +277,9 @@ func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
 		assert.Equal(t, 1, int(b["total"].(float64)), "expected exact timestamp search %s to return 1 resource", query)
 	}
 
-	// 6. Patient/$everything for Alice remains 15 resources
+	// 6. Patient/$everything for Alice returns all 47 longitudinal resources
 	evBytes := getRaw("/fhir/r4/demo/Patient/pat-alice-001/$everything")
 	var evBundle map[string]any
 	require.NoError(t, json.Unmarshal(evBytes, &evBundle))
-	assert.Equal(t, 15, int(evBundle["total"].(float64)))
+	assert.Equal(t, 47, int(evBundle["total"].(float64)))
 }

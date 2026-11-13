@@ -11,7 +11,7 @@ on:
 
 jobs:
   inferno:
-    name: HL7 Inferno (US Core v6.1.0 + SMART STU2 + Bulk Data v2.0.0) [${{ matrix.store }}]
+    name: HL7 Inferno (US Core v6.1.0/v7.0.0 + IPA v1.0.0 + SMART STU2 + Bulk Data v2.0.0) [${{ matrix.store }}]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

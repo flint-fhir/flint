@@ -160,7 +160,7 @@ flintd --store=sqlite --sqlite-dsn=flint.db
 
 ### Option 2: Docker Compose (PostgreSQL 16 + FHIR Server + Seeded US Core Cohort)
 
-Run `flintd` + PostgreSQL 16 and automatically seed the 29-resource US Core v6.1.0 & v7.0.0 `"demo"` cohort with one command:
+Run `flintd` + PostgreSQL 16 and automatically seed the 62-resource US Core v6.1.0 & v7.0.0 + HL7 IPA `"demo"` cohort with one command:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/docker-compose.yml -o docker-compose.yml
@@ -198,7 +198,7 @@ docker run --rm -p 8080:8080 \
 Seed the US Core `"demo"` cohort or run the 137-check certification CLI using the same container image:
 
 ```bash
-# Seed the 29-resource US Core v6.1.0 & v7.0.0 cohort into tenant "demo"
+# Seed the 62-resource US Core v6.1.0 & v7.0.0 + HL7 IPA cohort into tenant "demo"
 docker run --rm --entrypoint /usr/local/bin/seed \
   ghcr.io/flint-fhir/flint:0.3.0 -url http://host.docker.internal:8080 -tenant demo
 
@@ -209,12 +209,13 @@ docker run --rm --entrypoint /usr/local/bin/certify \
 
 ### Runtime Configuration (`flintd` CLI Flags & Environment Variables)
 
-CLI flags: `--version`, `--store=postgres|sqlite|doris`, `--analytics-store=doris|sqlite|none`, `--sqlite-dsn=flint.db|:memory:`, `--tenant-isolation=schema|shared`.
+CLI flags: `--version`, `--store=postgres|sqlite|doris`, `--analytics-store=doris|sqlite|none`, `--sqlite-dsn=flint.db|:memory:`, `--tenant-isolation=schema|shared`, `--referential-integrity=lenient|strict`.
 
 | Environment Variable | Default | Backend / Scope | Description |
 |:---------------------|:--------|:----------------|:------------|
 | `FLINT_STORE_BACKEND` | `postgres` | All | Primary operational `store.Store` backend: `postgres`, `sqlite`, or `doris` (also `--store`) |
 | `FLINT_ANALYTICS_BACKEND` | `none` | Hybrid OLAP | Optional `store.AnalyticalStore` replica paired via `HybridStore`: `doris`, `sqlite`, or `none` (also `--analytics-store`) |
+| `FLINT_REFERENTIAL_INTEGRITY` | `lenient` | API Layer | Referential integrity mode (`lenient` or `strict` — rejects dangling local references with `422` and inbound-referenced deletes with `409 Conflict` unless `?_cascade=delete` is passed; also `--referential-integrity`) |
 | `FLINT_ADDR` | `:8080` | API Layer | HTTP listen address |
 | `FLINT_POSTGRES_DSN` | `postgres://flint:flint@localhost:5432/flint?sslmode=disable` | `postgres` | PostgreSQL connection string (auto-runs embedded migrations on boot) |
 | `FLINT_TENANT_ISOLATION` | `schema` | `postgres` | Multi-tenant physical isolation mode: `schema` (`tenant_<slug>` schemas) or `shared` (PostgreSQL RLS) |
@@ -396,7 +397,7 @@ Content-Type: application/fhir+json
 * **Create & Conditional Create (`If-None-Exist`)**: `POST /fhir/r4/{tenant}/{resourceType}` (`201 Created` + `Location` + `ETag`; when `If-None-Exist` header or Bundle `request.ifNoneExist` matches 1 existing resource, returns `200 OK` idempotently; returns `412 Precondition Failed` on multiple matches)
 * **Update / Create-on-Update & Conditional Update**: `PUT /fhir/r4/{tenant}/{resourceType}/{id}` and `PUT /fhir/r4/{tenant}/{resourceType}?{searchParams}` (supports optimistic concurrency via `If-Match: W/"<version>"`, returning `412 Precondition Failed` on version conflict)
 * **FHIRPath Patch, JSON Patch, Merge Patch & Conditional Patch**: `PATCH /fhir/r4/{tenant}/{resourceType}/{id}` and `PATCH /fhir/r4/{tenant}/{resourceType}?{searchParams}` (`application/fhir+json` HL7 FHIRPath Patch `Parameters`, `application/json-patch+json` RFC 6902, and `application/merge-patch+json` RFC 7396)
-* **Soft Delete & Conditional Delete (Single & Multiple `_count`)**: `DELETE /fhir/r4/{tenant}/{resourceType}/{id}` and `DELETE /fhir/r4/{tenant}/{resourceType}?{searchParams}` (`204 No Content` + tombstone version `ETag`; supports `If-Match: W/"<version>"` optimistic concurrency returning `412 Precondition Failed` on version conflict, `_count` for multiple conditional deletion, and `Prefer: return=OperationOutcome`)
+* **Soft Delete, Cascade Delete (`?_cascade=delete`) & Conditional Delete (Single & Multiple `_count`)**: `DELETE /fhir/r4/{tenant}/{resourceType}/{id}` and `DELETE /fhir/r4/{tenant}/{resourceType}?{searchParams}` (`204 No Content` + tombstone version `ETag`; supports `If-Match: W/"<version>"` optimistic concurrency returning `412 Precondition Failed` on version conflict, `?_cascade=delete` recursive transitive inbound dependency deletion, strict inbound delete conflict protection (`409 Conflict` under `--referential-integrity=strict`), `_count` for multiple conditional deletion, and `Prefer: return=OperationOutcome`)
 * **All 5 FHIR R4 Compartments (`Patient`, `Encounter`, `Practitioner`, `RelatedPerson`, `Device`, Wildcard `/*` & `$everything`)**: `GET/POST /fhir/r4/{tenant}/Patient/{id}/$everything`, `GET/POST /fhir/r4/{tenant}/Encounter/{id}/$everything` (with `_type`, `_typeFilter`, `_since`, `_count`, `_offset`), `GET/POST /fhir/r4/{tenant}/{compartmentType}/{id}/{resourceType}` (including `POST .../_search`), and Wildcard Multi-Type `GET/POST /fhir/r4/{tenant}/{compartmentType}/{id}/*`
 * **Terminology Services (`$expand`, `$validate-code`, `$lookup`)**:
   * `GET/POST /fhir/r4/{tenant}/ValueSet/$expand` & `/ValueSet/{id}/$expand`
@@ -422,7 +423,7 @@ Content-Type: application/fhir+json
 
 ### FHIR Conformance & Validation Engine (`pkg/validation`)
 Flint validates incoming FHIR resources prior to persistence and exposes standard validation operations:
-* **StructureDefinition Enforcement**: Validates elements against official HL7 FHIR R4 StructureDefinitions. Undeclared elements are rejected in strict mode (`structure`).
+* **StructureDefinition, Slicing (`discriminator`) & `fixed[x]` / `pattern[x]` Enforcement**: Validates elements against official HL7 FHIR R4, US Core v6.1.0/v7.0.0, and HL7 IPA v1.0.0 StructureDefinitions, including custom `ElementDefinition.slicing` (`value`, `pattern`, `type`, `profile`, `exists` discriminators; `open`, `closed`, `openAtEnd` rules; `ordered` slices; per-slice `min`/`max` and child constraints) and `fixed[x]` / `pattern[x]` structural subsumption. Undeclared elements are rejected in strict mode (`structure`).
 * **Cardinality Verification**: Mandatory 1..1 elements (e.g., `Observation.status`, `Observation.code`, `Condition.subject`, `Encounter.status`, `Encounter.class`) must be present and non-empty (`required`).
 * **Required ValueSets**: Bound code elements (e.g., `AdministrativeGender`, `ObservationStatus`, `ConditionClinicalStatus`, `EncounterStatus`) are strictly matched against canonical ValueSets (`code-invalid`).
 * **Primitive Format Constraints**: Primitive fields (`id`, `date`, `dateTime`, `instant`) are validated against FHIR regex patterns (`value`).
@@ -519,9 +520,9 @@ Flint leverages [Hegel](https://hegel.dev) (`hegel.dev/go/hegel`) for type-drive
 Alongside generative Hegel tests and the built-in 137-check `$certify` suite, every commit is verified against upstream HL7 conformance vectors and official HL7 Inferno test kits:
 
 * **Official `FHIR/sql-on-fhir-v2` Test Vectors (`server/testdata/sql-on-fhir-v2`)**: 100% pass across all **22 official suites (144/144 test cases)** on `ViewDefinition/$run` plus live SQL execution equivalence of `ViewDefinition/$sql` on embedded SQLite and PostgreSQL.
-* **Official HL7 FHIRPath R4 `tests-fhir-r4.xml` Corpus (`server/testdata/fhirpath-r4`)**: Executes the full **1,050+ runtime HL7 FHIRPath R4 specification vectors** (navigation, polymorphic `.ofType()`/`.as()`/`.is()`, temporal arithmetic & boundaries, UCUM quantities, math, regex, aggregates, and three-valued logic).
+* **Official HL7 FHIRPath R4 `tests-fhir-r4.xml` Corpus (`server/testdata/fhirpath-r4`)**: Executes all **1,076 official HL7 FHIRPath R4 runtime & static semantic type-checking specification vectors (0 skips)** (navigation, polymorphic `.ofType()`/`.as()`/`.is()`, static `ElementDefinition` path & polymorphic choice validation, temporal arithmetic & boundaries, UCUM quantities, math, regex, aggregates, and three-valued logic).
 * **Synthea R4 US Core Multi-Topology Parity**: Verifies identical `Bundle` transaction ingestion, chained/reverse-chained/compartment search, `Patient/$everything`, `Observation/$stats`, `ViewDefinition/$run`, and `$export` across all **5 runtime topologies** (`postgres`, file-backed `modernc.org/sqlite` WAL, `doris`, `hybrid-postgres+doris`, and `hybrid-postgres+sqlite`).
-* **Headless HL7 Inferno CI ([`.github/workflows/inferno.yml`](.github/workflows/inferno.yml), [`deploy/inferno/`](deploy/inferno/))**: Runs official **`us_core_test_kit` (`us_core_v610`)**, **`smart_app_launch_test_kit` (`smart_stu2` Backend Services)**, and **`bulk_data_test_kit` (`bulk_data_v200`)** against live `flintd` across both `--store=postgres` and `--store=sqlite` (`task certify-inferno-headless`).
+* **Headless HL7 Inferno CI ([`.github/workflows/inferno.yml`](.github/workflows/inferno.yml), [`deploy/inferno/`](deploy/inferno/))**: Runs official **`us_core_test_kit` (`us_core_v610` & `us_core_v700`)**, **`ipa_test_kit` (`ipa_v100`)**, **`smart_app_launch_test_kit` (`smart_stu2` Backend Services)**, and **`bulk_data_test_kit` (`bulk_data_v200`)** against live `flintd` across both `--store=postgres` and `--store=sqlite` (`task certify-inferno-headless`).
 
 ---
 
@@ -569,7 +570,7 @@ flint/
 ├── bin/                  # Compiled binaries (flintd, seed, certify, loadtest; optional: worker)
 ├── cmd/
 │   ├── flintd/           # Core FHIR R4 API HTTP server (--store=postgres|sqlite|doris, --analytics-store=doris|sqlite|none)
-│   ├── seed/             # Deterministic 29-resource US Core v6.1.0 & v7.0.0 cohort seeder (task seed)
+│   ├── seed/             # Deterministic 62-resource US Core v6.1.0/v7.0.0 & HL7 IPA cohort seeder (task seed)
 │   ├── certify/          # Automated 137-check conformance & certification CLI across 10 suites (task certify)
 │   ├── loadtest/         # High-throughput JSON & Binary Proto3 (-wire=proto) HTTP & Store load testing harness
 │   ├── worker/           # [Add-On] Temporal ingestion worker entrypoint (task build-worker)

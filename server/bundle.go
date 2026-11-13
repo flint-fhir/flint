@@ -172,6 +172,11 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	refMode := s.effectiveReferentialIntegrity(r)
+	opCascade := make(map[int]bool)
+	txWrites := make(map[string]bool)
+	txDeletes := make(map[string]bool)
+
 	for _, i := range order {
 		entry := bundle.Entry[i]
 		method := "PUT"
@@ -360,6 +365,22 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				responseEntries[i] = bundleErrorResponse(http.StatusForbidden, msg)
 				continue
 			}
+		}
+
+		entryCascadeDelete := false
+		if method == "DELETE" && urlQuery != "" {
+			cleanedQ, cDel, cErr := stripCascadeFromRawQuery(urlQuery)
+			if cErr != nil {
+				msg := fmt.Sprintf("entry[%d]: %v", i, cErr)
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusBadRequest, "invalid", msg)
+					return
+				}
+				responseEntries[i] = bundleErrorResponse(http.StatusBadRequest, msg)
+				continue
+			}
+			urlQuery = cleanedQ
+			entryCascadeDelete = cDel
 		}
 
 		// Parse Conditional PUT / Conditional PATCH / Conditional DELETE when urlQuery is present
@@ -614,6 +635,10 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		// Handle DELETE
 		if method == "DELETE" {
 			if isTransaction && entryCondParams != nil {
+				if entryCascadeDelete {
+					opCascade[len(ops)] = true
+				}
+				capturedResType := resType
 				ops = append(ops, store.BundleOperation{
 					Method: "DELETE",
 					Input: store.ResourceInput{
@@ -624,12 +649,12 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					ConditionalParams: entryCondParams,
 					VerifyDeleteMatch: func(matchedID string) error {
 						if hasSecCtx && auth.IsPatientRestricted(secCtx) {
-							exists, allowed, cErr := s.checkExistingResourceCompartment(r.Context(), tenant, resType, matchedID, secCtx.GetPatientId())
+							exists, allowed, cErr := s.checkExistingResourceCompartment(r.Context(), tenant, capturedResType, matchedID, secCtx.GetPatientId())
 							if cErr != nil {
 								return cErr
 							}
 							if !exists || !allowed {
-								return fmt.Errorf("%w: %s/%s", errForbiddenCompartment, resType, matchedID)
+								return fmt.Errorf("%w: %s/%s", errForbiddenCompartment, capturedResType, matchedID)
 							}
 						}
 						return nil
@@ -673,6 +698,9 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if isTransaction {
+				if entryCascadeDelete {
+					opCascade[len(ops)] = true
+				}
 				ops = append(ops, store.BundleOperation{
 					Method: "DELETE",
 					Input: store.ResourceInput{
@@ -687,6 +715,16 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Batch mode: execute immediately
+			if _, refErr := s.enforceInboundDeleteOrCascade(r.Context(), tenant, resType, resID, refMode, entryCascadeDelete, nil); refErr != nil {
+				if errors.Is(refErr, errReferentialIntegrityDeleteBlocked) {
+					responseEntries[i] = bundleErrorResponseWithCode(http.StatusConflict, "conflict", fmt.Sprintf("entry[%d]: %v", i, refErr))
+				} else if errors.Is(refErr, errForbiddenCompartment) {
+					responseEntries[i] = bundleErrorResponseWithCode(http.StatusForbidden, "forbidden", fmt.Sprintf("entry[%d]: %v", i, refErr))
+				} else {
+					responseEntries[i] = bundleErrorResponse(http.StatusInternalServerError, fmt.Sprintf("entry[%d]: %v", i, refErr))
+				}
+				continue
+			}
 			delRec, err := s.store.DeleteResourceWithExpectedVersion(r.Context(), tenant, resType, resID, expectedVersion)
 			if errors.Is(err, store.ErrVersionConflict) {
 				responseEntries[i] = bundleErrorResponse(http.StatusPreconditionFailed, err.Error())
@@ -960,6 +998,16 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Batch mode: execute entry independently
+		if refMode == ReferentialIntegrityStrict && s.store != nil {
+			if refErr := s.verifyOutboundReferences(r.Context(), tenant, resType, resID, msg, protoBytes, idx, nil, nil); refErr != nil {
+				if errors.Is(refErr, errReferentialIntegrityTargetMissing) {
+					responseEntries[i] = bundleErrorResponseWithCode(http.StatusUnprocessableEntity, "not-found", fmt.Sprintf("entry[%d]: %v", i, refErr))
+				} else {
+					responseEntries[i] = bundleErrorResponse(http.StatusInternalServerError, fmt.Sprintf("entry[%d]: %v", i, refErr))
+				}
+				continue
+			}
+		}
 		if condParams != nil && s.store != nil {
 			rec, created, err := s.store.ConditionalCreateResource(r.Context(), input, *condParams)
 			if errors.Is(err, store.ErrPreconditionFailed) {
@@ -1024,6 +1072,114 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 
 	// Execute all operations atomically in a single SQL transaction for transaction Bundles
 	if isTransaction && len(ops) > 0 && s.store != nil {
+		// Build transaction-wide write and delete target sets for intra-Bundle referential integrity
+		txWriteRefs := make(map[string][]localRefTarget)
+		resolvedCondDelID := make(map[int]string)
+		resolvedCondPutID := make(map[int]string)
+		for idxOp, op := range ops {
+			if op.Method == "DELETE" {
+				delID := op.Input.ResID
+				if delID == "" && op.ConditionalParams != nil && (opCascade[idxOp] || refMode == ReferentialIntegrityStrict) {
+					condCopy := *op.ConditionalParams
+					condCopy.Count = 2
+					condCopy.Offset = 0
+					if sr, sErr := s.store.Search(r.Context(), condCopy); sErr == nil && sr != nil && sr.Total == 1 && len(sr.Matches) == 1 {
+						delID = sr.Matches[0].ResID
+						resolvedCondDelID[idxOp] = delID
+					}
+				}
+				if delID != "" {
+					txDeletes[op.Input.ResType+"/"+delID] = true
+				}
+			} else {
+				writeID := op.Input.ResID
+				if op.Method == "PUT" && op.ConditionalParams != nil && refMode == ReferentialIntegrityStrict {
+					condCopy := *op.ConditionalParams
+					condCopy.Count = 2
+					condCopy.Offset = 0
+					if sr, sErr := s.store.Search(r.Context(), condCopy); sErr == nil && sr != nil && sr.Total == 1 && len(sr.Matches) == 1 {
+						writeID = sr.Matches[0].ResID
+						resolvedCondPutID[idxOp] = writeID
+					}
+				}
+				if writeID != "" {
+					key := op.Input.ResType + "/" + writeID
+					txWrites[key] = true
+					txWriteRefs[key] = s.extractOutboundLocalReferences(op.Input.ResType, writeID, nil, op.Input.ResourceProto, op.Input.SearchIndexes)
+				}
+			}
+		}
+
+		// Evaluate inbound reference checks / ?_cascade=delete on DELETE ops
+		for idxOp, op := range ops {
+			if op.Method != "DELETE" {
+				continue
+			}
+			delID := op.Input.ResID
+			if delID == "" {
+				delID = resolvedCondDelID[idxOp]
+			}
+			if delID == "" {
+				continue
+			}
+			cascade := opCascade[idxOp]
+			if !cascade && refMode != ReferentialIntegrityStrict {
+				continue
+			}
+			delKey := op.Input.ResType + "/" + delID
+			exemptSet := make(map[string]bool, len(txDeletes)+len(txWriteRefs))
+			for k := range txDeletes {
+				exemptSet[k] = true
+			}
+			for wKey, refs := range txWriteRefs {
+				stillRefs := false
+				for _, rTarget := range refs {
+					if rTarget.key() == delKey {
+						stillRefs = true
+						break
+					}
+				}
+				if !stillRefs {
+					exemptSet[wKey] = true
+				}
+			}
+			if _, refErr := s.enforceInboundDeleteOrCascade(r.Context(), tenant, op.Input.ResType, delID, refMode, cascade, exemptSet); refErr != nil {
+				if errors.Is(refErr, errReferentialIntegrityDeleteBlocked) {
+					writeOperationOutcome(w, http.StatusConflict, "conflict", refErr.Error())
+					return
+				}
+				if errors.Is(refErr, errForbiddenCompartment) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden", refErr.Error())
+					return
+				}
+				writeOperationOutcome(w, http.StatusInternalServerError, "exception", refErr.Error())
+				return
+			}
+		}
+
+		// Evaluate outbound reference existence checks on write ops in strict mode
+		if refMode == ReferentialIntegrityStrict {
+			for idxOp, op := range ops {
+				if op.Method == "DELETE" {
+					continue
+				}
+				writeID := op.Input.ResID
+				if cid, ok := resolvedCondPutID[idxOp]; ok && cid != "" {
+					writeID = cid
+				}
+				if refErr := s.verifyOutboundReferences(r.Context(), tenant, op.Input.ResType, writeID, nil, op.Input.ResourceProto, op.Input.SearchIndexes, txWrites, txDeletes); refErr != nil {
+					origIdx := opEntryIdx[idxOp]
+					msg := fmt.Sprintf("entry[%d]: %v", origIdx, refErr)
+					if errors.Is(refErr, errReferentialIntegrityTargetMissing) {
+						writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-found", msg)
+					} else {
+						writeOperationOutcome(w, http.StatusInternalServerError, "exception", msg)
+					}
+					return
+				}
+			}
+		}
+
 		results, err := s.store.ExecuteTransactionBundle(r.Context(), ops)
 		if errors.Is(err, store.ErrVersionConflict) || errors.Is(err, store.ErrPreconditionFailed) {
 			writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", err.Error())
@@ -1039,6 +1195,14 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(err, errForbiddenCompartment) {
 			writeOperationOutcome(w, http.StatusForbidden, "forbidden", err.Error())
+			return
+		}
+		if errors.Is(err, errReferentialIntegrityTargetMissing) {
+			writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-found", err.Error())
+			return
+		}
+		if errors.Is(err, errReferentialIntegrityDeleteBlocked) {
+			writeOperationOutcome(w, http.StatusConflict, "conflict", err.Error())
 			return
 		}
 		if err != nil {

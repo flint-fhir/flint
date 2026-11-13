@@ -267,6 +267,17 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if s.effectiveReferentialIntegrity(r) == ReferentialIntegrityStrict {
+			if refErr := s.verifyOutboundReferences(r.Context(), tenant, resType, resID, msg, protoBytes, idx, nil, nil); refErr != nil {
+				if errors.Is(refErr, errReferentialIntegrityTargetMissing) {
+					writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-found", refErr.Error())
+				} else {
+					writeOperationOutcome(w, http.StatusInternalServerError, "exception", refErr.Error())
+				}
+				return
+			}
+		}
+
 		rec, err = s.store.WriteResourceWithMeta(r.Context(), store.ResourceInput{
 			TenantID:        tenant,
 			ResType:         resType,
@@ -409,6 +420,17 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 	}
 	bodyID := extractProtoResourceID(msg)
 
+	if s.effectiveReferentialIntegrity(r) == ReferentialIntegrityStrict {
+		if refErr := s.verifyOutboundReferences(r.Context(), tenant, resType, bodyID, msg, nil, nil, nil, nil); refErr != nil {
+			if errors.Is(refErr, errReferentialIntegrityTargetMissing) {
+				writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-found", refErr.Error())
+				return
+			}
+			writeOperationOutcome(w, http.StatusInternalServerError, "exception", refErr.Error())
+			return
+		}
+	}
+
 	var finalProtoBytes []byte
 	var finalResID string
 	var finalIdx *store.SearchIndexes
@@ -474,6 +496,10 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 	}
 	if errors.Is(err, errForbiddenCompartment) {
 		writeOperationOutcome(w, http.StatusForbidden, "forbidden", err.Error())
+		return
+	}
+	if errors.Is(err, errReferentialIntegrityTargetMissing) {
+		writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-found", err.Error())
 		return
 	}
 	if err != nil {
@@ -598,6 +624,11 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 	resType := r.PathValue("resourceType")
 
 	q := r.URL.Query()
+	cascade, cascadeErr := parseCascadeDelete(q)
+	if cascadeErr != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", cascadeErr.Error())
+		return
+	}
 	if err := store.ValidateSearchQuery(q); err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
 		return
@@ -638,6 +669,58 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	refMode := s.effectiveReferentialIntegrity(r)
+	totalCascaded := 0
+	if cascade || refMode == ReferentialIntegrityStrict {
+		preSearch := condParams
+		if maxCount <= 1 {
+			preSearch.Count = 2
+		} else {
+			preSearch.Count = maxCount
+		}
+		preSearch.Offset = 0
+		if sr, sErr := s.store.Search(r.Context(), preSearch); sErr == nil && sr != nil && len(sr.Matches) > 0 && (maxCount > 1 || sr.Total <= 1) {
+			exemptMatched := make(map[string]bool, len(sr.Matches))
+			for _, m := range sr.Matches {
+				exemptMatched[resType+"/"+m.ResID] = true
+			}
+			for _, m := range sr.Matches {
+				if hasSecCtx && auth.IsPatientRestricted(secCtx) {
+					if strings.EqualFold(resType, "Patient") && cleanID(m.ResID) != cleanID(secCtx.GetPatientId()) {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden", errForbiddenCompartment.Error())
+						return
+					}
+					if !strings.EqualFold(resType, "Patient") && store.IsPatientCompartmentResourceType(resType) {
+						_, allowed, cErr := s.checkExistingResourceCompartment(r.Context(), tenant, resType, m.ResID, secCtx.GetPatientId())
+						if cErr != nil {
+							writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to execute conditional delete")
+							return
+						}
+						if !allowed {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden", errForbiddenCompartment.Error())
+							return
+						}
+					}
+				}
+				cCount, refErr := s.enforceInboundDeleteOrCascade(r.Context(), tenant, resType, m.ResID, refMode, cascade, exemptMatched)
+				if errors.Is(refErr, errReferentialIntegrityDeleteBlocked) {
+					writeOperationOutcome(w, http.StatusConflict, "conflict", refErr.Error())
+					return
+				}
+				if errors.Is(refErr, errForbiddenCompartment) {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden", refErr.Error())
+					return
+				}
+				if refErr != nil {
+					s.logger.Error("conditional delete referential integrity check", "error", refErr, "type", resType)
+					writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to check referential integrity")
+					return
+				}
+				totalCascaded += cCount
+			}
+		}
+	}
+
 	recs, err := s.store.ConditionalDeleteResources(
 		r.Context(),
 		tenant,
@@ -670,6 +753,10 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 		writeOperationOutcome(w, http.StatusForbidden, "forbidden", err.Error())
 		return
 	}
+	if errors.Is(err, errReferentialIntegrityDeleteBlocked) {
+		writeOperationOutcome(w, http.StatusConflict, "conflict", err.Error())
+		return
+	}
 	if err != nil {
 		s.logger.Error("conditional delete resource", "error", err, "type", resType)
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to execute conditional delete")
@@ -695,13 +782,17 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 		}
 	}
 	if parsePreferReturn(r) == "OperationOutcome" {
+		diag := fmt.Sprintf("Conditional delete soft-deleted %d %s resource(s)", len(recs), resType)
+		if totalCascaded > 0 {
+			diag = fmt.Sprintf("Conditional delete soft-deleted %d %s resource(s) (cascade-deleted %d referencing resource(s))", len(recs), resType, totalCascaded)
+		}
 		s.writeOperationResponse(w, r, http.StatusOK, "OperationOutcome", map[string]any{
 			"resourceType": "OperationOutcome",
 			"issue": []map[string]any{
 				{
 					"severity":    "information",
 					"code":        "informational",
-					"diagnostics": fmt.Sprintf("Conditional delete soft-deleted %d %s resource(s)", len(recs), resType),
+					"diagnostics": diag,
 				},
 			},
 		})

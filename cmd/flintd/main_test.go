@@ -308,6 +308,44 @@ func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
 			func(string, http.Handler) error { return nil },
 		)
 		require.ErrorContains(t, err, "invalid analytics backend")
+
+		// Invalid referential integrity mode via CLI or env
+		err = run(
+			[]string{"-referential-integrity", "invalid-mode"},
+			func(string) string { return "" },
+			io.Discard,
+			logger,
+			func(string, string) (*sql.DB, error) { return nil, nil },
+			func(string, http.Handler) error { return nil },
+		)
+		require.ErrorContains(t, err, "invalid referential integrity mode")
+
+		// Strict referential integrity via FLINT_REFERENTIAL_INTEGRITY env var
+		err = run(
+			[]string{"-store", "sqlite", "-sqlite-dsn", ":memory:"},
+			func(k string) string {
+				if k == "FLINT_REFERENTIAL_INTEGRITY" {
+					return "strict"
+				}
+				return ""
+			},
+			io.Discard,
+			logger,
+			sql.Open,
+			func(_ string, h http.Handler) error {
+				req := httptest.NewRequest(
+					http.MethodPost,
+					"/fhir/r4/demo/Observation",
+					strings.NewReader(`{"resourceType":"Observation","status":"final","code":{"text":"HR"},"subject":{"reference":"Patient/missing-pat"}}`),
+				)
+				req.Header.Set("Content-Type", "application/fhir+json")
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
+				return nil
+			},
+		)
+		require.NoError(t, err)
 	})
 
 	t.Run("real modernc sqlite file-backed store startup, HTTP CRUD, and WAL reload", func(t *testing.T) {

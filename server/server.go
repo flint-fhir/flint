@@ -96,6 +96,7 @@ type Server struct {
 	clientJWKs                 map[string]auth.JWK
 	clientJWKSets              map[string]auth.JWKSet
 	requireRegisteredClientJWK bool
+	referentialIntegrity       atomic.Int32
 	routerOnce                 sync.Once
 	internalRouter             http.Handler
 	metrics                    *serverMetrics
@@ -3453,6 +3454,17 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.effectiveReferentialIntegrity(r) == ReferentialIntegrityStrict {
+		if refErr := s.verifyOutboundReferences(r.Context(), tenant, resType, resID, msg, protoBytes, idx, nil, nil); refErr != nil {
+			if errors.Is(refErr, errReferentialIntegrityTargetMissing) {
+				writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-found", refErr.Error())
+			} else {
+				writeOperationOutcome(w, http.StatusInternalServerError, "exception", refErr.Error())
+			}
+			return
+		}
+	}
+
 	input := store.ResourceInput{
 		TenantID:      tenant,
 		ResType:       resType,
@@ -3721,6 +3733,17 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if s.effectiveReferentialIntegrity(r) == ReferentialIntegrityStrict {
+		if refErr := s.verifyOutboundReferences(r.Context(), tenant, resType, resID, msg, protoBytes, idx, nil, nil); refErr != nil {
+			if errors.Is(refErr, errReferentialIntegrityTargetMissing) {
+				writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-found", refErr.Error())
+			} else {
+				writeOperationOutcome(w, http.StatusInternalServerError, "exception", refErr.Error())
+			}
+			return
+		}
+	}
+
 	rec, err := s.store.WriteResourceWithMeta(r.Context(), store.ResourceInput{
 		TenantID:        tenant,
 		ResType:         resType,
@@ -3766,6 +3789,12 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	resType := r.PathValue("resourceType")
 	resID := r.PathValue("id")
 
+	cascade, cascadeErr := parseCascadeDelete(r.URL.Query())
+	if cascadeErr != nil {
+		writeOperationOutcome(w, http.StatusBadRequest, "invalid", cascadeErr.Error())
+		return
+	}
+
 	expectedVersion := 0
 	if ifMatch := strings.TrimSpace(r.Header.Get("If-Match")); ifMatch != "" {
 		v, err := store.ParseETagVersion(ifMatch)
@@ -3775,6 +3804,22 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		expectedVersion = v
+	}
+
+	refMode := s.effectiveReferentialIntegrity(r)
+	cascadedCount, refErr := s.enforceInboundDeleteOrCascade(r.Context(), tenant, resType, resID, refMode, cascade, nil)
+	if refErr != nil {
+		if errors.Is(refErr, errReferentialIntegrityDeleteBlocked) {
+			writeOperationOutcome(w, http.StatusConflict, "conflict", refErr.Error())
+			return
+		}
+		if errors.Is(refErr, errForbiddenCompartment) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", refErr.Error())
+			return
+		}
+		s.logger.Error("delete referential integrity check", "error", refErr, "type", resType, "id", resID)
+		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to evaluate referential integrity for delete")
+		return
 	}
 
 	rec, err := s.store.DeleteResourceWithExpectedVersion(r.Context(), tenant, resType, resID, expectedVersion)
@@ -3798,13 +3843,17 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	if parsePreferReturn(r) == "OperationOutcome" {
+		diag := fmt.Sprintf("Successfully deleted %s/%s", resType, resID)
+		if cascadedCount > 0 {
+			diag = fmt.Sprintf("Successfully deleted %s/%s (cascade-deleted %d referencing resource(s))", resType, resID, cascadedCount)
+		}
 		s.writeOperationResponse(w, r, http.StatusOK, "OperationOutcome", map[string]any{
 			"resourceType": "OperationOutcome",
 			"issue": []map[string]any{
 				{
 					"severity":    "information",
 					"code":        "informational",
-					"diagnostics": fmt.Sprintf("Successfully deleted %s/%s", resType, resID),
+					"diagnostics": diag,
 				},
 			},
 		})
@@ -5999,13 +6048,18 @@ func addSubsettedTag(resource map[string]any) {
 func usCoreSupportedProfiles(rt string) []string {
 	switch rt {
 	case "Patient":
-		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"}
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient",
+			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-patient",
+		}
 	case "Encounter":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-encounter"}
 	case "Condition":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-encounter-diagnosis",
+			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-condition",
+			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-problem-list-item",
 		}
 	case "Observation":
 		return []string{
@@ -6020,19 +6074,43 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-body-height",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-bmi",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pulse-oximetry",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-head-circumference",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-head-circumference-percentile",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pediatric-bmi-for-age",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pediatric-weight-for-height",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-smokingstatus",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-care-experience-preference",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-treatment-intervention-preference",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-simple-observation",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-screening-assessment",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-result",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-sdoh-assessment",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-occupation",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-pregnancyintent",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-pregnancystatus",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-sexual-orientation",
+			"http://hl7.org/fhir/StructureDefinition/vitalsigns",
+			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-observation",
 		}
 	case "Practitioner":
-		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitioner"}
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitioner",
+			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-practitioner",
+		}
 	case "MedicationRequest":
-		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationrequest"}
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationrequest",
+			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-medicationrequest",
+		}
+	case "MedicationStatement":
+		return []string{
+			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-medicationstatement",
+		}
 	case "AllergyIntolerance":
-		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-allergyintolerance"}
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-allergyintolerance",
+			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-allergyintolerance",
+		}
 	case "Procedure":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-procedure"}
 	case "DiagnosticReport":
@@ -6041,7 +6119,10 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note",
 		}
 	case "Immunization":
-		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-immunization"}
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-immunization",
+			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-immunization",
+		}
 	case "Organization":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-organization"}
 	case "Specimen":
@@ -6049,7 +6130,11 @@ func usCoreSupportedProfiles(rt string) []string {
 	case "Location":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-location"}
 	case "DocumentReference":
-		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-documentreference"}
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-documentreference",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-adi-documentreference",
+			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-documentreference",
+		}
 	case "Provenance":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-provenance"}
 	case "CarePlan":
@@ -6067,11 +6152,17 @@ func usCoreSupportedProfiles(rt string) []string {
 	case "MedicationDispense":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationdispense"}
 	case "Medication":
-		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medication"}
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medication",
+			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-medication",
+		}
 	case "Device":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-implantable-device"}
 	case "PractitionerRole":
-		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitionerrole"}
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitionerrole",
+			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-practitionerrole",
+		}
 	case "RelatedPerson":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-relatedperson"}
 	default:
@@ -6118,6 +6209,7 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 		{"name": "date", "type": "date"},
 	}
 
+	refPolicy := s.capabilityReferencePolicy(r)
 	spDefs := resourceSearchParamDefs()
 	usCoreOrder := fhirutil.USCoreResourceTypes()
 	seenTypes := make(map[string]bool, len(s.protoRegistry)+2)
@@ -6140,6 +6232,7 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			"conditionalRead":   "full-support",
 			"conditionalUpdate": true,
 			"conditionalDelete": "single",
+			"referencePolicy":   refPolicy,
 			"interaction":       interactions,
 			"searchParam":       sp,
 		}
@@ -6621,6 +6714,7 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 		"conditionalRead":   "full-support",
 		"conditionalUpdate": true,
 		"conditionalDelete": "single",
+		"referencePolicy":   refPolicy,
 		"interaction":       interactions,
 		"operation": []map[string]string{
 			{
@@ -6710,8 +6804,12 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			"conditionalRead":   "full-support",
 			"conditionalUpdate": true,
 			"conditionalDelete": "single",
+			"referencePolicy":   refPolicy,
 			"interaction":       interactions,
 			"searchParam":       sp,
+		}
+		if supProfs := usCoreSupportedProfiles(rt); len(supProfs) > 0 {
+			entry["supportedProfile"] = supProfs
 		}
 		switch rt {
 		case "Claim":
@@ -7351,6 +7449,7 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 		"fhirVersion":  "4.0.1",
 		"instantiates": []string{
 			"http://hl7.org/fhir/us/core/CapabilityStatement/us-core-server",
+			"http://hl7.org/fhir/uv/ipa/CapabilityStatement/ipa-server",
 			"http://hl7.org/fhir/uv/bulkdata/CapabilityStatement/bulk-data",
 		},
 		"format":      []string{"json", "application/fhir+json", "application/fhir+ndjson", "application/x-protobuf", "application/fhir+protobuf"},

@@ -40,6 +40,11 @@ func normalizeSearchIndexes(idx *SearchIndexes) *SearchIndexes {
 	if idx == nil {
 		return nil
 	}
+	for i := range idx.References {
+		if histIdx := strings.Index(idx.References[i].TargetID, "/_history/"); histIdx != -1 {
+			idx.References[i].TargetID = idx.References[i].TargetID[:histIdx]
+		}
+	}
 	for i := range idx.Tokens {
 		if idx.Tokens[i].SpSystem == "" && IsEnumTokenParam(idx.Tokens[i].SpName) {
 			idx.Tokens[i].SpValue = strings.ToLower(strings.ReplaceAll(idx.Tokens[i].SpValue, "_", "-"))

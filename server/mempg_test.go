@@ -740,6 +740,9 @@ func (c *memPGConn) QueryContext(_ context.Context, query string, args []driver.
 		newVer := nvInt(args, 3)
 		key := memResKey(tenant, resType, resID)
 		if cur := s.resources[key]; cur != nil {
+			if newVer <= 0 {
+				newVer = cur.version + 1
+			}
 			cur.version = newVer
 			cur.lastUpdated = now
 			cur.isDeleted = true
@@ -1185,12 +1188,13 @@ func (s *memPGStore) filterResources(q string, args []driver.NamedValue, applyPa
 }
 
 var (
-	reSortDateSub   = regexp.MustCompile(`\(SELECT (MIN|MAX)\(sd\.(sp_low|sp_high)\) FROM spidx_date sd WHERE [^)]+ sd\.sp_name = \$(\d+)\) (ASC|DESC)`)
-	reSortStringSub = regexp.MustCompile(`\(SELECT (MIN|MAX)\(ss\.sp_value\) FROM spidx_string ss WHERE [^)]+ ss\.sp_name = \$(\d+)\) (ASC|DESC)`)
-	reRfResTypeEq   = regexp.MustCompile(`AND rf\.res_type = \$(\d+)`)
-	reRfSpNameEq    = regexp.MustCompile(`AND rf\.sp_name = \$(\d+)`)
-	reRfSpNameAny   = regexp.MustCompile(`AND rf\.sp_name = ANY\(\$(\d+)\)`)
-	reRfTargetType  = regexp.MustCompile(`AND \(?rf\.target_type = \$(\d+)`)
+	reSortDateSub     = regexp.MustCompile(`\(SELECT (MIN|MAX)\(sd\.(sp_low|sp_high)\) FROM spidx_date sd WHERE [^)]+ sd\.sp_name = \$(\d+)\) (ASC|DESC)`)
+	reSortStringSub   = regexp.MustCompile(`\(SELECT (MIN|MAX)\(ss\.sp_value\) FROM spidx_string ss WHERE [^)]+ ss\.sp_name = \$(\d+)\) (ASC|DESC)`)
+	reRfResTypeEq     = regexp.MustCompile(`AND rf\.res_type = \$(\d+)`)
+	reRfSpNameEq      = regexp.MustCompile(`AND rf\.sp_name = \$(\d+)`)
+	reRfSpNameAny     = regexp.MustCompile(`AND rf\.sp_name = ANY\(\$(\d+)\)`)
+	reRfTargetType    = regexp.MustCompile(`AND \(?rf\.target_type = \$(\d+)`)
+	reRfTargetTypeAny = regexp.MustCompile(`AND \(?rf\.target_type = ANY\(\$(\d+)\)`)
 )
 
 func (s *memPGStore) resolveIncludeQuery(q string, args []driver.NamedValue) []*memResRecord {
@@ -1221,6 +1225,11 @@ func (s *memPGStore) resolveIncludeQuery(q string, args []driver.NamedValue) []*
 		idx, _ := strconv.Atoi(m[1])
 		wantTargetType = nvStr(args, idx-1)
 	}
+	var wantTargetTypes []string
+	if m := reRfTargetTypeAny.FindStringSubmatch(q); len(m) == 2 {
+		idx, _ := strconv.Atoi(m[1])
+		wantTargetTypes = parsePGStringArray(nvStr(args, idx-1))
+	}
 
 	seen := make(map[string]bool)
 	var out []*memResRecord
@@ -1238,6 +1247,9 @@ func (s *memPGStore) resolveIncludeQuery(q string, args []driver.NamedValue) []*
 			continue
 		}
 		if wantTargetType != "" && rf.TargetType != "" && rf.TargetType != wantTargetType {
+			continue
+		}
+		if len(wantTargetTypes) > 0 && rf.TargetType != "" && !slicesContains(wantTargetTypes, rf.TargetType) {
 			continue
 		}
 		if isRevInclude {

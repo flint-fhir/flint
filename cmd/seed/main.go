@@ -1,9 +1,7 @@
 // Command seed populates a running Flint FHIR R4 server with a realistic,
-// deterministic longitudinal clinical cohort covering all 13 US Core v6.1.0 &
-// v7.0.0 (USCDI v3 & v4) resource types (Organization, Location, Practitioner,
-// Patient, Encounter, Condition, Observation, MedicationRequest,
-// AllergyIntolerance, Procedure, DiagnosticReport, Specimen, Immunization)
-// using an atomic FHIR R4 transaction Bundle.
+// deterministic longitudinal clinical cohort covering all 26 US Core v6.1.0 &
+// v7.0.0 (USCDI v3 & v4) and HL7 IPA resource types using an atomic FHIR R4
+// transaction Bundle.
 //
 // Usage:
 //
@@ -140,7 +138,7 @@ func Run(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("decode transaction-response: %w", err)
 	}
 
-	fmt.Fprintf(out, "🔥 Seeded %d FHIR R4 resources (all 13 US Core v6.1.0 & v7.0.0 profiles) into tenant %q (%s)\n\n", len(txResp.Entry), tenant, endpoint)
+	fmt.Fprintf(out, "🔥 Seeded %d FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant %q (%s)\n\n", len(txResp.Entry), tenant, endpoint)
 	for _, e := range txResp.Entry {
 		fmt.Fprintf(out, "  • %-42s  %-12s  ETag: %s\n", e.FullURL, e.Response.Status, e.Response.ETag)
 	}
@@ -159,11 +157,9 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 // CohortTransactionBundleJSON returns a deterministic, idempotent FHIR R4 transaction Bundle
-// containing 29 resources across all 13 US Core v6.1.0 & v7.0.0 (USCDI v3 & v4) resource types:
-// 2 Organizations, 1 Location, 2 Practitioners, 3 Patients, 3 Encounters, 2 Conditions,
-// 7 Observations (including Average Blood Pressure & Care Experience Preference),
-// 2 MedicationRequests, 1 AllergyIntolerance, 2 Procedures, 2 DiagnosticReports,
-// 1 Specimen, and 1 Immunization.
+// covering all 26 US Core v6.1.0 & v7.0.0 (USCDI v3 & v4) and HL7 IPA resource types plus
+// vital-signs, laboratory, smoking-status, SDOH, screening, preference, pregnancy, occupation,
+// health-concern, implantable-device, clinical-note, and medicationReference sub-profiles.
 func CohortTransactionBundleJSON() ([]byte, error) {
 	entries := []map[string]any{
 		// 1. Organizations (2) & Location (1)
@@ -283,14 +279,93 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			"active":       true,
 			"gender":       "female",
 			"birthDate":    "1985-04-12",
+			"extension": []map[string]any{
+				{
+					"url": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-race",
+					"extension": []map[string]any{
+						{
+							"url": "ombCategory",
+							"valueCoding": map[string]any{
+								"system":  "urn:oid:2.16.840.1.113883.6.238",
+								"code":    "2106-3",
+								"display": "White",
+							},
+						},
+						{
+							"url":         "text",
+							"valueString": "White",
+						},
+					},
+				},
+				{
+					"url": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-ethnicity",
+					"extension": []map[string]any{
+						{
+							"url": "ombCategory",
+							"valueCoding": map[string]any{
+								"system":  "urn:oid:2.16.840.1.113883.6.238",
+								"code":    "2186-5",
+								"display": "Not Hispanic or Latino",
+							},
+						},
+						{
+							"url":         "text",
+							"valueString": "Not Hispanic or Latino",
+						},
+					},
+				},
+				{
+					"url":       "http://hl7.org/fhir/us/core/StructureDefinition/us-core-birthsex",
+					"valueCode": "F",
+				},
+				{
+					"url":       "http://hl7.org/fhir/us/core/StructureDefinition/us-core-sex",
+					"valueCode": "248152002",
+				},
+				{
+					"url": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-tribal-affiliation",
+					"extension": []map[string]any{
+						{
+							"url": "tribalAffiliation",
+							"valueCodeableConcept": map[string]any{
+								"coding": []map[string]any{
+									{
+										"system":  "http://terminology.hl7.org/CodeSystem/v3-TribalEntityUS",
+										"code":    "91",
+										"display": "Eastern Band of Cherokee Indians",
+									},
+								},
+							},
+						},
+						{
+							"url":          "isEnrolled",
+							"valueBoolean": false,
+						},
+					},
+				},
+			},
 			"identifier": []map[string]any{
 				{"system": "http://hospital.example.org/mrn", "value": "MRN-1001"},
 			},
 			"name": []map[string]any{
 				{"use": "official", "family": "Wonderland", "given": []string{"Alice", "Marie"}},
 			},
+			"telecom": []map[string]any{
+				{"system": "phone", "value": "555-010-1001", "use": "mobile"},
+				{"system": "email", "value": "alice.wonderland@example.org", "use": "home"},
+			},
 			"address": []map[string]any{
-				{"line": []string{"742 Evergreen Terrace"}, "city": "San Francisco", "state": "CA", "postalCode": "94105"},
+				{"line": []string{"742 Evergreen Terrace"}, "city": "San Francisco", "state": "CA", "postalCode": "94105", "country": "US"},
+			},
+			"communication": []map[string]any{
+				{
+					"language": map[string]any{
+						"coding": []map[string]any{
+							{"system": "urn:ietf:bcp:47", "code": "en-US", "display": "English (United States)"},
+						},
+					},
+					"preferred": true,
+				},
 			},
 			"generalPractitioner": []map[string]any{
 				{"reference": "Practitioner/prac-cardiology-1"},
@@ -984,6 +1059,662 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			},
 			"occurrenceDateTime": "2026-03-01T11:20:00Z",
 			"lotNumber":          "FLINT-LOT-2026A",
+		}),
+
+		// 6. Complete US Core v6.1.0 & v7.0.0 + HL7 IPA Resource Types & Sub-Profiles for Alice (pat-alice-001)
+		putEntry("PractitionerRole/pracrole-cardiology-1", map[string]any{
+			"resourceType": "PractitionerRole",
+			"id":           "pracrole-cardiology-1",
+			"active":       true,
+			"practitioner": map[string]any{"reference": "Practitioner/prac-cardiology-1"},
+			"organization": map[string]any{"reference": "Organization/org-flint-health"},
+			"location": []map[string]any{
+				{"reference": "Location/loc-flint-cardiology"},
+			},
+			"code": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://nucc.org/provider-taxonomy", "code": "207RC0000X", "display": "Cardiovascular Disease Physician"},
+					},
+				},
+			},
+			"specialty": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://nucc.org/provider-taxonomy", "code": "207RC0000X", "display": "Cardiovascular Disease Physician"},
+					},
+				},
+			},
+			"telecom": []map[string]any{
+				{"system": "phone", "value": "555-019-2000", "use": "work"},
+			},
+		}),
+		putEntry("RelatedPerson/relperson-alice-spouse", map[string]any{
+			"resourceType": "RelatedPerson",
+			"id":           "relperson-alice-spouse",
+			"active":       true,
+			"patient":      map[string]any{"reference": "Patient/pat-alice-001"},
+			"relationship": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/v3-RoleCode", "code": "SPS", "display": "spouse"},
+					},
+				},
+			},
+			"name": []map[string]any{
+				{"use": "official", "family": "Wonderland", "given": []string{"Arthur"}},
+			},
+			"telecom": []map[string]any{
+				{"system": "phone", "value": "555-010-1002", "use": "mobile"},
+			},
+			"address": []map[string]any{
+				{"line": []string{"742 Evergreen Terrace"}, "city": "San Francisco", "state": "CA", "postalCode": "94105", "country": "US"},
+			},
+		}),
+		putEntry("Medication/med-atorvastatin-001", map[string]any{
+			"resourceType": "Medication",
+			"id":           "med-atorvastatin-001",
+			"status":       "active",
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "617312", "display": "Atorvastatin 20 MG Oral Tablet"},
+				},
+			},
+		}),
+		putEntry("MedicationRequest/medreq-alice-atorvastatin-ref", map[string]any{
+			"resourceType":        "MedicationRequest",
+			"id":                  "medreq-alice-atorvastatin-ref",
+			"status":              "active",
+			"intent":              "order",
+			"subject":             map[string]any{"reference": "Patient/pat-alice-001"},
+			"encounter":           map[string]any{"reference": "Encounter/enc-alice-001"},
+			"requester":           map[string]any{"reference": "Practitioner/prac-cardiology-1"},
+			"authoredOn":          "2026-01-15T09:32:00Z",
+			"medicationReference": map[string]any{"reference": "Medication/med-atorvastatin-001"},
+		}),
+		putEntry("MedicationDispense/meddisp-alice-lisinopril", map[string]any{
+			"resourceType": "MedicationDispense",
+			"id":           "meddisp-alice-lisinopril",
+			"status":       "completed",
+			"medicationCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "314076", "display": "Lisinopril 10 MG Oral Tablet"},
+				},
+			},
+			"subject": map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer": []map[string]any{
+				{"actor": map[string]any{"reference": "Practitioner/prac-cardiology-1"}},
+			},
+			"authorizingPrescription": []map[string]any{
+				{"reference": "MedicationRequest/medreq-alice-lisinopril"},
+			},
+			"type": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode", "code": "FF", "display": "First Fill"},
+				},
+			},
+			"quantity": map[string]any{
+				"value":  30.0,
+				"unit":   "TAB",
+				"system": "http://terminology.hl7.org/CodeSystem/v3-orderableDrugForm",
+				"code":   "TAB",
+			},
+			"whenHandedOver": "2026-01-15T10:30:00Z",
+		}),
+		putEntry("Coverage/cov-alice-medicare", map[string]any{
+			"resourceType": "Coverage",
+			"id":           "cov-alice-medicare",
+			"status":       "active",
+			"identifier": []map[string]any{
+				{"system": "http://flint-health.example.org/memberid", "value": "MEM-ALICE-001"},
+			},
+			"type": map[string]any{
+				"coding": []map[string]any{
+					{"system": "https://nahdo.org/sopt", "code": "1", "display": "MEDICARE"},
+				},
+			},
+			"subscriberId": "SUB-ALICE-001",
+			"beneficiary":  map[string]any{"reference": "Patient/pat-alice-001"},
+			"relationship": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship", "code": "self", "display": "Self"},
+				},
+			},
+			"period": map[string]any{
+				"start": "2026-01-01",
+				"end":   "2026-12-31",
+			},
+			"payor": []map[string]any{
+				{"reference": "Organization/org-flint-health"},
+			},
+			"class": []map[string]any{
+				{
+					"type": map[string]any{
+						"coding": []map[string]any{
+							{"system": "http://terminology.hl7.org/CodeSystem/coverage-class", "code": "group"},
+						},
+					},
+					"value": "GRP-CARDIO-100",
+					"name":  "Flint Preferred Group Plan",
+				},
+			},
+		}),
+		putEntry("Goal/goal-alice-bp", map[string]any{
+			"resourceType":    "Goal",
+			"id":              "goal-alice-bp",
+			"lifecycleStatus": "active",
+			"achievementStatus": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/goal-achievement", "code": "in-progress", "display": "In Progress"},
+				},
+			},
+			"description": map[string]any{
+				"text": "Maintain systolic blood pressure below 130 mmHg",
+			},
+			"subject": map[string]any{"reference": "Patient/pat-alice-001"},
+			"target": []map[string]any{
+				{"dueDate": "2026-12-31"},
+			},
+		}),
+		putEntry("CareTeam/careteam-alice-001", map[string]any{
+			"resourceType": "CareTeam",
+			"id":           "careteam-alice-001",
+			"status":       "active",
+			"name":         "Alice Wonderland Multidisciplinary Care Team",
+			"subject":      map[string]any{"reference": "Patient/pat-alice-001"},
+			"participant": []map[string]any{
+				{
+					"role": []map[string]any{
+						{
+							"coding": []map[string]any{
+								{"system": "http://snomed.info/sct", "code": "17561000", "display": "Cardiologist"},
+							},
+						},
+					},
+					"member": map[string]any{"reference": "Practitioner/prac-cardiology-1"},
+				},
+			},
+		}),
+		putEntry("CarePlan/careplan-alice-htn", map[string]any{
+			"resourceType": "CarePlan",
+			"id":           "careplan-alice-htn",
+			"status":       "active",
+			"intent":       "plan",
+			"title":        "Hypertension Longitudinal Management Plan",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://hl7.org/fhir/us/core/CodeSystem/careplan-category", "code": "assess-plan"},
+					},
+				},
+			},
+			"subject":   map[string]any{"reference": "Patient/pat-alice-001"},
+			"encounter": map[string]any{"reference": "Encounter/enc-alice-001"},
+			"careTeam": []map[string]any{
+				{"reference": "CareTeam/careteam-alice-001"},
+			},
+			"addresses": []map[string]any{
+				{"reference": "Condition/cond-alice-htn"},
+			},
+			"goal": []map[string]any{
+				{"reference": "Goal/goal-alice-bp"},
+			},
+		}),
+		putEntry("ServiceRequest/sr-alice-lipid", map[string]any{
+			"resourceType": "ServiceRequest",
+			"id":           "sr-alice-lipid",
+			"status":       "active",
+			"intent":       "order",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://snomed.info/sct", "code": "108252007", "display": "Laboratory procedure"},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://loinc.org", "code": "24331-1", "display": "Lipid 1996 panel - Serum or Plasma"},
+				},
+			},
+			"subject":    map[string]any{"reference": "Patient/pat-alice-001"},
+			"encounter":  map[string]any{"reference": "Encounter/enc-alice-001"},
+			"authoredOn": "2026-01-15T09:35:00Z",
+			"requester":  map[string]any{"reference": "Practitioner/prac-cardiology-1"},
+		}),
+		putEntry("DocumentReference/docref-alice-note", map[string]any{
+			"resourceType": "DocumentReference",
+			"id":           "docref-alice-note",
+			"status":       "current",
+			"type": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://loinc.org", "code": "34117-2", "display": "History and physical note"},
+				},
+			},
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-documentreference-category", "code": "clinical-note", "display": "Clinical Note"},
+					},
+				},
+			},
+			"subject": map[string]any{"reference": "Patient/pat-alice-001"},
+			"date":    "2026-01-15T10:05:00Z",
+			"author": []map[string]any{
+				{"reference": "Practitioner/prac-cardiology-1"},
+			},
+			"custodian": map[string]any{"reference": "Organization/org-flint-health"},
+			"content": []map[string]any{
+				{
+					"attachment": map[string]any{
+						"contentType": "text/plain",
+						"data":        "Q2FyZGlvbG9neSBhbWJ1bGF0b3J5IGZvbGxvdy11cCBub3RlLg==",
+					},
+					"format": map[string]any{
+						"system":  "http://ihe.net/fhir/ihe.formatcode.fhir/CodeSystem/formatcode",
+						"code":    "urn:ihe:iti:xds:2017:mimeTypeSufficient",
+						"display": "mimeType Sufficient",
+					},
+				},
+			},
+			"context": map[string]any{
+				"encounter": []map[string]any{
+					{"reference": "Encounter/enc-alice-001"},
+				},
+				"period": map[string]any{
+					"start": "2026-01-15T09:00:00Z",
+					"end":   "2026-01-15T10:00:00Z",
+				},
+			},
+		}),
+		putEntry("QuestionnaireResponse/qr-alice-phq9", map[string]any{
+			"resourceType":  "QuestionnaireResponse",
+			"id":            "qr-alice-phq9",
+			"questionnaire": "http://hl7.org/fhir/us/core/Questionnaire/phq-9-quick-depression-assessment-panel",
+			"status":        "completed",
+			"subject":       map[string]any{"reference": "Patient/pat-alice-001"},
+			"authored":      "2026-01-15T09:19:00Z",
+			"author":        map[string]any{"reference": "Practitioner/prac-cardiology-1"},
+			"item": []map[string]any{
+				{
+					"linkId": "44250-9",
+					"text":   "Little interest or pleasure in doing things",
+					"answer": []map[string]any{
+						{
+							"valueCoding": map[string]any{
+								"system":  "http://loinc.org",
+								"code":    "LA6568-5",
+								"display": "Not at all",
+							},
+						},
+					},
+				},
+			},
+		}),
+		putEntry("Device/dev-alice-pacemaker", map[string]any{
+			"resourceType": "Device",
+			"id":           "dev-alice-pacemaker",
+			"udiCarrier": []map[string]any{
+				{
+					"deviceIdentifier": "00844588003288",
+					"carrierHRF":       "(01)00844588003288(11)240101(17)290101(10)LOT1(21)SER1",
+				},
+			},
+			"status":       "active",
+			"manufacturer": "Acme Cardiac Devices",
+			"lotNumber":    "LOT1",
+			"serialNumber": "SER1",
+			"type": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://snomed.info/sct", "code": "14106009", "display": "Cardiac pacemaker, device"},
+				},
+			},
+			"patient": map[string]any{"reference": "Patient/pat-alice-001"},
+		}),
+		putEntry("Provenance/prov-alice-001", map[string]any{
+			"resourceType": "Provenance",
+			"id":           "prov-alice-001",
+			"target": []map[string]any{
+				{"reference": "Patient/pat-alice-001"},
+				{"reference": "Condition/cond-alice-htn"},
+				{"reference": "Observation/obs-alice-bp"},
+			},
+			"recorded": "2026-01-15T10:10:00Z",
+			"agent": []map[string]any{
+				{
+					"type": map[string]any{
+						"coding": []map[string]any{
+							{"system": "http://terminology.hl7.org/CodeSystem/provenance-participant-type", "code": "author", "display": "Author"},
+						},
+					},
+					"who":        map[string]any{"reference": "Practitioner/prac-cardiology-1"},
+					"onBehalfOf": map[string]any{"reference": "Organization/org-flint-health"},
+				},
+			},
+		}),
+		putEntry("Condition/cond-alice-health-concern", map[string]any{
+			"resourceType": "Condition",
+			"id":           "cond-alice-health-concern",
+			"clinicalStatus": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"},
+				},
+			},
+			"verificationStatus": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"},
+				},
+			},
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://hl7.org/fhir/us/core/CodeSystem/condition-category", "code": "health-concern", "display": "Health Concern"},
+					},
+				},
+				{
+					"coding": []map[string]any{
+						{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-category", "code": "sdoh", "display": "SDOH"},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://snomed.info/sct", "code": "733423003", "display": "Food insecurity"},
+				},
+			},
+			"subject":      map[string]any{"reference": "Patient/pat-alice-001"},
+			"encounter":    map[string]any{"reference": "Encounter/enc-alice-001"},
+			"recordedDate": "2026-01-15T09:18:00Z",
+		}),
+		putEntry("DiagnosticReport/dr-alice-radiology", map[string]any{
+			"resourceType": "DiagnosticReport",
+			"id":           "dr-alice-radiology",
+			"status":       "final",
+			"category": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://loinc.org", "code": "LP29684-5", "display": "Radiology"},
+					},
+				},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://loinc.org", "code": "30746-2", "display": "XR Chest 2 Views"},
+				},
+			},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"encounter":         map[string]any{"reference": "Encounter/enc-alice-001"},
+			"effectiveDateTime": "2026-01-15T09:40:00Z",
+			"issued":            "2026-01-15T09:55:00Z",
+			"performer": []map[string]any{
+				{"reference": "Practitioner/prac-cardiology-1"},
+			},
+			"presentedForm": []map[string]any{
+				{
+					"contentType": "text/plain",
+					"data":        "Q2hlc3QgWC1yYXk6IG5vcm1hbCBjYXJkaW9tZWRpYXN0aW5hbCBzaWxob3VldHRlLg==",
+				},
+			},
+		}),
+		putEntry("Immunization/imm-alice-flu", map[string]any{
+			"resourceType": "Immunization",
+			"id":           "imm-alice-flu",
+			"status":       "completed",
+			"vaccineCode": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://hl7.org/fhir/sid/cvx", "code": "141", "display": "Influenza, seasonal, injectable"},
+				},
+			},
+			"patient":            map[string]any{"reference": "Patient/pat-alice-001"},
+			"encounter":          map[string]any{"reference": "Encounter/enc-alice-001"},
+			"occurrenceDateTime": "2026-01-15T09:50:00Z",
+			"primarySource":      true,
+		}),
+		putEntry("Observation/obs-alice-resp-rate", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-resp-rate",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "9279-1", "display": "Respiratory rate"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:15:00Z",
+			"valueQuantity":     map[string]any{"value": 16.0, "unit": "breaths/minute", "system": "http://unitsofmeasure.org", "code": "/min"},
+		}),
+		putEntry("Observation/obs-alice-body-temp", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-body-temp",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "8310-5", "display": "Body temperature"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:15:00Z",
+			"valueQuantity":     map[string]any{"value": 36.8, "unit": "C", "system": "http://unitsofmeasure.org", "code": "Cel"},
+		}),
+		putEntry("Observation/obs-alice-body-height", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-body-height",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "8302-2", "display": "Body height"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:15:00Z",
+			"valueQuantity":     map[string]any{"value": 165.0, "unit": "cm", "system": "http://unitsofmeasure.org", "code": "cm"},
+		}),
+		putEntry("Observation/obs-alice-body-weight", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-body-weight",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "29463-7", "display": "Body weight"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:15:00Z",
+			"valueQuantity":     map[string]any{"value": 64.0, "unit": "kg", "system": "http://unitsofmeasure.org", "code": "kg"},
+		}),
+		putEntry("Observation/obs-alice-bmi", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-bmi",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "39156-5", "display": "Body mass index (BMI) [Ratio]"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:15:00Z",
+			"valueQuantity":     map[string]any{"value": 23.5, "unit": "kg/m2", "system": "http://unitsofmeasure.org", "code": "kg/m2"},
+		}),
+		putEntry("Observation/obs-alice-pulse-ox", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-pulse-ox",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"}}},
+			},
+			"code": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://loinc.org", "code": "59408-5", "display": "Oxygen saturation in Arterial blood by Pulse oximetry"},
+					{"system": "http://loinc.org", "code": "2708-6", "display": "Oxygen saturation in Arterial blood"},
+				},
+			},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:15:00Z",
+			"valueQuantity":     map[string]any{"value": 98.0, "unit": "%", "system": "http://unitsofmeasure.org", "code": "%"},
+			"component": []map[string]any{
+				{
+					"code":          map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "3151-8", "display": "Inhaled oxygen flow rate"}}},
+					"valueQuantity": map[string]any{"value": 2.0, "unit": "L/min", "system": "http://unitsofmeasure.org", "code": "L/min"},
+				},
+				{
+					"code":          map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "3150-0", "display": "Inhaled oxygen concentration"}}},
+					"valueQuantity": map[string]any{"value": 28.0, "unit": "%", "system": "http://unitsofmeasure.org", "code": "%"},
+				},
+			},
+		}),
+		putEntry("Observation/obs-alice-head-circ", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-head-circ",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs", "display": "Vital Signs"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "9843-4", "display": "Head Occipital-frontal circumference"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:15:00Z",
+			"valueQuantity":     map[string]any{"value": 55.0, "unit": "cm", "system": "http://unitsofmeasure.org", "code": "cm"},
+		}),
+		putEntry("Observation/obs-alice-smoking", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-smoking",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "social-history", "display": "Social History"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "72166-2", "display": "Tobacco smoking status"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:16:00Z",
+			"valueCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://snomed.info/sct", "code": "266919005", "display": "Never smoked tobacco"},
+				},
+			},
+		}),
+		putEntry("Observation/obs-alice-sdoh", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-sdoh",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "survey", "display": "Survey"}}},
+				{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-category", "code": "sdoh", "display": "SDOH"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "93030-5", "display": "Has lack of transportation kept you from medical appointments, meetings, work, or from getting things needed for daily living"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:17:00Z",
+			"valueCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://loinc.org", "code": "LA32-8", "display": "No"},
+				},
+			},
+		}),
+		putEntry("Observation/obs-alice-treatment-pref", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-treatment-pref",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-category", "code": "treatment-intervention-preference", "display": "Treatment Intervention Preference"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "75773-2", "display": "Goals, preferences, and priorities for medical treatment"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:18:00Z",
+			"valueString":       "Full code; prefers conservative non-invasive management first",
+		}),
+		putEntry("Observation/obs-alice-occupation", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-occupation",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "social-history", "display": "Social History"}}},
+			},
+			"code":            map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "11341-5", "display": "History of Occupation"}}},
+			"subject":         map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":       []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectivePeriod": map[string]any{"start": "2018-01-01"},
+			"valueCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{"system": "https://www.cdc.gov/niosh/topics/coding/default.html", "code": "15-1252.00", "display": "Software Developers"},
+				},
+			},
+		}),
+		putEntry("Observation/obs-alice-pregnancy-status", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-pregnancy-status",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "social-history", "display": "Social History"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "82810-3", "display": "Pregnancy status"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:18:00Z",
+			"valueCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://snomed.info/sct", "code": "60001007", "display": "Not pregnant"},
+				},
+			},
+		}),
+		putEntry("Observation/obs-alice-pregnancy-intent", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-pregnancy-intent",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "social-history", "display": "Social History"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "86645-9", "display": "Pregnancy intention in the next year"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:18:00Z",
+			"valueCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://snomed.info/sct", "code": "454411000124108", "display": "No intention of becoming pregnant in next year"},
+				},
+			},
+		}),
+		putEntry("Observation/obs-alice-lab-ldl", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-lab-ldl",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory", "display": "Laboratory"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "13457-7", "display": "Cholesterol in LDL [Mass/volume] in Serum or Plasma by calculation"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Organization/org-flint-health"}},
+			"effectiveDateTime": "2026-01-15T09:25:00Z",
+			"valueQuantity":     map[string]any{"value": 112.0, "unit": "mg/dL", "system": "http://unitsofmeasure.org", "code": "mg/dL"},
+		}),
+		putEntry("Observation/obs-alice-clinical-result", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-clinical-result",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "imaging", "display": "Imaging"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "18748-4", "display": "Diagnostic imaging study"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"encounter":         map[string]any{"reference": "Encounter/enc-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:40:00Z",
+			"valueString":       "Normal cardiac silhouette, clear bilateral lung fields",
+		}),
+		putEntry("MedicationStatement/medstmt-alice-001", map[string]any{
+			"resourceType":        "MedicationStatement",
+			"id":                  "medstmt-alice-001",
+			"status":              "active",
+			"medicationReference": map[string]any{"reference": "Medication/med-atorvastatin-001"},
+			"subject":             map[string]any{"reference": "Patient/pat-alice-001"},
+			"context":             map[string]any{"reference": "Encounter/enc-alice-001"},
+			"effectiveDateTime":   "2026-01-15T08:00:00Z",
+			"dateAsserted":        "2026-01-15T09:30:00Z",
+			"informationSource":   map[string]any{"reference": "Patient/pat-alice-001"},
+			"dosage": []map[string]any{
+				{"text": "Take 1 tablet by mouth nightly"},
+			},
 		}),
 	}
 
