@@ -14,7 +14,6 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/store"
-	"github.com/flint-fhir/flint/store/postgres"
 )
 
 // Built-in canonical Measure definitions supported out of the box by Measure/$evaluate-measure.
@@ -71,7 +70,7 @@ func resolveMeasureSpec(ctx context.Context, s *Server, tenant, rawMeasure strin
 	// Try searching Measure by indexed canonical url (spidx_uri) or identifier (spidx_token) first
 	rawTrimmed := strings.TrimSpace(rawMeasure)
 	if rawTrimmed != "" {
-		if sr, err := s.store.Search(ctx, postgres.SearchParams{
+		if sr, err := s.store.Search(ctx, store.SearchParams{
 			TenantID: tenant,
 			ResType:  "Measure",
 			URIs:     map[string]string{"url": rawTrimmed},
@@ -81,7 +80,7 @@ func resolveMeasureSpec(ctx context.Context, s *Server, tenant, rawMeasure strin
 				return spec, nil
 			}
 		}
-		if sr, err := s.store.Search(ctx, postgres.SearchParams{
+		if sr, err := s.store.Search(ctx, store.SearchParams{
 			TenantID: tenant,
 			ResType:  "Measure",
 			Tokens:   map[string]string{"identifier": rawTrimmed},
@@ -94,7 +93,7 @@ func resolveMeasureSpec(ctx context.Context, s *Server, tenant, rawMeasure strin
 	}
 
 	// Fallback scan for legacy/differently-cased Measure resources
-	sr, err := s.store.Search(ctx, postgres.SearchParams{
+	sr, err := s.store.Search(ctx, store.SearchParams{
 		TenantID: tenant,
 		ResType:  "Measure",
 		Count:    100,
@@ -114,11 +113,11 @@ func resolveMeasureSpec(ctx context.Context, s *Server, tenant, rawMeasure strin
 	return nil, sql.ErrNoRows
 }
 
-func measureSpecFromRecord(s *Server, rec *postgres.ResourceRecord) (*measureSpec, error) {
+func measureSpecFromRecord(s *Server, rec *store.ResourceRecord) (*measureSpec, error) {
 	return measureSpecFromProto(s, rec.ResID, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 }
 
-func measureSpecFromSearchResult(s *Server, rec postgres.SearchResult) (*measureSpec, error) {
+func measureSpecFromSearchResult(s *Server, rec store.SearchResult) (*measureSpec, error) {
 	return measureSpecFromProto(s, rec.ResID, rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
 }
 
@@ -277,7 +276,7 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fetch candidate Patient(s)
-	patSearch := postgres.SearchParams{
+	patSearch := store.SearchParams{
 		TenantID: tenant,
 		ResType:  "Patient",
 		Count:    500,
@@ -622,7 +621,7 @@ func (s *Server) handleCareGaps(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	patSearch := postgres.SearchParams{
+	patSearch := store.SearchParams{
 		TenantID: tenant,
 		ResType:  "Patient",
 		Count:    200,
@@ -891,7 +890,7 @@ func (s *Server) loadCohortClinicalSnapshots(ctx context.Context, tenant string,
 	limit := max(200, len(patIDs)*50)
 
 	loadBatch := func(resType string, assign func(snap *patientClinicalSnapshot, m map[string]any)) {
-		sr, err := s.store.Search(ctx, postgres.SearchParams{
+		sr, err := s.store.Search(ctx, store.SearchParams{
 			TenantID:   tenant,
 			ResType:    resType,
 			References: map[string]string{"patient": refFilter},
@@ -934,7 +933,7 @@ func (s *Server) loadPatientClinicalSnapshot(ctx context.Context, tenant, patID 
 	}
 	cohort := s.loadCohortClinicalSnapshots(ctx, tenant, []string{patID})
 	snap := cohort[patID]
-	if sr, err := s.store.Search(ctx, postgres.SearchParams{
+	if sr, err := s.store.Search(ctx, store.SearchParams{
 		TenantID:   tenant,
 		ResType:    "AllergyIntolerance",
 		References: map[string]string{"patient": "Patient/" + patID},

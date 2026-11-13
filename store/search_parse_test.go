@@ -1,4 +1,4 @@
-package postgres_test
+package store_test
 
 import (
 	"testing"
@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 func TestParseDateOp(t *testing.T) {
@@ -62,7 +62,7 @@ func TestParseDateOp(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			op, err := postgres.ParseDateOp(tt.input)
+			op, err := store.ParseDateOp(tt.input)
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
@@ -122,7 +122,7 @@ func TestParseQuantityOp(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			op, err := postgres.ParseQuantityOp(tt.input)
+			op, err := store.ParseQuantityOp(tt.input)
 			if tt.wantErr {
 				assert.Error(t, err)
 				return
@@ -138,7 +138,7 @@ func TestParseQuantityOp(t *testing.T) {
 
 func TestParseInclude(t *testing.T) {
 	t.Run("Standard include Source:param", func(t *testing.T) {
-		inc, err := postgres.ParseInclude("Observation:patient")
+		inc, err := store.ParseInclude("Observation:patient")
 		require.NoError(t, err)
 		assert.Equal(t, "Observation", inc.SourceType)
 		assert.Equal(t, "patient", inc.ParamName)
@@ -146,7 +146,7 @@ func TestParseInclude(t *testing.T) {
 	})
 
 	t.Run("Include with explicit target Source:param:Target", func(t *testing.T) {
-		inc, err := postgres.ParseInclude("Encounter:subject:Patient")
+		inc, err := store.ParseInclude("Encounter:subject:Patient")
 		require.NoError(t, err)
 		assert.Equal(t, "Encounter", inc.SourceType)
 		assert.Equal(t, "subject", inc.ParamName)
@@ -154,14 +154,14 @@ func TestParseInclude(t *testing.T) {
 	})
 
 	t.Run("Invalid include format", func(t *testing.T) {
-		_, err := postgres.ParseInclude("InvalidFormat")
+		_, err := store.ParseInclude("InvalidFormat")
 		assert.Error(t, err)
 	})
 }
 
 func TestParseChainedParam(t *testing.T) {
 	t.Run("Implicit target type", func(t *testing.T) {
-		p, ok := postgres.ParseChainedParam("patient.name", "Smith")
+		p, ok := store.ParseChainedParam("patient.name", "Smith")
 		require.True(t, ok)
 		assert.Equal(t, "patient", p.RefParam)
 		assert.Equal(t, "Patient", p.TargetType)
@@ -170,7 +170,7 @@ func TestParseChainedParam(t *testing.T) {
 	})
 
 	t.Run("Explicit target type", func(t *testing.T) {
-		p, ok := postgres.ParseChainedParam("subject:Patient.family", "Doe")
+		p, ok := store.ParseChainedParam("subject:Patient.family", "Doe")
 		require.True(t, ok)
 		assert.Equal(t, "subject", p.RefParam)
 		assert.Equal(t, "Patient", p.TargetType)
@@ -180,29 +180,29 @@ func TestParseChainedParam(t *testing.T) {
 	})
 
 	t.Run("Multi-hop chained param with implicit and explicit target types", func(t *testing.T) {
-		p, ok := postgres.ParseChainedParam("patient.organization.name:exact", "Acme Health")
+		p, ok := store.ParseChainedParam("patient.organization.name:exact", "Acme Health")
 		require.True(t, ok)
 		assert.Equal(t, "patient", p.RefParam)
 		assert.Equal(t, "Organization", p.TargetType)
 		require.Len(t, p.Hops, 2)
-		assert.Equal(t, postgres.ChainedHop{RefParam: "patient", TargetType: "Patient"}, p.Hops[0])
-		assert.Equal(t, postgres.ChainedHop{RefParam: "organization", TargetType: "Organization"}, p.Hops[1])
+		assert.Equal(t, store.ChainedHop{RefParam: "patient", TargetType: "Patient"}, p.Hops[0])
+		assert.Equal(t, store.ChainedHop{RefParam: "organization", TargetType: "Organization"}, p.Hops[1])
 		assert.Equal(t, "name", p.TargetParam)
 		assert.Equal(t, "exact", p.TargetModifier)
 		assert.Equal(t, "string", p.ParamType)
 		assert.Equal(t, "Acme Health", p.Value)
 
-		p2, ok := postgres.ParseChainedParam("subject:Patient.general-practitioner:Practitioner.identifier", "http://hl7.org/fhir/sid/us-npi|12345")
+		p2, ok := store.ParseChainedParam("subject:Patient.general-practitioner:Practitioner.identifier", "http://hl7.org/fhir/sid/us-npi|12345")
 		require.True(t, ok)
 		require.Len(t, p2.Hops, 2)
-		assert.Equal(t, postgres.ChainedHop{RefParam: "subject", TargetType: "Patient"}, p2.Hops[0])
-		assert.Equal(t, postgres.ChainedHop{RefParam: "general-practitioner", TargetType: "Practitioner"}, p2.Hops[1])
+		assert.Equal(t, store.ChainedHop{RefParam: "subject", TargetType: "Patient"}, p2.Hops[0])
+		assert.Equal(t, store.ChainedHop{RefParam: "general-practitioner", TargetType: "Practitioner"}, p2.Hops[1])
 		assert.Equal(t, "identifier", p2.TargetParam)
 		assert.Equal(t, "token", p2.ParamType)
 	})
 
 	t.Run("Chained URI param with :below modifier", func(t *testing.T) {
-		p, ok := postgres.ParseChainedParam("questionnaire.url:below", "http://example.org/fhir/Questionnaire")
+		p, ok := store.ParseChainedParam("questionnaire.url:below", "http://example.org/fhir/Questionnaire")
 		require.True(t, ok)
 		assert.Equal(t, "questionnaire", p.RefParam)
 		assert.Equal(t, "Questionnaire", p.TargetType)
@@ -212,14 +212,14 @@ func TestParseChainedParam(t *testing.T) {
 	})
 
 	t.Run("Non-chained param", func(t *testing.T) {
-		_, ok := postgres.ParseChainedParam("gender", "male")
+		_, ok := store.ParseChainedParam("gender", "male")
 		assert.False(t, ok)
 	})
 }
 
 func TestParseIfNoneExist(t *testing.T) {
 	t.Run("Valid If-None-Exist query", func(t *testing.T) {
-		sp, err := postgres.ParseIfNoneExist("t1", "Patient", "Patient?identifier=http://mrn|123")
+		sp, err := store.ParseIfNoneExist("t1", "Patient", "Patient?identifier=http://mrn|123")
 		require.NoError(t, err)
 		assert.Equal(t, "http://mrn|123", sp.Tokens["identifier"])
 		assert.Equal(t, 2, sp.Count)
@@ -238,7 +238,7 @@ func TestParseIfNoneExist(t *testing.T) {
 			"identifier=",
 		}
 		for _, h := range invalidHeaders {
-			_, err := postgres.ParseIfNoneExist("t1", "Patient", h)
+			_, err := store.ParseIfNoneExist("t1", "Patient", h)
 			assert.Error(t, err, "expected ParseIfNoneExist to reject %q", h)
 		}
 	})
@@ -249,8 +249,8 @@ func TestBuildSearchParamsFromQuery_LastUpdated(t *testing.T) {
 		"_lastUpdated": {"ge2026-01-01", "le2026-12-31T23:59:59Z"},
 		"patient":      {"Patient/pat-1"},
 	}
-	require.NoError(t, postgres.ValidateSearchQuery(q))
-	sp := postgres.BuildSearchParamsFromQuery("t1", "Observation", q)
+	require.NoError(t, store.ValidateSearchQuery(q))
+	sp := store.BuildSearchParamsFromQuery("t1", "Observation", q)
 	require.Len(t, sp.LastUpdated, 2)
 	assert.Equal(t, "ge", sp.LastUpdated[0].Prefix)
 	assert.Equal(t, "le", sp.LastUpdated[1].Prefix)
@@ -258,13 +258,13 @@ func TestBuildSearchParamsFromQuery_LastUpdated(t *testing.T) {
 	badQ := map[string][]string{
 		"_lastUpdated": {"genot-a-date"},
 	}
-	err := postgres.ValidateSearchQuery(badQ)
+	err := store.ValidateSearchQuery(badQ)
 	assert.Error(t, err, "expected invalid _lastUpdated date to return an error")
 }
 
 func TestParseCompositeTokenQuantity(t *testing.T) {
 	t.Run("Valid code-value-quantity with system|code and UCUM quantity", func(t *testing.T) {
-		p, err := postgres.ParseCompositeTokenQuantity("code-value-quantity", "http://loinc.org|4548-4$ge8.0|http://unitsofmeasure.org|%")
+		p, err := store.ParseCompositeTokenQuantity("code-value-quantity", "http://loinc.org|4548-4$ge8.0|http://unitsofmeasure.org|%")
 		require.NoError(t, err)
 		assert.Equal(t, "code-value-quantity", p.ParamName)
 		assert.Equal(t, "http://loinc.org", p.TokenSystem)
@@ -276,7 +276,7 @@ func TestParseCompositeTokenQuantity(t *testing.T) {
 	})
 
 	t.Run("Valid component-code-value-quantity with code-only token", func(t *testing.T) {
-		p, err := postgres.ParseCompositeTokenQuantity("component-code-value-quantity", "8480-6$ge140")
+		p, err := store.ParseCompositeTokenQuantity("component-code-value-quantity", "8480-6$ge140")
 		require.NoError(t, err)
 		assert.Equal(t, "component-code-value-quantity", p.ParamName)
 		assert.Empty(t, p.TokenSystem)
@@ -286,10 +286,10 @@ func TestParseCompositeTokenQuantity(t *testing.T) {
 	})
 
 	t.Run("Rejects invalid composite format", func(t *testing.T) {
-		_, err := postgres.ParseCompositeTokenQuantity("code-value-quantity", "no-dollar-separator")
+		_, err := store.ParseCompositeTokenQuantity("code-value-quantity", "no-dollar-separator")
 		assert.Error(t, err)
 
-		_, err = postgres.ParseCompositeTokenQuantity("code-value-quantity", "8480-6$not-a-number")
+		_, err = store.ParseCompositeTokenQuantity("code-value-quantity", "8480-6$not-a-number")
 		assert.Error(t, err)
 	})
 
@@ -300,12 +300,12 @@ func TestParseCompositeTokenQuantity(t *testing.T) {
 				"8462-4$ge90",
 			},
 		}
-		require.NoError(t, postgres.ValidateSearchQuery(q))
-		sp := postgres.BuildSearchParamsFromQuery("t1", "Observation", q)
+		require.NoError(t, store.ValidateSearchQuery(q))
+		sp := store.BuildSearchParamsFromQuery("t1", "Observation", q)
 		require.Len(t, sp.CompositeTokenQuantities, 2)
 		require.Len(t, sp.CompositeTokenQuantities[0], 2)
 		require.Len(t, sp.CompositeTokenQuantities[1], 1)
-		assert.True(t, postgres.HasSearchCriteria(sp))
+		assert.True(t, store.HasSearchCriteria(sp))
 	})
 
 	t.Run("BuildSearchParamsFromQuery parses URI params and :below/:above modifiers", func(t *testing.T) {
@@ -313,12 +313,12 @@ func TestParseCompositeTokenQuantity(t *testing.T) {
 			"url:below": {"http://hl7.org/fhir/ValueSet"},
 			"system":    {"http://loinc.org"},
 		}
-		require.NoError(t, postgres.ValidateSearchQuery(q))
-		sp := postgres.BuildSearchParamsFromQuery("t1", "ValueSet", q)
+		require.NoError(t, store.ValidateSearchQuery(q))
+		sp := store.BuildSearchParamsFromQuery("t1", "ValueSet", q)
 		require.Len(t, sp.URIFilters["url:below"], 1)
 		assert.Equal(t, "http://hl7.org/fhir/ValueSet", sp.URIFilters["url:below"][0])
 		assert.Equal(t, "http://loinc.org", sp.URIs["system"])
-		assert.True(t, postgres.HasSearchCriteria(sp))
+		assert.True(t, store.HasSearchCriteria(sp))
 	})
 
 	t.Run("BuildSearchParamsFromQuery routes token :in, :not-in, :below, :above and reference :identifier", func(t *testing.T) {
@@ -330,15 +330,15 @@ func TestParseCompositeTokenQuantity(t *testing.T) {
 			"patient:identifier": {"http://hospital.example.org/mrn|MRN-001"},
 			"_profile:below":     {"http://hl7.org/fhir/us/core/StructureDefinition/"},
 		}
-		require.NoError(t, postgres.ValidateSearchQuery(q))
-		sp := postgres.BuildSearchParamsFromQuery("t1", "Observation", q)
+		require.NoError(t, store.ValidateSearchQuery(q))
+		sp := store.BuildSearchParamsFromQuery("t1", "Observation", q)
 		assert.Equal(t, "http://hl7.org/fhir/ValueSet/observation-vitalsignresult", sp.Tokens["code:in"])
 		assert.Equal(t, "http://hl7.org/fhir/ValueSet/administrative-gender", sp.Tokens["status:not-in"])
 		assert.Equal(t, "http://snomed.info/sct|73211009", sp.Tokens["code:below"])
 		assert.Equal(t, "http://snomed.info/sct|44054006", sp.Tokens["code:above"])
 		assert.Equal(t, "http://hospital.example.org/mrn|MRN-001", sp.References["patient:identifier"])
 		assert.Equal(t, "http://hl7.org/fhir/us/core/StructureDefinition/", sp.URIs["_profile:below"])
-		assert.True(t, postgres.HasSearchCriteria(sp))
+		assert.True(t, store.HasSearchCriteria(sp))
 	})
 
 	t.Run("BuildSearchParamsFromQuery parses _type, token :text modifier, chained :text, and _has :text", func(t *testing.T) {
@@ -349,8 +349,8 @@ func TestParseCompositeTokenQuantity(t *testing.T) {
 			"subject:Patient.identifier:text":  {"Medical Record"},
 			"_has:Condition:patient:code:text": {"diabetes"},
 		}
-		require.NoError(t, postgres.ValidateSearchQuery(q))
-		sp := postgres.BuildSearchParamsFromQuery("t1", "", q)
+		require.NoError(t, store.ValidateSearchQuery(q))
+		sp := store.BuildSearchParamsFromQuery("t1", "", q)
 		assert.Equal(t, []string{"Patient", "Observation", "Condition"}, sp.ResTypes)
 		assert.Equal(t, "hypertension", sp.Strings["code:text"])
 		assert.Equal(t, "vital", sp.Strings["category:text"])
@@ -362,66 +362,33 @@ func TestParseCompositeTokenQuantity(t *testing.T) {
 		assert.Equal(t, "Condition", sp.Has[0].SourceType)
 		assert.Equal(t, "code:text", sp.Has[0].SearchParam)
 		assert.Equal(t, "string", sp.Has[0].ParamType)
-		assert.True(t, postgres.HasSearchCriteria(sp))
+		assert.True(t, store.HasSearchCriteria(sp))
 
-		links := postgres.DefaultGraphLinksForResource("Patient")
+		links := store.DefaultGraphLinksForResource("Patient")
 		assert.NotEmpty(t, links)
 	})
 }
 
-func TestTenantIsolationConfiguration(t *testing.T) {
-	mode, err := postgres.ParseTenantIsolationMode("")
-	require.NoError(t, err)
-	assert.Equal(t, postgres.TenantIsolationSchema, mode)
-
-	mode, err = postgres.ParseTenantIsolationMode("shared")
-	require.NoError(t, err)
-	assert.Equal(t, postgres.TenantIsolationShared, mode)
-
-	mode, err = postgres.ParseTenantIsolationMode("schema")
-	require.NoError(t, err)
-	assert.Equal(t, postgres.TenantIsolationSchema, mode)
-
-	mode, err = postgres.ParseTenantIsolationMode("schema-per-tenant")
-	require.NoError(t, err)
-	assert.Equal(t, postgres.TenantIsolationSchema, mode)
-
-	_, err = postgres.ParseTenantIsolationMode("invalid-mode")
-	assert.Error(t, err)
-
-	schemaName, err := postgres.TenantSchemaName("HCA-West-01")
-	require.NoError(t, err)
-	assert.Equal(t, "tenant_hca_west_01", schemaName)
-
-	_, err = postgres.TenantSchemaName("   ")
-	assert.Error(t, err)
-
-	st := postgres.New(nil, postgres.WithTenantIsolation(postgres.TenantIsolationSchema))
-	assert.Equal(t, postgres.TenantIsolationSchema, st.TenantIsolation())
-	st.SetTenantIsolation(postgres.TenantIsolationShared)
-	assert.Equal(t, postgres.TenantIsolationShared, st.TenantIsolation())
-}
-
 func TestWave11SearchParsing(t *testing.T) {
 	t.Run("Wildcard _include=* and _revinclude=* parsing", func(t *testing.T) {
-		incAll, err := postgres.ParseInclude("*")
+		incAll, err := store.ParseInclude("*")
 		require.NoError(t, err)
 		assert.Equal(t, "*", incAll.SourceType)
 		assert.Equal(t, "*", incAll.ParamName)
 
-		incTypeWild, err := postgres.ParseInclude("Observation:*")
+		incTypeWild, err := store.ParseInclude("Observation:*")
 		require.NoError(t, err)
 		assert.Equal(t, "Observation", incTypeWild.SourceType)
 		assert.Equal(t, "*", incTypeWild.ParamName)
 
-		revAll, err := postgres.ParseInclude("*:*")
+		revAll, err := store.ParseInclude("*:*")
 		require.NoError(t, err)
 		assert.Equal(t, "*", revAll.SourceType)
 		assert.Equal(t, "*", revAll.ParamName)
 	})
 
 	t.Run("Multi-hop recursive _has reverse chaining", func(t *testing.T) {
-		hp, ok, err := postgres.ParseHasParam("_has:Encounter:patient:_has:Observation:encounter:code", "http://loinc.org|8867-4")
+		hp, ok, err := store.ParseHasParam("_has:Encounter:patient:_has:Observation:encounter:code", "http://loinc.org|8867-4")
 		require.NoError(t, err)
 		require.True(t, ok)
 		assert.Equal(t, "Encounter", hp.SourceType)
@@ -443,25 +410,25 @@ func TestWave11SearchParsing(t *testing.T) {
 			"code-value-date":              {"http://loinc.org|8867-4$ap2026-01-15"},
 			"code-value-string":            {"http://loinc.org|95541-9$Digital"},
 		}
-		require.NoError(t, postgres.ValidateSearchQuery(q))
-		sp := postgres.BuildSearchParamsFromQuery("t1", "Observation", q)
+		require.NoError(t, store.ValidateSearchQuery(q))
+		sp := store.BuildSearchParamsFromQuery("t1", "Observation", q)
 		assert.Equal(t, "http://terminology.hl7.org/CodeSystem/v2-0203|MR|MRN-001", sp.Tokens["identifier:of-type"])
 		require.Len(t, sp.CompositeTokenTokens, 3)
 		require.Len(t, sp.CompositeTokenDates, 1)
 		assert.Equal(t, "ap", sp.CompositeTokenDates[0][0].Date.Prefix)
 		require.Len(t, sp.CompositeTokenStrings, 1)
 		assert.Equal(t, "Digital", sp.CompositeTokenStrings[0][0].Value)
-		assert.True(t, postgres.HasSearchCriteria(sp))
+		assert.True(t, store.HasSearchCriteria(sp))
 
 		// Invalid :of-type (missing third segment)
 		badQ := map[string][]string{
 			"identifier:of-type": {"MR|MRN-001"},
 		}
-		assert.Error(t, postgres.ValidateSearchQuery(badQ))
+		assert.Error(t, store.ValidateSearchQuery(badQ))
 
-		assert.True(t, postgres.IsKnownSearchParam("code-value-concept"))
-		assert.True(t, postgres.IsKnownSearchParam("identifier:of-type"))
-		assert.True(t, postgres.IsKnownSearchParam("_has:Encounter:patient:_has:Observation:encounter:code"))
-		assert.False(t, postgres.IsKnownSearchParam("totally_unknown_param"))
+		assert.True(t, store.IsKnownSearchParam("code-value-concept"))
+		assert.True(t, store.IsKnownSearchParam("identifier:of-type"))
+		assert.True(t, store.IsKnownSearchParam("_has:Encounter:patient:_has:Observation:encounter:code"))
+		assert.False(t, store.IsKnownSearchParam("totally_unknown_param"))
 	})
 }

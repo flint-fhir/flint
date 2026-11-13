@@ -12,42 +12,6 @@ import (
 	"time"
 )
 
-// OAuthAuthCodeRecord represents a persisted OAuth2 authorization code grant.
-type OAuthAuthCodeRecord struct {
-	ClientID            string
-	RedirectURI         string
-	Scope               string
-	CodeChallenge       string
-	CodeChallengeMethod string
-	PatientID           string
-	EncounterID         string
-	TenantID            string
-	Nonce               string
-	ExpiresAt           time.Time
-}
-
-// OAuthRefreshTokenRecord represents a persisted OAuth2 refresh token grant.
-type OAuthRefreshTokenRecord struct {
-	Subject     string
-	PatientID   string
-	EncounterID string
-	Scope       string
-	ExpiresAt   time.Time
-}
-
-// ExportJobRecord represents a persisted FHIR Bulk Data ($export) job.
-type ExportJobRecord struct {
-	ID         string
-	TenantID   string
-	PatientID  string
-	CreatedAt  time.Time
-	RequestURL string
-	TypesOrder []string
-	Files      map[string][]byte
-	Counts     map[string]int
-	Combined   []byte
-}
-
 func hashToken(rawToken string) string {
 	sum := sha256.Sum256([]byte(rawToken))
 	return hex.EncodeToString(sum[:])

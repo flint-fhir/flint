@@ -9,19 +9,9 @@ import (
 	"time"
 
 	"github.com/lib/pq"
-)
 
-// ExportParams specifies filters for FHIR Bulk Data Access ($export).
-type ExportParams struct {
-	TenantID           string
-	PatientID          string     // Optional: scopes export to a single Patient/{id} compartment
-	PatientIDs         []string   // Optional: scopes export to a specific cohort of Patient IDs (Group/{id}/$export or patient parameter)
-	EmptyCohort        bool       // Optional: when true, cohort resolved to 0 active patients so export yields 0 resources
-	PatientCompartment bool       // Optional: when true (and PatientID == ""), scopes export to active Patient compartments
-	ResourceTypes      []string   // Optional: _type filter (e.g. ["Patient", "Observation"])
-	Since              *time.Time // Optional: _since filter (last_updated >= Since)
-	Until              *time.Time // Optional: _until filter (last_updated <= Until)
-}
+	"github.com/flint-fhir/flint/store"
+)
 
 // ExportResources retrieves all active FHIR resources matching ExportParams ordered
 // deterministically by (res_type, res_id) for NDJSON bulk export.
@@ -336,10 +326,7 @@ func (s *Store) streamSinglePatientCompartment(ctx context.Context, params Expor
 // When hardExpunge is false, resources are soft-deleted with version tombstones;
 // when hardExpunge is true, resources, history, and search indexes are physically removed.
 func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID string, hardExpunge bool) ([]ResourceRecord, error) {
-	compTypes := make([]string, 0, len(patientCompartmentTypes))
-	for rt := range patientCompartmentTypes {
-		compTypes = append(compTypes, rt)
-	}
+	compTypes := store.PatientCompartmentResourceTypes()
 
 	type targetRef struct {
 		resType    string
@@ -460,17 +447,6 @@ func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID
 		return nil, err
 	}
 	return purged, nil
-}
-
-// ExpungeParams specifies filters and options for the physical $expunge operation.
-type ExpungeParams struct {
-	TenantID                string
-	ResType                 string // Optional: restricts expunge to a specific FHIR resource type
-	ResID                   string // Optional: restricts expunge to a specific FHIR resource instance
-	ExpungeDeletedResources bool   // Physically remove soft-deleted resources and their history
-	ExpungePreviousVersions bool   // Physically remove non-current historical versions of active resources
-	ExpungeEverything       bool   // Physically remove matching active + deleted resources, history, and indexes
-	Limit                   int    // Maximum number of resources to expunge (default 10000)
 }
 
 // ExpungeResources physically deletes soft-deleted resources, historical versions, or all matching

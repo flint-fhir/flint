@@ -60,8 +60,8 @@ jobs:
 
       - name: Go Native Fuzzing Gate (Search, _filter, FHIRPath, Patch & Validator)
         run: |
-          go test ./store/postgres -run '^$' -fuzz=FuzzParseFilterExpr -fuzztime=2s
-          go test ./store/postgres -run '^$' -fuzz=FuzzSearchQueryAndIfNoneExist -fuzztime=2s
+          go test ./store -run '^$' -fuzz=FuzzParseFilterExpr -fuzztime=2s
+          go test ./store -run '^$' -fuzz=FuzzSearchQueryAndIfNoneExist -fuzztime=2s
           go test ./server -run '^$' -fuzz=FuzzFHIRPathR4Engine -fuzztime=2s
           go test ./server -run '^$' -fuzz=FuzzPatchEngines -fuzztime=2s
           go test ./server -run '^$' -fuzz=FuzzValidationAndDynamicExtraction -fuzztime=2s

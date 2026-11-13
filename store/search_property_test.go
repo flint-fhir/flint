@@ -1,4 +1,4 @@
-package postgres_test
+package store_test
 
 import (
 	"fmt"
@@ -6,7 +6,7 @@ import (
 
 	"hegel.dev/go/hegel"
 
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 // Property-based tests for FHIR search parameter parsing using Hegel.
@@ -26,7 +26,7 @@ func TestProperty_DateParsingInvariance(t *testing.T) {
 		isoDate := hegel.Draw(ht, hegel.FromRegex(isoDateRegex, true))
 
 		raw := prefix + isoDate
-		op, err := postgres.ParseDateOp(raw)
+		op, err := store.ParseDateOp(raw)
 		if err != nil {
 			ht.Fatalf("ParseDateOp(%q) failed unexpectedly: %v", raw, err)
 		}
@@ -50,7 +50,7 @@ func TestProperty_QuantityParsingInvariance(t *testing.T) {
 		code := hegel.Draw(ht, hegel.FromRegex(unitCodeRegex, true))
 
 		raw := fmt.Sprintf("%s%s|%s|%s", prefix, numStr, system, code)
-		op, err := postgres.ParseQuantityOp(raw)
+		op, err := store.ParseQuantityOp(raw)
 		if err != nil {
 			ht.Fatalf("ParseQuantityOp(%q) failed: %v", raw, err)
 		}
@@ -79,7 +79,7 @@ func TestProperty_IncludeParsingInvariance(t *testing.T) {
 		targetType := hegel.Draw(ht, hegel.FromRegex(`(Patient|Practitioner|Organization)`, true))
 
 		raw := fmt.Sprintf("%s:%s:%s", sourceType, paramName, targetType)
-		inc, err := postgres.ParseInclude(raw)
+		inc, err := store.ParseInclude(raw)
 		if err != nil {
 			ht.Fatalf("ParseInclude(%q) failed: %v", raw, err)
 		}
@@ -93,9 +93,9 @@ func TestProperty_IncludeParsingInvariance(t *testing.T) {
 func TestProperty_ETagRoundTripInvariance(t *testing.T) {
 	hegel.Test(t, func(ht *hegel.T) {
 		version := hegel.Draw(ht, hegel.Integers(1, 1_000_000))
-		etag := postgres.FormatETag(version)
+		etag := store.FormatETag(version)
 
-		parsed, err := postgres.ParseETagVersion(etag)
+		parsed, err := store.ParseETagVersion(etag)
 		if err != nil {
 			ht.Fatalf("ParseETagVersion(%q) failed: %v", etag, err)
 		}
@@ -104,7 +104,7 @@ func TestProperty_ETagRoundTripInvariance(t *testing.T) {
 		}
 
 		// Strong ETag and bare version should also parse to the same version
-		strongParsed, err := postgres.ParseETagVersion(fmt.Sprintf(`"%d"`, version))
+		strongParsed, err := store.ParseETagVersion(fmt.Sprintf(`"%d"`, version))
 		if err != nil || strongParsed != version {
 			ht.Fatalf("ParseETagVersion strong failed: %v (%d)", err, strongParsed)
 		}
@@ -120,7 +120,7 @@ func TestProperty_IfNoneExistParsingInvariance(t *testing.T) {
 		family := hegel.Draw(ht, hegel.FromRegex(`[A-Za-z]{3,10}`, true))
 
 		raw := fmt.Sprintf("%s?identifier=%s|%s&family=%s", resType, system, mrn, family)
-		params, err := postgres.ParseIfNoneExist(tenant, resType, raw)
+		params, err := store.ParseIfNoneExist(tenant, resType, raw)
 		if err != nil {
 			ht.Fatalf("ParseIfNoneExist(%q) failed: %v", raw, err)
 		}
@@ -141,11 +141,11 @@ func TestProperty_ParsersNeverPanicOnArbitraryFuzz(t *testing.T) {
 		arbitraryInput := hegel.Draw(ht, hegel.FromRegex(`.*`, true))
 
 		// Must never panic or crash
-		_, _ = postgres.ParseDateOp(arbitraryInput)
-		_, _ = postgres.ParseQuantityOp(arbitraryInput)
-		_, _ = postgres.ParseInclude(arbitraryInput)
-		_, _ = postgres.ParseChainedParam(arbitraryInput, arbitraryInput)
-		_, _ = postgres.ParseETagVersion(arbitraryInput)
-		_, _ = postgres.ParseIfNoneExist("default", "Patient", arbitraryInput)
+		_, _ = store.ParseDateOp(arbitraryInput)
+		_, _ = store.ParseQuantityOp(arbitraryInput)
+		_, _ = store.ParseInclude(arbitraryInput)
+		_, _ = store.ParseChainedParam(arbitraryInput, arbitraryInput)
+		_, _ = store.ParseETagVersion(arbitraryInput)
+		_, _ = store.ParseIfNoneExist("default", "Patient", arbitraryInput)
 	})
 }

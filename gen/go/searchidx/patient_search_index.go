@@ -3,7 +3,7 @@
 // backend: postgres
 // mode: search_index
 
-package postgres
+package searchidx
 
 import (
 	patient_go_proto "github.com/google/fhir/go/proto/google/fhir/proto/r4/core/resources/patient_go_proto"

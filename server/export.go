@@ -21,7 +21,7 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 const maxStoredExportJobs = 256
@@ -43,7 +43,7 @@ type exportJob struct {
 
 func (s *Server) storeExportJob(job *exportJob) {
 	if s.store != nil && job != nil && job.Status != "in-progress" {
-		_ = s.store.SaveExportJob(context.Background(), postgres.ExportJobRecord{
+		_ = s.store.SaveExportJob(context.Background(), store.ExportJobRecord{
 			ID:         job.ID,
 			TenantID:   job.TenantID,
 			PatientID:  job.PatientID,
@@ -184,7 +184,7 @@ func (s *Server) handleSinglePatientExport(w http.ResponseWriter, r *http.Reques
 
 type exportTypeFilter struct {
 	resType string
-	params  postgres.SearchParams
+	params  store.SearchParams
 }
 
 type parsedExportRequest struct {
@@ -369,7 +369,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 
 	var since *time.Time
 	if sinceRaw := strings.TrimSpace(reqParams.sinceRaw); sinceRaw != "" {
-		dOp, err := postgres.ParseDateOp(sinceRaw)
+		dOp, err := store.ParseDateOp(sinceRaw)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid _since parameter %q: %v", sinceRaw, err))
@@ -381,7 +381,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 
 	var until *time.Time
 	if untilRaw := strings.TrimSpace(reqParams.untilRaw); untilRaw != "" {
-		dOp, err := postgres.ParseDateOp(untilRaw)
+		dOp, err := store.ParseDateOp(untilRaw)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid _until parameter %q: %v", untilRaw, err))
@@ -436,12 +436,12 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 				fmt.Sprintf("invalid query in _typeFilter %q", tf))
 			return
 		}
-		if err := postgres.ValidateSearchQuery(qVals); err != nil {
+		if err := store.ValidateSearchQuery(qVals); err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid _typeFilter %q: %v", tf, err))
 			return
 		}
-		sp := postgres.BuildSearchParamsFromQuery(tenant, rt, qVals)
+		sp := store.BuildSearchParamsFromQuery(tenant, rt, qVals)
 		sp.Count = 10000
 		parsedTypeFilters = append(parsedTypeFilters, exportTypeFilter{
 			resType: rt,
@@ -513,7 +513,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 				fmt.Sprintf("Patient/%s not found", patientID))
 			return
 		}
-		if errors.Is(err, postgres.ErrResourceDeleted) {
+		if errors.Is(err, store.ErrResourceDeleted) {
 			writeOperationOutcome(w, http.StatusGone, "deleted",
 				fmt.Sprintf("Patient/%s has been deleted", patientID))
 			return
@@ -535,7 +535,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 				fmt.Sprintf("Group/%s not found", groupID))
 			return
 		}
-		if errors.Is(err, postgres.ErrResourceDeleted) {
+		if errors.Is(err, store.ErrResourceDeleted) {
 			writeOperationOutcome(w, http.StatusGone, "deleted",
 				fmt.Sprintf("Group/%s has been deleted", groupID))
 			return
@@ -595,7 +595,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		return
 	}
 
-	exportParams := postgres.ExportParams{
+	exportParams := store.ExportParams{
 		TenantID:           tenant,
 		PatientID:          patientID,
 		PatientIDs:         cohortPatientIDs,
@@ -633,7 +633,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 				allowedPat = cleanID(secCtx.GetPatientId())
 			}
 			total := 0
-			_ = s.streamExportResources(r.Context(), exportParams, func(res postgres.SearchResult) error {
+			_ = s.streamExportResources(r.Context(), exportParams, func(res store.SearchResult) error {
 				if !matchesExportTypeFilter(typeFilterAllowed, res.ResType, res.ResID) {
 					return nil
 				}
@@ -679,7 +679,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 		if patientRestricted {
 			allowedPat = cleanID(secCtx.GetPatientId())
 		}
-		_ = s.streamExportResources(r.Context(), exportParams, func(res postgres.SearchResult) error {
+		_ = s.streamExportResources(r.Context(), exportParams, func(res store.SearchResult) error {
 			if !matchesExportTypeFilter(typeFilterAllowed, res.ResType, res.ResID) {
 				return nil
 			}
@@ -813,7 +813,7 @@ func (s *Server) resolveExportGroupCohort(
 		}
 		if periodMap, ok := m["period"].(map[string]any); ok {
 			if endStr, _ := periodMap["end"].(string); strings.TrimSpace(endStr) != "" {
-				if dOp, err := postgres.ParseDateOp(strings.TrimSpace(endStr)); err == nil {
+				if dOp, err := store.ParseDateOp(strings.TrimSpace(endStr)); err == nil {
 					if dOp.Value.Before(now) {
 						continue
 					}
@@ -899,7 +899,7 @@ func matchesExportTypeFilter(allowed map[string]map[string]bool, resType, resID 
 	return idSet[resID]
 }
 
-func (s *Server) formatExportNDJSONLine(res postgres.SearchResult, elements []string) ([]byte, bool) {
+func (s *Server) formatExportNDJSONLine(res store.SearchResult, elements []string) ([]byte, bool) {
 	resource, err := s.protoToFHIRMapWithMeta(res.ResType, res.ResourceProto, res.ResVersion, res.LastUpdated)
 	if err != nil {
 		s.logger.Error("proto to map in export", "error", err, "type", res.ResType, "id", res.ResID)
@@ -922,7 +922,7 @@ func (s *Server) formatExportNDJSONLine(res postgres.SearchResult, elements []st
 	return compactLine.Bytes(), true
 }
 
-func (s *Server) streamExportResources(ctx context.Context, params postgres.ExportParams, emit func(postgres.SearchResult) error) error {
+func (s *Server) streamExportResources(ctx context.Context, params store.ExportParams, emit func(store.SearchResult) error) error {
 	if s.analyticalStore != nil {
 		return s.analyticalStore.StreamAnalyticalExport(ctx, params, emit)
 	}
@@ -940,7 +940,7 @@ func isProtoExportJob(job *exportJob) bool {
 func (s *Server) populateExportJob(
 	ctx context.Context,
 	job *exportJob,
-	exportParams postgres.ExportParams,
+	exportParams store.ExportParams,
 	typeFilterAllowed map[string]map[string]bool,
 	elements []string,
 	hasSecCtx bool,
@@ -966,7 +966,7 @@ func (s *Server) populateExportJob(
 		allowedPat = cleanID(secCtx.GetPatientId())
 	}
 
-	err := s.streamExportResources(ctx, exportParams, func(res postgres.SearchResult) error {
+	err := s.streamExportResources(ctx, exportParams, func(res store.SearchResult) error {
 		if !matchesExportTypeFilter(typeFilterAllowed, res.ResType, res.ResID) {
 			return nil
 		}

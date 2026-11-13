@@ -27,7 +27,6 @@ import (
 	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/store"
-	"github.com/flint-fhir/flint/store/postgres"
 )
 
 // syncSearchParameterOnWrite inspects a written SearchParameter or StructureDefinition resource
@@ -59,7 +58,7 @@ func (s *Server) syncSearchParameterOnDelete(resType, resID string) {
 	if !strings.EqualFold(resType, "SearchParameter") || resID == "" {
 		return
 	}
-	postgres.UnregisterCustomSearchParam(resID)
+	store.UnregisterCustomSearchParam(resID)
 }
 
 func registerSearchParameterMap(fallbackID string, m map[string]any) {
@@ -72,7 +71,7 @@ func registerSearchParameterMap(fallbackID string, m map[string]any) {
 	}
 	status, _ := m["status"].(string)
 	if strings.EqualFold(strings.TrimSpace(status), "retired") {
-		postgres.UnregisterCustomSearchParam(id)
+		store.UnregisterCustomSearchParam(id)
 		return
 	}
 	code, _ := m["code"].(string)
@@ -103,7 +102,7 @@ func registerSearchParameterMap(fallbackID string, m map[string]any) {
 	if strings.TrimSpace(code) == "" || strings.TrimSpace(paramType) == "" || len(bases) == 0 {
 		return
 	}
-	postgres.RegisterCustomSearchParam(postgres.CustomSearchParamDef{
+	store.RegisterCustomSearchParam(store.CustomSearchParamDef{
 		ID:          strings.TrimSpace(id),
 		URL:         strings.TrimSpace(urlStr),
 		Code:        strings.TrimSpace(code),
@@ -118,7 +117,7 @@ func (s *Server) syncTenantCustomSearchParams(ctx context.Context, tenant string
 	if s.store == nil || tenant == "" {
 		return
 	}
-	sr, err := s.store.Search(ctx, postgres.SearchParams{
+	sr, err := s.store.Search(ctx, store.SearchParams{
 		TenantID: tenant,
 		ResType:  "SearchParameter",
 		Count:    200,
@@ -232,7 +231,7 @@ func (s *Server) handleReindex(w http.ResponseWriter, r *http.Request) {
 
 	s.syncTenantCustomSearchParams(r.Context(), tenant)
 
-	res, err := s.store.Reindex(r.Context(), postgres.ReindexParams{
+	res, err := s.store.Reindex(r.Context(), store.ReindexParams{
 		TenantID:   tenant,
 		ResType:    resType,
 		ResID:      resID,
@@ -243,7 +242,7 @@ func (s *Server) handleReindex(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("%s/%s not found", resType, resID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted",
 			fmt.Sprintf("%s/%s has been deleted", resType, resID))
 		return
@@ -538,12 +537,12 @@ func (s *Server) resolvePlanDefinition(ctx context.Context, tenant, defID, canon
 			if m, err := s.protoToFHIRMapWithMeta("PlanDefinition", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
 				return m, nil
 			}
-		} else if errors.Is(err, postgres.ErrResourceDeleted) {
+		} else if errors.Is(err, store.ErrResourceDeleted) {
 			return nil, err
 		}
 	}
 	if s.store != nil && canonical != "" {
-		sr, err := s.store.Search(ctx, postgres.SearchParams{
+		sr, err := s.store.Search(ctx, store.SearchParams{
 			TenantID: tenant,
 			ResType:  "PlanDefinition",
 			URIs:     map[string]string{"url": canonical},
@@ -590,12 +589,12 @@ func (s *Server) resolveActivityDefinition(ctx context.Context, tenant, defID, c
 			if m, err := s.protoToFHIRMapWithMeta("ActivityDefinition", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
 				return m, nil
 			}
-		} else if errors.Is(err, postgres.ErrResourceDeleted) {
+		} else if errors.Is(err, store.ErrResourceDeleted) {
 			return nil, err
 		}
 	}
 	if s.store != nil && canonical != "" {
-		sr, err := s.store.Search(ctx, postgres.SearchParams{
+		sr, err := s.store.Search(ctx, store.SearchParams{
 			TenantID: tenant,
 			ResType:  "ActivityDefinition",
 			URIs:     map[string]string{"url": canonical},
@@ -676,7 +675,7 @@ func (s *Server) handlePlanDefinitionApply(w http.ResponseWriter, r *http.Reques
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("PlanDefinition %q not found", target))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("PlanDefinition/%s has been deleted", in.DefinitionID))
 		return
 	}
@@ -685,7 +684,7 @@ func (s *Server) handlePlanDefinitionApply(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	patEverything, err := s.store.PatientEverything(r.Context(), postgres.PatientEverythingParams{
+	patEverything, err := s.store.PatientEverything(r.Context(), store.PatientEverythingParams{
 		TenantID:  tenant,
 		PatientID: patID,
 		Count:     500,
@@ -694,7 +693,7 @@ func (s *Server) handlePlanDefinitionApply(w http.ResponseWriter, r *http.Reques
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("Patient/%s has been deleted", patID))
 		return
 	}
@@ -912,7 +911,7 @@ func (s *Server) handleActivityDefinitionApply(w http.ResponseWriter, r *http.Re
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patID))
 			return
 		}
-		if errors.Is(err, postgres.ErrResourceDeleted) {
+		if errors.Is(err, store.ErrResourceDeleted) {
 			writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("Patient/%s has been deleted", patID))
 			return
 		}
@@ -929,7 +928,7 @@ func (s *Server) handleActivityDefinitionApply(w http.ResponseWriter, r *http.Re
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("ActivityDefinition %q not found", target))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("ActivityDefinition/%s has been deleted", in.DefinitionID))
 		return
 	}
@@ -1065,11 +1064,11 @@ func synthesizeInlineActionResource(actMap map[string]any, synthID, planURL, sub
 	return out
 }
 
-func (s *Server) decodeCompartmentMaps(sr *postgres.SearchResults) []map[string]any {
+func (s *Server) decodeCompartmentMaps(sr *store.SearchResults) []map[string]any {
 	if sr == nil {
 		return nil
 	}
-	all := make([]postgres.SearchResult, 0, len(sr.Matches)+len(sr.Includes))
+	all := make([]store.SearchResult, 0, len(sr.Matches)+len(sr.Includes))
 	all = append(all, sr.Matches...)
 	all = append(all, sr.Includes...)
 	out := make([]map[string]any, 0, len(all))
@@ -1401,7 +1400,7 @@ func (s *Server) handleDataRequirements(w http.ResponseWriter, r *http.Request) 
 			fmt.Sprintf("knowledge artifact %q not found for $data-requirements", target))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted",
 			fmt.Sprintf("%s/%s has been deleted", scopeTarget, defID))
 		return
@@ -1654,7 +1653,7 @@ func (s *Server) resolveDataRequirementsLibrary(
 	for _, rt := range candidateTypes {
 		if defID != "" {
 			rec, err := s.store.ReadResourceWithMeta(ctx, tenant, rt, defID)
-			if errors.Is(err, postgres.ErrResourceDeleted) {
+			if errors.Is(err, store.ErrResourceDeleted) {
 				return nil, err
 			}
 			if err == nil && rec != nil {
@@ -1668,7 +1667,7 @@ func (s *Server) resolveDataRequirementsLibrary(
 			if idx := strings.IndexByte(cleanCanon, '|'); idx != -1 {
 				cleanCanon = strings.TrimSpace(cleanCanon[:idx])
 			}
-			sr, err := s.store.Search(ctx, postgres.SearchParams{
+			sr, err := s.store.Search(ctx, store.SearchParams{
 				TenantID: tenant,
 				ResType:  rt,
 				URIs:     map[string]string{"url": cleanCanon},
@@ -1681,7 +1680,7 @@ func (s *Server) resolveDataRequirementsLibrary(
 				}
 			}
 			// Fallback scan for artifacts whose canonical url is not indexed in spidx_uri
-			if srAll, sErr := s.store.Search(ctx, postgres.SearchParams{
+			if srAll, sErr := s.store.Search(ctx, store.SearchParams{
 				TenantID: tenant,
 				ResType:  rt,
 				Count:    50,
@@ -2019,7 +2018,7 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("%s/%s not found", resType, resID))
 			return
 		}
-		if errors.Is(err, postgres.ErrResourceDeleted) {
+		if errors.Is(err, store.ErrResourceDeleted) {
 			writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("%s/%s has been deleted", resType, resID))
 			return
 		}
@@ -2305,7 +2304,7 @@ func (s *Server) handleMeasureCollectData(w http.ResponseWriter, r *http.Request
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Measure %q not found", target))
 			return
 		}
-		if errors.Is(err, postgres.ErrResourceDeleted) {
+		if errors.Is(err, store.ErrResourceDeleted) {
 			writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("Measure/%s has been deleted", defID))
 			return
 		}
@@ -2330,7 +2329,7 @@ func (s *Server) handleMeasureCollectData(w http.ResponseWriter, r *http.Request
 	if patID != "" {
 		patIDs = []string{patID}
 	} else {
-		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		sr, err := s.store.Search(r.Context(), store.SearchParams{
 			TenantID: tenant,
 			ResType:  "Patient",
 			Count:    50,
@@ -2347,7 +2346,7 @@ func (s *Server) handleMeasureCollectData(w http.ResponseWriter, r *http.Request
 	seenRes := make(map[string]bool)
 
 	for _, pid := range patIDs {
-		pe, err := s.store.PatientEverything(r.Context(), postgres.PatientEverythingParams{
+		pe, err := s.store.PatientEverything(r.Context(), store.PatientEverythingParams{
 			TenantID:  tenant,
 			PatientID: pid,
 			Count:     200,
@@ -2358,7 +2357,7 @@ func (s *Server) handleMeasureCollectData(w http.ResponseWriter, r *http.Request
 					writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patID))
 					return
 				}
-				if errors.Is(err, postgres.ErrResourceDeleted) {
+				if errors.Is(err, store.ErrResourceDeleted) {
 					writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("Patient/%s has been deleted", patID))
 					return
 				}
@@ -2518,7 +2517,7 @@ func (s *Server) handleMeasureSubmitData(w http.ResponseWriter, r *http.Request)
 			"response": map[string]any{
 				"status":   "200 OK",
 				"location": fmt.Sprintf("%s/%s/_history/%d", rt, rid, vid),
-				"etag":     postgres.FormatETag(vid),
+				"etag":     store.FormatETag(vid),
 			},
 		})
 	}
@@ -2564,14 +2563,14 @@ func (s *Server) upsertResourceMap(ctx context.Context, tenant string, rm map[st
 	if err != nil {
 		return "", "", 0, nil, err
 	}
-	var idx *postgres.SearchIndexes
+	var idx *store.SearchIndexes
 	if extractor, hasExt := s.extractors[rt]; hasExt {
 		idx, _ = extractor(tenant, rid, protoBytes)
 	}
 	if s.store == nil {
 		return rt, rid, 1, rm, nil
 	}
-	rec, err := s.store.WriteResourceWithMeta(ctx, postgres.ResourceInput{
+	rec, err := s.store.WriteResourceWithMeta(ctx, store.ResourceInput{
 		TenantID:      tenant,
 		ResType:       rt,
 		ResID:         rid,
@@ -2695,7 +2694,7 @@ func (s *Server) handleGroupMemberMutate(w http.ResponseWriter, r *http.Request,
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Group/%s not found", groupID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("Group/%s has been deleted", groupID))
 		return
 	}
@@ -2779,7 +2778,7 @@ func (s *Server) handleGroupMemberMutate(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	w.Header().Set("ETag", postgres.FormatETag(vid))
+	w.Header().Set("ETag", store.FormatETag(vid))
 	s.writeOperationResponse(w, r, http.StatusOK, "Group", savedMap)
 }
 
@@ -2869,7 +2868,7 @@ func (s *Server) handleObservationLastN(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	sp := postgres.SearchParams{
+	sp := store.SearchParams{
 		TenantID:   tenant,
 		ResType:    "Observation",
 		Tokens:     make(map[string]string),
@@ -2974,7 +2973,7 @@ func extractObservationCodeKey(rm map[string]any) string {
 func extractObservationEffectiveTime(rm map[string]any, fallback time.Time) time.Time {
 	for _, k := range []string{"effectiveDateTime", "effectiveInstant", "issued"} {
 		if s, _ := rm[k].(string); strings.TrimSpace(s) != "" {
-			if dOp, err := postgres.ParseDateOp(strings.TrimSpace(s)); err == nil && !dOp.Value.IsZero() {
+			if dOp, err := store.ParseDateOp(strings.TrimSpace(s)); err == nil && !dOp.Value.IsZero() {
 				return dOp.Value
 			}
 		}
@@ -2982,7 +2981,7 @@ func extractObservationEffectiveTime(rm map[string]any, fallback time.Time) time
 	if ep, ok := rm["effectivePeriod"].(map[string]any); ok {
 		for _, k := range []string{"end", "start"} {
 			if s, _ := ep[k].(string); strings.TrimSpace(s) != "" {
-				if dOp, err := postgres.ParseDateOp(strings.TrimSpace(s)); err == nil && !dOp.Value.IsZero() {
+				if dOp, err := store.ParseDateOp(strings.TrimSpace(s)); err == nil && !dOp.Value.IsZero() {
 					return dOp.Value
 				}
 			}
@@ -3095,7 +3094,7 @@ func (s *Server) handleObservationStats(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+	sr, err := s.store.Search(r.Context(), store.SearchParams{
 		TenantID:   tenant,
 		ResType:    "Observation",
 		References: map[string]string{"patient": "Patient/" + patID},
@@ -3463,7 +3462,7 @@ func (s *Server) handlePatientMerge(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("source Patient/%s not found", sourceID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("source Patient/%s has been deleted", sourceID))
 		return
 	}
@@ -3477,7 +3476,7 @@ func (s *Server) handlePatientMerge(w http.ResponseWriter, r *http.Request) {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("target Patient/%s not found", targetID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("target Patient/%s has been deleted", targetID))
 		return
 	}
@@ -3501,7 +3500,7 @@ func (s *Server) handlePatientMerge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Discover all clinical compartment resources referencing Patient/{sourceID}
-	pe, _ := s.store.PatientEverything(r.Context(), postgres.PatientEverythingParams{
+	pe, _ := s.store.PatientEverything(r.Context(), store.PatientEverythingParams{
 		TenantID:  tenant,
 		PatientID: sourceID,
 		Count:     500,
@@ -3706,17 +3705,17 @@ func (s *Server) handleAppointmentFind(w http.ResponseWriter, r *http.Request) {
 
 	var startBound, endBound time.Time
 	if startParam != "" {
-		if dOp, err := postgres.ParseDateOp(startParam); err == nil && !dOp.Value.IsZero() {
+		if dOp, err := store.ParseDateOp(startParam); err == nil && !dOp.Value.IsZero() {
 			startBound = dOp.Value
 		}
 	}
 	if endParam != "" {
-		if dOp, err := postgres.ParseDateOp(endParam); err == nil && !dOp.Value.IsZero() {
+		if dOp, err := store.ParseDateOp(endParam); err == nil && !dOp.Value.IsZero() {
 			endBound = dOp.Value
 		}
 	}
 
-	slotRes, err := s.store.Search(r.Context(), postgres.SearchParams{
+	slotRes, err := s.store.Search(r.Context(), store.SearchParams{
 		TenantID: tenant,
 		ResType:  "Slot",
 		Count:    200,
@@ -3743,12 +3742,12 @@ func (s *Server) handleAppointmentFind(w http.ResponseWriter, r *http.Request) {
 		slotStartStr, _ := slotMap["start"].(string)
 		slotEndStr, _ := slotMap["end"].(string)
 		if !startBound.IsZero() && slotStartStr != "" {
-			if stOp, err := postgres.ParseDateOp(slotStartStr); err == nil && !stOp.Value.IsZero() && stOp.Value.Before(startBound) {
+			if stOp, err := store.ParseDateOp(slotStartStr); err == nil && !stOp.Value.IsZero() && stOp.Value.Before(startBound) {
 				continue
 			}
 		}
 		if !endBound.IsZero() && slotEndStr != "" {
-			if etOp, err := postgres.ParseDateOp(slotEndStr); err == nil && !etOp.Value.IsZero() && etOp.Value.After(endBound) {
+			if etOp, err := store.ParseDateOp(slotEndStr); err == nil && !etOp.Value.IsZero() && etOp.Value.After(endBound) {
 				continue
 			}
 		}
@@ -4304,7 +4303,7 @@ func (s *Server) handleCapabilityStatementImplements(w http.ResponseWriter, r *h
 	// If clientCap is not supplied inline, resolve from canonical URL or stored CapabilityStatement
 	if clientCap == nil && canonicalParam != "" {
 		if s.store != nil {
-			if csRes, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "CapabilityStatement", Count: 20}); err == nil {
+			if csRes, err := s.store.Search(r.Context(), store.SearchParams{TenantID: tenant, ResType: "CapabilityStatement", Count: 20}); err == nil {
 				for _, sr := range csRes.Matches {
 					if cm, convErr := s.protoToFHIRMapWithMeta("CapabilityStatement", sr.ResourceProto, sr.ResVersion, sr.LastUpdated); convErr == nil {
 						if u, _ := cm["url"].(string); strings.EqualFold(u, canonicalParam) || strings.EqualFold(sr.ResID, cleanID(canonicalParam)) {
@@ -4518,7 +4517,7 @@ func (s *Server) handleStructureDefinitionSnapshot(w http.ResponseWriter, r *htt
 	}
 
 	if sdMap == nil && urlParam != "" && s.store != nil {
-		if sdRes, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "StructureDefinition", Count: 50}); err == nil {
+		if sdRes, err := s.store.Search(r.Context(), store.SearchParams{TenantID: tenant, ResType: "StructureDefinition", Count: 50}); err == nil {
 			for _, sr := range sdRes.Matches {
 				if candidate, convErr := s.protoToFHIRMapWithMeta("StructureDefinition", sr.ResourceProto, sr.ResVersion, sr.LastUpdated); convErr == nil {
 					if u, _ := candidate["url"].(string); strings.EqualFold(u, urlParam) {
@@ -5028,7 +5027,7 @@ func (s *Server) handleStructureMapTransform(w http.ResponseWriter, r *http.Requ
 	}
 
 	if smMap == nil && sourceURL != "" && s.store != nil {
-		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "StructureMap", Count: 50}); err == nil {
+		if sr, err := s.store.Search(r.Context(), store.SearchParams{TenantID: tenant, ResType: "StructureMap", Count: 50}); err == nil {
 			for _, m := range sr.Matches {
 				if cand, convErr := s.protoToFHIRMapWithMeta("StructureMap", m.ResourceProto, m.ResVersion, m.LastUpdated); convErr == nil {
 					if u, _ := cand["url"].(string); strings.EqualFold(u, sourceURL) || strings.EqualFold(m.ResID, cleanID(sourceURL)) {
@@ -5252,7 +5251,7 @@ func (s *Server) handleNamingSystemPreferredID(w http.ResponseWriter, r *http.Re
 
 	// 1. Check tenant-stored NamingSystem resources first
 	if s.store != nil {
-		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "NamingSystem", Count: 50}); err == nil {
+		if sr, err := s.store.Search(r.Context(), store.SearchParams{TenantID: tenant, ResType: "NamingSystem", Count: 50}); err == nil {
 			for _, m := range sr.Matches {
 				nsMap, convErr := s.protoToFHIRMapWithMeta("NamingSystem", m.ResourceProto, m.ResVersion, m.LastUpdated)
 				if convErr != nil {
@@ -5455,7 +5454,7 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var matchedResponses []map[string]any
-	if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "ClaimResponse", Count: 100}); err == nil {
+	if sr, err := s.store.Search(r.Context(), store.SearchParams{TenantID: tenant, ResType: "ClaimResponse", Count: 100}); err == nil {
 		for _, m := range sr.Matches {
 			crMap, convErr := s.protoToFHIRMapWithMeta("ClaimResponse", m.ResourceProto, m.ResVersion, m.LastUpdated)
 			if convErr != nil {
@@ -5671,7 +5670,7 @@ func (s *Server) handleQuestionnairePackage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	if qMap == nil && qCanonical != "" {
-		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "Questionnaire", Count: 50}); err == nil {
+		if sr, err := s.store.Search(r.Context(), store.SearchParams{TenantID: tenant, ResType: "Questionnaire", Count: 50}); err == nil {
 			for _, m := range sr.Matches {
 				candidate, cErr := s.protoToFHIRMapWithMeta("Questionnaire", m.ResourceProto, m.ResVersion, m.LastUpdated)
 				if cErr != nil {
@@ -5758,7 +5757,7 @@ func (s *Server) handleQuestionnairePackage(w http.ResponseWriter, r *http.Reque
 	// Resolve and append Library dependencies
 	for idx, libURL := range libCanonicals {
 		var libMap map[string]any
-		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "Library", Count: 50}); err == nil {
+		if sr, err := s.store.Search(r.Context(), store.SearchParams{TenantID: tenant, ResType: "Library", Count: 50}); err == nil {
 			for _, m := range sr.Matches {
 				candidate, cErr := s.protoToFHIRMapWithMeta("Library", m.ResourceProto, m.ResVersion, m.LastUpdated)
 				if cErr != nil {
@@ -5803,7 +5802,7 @@ func (s *Server) handleQuestionnairePackage(w http.ResponseWriter, r *http.Reque
 	// Resolve and append ValueSet dependencies
 	for idx, vsURL := range vsCanonicals {
 		var vsMap map[string]any
-		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "ValueSet", Count: 50}); err == nil {
+		if sr, err := s.store.Search(r.Context(), store.SearchParams{TenantID: tenant, ResType: "ValueSet", Count: 50}); err == nil {
 			for _, m := range sr.Matches {
 				candidate, cErr := s.protoToFHIRMapWithMeta("ValueSet", m.ResourceProto, m.ResVersion, m.LastUpdated)
 				if cErr != nil {
@@ -6389,7 +6388,7 @@ func (s *Server) handleListFind(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. Check stored List resources in the tenant matching patient + name/code/title
-	if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "List", Count: 50}); err == nil {
+	if sr, err := s.store.Search(r.Context(), store.SearchParams{TenantID: tenant, ResType: "List", Count: 50}); err == nil {
 		for _, m := range sr.Matches {
 			lMap, cErr := s.protoToFHIRMapWithMeta("List", m.ResourceProto, m.ResVersion, m.LastUpdated)
 			if cErr != nil {
@@ -6456,7 +6455,7 @@ func (s *Server) handleListFind(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var listEntries []map[string]any
-	if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+	if sr, err := s.store.Search(r.Context(), store.SearchParams{
 		TenantID:   tenant,
 		ResType:    targetResType,
 		References: map[string]string{"patient": "Patient/" + patientParam},
@@ -6643,7 +6642,7 @@ func (s *Server) handleChargeItemApply(w http.ResponseWriter, r *http.Request) {
 
 	ciDef := inlineCIDef
 	if ciDef == nil && defCanonical != "" {
-		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "ChargeItemDefinition", Count: 50}); err == nil {
+		if sr, err := s.store.Search(r.Context(), store.SearchParams{TenantID: tenant, ResType: "ChargeItemDefinition", Count: 50}); err == nil {
 			for _, m := range sr.Matches {
 				if candidate, cErr := s.protoToFHIRMapWithMeta("ChargeItemDefinition", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
 					u, _ := candidate["url"].(string)
@@ -6961,7 +6960,7 @@ func (s *Server) handleCoverageEligibilitySubmit(w http.ResponseWriter, r *http.
 		}
 	}
 	if len(coverageRefs) == 0 && patID != "" {
-		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:   tenant,
 			ResType:    "Coverage",
 			References: map[string]string{"patient": "Patient/" + patID},
@@ -7435,7 +7434,7 @@ func (s *Server) handleCDexSubmitAttachment(w http.ResponseWriter, r *http.Reque
 		}
 	}
 	if matchedTask == nil && trackingID != "" {
-		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{TenantID: tenant, ResType: "Task", Count: 50}); err == nil {
+		if sr, err := s.store.Search(r.Context(), store.SearchParams{TenantID: tenant, ResType: "Task", Count: 50}); err == nil {
 			for _, m := range sr.Matches {
 				if candidate, cErr := s.protoToFHIRMapWithMeta("Task", m.ResourceProto, m.ResVersion, m.LastUpdated); cErr == nil {
 					if ids, ok := candidate["identifier"].([]any); ok {
@@ -7709,7 +7708,7 @@ func (s *Server) handleLibraryEvaluate(w http.ResponseWriter, r *http.Request) {
 	if patID != "" {
 		// Query patient Conditions and Observations when needed
 		var condMaps, obsMaps []map[string]any
-		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, err := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:   tenant,
 			ResType:    "Condition",
 			References: map[string]string{"patient": "Patient/" + patID},
@@ -7721,7 +7720,7 @@ func (s *Server) handleLibraryEvaluate(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, err := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:   tenant,
 			ResType:    "Observation",
 			References: map[string]string{"patient": "Patient/" + patID},
@@ -7829,7 +7828,7 @@ func (s *Server) handleLibraryEvaluate(w http.ResponseWriter, r *http.Request) {
 				case "Observation":
 					candidates = obsMaps
 				default:
-					if sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+					if sr, err := s.store.Search(r.Context(), store.SearchParams{
 						TenantID:   tenant,
 						ResType:    drType,
 						References: map[string]string{"patient": "Patient/" + patID},
@@ -8019,7 +8018,7 @@ func (s *Server) handlePatientHealthCardsIssue(w http.ResponseWriter, r *http.Re
 	resIdx := 1
 
 	if wantImm {
-		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:   tenant,
 			ResType:    "Immunization",
 			References: map[string]string{"patient": "Patient/" + patID},
@@ -8048,7 +8047,7 @@ func (s *Server) handlePatientHealthCardsIssue(w http.ResponseWriter, r *http.Re
 	}
 
 	if wantLab {
-		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:   tenant,
 			ResType:    "Observation",
 			References: map[string]string{"patient": "Patient/" + patID},
@@ -8211,7 +8210,7 @@ func (s *Server) handlePatientPCDE(w http.ResponseWriter, r *http.Request) {
 	var clinicalRefs []map[string]any
 
 	for _, rt := range []string{"Coverage", "CarePlan", "Claim", "ClaimResponse", "Condition", "ServiceRequest", "MedicationRequest"} {
-		sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:   tenant,
 			ResType:    rt,
 			References: map[string]string{"patient": "Patient/" + patID},
@@ -8484,7 +8483,7 @@ func (s *Server) handleResearchStudyEvaluateEligibility(w http.ResponseWriter, r
 
 	// Load patient Conditions and Observations
 	var condMaps, obsMaps []map[string]any
-	if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID:   tenant,
 		ResType:    "Condition",
 		References: map[string]string{"patient": "Patient/" + patID},
@@ -8496,7 +8495,7 @@ func (s *Server) handleResearchStudyEvaluateEligibility(w http.ResponseWriter, r
 			}
 		}
 	}
-	if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID:   tenant,
 		ResType:    "Observation",
 		References: map[string]string{"patient": "Patient/" + patID},
@@ -9038,7 +9037,7 @@ func (s *Server) handleMeasureEvaluateRiskConditionCategory(w http.ResponseWrite
 	hasElevatedBP := false
 	hasElevatedA1c := false
 
-	if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID:   tenant,
 		ResType:    "Condition",
 		References: map[string]string{"patient": "Patient/" + patID},
@@ -9063,7 +9062,7 @@ func (s *Server) handleMeasureEvaluateRiskConditionCategory(w http.ResponseWrite
 		}
 	}
 
-	if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID:   tenant,
 		ResType:    "Observation",
 		References: map[string]string{"patient": "Patient/" + patID},
@@ -9296,12 +9295,12 @@ func (s *Server) handleScheduleFind(w http.ResponseWriter, r *http.Request) {
 
 	var startBound, endBound time.Time
 	if startParam != "" {
-		if dOp, err := postgres.ParseDateOp(startParam); err == nil && !dOp.Value.IsZero() {
+		if dOp, err := store.ParseDateOp(startParam); err == nil && !dOp.Value.IsZero() {
 			startBound = dOp.Value
 		}
 	}
 	if endParam != "" {
-		if dOp, err := postgres.ParseDateOp(endParam); err == nil && !dOp.Value.IsZero() {
+		if dOp, err := store.ParseDateOp(endParam); err == nil && !dOp.Value.IsZero() {
 			endBound = dOp.Value
 		}
 	}
@@ -9320,7 +9319,7 @@ func (s *Server) handleScheduleFind(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	} else {
-		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID: tenant,
 			ResType:  "Schedule",
 			Count:    100,
@@ -9367,7 +9366,7 @@ func (s *Server) handleScheduleFind(w http.ResponseWriter, r *http.Request) {
 
 	// Include free Slots belonging to matched Schedules
 	slotCountForSched := make(map[string]int)
-	if slotRes, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if slotRes, sErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID: tenant,
 		ResType:  "Slot",
 		Count:    200,
@@ -9389,12 +9388,12 @@ func (s *Server) handleScheduleFind(w http.ResponseWriter, r *http.Request) {
 			slotStartStr, _ := slotMap["start"].(string)
 			slotEndStr, _ := slotMap["end"].(string)
 			if !startBound.IsZero() && slotStartStr != "" {
-				if stOp, err := postgres.ParseDateOp(slotStartStr); err == nil && !stOp.Value.IsZero() && stOp.Value.Before(startBound) {
+				if stOp, err := store.ParseDateOp(slotStartStr); err == nil && !stOp.Value.IsZero() && stOp.Value.Before(startBound) {
 					continue
 				}
 			}
 			if !endBound.IsZero() && slotEndStr != "" {
-				if etOp, err := postgres.ParseDateOp(slotEndStr); err == nil && !etOp.Value.IsZero() && etOp.Value.After(endBound) {
+				if etOp, err := store.ParseDateOp(slotEndStr); err == nil && !etOp.Value.IsZero() && etOp.Value.After(endBound) {
 					continue
 				}
 			}
@@ -9590,7 +9589,7 @@ func (s *Server) handleOrderCRD(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if covRef == "" && patID != "" {
-		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:   tenant,
 			ResType:    "Coverage",
 			References: map[string]string{"patient": "Patient/" + patID},
@@ -9762,7 +9761,7 @@ func (s *Server) handleAdverseEventEvaluate(w http.ResponseWriter, r *http.Reque
 
 	if aeMap == nil && subjectParam != "" {
 		patID := strings.TrimPrefix(subjectParam, "Patient/")
-		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:   tenant,
 			ResType:    "AdverseEvent",
 			References: map[string]string{"patient": "Patient/" + patID},
@@ -9824,7 +9823,7 @@ func (s *Server) handleAdverseEventEvaluate(w http.ResponseWriter, r *http.Reque
 
 	hasAllergy := false
 	if patID != "" {
-		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:   tenant,
 			ResType:    "AllergyIntolerance",
 			References: map[string]string{"patient": "Patient/" + patID},
@@ -9833,7 +9832,7 @@ func (s *Server) handleAdverseEventEvaluate(w http.ResponseWriter, r *http.Reque
 			hasAllergy = true
 		}
 		if suspectCount == 0 {
-			if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 				TenantID:   tenant,
 				ResType:    "MedicationRequest",
 				References: map[string]string{"patient": "Patient/" + patID},
@@ -9986,7 +9985,7 @@ func (s *Server) handleCarePlanEvaluate(w http.ResponseWriter, r *http.Request) 
 
 	if cpMap == nil && subjectParam != "" {
 		patID := strings.TrimPrefix(subjectParam, "Patient/")
-		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:   tenant,
 			ResType:    "CarePlan",
 			References: map[string]string{"patient": "Patient/" + patID},
@@ -10045,7 +10044,7 @@ func (s *Server) handleCarePlanEvaluate(w http.ResponseWriter, r *http.Request) 
 
 	if patID != "" {
 		if len(goalMaps) == 0 {
-			if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 				TenantID:   tenant,
 				ResType:    "Goal",
 				References: map[string]string{"patient": "Patient/" + patID},
@@ -10062,7 +10061,7 @@ func (s *Server) handleCarePlanEvaluate(w http.ResponseWriter, r *http.Request) 
 				}
 			}
 		}
-		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:   tenant,
 			ResType:    "Observation",
 			References: map[string]string{"patient": "Patient/" + patID},
@@ -10300,7 +10299,7 @@ func (s *Server) handlePatientImmDSForecast(w http.ResponseWriter, r *http.Reque
 	// Collect stored and inline Immunizations
 	var immMaps []map[string]any
 	immMaps = append(immMaps, inlineImms...)
-	if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID:   tenant,
 		ResType:    "Immunization",
 		References: map[string]string{"patient": "Patient/" + patID},
@@ -10582,7 +10581,7 @@ func (s *Server) handleGFESubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if covMap == nil && patID != "" {
-		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:   tenant,
 			ResType:    "Coverage",
 			References: map[string]string{"patient": "Patient/" + patID},
@@ -10837,7 +10836,7 @@ func (s *Server) handleRiskAssessmentEvaluate(w http.ResponseWriter, r *http.Req
 	var basisRefs []map[string]any
 	riskFactors := 0
 
-	if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID:   tenant,
 		ResType:    "Condition",
 		References: map[string]string{"patient": "Patient/" + patID},
@@ -10849,7 +10848,7 @@ func (s *Server) handleRiskAssessmentEvaluate(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID:   tenant,
 		ResType:    "Observation",
 		References: map[string]string{"patient": "Patient/" + patID},
@@ -11024,7 +11023,7 @@ func (s *Server) handleCompositionDocumentType(w http.ResponseWriter, r *http.Re
 	}
 
 	if compID == "" {
-		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID: tenant,
 			ResType:  "Composition",
 			Count:    1,
@@ -11420,7 +11419,7 @@ func (s *Server) handleMedicationKnowledgeAndInteractions(w http.ResponseWriter,
 	var issueParams []map[string]any
 
 	// Check AllergyIntolerance records for the patient
-	if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID:   tenant,
 		ResType:    "AllergyIntolerance",
 		References: map[string]string{"patient": "Patient/" + patID},
@@ -11706,7 +11705,7 @@ func (s *Server) handlePatientIHEPix(w http.ResponseWriter, r *http.Request) {
 			patMap = pm
 		}
 	} else if sourceIdent != "" {
-		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		sr, err := s.store.Search(r.Context(), store.SearchParams{
 			TenantID: tenant,
 			ResType:  "Patient",
 			Tokens:   map[string]string{"identifier": sourceIdent},
@@ -11957,7 +11956,7 @@ func (s *Server) handleDiagnosticReportEvaluate(w http.ResponseWriter, r *http.R
 	}
 
 	if drMap == nil {
-		if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID: tenant,
 			ResType:  "DiagnosticReport",
 			Count:    1,
@@ -12200,7 +12199,7 @@ func (s *Server) handlePatientBulkMemberMatch(w http.ResponseWriter, r *http.Req
 					if im, ok := rawI.(map[string]any); ok {
 						val, _ := im["value"].(string)
 						if val != "" {
-							if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+							if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 								TenantID: tenant,
 								ResType:  "Patient",
 								Tokens:   map[string]string{"identifier": val},
@@ -12222,7 +12221,7 @@ func (s *Server) handlePatientBulkMemberMatch(w http.ResponseWriter, r *http.Req
 				}
 			}
 			if family != "" {
-				if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+				if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 					TenantID: tenant,
 					ResType:  "Patient",
 					Strings:  map[string]string{"family": family},
@@ -12365,7 +12364,7 @@ func (s *Server) handleDaVinciDataExport(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		for _, rt := range []string{"Condition", "Observation", "MedicationRequest", "AllergyIntolerance", "Immunization"} {
-			if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 				TenantID:   tenant,
 				ResType:    rt,
 				References: map[string]string{"patient": "Patient/" + patID},
@@ -12823,7 +12822,7 @@ func (s *Server) handlePlanNetDirectory(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if strings.EqualFold(resType, "PractitionerRole") {
-		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		sr, err := s.store.Search(r.Context(), store.SearchParams{
 			TenantID: tenant,
 			ResType:  "PractitionerRole",
 			Count:    100,
@@ -12920,7 +12919,7 @@ func (s *Server) handlePlanNetDirectory(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// HealthcareService/$find-services
-	sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+	sr, err := s.store.Search(r.Context(), store.SearchParams{
 		TenantID: tenant,
 		ResType:  "HealthcareService",
 		Count:    100,
@@ -13300,7 +13299,7 @@ func (s *Server) handlePatientSDOHSummary(w http.ResponseWriter, r *http.Request
 	}
 
 	for _, rt := range []string{"Condition", "Observation", "Goal", "ServiceRequest", "Task", "Consent"} {
-		sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+		sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:         tenant,
 			ResType:          rt,
 			ReferenceFilters: map[string][]string{"patient": {patID}},
@@ -13411,7 +13410,7 @@ func (s *Server) handleConsentEvaluate(w http.ResponseWriter, r *http.Request) {
 			consents = append(consents, cm)
 		}
 	} else if len(consents) == 0 {
-		sp := postgres.SearchParams{
+		sp := store.SearchParams{
 			TenantID: tenant,
 			ResType:  "Consent",
 			Count:    50,
@@ -13568,7 +13567,7 @@ func (s *Server) handleCarinBlueButton(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
-		if covSR, cErr := s.store.Search(r.Context(), postgres.SearchParams{
+		if covSR, cErr := s.store.Search(r.Context(), store.SearchParams{
 			TenantID:         tenant,
 			ResType:          "Coverage",
 			ReferenceFilters: map[string][]string{"patient": {patID}},
@@ -13589,7 +13588,7 @@ func (s *Server) handleCarinBlueButton(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	eobSearch := postgres.SearchParams{
+	eobSearch := store.SearchParams{
 		TenantID: tenant,
 		ResType:  "ExplanationOfBenefit",
 		Count:    50,
@@ -13864,7 +13863,7 @@ func (s *Server) handlePublicHealthECR(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		for _, rt := range []string{"Condition", "Observation"} {
-			if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 				TenantID:         tenant,
 				ResType:          rt,
 				ReferenceFilters: map[string][]string{"patient": {patID}},
@@ -14421,7 +14420,7 @@ func (s *Server) handleMCODEOncology(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var conds []map[string]any
-	if condSR, cErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if condSR, cErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID:         tenant,
 		ResType:          "Condition",
 		ReferenceFilters: map[string][]string{"patient": {targetID}},
@@ -14475,7 +14474,7 @@ func (s *Server) handleMCODEOncology(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var obsList []map[string]any
-	if obsSR, oErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if obsSR, oErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID:         tenant,
 		ResType:          "Observation",
 		ReferenceFilters: map[string][]string{"patient": {targetID}},
@@ -14875,7 +14874,7 @@ func (s *Server) handleIHEMHDExchange(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sp := postgres.SearchParams{
+	sp := store.SearchParams{
 		TenantID: tenant,
 		ResType:  "DocumentReference",
 		Count:    100,
@@ -15401,7 +15400,7 @@ func (s *Server) handlePACIOPostAcute(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var obsList []map[string]any
-	if obsSR, oErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if obsSR, oErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID:         tenant,
 		ResType:          "Observation",
 		ReferenceFilters: map[string][]string{"patient": {targetID}},
@@ -15770,7 +15769,7 @@ func (s *Server) handleVulcanClinicalResearch(w http.ResponseWriter, r *http.Req
 	}
 
 	var members []map[string]any
-	if patSR, pErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if patSR, pErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID: tenant,
 		ResType:  "Patient",
 		Count:    50,
@@ -16156,7 +16155,7 @@ func (s *Server) handleIHEPDQmAndITI68(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var entries []map[string]any
-	if patSR, pErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if patSR, pErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID: tenant,
 		ResType:  "Patient",
 		Count:    100,
@@ -16335,7 +16334,7 @@ func (s *Server) handleFASTNationalDirectory(w http.ResponseWriter, r *http.Requ
 	}
 
 	var entries []map[string]any
-	if epSR, eErr := s.store.Search(r.Context(), postgres.SearchParams{
+	if epSR, eErr := s.store.Search(r.Context(), store.SearchParams{
 		TenantID: tenant,
 		ResType:  "Endpoint",
 		Count:    50,
@@ -18953,7 +18952,7 @@ func (s *Server) handleFASTDigitalIdentity(w http.ResponseWriter, r *http.Reques
 			"name":      []map[string]any{{"family": "Wonderland", "given": []string{"Alice"}}},
 		}
 		if s.store != nil {
-			if sr, sErr := s.store.Search(r.Context(), postgres.SearchParams{
+			if sr, sErr := s.store.Search(r.Context(), store.SearchParams{
 				TenantID: tenant,
 				ResType:  "Patient",
 				Count:    1,

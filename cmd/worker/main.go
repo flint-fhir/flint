@@ -21,6 +21,7 @@ import (
 	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/ingest/activity"
 	"github.com/flint-fhir/flint/ingest/workflow"
+	"github.com/flint-fhir/flint/store"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -97,12 +98,12 @@ func loadWorkerConfig(args []string, getenv func(string) string) (workerConfig, 
 	}, nil
 }
 
-func buildWorkerActivities(store *postgres.Store, producer *automq.Producer, logger *slog.Logger) *activity.Activities {
+func buildWorkerActivities(pgStore *postgres.Store, producer *automq.Producer, logger *slog.Logger) *activity.Activities {
 	return &activity.Activities{
-		Store:           store,
+		Store:           pgStore,
 		Producer:        producer,
 		Logger:          logger,
-		IndexExtractors: postgres.DefaultIndexExtractors(),
+		IndexExtractors: store.DefaultIndexExtractors(),
 	}
 }
 

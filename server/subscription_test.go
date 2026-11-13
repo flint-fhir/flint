@@ -4,35 +4,35 @@ import (
 	"testing"
 	"time"
 
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 func TestSubscriptionMatchesResourceWithMeta_AllCriteriaFamilies(t *testing.T) {
 	obsDate := time.Date(2026, 2, 10, 14, 0, 0, 0, time.UTC)
 	lastUpdated := time.Date(2026, 2, 10, 15, 0, 0, 0, time.UTC)
 
-	idx := &postgres.SearchIndexes{
-		Tokens: []postgres.SpidxToken{
+	idx := &store.SearchIndexes{
+		Tokens: []store.SpidxToken{
 			{SpName: "code", SpSystem: "http://loinc.org", SpValue: "8867-4"},
 			{SpName: "category", SpSystem: "http://terminology.hl7.org/CodeSystem/observation-category", SpValue: "vital-signs"},
 			{SpName: "status", SpValue: "final"},
 			{SpName: "_profile", SpValue: "http://hl7.org/fhir/us/core/StructureDefinition/us-core-heart-rate"},
 		},
-		Strings: []postgres.SpidxString{
+		Strings: []store.SpidxString{
 			{SpName: "device-name", SpValue: "Bedside Cardiac Monitor"},
 		},
-		Dates: []postgres.SpidxDate{
+		Dates: []store.SpidxDate{
 			{SpName: "date", SpLow: obsDate, SpHigh: obsDate},
 		},
-		Quantities: []postgres.SpidxQuantity{
+		Quantities: []store.SpidxQuantity{
 			{SpName: "value-quantity", SpSystem: "http://unitsofmeasure.org", SpCode: "/min", SpValue: 112},
 			{SpName: "comp-cvq:http://loinc.org|8480-6", SpSystem: "http://unitsofmeasure.org", SpCode: "mm[Hg]", SpValue: 145},
 		},
-		References: []postgres.SpidxReference{
+		References: []store.SpidxReference{
 			{SpName: "patient", TargetType: "Patient", TargetID: "pat-42"},
 			{SpName: "subject", TargetType: "Patient", TargetID: "pat-42"},
 		},
-		URIs: []postgres.SpidxURI{
+		URIs: []store.SpidxURI{
 			{SpName: "_profile", SpValue: "http://hl7.org/fhir/us/core/StructureDefinition/us-core-heart-rate"},
 			{SpName: "_source", SpValue: "https://ehr.hospital.org/Epic/ICU"},
 		},

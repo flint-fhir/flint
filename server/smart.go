@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/flint-fhir/flint/pkg/auth"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 	"github.com/google/uuid"
 )
 
@@ -91,7 +91,7 @@ func (s *Server) SetRequireRegisteredClientJWK(require bool) {
 
 func (s *Server) storeAuthCode(code string, entry authCodeEntry) {
 	if s.store != nil {
-		_ = s.store.SaveAuthCode(context.Background(), code, postgres.OAuthAuthCodeRecord{
+		_ = s.store.SaveAuthCode(context.Background(), code, store.OAuthAuthCodeRecord{
 			ClientID:            entry.ClientID,
 			RedirectURI:         entry.RedirectURI,
 			Scope:               entry.Scope,
@@ -167,7 +167,7 @@ func (s *Server) consumeAuthCode(code string) (authCodeEntry, bool) {
 
 func (s *Server) storeRefreshToken(token string, entry refreshTokenEntry) {
 	if s.store != nil {
-		_ = s.store.SaveRefreshToken(context.Background(), token, postgres.OAuthRefreshTokenRecord{
+		_ = s.store.SaveRefreshToken(context.Background(), token, store.OAuthRefreshTokenRecord{
 			Subject:     entry.Subject,
 			PatientID:   entry.PatientID,
 			EncounterID: entry.EncounterID,

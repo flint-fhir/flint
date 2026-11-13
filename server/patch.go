@@ -20,7 +20,7 @@ import (
 	"github.com/flint-fhir/flint/pkg/auth"
 	automq "github.com/flint-fhir/flint/pkg/cdc"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 var (
@@ -59,7 +59,7 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 
 	expectedVersion := 0
 	if ifMatch := strings.TrimSpace(r.Header.Get("If-Match")); ifMatch != "" {
-		v, err := postgres.ParseETagVersion(ifMatch)
+		v, err := store.ParseETagVersion(ifMatch)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid If-Match header %q", ifMatch))
@@ -102,11 +102,11 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var (
-		existingRec *postgres.ResourceRecord
-		rec         *postgres.ResourceRecord
+		existingRec *store.ResourceRecord
+		rec         *store.ResourceRecord
 		patchedJSON []byte
 		protoBytes  []byte
-		idx         *postgres.SearchIndexes
+		idx         *store.SearchIndexes
 	)
 	for attempt := 0; ; attempt++ {
 		existingRec, err = s.store.ReadResourceWithMeta(r.Context(), tenant, resType, resID)
@@ -115,9 +115,9 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("%s/%s not found", resType, resID))
 			return
 		}
-		if errors.Is(err, postgres.ErrResourceDeleted) {
+		if errors.Is(err, store.ErrResourceDeleted) {
 			if existingRec != nil && existingRec.ResVersion > 0 {
-				w.Header().Set("ETag", postgres.FormatETag(existingRec.ResVersion))
+				w.Header().Set("ETag", store.FormatETag(existingRec.ResVersion))
 			}
 			writeOperationOutcome(w, http.StatusGone, "deleted",
 				fmt.Sprintf("%s/%s has been deleted", resType, resID))
@@ -131,7 +131,7 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 
 		if expectedVersion > 0 && existingRec.ResVersion != expectedVersion {
 			writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict",
-				fmt.Sprintf("%v: expected version %d, current version %d", postgres.ErrVersionConflict, expectedVersion, existingRec.ResVersion))
+				fmt.Sprintf("%v: expected version %d, current version %d", store.ErrVersionConflict, expectedVersion, existingRec.ResVersion))
 			return
 		}
 
@@ -248,8 +248,8 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 
 		if secCtx, ok := auth.FromContext(r.Context()); ok {
 			if auth.IsPatientRestricted(secCtx) {
-				if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
-					if !postgres.IndexesBelongToPatientCompartment(resType, resID, idx, cleanID(secCtx.GetPatientId())) {
+				if strings.EqualFold(resType, "Patient") || store.IsPatientCompartmentResourceType(resType) {
+					if !store.IndexesBelongToPatientCompartment(resType, resID, idx, cleanID(secCtx.GetPatientId())) {
 						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 							fmt.Sprintf("patient-scoped token (%s) cannot patch %s/%s outside patient compartment",
 								secCtx.GetPatientId(), resType, resID))
@@ -267,7 +267,7 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		rec, err = s.store.WriteResourceWithMeta(r.Context(), postgres.ResourceInput{
+		rec, err = s.store.WriteResourceWithMeta(r.Context(), store.ResourceInput{
 			TenantID:        tenant,
 			ResType:         resType,
 			ResID:           resID,
@@ -275,7 +275,7 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 			SearchIndexes:   idx,
 			ExpectedVersion: existingRec.ResVersion,
 		})
-		if errors.Is(err, postgres.ErrVersionConflict) {
+		if errors.Is(err, store.ErrVersionConflict) {
 			if expectedVersion == 0 && attempt < 16 {
 				continue
 			}
@@ -300,7 +300,7 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 	s.dispatchSubscriptions(r.Context(), tenant, resType, resID, protoBytes, rec.ResVersion, rec.LastUpdated, idx)
 	s.recordAutoProvenance(r, w, tenant, resType, resID, rec.ResVersion, idx, xProvTemplate)
 
-	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+	w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 	s.writeResourceWriteResponse(w, r, http.StatusOK, md, resType, resID, rec.ResVersion, rec.LastUpdated, protoBytes, patchedJSON)
 }
@@ -324,12 +324,12 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 	}
 
 	q := r.URL.Query()
-	if err := postgres.ValidateSearchQuery(q); err != nil {
+	if err := store.ValidateSearchQuery(q); err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
-	condParams := postgres.BuildSearchParamsFromQuery(tenant, resType, q)
-	if !postgres.HasSearchCriteria(condParams) {
+	condParams := store.BuildSearchParamsFromQuery(tenant, resType, q)
+	if !store.HasSearchCriteria(condParams) {
 		writeOperationOutcome(w, http.StatusBadRequest, "required",
 			"conditional update requires at least one search parameter in the query string")
 		return
@@ -349,7 +349,7 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 
 	expectedVersion := 0
 	if ifMatch := strings.TrimSpace(r.Header.Get("If-Match")); ifMatch != "" {
-		v, err := postgres.ParseETagVersion(ifMatch)
+		v, err := store.ParseETagVersion(ifMatch)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid If-Match header %q", ifMatch))
@@ -411,17 +411,17 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 
 	var finalProtoBytes []byte
 	var finalResID string
-	var finalIdx *postgres.SearchIndexes
+	var finalIdx *store.SearchIndexes
 
 	rec, err := s.store.ConditionalUpdateResource(
 		r.Context(),
 		tenant,
 		resType,
 		condParams,
-		func(matchedID string, isExisting bool) (postgres.ResourceInput, error) {
+		func(matchedID string, isExisting bool) (store.ResourceInput, error) {
 			if isExisting {
 				if bodyID != "" && bodyID != matchedID {
-					return postgres.ResourceInput{}, fmt.Errorf("%w: body id %q != matched id %q", errConditionalIDMismatch, bodyID, matchedID)
+					return store.ResourceInput{}, fmt.Errorf("%w: body id %q != matched id %q", errConditionalIDMismatch, bodyID, matchedID)
 				}
 				finalResID = matchedID
 			} else {
@@ -435,7 +435,7 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 			setProtoResourceID(msg, finalResID)
 			pBytes, mErr := proto.Marshal(msg)
 			if mErr != nil {
-				return postgres.ResourceInput{}, mErr
+				return store.ResourceInput{}, mErr
 			}
 			finalProtoBytes = pBytes
 
@@ -447,14 +447,14 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 			s.enrichProvenancePatientIndex(r.Context(), tenant, resType, finalIdx)
 
 			if hasSecCtx && auth.IsPatientRestricted(secCtx) {
-				if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
-					if !postgres.IndexesBelongToPatientCompartment(resType, finalResID, finalIdx, cleanID(secCtx.GetPatientId())) {
-						return postgres.ResourceInput{}, fmt.Errorf("%w: %s/%s", errForbiddenCompartment, resType, finalResID)
+				if strings.EqualFold(resType, "Patient") || store.IsPatientCompartmentResourceType(resType) {
+					if !store.IndexesBelongToPatientCompartment(resType, finalResID, finalIdx, cleanID(secCtx.GetPatientId())) {
+						return store.ResourceInput{}, fmt.Errorf("%w: %s/%s", errForbiddenCompartment, resType, finalResID)
 					}
 				}
 			}
 
-			return postgres.ResourceInput{
+			return store.ResourceInput{
 				TenantID:        tenant,
 				ResType:         resType,
 				ResID:           finalResID,
@@ -464,7 +464,7 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 			}, nil
 		},
 	)
-	if errors.Is(err, postgres.ErrPreconditionFailed) || errors.Is(err, postgres.ErrVersionConflict) {
+	if errors.Is(err, store.ErrPreconditionFailed) || errors.Is(err, store.ErrVersionConflict) {
 		writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", err.Error())
 		return
 	}
@@ -496,7 +496,7 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 	s.recordAutoProvenance(r, w, tenant, resType, rec.ResID, rec.ResVersion, finalIdx, xProvTemplate)
 
 	w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, rec.ResID))
-	w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+	w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 	status := http.StatusOK
 	if rec.Created {
@@ -522,12 +522,12 @@ func (s *Server) handleConditionalPatch(w http.ResponseWriter, r *http.Request) 
 	}
 
 	q := r.URL.Query()
-	if err := postgres.ValidateSearchQuery(q); err != nil {
+	if err := store.ValidateSearchQuery(q); err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
-	condParams := postgres.BuildSearchParamsFromQuery(tenant, resType, q)
-	if !postgres.HasSearchCriteria(condParams) {
+	condParams := store.BuildSearchParamsFromQuery(tenant, resType, q)
+	if !store.HasSearchCriteria(condParams) {
 		writeOperationOutcome(w, http.StatusBadRequest, "required",
 			"conditional patch requires at least one search parameter in the query string")
 		return
@@ -560,7 +560,7 @@ func (s *Server) handleConditionalPatch(w http.ResponseWriter, r *http.Request) 
 	}
 	if sr.Total > 1 {
 		writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict",
-			fmt.Sprintf("%v: conditional patch matched %d existing %s resources", postgres.ErrPreconditionFailed, sr.Total, resType))
+			fmt.Sprintf("%v: conditional patch matched %d existing %s resources", store.ErrPreconditionFailed, sr.Total, resType))
 		return
 	}
 
@@ -571,7 +571,7 @@ func (s *Server) handleConditionalPatch(w http.ResponseWriter, r *http.Request) 
 				fmt.Sprintf("patient-scoped token (%s) cannot patch patient %s", secCtx.GetPatientId(), matchedID))
 			return
 		}
-		if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) {
+		if !strings.EqualFold(resType, "Patient") && store.IsPatientCompartmentResourceType(resType) {
 			exists, allowed, cErr := s.checkExistingResourceCompartment(r.Context(), tenant, resType, matchedID, secCtx.GetPatientId())
 			if cErr != nil {
 				writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
@@ -598,12 +598,12 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 	resType := r.PathValue("resourceType")
 
 	q := r.URL.Query()
-	if err := postgres.ValidateSearchQuery(q); err != nil {
+	if err := store.ValidateSearchQuery(q); err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", err.Error())
 		return
 	}
-	condParams := postgres.BuildSearchParamsFromQuery(tenant, resType, q)
-	if !postgres.HasSearchCriteria(condParams) {
+	condParams := store.BuildSearchParamsFromQuery(tenant, resType, q)
+	if !store.HasSearchCriteria(condParams) {
 		writeOperationOutcome(w, http.StatusBadRequest, "required",
 			"conditional delete requires at least one search parameter in the query string")
 		return
@@ -614,7 +614,7 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 	}
 
 	if ifMatch := strings.TrimSpace(r.Header.Get("If-Match")); ifMatch != "" {
-		v, err := postgres.ParseETagVersion(ifMatch)
+		v, err := store.ParseETagVersion(ifMatch)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid If-Match header %q", ifMatch))
@@ -649,7 +649,7 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 				if strings.EqualFold(resType, "Patient") && cleanID(matchedID) != cleanID(secCtx.GetPatientId()) {
 					return errForbiddenCompartment
 				}
-				if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) {
+				if !strings.EqualFold(resType, "Patient") && store.IsPatientCompartmentResourceType(resType) {
 					_, allowed, cErr := s.checkExistingResourceCompartment(r.Context(), tenant, resType, matchedID, secCtx.GetPatientId())
 					if cErr != nil {
 						return cErr
@@ -662,7 +662,7 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 			return nil
 		},
 	)
-	if errors.Is(err, postgres.ErrPreconditionFailed) || errors.Is(err, postgres.ErrVersionConflict) {
+	if errors.Is(err, store.ErrPreconditionFailed) || errors.Is(err, store.ErrVersionConflict) {
 		writeOperationOutcome(w, http.StatusPreconditionFailed, "conflict", err.Error())
 		return
 	}
@@ -679,7 +679,7 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 	if len(recs) > 0 {
 		first := recs[0]
 		if first.ResVersion > 0 {
-			w.Header().Set("ETag", postgres.FormatETag(first.ResVersion))
+			w.Header().Set("ETag", store.FormatETag(first.ResVersion))
 			w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/%s/%s", tenant, resType, first.ResID))
 		}
 		for _, rec := range recs {

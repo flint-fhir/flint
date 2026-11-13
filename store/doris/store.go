@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/flint-fhir/flint/store"
-	"github.com/flint-fhir/flint/store/postgres"
 )
 
 // Option configures an Apache Doris Store.
@@ -1623,7 +1622,7 @@ func (s *Store) BelongsToPatientCompartment(_ context.Context, tenantID, resType
 	if strings.EqualFold(resType, "Patient") {
 		return resID == patientID, nil
 	}
-	if !postgres.IsPatientCompartmentResourceType(resType) {
+	if !store.IsPatientCompartmentResourceType(resType) {
 		return true, nil
 	}
 	key := resKey(tenantID, resType, resID)
@@ -2336,7 +2335,7 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 		return nil
 	}
 
-	extractors := postgres.DefaultIndexExtractors()
+	extractors := store.DefaultIndexExtractors()
 	resources := make(map[string]storedEntry)
 	history := make(map[string][]store.ResourceRecord)
 	audits := make(map[string][]store.AuditRecord)

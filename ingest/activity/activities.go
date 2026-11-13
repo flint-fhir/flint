@@ -10,7 +10,6 @@ import (
 
 	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/store"
-	"github.com/flint-fhir/flint/store/postgres"
 )
 
 var (
@@ -20,7 +19,7 @@ var (
 
 func getDefaultExtractors() map[string]IndexExtractorFunc {
 	defaultExtractorsOnce.Do(func() {
-		defaultExtractorsMap = postgres.DefaultIndexExtractors()
+		defaultExtractorsMap = store.DefaultIndexExtractors()
 	})
 	return defaultExtractorsMap
 }
@@ -65,7 +64,7 @@ type PublishToAutoMQInput struct {
 
 // BatchStore is the operational store interface required for batch ingestion.
 type BatchStore interface {
-	WriteBatch(ctx context.Context, inputs []postgres.ResourceInput) error
+	WriteBatch(ctx context.Context, inputs []store.ResourceInput) error
 }
 
 // Activities holds dependencies for all ingest activities.
@@ -75,12 +74,12 @@ type Activities struct {
 	Logger   *slog.Logger
 	// IndexExtractors maps resource type → extraction function.
 	// When nil or missing a resource type, WritePostgresBatch falls back to
-	// postgres.DefaultIndexExtractors() covering all 146 FHIR R4 resource types.
+	// store.DefaultIndexExtractors() covering all 146 FHIR R4 resource types.
 	IndexExtractors map[string]IndexExtractorFunc
 }
 
 // IndexExtractorFunc extracts search indexes from a proto-encoded resource.
-type IndexExtractorFunc = postgres.IndexExtractorFunc
+type IndexExtractorFunc = store.IndexExtractorFunc
 
 func (a *Activities) logger() *slog.Logger {
 	if a != nil && a.Logger != nil {
@@ -110,13 +109,13 @@ func (a *Activities) WritePostgresBatch(ctx context.Context, input WritePostgres
 		return fmt.Errorf("postgres store is nil")
 	}
 
-	inputs := make([]postgres.ResourceInput, len(input.ResourceProtos))
+	inputs := make([]store.ResourceInput, len(input.ResourceProtos))
 
 	for i := range input.ResourceProtos {
 		resType := input.ResourceTypes[i]
 		resID := input.ResourceIDs[i]
 
-		ri := postgres.ResourceInput{
+		ri := store.ResourceInput{
 			TenantID:       input.TenantID,
 			ResType:        resType,
 			ResID:          resID,

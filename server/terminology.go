@@ -18,7 +18,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/flint-fhir/flint/pkg/fhirutil"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 type terminologyConcept struct {
@@ -342,14 +342,14 @@ func (s *Server) resolveValueSetConceptsWithDepth(ctx context.Context, tenant, v
 			}
 		}
 	} else if vsURL != "" && s.store != nil {
-		sr, err := s.store.Search(ctx, postgres.SearchParams{
+		sr, err := s.store.Search(ctx, store.SearchParams{
 			TenantID: tenant,
 			ResType:  "ValueSet",
 			URIs:     map[string]string{"url": vsURL},
 			Count:    1,
 		})
 		if err != nil || len(sr.Matches) == 0 {
-			sr, err = s.store.Search(ctx, postgres.SearchParams{
+			sr, err = s.store.Search(ctx, store.SearchParams{
 				TenantID: tenant,
 				ResType:  "ValueSet",
 				Tokens:   map[string]string{"url": vsURL},
@@ -680,14 +680,14 @@ func (s *Server) resolveCodeSystemConceptsWithInline(ctx context.Context, tenant
 			}
 		}
 	} else if csURL != "" && s.store != nil {
-		sr, err := s.store.Search(ctx, postgres.SearchParams{
+		sr, err := s.store.Search(ctx, store.SearchParams{
 			TenantID: tenant,
 			ResType:  "CodeSystem",
 			URIs:     map[string]string{"url": csURL},
 			Count:    1,
 		})
 		if err != nil || len(sr.Matches) == 0 {
-			sr, err = s.store.Search(ctx, postgres.SearchParams{
+			sr, err = s.store.Search(ctx, store.SearchParams{
 				TenantID: tenant,
 				ResType:  "CodeSystem",
 				Tokens:   map[string]string{"url": csURL},
@@ -1323,14 +1323,14 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 			foundExplicitMap = true
 		}
 	} else if cmURL != "" && s.store != nil {
-		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		sr, err := s.store.Search(r.Context(), store.SearchParams{
 			TenantID: tenant,
 			ResType:  "ConceptMap",
 			URIs:     map[string]string{"url": cmURL},
 			Count:    10,
 		})
 		if err != nil || len(sr.Matches) == 0 {
-			sr, err = s.store.Search(r.Context(), postgres.SearchParams{
+			sr, err = s.store.Search(r.Context(), store.SearchParams{
 				TenantID: tenant,
 				ResType:  "ConceptMap",
 				Tokens:   map[string]string{"url": cmURL},
@@ -1366,10 +1366,10 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 					uriFilters["target-uri"] = targetSystem
 				}
 			}
-			var sr *postgres.SearchResults
+			var sr *store.SearchResults
 			var err error
 			if len(uriFilters) > 0 {
-				sr, err = s.store.Search(r.Context(), postgres.SearchParams{
+				sr, err = s.store.Search(r.Context(), store.SearchParams{
 					TenantID: tenant,
 					ResType:  "ConceptMap",
 					URIs:     uriFilters,
@@ -1377,7 +1377,7 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 				})
 			}
 			if sr == nil || err != nil || len(sr.Matches) == 0 {
-				sr, err = s.store.Search(r.Context(), postgres.SearchParams{
+				sr, err = s.store.Search(r.Context(), store.SearchParams{
 					TenantID: tenant,
 					ResType:  "ConceptMap",
 					Count:    100,
@@ -1457,14 +1457,14 @@ func (s *Server) handleConceptMapTranslate(w http.ResponseWriter, r *http.Reques
 // ExpandTerminologySearchParams resolves terminology-aware token search modifiers
 // (:in, :not-in, :below, :above) across direct and chained token search parameters,
 // rewriting them into spidx_token-compatible filters.
-func (s *Server) ExpandTerminologySearchParams(ctx context.Context, tenant string, params *postgres.SearchParams) error {
+func (s *Server) ExpandTerminologySearchParams(ctx context.Context, tenant string, params *store.SearchParams) error {
 	return s.expandTerminologySearchParams(ctx, tenant, params)
 }
 
 // expandTerminologySearchParams resolves terminology-aware token search modifiers
 // (:in, :not-in, :below, :above) across direct and chained token search parameters,
 // rewriting them into spidx_token-compatible filters.
-func (s *Server) expandTerminologySearchParams(ctx context.Context, tenant string, params *postgres.SearchParams) error {
+func (s *Server) expandTerminologySearchParams(ctx context.Context, tenant string, params *store.SearchParams) error {
 	if params == nil {
 		return nil
 	}
@@ -1532,7 +1532,7 @@ func (s *Server) expandTerminologySearchParams(ctx context.Context, tenant strin
 	return nil
 }
 
-func (s *Server) expandFilterExprTerminology(ctx context.Context, tenant string, expr *postgres.FilterExpr) error {
+func (s *Server) expandFilterExprTerminology(ctx context.Context, tenant string, expr *store.FilterExpr) error {
 	if expr == nil {
 		return nil
 	}

@@ -20,11 +20,11 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/pkg/validation"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 func TestNormalizeFHIRJSONToProtoJSON_StandardFlatFHIR(t *testing.T) {
-	extractors := postgres.DefaultIndexExtractors()
+	extractors := store.DefaultIndexExtractors()
 
 	t.Run("Standard flat FHIR Patient JSON unmarshals and extracts search indexes", func(t *testing.T) {
 		rawPatient := []byte(`{

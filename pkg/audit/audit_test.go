@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/flint-fhir/flint/pkg/audit"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 func TestClassifyHTTPInteraction(t *testing.T) {
@@ -160,7 +160,7 @@ func TestMemoryRecorderAndToFHIRResource(t *testing.T) {
 	rec := audit.NewMemoryRecorder()
 
 	now := time.Date(2026, 10, 9, 20, 0, 0, 0, time.UTC)
-	err := rec.Record(ctx, postgres.AuditRecord{
+	err := rec.Record(ctx, store.AuditRecord{
 		TenantID:      "tenant-1",
 		AuditID:       "aud-1",
 		Recorded:      now,
@@ -184,7 +184,7 @@ func TestMemoryRecorderAndToFHIRResource(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "practitioner-42", got.AgentSubject)
 
-	list, total, err := rec.Query(ctx, postgres.AuditQueryParams{
+	list, total, err := rec.Query(ctx, store.AuditQueryParams{
 		TenantID:   "tenant-1",
 		EntityType: "Patient",
 		EntityID:   "pat-100",
@@ -245,7 +245,7 @@ func TestClassifyAllInteractionsOutcomesAndMemoryQueryWave55(t *testing.T) {
 
 	// MemoryRecorder defaults, not-found, and filter branches
 	mem := audit.NewMemoryRecorder()
-	require.NoError(t, mem.Record(t.Context(), postgres.AuditRecord{
+	require.NoError(t, mem.Record(t.Context(), store.AuditRecord{
 		TenantID:     "t1",
 		AuditID:      "a1",
 		Action:       audit.ActionCreate,
@@ -259,7 +259,7 @@ func TestClassifyAllInteractionsOutcomesAndMemoryQueryWave55(t *testing.T) {
 	_, err := mem.Read(t.Context(), "t1", "missing")
 	require.Error(t, err)
 
-	recs, total, err := mem.Query(t.Context(), postgres.AuditQueryParams{
+	recs, total, err := mem.Query(t.Context(), store.AuditQueryParams{
 		TenantID:     "t1",
 		Action:       audit.ActionCreate,
 		SubtypeCode:  "create",
@@ -276,7 +276,7 @@ func TestClassifyAllInteractionsOutcomesAndMemoryQueryWave55(t *testing.T) {
 	require.Len(t, recs, 1)
 
 	// Offset beyond total
-	emptyRecs, total, err := mem.Query(t.Context(), postgres.AuditQueryParams{TenantID: "t1", Offset: 5})
+	emptyRecs, total, err := mem.Query(t.Context(), store.AuditQueryParams{TenantID: "t1", Offset: 5})
 	require.NoError(t, err)
 	assert.Equal(t, 1, total)
 	assert.Empty(t, emptyRecs)
@@ -295,7 +295,7 @@ func TestClassifyAllInteractionsOutcomesAndMemoryQueryWave55(t *testing.T) {
 	_, _, badOK := audit.ValidatePurposeOfUse("INVALID-PURPOSE")
 	assert.False(t, badOK)
 
-	recWithPOU := postgres.AuditRecord{
+	recWithPOU := store.AuditRecord{
 		TenantID:     "t1",
 		AuditID:      "a-pou-1",
 		Action:       audit.ActionRead,
@@ -318,7 +318,7 @@ func TestClassifyAllInteractionsOutcomesAndMemoryQueryWave55(t *testing.T) {
 	assert.Empty(t, emptyEntries)
 	assert.Len(t, emptyHead, 64)
 
-	chainHead, verifiedCount, chainEntries, valid := audit.VerifyAuditChain([]postgres.AuditRecord{recWithPOU, recs[0]})
+	chainHead, verifiedCount, chainEntries, valid := audit.VerifyAuditChain([]store.AuditRecord{recWithPOU, recs[0]})
 	assert.True(t, valid)
 	assert.Equal(t, 2, verifiedCount)
 	assert.Len(t, chainEntries, 2)

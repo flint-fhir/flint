@@ -1108,3 +1108,68 @@ func TestWave57PostgresCoverageHardening(t *testing.T) {
 	assert.True(t, HasSearchCriteria(SearchParams{CompartmentType: "Patient", CompartmentID: "p1"}))
 	assert.True(t, HasSearchCriteria(SearchParams{Text: []string{"abc"}}))
 }
+
+func TestPostgresSearchSQLBuilderModifiersAndFilters(t *testing.T) {
+	ctx := t.Context()
+	st := openMockPGStore(t)
+
+	filterCases := []string{
+		`birthdate ne 1980-01-01 and birthdate ge 1970-01-01`,
+		`value-quantity ne 5.5 and value-quantity gt 1.0`,
+		`name:text eq "smith" and name co "sm" and name sw "s" and name ew "h" and name gt "a" and name ge "a" and name lt "z" and name le "z" and name ne "jones"`,
+		`subject eq "Patient/p1,p2" and subject:Patient ne "p3"`,
+		`url sb "http://example.org/fhir/" and url ss "http://example.org/fhir/ValueSet/1" and url co "fhir" and url sw "http" and url ew "1" and url ne "http://other.org"`,
+		`identifier:of-type eq "http://terminology.hl7.org/CodeSystem/v2-0203|MR|123"`,
+		`identifier co "12" and identifier sw "1" and identifier ew "3"`,
+		`identifier eq "|123,http://sys|,http://sys|123,bare"`,
+		`gender eq "http://hl7.org/fhir/administrative-gender|female,male" and gender ni "other"`,
+		`subject:Patient.organization.name eq "Acme" and subject.name ne "Bob"`,
+	}
+
+	var parsedFilters []FilterExpr
+	for _, raw := range filterCases {
+		fe, err := ParseFilterExpr(raw)
+		require.NoError(t, err, "ParseFilterExpr(%s)", raw)
+		parsedFilters = append(parsedFilters, fe)
+	}
+
+	chainedQueries := [][2]string{
+		{"subject:Patient.birthdate", "ge1980-01-01"},
+		{"subject.value-quantity", "gt10||mg"},
+		{"subject.organization", "Organization/org-1,org-2"},
+		{"subject.organization:Organization", "org-3"},
+		{"subject.url:below", "http://example.org/fhir/"},
+		{"subject.url:above", "http://example.org/fhir/StructureDefinition/p1"},
+		{"subject.url", "http://example.org/u1"},
+		{"subject.name:text", "Alice"},
+		{"subject.name:exact", "Smith"},
+		{"subject.name:contains", "mit"},
+		{"subject.gender:not", "male"},
+		{"subject.identifier", "|123,http://sys|,http://sys|123"},
+	}
+	var chained []ChainedParam
+	for _, cq := range chainedQueries {
+		cp, ok := ParseChainedParam(cq[0], cq[1])
+		require.True(t, ok, "ParseChainedParam(%s)", cq[0])
+		chained = append(chained, *cp)
+	}
+
+	_, err := st.Search(ctx, SearchParams{
+		TenantID: "t1",
+		ResType:  "Observation",
+		ReferenceFilters: map[string][]string{
+			"subject:identifier": {"http://mrn|123,|123,http://mrn|,123"},
+		},
+		Chained: chained,
+		Filters: parsedFilters,
+		Sort: []SortSpec{
+			{Param: "date", Desc: true},
+			{Param: "value-quantity", Desc: false},
+			{Param: "name", Desc: false},
+			{Param: "subject", Desc: false},
+			{Param: "url", Desc: false},
+			{Param: "status", Desc: false},
+		},
+	})
+	require.NoError(t, err)
+}

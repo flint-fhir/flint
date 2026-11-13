@@ -17,7 +17,7 @@ import (
 	"github.com/flint-fhir/flint/pkg/auth"
 	automq "github.com/flint-fhir/flint/pkg/cdc"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 // handlePatientSummary implements GET|POST /fhir/r4/{tenant}/Patient/{id}/$summary
@@ -92,7 +92,7 @@ func (s *Server) assembleIPSSummaryBundle(r *http.Request, tenant, patientID str
 		}
 	}
 
-	sr, err := s.store.PatientEverything(r.Context(), postgres.PatientEverythingParams{
+	sr, err := s.store.PatientEverything(r.Context(), store.PatientEverythingParams{
 		TenantID:  tenant,
 		PatientID: patientID,
 		Count:     500,
@@ -100,7 +100,7 @@ func (s *Server) assembleIPSSummaryBundle(r *http.Request, tenant, patientID str
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patientID)
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		return nil, http.StatusGone, "deleted", fmt.Sprintf("Patient/%s has been deleted", patientID)
 	}
 	if err != nil {
@@ -423,7 +423,7 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 	// Fetch active Coverage resources in the tenant to check subscriberId / identifier links.
 	// Pre-filter via spidx_token (identifier / subscriber-id) when CoverageToMatch specifies
 	// a subscriberId or identifier, with fallback to a bounded scan for legacy/differently-cased rows.
-	covSearchParams := postgres.SearchParams{
+	covSearchParams := store.SearchParams{
 		TenantID: tenant,
 		ResType:  "Coverage",
 		Count:    200,
@@ -449,7 +449,7 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 	for _, cid := range covIdentifiers {
 		addCovTok(cid)
 	}
-	var covSR *postgres.SearchResults
+	var covSR *store.SearchResults
 	if len(covTokenParts) > 0 {
 		filteredCovParams := covSearchParams
 		filteredCovParams.Tokens = map[string]string{"identifier": strings.Join(covTokenParts, ",")}
@@ -518,7 +518,7 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 	for patID := range coveragePatients {
 		extraPatIDs = append(extraPatIDs, patID)
 	}
-	patCandParams := postgres.PatientMatchCandidateParams{
+	patCandParams := store.PatientMatchCandidateParams{
 		TenantID:          tenant,
 		ExtraCandidateIDs: extraPatIDs,
 		Identifiers:       candIdentifiers,
@@ -749,7 +749,7 @@ func (s *Server) handleClaimSubmit(w http.ResponseWriter, r *http.Request) {
 					fmt.Sprintf("insufficient scope to persist supporting %s resource in Claim/$submit Bundle", supType))
 				return
 			}
-			if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(supType, "Patient") && !postgres.IsPatientCompartmentResourceType(supType) {
+			if auth.IsPatientRestricted(secCtx) && !strings.EqualFold(supType, "Patient") && !store.IsPatientCompartmentResourceType(supType) {
 				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 					fmt.Sprintf("patient-scoped token (%s) cannot create non-compartment supporting resource %s in Claim/$submit",
 						secCtx.GetPatientId(), supType))
@@ -963,7 +963,7 @@ func (s *Server) persistFHIRMapResource(r *http.Request, tenant, resType string,
 	if err != nil {
 		return "", err
 	}
-	var idx *postgres.SearchIndexes
+	var idx *store.SearchIndexes
 	if extractor, ok := s.extractors[resType]; ok {
 		idx, _ = extractor(tenant, resID, protoBytes)
 	}
@@ -971,8 +971,8 @@ func (s *Server) persistFHIRMapResource(r *http.Request, tenant, resType string,
 	if secCtx, hasSecCtx := auth.FromContext(r.Context()); hasSecCtx {
 		if auth.IsPatientRestricted(secCtx) {
 			allowedPatientID := cleanID(secCtx.GetPatientId())
-			if strings.EqualFold(resType, "Patient") || postgres.IsPatientCompartmentResourceType(resType) {
-				if !postgres.IndexesBelongToPatientCompartment(resType, resID, idx, allowedPatientID) {
+			if strings.EqualFold(resType, "Patient") || store.IsPatientCompartmentResourceType(resType) {
+				if !store.IndexesBelongToPatientCompartment(resType, resID, idx, allowedPatientID) {
 					return "", fmt.Errorf("%w: %s/%s does not belong to restricted patient compartment %s",
 						errForbiddenCompartment, resType, resID, allowedPatientID)
 				}
@@ -999,7 +999,7 @@ func (s *Server) persistFHIRMapResource(r *http.Request, tenant, resType string,
 		}
 	}
 
-	rec, err := s.store.WriteResourceWithMeta(r.Context(), postgres.ResourceInput{
+	rec, err := s.store.WriteResourceWithMeta(r.Context(), store.ResourceInput{
 		TenantID:      tenant,
 		ResType:       resType,
 		ResID:         resID,

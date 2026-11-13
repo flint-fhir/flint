@@ -16,8 +16,6 @@ import (
 	"reflect"
 	"strings"
 	"time"
-
-	"github.com/flint-fhir/flint/store/postgres"
 )
 
 // BackendType identifies a storage backend engine.
@@ -63,79 +61,6 @@ func ParseOptionalBackendType(raw string) (BackendType, error) {
 		return "", fmt.Errorf("invalid analytics backend %q (valid backends: %q, %q, %q, or \"none\")", raw, BackendDoris, BackendPostgres, BackendSQLite)
 	}
 }
-
-// MaxSearchCount is the maximum number of resources returned in a single search page.
-const (
-	MaxSearchCount = postgres.MaxSearchCount
-	BundleOpWrite  = postgres.BundleOpWrite
-	BundleOpDelete = postgres.BundleOpDelete
-)
-
-// Re-exported storage error sentinels.
-var (
-	ErrVersionConflict       = postgres.ErrVersionConflict
-	ErrResourceDeleted       = postgres.ErrResourceDeleted
-	ErrInvalidETag           = postgres.ErrInvalidETag
-	ErrResourceAlreadyExists = postgres.ErrResourceAlreadyExists
-	ErrPreconditionFailed    = postgres.ErrPreconditionFailed
-	ErrCrossTenantBatch      = postgres.ErrCrossTenantBatch
-	ErrNoTenant              = postgres.ErrNoTenant
-	ParseDateOp              = postgres.ParseDateOp
-	ParseQuantityOp          = postgres.ParseQuantityOp
-	ParseChainedParam        = postgres.ParseChainedParam
-)
-
-// Re-exported domain types from store/postgres so callers and backend implementations
-// share the exact same zero-copy structs without conversion overhead.
-type (
-	SearchIndexes               = postgres.SearchIndexes
-	SpidxString                 = postgres.SpidxString
-	SpidxToken                  = postgres.SpidxToken
-	SpidxDate                   = postgres.SpidxDate
-	SpidxReference              = postgres.SpidxReference
-	SpidxQuantity               = postgres.SpidxQuantity
-	SpidxURI                    = postgres.SpidxURI
-	IndexExtractorFunc          = postgres.IndexExtractorFunc
-	ResourceInput               = postgres.ResourceInput
-	ResourceRecord              = postgres.ResourceRecord
-	BundleOperationType         = postgres.BundleOperationType
-	BundleOperation             = postgres.BundleOperation
-	BundleOpResult              = postgres.BundleOpResult
-	HistoryParams               = postgres.HistoryParams
-	ReindexParams               = postgres.ReindexParams
-	ReindexResult               = postgres.ReindexResult
-	SearchParams                = postgres.SearchParams
-	DateOp                      = postgres.DateOp
-	QuantityOp                  = postgres.QuantityOp
-	IncludeParam                = postgres.IncludeParam
-	ChainedHop                  = postgres.ChainedHop
-	ChainedParam                = postgres.ChainedParam
-	HasParam                    = postgres.HasParam
-	SortSpec                    = postgres.SortSpec
-	CompositeTokenQuantityParam = postgres.CompositeTokenQuantityParam
-	CompositeTokenTokenParam    = postgres.CompositeTokenTokenParam
-	CompositeTokenDateParam     = postgres.CompositeTokenDateParam
-	CompositeTokenStringParam   = postgres.CompositeTokenStringParam
-	FilterExpr                  = postgres.FilterExpr
-	SearchResult                = postgres.SearchResult
-	SearchResults               = postgres.SearchResults
-	PatientEverythingParams     = postgres.PatientEverythingParams
-	EncounterEverythingParams   = postgres.EncounterEverythingParams
-	GroupEverythingParams       = postgres.GroupEverythingParams
-	PatientMatchCandidateParams = postgres.PatientMatchCandidateParams
-	GraphLink                   = postgres.GraphLink
-	GraphTarget                 = postgres.GraphTarget
-	ResourceGraphParams         = postgres.ResourceGraphParams
-	MetaCodingPair              = postgres.MetaCodingPair
-	AggregatedMeta              = postgres.AggregatedMeta
-	ExportParams                = postgres.ExportParams
-	ExpungeParams               = postgres.ExpungeParams
-	AuditRecord                 = postgres.AuditRecord
-	AuditQueryParams            = postgres.AuditQueryParams
-	OAuthAuthCodeRecord         = postgres.OAuthAuthCodeRecord
-	OAuthRefreshTokenRecord     = postgres.OAuthRefreshTokenRecord
-	ExportJobRecord             = postgres.ExportJobRecord
-)
 
 // Store defines the operational persistence contract for the Flint FHIR R4 API layer.
 // Concrete implementations live in store/postgres, store/sqlite, and store/doris,
@@ -267,5 +192,3 @@ func IsNil(v any) bool {
 	rv := reflect.ValueOf(v)
 	return rv.Kind() == reflect.Pointer && rv.IsNil()
 }
-
-var _ Store = (*postgres.Store)(nil)

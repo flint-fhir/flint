@@ -8,41 +8,6 @@ import (
 	"time"
 )
 
-// AuditRecord represents a persisted HIPAA / ONC security audit event (FHIR R4 AuditEvent).
-type AuditRecord struct {
-	TenantID      string
-	AuditID       string
-	Recorded      time.Time
-	Action        string // C, R, U, D, E
-	SubtypeCode   string // read, vread, update, delete, history-instance, create, search-type, validate, batch
-	Outcome       string // 0 (success), 4 (minor failure / 4xx), 8 (serious failure / 5xx)
-	OutcomeDesc   string
-	HTTPMethod    string
-	HTTPStatus    int
-	RequestURI    string
-	AgentSubject  string
-	AgentPatient  string
-	ClientIP      string
-	EntityType    string
-	EntityID      string
-	EntityVersion string
-	PurposeOfUse  string
-}
-
-// AuditQueryParams specifies search filters for querying FHIR AuditEvent records.
-type AuditQueryParams struct {
-	TenantID     string
-	Action       string
-	SubtypeCode  string
-	Outcome      string
-	AgentSubject string
-	AgentPatient string
-	EntityType   string
-	EntityID     string
-	Count        int
-	Offset       int
-}
-
 // WriteAuditEvent inserts an immutable security audit record into fhir_audit_event.
 func (s *Store) WriteAuditEvent(ctx context.Context, rec AuditRecord) error {
 	if rec.Recorded.IsZero() {

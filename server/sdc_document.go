@@ -21,7 +21,7 @@ import (
 	"github.com/flint-fhir/flint/pkg/auth"
 	automq "github.com/flint-fhir/flint/pkg/cdc"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 // handleQuestionnairePopulate implements POST/GET /fhir/r4/{tenant}/Questionnaire/$populate
@@ -109,7 +109,7 @@ func (s *Server) handleQuestionnairePopulate(w http.ResponseWriter, r *http.Requ
 	// Load Patient resource
 	patRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Patient", patientID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, postgres.ErrResourceDeleted) {
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, store.ErrResourceDeleted) {
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patientID))
 			return
 		}
@@ -130,7 +130,7 @@ func (s *Server) handleQuestionnairePopulate(w http.ResponseWriter, r *http.Requ
 	if questionnaireMap == nil && qID != "" && qID != "phq-9" && qID != "clinical-intake" {
 		qRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Questionnaire", qID)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) || errors.Is(err, postgres.ErrResourceDeleted) {
+			if errors.Is(err, sql.ErrNoRows) || errors.Is(err, store.ErrResourceDeleted) {
 				writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Questionnaire/%s not found", qID))
 				return
 			}
@@ -148,14 +148,14 @@ func (s *Server) handleQuestionnairePopulate(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	if questionnaireMap == nil && questionnaireURL != "" {
-		sr, err := s.store.Search(r.Context(), postgres.SearchParams{
+		sr, err := s.store.Search(r.Context(), store.SearchParams{
 			TenantID: tenant,
 			ResType:  "Questionnaire",
 			URIs:     map[string]string{"url": questionnaireURL},
 			Count:    1,
 		})
 		if err != nil || len(sr.Matches) == 0 {
-			sr, err = s.store.Search(r.Context(), postgres.SearchParams{
+			sr, err = s.store.Search(r.Context(), store.SearchParams{
 				TenantID: tenant,
 				ResType:  "Questionnaire",
 				Tokens:   map[string]string{"url": questionnaireURL},
@@ -174,7 +174,7 @@ func (s *Server) handleQuestionnairePopulate(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Fetch patient clinical context for pre-population
-	evResults, _ := s.store.PatientEverything(r.Context(), postgres.PatientEverythingParams{
+	evResults, _ := s.store.PatientEverything(r.Context(), store.PatientEverythingParams{
 		TenantID:  tenant,
 		PatientID: patientID,
 		Count:     500,
@@ -572,7 +572,7 @@ func (s *Server) handleQuestionnaireResponseExtract(w http.ResponseWriter, r *ht
 	if qrMap == nil && qrID != "" && s.store != nil {
 		rec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "QuestionnaireResponse", qrID)
 		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) || errors.Is(err, postgres.ErrResourceDeleted) {
+			if errors.Is(err, sql.ErrNoRows) || errors.Is(err, store.ErrResourceDeleted) {
 				writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("QuestionnaireResponse/%s not found", qrID))
 				return
 			}
@@ -957,7 +957,7 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 
 	compRec, err := s.store.ReadResourceWithMeta(r.Context(), tenant, "Composition", compID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, postgres.ErrResourceDeleted) {
+		if errors.Is(err, sql.ErrNoRows) || errors.Is(err, store.ErrResourceDeleted) {
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Composition/%s not found", compID))
 			return
 		}
@@ -1092,7 +1092,7 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 						secCtx.GetPatientId(), resID))
 				return
 			}
-			if !strings.EqualFold(resType, "Patient") && postgres.IsPatientCompartmentResourceType(resType) {
+			if !strings.EqualFold(resType, "Patient") && store.IsPatientCompartmentResourceType(resType) {
 				exists, allowed, err := s.checkExistingResourceCompartment(r.Context(), tenant, resType, resID, allowedPatientID)
 				if err != nil {
 					writeOperationOutcome(w, http.StatusInternalServerError, "exception", "internal security check error")
@@ -1155,7 +1155,7 @@ func (s *Server) handleCompositionDocument(w http.ResponseWriter, r *http.Reques
 		if rec, rErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Bundle", persistedID); rErr == nil && rec != nil {
 			w.Header().Set("Location", fmt.Sprintf("/fhir/r4/%s/Bundle/%s", tenant, persistedID))
 			w.Header().Set("Content-Location", fmt.Sprintf("/fhir/r4/%s/Bundle/%s/_history/%d", tenant, persistedID, rec.ResVersion))
-			w.Header().Set("ETag", postgres.FormatETag(rec.ResVersion))
+			w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 			w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 			docBundle["meta"] = map[string]any{
 				"versionId":   strconv.Itoa(rec.ResVersion),
@@ -1326,10 +1326,10 @@ func (s *Server) handleDocumentReferenceDocref(w http.ResponseWriter, r *http.Re
 		count = n
 	}
 
-	var dateOps []postgres.DateOp
-	var startOp, endOp *postgres.DateOp
+	var dateOps []store.DateOp
+	var startOp, endOp *store.DateOp
 	if startParam != "" {
-		op, err := postgres.ParseDateOp("ge" + strings.TrimPrefix(startParam, "ge"))
+		op, err := store.ParseDateOp("ge" + strings.TrimPrefix(startParam, "ge"))
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid start date parameter %q: %v", startParam, err))
@@ -1339,7 +1339,7 @@ func (s *Server) handleDocumentReferenceDocref(w http.ResponseWriter, r *http.Re
 		dateOps = append(dateOps, op)
 	}
 	if endParam != "" {
-		op, err := postgres.ParseDateOp("le" + strings.TrimPrefix(endParam, "le"))
+		op, err := store.ParseDateOp("le" + strings.TrimPrefix(endParam, "le"))
 		if err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
 				fmt.Sprintf("invalid end date parameter %q: %v", endParam, err))
@@ -1360,7 +1360,7 @@ func (s *Server) handleDocumentReferenceDocref(w http.ResponseWriter, r *http.Re
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", patientID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("Patient/%s has been deleted", patientID))
 		return
 	}
@@ -1374,7 +1374,7 @@ func (s *Server) handleDocumentReferenceDocref(w http.ResponseWriter, r *http.Re
 	}
 
 	// 1. Search stored DocumentReference resources in the patient's compartment
-	sp := postgres.SearchParams{
+	sp := store.SearchParams{
 		TenantID:   tenant,
 		ResType:    "DocumentReference",
 		References: map[string]string{"patient": "Patient/" + patientID},
@@ -1385,7 +1385,7 @@ func (s *Server) handleDocumentReferenceDocref(w http.ResponseWriter, r *http.Re
 		sp.TokenFilters = map[string][]string{"type": {typeParam}}
 	}
 	if len(dateOps) > 0 {
-		sp.DateFilters = map[string][]postgres.DateOp{"date": dateOps}
+		sp.DateFilters = map[string][]store.DateOp{"date": dateOps}
 	}
 
 	sr, err := s.store.Search(r.Context(), sp)
@@ -1612,7 +1612,7 @@ func (s *Server) recordAutoProvenance(
 	w http.ResponseWriter,
 	tenant, resType, resID string,
 	resVersion int,
-	targetIdx *postgres.SearchIndexes,
+	targetIdx *store.SearchIndexes,
 	spec *xProvenanceSpec,
 ) {
 	if spec == nil || !spec.enabled || s.store == nil {
@@ -1711,12 +1711,12 @@ func (s *Server) persistSystemProvenanceMap(ctx context.Context, tenant string, 
 	if err != nil {
 		return "", err
 	}
-	var idx *postgres.SearchIndexes
+	var idx *store.SearchIndexes
 	if extractor, ok := s.extractors["Provenance"]; ok {
 		idx, _ = extractor(tenant, provID, protoBytes)
 	}
 	if idx == nil {
-		idx = &postgres.SearchIndexes{}
+		idx = &store.SearchIndexes{}
 	}
 	if patientID != "" {
 		appendProvenancePatientRef(idx, tenant, provID, cleanID(patientID))
@@ -1724,7 +1724,7 @@ func (s *Server) persistSystemProvenanceMap(ctx context.Context, tenant string, 
 		s.enrichProvenancePatientIndex(ctx, tenant, provID, idx)
 	}
 
-	rec, err := s.store.WriteResourceWithMeta(ctx, postgres.ResourceInput{
+	rec, err := s.store.WriteResourceWithMeta(ctx, store.ResourceInput{
 		TenantID:      tenant,
 		ResType:       "Provenance",
 		ResID:         provID,
@@ -1744,7 +1744,7 @@ func (s *Server) persistSystemProvenanceMap(ctx context.Context, tenant string, 
 	return provID, nil
 }
 
-func appendProvenancePatientRef(idx *postgres.SearchIndexes, tenant, provID, patientID string) {
+func appendProvenancePatientRef(idx *store.SearchIndexes, tenant, provID, patientID string) {
 	if idx == nil || patientID == "" {
 		return
 	}
@@ -1754,7 +1754,7 @@ func appendProvenancePatientRef(idx *postgres.SearchIndexes, tenant, provID, pat
 		}
 	}
 	idx.References = append(idx.References,
-		postgres.SpidxReference{
+		store.SpidxReference{
 			TenantID:   tenant,
 			ResType:    "Provenance",
 			ResID:      provID,
@@ -1762,7 +1762,7 @@ func appendProvenancePatientRef(idx *postgres.SearchIndexes, tenant, provID, pat
 			TargetType: "Patient",
 			TargetID:   patientID,
 		},
-		postgres.SpidxReference{
+		store.SpidxReference{
 			TenantID:   tenant,
 			ResType:    "Provenance",
 			ResID:      provID,
@@ -1776,7 +1776,7 @@ func appendProvenancePatientRef(idx *postgres.SearchIndexes, tenant, provID, pat
 // enrichProvenancePatientIndex resolves the Patient compartment for a Provenance resource
 // whose target references a clinical compartment resource (e.g. Observation/obs-1) so that
 // patient-compartment queries and SMART patient-scoped tokens work uniformly on Provenance.
-func (s *Server) enrichProvenancePatientIndex(ctx context.Context, tenant, provID string, idx *postgres.SearchIndexes) {
+func (s *Server) enrichProvenancePatientIndex(ctx context.Context, tenant, provID string, idx *store.SearchIndexes) {
 	if idx == nil {
 		return
 	}
@@ -1797,7 +1797,7 @@ func (s *Server) enrichProvenancePatientIndex(ctx context.Context, tenant, provI
 			appendProvenancePatientRef(idx, tenant, provID, ref.TargetID)
 			return
 		}
-		if postgres.IsPatientCompartmentResourceType(ref.TargetType) {
+		if store.IsPatientCompartmentResourceType(ref.TargetType) {
 			rec, err := s.store.ReadResourceWithMeta(ctx, tenant, ref.TargetType, ref.TargetID)
 			if err != nil || rec == nil {
 				continue
@@ -1848,7 +1848,7 @@ func (s *Server) handleResourceProvenance(w http.ResponseWriter, r *http.Request
 			fmt.Sprintf("%s/%s not found", resType, resID))
 		return
 	}
-	if errors.Is(err, postgres.ErrResourceDeleted) {
+	if errors.Is(err, store.ErrResourceDeleted) {
 		writeOperationOutcome(w, http.StatusGone, "deleted",
 			fmt.Sprintf("%s/%s has been deleted", resType, resID))
 		return
@@ -1863,7 +1863,7 @@ func (s *Server) handleResourceProvenance(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	sp := postgres.SearchParams{
+	sp := store.SearchParams{
 		TenantID:         tenant,
 		ResType:          "Provenance",
 		References:       map[string]string{"target": resType + "/" + resID},
@@ -1878,7 +1878,7 @@ func (s *Server) handleResourceProvenance(w http.ResponseWriter, r *http.Request
 	}
 
 	if hasSecCtx && len(sr.Matches) > 0 {
-		filtered := make([]postgres.SearchResult, 0, len(sr.Matches))
+		filtered := make([]store.SearchResult, 0, len(sr.Matches))
 		for _, m := range sr.Matches {
 			if s.resourceAllowedByGranularScope(secCtx, tenant, "Provenance", m.ResID, m.ResourceProto) {
 				filtered = append(filtered, m)

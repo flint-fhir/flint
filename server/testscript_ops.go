@@ -17,7 +17,7 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
-	"github.com/flint-fhir/flint/store/postgres"
+	"github.com/flint-fhir/flint/store"
 )
 
 func canonicalR4ResourceType(raw string) string {
@@ -147,7 +147,7 @@ func (s *Server) handleTestScriptEvaluate(w http.ResponseWriter, r *http.Request
 			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("TestScript/%s not found", scriptID))
 			return
 		}
-		if errors.Is(err, postgres.ErrResourceDeleted) {
+		if errors.Is(err, store.ErrResourceDeleted) {
 			writeOperationOutcome(w, http.StatusGone, "deleted", fmt.Sprintf("TestScript/%s has been deleted", scriptID))
 			return
 		}
