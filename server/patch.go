@@ -778,6 +778,7 @@ func (s *Server) handleConditionalDelete(w http.ResponseWriter, r *http.Request)
 					ResID:    rec.ResID,
 					Op:       "D",
 				})
+				s.dispatchSubscriptionDelete(r.Context(), tenant, resType, rec.ResID, rec.ResVersion, rec.LastUpdated)
 			}
 		}
 	}

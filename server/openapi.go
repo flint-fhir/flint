@@ -82,10 +82,10 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "FHIR R4 Subscriptions",
-			Capability:    "Subscription Lifecycle (requested -> active) & Automated rest-hook Webhook Delivery",
-			Specification: "HL7 FHIR R4 Subscription (rest-hook)",
+			Capability:    "Subscription Lifecycle (requested -> active), RFC 6455 WebSocket Push Streaming ($subscriptions-ws, $bind-ws, R5 Backport handshake/heartbeat/event-notification) & rest-hook / CloudEvents v1.0 Delivery",
+			Specification: "HL7 FHIR R4 Subscription (rest-hook & websocket) / R5 Backport IG / CloudEvents v1.0",
 			Status:        "Verified",
-			Endpoint:      "/fhir/r4/{tenant}/Subscription",
+			Endpoint:      "/fhir/r4/{tenant}/$subscriptions-ws",
 		},
 		{
 			Category:      "Bulk Data Access",
@@ -1438,6 +1438,106 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "FHIR Parameters subscription status report"},
+				},
+			},
+		},
+		"/$subscriptions-ws": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "RFC 6455 WebSocket stream for FHIR R4 & R5 Backport Subscription notifications",
+				"operationId": "subscriptionsWebSocket",
+				"responses": map[string]any{
+					"101": map[string]any{"description": "Switching Protocols (RFC 6455 WebSocket stream)"},
+				},
+			},
+		},
+		"/Subscription/$bind-ws": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "Mint short-lived WebSocket binding token for active Subscription(s) ($bind-ws, GET)",
+				"operationId": "subscriptionBindWSGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters with token, expiration, websocket-url, and subscription"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "Mint short-lived WebSocket binding token for active Subscription(s) ($bind-ws, POST)",
+				"operationId": "subscriptionBindWSPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters with token, expiration, websocket-url, and subscription"},
+				},
+			},
+		},
+		"/Subscription/{id}/$bind-ws": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "Mint short-lived WebSocket binding token for Subscription/{id} ($bind-ws, GET)",
+				"operationId": "subscriptionInstanceBindWSGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters with token, expiration, websocket-url, and subscription"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "Mint short-lived WebSocket binding token for Subscription/{id} ($bind-ws, POST)",
+				"operationId": "subscriptionInstanceBindWSPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters with token, expiration, websocket-url, and subscription"},
+				},
+			},
+		},
+		"/Subscription/$get-ws-binding-token": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "Mint short-lived WebSocket binding token for active Subscription(s) ($get-ws-binding-token, GET)",
+				"operationId": "subscriptionGetWSBindingTokenGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters with token, expiration, websocket-url, and subscription"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "Mint short-lived WebSocket binding token for active Subscription(s) ($get-ws-binding-token, POST)",
+				"operationId": "subscriptionGetWSBindingTokenPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters with token, expiration, websocket-url, and subscription"},
+				},
+			},
+		},
+		"/Subscription/{id}/$get-ws-binding-token": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "Mint short-lived WebSocket binding token for Subscription/{id} ($get-ws-binding-token, GET)",
+				"operationId": "subscriptionInstanceGetWSBindingTokenGet",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters with token, expiration, websocket-url, and subscription"},
+				},
+			},
+			"post": map[string]any{
+				"tags":        []string{"Subscription"},
+				"summary":     "Mint short-lived WebSocket binding token for Subscription/{id} ($get-ws-binding-token, POST)",
+				"operationId": "subscriptionInstanceGetWSBindingTokenPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR Parameters with token, expiration, websocket-url, and subscription"},
 				},
 			},
 		},

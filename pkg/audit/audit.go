@@ -165,6 +165,9 @@ func ClassifyHTTPInteraction(method string, parts []string, statusCode int) (act
 		if op == "install-ig" || op == "load-ig" || op == "igs" {
 			return ActionExecute, op, "ImplementationGuide", "", ""
 		}
+		if op == "subscriptions-ws" {
+			return ActionExecute, op, "Subscription", "", ""
+		}
 		return ActionExecute, op, "System", "", ""
 	}
 	if len(parts) == 3 {
@@ -182,6 +185,9 @@ func ClassifyHTTPInteraction(method string, parts []string, statusCode int) (act
 	resType := parts[3]
 	if resType == "$install-ig" || resType == "$load-ig" || resType == "$igs" {
 		return ActionExecute, strings.TrimPrefix(resType, "$"), "ImplementationGuide", "", ""
+	}
+	if resType == "$subscriptions-ws" {
+		return ActionExecute, "subscriptions-ws", "Subscription", "", ""
 	}
 	if len(parts) == 4 && resType == "_search" && method == http.MethodPost {
 		return ActionExecute, "search-system", "System", "", ""
