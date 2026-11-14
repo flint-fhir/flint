@@ -26,7 +26,7 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 	return []ConformanceMatrixEntry{
 		{
 			Category:      "Decoupled API & Pluggable Storage",
-			Capability:    "Storage-Agnostic FHIR R4 API Layer (JSON, NDJSON, CSV/TSV & Binary Proto3 HTTP Wire) over Pluggable store.Store & store.AnalyticalStore Backends (PostgreSQL, Embedded SQLite WAL, Apache Doris MPP & Real-Time HybridStore)",
+			Capability:    "Storage-Agnostic FHIR R4 API Layer (JSON, XML, NDJSON, CSV/TSV & Binary Proto3 HTTP Wire) over Pluggable store.Store & store.AnalyticalStore Backends (PostgreSQL, Embedded SQLite WAL, Apache Doris MPP & Real-Time HybridStore)",
 			Specification: "Google FHIR R4 Protobuf + Pluggable Operational & Analytical Storage Plane",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/{resourceType}",
