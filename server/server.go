@@ -95,7 +95,10 @@ type Server struct {
 	disallowPrivateWebhooks    bool
 	clientJWKs                 map[string]auth.JWK
 	clientJWKSets              map[string]auth.JWKSet
+	clientSecrets              map[string]string
+	launchContexts             map[string]launchContextEntry
 	requireRegisteredClientJWK bool
+	requirePKCE                bool
 	referentialIntegrity       atomic.Int32
 	igMu                       sync.RWMutex
 	igState                    *igRegistryState
@@ -138,6 +141,8 @@ func New(st store.Store, logger *slog.Logger) *Server {
 		revokedTokens:   make(map[string]time.Time),
 		clientJWKs:      make(map[string]auth.JWK),
 		clientJWKSets:   make(map[string]auth.JWKSet),
+		clientSecrets:   make(map[string]string),
+		launchContexts:  make(map[string]launchContextEntry),
 		validator:       valEngine,
 		auditRecorder:   auditRec,
 		exportJobs:      make(map[string]*exportJob),
@@ -309,6 +314,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	// Built-in SMART on FHIR v2.0.0 OAuth2 & OIDC Discovery endpoints
 	mux.HandleFunc("GET /oauth2/authorize", s.handleOAuthAuthorize)
 	mux.HandleFunc("POST /oauth2/authorize", s.handleOAuthAuthorize)
+	mux.HandleFunc("POST /oauth2/launch", s.handleOAuthLaunch)
 	mux.HandleFunc("POST /oauth2/token", s.handleOAuthToken)
 	mux.HandleFunc("POST /oauth2/introspect", s.handleOAuthIntrospect)
 	mux.HandleFunc("POST /oauth2/revoke", s.handleOAuthRevoke)
