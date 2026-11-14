@@ -92,6 +92,7 @@ type Server struct {
 	subSem                     chan struct{}
 	subStatsMu                 sync.RWMutex
 	subStats                   map[string]*subscriptionDeliveryStats
+	subWSHub                   *subscriptionWSHub
 	disallowPrivateWebhooks    bool
 	clientJWKs                 map[string]auth.JWK
 	clientJWKSets              map[string]auth.JWKSet
@@ -147,6 +148,7 @@ func New(st store.Store, logger *slog.Logger) *Server {
 		auditRecorder:   auditRec,
 		exportJobs:      make(map[string]*exportJob),
 		subSem:          make(chan struct{}, 32),
+		subWSHub:        newSubscriptionWSHub(),
 		metrics:         newServerMetrics(),
 	}
 	valEngine.SetValueSetValidator(srv.validateCodeAgainstKnownValueSet)
@@ -372,6 +374,8 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$sync-analytics", s.handleSyncAnalytics)
 	mux.HandleFunc("GET /fhir/r4/$install-ig", s.handleInstallIG)
 	mux.HandleFunc("POST /fhir/r4/$install-ig", s.handleInstallIG)
+	mux.HandleFunc("GET /fhir/r4/$subscriptions-ws", s.handleSubscriptionsWS)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$subscriptions-ws", s.handleSubscriptionsWS)
 	mux.HandleFunc("GET /fhir/r4/$load-ig", s.handleInstallIG)
 	mux.HandleFunc("POST /fhir/r4/$load-ig", s.handleInstallIG)
 	mux.HandleFunc("GET /fhir/r4/$igs", s.handleListIGs)
@@ -614,6 +618,12 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", "Subscription")
 					s.handleSubscriptionEvents(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Subscription") && (parts[4] == "$bind-ws" || parts[4] == "$get-ws-binding-token") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", "Subscription")
+					s.handleSubscriptionBindWS(w, r)
 					return
 				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "ConceptMap") && parts[4] == "$closure" {
@@ -2458,6 +2468,13 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					s.handleSubscriptionEvents(w, r)
 					return
 				}
+				if strings.EqualFold(parts[3], "Subscription") && (parts[5] == "$bind-ws" || parts[5] == "$get-ws-binding-token") {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("resourceType", "Subscription")
+					r.SetPathValue("id", parts[4])
+					s.handleSubscriptionBindWS(w, r)
+					return
+				}
 				if (strings.EqualFold(parts[3], "Library") || strings.EqualFold(parts[3], "Measure") || strings.EqualFold(parts[3], "PlanDefinition") || strings.EqualFold(parts[3], "ActivityDefinition") || strings.EqualFold(parts[3], "Questionnaire")) && parts[5] == "$data-requirements" {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -3865,6 +3882,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 			ResID:    resID,
 			Op:       "D",
 		})
+		s.dispatchSubscriptionDelete(r.Context(), tenant, resType, resID, rec.ResVersion, rec.LastUpdated)
 	}
 	if parsePreferReturn(r) == "OperationOutcome" {
 		diag := fmt.Sprintf("Successfully deleted %s/%s", resType, resID)
@@ -7118,6 +7136,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "events",
 					"definition": "http://hl7.org/fhir/uv/subscriptions-backport/OperationDefinition/backport-subscription-events",
 				},
+				{
+					"name":       "bind-ws",
+					"definition": "http://hl7.org/fhir/uv/subscriptions-backport/OperationDefinition/backport-subscription-get-ws-binding-token",
+				},
+				{
+					"name":       "get-ws-binding-token",
+					"definition": "http://hl7.org/fhir/uv/subscriptions-backport/OperationDefinition/backport-subscription-get-ws-binding-token",
+				},
 			}
 		case "PlanDefinition":
 			entry["operation"] = []map[string]string{
@@ -7700,6 +7726,14 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "events",
 						"definition": "http://hl7.org/fhir/uv/subscriptions-backport/OperationDefinition/backport-subscription-events",
+					},
+					{
+						"name":       "bind-ws",
+						"definition": "http://hl7.org/fhir/uv/subscriptions-backport/OperationDefinition/backport-subscription-get-ws-binding-token",
+					},
+					{
+						"name":       "subscriptions-ws",
+						"definition": "http://flint.fhir.org/OperationDefinition/Subscription-websocket",
 					},
 					{
 						"name":       "collect-data",

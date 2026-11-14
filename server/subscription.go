@@ -19,6 +19,7 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/store"
+	"github.com/google/uuid"
 )
 
 type subscriptionEventRecord struct {
@@ -27,6 +28,7 @@ type subscriptionEventRecord struct {
 	ResType     string
 	ResID       string
 	ResVersion  int
+	Action      string
 	Resource    map[string]any
 }
 
@@ -38,21 +40,28 @@ type subscriptionDeliveryStats struct {
 	events          []subscriptionEventRecord
 }
 
-func (s *Server) recordSubscriptionEvent(tenant, subID, resType, resID string, resVersion int, lastUpdated time.Time, resourceProto []byte) {
+func (s *Server) recordSubscriptionEventWithAction(tenant, subID, resType, resID string, resVersion int, lastUpdated time.Time, resourceProto []byte, action string) subscriptionEventRecord {
 	if subID == "" {
-		return
+		return subscriptionEventRecord{}
+	}
+	if action == "" {
+		if resVersion <= 1 {
+			action = "create"
+		} else {
+			action = "update"
+		}
 	}
 	ts := lastUpdated.UTC()
 	if ts.IsZero() {
 		ts = time.Now().UTC()
 	}
 	var resMap map[string]any
-	if len(resourceProto) > 0 {
+	if action != "delete" && len(resourceProto) > 0 {
 		if m, err := s.protoToFHIRMapWithMeta(resType, resourceProto, resVersion, ts); err == nil {
 			resMap = m
 		}
 	}
-	if resMap == nil {
+	if resMap == nil && action != "delete" {
 		resMap = map[string]any{
 			"resourceType": resType,
 			"id":           resID,
@@ -78,17 +87,20 @@ func (s *Server) recordSubscriptionEvent(tenant, subID, resType, resID string, r
 	if n := len(st.events); n > 0 {
 		nextNum = st.events[n-1].EventNumber + 1
 	}
-	st.events = append(st.events, subscriptionEventRecord{
+	ev := subscriptionEventRecord{
 		EventNumber: nextNum,
 		Timestamp:   ts,
 		ResType:     resType,
 		ResID:       resID,
 		ResVersion:  resVersion,
+		Action:      action,
 		Resource:    resMap,
-	})
+	}
+	st.events = append(st.events, ev)
 	if len(st.events) > 500 {
 		st.events = st.events[len(st.events)-500:]
 	}
+	return ev
 }
 
 func (s *Server) recordSubscriptionDelivery(tenant, subID string, delivered bool, errMsg string) {
@@ -282,9 +294,113 @@ func normalizeSubscriptionOnWrite(resType string, rawJSON []byte) []byte {
 }
 
 // dispatchSubscriptions evaluates active FHIR R4 Subscriptions in tenant against
-// a newly created or updated resource and dispatches rest-hook notifications asynchronously.
+// a newly created or updated resource and dispatches rest-hook and WebSocket notifications.
 func (s *Server) dispatchSubscriptions(ctx context.Context, tenant, resType, resID string, resourceProto []byte, resVersion int, lastUpdated time.Time, idx *store.SearchIndexes) {
-	if s.store == nil || resType == "Subscription" || resType == "AuditEvent" {
+	action := "update"
+	if resVersion <= 1 {
+		action = "create"
+	}
+	s.dispatchSubscriptionsWithAction(ctx, tenant, resType, resID, resourceProto, resVersion, lastUpdated, idx, action)
+}
+
+// dispatchSubscriptionDelete evaluates active FHIR R4 Subscriptions in tenant against
+// a soft-deleted resource (matching Subscription.criteria against the resource's prior version)
+// and unbinds WebSocket streams when a Subscription itself is deleted.
+func (s *Server) dispatchSubscriptionDelete(ctx context.Context, tenant, resType, resID string, resVersion int, lastUpdated time.Time) {
+	if strings.EqualFold(resType, "Subscription") {
+		s.syncSubscriptionWebSocketLifecycle(tenant, resID, nil)
+		return
+	}
+	if s.store == nil || strings.EqualFold(resType, "AuditEvent") {
+		return
+	}
+	sr, err := s.store.Search(ctx, store.SearchParams{
+		TenantID: tenant,
+		ResType:  "Subscription",
+		Tokens:   map[string]string{"status": "active"},
+		Count:    1,
+	})
+	if err != nil || sr == nil || len(sr.Matches) == 0 {
+		return
+	}
+	var prevProto []byte
+	var idx *store.SearchIndexes
+	if history, _, hErr := s.store.ListResourceHistory(ctx, tenant, resType, resID, 5, 0); hErr == nil {
+		for _, h := range history {
+			if len(h.ResourceProto) > 0 {
+				prevProto = h.ResourceProto
+				if extractor, ok := s.extractors[resType]; ok {
+					idx, _ = extractor(tenant, resID, prevProto)
+				}
+				break
+			}
+		}
+	}
+	if lastUpdated.IsZero() {
+		lastUpdated = time.Now().UTC()
+	}
+	s.dispatchSubscriptionsWithAction(ctx, tenant, resType, resID, prevProto, resVersion, lastUpdated, idx, "delete")
+}
+
+func buildCloudEventNotification(
+	tenant, subID, resType, resID string,
+	resVersion int,
+	lastUpdated time.Time,
+	action, contentMode string,
+	resMap map[string]any,
+) map[string]any {
+	ts := lastUpdated.UTC()
+	if ts.IsZero() {
+		ts = time.Now().UTC()
+	}
+	if action == "" {
+		action = "update"
+	}
+	ce := map[string]any{
+		"specversion":     "1.0",
+		"id":              uuid.NewString(),
+		"source":          fmt.Sprintf("/fhir/r4/%s/Subscription/%s", tenant, subID),
+		"type":            "org.hl7.fhir.r4.subscription-notification",
+		"subject":         fmt.Sprintf("%s/%s", resType, resID),
+		"time":            ts.UTC().Format(time.RFC3339),
+		"datacontenttype": "application/fhir+json",
+		"fhiraction":      action,
+	}
+	switch contentMode {
+	case "empty":
+		// Omit data payload per empty content mode
+	case "id-only":
+		ce["data"] = map[string]any{
+			"resourceType": resType,
+			"id":           resID,
+			"meta": map[string]any{
+				"versionId":   strconv.Itoa(resVersion),
+				"lastUpdated": ts.UTC().Format(time.RFC3339),
+			},
+		}
+	default:
+		if action == "delete" || resMap == nil {
+			ce["data"] = map[string]any{
+				"resourceType": resType,
+				"id":           resID,
+				"meta": map[string]any{
+					"versionId":   strconv.Itoa(resVersion),
+					"lastUpdated": ts.UTC().Format(time.RFC3339),
+				},
+			}
+		} else {
+			ce["data"] = resMap
+		}
+	}
+	return ce
+}
+
+func (s *Server) dispatchSubscriptionsWithAction(ctx context.Context, tenant, resType, resID string, resourceProto []byte, resVersion int, lastUpdated time.Time, idx *store.SearchIndexes, action string) {
+	if strings.EqualFold(resType, "Subscription") {
+		s.syncSubscriptionWebSocketLifecycle(tenant, resID, resourceProto)
+		return
+	}
+	if s.store == nil || strings.EqualFold(resType, "AuditEvent") {
 		return
 	}
 
@@ -320,13 +436,22 @@ func (s *Server) dispatchSubscriptions(ctx context.Context, tenant, resType, res
 			continue
 		}
 
-		s.recordSubscriptionEvent(tenant, subRes.ResID, resType, resID, resVersion, lastUpdated, resourceProto)
+		ev := s.recordSubscriptionEventWithAction(tenant, subRes.ResID, resType, resID, resVersion, lastUpdated, resourceProto, action)
 
 		channel, _ := subMap["channel"].(map[string]any)
 		if channel == nil {
 			continue
 		}
 		chType, _ := channel["type"].(string)
+		if strings.EqualFold(strings.TrimSpace(chType), "websocket") {
+			status, _ := subMap["status"].(string)
+			if status == "" {
+				status = "active"
+			}
+			s.dispatchWebSocketSubscription(tenant, subRes.ResID, status, ev, resourceProto, idx)
+			continue
+		}
+
 		endpoint, _ := channel["endpoint"].(string)
 		if !strings.EqualFold(chType, "rest-hook") || strings.TrimSpace(endpoint) == "" {
 			continue
@@ -354,22 +479,43 @@ func (s *Server) dispatchSubscriptions(ctx context.Context, tenant, resType, res
 
 		var bodyBytes []byte
 		lowerPayload := strings.ToLower(strings.TrimSpace(payloadType))
+		mediaPayload := lowerPayload
+		if semi := strings.IndexByte(mediaPayload, ';'); semi >= 0 {
+			mediaPayload = strings.TrimSpace(mediaPayload[:semi])
+		}
+		contentMode, explicitContent := extractSubscriptionChannelContentMode(subMap)
+		if !explicitContent && mediaPayload != "" {
+			contentMode = "full-resource"
+		}
+
 		switch {
-		case lowerPayload == "id-only":
+		case mediaPayload == "application/cloudevents+json":
+			ce := buildCloudEventNotification(tenant, subRes.ResID, resType, resID, resVersion, lastUpdated, action, contentMode, ev.Resource)
+			bodyBytes, _ = json.Marshal(ce)
+			payloadType = "application/cloudevents+json; charset=utf-8"
+		case mediaPayload == "application/cloudevents-batch+json":
+			ce := buildCloudEventNotification(tenant, subRes.ResID, resType, resID, resVersion, lastUpdated, action, contentMode, ev.Resource)
+			bodyBytes, _ = json.Marshal([]map[string]any{ce})
+			payloadType = "application/cloudevents-batch+json; charset=utf-8"
+		case mediaPayload == "empty" || (explicitContent && contentMode == "empty"):
+			bodyBytes = nil
+		case mediaPayload == "id-only" || (explicitContent && contentMode == "id-only") || (action == "delete" && strings.Contains(mediaPayload, "json")):
 			bodyBytes, _ = json.Marshal(map[string]any{
 				"resourceType": resType,
 				"id":           resID,
 				"meta": map[string]any{
 					"versionId":   fmt.Sprintf("%d", resVersion),
-					"lastUpdated": lastUpdated.UTC().Format(time.RFC3339),
+					"lastUpdated": ev.Timestamp.UTC().Format(time.RFC3339),
 				},
 			})
 			payloadType = "application/fhir+json; charset=utf-8"
 		case strings.Contains(lowerPayload, "proto"):
 			bodyBytes = resourceProto
 		case strings.Contains(lowerPayload, "json"):
-			if jb, err := s.protoToJSONWithMeta(resType, resourceProto, resVersion, lastUpdated); err == nil {
-				bodyBytes = jb
+			if len(resourceProto) > 0 {
+				if jb, err := s.protoToJSONWithMeta(resType, resourceProto, resVersion, lastUpdated); err == nil {
+					bodyBytes = jb
+				}
 			}
 		}
 
@@ -1382,20 +1528,14 @@ func (s *Server) handleSubscriptionEvents(w http.ResponseWriter, r *http.Request
 		status = "off"
 	}
 	if contentMode == "" {
-		contentMode = "full-resource"
-		if ch, ok := subMap["channel"].(map[string]any); ok {
-			if pl, _ := ch["payload"].(string); strings.EqualFold(strings.TrimSpace(pl), "id-only") {
-				contentMode = "id-only"
-			}
+		if cm, explicit := extractSubscriptionChannelContentMode(subMap); explicit {
+			contentMode = cm
+		} else {
+			contentMode = "full-resource"
 		}
 	}
 
 	stats := s.getSubscriptionDeliveryStats(tenant, subID)
-	totalEvents := stats.eventsDelivered
-	if n := len(stats.events); n > 0 && stats.events[n-1].EventNumber > totalEvents {
-		totalEvents = stats.events[n-1].EventNumber
-	}
-
 	matched := make([]subscriptionEventRecord, 0, len(stats.events))
 	for _, ev := range stats.events {
 		if hasSince && ev.EventNumber < sinceNum {
@@ -1407,109 +1547,6 @@ func (s *Server) handleSubscriptionEvents(w http.ResponseWriter, r *http.Request
 		matched = append(matched, ev)
 	}
 
-	statusParams := []map[string]any{
-		{
-			"name": "subscription",
-			"valueReference": map[string]any{
-				"reference": "Subscription/" + subID,
-			},
-		},
-		{
-			"name":      "status",
-			"valueCode": status,
-		},
-		{
-			"name":      "type",
-			"valueCode": "event-notification",
-		},
-		{
-			"name":        "events-since-subscription-start",
-			"valueString": strconv.FormatInt(totalEvents, 10),
-		},
-		{
-			"name":         "events-in-notification",
-			"valueInteger": len(matched),
-		},
-	}
-
-	for _, ev := range matched {
-		parts := []map[string]any{
-			{
-				"name":        "event-number",
-				"valueString": strconv.FormatInt(ev.EventNumber, 10),
-			},
-			{
-				"name":         "timestamp",
-				"valueInstant": ev.Timestamp.UTC().Format(time.RFC3339),
-			},
-		}
-		if contentMode != "empty" {
-			parts = append(parts, map[string]any{
-				"name": "focus",
-				"valueReference": map[string]any{
-					"reference": ev.ResType + "/" + ev.ResID,
-				},
-			})
-		}
-		statusParams = append(statusParams, map[string]any{
-			"name": "notification-event",
-			"part": parts,
-		})
-	}
-
-	statusRes := map[string]any{
-		"resourceType": "Parameters",
-		"id":           subID + "-events-status",
-		"parameter":    statusParams,
-	}
-
-	entries := []map[string]any{
-		{
-			"fullUrl":  fmt.Sprintf("Subscription/%s/$status", subID),
-			"resource": statusRes,
-			"request": map[string]any{
-				"method": "GET",
-				"url":    fmt.Sprintf("Subscription/%s/$status", subID),
-			},
-			"response": map[string]any{
-				"status": "200 OK",
-			},
-		},
-	}
-
-	if contentMode != "empty" {
-		for _, ev := range matched {
-			entry := map[string]any{
-				"fullUrl": ev.ResType + "/" + ev.ResID,
-				"request": map[string]any{
-					"method": "PUT",
-					"url":    ev.ResType + "/" + ev.ResID,
-				},
-				"response": map[string]any{
-					"status": "200 OK",
-				},
-			}
-			if contentMode == "full-resource" && ev.Resource != nil {
-				entry["resource"] = ev.Resource
-			} else if contentMode == "id-only" {
-				entry["resource"] = map[string]any{
-					"resourceType": ev.ResType,
-					"id":           ev.ResID,
-					"meta": map[string]any{
-						"versionId":   strconv.Itoa(ev.ResVersion),
-						"lastUpdated": ev.Timestamp.UTC().Format(time.RFC3339),
-					},
-				}
-			}
-			entries = append(entries, entry)
-		}
-	}
-
-	bundle := map[string]any{
-		"resourceType": "Bundle",
-		"type":         "history",
-		"total":        len(matched),
-		"entry":        entries,
-	}
+	bundle := s.buildSubscriptionNotificationBundle(tenant, subID, status, "event-notification", contentMode, matched)
 	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
 }

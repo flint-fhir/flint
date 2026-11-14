@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"errors"
@@ -57,6 +58,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				validator = s.devAuth
 			}
 
+			// Allow RFC 6455 WebSocket upgrade requests without an HTTP Authorization header
+			// so browser WebSocket clients can authenticate post-upgrade via R5 Backport bind-with-token.
+			if authHeader == "" && isSubscriptionsWSUpgrade(r, parts) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// Extract Bearer token
 			if authHeader == "" || !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
 				writeOperationOutcome(w, http.StatusUnauthorized, "login", "missing or malformed Authorization header")
@@ -109,6 +117,20 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						"insufficient SMART scope for $install-ig (requires system or user ImplementationGuide write scope)")
 					return
 				}
+			}
+			ctx := auth.WithSecurityContext(r.Context(), secCtx)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+		if len(parts) == 3 && parts[2] == "$subscriptions-ws" {
+			if secCtx.GetTenantId() != "" && secCtx.GetTenantId() != "default" {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+					fmt.Sprintf("token tenant %s cannot access system-level operation %s", secCtx.GetTenantId(), parts[2]))
+				return
+			}
+			if !auth.Allows(secCtx, "Subscription", auth.ActionRead) && !auth.Allows(secCtx, "Subscription", auth.ActionSearch) {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for $subscriptions-ws")
+				return
 			}
 			ctx := auth.WithSecurityContext(r.Context(), secCtx)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -256,14 +278,25 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient SMART scope for "+resType)
 							return
 						}
+					} else if resType == "$subscriptions-ws" {
+						if !auth.Allows(secCtx, "Subscription", auth.ActionRead) && !auth.Allows(secCtx, "Subscription", auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for $subscriptions-ws")
+							return
+						}
 					} else if resType == "_history" || resType == "$meta" {
 						// System-level history or $meta: GET /{tenant}/_history or GET /{tenant}/$meta
 						if len(secCtx.GetScopes()) == 0 {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden", "insufficient scope for system operation "+resType)
 							return
 						}
-					} else if len(parts) == 5 && (parts[4] == "_history" || parts[4] == "$meta" || (strings.EqualFold(resType, "Subscription") && (parts[4] == "$status" || parts[4] == "$events"))) {
-						// Type-level history, $meta, Subscription/$status, or Subscription/$events
+					} else if len(parts) == 5 && strings.EqualFold(resType, "Subscription") && isSubscriptionOpName(parts[4]) {
+						if !auth.Allows(secCtx, "Subscription", auth.ActionRead) && !auth.Allows(secCtx, "Subscription", auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("insufficient scope for %s on Subscription", parts[4]))
+							return
+						}
+					} else if len(parts) == 5 && (parts[4] == "_history" || parts[4] == "$meta") {
+						// Type-level history or $meta
 						if !auth.Allows(secCtx, resType, auth.ActionRead) && !auth.Allows(secCtx, resType, auth.ActionSearch) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								fmt.Sprintf("insufficient scope for %s on %s", parts[4], resType))
@@ -318,6 +351,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 						if auth.IsPatientRestricted(secCtx) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								"patient-scoped token cannot invoke multi-patient Group/$everything; use /Patient/{id}/$everything")
+							return
+						}
+					} else if len(parts) == 6 && strings.EqualFold(resType, "Subscription") && isSubscriptionOpName(parts[5]) {
+						if !auth.Allows(secCtx, "Subscription", auth.ActionRead) && !auth.Allows(secCtx, "Subscription", auth.ActionSearch) {
+							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+								fmt.Sprintf("insufficient scope for %s on Subscription", parts[5]))
 							return
 						}
 					} else if len(parts) >= 5 {
@@ -622,7 +661,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 								fmt.Sprintf("insufficient scope for validate on %s", resType))
 							return
 						}
-					} else if strings.EqualFold(resType, "Subscription") && ((len(parts) == 5 && (parts[4] == "$status" || parts[4] == "$events")) || (len(parts) == 6 && (parts[5] == "$status" || parts[5] == "$events"))) {
+					} else if strings.EqualFold(resType, "Subscription") && ((len(parts) == 5 && isSubscriptionOpName(parts[4])) || (len(parts) == 6 && isSubscriptionOpName(parts[5]))) {
 						if !auth.Allows(secCtx, "Subscription", auth.ActionRead) && !auth.Allows(secCtx, "Subscription", auth.ActionSearch) {
 							writeOperationOutcome(w, http.StatusForbidden, "forbidden",
 								"insufficient scope for Subscription operation")
@@ -972,6 +1011,54 @@ func (w *auditResponseWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
+func (w *auditResponseWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *auditResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
+}
+
+func (w *auditResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hj, ok := w.ResponseWriter.(http.Hijacker); ok {
+		conn, bufrw, err := hj.Hijack()
+		if err == nil && !w.wroteHeader {
+			w.statusCode = http.StatusSwitchingProtocols
+			w.wroteHeader = true
+		}
+		return conn, bufrw, err
+	}
+	rc := http.NewResponseController(w.ResponseWriter)
+	conn, bufrw, err := rc.Hijack()
+	if err == nil && !w.wroteHeader {
+		w.statusCode = http.StatusSwitchingProtocols
+		w.wroteHeader = true
+	}
+	return conn, bufrw, err
+}
+
+func isSubscriptionsWSUpgrade(r *http.Request, parts []string) bool {
+	if r == nil || r.Method != http.MethodGet {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") {
+		return false
+	}
+	if len(parts) == 3 && parts[0] == "fhir" && parts[1] == "r4" && parts[2] == "$subscriptions-ws" {
+		return true
+	}
+	if len(parts) == 4 && parts[0] == "fhir" && parts[1] == "r4" && parts[3] == "$subscriptions-ws" {
+		return true
+	}
+	return false
+}
+
+func isSubscriptionOpName(op string) bool {
+	return op == "$status" || op == "$events" || op == "$bind-ws" || op == "$get-ws-binding-token"
+}
+
 // auditMiddleware records an immutable HL7 FHIR R4 / US Core AuditEvent for every
 // clinical interaction and security rejection (401/403), and enforces TEFCA PurposeOfUse headers.
 func (s *Server) auditMiddleware(next http.Handler) http.Handler {
@@ -1065,8 +1152,12 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 				patientID = cleanID(sub)
 			}
 		}
+		auditCtx := r.Context()
+		if arw.statusCode == http.StatusSwitchingProtocols {
+			auditCtx = context.WithoutCancel(auditCtx)
+		}
 		if patientID == "" && store.IsPatientCompartmentResourceType(entityType) && entityID != "" {
-			patientID = s.resolveClinicalResourcePatientID(r.Context(), tenantID, entityType, entityID)
+			patientID = s.resolveClinicalResourcePatientID(auditCtx, tenantID, entityType, entityID)
 		}
 
 		outcomeCode, outcomeDesc := audit.ClassifyHTTPOutcome(arw.statusCode)
@@ -1091,7 +1182,7 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 			PurposeOfUse:  holder.purposeOfUse,
 		}
 
-		if err := s.auditRecorder.Record(r.Context(), rec); err != nil {
+		if err := s.auditRecorder.Record(auditCtx, rec); err != nil {
 			s.logger.Warn("failed to record audit event", "error", err, "path", r.URL.Path)
 		}
 	})
