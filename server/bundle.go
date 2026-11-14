@@ -66,6 +66,14 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body = decodedJSON
+	} else if isXMLContentType(r) {
+		decodedJSON, err := decodeXMLBodyToFHIRJSON(body, "Bundle")
+		if err != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure",
+				fmt.Sprintf("invalid Bundle XML payload: %v", err))
+			return
+		}
+		body = decodedJSON
 	}
 
 	var bundle bundleRequest
@@ -1294,6 +1302,10 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		"resourceType": "Bundle",
 		"type":         bundle.Type + "-response",
 		"entry":        finalEntries,
+	}
+
+	if okXML, _ := wantsXMLResponse(r); okXML && writeFHIRXMLMap(w, r, http.StatusOK, responseBundle) {
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")

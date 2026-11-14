@@ -54,6 +54,7 @@ import (
 	"github.com/flint-fhir/flint/pkg/auth"
 	automq "github.com/flint-fhir/flint/pkg/cdc"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
+	"github.com/flint-fhir/flint/pkg/fhirxml"
 	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/store"
 )
@@ -287,7 +288,7 @@ func (s *Server) RegisterIndexExtractor(resType string, fn store.IndexExtractorF
 
 // Handler returns the HTTP handler for the FHIR API.
 func (s *Server) Handler() http.Handler {
-	return s.metricsMiddleware(s.auditMiddleware(s.authMiddleware(s.fhirRouter())))
+	return s.metricsMiddleware(s.xmlNegotiationMiddleware(s.auditMiddleware(s.authMiddleware(s.fhirRouter()))))
 }
 
 func (s *Server) fhirRouter() http.Handler {
@@ -2825,9 +2826,9 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		if strings.EqualFold(resType, "Binary") {
 			formatParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("_format")))
 			acceptHdr := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
-			wantsFHIRJSON := strings.Contains(formatParam, "fhir") || strings.Contains(formatParam, "json") ||
-				strings.Contains(acceptHdr, "application/fhir+json") || strings.Contains(acceptHdr, "application/json")
-			if !wantsFHIRJSON && (formatParam != "" || acceptHdr != "") {
+			wantsFHIRWrapper := strings.Contains(formatParam, "fhir") || strings.Contains(formatParam, "json") || formatParam == "xml" ||
+				strings.Contains(acceptHdr, "application/fhir+json") || strings.Contains(acceptHdr, "application/json") || strings.Contains(acceptHdr, "application/fhir+xml")
+			if !wantsFHIRWrapper && (formatParam != "" || acceptHdr != "") {
 				if binMap, mErr := s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); mErr == nil {
 					ct, _ := binMap["contentType"].(string)
 					dataB64, _ := binMap["data"].(string)
@@ -2865,12 +2866,15 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 	if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
 		return
 	}
+	if okXML, _ := wantsXMLResponse(r); okXML && writeFHIRXMLFromJSON(w, r, http.StatusOK, jsonBytes) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {
 		w.Write(jsonBytes)
@@ -3036,9 +3040,9 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 		if strings.EqualFold(resType, "Binary") {
 			formatParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("_format")))
 			acceptHdr := strings.ToLower(strings.TrimSpace(r.Header.Get("Accept")))
-			wantsFHIRJSON := strings.Contains(formatParam, "fhir") || strings.Contains(formatParam, "json") ||
-				strings.Contains(acceptHdr, "application/fhir+json") || strings.Contains(acceptHdr, "application/json")
-			if !wantsFHIRJSON && (formatParam != "" || acceptHdr != "") {
+			wantsFHIRWrapper := strings.Contains(formatParam, "fhir") || strings.Contains(formatParam, "json") || formatParam == "xml" ||
+				strings.Contains(acceptHdr, "application/fhir+json") || strings.Contains(acceptHdr, "application/json") || strings.Contains(acceptHdr, "application/fhir+xml")
+			if !wantsFHIRWrapper && (formatParam != "" || acceptHdr != "") {
 				if binMap, mErr := s.protoToFHIRMapWithMeta(resType, rec.ResourceProto, rec.ResVersion, rec.LastUpdated); mErr == nil {
 					ct, _ := binMap["contentType"].(string)
 					dataB64, _ := binMap["data"].(string)
@@ -3076,12 +3080,15 @@ func (s *Server) handleVRead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.Header().Set("ETag", store.FormatETag(rec.ResVersion))
 	w.Header().Set("Last-Modified", rec.LastUpdated.UTC().Format(http.TimeFormat))
 	if checkConditionalReadNotModified(w, r, rec.ResVersion, rec.LastUpdated) {
 		return
 	}
+	if okXML, _ := wantsXMLResponse(r); okXML && writeFHIRXMLFromJSON(w, r, http.StatusOK, jsonBytes) {
+		return
+	}
+	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {
 		w.Write(jsonBytes)
@@ -3394,6 +3401,15 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
+		if isXMLContentType(r) {
+			decodedJSON, xmlErr := decodeXMLBodyToFHIRJSON(body, resType)
+			if xmlErr != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "structure",
+					fmt.Sprintf("invalid FHIR XML: %v", xmlErr))
+				return
+			}
+			body = decodedJSON
+		}
 		resolvedBody, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, body, nil)
 		if refErr != nil {
 			writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
@@ -3677,6 +3693,15 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
+		if isXMLContentType(r) {
+			decodedJSON, xmlErr := decodeXMLBodyToFHIRJSON(body, resType)
+			if xmlErr != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "structure",
+					fmt.Sprintf("invalid FHIR XML: %v", xmlErr))
+				return
+			}
+			body = decodedJSON
+		}
 		resolvedBody, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, body, nil)
 		if refErr != nil {
 			writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
@@ -3957,7 +3982,7 @@ func wantsProtoResponse(r *http.Request) (bool, string) {
 	if strings.Contains(accept, "application/x-protobuf") || strings.Contains(accept, "application/protobuf") {
 		return true, "application/x-protobuf"
 	}
-	if strings.Contains(accept, "json") {
+	if strings.Contains(accept, "json") || strings.Contains(accept, "xml") {
 		return false, ""
 	}
 	if isProtoContentType(r) {
@@ -4441,6 +4466,15 @@ func (s *Server) handleValidate(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 				}
+			}
+			unwrapValidateParameters(rootMap)
+		}
+	} else if isXMLContentType(r) {
+		if len(bytes.TrimSpace(body)) > 0 {
+			rootMap, xmlErr := fhirxml.UnmarshalFHIRMap(body)
+			if xmlErr != nil {
+				writeValidateErrorOutcome(w, r, http.StatusBadRequest, validation.CodeStructure, fmt.Sprintf("malformed XML: %v", xmlErr))
+				return
 			}
 			unwrapValidateParameters(rootMap)
 		}
@@ -7520,8 +7554,8 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			"http://hl7.org/fhir/uv/ipa/CapabilityStatement/ipa-server",
 			"http://hl7.org/fhir/uv/bulkdata/CapabilityStatement/bulk-data",
 		},
-		"format":      []string{"json", "application/fhir+json", "application/fhir+ndjson", "application/x-protobuf", "application/fhir+protobuf"},
-		"patchFormat": []string{"application/json-patch+json", "application/merge-patch+json", "application/fhir+json", "application/x-protobuf", "application/fhir+protobuf"},
+		"format":      []string{"json", "application/fhir+json", "xml", "application/fhir+xml", "application/xml", "text/xml", "application/fhir+ndjson", "application/x-protobuf", "application/fhir+protobuf"},
+		"patchFormat": []string{"application/json-patch+json", "application/merge-patch+json", "application/fhir+json", "application/fhir+xml", "application/x-protobuf", "application/fhir+protobuf"},
 		"software": map[string]any{
 			"name":    "Flint FHIR Server",
 			"version": Version,
@@ -8090,6 +8124,9 @@ func (s *Server) writeOperationResponse(w http.ResponseWriter, r *http.Request, 
 			}
 		}
 	}
+	if okXML, _ := wantsXMLResponse(r); okXML && writeFHIRXMLMap(w, r, status, out) {
+		return
+	}
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(status)
 	if r == nil || r.Method != http.MethodHead {
@@ -8097,8 +8134,8 @@ func (s *Server) writeOperationResponse(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-// decodeOperationBodyMap decodes a POST operation request body from either binary Proto3
-// (Parameters or fallbackResType) when Content-Type is protobuf, or FHIR JSON.
+// decodeOperationBodyMap decodes a POST operation request body from binary Proto3,
+// HL7 FHIR XML, or FHIR JSON.
 func (s *Server) decodeOperationBodyMap(r *http.Request, body []byte, fallbackResType string) (map[string]any, error) {
 	if isProtoContentType(r) {
 		if pm, err := s.protoToFHIRMap("Parameters", body); err == nil {
@@ -8118,6 +8155,9 @@ func (s *Server) decodeOperationBodyMap(r *http.Request, body []byte, fallbackRe
 			}
 		}
 		return s.protoToFHIRMap("Parameters", body)
+	}
+	if isXMLContentType(r) {
+		return fhirxml.UnmarshalFHIRMap(body)
 	}
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -8252,9 +8292,7 @@ func writePreferResourceResponse(w http.ResponseWriter, r *http.Request, status 
 	case "minimal":
 		w.WriteHeader(status)
 	case "OperationOutcome":
-		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
-		w.WriteHeader(status)
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		ooMap := map[string]any{
 			"resourceType": "OperationOutcome",
 			"issue": []map[string]any{
 				{
@@ -8263,8 +8301,17 @@ func writePreferResourceResponse(w http.ResponseWriter, r *http.Request, status 
 					"diagnostics": fmt.Sprintf("%s/%s version %d stored", resType, resID, version),
 				},
 			},
-		})
+		}
+		if okXML, _ := wantsXMLResponse(r); okXML && writeFHIRXMLMap(w, r, status, ooMap) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(ooMap)
 	default:
+		if okXML, _ := wantsXMLResponse(r); okXML && writeFHIRXMLFromJSON(w, r, status, jsonBytes) {
+			return
+		}
 		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 		w.WriteHeader(status)
 		_, _ = w.Write(jsonBytes)

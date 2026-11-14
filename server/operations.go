@@ -278,6 +278,13 @@ func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
 			m["resourceType"] = "Patient"
 			payload = m
 		}
+	} else if isXMLContentType(r) {
+		var xmlErr error
+		payload, xmlErr = decodeXMLBodyToFHIRMap(body)
+		if xmlErr != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure", "invalid XML in Patient/$match body")
+			return
+		}
 	} else {
 		if err := json.Unmarshal(body, &payload); err != nil {
 			writeOperationOutcome(w, http.StatusBadRequest, "structure", "invalid JSON in Patient/$match body")
@@ -465,6 +472,10 @@ func (s *Server) handlePatientMatch(w http.ResponseWriter, r *http.Request) {
 		"type":         "searchset",
 		"total":        len(entries),
 		"entry":        entries,
+	}
+
+	if okXML, _ := wantsXMLResponse(r); okXML && writeFHIRXMLMap(w, r, http.StatusOK, bundle) {
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
@@ -817,6 +828,12 @@ func (s *Server) extractInputValueMeta(r *http.Request, body []byte) (map[string
 		}
 		m["resourceType"] = "Parameters"
 		payload = m
+	} else if isXMLContentType(r) {
+		var xmlErr error
+		payload, xmlErr = decodeXMLBodyToFHIRMap(body)
+		if xmlErr != nil {
+			return nil, fmt.Errorf("invalid XML body: %w", xmlErr)
+		}
 	} else {
 		if err := json.Unmarshal(body, &payload); err != nil {
 			return nil, fmt.Errorf("invalid JSON body: %w", err)
@@ -1055,6 +1072,13 @@ func (s *Server) handleResourceGraph(w http.ResponseWriter, r *http.Request) {
 					}
 					m["resourceType"] = "GraphDefinition"
 					rootMap = m
+				}
+			} else if isXMLContentType(r) {
+				var xmlErr error
+				rootMap, xmlErr = decodeXMLBodyToFHIRMap([]byte(trimmed))
+				if xmlErr != nil {
+					writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid XML body: %v", xmlErr))
+					return
 				}
 			} else {
 				if err := json.Unmarshal([]byte(trimmed), &rootMap); err != nil {

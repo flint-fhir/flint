@@ -183,6 +183,8 @@ func (s *Server) extractTerminologyParams(r *http.Request, defaultResType string
 						root = rm
 					}
 				}
+			} else if isXMLContentType(r) {
+				root, _ = decodeXMLBodyToFHIRMap(bodyBytes)
 			} else {
 				_ = json.Unmarshal(bodyBytes, &root)
 			}
@@ -305,6 +307,9 @@ func (s *Server) writeTerminologyResourceResponse(w http.ResponseWriter, r *http
 				}
 			}
 		}
+	}
+	if okXML, _ := wantsXMLResponse(r); okXML && writeFHIRXMLMap(w, r, http.StatusOK, out) {
+		return
 	}
 	w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
@@ -1838,6 +1843,13 @@ func (s *Server) handleClosure(w http.ResponseWriter, r *http.Request) {
 				raw, pErr = s.protoToFHIRMapWithMeta("Parameters", body, 0, time.Time{})
 				if pErr != nil {
 					writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid Proto3 Parameters in $closure request: %v", pErr))
+					return
+				}
+			} else if isXMLContentType(r) {
+				var xmlErr error
+				raw, xmlErr = decodeXMLBodyToFHIRMap(body)
+				if xmlErr != nil {
+					writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid XML in $closure request: %v", xmlErr))
 					return
 				}
 			} else if err := json.Unmarshal(body, &raw); err != nil {
