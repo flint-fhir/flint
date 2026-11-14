@@ -528,3 +528,61 @@ func writeTestIGArchive(t *testing.T, outPath string, files map[string]string) {
 	require.NoError(t, gzw.Close())
 	require.NoError(t, os.WriteFile(outPath, buf.Bytes(), 0o600))
 }
+
+func TestConfigureTerminologyClientFlagsAndEnv(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Disabled when unset
+	srv := server.New(nil, logger)
+	require.NoError(t, configureTerminologyClient(srv, cliOptions{}, logger, func(string) string { return "" }))
+	assert.Nil(t, srv.TerminologyClient())
+
+	// Configured via CLI flags
+	opts, err := parseCLIOptions([]string{
+		"--tx-server-url=https://tx.fhir.org/r4/",
+		"--tx-timeout=3s",
+		"--tx-cache-ttl=10m",
+		"--tx-cache-max-entries=2048",
+		"--tx-auth-header=Bearer secret",
+		"--tx-fail-open=false",
+	}, io.Discard)
+	require.NoError(t, err)
+	require.NoError(t, configureTerminologyClient(srv, opts, logger, func(string) string { return "" }))
+	require.NotNil(t, srv.TerminologyClient())
+	assert.Equal(t, "https://tx.fhir.org/r4", srv.TerminologyClient().BaseURL())
+	assert.False(t, srv.TerminologyClient().FailOpen())
+
+	// Configured via FLINT_TX_* environment variables inside run(...)
+	env := map[string]string{
+		"FLINT_STORE_BACKEND":        "sqlite",
+		"FLINT_SQLITE_DSN":           ":memory:",
+		"FLINT_TX_SERVER_URL":        "https://tx-env.fhir.org/r4",
+		"FLINT_TX_TIMEOUT":           "4s",
+		"FLINT_TX_CACHE_TTL":         "5m",
+		"FLINT_TX_CACHE_MAX_ENTRIES": "512",
+		"FLINT_TX_AUTH_HEADER":       "X-Api-Key: k1",
+		"FLINT_TX_FAIL_OPEN":         "true",
+	}
+	err = run(
+		nil,
+		func(k string) string { return env[k] },
+		io.Discard,
+		logger,
+		sql.Open,
+		func(string, http.Handler) error { return nil },
+	)
+	require.NoError(t, err)
+
+	// Invalid configuration error branches
+	badCases := []map[string]string{
+		{"FLINT_TX_SERVER_URL": "ftp://bad"},
+		{"FLINT_TX_SERVER_URL": "https://tx.fhir.org/r4", "FLINT_TX_TIMEOUT": "bad"},
+		{"FLINT_TX_SERVER_URL": "https://tx.fhir.org/r4", "FLINT_TX_CACHE_TTL": "bad"},
+		{"FLINT_TX_SERVER_URL": "https://tx.fhir.org/r4", "FLINT_TX_CACHE_MAX_ENTRIES": "bad"},
+		{"FLINT_TX_SERVER_URL": "https://tx.fhir.org/r4", "FLINT_TX_FAIL_OPEN": "not-bool"},
+	}
+	for _, tc := range badCases {
+		err := configureTerminologyClient(server.New(nil, logger), cliOptions{}, logger, func(k string) string { return tc[k] })
+		require.Error(t, err)
+	}
+}
