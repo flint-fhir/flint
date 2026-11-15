@@ -14,7 +14,7 @@ Because zero database drivers or SQL queries leak above `store/store.go`, the ex
 ```mermaid
 flowchart TB
   subgraph Clients["Clients & Wire Protocols"]
-    JSON["FHIR JSON / NDJSON / CSV / TSV\n(application/fhir+json, text/csv)"]
+    JSON["FHIR JSON / XML / NDJSON / CSV / TSV\n(application/fhir+json, application/fhir+xml, text/csv)"]
     PROTO["Binary Google FHIR Proto3\n(application/x-protobuf, application/fhir+protobuf)"]
   end
 
@@ -87,11 +87,11 @@ Flint inverts this model through three architectural invariants:
 
 | Subsystem | Package(s) | Responsibility |
 | :--- | :--- | :--- |
-| **Wire & Content Negotiation** | [`server/`](../server/server.go), [`pkg/fhirutil`](../pkg/fhirutil) | Negotiates `application/fhir+json`, `application/fhir+ndjson`, `text/csv`, `text/tab-separated-values`, `application/x-protobuf`, and `application/fhir+protobuf`; handles `_summary`, `_elements` (`SUBSETTED`), `Prefer`, and RFC 6902 / RFC 7396 / FHIRPath `PATCH`. |
-| **Identity, SMART v2 & UDAP** | [`pkg/auth`](../pkg/auth), `server/smart_*.go` | Built-in SMART App Launch v2.0.0 OAuth2 server (`S256` PKCE, Backend Services `private_key_jwt` RFC 7523, token introspection/revocation), UDAP dynamic client registration, external OIDC/Zitadel JWT validation, patient compartment enforcement, and v2 sub-resource scope filtering (`?category=vital-signs`). |
-| **Validation & FHIRPath R4** | [`pkg/validation`](../pkg/validation) | Validates cardinality, choice-type invariants, terminology bindings, regex patterns, reference targets, and FHIRPath constraints across all 146 FHIR R4 resources and 26 built-in US Core v6.1.0 & v7.0.0 profiles (`$validate` + write-time enforcement). |
+| **Wire & Content Negotiation** | [`server/`](../server/server.go), [`pkg/fhirutil`](../pkg/fhirutil), [`pkg/fhirxml`](../pkg/fhirxml) | Negotiates `application/fhir+json`, `application/fhir+xml` (`_format=xml`), `application/fhir+ndjson`, `text/csv`, `text/tab-separated-values`, `application/x-protobuf`, and `application/fhir+protobuf`; handles `_summary`, `_elements` (`SUBSETTED`), `Prefer`, `$convert`, and RFC 6902 / RFC 7396 / FHIRPath `PATCH`. |
+| **Identity, SMART v2 & UDAP** | [`pkg/auth`](../pkg/auth), `server/smart_*.go` | Built-in SMART App Launch v2.0.0 OAuth2 server (`S256` PKCE, standalone & EHR launch, OIDC `id_token` / `fhirUser`, Backend Services & confidential asymmetric `private_key_jwt` RFC 7523, token introspection/revocation), UDAP dynamic client registration, external OIDC/Zitadel JWT validation, patient compartment enforcement, and v2 sub-resource scope filtering (`?category=vital-signs`). |
+| **Validation, Terminology & FHIRPath R4** | [`pkg/validation`](../pkg/validation), [`pkg/txclient`](../pkg/txclient) | Validates cardinality, slicing discriminators, choice-type invariants, terminology bindings (with optional LRU/TTL cached external terminology server federation via `FLINT_TX_SERVER_URL`), regex patterns, reference targets, and FHIRPath constraints across all 146 FHIR R4 resources and 26 built-in US Core v6.1.0 & v7.0.0 profiles (`$validate` + write-time enforcement). |
 | **Search & UCUM Engine** | `server/search_*.go`, [`pkg/ucum`](../pkg/ucum) | Parses FHIR R4 search queries (chained parameters, recursive `_has`, composites, `:in`/`:not-in`/`:below`/`:above` terminology modifiers, `_filter` ASTs, `_include`/`_revinclude:iterate`) into backend-neutral [`store.SearchParams`](../store/store.go) structs and normalizes UCUM quantities. |
-| **Clinical & National IGs** | `server/*_ops.go` | Implements 35+ HL7 IGs & 130+ operations (`$everything`, `$summary` IPS, `$docref`, `$populate`/`$extract` SDC, `$evaluate-measure`/`$care-gaps`, `PlanDefinition/$apply`, Da Vinci suite, CARIN BB, FAST, Gravity SDOH, mCODE, PACIO, Public Health, Vulcan, Subscriptions, CDS Hooks v2.0). |
+| **Clinical, Subscriptions & National IGs** | `server/*_ops.go`, `server/subscriptions.go` | Implements 35+ HL7 IGs & 130+ operations (`$everything`, `$summary` IPS, `$docref`, `$populate`/`$extract` SDC, `$evaluate-measure`/`$care-gaps`, `PlanDefinition/$apply`, Da Vinci suite, CARIN BB, FAST, Gravity SDOH, mCODE, PACIO, Public Health, Vulcan, RFC 6455 WebSocket `$subscriptions-ws` & CloudEvents v1.0 Subscriptions, CDS Hooks v2.0). |
 | **SQL-on-FHIR v2** | `server/sqlonfhir.go` | Evaluates `ViewDefinition/$run` and `$export` in-memory over `protoreflect` against *any* `store.Store`, and compiles `ViewDefinition/$sql` into native zero-JSON SQL for `postgres`, `sqlite`, and `doris`. |
 | **Audit & Conformance** | [`pkg/audit`](../pkg/audit), [`pkg/certify`](../pkg/certify/certify.go) | Automatically records ASTM E2147 / ONC `(d)(2)` `AuditEvent` trails and runs the 137-check `$certify` conformance harness and `TestScript/$evaluate` engine. |
 
