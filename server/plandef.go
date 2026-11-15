@@ -6228,6 +6228,8 @@ func (s *Server) handleResourceConvert(w http.ResponseWriter, r *http.Request) {
 							var parsed map[string]any
 							if json.Unmarshal([]byte(sVal), &parsed) == nil {
 								inputMap = parsed
+							} else if xmlParsed, xErr := decodeXMLBodyToFHIRMap([]byte(sVal)); xErr == nil {
+								inputMap = xmlParsed
 							}
 						}
 					case "to", "format":
@@ -6320,6 +6322,13 @@ func (s *Server) handleResourceConvert(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to denormalize protobuf to FHIR JSON: "+err.Error())
 		return
+	}
+
+	if wantsXMLConvertOutput(targetFormat, r) {
+		w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")
+		if writeFHIRXMLFromJSON(w, r, http.StatusOK, canonicalJSON) {
+			return
+		}
 	}
 
 	w.Header().Set("X-Flint-Storage-Model", "zero-json-proto3")

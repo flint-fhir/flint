@@ -93,6 +93,17 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("failed to encode PATCH body: %v", err))
 			return
 		}
+	} else if isXMLContentType(r) {
+		if len(bytes.TrimSpace(body)) == 0 {
+			writeOperationOutcome(w, http.StatusBadRequest, "required", "empty PATCH request body")
+			return
+		}
+		var xmlErr error
+		trimmedBody, xmlErr = decodeXMLBodyToFHIRJSON(body, "")
+		if xmlErr != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("invalid XML PATCH body: %v", xmlErr))
+			return
+		}
 	} else {
 		trimmedBody = bytes.TrimSpace(body)
 		if len(trimmedBody) == 0 {
@@ -387,6 +398,15 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	} else {
+		if isXMLContentType(r) {
+			decodedJSON, xmlErr := decodeXMLBodyToFHIRJSON(body, resType)
+			if xmlErr != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "structure",
+					fmt.Sprintf("invalid FHIR XML: %v", xmlErr))
+				return
+			}
+			body = decodedJSON
+		}
 		resolvedBody, refStatus, refErr := s.resolveConditionalReferencesInJSON(r.Context(), tenant, body, nil)
 		if refErr != nil {
 			writeOperationOutcome(w, refStatus, conditionalRefOutcomeCode(refStatus), refErr.Error())
