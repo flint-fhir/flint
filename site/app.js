@@ -2,7 +2,7 @@ const quickstartSnippets = {
   sqlite: `# Install via Homebrew, POSIX installer, or pure-Go single binary (zero Docker/DB required!)
 brew install flint-fhir/tap/flint
 # or: curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/install.sh | sh
-# or: CGO_ENABLED=0 go install github.com/flint-fhir/flint/cmd/flintd@v0.4.0
+# or: CGO_ENABLED=0 go install github.com/flint-fhir/flint/cmd/flintd@v0.5.0
 
 # Boot complete FHIR R4 API server over embedded SQLite WAL (or use :memory:)
 flintd --store=sqlite --sqlite-dsn=flint.db
@@ -21,16 +21,23 @@ curl -s http://localhost:8080/fhir/r4/demo/$certify | jq .result`,
   container: `# Option A: PostgreSQL OLTP container (auto-migrates on boot)
 docker run --rm -p 8080:8080 \\
   -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \\
-  ghcr.io/flint-fhir/flint:0.4.0
+  ghcr.io/flint-fhir/flint:0.5.0
 
 # Option B: Hybrid PostgreSQL OLTP + Real-Time Apache Doris MPP Analytics
 docker run --rm -p 8080:8080 \\
   -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \\
   -e FLINT_DORIS_DSN="root:@tcp(host.docker.internal:9030)/flint" \\
-  ghcr.io/flint-fhir/flint:0.4.0 --store=postgres --analytics-store=doris`
+  ghcr.io/flint-fhir/flint:0.5.0 --store=postgres --analytics-store=doris`
 };
 
 const igCatalog = [
+  {
+    title: "Bidirectional HL7 FHIR R4 XML Wire, WebSocket Subscriptions & Tx Federation",
+    domain: "Core & ONC",
+    desc: "Native HL7 FHIR R4 XML (application/fhir+xml, _format=xml) <-> Proto3 wire negotiation, RFC 6455 WebSocket ($subscriptions-ws, $bind-ws) & CloudEvents v1.0 Subscriptions push streaming, and cached upstream terminology server federation (--tx-server-url / FLINT_TX_SERVER_URL).",
+    ops: ["application/fhir+xml", "GET /$subscriptions-ws", "Subscription/$bind-ws", "POST /$convert", "--tx-server-url"],
+    curl: "curl -s -H 'Accept: application/fhir+xml' 'http://localhost:8080/fhir/r4/demo/Patient/example-patient-1'"
+  },
   {
     title: "HL7 FHIR R4 NPM (.tgz) Implementation Guide Package Loader",
     domain: "Core & ONC",

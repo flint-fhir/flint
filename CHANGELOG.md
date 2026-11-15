@@ -5,6 +5,30 @@ All notable changes to **Flint** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-11-14
+
+### Added
+
+- **Bidirectional HL7 FHIR R4 XML Wire Format (`pkg/fhirxml`, `server/xml_wire.go`)**:
+  - Added pure-Go, zero-external-dependency HL7 FHIR R4 XML (`http://hl7.org/fhir`) ↔ FHIR JSON / `google/fhir` Proto3 transcoder (`pkg/fhirxml`) covering all 146 R4 resource types, `value="..."` primitive attributes, shadow `_field` primitive `id`/`extension` elements, `Extension.url` XML attributes, raw `Narrative.div` XHTML (`http://www.w3.org/1999/xhtml`), inline `<contained>` and `<Bundle><entry><resource>` wrappers, polymorphic `[x]` choice elements, deterministic `StructureDefinition` element ordering, XXE/DOCTYPE/ENTITY & depth-limit hardening, and round-trip fuzzing (`FuzzXMLRoundTrip`).
+  - Wired end-to-end HTTP content negotiation (`Accept: application/fhir+xml`, `application/xml`, `text/xml` with `;q=` quality factors, `Content-Type` fallback, and `?_format=xml|application/fhir+xml`) across CRUD, `vread`, `_history`, Search, `batch`/`transaction` `Bundle`, `PATCH`, `$validate`, `$convert`, terminology operations, `PlanDefinition/$apply`, `OperationOutcome` diagnostics, and `CapabilityStatement.format`.
+- **Real-Time FHIR R4 & R5 Backport Subscriptions Push Streaming — WebSockets & CloudEvents v1.0 (`server/subscriptions.go`)**:
+  - Added pure-Go RFC 6455 WebSocket `Subscription` channel (`channel.type = "websocket"`) on `GET /fhir/r4/$subscriptions-ws` and `GET /fhir/r4/{tenant}/$subscriptions-ws`, supporting direct `bind <id>` and R5 Backport token-bound `bind : <token>` (`Subscription/$bind-ws` & `$get-ws-binding-token`), initial `bound <id>` / `handshake` `SubscriptionStatus` frames, periodic `ping <id>` keepalive heartbeats, real-time R5 Backport `history` notification `Bundle` (`empty`, `id-only`, `full-resource`) push delivery, and tenant isolation.
+  - Added CNCF CloudEvents v1.0 (`application/cloudevents+json` and `application/cloudevents-batch+json`) `rest-hook` webhook envelope formatting (`specversion: "1.0"`, `type: "org.hl7.fhir.r4.subscription.<ResourceType>"`, `source`, `subject`, `datacontenttype`, `data`) with `flint_subscription_ws_active_connections` and `flint_subscription_ws_messages_sent_total` Prometheus metrics.
+- **External FHIR R4 Terminology Server Federation (`pkg/txclient`, `server/terminology.go`)**:
+  - Added thread-safe, bounded-timeout external FHIR R4 terminology federation client (`pkg/txclient`) with in-memory LRU + TTL caching (`--tx-server-url` / `FLINT_TX_SERVER_URL`, `--tx-timeout` / `FLINT_TX_TIMEOUT`, `--tx-cache-ttl` / `FLINT_TX_CACHE_TTL`, `--tx-cache-max-entries` / `FLINT_TX_CACHE_MAX_ENTRIES`, `--tx-auth-header` / `FLINT_TX_AUTH_HEADER`, `--tx-fail-open` / `FLINT_TX_FAIL_OPEN`).
+  - Wired transparent upstream fallback delegation across `ValueSet/$expand`, `ValueSet/$validate-code`, `CodeSystem/$lookup`, `CodeSystem/$validate-code`, `CodeSystem/$subsumes`, `:in` / `:not-in` terminology search modifiers, and `strength: "required"` `ElementDefinition.binding` `ValueSet` validation when code systems or value sets are not locally loaded, plus `flint_tx_federation_requests_total` and `flint_tx_federation_cache_hits_total` Prometheus metrics.
+- **Full HL7 Inferno SMART App Launch STU2 Conformance (`deploy/inferno/headless/run_suites.rb`, `server/smart.go`)**:
+  - Automated headless OAuth2/PKCE (`S256`) browser-redirect, EHR launch (`/oauth2/launch`), OpenID Connect `id_token` (`fhirUser`), refresh token rotation & downscoping, token introspection/revocation, and confidential asymmetric `ES384` `private_key_jwt` standalone launch execution in HL7 Inferno CI (`smart_stu2` 60/60 + `smart_stu2_asymmetric` 20/20 — **896 passing leaf tests** across PostgreSQL and SQLite).
+
+### Changed
+
+- Synchronized runtime version reporting (`0.5.0`) across `flintd --version`, `CapabilityStatement.software.version`, OpenAPI 3.1.0 `info.version`, `Dockerfile`, `analytics/pyproject.toml`, `install.sh`, `README.md`, and `site/`.
+
+### Fixed
+
+- Bootstrapped public [`flint-fhir/homebrew-tap`](https://github.com/flint-fhir/homebrew-tap) (`brew install flint-fhir/tap/flint`) and fixed job-level `env: HOMEBREW_TAP_TOKEN` conditional evaluation in [`.github/workflows/release.yml`](.github/workflows/release.yml).
+
 ## [0.4.0] - 2026-11-13
 
 ### Added

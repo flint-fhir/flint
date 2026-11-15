@@ -1,6 +1,6 @@
 # Flint — Decoupled FHIR R4 API & Pluggable Clinical Storage Engine
 
-[![Release](https://img.shields.io/badge/Release-v0.4.0-f97316)](CHANGELOG.md)
+[![Release](https://img.shields.io/badge/Release-v0.5.0-f97316)](CHANGELOG.md)
 [![CI](https://github.com/flint-fhir/flint/actions/workflows/ci.yml/badge.svg)](https://github.com/flint-fhir/flint/actions/workflows/ci.yml)
 [![HL7 Inferno](https://github.com/flint-fhir/flint/actions/workflows/inferno.yml/badge.svg)](https://github.com/flint-fhir/flint/actions/workflows/inferno.yml)
 [![Conformance](https://img.shields.io/badge/%24certify-137%2F137%20Checks-22c55e)](pkg/certify/certify.go)
@@ -10,9 +10,9 @@
 [![Website](https://img.shields.io/badge/Website-flint--fhir.github.io-f97316?logo=github)](https://flint-fhir.github.io/flint/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-**Flint** (`v0.4.0`) is an open-source, high-throughput **HL7 FHIR R4 API and clinical interoperability engine** written in Go. Flint strictly separates its **storage-agnostic FHIR R4 API & Clinical Layer** ([`server/`](server/), [`pkg/`](pkg/)) from its **Pluggable Persistence & Analytical Plane** ([`store/`](store/)):
+**Flint** (`v0.5.0`) is an open-source, high-throughput **HL7 FHIR R4 API and clinical interoperability engine** written in Go. Flint strictly separates its **storage-agnostic FHIR R4 API & Clinical Layer** ([`server/`](server/), [`pkg/`](pkg/)) from its **Pluggable Persistence & Analytical Plane** ([`store/`](store/)):
 
-1. **Storage-Agnostic FHIR R4 API Layer (`server/`)**: Speaks both standard FHIR JSON/NDJSON/CSV/TSV and **zero-JSON binary `google/fhir` Proto3 over HTTP** (`application/x-protobuf`, `application/fhir+protobuf`). Owns SMART on FHIR v2 OAuth2/PKCE/Backend Services/UDAP, ASTM E2147 `AuditEvent` logging, `StructureDefinition`/`ValueSet`/FHIRPath R4 validation (including slicing discriminators & semantic type-checking), startup/runtime **HL7 FHIR NPM (`.tgz`) IG package loading** (`--ig-package`, `POST /$install-ig`), ACID `Bundle` coordination, UCUM unit normalization, **35+ National HL7 Implementation Guides (130+ `$` operations)**, **HL7 SQL-on-FHIR v2 (`ViewDefinition/$run`, `$export`, and multi-dialect `$sql` compiler)**, `TestScript/$evaluate`, and a built-in **137-check `$certify` conformance harness**—with zero SQL dialect or database driver coupling.
+1. **Storage-Agnostic FHIR R4 API Layer (`server/`)**: Speaks standard FHIR JSON, **bidirectional HL7 FHIR R4 XML (`application/fhir+xml`, `_format=xml`)**, NDJSON, CSV/TSV, and **zero-JSON binary `google/fhir` Proto3 over HTTP** (`application/x-protobuf`, `application/fhir+protobuf`). Owns SMART on FHIR v2 OAuth2/PKCE/EHR Launch/OIDC/Backend Services/UDAP, ASTM E2147 `AuditEvent` logging, `StructureDefinition`/`ValueSet`/FHIRPath R4 validation (including slicing discriminators, semantic type-checking & optional LRU/TTL cached **external terminology server federation** via `--tx-server-url` / `FLINT_TX_SERVER_URL`), startup/runtime **HL7 FHIR NPM (`.tgz`) IG package loading** (`--ig-package`, `POST /$install-ig`), ACID `Bundle` coordination, **real-time RFC 6455 WebSocket (`$subscriptions-ws`, `$bind-ws`) & CNCF CloudEvents v1.0 `Subscription` streaming**, UCUM unit normalization, **35+ National HL7 Implementation Guides (130+ `$` operations)**, **HL7 SQL-on-FHIR v2 (`ViewDefinition/$run`, `$export`, and multi-dialect `$sql` compiler)**, `TestScript/$evaluate`, and a built-in **137-check `$certify` conformance harness**—with zero SQL dialect or database driver coupling.
 2. **Pluggable Storage & Analytical Plane (`store.Store` + `store.AnalyticalStore`)**: Run the exact same `flintd` binary over **PostgreSQL 15+** (ACID OLTP + physical schema-per-tenant isolation), **Embedded SQLite WAL** (pure-Go `CGO_ENABLED=0`, zero external dependencies, `:memory:` or single file), **Apache Doris MPP** (Unique Key Merge-on-Write columnar + inverted indexes), or **Real-Time Hybrid OLTP + OLAP (`store.HybridStore`)** (`--store=postgres --analytics-store=doris|sqlite`) with **100% API and certification parity**.
 
 All 146 FHIR R4 domain models and search index extractors are compiled directly from `google/fhir` Protocol Buffers using [proto2type](https://github.com/protocgen/proto2type) — **zero JSON/JSONB/VARIANT blobs are stored in any backend**.
@@ -25,10 +25,10 @@ All 146 FHIR R4 domain models and search index extractors are compiled directly 
 
 Traditional FHIR servers (e.g. HAPI FHIR, Medplum) entangle HTTP/clinical semantics directly with database-specific `JSONB` queries, incurring heavy runtime parsing overhead and locking deployments to a single database:
 
-| Dimension | Traditional FHIR Servers | Flint (`v0.4.0`) |
+| Dimension | Traditional FHIR Servers | Flint (`v0.5.0`) |
 |:----------|:-------------------------|:-----------------|
 | **Architectural Boundary** | HTTP handlers coupled to RDBMS-specific JSONB SQL (`->>`, `@>`) | **Strict two-plane split**: storage-agnostic FHIR R4 API (`server/`) over narrow `store.Store` & `store.AnalyticalStore` Go interfaces |
-| **Wire & At-Rest Format** | Text JSON over HTTP + heavy `JSONB` table sprawl | **JSON + Binary Proto3 HTTP wire** & **100% Zero-JSON Proto3 storage** (**16× wire reduction**, 124B vs ~2KB) |
+| **Wire & At-Rest Format** | Text JSON over HTTP + heavy `JSONB` table sprawl | **JSON + FHIR XML + Binary Proto3 HTTP wire** & **100% Zero-JSON Proto3 storage** (**16× wire reduction**, 124B vs ~2KB) |
 | **Pluggable Storage** | Locked to a single relational DB + external Elasticsearch | **PostgreSQL**, **Embedded SQLite WAL** (0-dep), **Apache Doris MPP**, & **Hybrid OLTP+OLAP (`HybridStore`)** |
 | **Search Indexing** | Deep relational joins or async search cluster lag | API-extracted `SearchIndexEntry` values into **6 covering `spidx_*` B-tree tables** or **Doris `ARRAY<VARCHAR>` inverted indexes** |
 | **SQL-on-FHIR v2** | Runtime JSONB path extraction (`jsonb_path_query`) | **Zero-JSON `ViewDefinition/$run`, `$export` & multi-dialect `$sql` compiler** (`postgres`, `sqlite`, `doris`) |
@@ -133,8 +133,8 @@ Flint implements full search index extraction, transactional persistence, SMART 
 | **`Claim` (`$submit`, `$inquire`, `$pas-inquire`, `$predetermine`, `$gfe-submit`, `$rtpbc-submit`), `ClaimResponse` (`$rtpbc-coverage`), `ExplanationOfBenefit` (`$pct-aeob-summary`, `$carin-bb-claims`), `CoverageEligibilityRequest` (`$submit`), `Communication` (`$cdex-submit-attachment`), `Bundle` (`$cdex-sign`, `$cdex-verify-signature`), `Task` (`$submit-attachment`, `$cdex-submit-attachment`, `$cdex-request`, `$cdex-poll`, `$cdex-questionnaire-request`, `$pct-gfe-coordination`, `$sdoh-fulfill`) & `ChargeItem` (`$apply`)** | HL7 Da Vinci PAS (`$submit`, `$inquire`, `$pas-inquire`), PCT Good Faith Estimate, GFE Coordination & AEOB (`$gfe-submit`, `$pct-gfe-coordination`, `$pct-aeob-summary`), CARIN Blue Button Oral & Vision Claims (`$carin-bb-claims`), Gravity SDOH CBO Referral Fulfillment (`$sdoh-fulfill`), CARIN Real-Time Pharmacy Benefit Check (RTPBC), CDex Attachment Exchange, Digital Signatures & Task-Based Data Request (`$cdex-submit-attachment`, `$cdex-sign`, `$cdex-verify-signature`, `$cdex-request`, `$cdex-poll`, `$cdex-questionnaire-request`), Real-Time Eligibility, Pre-Determination & FHIR R4 Financial Pricing | `POST /Claim/$submit` (accepts `Claim`, `Bundle`, or `Parameters`; persists & returns adjudicated `ClaimResponse` with `preAuthRef`), `GET/POST /Claim/$inquire`, `/Claim/{id}/$inquire`, `POST /Claim/$pas-inquire` (PAS prior authorization inquiry), `POST /Claim/$predetermine`, `/Claim/{id}/$predetermine` (pre-determination benefit & copay estimation), `POST /Claim/$gfe-submit`, `GET/POST /Patient/{id}/$gfe`, `GET/POST /ExplanationOfBenefit/$pct-aeob-summary`, `GET/POST /ExplanationOfBenefit/$carin-bb-claims` & `POST /Task/$pct-gfe-coordination` (Da Vinci PCT Good Faith Estimate, GFE coordination, AEOB & CARIN BB claims), `POST /Task/$sdoh-fulfill` (Gravity SDOH closed-loop CBO referral fulfillment), `POST /Claim/$rtpbc-submit`, `GET/POST /ClaimResponse/$rtpbc-coverage` & `GET/POST /Patient/{id}/$rtpbc-summary` (CARIN RTPBC patient-pay & formulary alternative check), `POST /$submit-attachment`, `/Task/$submit-attachment`, `/Task/$cdex-submit-attachment`, `/Task/{id}/$submit-attachment`, `POST /Communication/$cdex-submit-attachment`, `POST /Bundle/$cdex-sign`, `POST /Bundle/$cdex-verify-signature`, `POST /Task/$cdex-request`, `GET/POST /Task/{id}/$cdex-poll` & `POST /Task/$cdex-questionnaire-request` (CDex clinical attachment, JWS digital signatures, Task-based data request & Questionnaire Task), `POST /CoverageEligibilityRequest/$submit`, `/CoverageEligibilityRequest/{id}/$submit` (adjudicated `CoverageEligibilityResponse`), `POST /ChargeItem/$apply`, `/ChargeItem/{id}/$apply` (`ChargeItemDefinition` pricing engine) | `_id`, `patient`, `provider`, `status`, `use`, `created`, `claim`, `preAuthRef`, `TrackingId`, `AttachTo`, `definition` | `user/Claim.cruds`, `system/Claim.cruds`, `patient/Claim.rs` | ✅ Production Ready |
 | **`Measure`, `MeasureReport`, `$evaluate-measure`, `$care-gaps`, `$evaluate-risk-condition-category`, `$ra-evaluate-risk`, `$ra-remediate`, `$vbpr-performance`, `$vbpr-attest`, `$nhsn-acute-care`, `$nhsn-dqm-evaluate`, `$nhsn-aur-submit`, `$saner-report-capacity`, `$data-requirements`, `$collect-data` & `$submit-data` (eCQM / DEQM / RA / VBPR / NHSN / SANER)** | HL7 FHIR R4 Clinical Quality Measures / Da Vinci DEQM, Risk Adjustment, Value-Based Performance Reporting, CDC NHSN HAI/AUR/DQM & HL7 Public Health SANER (`CMS165`, `CMS122`, `CMS-HCC`, `VBPR`, `NHSN-AUR`, `NHSN-DQM`, `SANER`) | `GET/POST /Measure/$evaluate-measure`, `/Measure/{id}/$evaluate-measure` (`individual`, `subject-list`, `summary`), `GET/POST /Measure/$care-gaps`, `GET/POST /Measure/$evaluate-risk-condition-category`, `/Measure/{id}/$evaluate-risk-condition-category` (HCC coding gap evaluation), `POST /MeasureReport/$ra-evaluate-risk`, `POST /MeasureReport/{id}/$ra-remediate`, `GET/POST /MeasureReport/$vbpr-performance`, `POST /MeasureReport/{id}/$vbpr-attest`, `GET/POST /Measure/$nhsn-acute-care`, `POST /Measure/$nhsn-dqm-evaluate`, `POST /MeasureReport/$nhsn-aur-submit`, `POST /MeasureReport/$saner-report-capacity`, `GET/POST /Patient/{id}/$nhsn-hai-summary`, `GET/POST /Patient/{id}/$nhsn-ach-summary`, `GET/POST /Measure/$data-requirements`, `GET/POST /Measure/$collect-data`, `POST /Measure/$submit-data` | `measure`, `periodStart`, `periodEnd`, `subject`, `reportType`, `status`, `measureReport` | `user/Measure.rs`, `system/Measure.rs`, `patient/*.rs` | ✅ Production Ready |
 | **HL7 CDS Hooks v2.0 (`/cds-services`)** | HL7 CDS Hooks v2.0 Clinical Decision Support (`patient-view`, `order-select`) | `GET /cds-services`, `POST /cds-services/{serviceId}` (auto-hydrating FHIR prefetch + actionable Cards/Suggestions) | `flint-hypertension-care-gap`, `flint-diabetes-a1c-care-gap`, `flint-medication-allergy-check` | Public Discovery / SMART Bearer Token | ✅ Production Ready |
-| **Terminology (`ValueSet`, `CodeSystem`, `ConceptMap`, `NamingSystem`, `$closure`)** | HL7 FHIR R4 Terminology Services & US Core ValueSets | `GET/POST ValueSet/$expand`, `ValueSet/$validate-code`, `CodeSystem/$lookup`, `CodeSystem/$validate-code`, `CodeSystem/$subsumes`, `CodeSystem/$find-matches`, `ConceptMap/$translate`, `NamingSystem/$preferred-id`, `POST /$closure` | `url`, `filter`, `count`, `offset`, `code`, `codeA`, `codeB`, `system`, `targetsystem`, `reverse`, `name`, `concept`, `version`, `property`, `exact` | `user/ValueSet.rs`, `system/ValueSet.rs`, `patient/*.rs` | ✅ Production Ready |
-| **`Subscription` (`rest-hook`, `$status` & `$events`)** | HL7 FHIR R4 Subscription Notification Framework & R5 Backport IG | `POST/PUT/PATCH /Subscription` (`requested` → `active` lifecycle, `Subscription.end` auto-expiration), `GET/POST /Subscription/{id}/$status`, `/Subscription/$status`, `GET/POST /Subscription/{id}/$events`, `/Subscription/$events`, real-time HTTP `POST` webhook delivery | Full search criteria evaluation (`date`, `quantity`, `token`, `:not`, `string` `:exact`/`:contains`, `reference` `:TargetType`, `uri` `:below`/`:above`, `composite`, `:missing`, `eventsSinceNumber`, `eventsUntilNumber`, `content`) | `user/Subscription.cruds`, `system/Subscription.cruds` | ✅ Production Ready |
+| **Terminology (`ValueSet`, `CodeSystem`, `ConceptMap`, `NamingSystem`, `$closure` & Federated Tx)** | HL7 FHIR R4 Terminology Services, US Core ValueSets & External Terminology Server Federation (`FLINT_TX_SERVER_URL`) | `GET/POST ValueSet/$expand`, `ValueSet/$validate-code`, `CodeSystem/$lookup`, `CodeSystem/$validate-code`, `CodeSystem/$subsumes`, `CodeSystem/$find-matches`, `ConceptMap/$translate`, `NamingSystem/$preferred-id`, `POST /$closure`, LRU/TTL cached upstream delegation (`--tx-server-url`) | `url`, `filter`, `count`, `offset`, `code`, `codeA`, `codeB`, `system`, `targetsystem`, `reverse`, `name`, `concept`, `version`, `property`, `exact`, `:in`, `:not-in` | `user/ValueSet.rs`, `system/ValueSet.rs`, `patient/*.rs` | ✅ Production Ready |
+| **`Subscription` (`rest-hook`, `websocket`, CloudEvents v1.0, `$status`, `$events` & `$bind-ws`)** | HL7 FHIR R4 Subscription Notification Framework, R5 Backport IG & CNCF CloudEvents v1.0 | `POST/PUT/PATCH /Subscription` (`requested` → `active` lifecycle, `Subscription.end` auto-expiration), `GET /fhir/r4/{tenant}/$subscriptions-ws` (RFC 6455 WebSocket `bind <id>` & `bind : <token>` push streaming), `GET/POST /Subscription/{id}/$bind-ws`, `/Subscription/$bind-ws` (`$get-ws-binding-token`), `GET/POST /Subscription/{id}/$status`, `/Subscription/$status`, `GET/POST /Subscription/{id}/$events`, `/Subscription/$events`, HTTP `POST` webhook & CloudEvents v1.0 (`application/cloudevents+json`, `application/cloudevents-batch+json`) delivery | Full search criteria evaluation (`date`, `quantity`, `token`, `:not`, `string` `:exact`/`:contains`, `reference` `:TargetType`, `uri` `:below`/`:above`, `composite`, `:missing`, `eventsSinceNumber`, `eventsUntilNumber`, `content`) | `user/Subscription.cruds`, `system/Subscription.cruds` | ✅ Production Ready |
 | **`AuditEvent`** | ASTM E2147 / ONC `§170.315(d)(2)` Auditable Events | `read`, `search-type` | `_id`, `date`, `entity`, `patient`, `agent`, `action`, `subtype`, `outcome` | `user/AuditEvent.rs`, `system/AuditEvent.rs` | ✅ Production Ready |
 | **`Bundle`** | HL7 FHIR R4 Batch & ACID Transaction | `batch`, `transaction` (`POST`, `PUT`, `PATCH`, `DELETE`, `GET`, `HEAD`, `urn:uuid:` resolution, `ifNoneExist`, `ifMatch`, `ifNoneMatch`, `ifModifiedSince`, conditional `?searchParams` URLs) | N/A | Per-entry SMART scope & compartment validation | ✅ Production Ready |
 | **`$export`, `$import` & `Group` (`$everything`, `$add`, `$remove`, `$member-add`, `$member-remove`, `$confirm-attribution-list`, `$atr-summary`, `$pdex-provider-member-match`, `$davinci-data-export`)** | HL7 FHIR Bulk Data Access v2.0.0 / ONC `§170.315(g)(10)`, Zero-JSON Binary Proto3 Bulk Export/Import (`application/x-protobuf`), Da Vinci Member Attribution (ATR), CMS-0057-F / Da Vinci PDex v2.1.0 Provider Access & Payer-to-Payer Data Exchange & Cohort Management | `GET/POST` System (`/$export`), All-Patients (`/Patient/$export`), Active Group Member Cohort (`/Group/{id}/$export`, `/Group/{id}/$everything`, `/Group/{id}/$davinci-data-export`, `POST /Group/{id}/$add`, `POST /Group/{id}/$remove`, `POST /Group/{id}/$member-add`, `POST /Group/{id}/$member-remove`, `POST /Group/{id}/$confirm-attribution-list`, `GET/POST /Group/{id}/$atr-summary`, `POST /Group/$pdex-provider-member-match`), Single-Patient (`/Patient/{id}/$export`), Bulk NDJSON & Binary Proto3 `Bundle` Import (`POST /$import`, `/$import-poll/{jobId}`), Postgres-persisted Async Poll (`/$export-poll/{jobId}`), NDJSON & Proto3 Download (`/$export-file/{jobId}/{file}`) | `_type`, `_since`, `_until`, `_elements`, `_typeFilter`, `patient`, `_outputFormat` (`application/fhir+ndjson`, `application/x-protobuf`), `inputFormat`, `input`, `member`, `memberId`, `attributionPeriod` | `system/*.rs` (Export), `system/*.cruds` (Import), `patient/*.rs` (Single-Patient) | ✅ Production Ready |
@@ -160,7 +160,7 @@ brew install flint-fhir/tap/flint
 curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/install.sh | sh
 
 # C) Install from source with Go 1.26+ (CGO_ENABLED=0)
-CGO_ENABLED=0 go install github.com/flint-fhir/flint/cmd/flintd@v0.4.0
+CGO_ENABLED=0 go install github.com/flint-fhir/flint/cmd/flintd@v0.5.0
 
 # Start flintd backed by embedded SQLite WAL (use :memory: for ephemeral sandboxes)
 flintd --store=sqlite --sqlite-dsn=flint.db
@@ -206,7 +206,7 @@ docker compose --profile seed up -d
 Once running, open:
 * **Interactive SMART v2 Sandbox & Clinical Recipe Runner (`$docs`)**: [http://localhost:8080/fhir/r4/demo/$docs](http://localhost:8080/fhir/r4/demo/$docs)
 * **Live 137-Check Conformance `TestReport` (`$certify`)**: [http://localhost:8080/fhir/r4/demo/$certify](http://localhost:8080/fhir/r4/demo/$certify)
-* **Proto-Compiled OpenAPI 3.1.0 Spec (`v0.4.0`)**: [http://localhost:8080/fhir/r4/demo/openapi.json](http://localhost:8080/fhir/r4/demo/openapi.json)
+* **Proto-Compiled OpenAPI 3.1.0 Spec (`v0.5.0`)**: [http://localhost:8080/fhir/r4/demo/openapi.json](http://localhost:8080/fhir/r4/demo/openapi.json)
 
 ### Option 3: Container Image (`ghcr.io/flint-fhir/flint`)
 
@@ -215,18 +215,18 @@ Run the prebuilt multi-arch container (`linux/amd64`, `linux/arm64`) over SQLite
 ```bash
 # A) Zero-dependency container with embedded SQLite WAL
 docker run --rm -p 8080:8080 \
-  ghcr.io/flint-fhir/flint:0.4.0 --store=sqlite --sqlite-dsn=/tmp/flint.db
+  ghcr.io/flint-fhir/flint:0.5.0 --store=sqlite --sqlite-dsn=/tmp/flint.db
 
 # B) Production PostgreSQL OLTP (auto-applies embedded migrations on startup)
 docker run --rm -p 8080:8080 \
   -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \
-  ghcr.io/flint-fhir/flint:0.4.0
+  ghcr.io/flint-fhir/flint:0.5.0
 
 # C) Hybrid OLTP (PostgreSQL) + MPP OLAP (Apache Doris)
 docker run --rm -p 8080:8080 \
   -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \
   -e FLINT_DORIS_DSN="root:@tcp(host.docker.internal:9030)/flint" \
-  ghcr.io/flint-fhir/flint:0.4.0 --store=postgres --analytics-store=doris
+  ghcr.io/flint-fhir/flint:0.5.0 --store=postgres --analytics-store=doris
 ```
 
 Seed the US Core `"demo"` cohort or run the 137-check certification CLI using the same container image:
@@ -234,16 +234,16 @@ Seed the US Core `"demo"` cohort or run the 137-check certification CLI using th
 ```bash
 # Seed the 62-resource US Core v6.1.0 & v7.0.0 + HL7 IPA cohort into tenant "demo"
 docker run --rm --entrypoint /usr/local/bin/seed \
-  ghcr.io/flint-fhir/flint:0.4.0 -url http://host.docker.internal:8080 -tenant demo
+  ghcr.io/flint-fhir/flint:0.5.0 -url http://host.docker.internal:8080 -tenant demo
 
 # Run the 137-check conformance certification suite (10 suites)
 docker run --rm --entrypoint /usr/local/bin/certify \
-  ghcr.io/flint-fhir/flint:0.4.0 -url http://host.docker.internal:8080 -tenant demo
+  ghcr.io/flint-fhir/flint:0.5.0 -url http://host.docker.internal:8080 -tenant demo
 ```
 
 ### Runtime Configuration (`flintd` CLI Flags & Environment Variables)
 
-CLI flags: `--version`, `--store=postgres|sqlite|doris`, `--analytics-store=doris|sqlite|none`, `--sqlite-dsn=flint.db|:memory:`, `--tenant-isolation=schema|shared`, `--referential-integrity=lenient|strict`, `--ig-package=<path>`, `--ig-load-examples`.
+CLI flags: `--version`, `--store=postgres|sqlite|doris`, `--analytics-store=doris|sqlite|none`, `--sqlite-dsn=flint.db|:memory:`, `--tenant-isolation=schema|shared`, `--referential-integrity=lenient|strict`, `--ig-package=<path>`, `--ig-load-examples`, `--tx-server-url=<url>`, `--tx-timeout=5s`, `--tx-cache-ttl=15m`, `--tx-cache-max-entries=4096`, `--tx-auth-header=<hdr>`, `--tx-fail-open=true|false`.
 
 | Environment Variable | Default | Backend / Scope | Description |
 |:---------------------|:--------|:----------------|:------------|
@@ -266,6 +266,12 @@ CLI flags: `--version`, `--store=postgres|sqlite|doris`, `--analytics-store=dori
 | `FLINT_ZITADEL_TENANT_FROM_DOMAIN` | `false` | Auth | Derive Flint tenant slug from Zitadel organization primary domain |
 | `FLINT_SMART_AUTH_URL` | `/oauth2/authorize` | Auth | Advertised OAuth2 authorization endpoint in `/.well-known/smart-configuration` |
 | `FLINT_SMART_TOKEN_URL` | `/oauth2/token` | Auth | Advertised OAuth2 token endpoint in `/.well-known/smart-configuration` |
+| `FLINT_TX_SERVER_URL` | *(empty — local only)* | Terminology | Optional upstream FHIR R4 terminology server base URL (e.g. `https://tx.fhir.org/r4`; also `--tx-server-url`) |
+| `FLINT_TX_TIMEOUT` | `5s` | Terminology | Per-request timeout for federated terminology calls (also `--tx-timeout`) |
+| `FLINT_TX_CACHE_TTL` | `15m` | Terminology | In-memory LRU cache TTL for federated terminology responses (`-1s` disables; also `--tx-cache-ttl`) |
+| `FLINT_TX_CACHE_MAX_ENTRIES` | `4096` | Terminology | Maximum cached federated terminology entries (also `--tx-cache-max-entries`) |
+| `FLINT_TX_AUTH_HEADER` | *(empty)* | Terminology | Optional `Authorization` or custom `Header: Value` sent to upstream terminology server (also `--tx-auth-header`) |
+| `FLINT_TX_FAIL_OPEN` | `true` | Terminology | Fail-open (`true`) or fail-closed (`false`) when upstream terminology server is unreachable (also `--tx-fail-open`) |
 | `FLINT_AUTOMQ_BROKERS` | *(empty — disabled)* | CDC Add-On | Comma-separated Kafka/AutoMQ brokers for `pkg/cdc` resource event streaming |
 | `FLINT_SCHEMA_REGISTRY_URL` | *(empty)* | CDC Add-On | Optional Schema Registry endpoint for AutoMQ Table Topic registration |
 
@@ -556,7 +562,7 @@ Alongside generative Hegel tests and the built-in 137-check `$certify` suite, ev
 * **Official `FHIR/sql-on-fhir-v2` Test Vectors (`server/testdata/sql-on-fhir-v2`)**: 100% pass across all **22 official suites (144/144 test cases)** on `ViewDefinition/$run` plus live SQL execution equivalence of `ViewDefinition/$sql` on embedded SQLite and PostgreSQL.
 * **Official HL7 FHIRPath R4 `tests-fhir-r4.xml` Corpus (`server/testdata/fhirpath-r4`)**: Executes all **1,076 official HL7 FHIRPath R4 runtime & static semantic type-checking specification vectors (0 skips)** (navigation, polymorphic `.ofType()`/`.as()`/`.is()`, static `ElementDefinition` path & polymorphic choice validation, temporal arithmetic & boundaries, UCUM quantities, math, regex, aggregates, and three-valued logic).
 * **Synthea R4 US Core Multi-Topology Parity**: Verifies identical `Bundle` transaction ingestion, chained/reverse-chained/compartment search, `Patient/$everything`, `Observation/$stats`, `ViewDefinition/$run`, and `$export` across all **5 runtime topologies** (`postgres`, file-backed `modernc.org/sqlite` WAL, `doris`, `hybrid-postgres+doris`, and `hybrid-postgres+sqlite`).
-* **Headless HL7 Inferno CI ([`.github/workflows/inferno.yml`](.github/workflows/inferno.yml), [`deploy/inferno/`](deploy/inferno/))**: Runs official **`us_core_test_kit` (`us_core_v610` & `us_core_v700`)**, **`ipa_test_kit` (`ipa_v100`)**, **`smart_app_launch_test_kit` (`smart_stu2` Backend Services)**, and **`bulk_data_test_kit` (`bulk_data_v200`)** against live `flintd` across both `--store=postgres` and `--store=sqlite` (`task certify-inferno-headless`).
+* **Headless HL7 Inferno CI ([`.github/workflows/inferno.yml`](.github/workflows/inferno.yml), [`deploy/inferno/`](deploy/inferno/))**: Runs official **`us_core_test_kit` (`us_core_v610` & `us_core_v700`)**, **`ipa_test_kit` (`ipa_v100`)**, **`smart_app_launch_test_kit` (full `smart_stu2` Standalone, EHR Launch, OIDC, PKCE, Refresh Rotation, Introspection/Revocation + `smart_stu2_asymmetric` `ES384` `private_key_jwt` — 896 passing leaf tests)**, and **`bulk_data_test_kit` (`bulk_data_v200`)** against live `flintd` across both `--store=postgres` and `--store=sqlite` (`task certify-inferno-headless`).
 
 ---
 
@@ -627,7 +633,9 @@ flint/
 │   ├── cdc/              # Generic, zero-dependency CDC Publisher interface & in-memory sink
 │   ├── certify/          # 137-check FHIR R4 / US Core / ONC (g)(10) / National IG / TestScript / SQL-on-FHIR v2 conformance engine
 │   ├── fhirutil/         # Bidirectional flat FHIR R4 JSON <-> google/fhir protojson codec & OpenAPI schema compiler
+│   ├── fhirxml/          # Pure-Go bidirectional HL7 FHIR R4 XML <-> FHIR JSON / Proto3 wire transcoder
 │   ├── igloader/         # Pure-Go HL7 FHIR R4 NPM (.tgz) Implementation Guide package loader
+│   ├── txclient/         # Thread-safe LRU/TTL cached external FHIR R4 terminology federation client
 │   ├── ucum/             # Canonical UCUM clinical unit conversion engine
 │   └── validation/       # FHIR StructureDefinition, slicing, ValueSet, cardinality & FHIRPath R4 validator
 ├── proto/
@@ -645,7 +653,7 @@ flint/
 ├── ingest/               # [Add-On] Temporal IngestFHIRBundle workflow & activities
 ├── analytics/            # [Add-On] SQLMesh clinical dimensional lakehouse models & DuckDB unit tests
 ├── install.sh            # Zero-dependency SHA-256 verified POSIX binary installer
-├── CHANGELOG.md          # Release history (v0.1.0 -> v0.4.0)
+├── CHANGELOG.md          # Release history (v0.1.0 -> v0.5.0)
 ├── flake.nix             # Hermetic Nix development environment (Go 1.26, Buf, Atlas, golangci-lint)
 ├── lefthook.yml          # Git pre-commit & pre-push hooks
 └── Taskfile.yaml         # Project workflow automation tasks

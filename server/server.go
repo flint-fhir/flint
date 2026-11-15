@@ -1,8 +1,8 @@
 // Package server implements Flint's storage-agnostic HL7 FHIR R4 REST API and
 // clinical interoperability layer.
 //
-// The API layer handles wire-format negotiation (FHIR JSON, NDJSON, CSV/TSV, and
-// zero-JSON binary google/fhir Proto3 over HTTP), SMART on FHIR v2 authorization,
+// The API layer handles wire-format negotiation (FHIR JSON, HL7 FHIR R4 XML, NDJSON,
+// CSV/TSV, and zero-JSON binary google/fhir Proto3 over HTTP), SMART on FHIR v2 authorization,
 // ASTM E2147 AuditEvent recording, StructureDefinition/ValueSet/FHIRPath validation,
 // ACID Bundle orchestration, UCUM search normalization, 35+ National HL7 IGs, and
 // HL7 SQL-on-FHIR v2 evaluation/transpilation. Persistence and OLAP pushdown are
@@ -61,7 +61,7 @@ import (
 )
 
 // Version is the semantic version of the Flint FHIR R4 API & Interoperability engine.
-const Version = "0.4.0"
+const Version = "0.5.0"
 
 var idSeq atomic.Uint64
 
