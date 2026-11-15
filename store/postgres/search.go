@@ -1606,6 +1606,7 @@ var ucumLinearDimensions = [][]ucumUnitConversion{
 		{code: "ug", scale: 1e-6},
 		{code: "mcg", scale: 1e-6},
 		{code: "ng", scale: 1e-9},
+		{code: "pg", scale: 1e-12},
 		{code: "[lb_av]", scale: 453.59237},
 		{code: "lb", scale: 453.59237},
 		{code: "lbs", scale: 453.59237},
@@ -1619,6 +1620,7 @@ var ucumLinearDimensions = [][]ucumUnitConversion{
 		{code: "cm", scale: 0.01},
 		{code: "mm", scale: 1e-3},
 		{code: "um", scale: 1e-6},
+		{code: "nm", scale: 1e-9},
 		{code: "[in_i]", scale: 0.0254},
 		{code: "in", scale: 0.0254},
 		{code: "[ft_i]", scale: 0.3048},
@@ -1672,8 +1674,10 @@ var ucumLinearDimensions = [][]ucumUnitConversion{
 		{code: "mg/dl", scale: 0.01},
 		{code: "mg/L", scale: 1e-3},
 		{code: "mg/l", scale: 1e-3},
+		{code: "ug/mL", scale: 1e-3},
 		{code: "ug/dL", scale: 1e-5},
 		{code: "ug/L", scale: 1e-6},
+		{code: "ng/mL", scale: 1e-6},
 	},
 	// Substance amount (canonical base: mol)
 	{
@@ -1681,6 +1685,15 @@ var ucumLinearDimensions = [][]ucumUnitConversion{
 		{code: "mmol", scale: 1e-3},
 		{code: "umol", scale: 1e-6},
 		{code: "nmol", scale: 1e-9},
+		{code: "pmol", scale: 1e-12},
+	},
+	// Substance concentration (canonical base: mol/L)
+	{
+		{code: "mol/L", scale: 1.0},
+		{code: "mmol/L", scale: 1e-3},
+		{code: "umol/L", scale: 1e-6},
+		{code: "nmol/L", scale: 1e-9},
+		{code: "pmol/L", scale: 1e-12},
 	},
 }
 

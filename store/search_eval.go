@@ -227,6 +227,7 @@ var ucumConversionTable = map[string]ucumFactor{
 	"pg":      {dim: "mass", factor: 1e-12},
 	"[lb_av]": {dim: "mass", factor: 453.59237},
 	"lb":      {dim: "mass", factor: 453.59237},
+	"lbs":     {dim: "mass", factor: 453.59237},
 	"[oz_av]": {dim: "mass", factor: 28.349523125},
 	"oz":      {dim: "mass", factor: 28.349523125},
 
@@ -241,20 +242,24 @@ var ucumConversionTable = map[string]ucumFactor{
 	"in":     {dim: "length", factor: 0.0254},
 	"[ft_i]": {dim: "length", factor: 0.3048},
 	"ft":     {dim: "length", factor: 0.3048},
+	"[yd_i]": {dim: "length", factor: 0.9144},
 
 	// Volume (canonical: L)
 	"L":        {dim: "volume", factor: 1.0},
 	"l":        {dim: "volume", factor: 1.0},
 	"dL":       {dim: "volume", factor: 0.1},
 	"dl":       {dim: "volume", factor: 0.1},
+	"cL":       {dim: "volume", factor: 0.01},
+	"cl":       {dim: "volume", factor: 0.01},
 	"mL":       {dim: "volume", factor: 0.001},
 	"ml":       {dim: "volume", factor: 0.001},
+	"cm3":      {dim: "volume", factor: 0.001},
 	"uL":       {dim: "volume", factor: 1e-6},
 	"ul":       {dim: "volume", factor: 1e-6},
 	"[foz_us]": {dim: "volume", factor: 0.0295735295625},
 	"[gal_us]": {dim: "volume", factor: 3.785411784},
 
-	// Duration (canonical: s)
+	// Duration (canonical: s; UCUM Julian month mo_j & year a_j)
 	"s":   {dim: "time", factor: 1.0},
 	"ms":  {dim: "time", factor: 0.001},
 	"min": {dim: "time", factor: 60.0},
@@ -262,20 +267,37 @@ var ucumConversionTable = map[string]ucumFactor{
 	"hr":  {dim: "time", factor: 3600.0},
 	"d":   {dim: "time", factor: 86400.0},
 	"wk":  {dim: "time", factor: 604800.0},
-	"mo":  {dim: "time", factor: 2629746.0},
-	"a":   {dim: "time", factor: 31556952.0},
-	"yr":  {dim: "time", factor: 31556952.0},
+	"mo":  {dim: "time", factor: 2629800.0},
+	"a":   {dim: "time", factor: 31557600.0},
+	"yr":  {dim: "time", factor: 31557600.0},
+
+	// Pressure (canonical: Pa)
+	"Pa":     {dim: "pressure", factor: 1.0},
+	"kPa":    {dim: "pressure", factor: 1000.0},
+	"mm[Hg]": {dim: "pressure", factor: 133.322387415},
+	"mmHg":   {dim: "pressure", factor: 133.322387415},
 
 	// Mass Concentration (canonical: g/L)
 	"g/L":   {dim: "mass_conc", factor: 1.0},
+	"g/l":   {dim: "mass_conc", factor: 1.0},
 	"g/dL":  {dim: "mass_conc", factor: 10.0},
+	"g/dl":  {dim: "mass_conc", factor: 10.0},
 	"mg/L":  {dim: "mass_conc", factor: 0.001},
+	"mg/l":  {dim: "mass_conc", factor: 0.001},
 	"mg/dL": {dim: "mass_conc", factor: 0.01},
+	"mg/dl": {dim: "mass_conc", factor: 0.01},
 	"mg/mL": {dim: "mass_conc", factor: 1.0},
 	"ug/L":  {dim: "mass_conc", factor: 1e-6},
 	"ug/dL": {dim: "mass_conc", factor: 1e-5},
 	"ug/mL": {dim: "mass_conc", factor: 0.001},
 	"ng/mL": {dim: "mass_conc", factor: 1e-6},
+
+	// Substance Amount (canonical: mol)
+	"mol":  {dim: "subst", factor: 1.0},
+	"mmol": {dim: "subst", factor: 0.001},
+	"umol": {dim: "subst", factor: 1e-6},
+	"nmol": {dim: "subst", factor: 1e-9},
+	"pmol": {dim: "subst", factor: 1e-12},
 
 	// Substance Concentration (canonical: mol/L)
 	"mol/L":  {dim: "subst_conc", factor: 1.0},

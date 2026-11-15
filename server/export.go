@@ -39,6 +39,21 @@ type exportJob struct {
 	Status     string            // "in-progress", "completed", "failed"
 	Err        string
 	done       chan struct{}
+	cancel     context.CancelFunc
+}
+
+func (s *Server) cancelAllExportJobs() {
+	s.exportMu.RLock()
+	cancels := make([]context.CancelFunc, 0, len(s.exportJobs))
+	for _, job := range s.exportJobs {
+		if job != nil && job.cancel != nil {
+			cancels = append(cancels, job.cancel)
+		}
+	}
+	s.exportMu.RUnlock()
+	for _, c := range cancels {
+		c()
+	}
 }
 
 func (s *Server) storeExportJob(job *exportJob) {
@@ -713,6 +728,7 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 	w.Header().Set("Content-Location", pollLocation)
 
 	if isAsync {
+		asyncCtx, cancel := s.deriveBackgroundContext(r.Context())
 		job := &exportJob{
 			ID:         jobID,
 			TenantID:   tenant,
@@ -721,11 +737,17 @@ func (s *Server) executeBulkExport(w http.ResponseWriter, r *http.Request, isPat
 			RequestURL: base + r.URL.RequestURI(),
 			Status:     "in-progress",
 			done:       make(chan struct{}),
+			cancel:     cancel,
 		}
 		s.storeExportJob(job)
 
-		asyncCtx := context.WithoutCancel(r.Context())
-		go s.populateExportJob(asyncCtx, job, exportParams, typeFilterAllowed, reqParams.elements, hasSecCtx, secCtx, patientID)
+		if !s.startBackgroundWorker(func() {
+			defer cancel()
+			s.populateExportJob(asyncCtx, job, exportParams, typeFilterAllowed, reqParams.elements, hasSecCtx, secCtx, patientID)
+		}) {
+			cancel()
+			close(job.done)
+		}
 
 		w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
 		w.WriteHeader(http.StatusAccepted)
@@ -967,6 +989,9 @@ func (s *Server) populateExportJob(
 	}
 
 	err := s.streamExportResources(ctx, exportParams, func(res store.SearchResult) error {
+		if cErr := ctx.Err(); cErr != nil {
+			return cErr
+		}
 		if !matchesExportTypeFilter(typeFilterAllowed, res.ResType, res.ResID) {
 			return nil
 		}
@@ -1038,7 +1063,7 @@ func (s *Server) populateExportJob(
 	}
 	s.exportMu.Unlock()
 
-	if err == nil {
+	if err == nil && ctx.Err() == nil {
 		s.storeExportJob(job)
 	}
 }
@@ -1127,15 +1152,18 @@ func (s *Server) handleExportCancel(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("export job %s not found", jobID))
 		return
 	}
+	if !s.authorizeExportJobAccess(w, r, job, "") {
+		return
+	}
+
+	if job.cancel != nil {
+		job.cancel()
+	}
 	if job.done != nil {
 		select {
 		case <-job.done:
 		case <-time.After(500 * time.Millisecond):
 		}
-	}
-
-	if !s.authorizeExportJobAccess(w, r, job, "") {
-		return
 	}
 
 	if job.PatientID != "" {

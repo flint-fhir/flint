@@ -18,7 +18,7 @@ CGO_ENABLED=0 go run ./examples/embedded-sqlite \
 Once running, open:
 - **CapabilityStatement**: `http://127.0.0.1:8080/fhir/r4/demo/metadata`
 - **Interactive SMART v2 & Clinical Sandbox (`$docs`)**: `http://127.0.0.1:8080/fhir/r4/demo/$docs`
-- **Live 137-Check Certification Suite (`$certify`)**: `http://127.0.0.1:8080/fhir/r4/demo/$certify`
+- **Live 138-Check Certification Suite (`$certify`)**: `http://127.0.0.1:8080/fhir/r4/demo/$certify`
 
 ## Embed in Your Own Go Service
 

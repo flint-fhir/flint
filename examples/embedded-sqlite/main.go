@@ -186,7 +186,7 @@ func run(
 	_, _ = fmt.Fprintf(out, "Flint embedded FHIR R4 server listening on http://%s (dsn=%s, referential_integrity=%s)\n", *addr, *dsn, refMode)
 	_, _ = fmt.Fprintf(out, "  CapabilityStatement: http://%s/fhir/r4/demo/metadata\n", *addr)
 	_, _ = fmt.Fprintf(out, "  Interactive Sandbox: http://%s/fhir/r4/demo/$docs\n", *addr)
-	_, _ = fmt.Fprintf(out, "  137-Check $certify:  http://%s/fhir/r4/demo/$certify\n", *addr)
+	_, _ = fmt.Fprintf(out, "  138-Check $certify:  http://%s/fhir/r4/demo/$certify\n", *addr)
 
 	return serve(ctx, *addr, srv.Handler())
 }

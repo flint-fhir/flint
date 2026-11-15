@@ -1446,7 +1446,8 @@ var (
 	reTokenEmptySys   = regexp.MustCompile(`sp_system = '' AND [a-z0-9_]+\.sp_value = \$(\d+)`)
 	reTokenSysOnly    = regexp.MustCompile(`sp_system = \$(\d+)`)
 	reDateCmp         = regexp.MustCompile(`sp_(low|high)\s*(<=|>=|<|>)\s*\$(\d+)`)
-	reQuantBranchCode = regexp.MustCompile(`\(([^()]+)\) AND [a-z0-9_]+\.sp_code = \$(\d+)`)
+	reQuantOrGroup    = regexp.MustCompile(`\(\([^()]*(?:\([^()]*\)[^()]*)?\)(?: OR \([^()]*(?:\([^()]*\)[^()]*)?\))+\)`)
+	reQuantBranchCode = regexp.MustCompile(`\((?:\(([^()]+)\)|([^()]+)) AND [a-z0-9_]+\.sp_code = \$(\d+)\)`)
 	reQuantValCmp     = regexp.MustCompile(`sp_value\s*(<=|>=|!=|<|>|=)\s*\$(\d+)`)
 	reQuantCodeOnly   = regexp.MustCompile(`sp_code = \$(\d+)`)
 	reQuantSysOnly    = regexp.MustCompile(`sp_system = \$(\d+)`)
@@ -1919,7 +1920,34 @@ func (s *memPGStore) matchSpidxQuantJoin(r *memResRecord, line string, args []dr
 	return s.matchQuantCondOnRec(r, spName, condPart, args)
 }
 
+func matchQuantBranches(row store.SpidxQuantity, branches [][]string, args []driver.NamedValue) bool {
+	for _, b := range branches {
+		valExpr := b[1]
+		if valExpr == "" {
+			valExpr = b[2]
+		}
+		cIdx, _ := strconv.Atoi(b[3])
+		if row.SpCode != nvStr(args, cIdx-1) {
+			continue
+		}
+		bCmps := reQuantValCmp.FindAllStringSubmatch(valExpr, -1)
+		allOk := true
+		for _, cm := range bCmps {
+			vIdx, _ := strconv.Atoi(cm[2])
+			if !evalSingleQuantCmp(row.SpValue, cm[1], nvFloat(args, vIdx-1)) {
+				allOk = false
+				break
+			}
+		}
+		if allOk {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *memPGStore) matchQuantCondOnRec(r *memResRecord, spName, condPart string, args []driver.NamedValue) bool {
+	orGroups := reQuantOrGroup.FindAllString(condPart, -1)
 	branches := reQuantBranchCode.FindAllStringSubmatch(condPart, -1)
 	valCmps := reQuantValCmp.FindAllStringSubmatch(condPart, -1)
 	codeMatches := reQuantCodeOnly.FindAllStringSubmatch(condPart, -1)
@@ -1936,28 +1964,22 @@ func (s *memPGStore) matchQuantCondOnRec(r *memResRecord, spName, condPart strin
 				continue
 			}
 		}
-		if len(branches) > 0 {
-			matchedBranch := false
-			for _, b := range branches {
-				cIdx, _ := strconv.Atoi(b[2])
-				if row.SpCode != nvStr(args, cIdx-1) {
-					continue
-				}
-				bCmps := reQuantValCmp.FindAllStringSubmatch(b[1], -1)
-				allOk := true
-				for _, cm := range bCmps {
-					vIdx, _ := strconv.Atoi(cm[2])
-					if !evalSingleQuantCmp(row.SpValue, cm[1], nvFloat(args, vIdx-1)) {
-						allOk = false
-						break
-					}
-				}
-				if allOk {
-					matchedBranch = true
+		if len(orGroups) > 0 {
+			allGroupsOk := true
+			for _, grp := range orGroups {
+				grpBranches := reQuantBranchCode.FindAllStringSubmatch(grp, -1)
+				if len(grpBranches) > 0 && !matchQuantBranches(row, grpBranches, args) {
+					allGroupsOk = false
 					break
 				}
 			}
-			if matchedBranch {
+			if allGroupsOk {
+				return true
+			}
+			continue
+		}
+		if len(branches) > 0 {
+			if matchQuantBranches(row, branches, args) {
 				return true
 			}
 			continue

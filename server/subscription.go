@@ -521,14 +521,19 @@ func (s *Server) dispatchSubscriptionsWithAction(ctx context.Context, tenant, re
 
 		subID := subRes.ResID
 		// Dispatch webhook asynchronously via bounded worker semaphore so write latency is never blocked
-		asyncCtx := context.WithoutCancel(ctx)
 		if s.subSem != nil {
 			select {
 			case s.subSem <- struct{}{}:
-				go func(sid, ep, pt string, hdrs []string, body []byte) {
+				sid, ep, pt, hdrs, body := subID, endpoint, payloadType, headers, bodyBytes
+				started := s.startBackgroundWorker(func() {
 					defer func() { <-s.subSem }()
+					asyncCtx, cancel := s.deriveBackgroundContext(ctx)
+					defer cancel()
 					s.deliverRestHook(asyncCtx, tenant, sid, ep, pt, hdrs, body)
-				}(subID, endpoint, payloadType, headers, bodyBytes)
+				})
+				if !started {
+					<-s.subSem
+				}
 			default:
 				s.recordSubscriptionDelivery(tenant, subID, false, "subscription delivery queue full")
 				if s.metrics != nil {
@@ -539,7 +544,12 @@ func (s *Server) dispatchSubscriptionsWithAction(ctx context.Context, tenant, re
 				}
 			}
 		} else {
-			go s.deliverRestHook(asyncCtx, tenant, subID, endpoint, payloadType, headers, bodyBytes)
+			sid, ep, pt, hdrs, body := subID, endpoint, payloadType, headers, bodyBytes
+			s.startBackgroundWorker(func() {
+				asyncCtx, cancel := s.deriveBackgroundContext(ctx)
+				defer cancel()
+				s.deliverRestHook(asyncCtx, tenant, sid, ep, pt, hdrs, body)
+			})
 		}
 	}
 }
@@ -1104,14 +1114,24 @@ func (s *Server) deliverRestHook(ctx context.Context, tenant, subID, endpoint, p
 			return http.ErrUseLastResponse
 		},
 	}
+	defer transport.CloseIdleConnections()
 
 	const maxAttempts = 2
 	var lastErr error
 	var lastStatus int
 
 	for attempt := range maxAttempts {
+		if ctx.Err() != nil {
+			return
+		}
 		if attempt > 0 {
-			time.Sleep(50 * time.Millisecond)
+			timer := time.NewTimer(50 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
 		}
 		reqCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 

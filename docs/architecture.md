@@ -5,7 +5,7 @@ Flint is designed around a strict two-plane separation:
 1. **The FHIR R4 API & Interoperability Layer (`server/`, `pkg/*`)** — A storage-agnostic clinical protocol engine that owns HTTP/wire negotiation, SMART on FHIR v2 security, validation, FHIRPath R4 evaluation, UCUM canonicalization, 35+ National HL7 Implementation Guides (130+ operations), and HL7 SQL-on-FHIR v2 compilation.
 2. **The Pluggable Persistence & Analytical Storage Layer (`store/`)** — A narrow, SQL-free Go interface boundary ([`store.Store`](../store/store.go) and [`store.AnalyticalStore`](../store/store.go)) implemented by **PostgreSQL** (`store/postgres`), **Embedded SQLite WAL** (`store/sqlite`), **Apache Doris MPP** (`store/doris`), and real-time dual-plane **[`store.HybridStore`](../store/hybrid.go)** topologies.
 
-Because zero database drivers or SQL queries leak above `store/store.go`, the exact same `flintd` binary and [`server.Server`](../server/server.go) instance pass **137/137 automated conformance checks (`$certify`)** regardless of whether the underlying store is a single `:memory:` SQLite database on a laptop, a multi-tenant PostgreSQL cluster, an Apache Doris MPP analytical cluster, or a Hybrid OLTP + OLAP deployment.
+Because zero database drivers or SQL queries leak above `store/store.go`, the exact same `flintd` binary and [`server.Server`](../server/server.go) instance pass **138/138 automated conformance checks (`$certify`)** regardless of whether the underlying store is a single `:memory:` SQLite database on a laptop, a multi-tenant PostgreSQL cluster, an Apache Doris MPP analytical cluster, or a Hybrid OLTP + OLAP deployment.
 
 ---
 
@@ -76,7 +76,7 @@ Flint inverts this model through three architectural invariants:
    - Incoming `application/fhir+json` payloads are unmarshaled once at the HTTP edge into strongly typed `google.fhir.r4.core.*` `proto.Message` structs (and `application/x-protobuf` / `application/fhir+protobuf` requests skip JSON parsing altogether).
    - Storage backends receive pre-serialized, deterministic Proto3 wire bytes (`[]byte`) plus pre-extracted metadata—never raw JSON strings.
 2. **Search Extraction & UCUM Normalization Happen in the API Layer**:
-   - Before invoking `store.WriteResourceWithMeta` or `store.ExecuteTransactionBundle`, the API layer inspects the `proto.Message` via generated extractors and `protoreflect`, canonicalizes UCUM clinical units (`pkg/ucum`, e.g., `150 [lb_av]` → `68.0389 kg`, `98.6 [degF]` → `310.15 K`), and emits normalized `SearchIndexEntry` values across FHIR's 6 index families (`string`, `token`, `reference`, `date`, `number`, `quantity`).
+   - Before invoking `store.WriteResourceWithMeta` or `store.ExecuteTransactionBundle`, the API layer inspects the `proto.Message` via generated extractors and `protoreflect`, emits normalized `SearchIndexEntry` values across FHIR's 6 index families (`string`, `token`, `reference`, `date`, `number`, `quantity`), and evaluates canonical UCUM clinical units (`store/`, e.g., `150 [lb_av]` ↔ `68.0389 kg`, `98.6 [degF]` ↔ `310.15 K`) consistently across backends.
    - Storage backends only index and query clean typed primitives—they do not need embedded FHIR or UCUM domain logic.
 3. **Clinical Semantics & Multi-IG Workflows Compose Over `store.Store`**:
    - All 130+ `$` operations, 35+ National HL7 IGs, SMART on FHIR v2 scope filters, FHIR Subscriptions (`rest-hook`), CDS Hooks v2.0 services, CQL/FHIRPath eCQMs (`$evaluate-measure`, `$care-gaps`), `ViewDefinition/$run`, and `TestScript/$evaluate` sit in `server/` above `store.Store`. Adding a new storage backend immediately inherits the entire FHIR R4 & National IG surface for free.
@@ -90,10 +90,10 @@ Flint inverts this model through three architectural invariants:
 | **Wire & Content Negotiation** | [`server/`](../server/server.go), [`pkg/fhirutil`](../pkg/fhirutil), [`pkg/fhirxml`](../pkg/fhirxml) | Negotiates `application/fhir+json`, `application/fhir+xml` (`_format=xml`), `application/fhir+ndjson`, `text/csv`, `text/tab-separated-values`, `application/x-protobuf`, and `application/fhir+protobuf`; handles `_summary`, `_elements` (`SUBSETTED`), `Prefer`, `$convert`, and RFC 6902 / RFC 7396 / FHIRPath `PATCH`. |
 | **Identity, SMART v2 & UDAP** | [`pkg/auth`](../pkg/auth), `server/smart_*.go` | Built-in SMART App Launch v2.0.0 OAuth2 server (`S256` PKCE, standalone & EHR launch, OIDC `id_token` / `fhirUser`, Backend Services & confidential asymmetric `private_key_jwt` RFC 7523, token introspection/revocation), UDAP dynamic client registration, external OIDC/Zitadel JWT validation, patient compartment enforcement, and v2 sub-resource scope filtering (`?category=vital-signs`). |
 | **Validation, Terminology & FHIRPath R4** | [`pkg/validation`](../pkg/validation), [`pkg/txclient`](../pkg/txclient) | Validates cardinality, slicing discriminators, choice-type invariants, terminology bindings (with optional LRU/TTL cached external terminology server federation via `FLINT_TX_SERVER_URL`), regex patterns, reference targets, and FHIRPath constraints across all 146 FHIR R4 resources and 26 built-in US Core v6.1.0 & v7.0.0 profiles (`$validate` + write-time enforcement). |
-| **Search & UCUM Engine** | `server/search_*.go`, [`pkg/ucum`](../pkg/ucum) | Parses FHIR R4 search queries (chained parameters, recursive `_has`, composites, `:in`/`:not-in`/`:below`/`:above` terminology modifiers, `_filter` ASTs, `_include`/`_revinclude:iterate`) into backend-neutral [`store.SearchParams`](../store/store.go) structs and normalizes UCUM quantities. |
+| **Search & UCUM Engine** | `server/search_*.go`, [`store/`](../store/search_eval.go) | Parses FHIR R4 search queries (chained parameters, recursive `_has`, composites, `:in`/`:not-in`/`:below`/`:above` terminology modifiers, `_filter` ASTs, `_include`/`_revinclude:iterate`) into backend-neutral [`store.SearchParams`](../store/store.go) structs and normalizes UCUM quantities. |
 | **Clinical, Subscriptions & National IGs** | `server/*_ops.go`, `server/subscriptions.go` | Implements 35+ HL7 IGs & 130+ operations (`$everything`, `$summary` IPS, `$docref`, `$populate`/`$extract` SDC, `$evaluate-measure`/`$care-gaps`, `PlanDefinition/$apply`, Da Vinci suite, CARIN BB, FAST, Gravity SDOH, mCODE, PACIO, Public Health, Vulcan, RFC 6455 WebSocket `$subscriptions-ws` & CloudEvents v1.0 Subscriptions, CDS Hooks v2.0). |
 | **SQL-on-FHIR v2** | `server/sqlonfhir.go` | Evaluates `ViewDefinition/$run` and `$export` in-memory over `protoreflect` against *any* `store.Store`, and compiles `ViewDefinition/$sql` into native zero-JSON SQL for `postgres`, `sqlite`, and `doris`. |
-| **Audit & Conformance** | [`pkg/audit`](../pkg/audit), [`pkg/certify`](../pkg/certify/certify.go) | Automatically records ASTM E2147 / ONC `(d)(2)` `AuditEvent` trails and runs the 137-check `$certify` conformance harness and `TestScript/$evaluate` engine. |
+| **Audit & Conformance** | [`pkg/audit`](../pkg/audit), [`pkg/certify`](../pkg/certify/certify.go) | Automatically records ASTM E2147 / ONC `(d)(2)` `AuditEvent` trails and runs the 138-check `$certify` conformance harness and `TestScript/$evaluate` engine. |
 
 ---
 
@@ -139,7 +139,7 @@ Flint enforces physical Go package decoupling across the repository:
 
 ## 5. Plane 2: Pluggable Storage Topologies & When to Choose Each
 
-All topologies expose **100% identical FHIR R4 REST, Search, SMART v2, IG, and `$certify` (`137/137`) behavior**—only CLI flags or environment variables change:
+All topologies expose **100% identical FHIR R4 REST, Search, SMART v2, IG, and `$certify` (`138/138`) behavior**—only CLI flags or environment variables change:
 
 | Topology | CLI Flags / Env Vars | Storage Layout | Ideal Use Case |
 | :--- | :--- | :--- | :--- |

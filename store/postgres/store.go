@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -269,6 +270,19 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []BundleOperat
 
 	var results []BundleOpResult
 	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		lockKeys := make([]string, 0, len(ops)*2)
+		for _, op := range ops {
+			if op.ConditionalParams != nil || op.IfNoneExist != nil {
+				lockKeys = append(lockKeys, op.Input.TenantID+":"+op.Input.ResType)
+			}
+			if op.Input.ResID != "" {
+				lockKeys = append(lockKeys, op.Input.TenantID+":"+op.Input.ResType+":"+op.Input.ResID)
+			}
+		}
+		if err := acquireSortedResourceLocks(ctx, tx, lockKeys); err != nil {
+			return err
+		}
+
 		results = make([]BundleOpResult, 0, len(ops))
 		for i, op := range ops {
 			if op.OpType == BundleOpDelete || strings.EqualFold(op.Method, "DELETE") {
@@ -417,6 +431,15 @@ func (s *Store) WriteBatch(ctx context.Context, inputs []ResourceInput) error {
 		}
 	}
 	return s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
+		lockKeys := make([]string, 0, len(inputs))
+		for _, input := range inputs {
+			if input.ResID != "" {
+				lockKeys = append(lockKeys, input.TenantID+":"+input.ResType+":"+input.ResID)
+			}
+		}
+		if err := acquireSortedResourceLocks(ctx, tx, lockKeys); err != nil {
+			return err
+		}
 		for _, input := range inputs {
 			if _, err := writeResourceInTx(ctx, tx, input); err != nil {
 				return fmt.Errorf("resource %s/%s: %w", input.ResType, input.ResID, err)
@@ -426,7 +449,37 @@ func (s *Store) WriteBatch(ctx context.Context, inputs []ResourceInput) error {
 	})
 }
 
+func acquireSortedResourceLocks(ctx context.Context, tx *sql.Tx, keys []string) error {
+	if len(keys) <= 1 {
+		return nil
+	}
+	sorted := make([]string, 0, len(keys))
+	seen := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
+		if _, ok := seen[k]; !ok {
+			seen[k] = struct{}{}
+			sorted = append(sorted, k)
+		}
+	}
+	sort.Strings(sorted)
+	for _, k := range sorted {
+		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", k); err != nil {
+			return fmt.Errorf("acquire ordered resource lock: %w", err)
+		}
+	}
+	return nil
+}
+
 func writeResourceInTx(ctx context.Context, tx *sql.Tx, input ResourceInput) (*ResourceRecord, error) {
+	if input.ResID != "" {
+		resLockKey := input.TenantID + ":" + input.ResType + ":" + input.ResID
+		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", resLockKey); err != nil {
+			return nil, fmt.Errorf("acquire resource lock: %w", err)
+		}
+	}
 	var curVersion int
 	var curDeleted bool
 	err := tx.QueryRowContext(ctx, `
@@ -769,6 +822,12 @@ func (s *Store) DeleteResourceWithExpectedVersion(ctx context.Context, tenantID,
 }
 
 func (s *Store) deleteResourceInTx(ctx context.Context, tx *sql.Tx, tenantID, resType, resID string, expectedVersion int) (*ResourceRecord, error) {
+	if resID != "" {
+		resLockKey := tenantID + ":" + resType + ":" + resID
+		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", resLockKey); err != nil {
+			return nil, fmt.Errorf("acquire resource lock: %w", err)
+		}
+	}
 	var curVersion int
 	var curUpdated time.Time
 	var curDeleted bool

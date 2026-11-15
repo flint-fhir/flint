@@ -7,14 +7,14 @@ brew install flint-fhir/tap/flint
 # Boot complete FHIR R4 API server over embedded SQLite WAL (or use :memory:)
 flintd --store=sqlite --sqlite-dsn=flint.db
 
-# Verify 137/137 automated conformance checks across 10 suites:
+# Verify 138/138 automated conformance checks across 10 suites:
 curl -s http://localhost:8080/fhir/r4/demo/$certify | jq .result`,
 
   compose: `# Start Flint FHIR R4 API + PostgreSQL 16 + seeded 62-resource US Core v6/v7 & IPA cohort
 curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/docker-compose.yml -o docker-compose.yml
 docker compose --profile seed up -d
 
-# Explore the live SMART v2 Sandbox & 137-Check Conformance Suite:
+# Explore the live SMART v2 Sandbox & 138-Check Conformance Suite:
 open http://localhost:8080/fhir/r4/demo/$docs
 curl -s http://localhost:8080/fhir/r4/demo/$certify | jq .result`,
 

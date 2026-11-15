@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"hash/fnv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -27,6 +29,9 @@ type HybridStore struct {
 	replica           Store
 	analytical        AnalyticalStore
 	extractors        map[string]IndexExtractorFunc
+	repStripes        [64]sync.Mutex
+	repVerMu          sync.Mutex
+	lastRepVer        map[string]int
 	replicatedWrites  atomic.Uint64
 	replicatedDeletes atomic.Uint64
 	replicationErrors atomic.Uint64
@@ -45,6 +50,7 @@ func NewHybridStore(primary Store, replica Store) *HybridStore {
 		replica:    replica,
 		analytical: analytical,
 		extractors: DefaultIndexExtractors(),
+		lastRepVer: make(map[string]int),
 	}
 }
 
@@ -163,6 +169,52 @@ func (h *HybridStore) ensureSearchIndexes(in ResourceInput) ResourceInput {
 	return in
 }
 
+func (h *HybridStore) lockReplicationStripe(tenantID, resType, resID string) (string, func()) {
+	key := tenantID + "|" + resType + "|" + resID
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(key))
+	idx := hasher.Sum32() % uint32(len(h.repStripes))
+	h.repStripes[idx].Lock()
+	return key, h.repStripes[idx].Unlock
+}
+
+func (h *HybridStore) shouldApplyReplicatedVersion(key string, ver int) bool {
+	if ver <= 0 {
+		return true
+	}
+	h.repVerMu.Lock()
+	defer h.repVerMu.Unlock()
+	if h.lastRepVer == nil {
+		h.lastRepVer = make(map[string]int)
+	}
+	if ver < h.lastRepVer[key] {
+		return false
+	}
+	h.lastRepVer[key] = ver
+	return true
+}
+
+func (h *HybridStore) clearReplicatedVersions(tenantID, resType, resID string) {
+	h.repVerMu.Lock()
+	defer h.repVerMu.Unlock()
+	if len(h.lastRepVer) == 0 {
+		return
+	}
+	if tenantID != "" && resType != "" && resID != "" {
+		delete(h.lastRepVer, tenantID+"|"+resType+"|"+resID)
+		return
+	}
+	prefix := tenantID + "|"
+	if resType != "" {
+		prefix = tenantID + "|" + resType + "|"
+	}
+	for k := range h.lastRepVer {
+		if tenantID == "" || strings.HasPrefix(k, prefix) {
+			delete(h.lastRepVer, k)
+		}
+	}
+}
+
 func (h *HybridStore) replicateRecord(ctx context.Context, baseInput ResourceInput, rec *ResourceRecord) {
 	if IsNil(h.replica) || rec == nil {
 		return
@@ -188,8 +240,27 @@ func (h *HybridStore) replicateRecord(ctx context.Context, baseInput ResourceInp
 		repIn.ResourceProto = baseInput.ResourceProto
 	}
 	repIn = h.ensureSearchIndexes(repIn)
+
+	key, unlock := h.lockReplicationStripe(repIn.TenantID, repIn.ResType, repIn.ResID)
+	defer unlock()
+	if !h.shouldApplyReplicatedVersion(key, rec.ResVersion) {
+		return
+	}
 	_, err := h.replica.WriteResourceWithMeta(ctx, repIn)
 	h.recordWriteReplication(err, 1)
+}
+
+func (h *HybridStore) replicateDeleteWithMeta(ctx context.Context, tenantID, resType, resID string, ver int) {
+	if IsNil(h.replica) || resID == "" {
+		return
+	}
+	key, unlock := h.lockReplicationStripe(tenantID, resType, resID)
+	defer unlock()
+	if !h.shouldApplyReplicatedVersion(key, ver) {
+		return
+	}
+	_, rErr := h.replica.DeleteResourceWithMeta(ctx, tenantID, resType, resID)
+	h.recordDeleteReplication(rErr, 1)
 }
 
 // Ping checks connectivity to both the primary store and the analytical replica.
@@ -287,8 +358,7 @@ func (h *HybridStore) ConditionalDeleteResource(
 		return nil, err
 	}
 	if !IsNil(h.replica) && rec != nil && rec.ResID != "" {
-		_, rErr := h.replica.DeleteResourceWithMeta(ctx, tenantID, resType, rec.ResID)
-		h.recordDeleteReplication(rErr, 1)
+		h.replicateDeleteWithMeta(ctx, tenantID, resType, rec.ResID, rec.ResVersion)
 	}
 	return rec, nil
 }
@@ -308,8 +378,7 @@ func (h *HybridStore) ConditionalDeleteResources(
 	if !IsNil(h.replica) {
 		for _, rec := range recs {
 			if rec.ResID != "" {
-				_, rErr := h.replica.DeleteResourceWithMeta(ctx, tenantID, resType, rec.ResID)
-				h.recordDeleteReplication(rErr, 1)
+				h.replicateDeleteWithMeta(ctx, tenantID, resType, rec.ResID, rec.ResVersion)
 			}
 		}
 	}
@@ -326,12 +395,15 @@ func (h *HybridStore) ExecuteTransactionBundle(ctx context.Context, ops []Bundle
 		for i, op := range ops {
 			if op.OpType == BundleOpDelete || strings.EqualFold(op.Method, "DELETE") {
 				resID := op.Input.ResID
-				if i < len(results) && results[i].ResID != "" {
-					resID = results[i].ResID
+				ver := 0
+				if i < len(results) {
+					if results[i].ResID != "" {
+						resID = results[i].ResID
+					}
+					ver = results[i].ResVersion
 				}
 				if resID != "" {
-					_, rErr := h.replica.DeleteResourceWithMeta(ctx, op.Input.TenantID, op.Input.ResType, resID)
-					h.recordDeleteReplication(rErr, 1)
+					h.replicateDeleteWithMeta(ctx, op.Input.TenantID, op.Input.ResType, resID, ver)
 				}
 				continue
 			}
@@ -379,6 +451,8 @@ func (h *HybridStore) DeleteResource(ctx context.Context, tenantID, resType, res
 		return err
 	}
 	if !IsNil(h.replica) {
+		_, unlock := h.lockReplicationStripe(tenantID, resType, resID)
+		defer unlock()
 		rErr := h.replica.DeleteResource(ctx, tenantID, resType, resID)
 		h.recordDeleteReplication(rErr, 1)
 	}
@@ -391,10 +465,11 @@ func (h *HybridStore) DeleteResourceWithMeta(ctx context.Context, tenantID, resT
 	if err != nil {
 		return nil, err
 	}
-	if !IsNil(h.replica) {
-		_, rErr := h.replica.DeleteResourceWithMeta(ctx, tenantID, resType, resID)
-		h.recordDeleteReplication(rErr, 1)
+	ver := 0
+	if rec != nil {
+		ver = rec.ResVersion
 	}
+	h.replicateDeleteWithMeta(ctx, tenantID, resType, resID, ver)
 	return rec, nil
 }
 
@@ -404,10 +479,11 @@ func (h *HybridStore) DeleteResourceWithExpectedVersion(ctx context.Context, ten
 	if err != nil {
 		return nil, err
 	}
-	if !IsNil(h.replica) {
-		_, rErr := h.replica.DeleteResourceWithMeta(ctx, tenantID, resType, resID)
-		h.recordDeleteReplication(rErr, 1)
+	ver := 0
+	if rec != nil {
+		ver = rec.ResVersion
 	}
+	h.replicateDeleteWithMeta(ctx, tenantID, resType, resID, ver)
 	return rec, nil
 }
 
@@ -416,6 +492,11 @@ func (h *HybridStore) PurgePatientCompartment(ctx context.Context, tenantID, pat
 	recs, err := h.primary.PurgePatientCompartment(ctx, tenantID, patientID, hardExpunge)
 	if err != nil {
 		return nil, err
+	}
+	if hardExpunge {
+		for _, rec := range recs {
+			h.clearReplicatedVersions(tenantID, rec.ResType, rec.ResID)
+		}
 	}
 	if !IsNil(h.replica) {
 		_, rErr := h.replica.PurgePatientCompartment(ctx, tenantID, patientID, hardExpunge)
@@ -430,6 +511,7 @@ func (h *HybridStore) ExpungeResources(ctx context.Context, params ExpungeParams
 	if err != nil {
 		return 0, err
 	}
+	h.clearReplicatedVersions(params.TenantID, params.ResType, params.ResID)
 	if !IsNil(h.replica) {
 		_, rErr := h.replica.ExpungeResources(ctx, params)
 		h.recordDeleteReplication(rErr, uint64(n))

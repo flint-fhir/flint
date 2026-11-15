@@ -1,7 +1,7 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, HL7 SQL-on-FHIR v2, and 35+ National HL7
 // Implementation Guide conformance & certification runner. It executes 10 structured test suites
-// (137 checks) over HTTP against any Flint storage topology (PostgreSQL, SQLite, Apache Doris,
+// (138 checks) over HTTP against any Flint storage topology (PostgreSQL, SQLite, Apache Doris,
 // or HybridStore) and produces both a standard FHIR R4 TestReport resource and a scorecard.
 package certify
 
@@ -142,7 +142,7 @@ type Config struct {
 	SeedBundle  []byte
 }
 
-// Run executes all 10 certification suites (137 checks) against the configured Flint server.
+// Run executes all 10 certification suites (138 checks) against the configured Flint server.
 func Run(ctx context.Context, cfg Config) (*Report, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
 	if baseURL == "" {
@@ -6595,6 +6595,85 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("AN-55", suite10, "SQL-on-FHIR v2 forEach & forEachOrNull Unnesting Over Flattened .split(sep) & .toChars() Chains, Cross-Collection Pipe Union (|), Element-Scoped collection: true Arrays + Binary Proto3 Wire", t0, err, "SQL-on-FHIR v2 forEach/forEachOrNull unnesting over flattened split/toChars chains, cross-collection pipe union (|), element-scoped collection: true arrays & binary Proto3 $sql/$run verified")
+
+	// AN-56: Bidirectional HL7 FHIR R4 XML Wire Transport (application/fhir+xml CRUD, ETag/If-Match CAS, Search Bundle, Transaction Bundle, $validate, $convert & OperationOutcome)
+	t0 = time.Now()
+	{
+		xmlPat := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<Patient xmlns="http://hl7.org/fhir">
+  <id value="cert-xml-pat-1"/>
+  <active value="true"/>
+  <name>
+    <use value="official"/>
+    <family value="XmlWireCert"/>
+    <given value="Clara"/>
+  </name>
+  <gender value="female"/>
+  <birthDate value="1988-07-19"/>
+</Patient>`)
+		xmlTxBundle := []byte(`<Bundle xmlns="http://hl7.org/fhir">
+  <type value="transaction"/>
+  <entry>
+    <fullUrl value="Patient/cert-xml-pat-1"/>
+    <resource>
+      <Patient xmlns="http://hl7.org/fhir">
+        <id value="cert-xml-pat-1"/>
+        <active value="true"/>
+        <name>
+          <use value="official"/>
+          <family value="XmlWireCert"/>
+          <given value="Clara"/>
+          <given value="Rose"/>
+        </name>
+        <gender value="female"/>
+        <birthDate value="1988-07-19"/>
+      </Patient>
+    </resource>
+    <request>
+      <method value="PUT"/>
+      <url value="Patient/cert-xml-pat-1"/>
+    </request>
+  </entry>
+</Bundle>`)
+		invalidObsXML := []byte(`<Observation xmlns="http://hl7.org/fhir"><id value="cert-xml-invalid-obs"/></Observation>`)
+
+		respPutXML, bPutXML, errPutXML := doReq(http.MethodPut, basePath+"/Patient/cert-xml-pat-1", "application/fhir+xml", xmlPat, map[string]string{"Accept": "application/fhir+xml"})
+		respGetXML, bGetXML, errGetXML := doReq(http.MethodGet, basePath+"/Patient/cert-xml-pat-1", "", nil, map[string]string{"Accept": "application/fhir+xml"})
+		respCasXML, bCasXML, errCasXML := doReq(http.MethodPut, basePath+"/Patient/cert-xml-pat-1", "application/fhir+xml", xmlPat, map[string]string{"Accept": "application/fhir+xml", "If-Match": `W/"99999"`})
+		resp404XML, b404XML, err404XML := doReq(http.MethodGet, basePath+"/Patient/cert-xml-missing-404", "", nil, map[string]string{"Accept": "application/fhir+xml"})
+		respSearchXML, bSearchXML, errSearchXML := doReq(http.MethodGet, basePath+"/Patient?family=XmlWireCert&_format=application/fhir+xml", "", nil, nil)
+		respTxXML, bTxXML, errTxXML := doReq(http.MethodPost, basePath, "application/fhir+xml", xmlTxBundle, map[string]string{"Accept": "application/fhir+xml"})
+		respValOKXML, bValOKXML, errValOKXML := doReq(http.MethodPost, basePath+"/Patient/$validate", "application/fhir+xml", xmlPat, map[string]string{"Accept": "application/fhir+xml"})
+		respValBadXML, bValBadXML, errValBadXML := doReq(http.MethodPost, basePath+"/Observation/$validate", "application/fhir+xml", invalidObsXML, map[string]string{"Accept": "application/fhir+xml"})
+		respConvJSON, bConvJSON, errConvJSON := doReq(http.MethodPost, basePath+"/Patient/$convert", "application/fhir+xml", xmlPat, nil)
+		respConvXML, bConvXML, errConvXML := doReq(http.MethodPost, basePath+"/Patient/$convert?format=xml", "application/fhir+json", bConvJSON, nil)
+		_, _, _ = doReq(http.MethodDelete, basePath+"/Patient/cert-xml-pat-1", "", nil, nil)
+
+		if errPutXML != nil || respPutXML == nil || (respPutXML.StatusCode != http.StatusOK && respPutXML.StatusCode != http.StatusCreated) || !strings.Contains(respPutXML.Header.Get("Content-Type"), "application/fhir+xml") || respPutXML.Header.Get("X-Flint-Wire-Format") != "hl7.fhir.r4.xml" || respPutXML.Header.Get("ETag") == "" || !strings.Contains(string(bPutXML), `<family value="XmlWireCert"/>`) {
+			err = fmt.Errorf("XML PUT /Patient/cert-xml-pat-1 failed: err=%v body=%s", errPutXML, string(bPutXML))
+		} else if errGetXML != nil || respGetXML == nil || respGetXML.StatusCode != http.StatusOK || !strings.Contains(respGetXML.Header.Get("Content-Type"), "application/fhir+xml") || respGetXML.Header.Get("X-Flint-Wire-Format") != "hl7.fhir.r4.xml" || !strings.Contains(string(bGetXML), `<id value="cert-xml-pat-1"/>`) || !strings.Contains(string(bGetXML), `<versionId value="`) {
+			err = fmt.Errorf("XML GET /Patient/cert-xml-pat-1 failed: err=%v body=%s", errGetXML, string(bGetXML))
+		} else if errCasXML != nil || respCasXML == nil || respCasXML.StatusCode != http.StatusPreconditionFailed || !strings.Contains(respCasXML.Header.Get("Content-Type"), "application/fhir+xml") || !strings.Contains(string(bCasXML), "<OperationOutcome") || !strings.Contains(string(bCasXML), `<severity value="error"/>`) {
+			err = fmt.Errorf("XML If-Match conflict expected 412 XML OperationOutcome: err=%v body=%s", errCasXML, string(bCasXML))
+		} else if err404XML != nil || resp404XML == nil || resp404XML.StatusCode != http.StatusNotFound || !strings.Contains(resp404XML.Header.Get("Content-Type"), "application/fhir+xml") || !strings.Contains(string(b404XML), "<OperationOutcome") {
+			err = fmt.Errorf("XML 404 expected XML OperationOutcome: err=%v body=%s", err404XML, string(b404XML))
+		} else if errSearchXML != nil || respSearchXML == nil || respSearchXML.StatusCode != http.StatusOK || !strings.Contains(respSearchXML.Header.Get("Content-Type"), "application/fhir+xml") || !strings.Contains(string(bSearchXML), `<type value="searchset"/>`) || !strings.Contains(string(bSearchXML), `<id value="cert-xml-pat-1"/>`) {
+			err = fmt.Errorf("XML Search Bundle failed: err=%v body=%s", errSearchXML, string(bSearchXML))
+		} else if errTxXML != nil || respTxXML == nil || respTxXML.StatusCode != http.StatusOK || !strings.Contains(respTxXML.Header.Get("Content-Type"), "application/fhir+xml") || !strings.Contains(string(bTxXML), `<type value="transaction-response"/>`) {
+			err = fmt.Errorf("XML Transaction Bundle failed: err=%v body=%s", errTxXML, string(bTxXML))
+		} else if errValOKXML != nil || respValOKXML == nil || respValOKXML.StatusCode != http.StatusOK || !strings.Contains(respValOKXML.Header.Get("Content-Type"), "application/fhir+xml") || !strings.Contains(string(bValOKXML), "<OperationOutcome") {
+			err = fmt.Errorf("XML Patient/$validate failed: err=%v body=%s", errValOKXML, string(bValOKXML))
+		} else if errValBadXML != nil || respValBadXML == nil || respValBadXML.StatusCode != http.StatusBadRequest || !strings.Contains(respValBadXML.Header.Get("Content-Type"), "application/fhir+xml") || !strings.Contains(string(bValBadXML), `<severity value="error"/>`) {
+			err = fmt.Errorf("XML invalid Observation/$validate expected 400 XML OperationOutcome: err=%v body=%s", errValBadXML, string(bValBadXML))
+		} else if errConvJSON != nil || respConvJSON == nil || respConvJSON.StatusCode != http.StatusOK || !strings.Contains(respConvJSON.Header.Get("Content-Type"), "application/fhir+json") || !strings.Contains(string(bConvJSON), `"XmlWireCert"`) {
+			err = fmt.Errorf("XML->JSON Patient/$convert failed: err=%v body=%s", errConvJSON, string(bConvJSON))
+		} else if errConvXML != nil || respConvXML == nil || respConvXML.StatusCode != http.StatusOK || !strings.Contains(respConvXML.Header.Get("Content-Type"), "application/fhir+xml") || !strings.Contains(string(bConvXML), `<family value="XmlWireCert"/>`) {
+			err = fmt.Errorf("JSON->XML Patient/$convert?format=xml failed: err=%v body=%s", errConvXML, string(bConvXML))
+		} else {
+			err = nil
+		}
+	}
+	record("AN-56", suite10, "Bidirectional HL7 FHIR R4 XML Wire Transport (application/fhir+xml CRUD, ETag/If-Match CAS, Search Bundle, Transaction Bundle, $validate, $convert & OperationOutcome)", t0, err, "Bidirectional HL7 FHIR R4 XML wire transport (CRUD, ETag/If-Match 412 CAS, Search Bundle, Transaction Bundle, $validate, $convert & XML OperationOutcome) verified")
 
 	if rep.TotalChecks > 0 {
 		rep.Score = float64(rep.Passed) * 100.0 / float64(rep.TotalChecks)

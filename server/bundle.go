@@ -554,6 +554,9 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				responseEntries[i] = bundleErrorResponse(http.StatusPreconditionFailed, msg)
 				continue
 			}
+			if expectedVersion == 0 {
+				expectedVersion = currentRec.ResVersion
+			}
 			currentJSON, err := s.protoToJSONWithMeta(resType, currentRec.ResourceProto, 0, time.Time{})
 			if err != nil {
 				if isTransaction {

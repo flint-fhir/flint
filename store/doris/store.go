@@ -56,6 +56,10 @@ type Store struct {
 	database    string
 	groupCommit GroupCommitMode
 
+	// Bundle-level RWMutex: standalone mutators hold RLock; ExecuteTransactionBundle holds Lock
+	// so snapshot capture and compensating rollback are strictly isolated from concurrent writes.
+	txMu sync.RWMutex
+
 	// Sharded concurrency coordinator for TOCTOU-free conditional writes & If-Match checks
 	stripes [64]sync.Mutex
 
@@ -127,14 +131,39 @@ func (s *Store) ExecutedStatements() []string {
 	return out
 }
 
-func (s *Store) lockTenantResourceType(tenantID, resType string) func() {
+func (s *Store) stripeIndex(tenantID, resType string) int {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(tenantID))
 	_, _ = h.Write([]byte{':'})
 	_, _ = h.Write([]byte(resType))
-	idx := h.Sum32() % uint32(len(s.stripes))
+	return int(h.Sum32() % uint32(len(s.stripes)))
+}
+
+func (s *Store) lockTenantResourceType(tenantID, resType string) func() {
+	idx := s.stripeIndex(tenantID, resType)
 	s.stripes[idx].Lock()
 	return s.stripes[idx].Unlock
+}
+
+func (s *Store) lockBatchStripes(inputs []store.ResourceInput) func() {
+	seen := make(map[int]struct{}, len(inputs))
+	indices := make([]int, 0, len(inputs))
+	for _, in := range inputs {
+		idx := s.stripeIndex(in.TenantID, in.ResType)
+		if _, ok := seen[idx]; !ok {
+			seen[idx] = struct{}{}
+			indices = append(indices, idx)
+		}
+	}
+	slices.Sort(indices)
+	for _, idx := range indices {
+		s.stripes[idx].Lock()
+	}
+	return func() {
+		for i := len(indices) - 1; i >= 0; i-- {
+			s.stripes[indices[i]].Unlock()
+		}
+	}
 }
 
 func resKey(tenantID, resType, resID string) string {
@@ -178,6 +207,8 @@ func (s *Store) WriteResourceWithMeta(ctx context.Context, input store.ResourceI
 	if strings.TrimSpace(input.TenantID) == "" {
 		return nil, store.ErrNoTenant
 	}
+	s.txMu.RLock()
+	defer s.txMu.RUnlock()
 	unlock := s.lockTenantResourceType(input.TenantID, input.ResType)
 	defer unlock()
 
@@ -290,6 +321,11 @@ func (s *Store) WriteBatch(ctx context.Context, inputs []store.ResourceInput) er
 		return nil
 	}
 
+	s.txMu.RLock()
+	defer s.txMu.RUnlock()
+	unlockStripes := s.lockBatchStripes(inputs)
+	defer unlockStripes()
+
 	now := time.Now().UTC()
 	rows := make([]DorisResourceRow, 0, len(inputs))
 
@@ -385,6 +421,8 @@ func (s *Store) WriteBatch(ctx context.Context, inputs []store.ResourceInput) er
 // ConditionalCreateResource evaluates an If-None-Exist search query under the sharded
 // concurrency coordinator, preventing TOCTOU duplicate creation races on Apache Doris.
 func (s *Store) ConditionalCreateResource(ctx context.Context, input store.ResourceInput, condParams store.SearchParams) (*store.ResourceRecord, bool, error) {
+	s.txMu.RLock()
+	defer s.txMu.RUnlock()
 	unlock := s.lockTenantResourceType(input.TenantID, input.ResType)
 	defer unlock()
 
@@ -420,6 +458,8 @@ func (s *Store) ConditionalUpdateResource(
 	condParams store.SearchParams,
 	buildInput func(matchedID string, isExisting bool) (store.ResourceInput, error),
 ) (*store.ResourceRecord, error) {
+	s.txMu.RLock()
+	defer s.txMu.RUnlock()
 	unlock := s.lockTenantResourceType(tenantID, resType)
 	defer unlock()
 
@@ -479,6 +519,8 @@ func (s *Store) ConditionalDeleteResources(
 	maxCount int,
 	verifyMatch func(matchedID string) error,
 ) ([]store.ResourceRecord, error) {
+	s.txMu.RLock()
+	defer s.txMu.RUnlock()
 	unlock := s.lockTenantResourceType(tenantID, resType)
 	defer unlock()
 
@@ -532,6 +574,9 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []store.Bundle
 			return nil, store.ErrCrossTenantBatch
 		}
 	}
+
+	s.txMu.Lock()
+	defer s.txMu.Unlock()
 
 	// Capture state snapshot for compensating rollback on failure
 	s.mu.RLock()
@@ -620,7 +665,7 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []store.Bundle
 					}
 				}
 			}
-			rec, err := s.DeleteResourceWithExpectedVersion(ctx, op.Input.TenantID, op.Input.ResType, targetID, op.Input.ExpectedVersion)
+			rec, err := s.deleteUnlocked(ctx, op.Input.TenantID, op.Input.ResType, targetID, op.Input.ExpectedVersion)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				rollback()
 				return nil, fmt.Errorf("entry[%d] delete %s/%s: %w", i, op.Input.ResType, targetID, err)
@@ -643,7 +688,7 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []store.Bundle
 		}
 
 		if strings.EqualFold(op.Method, "POST") && op.IfNoneExist != nil {
-			rec, created, err := s.ConditionalCreateResource(ctx, op.Input, *op.IfNoneExist)
+			rec, created, err := s.conditionalCreateUnlocked(ctx, op.Input, *op.IfNoneExist)
 			if err != nil {
 				rollback()
 				return nil, fmt.Errorf("entry[%d] conditional create %s: %w", i, op.Input.ResType, err)
@@ -667,7 +712,7 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []store.Bundle
 
 		writeInput := op.Input
 		if strings.EqualFold(op.Method, "PUT") && op.ConditionalParams != nil && op.BuildWriteInput != nil {
-			rec, err := s.ConditionalUpdateResource(ctx, op.Input.TenantID, op.Input.ResType, *op.ConditionalParams, op.BuildWriteInput)
+			rec, err := s.conditionalUpdateUnlocked(ctx, op.Input.ResType, *op.ConditionalParams, op.BuildWriteInput)
 			if err != nil {
 				rollback()
 				return nil, fmt.Errorf("entry[%d] conditional update %s: %w", i, op.Input.ResType, err)
@@ -689,7 +734,11 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []store.Bundle
 			continue
 		}
 
-		rec, err := s.WriteResourceWithMeta(ctx, writeInput)
+		if strings.TrimSpace(writeInput.TenantID) == "" {
+			rollback()
+			return nil, fmt.Errorf("entry[%d] resource %s/%s: %w", i, writeInput.ResType, writeInput.ResID, store.ErrNoTenant)
+		}
+		rec, err := s.writeUnlocked(ctx, writeInput)
 		if err != nil {
 			rollback()
 			return nil, fmt.Errorf("entry[%d] resource %s/%s: %w", i, writeInput.ResType, writeInput.ResID, err)
@@ -847,6 +896,8 @@ func (s *Store) DeleteResourceWithMeta(ctx context.Context, tenantID, resType, r
 
 // DeleteResourceWithExpectedVersion soft-deletes a resource while enforcing If-Match when expectedVersion > 0.
 func (s *Store) DeleteResourceWithExpectedVersion(ctx context.Context, tenantID, resType, resID string, expectedVersion int) (*store.ResourceRecord, error) {
+	s.txMu.RLock()
+	defer s.txMu.RUnlock()
 	unlock := s.lockTenantResourceType(tenantID, resType)
 	defer unlock()
 
@@ -916,6 +967,8 @@ func (s *Store) deleteUnlocked(ctx context.Context, tenantID, resType, resID str
 
 // Reindex rebuilds inverted-index token arrays for matching active resources in Doris.
 func (s *Store) Reindex(ctx context.Context, params store.ReindexParams) (*store.ReindexResult, error) {
+	s.txMu.RLock()
+	defer s.txMu.RUnlock()
 	if params.ResType != "" && params.ResID != "" {
 		if _, err := s.ReadResourceWithMeta(ctx, params.TenantID, params.ResType, params.ResID); err != nil {
 			return nil, err
@@ -1955,6 +2008,8 @@ func (s *Store) EvaluateCohortCounts(ctx context.Context, tenantID string, resou
 
 // PurgePatientCompartment deletes a Patient and all compartment-linked clinical resources.
 func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID string, hardExpunge bool) ([]store.ResourceRecord, error) {
+	s.txMu.RLock()
+	defer s.txMu.RUnlock()
 	if _, err := s.ReadResourceWithMeta(ctx, tenantID, "Patient", patientID); err != nil {
 		if !errors.Is(err, store.ErrResourceDeleted) || !hardExpunge {
 			return nil, err
@@ -2015,6 +2070,8 @@ func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID
 
 // ExpungeResources physically removes soft-deleted resources or historical versions.
 func (s *Store) ExpungeResources(ctx context.Context, params store.ExpungeParams) (int, error) {
+	s.txMu.RLock()
+	defer s.txMu.RUnlock()
 	if !params.ExpungeDeletedResources && !params.ExpungePreviousVersions && !params.ExpungeEverything {
 		params.ExpungeDeletedResources = true
 	}
