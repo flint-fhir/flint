@@ -20,6 +20,7 @@ import (
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/pkg/igloader"
+	"github.com/flint-fhir/flint/pkg/txclient"
 	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/store"
 )
@@ -604,20 +605,55 @@ func (s *Server) validateCodeAgainstKnownValueSet(vsCanonical, system, code stri
 			hasStoredVS = true
 		}
 	}
-	if inlineVS == nil && !hasExplicitIGCS && !hasStoredVS {
+
+	knownLocally := inlineVS != nil || hasExplicitIGCS || hasStoredVS
+	if knownLocally {
+		_, _, concepts, err := s.resolveLocalValueSetConcepts(context.Background(), "default", "", vsCanonical, inlineVS)
+		if err == nil && len(concepts) > 0 {
+			for _, c := range concepts {
+				if c.Code == code && (system == "" || c.System == "" || strings.EqualFold(c.System, system)) {
+					return true, true
+				}
+			}
+			if _, needsExt := s.valueSetNeedsExternalFederation(context.Background(), "default", "", vsCanonical, inlineVS); !needsExt {
+				return true, false
+			}
+		}
+	}
+
+	if s.txClient == nil {
 		return false, false
 	}
 
-	_, _, concepts, err := s.resolveValueSetConcepts(context.Background(), "default", "", vsCanonical, inlineVS)
-	if err != nil || len(concepts) == 0 {
+	qParams := map[string]string{
+		"url":  vsCanonical,
+		"code": code,
+	}
+	if system != "" {
+		qParams["system"] = system
+	}
+	txParams, txErr := s.validateValueSetViaTxClient(context.Background(), qParams, vsCanonical, nil, inlineVS)
+	if txErr == nil {
+		if valid, _, _, _, ok := txclient.ParseValidateCodeResult(txParams); ok {
+			return true, valid
+		}
 		return false, false
 	}
-	for _, c := range concepts {
-		if c.Code == code && (system == "" || c.System == "" || strings.EqualFold(c.System, system)) {
-			return true, true
+	if ue, ok := txclient.AsUpstreamError(txErr); ok {
+		if ue.IsNotFound() {
+			return false, false
+		}
+		if ue.IsTransient() {
+			if s.logger != nil {
+				s.logger.Warn("federated terminology ValueSet validation failed", "valueSet", vsCanonical, "system", system, "code", code, "error", ue.Error())
+			}
+			if s.txClient.FailOpen() {
+				return false, false
+			}
+			return true, false
 		}
 	}
-	return true, false
+	return false, false
 }
 
 func isAdminIGWriteAllowed(secCtx *auth.SecurityContext) bool {

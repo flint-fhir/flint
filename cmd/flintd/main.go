@@ -21,13 +21,16 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
 
 	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/pkg/txclient"
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store"
 	"github.com/flint-fhir/flint/store/doris"
@@ -64,6 +67,12 @@ type cliOptions struct {
 	referentialIntegrity string
 	igPackages           stringListFlag
 	igLoadExamples       bool
+	txServerURL          string
+	txTimeout            string
+	txCacheTTL           string
+	txCacheMaxEntries    int
+	txAuthHeader         string
+	txFailOpen           string
 }
 
 func main() {
@@ -98,6 +107,12 @@ func parseCLIOptions(args []string, errOut io.Writer) (cliOptions, error) {
 	fs.StringVar(&opts.referentialIntegrity, "referential-integrity", "", "Referential integrity policy: 'lenient' (default) or 'strict' (enforces target existence on write and inbound reference conflict on delete)")
 	fs.Var(&opts.igPackages, "ig-package", "Path to an HL7 FHIR R4 NPM (.tgz) archive, unpacked IG directory, or directory of .tgz packages (repeatable or comma-separated)")
 	fs.BoolVar(&opts.igLoadExamples, "ig-load-examples", false, "Also load and persist clinical example resources from --ig-package archives")
+	fs.StringVar(&opts.txServerURL, "tx-server-url", "", "Optional upstream FHIR R4 terminology server base URL (e.g. 'https://tx.fhir.org/r4')")
+	fs.StringVar(&opts.txTimeout, "tx-timeout", "", "Per-request timeout for federated terminology calls (e.g. '5s')")
+	fs.StringVar(&opts.txCacheTTL, "tx-cache-ttl", "", "In-memory LRU cache TTL for federated terminology responses (e.g. '15m', '-1s' to disable)")
+	fs.IntVar(&opts.txCacheMaxEntries, "tx-cache-max-entries", 0, "Maximum cached federated terminology entries (default 4096)")
+	fs.StringVar(&opts.txAuthHeader, "tx-auth-header", "", "Optional auth header for federated terminology calls (e.g. 'Bearer <token>' or 'X-Api-Key: <key>')")
+	fs.StringVar(&opts.txFailOpen, "tx-fail-open", "", "Fail-open ('true', default) or fail-closed ('false') when upstream terminology server is unreachable")
 	if err := fs.Parse(args); err != nil {
 		return cliOptions{}, err
 	}
@@ -133,6 +148,86 @@ func resolveIGConfig(cliOpts cliOptions, getenv func(string) string) ([]string, 
 	}
 	loadExamples := cliOpts.igLoadExamples || strings.EqualFold(strings.TrimSpace(getenv("FLINT_IG_LOAD_EXAMPLES")), "true")
 	return paths, loadExamples
+}
+
+func configureTerminologyClient(srv *server.Server, cliOpts cliOptions, logger *slog.Logger, getenv func(string) string) error {
+	rawBaseURL := strings.TrimSpace(cliOpts.txServerURL)
+	if rawBaseURL == "" {
+		rawBaseURL = strings.TrimSpace(getenv("FLINT_TX_SERVER_URL"))
+	}
+	if rawBaseURL == "" {
+		return nil
+	}
+
+	var timeout time.Duration
+	rawTimeout := strings.TrimSpace(cliOpts.txTimeout)
+	if rawTimeout == "" {
+		rawTimeout = strings.TrimSpace(getenv("FLINT_TX_TIMEOUT"))
+	}
+	if rawTimeout != "" {
+		d, err := time.ParseDuration(rawTimeout)
+		if err != nil {
+			return fmt.Errorf("invalid terminology timeout %q: %w", rawTimeout, err)
+		}
+		timeout = d
+	}
+
+	var cacheTTL time.Duration
+	rawTTL := strings.TrimSpace(cliOpts.txCacheTTL)
+	if rawTTL == "" {
+		rawTTL = strings.TrimSpace(getenv("FLINT_TX_CACHE_TTL"))
+	}
+	if rawTTL != "" {
+		d, err := time.ParseDuration(rawTTL)
+		if err != nil {
+			return fmt.Errorf("invalid terminology cache TTL %q: %w", rawTTL, err)
+		}
+		cacheTTL = d
+	}
+
+	maxEntries := cliOpts.txCacheMaxEntries
+	if maxEntries == 0 {
+		if rawMax := strings.TrimSpace(getenv("FLINT_TX_CACHE_MAX_ENTRIES")); rawMax != "" {
+			n, err := strconv.Atoi(rawMax)
+			if err != nil {
+				return fmt.Errorf("invalid terminology cache max entries %q: %w", rawMax, err)
+			}
+			maxEntries = n
+		}
+	}
+
+	authHeader := strings.TrimSpace(cliOpts.txAuthHeader)
+	if authHeader == "" {
+		authHeader = strings.TrimSpace(getenv("FLINT_TX_AUTH_HEADER"))
+	}
+
+	var failOpen *bool
+	rawFailOpen := strings.TrimSpace(cliOpts.txFailOpen)
+	if rawFailOpen == "" {
+		rawFailOpen = strings.TrimSpace(getenv("FLINT_TX_FAIL_OPEN"))
+	}
+	if rawFailOpen != "" {
+		b, err := strconv.ParseBool(rawFailOpen)
+		if err != nil {
+			return fmt.Errorf("invalid terminology fail-open %q: %w", rawFailOpen, err)
+		}
+		failOpen = txclient.BoolPtr(b)
+	}
+
+	cli, err := txclient.New(txclient.Config{
+		BaseURL:         rawBaseURL,
+		Timeout:         timeout,
+		CacheTTL:        cacheTTL,
+		CacheMaxEntries: maxEntries,
+		AuthHeader:      authHeader,
+		FailOpen:        failOpen,
+	})
+	if err != nil {
+		return fmt.Errorf("init federated terminology client: %w", err)
+	}
+	srv.SetTerminologyClient(cli)
+	logger.Info("federated FHIR R4 terminology client enabled", "base_url", cli.BaseURL(), "timeout", cli.Timeout().String(), "fail_open", cli.FailOpen())
+	return nil
 }
 
 func buildStoreOptions(isolationMode postgres.TenantIsolationMode, getenv func(string) string) []postgres.Option {
@@ -428,6 +523,10 @@ func run(
 			return fmt.Errorf("load ig packages: %w", err)
 		}
 		logger.Info("startup FHIR Implementation Guide packages loaded", "count", len(summaries), "tenant", igTenant)
+	}
+
+	if err := configureTerminologyClient(srv, cliOpts, logger, getenv); err != nil {
+		return err
 	}
 
 	// Optional AutoMQ / Kafka CDC producer configuration

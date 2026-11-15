@@ -54,6 +54,7 @@ import (
 	"github.com/flint-fhir/flint/pkg/auth"
 	automq "github.com/flint-fhir/flint/pkg/cdc"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
+	"github.com/flint-fhir/flint/pkg/txclient"
 	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/store"
 )
@@ -106,6 +107,7 @@ type Server struct {
 	routerOnce                 sync.Once
 	internalRouter             http.Handler
 	metrics                    *serverMetrics
+	txClient                   *txclient.Client
 }
 
 // New creates a new FHIR server backed by any pluggable store.Store implementation

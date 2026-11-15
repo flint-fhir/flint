@@ -18,6 +18,7 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/flint-fhir/flint/pkg/fhirutil"
+	"github.com/flint-fhir/flint/pkg/txclient"
 	"github.com/flint-fhir/flint/store"
 )
 
@@ -151,6 +152,25 @@ var builtInValueSetToCodeSystem = map[string]string{
 	"http://hl7.org/fhir/us/core/ValueSet/us-core-condition-code":   "http://snomed.info/sct",
 	"http://hl7.org/fhir/us/core/ValueSet/us-core-procedure-code":   "http://snomed.info/sct",
 	"http://hl7.org/fhir/us/core/ValueSet/us-core-medication-codes": "http://www.nlm.nih.gov/research/umls/rxnorm",
+}
+
+// partialBuiltInCodeSystems identifies built-in sample subsets of large external code systems
+// where an upstream federated terminology server should be consulted on local misses or expansions.
+var partialBuiltInCodeSystems = map[string]bool{
+	"http://loinc.org":                            true,
+	"http://snomed.info/sct":                      true,
+	"http://www.nlm.nih.gov/research/umls/rxnorm": true,
+}
+
+// SetTerminologyClient configures an optional federated FHIR R4 terminology client
+// used as a fallback when a ValueSet or CodeSystem is not completely defined locally.
+func (s *Server) SetTerminologyClient(c *txclient.Client) {
+	s.txClient = c
+}
+
+// TerminologyClient returns the configured federated terminology client, or nil if disabled.
+func (s *Server) TerminologyClient() *txclient.Client {
+	return s.txClient
 }
 
 func (s *Server) extractTerminologyParams(r *http.Request, defaultResType string) (map[string]string, map[string]any) {
@@ -314,33 +334,184 @@ func (s *Server) writeTerminologyResourceResponse(w http.ResponseWriter, r *http
 }
 
 func (s *Server) resolveValueSetConcepts(ctx context.Context, tenant, vsID, vsURL string, inlineVS map[string]any) (string, string, []terminologyConcept, error) {
-	return s.resolveValueSetConceptsWithDepth(ctx, tenant, vsID, vsURL, inlineVS, 0)
+	return s.resolveValueSetConceptsWithDepth(ctx, tenant, vsID, vsURL, inlineVS, 0, true)
 }
 
-func (s *Server) resolveValueSetConceptsWithDepth(ctx context.Context, tenant, vsID, vsURL string, inlineVS map[string]any, depth int) (string, string, []terminologyConcept, error) {
+func (s *Server) resolveLocalValueSetConcepts(ctx context.Context, tenant, vsID, vsURL string, inlineVS map[string]any) (string, string, []terminologyConcept, error) {
+	return s.resolveValueSetConceptsWithDepth(ctx, tenant, vsID, vsURL, inlineVS, 0, false)
+}
+
+func (s *Server) resolveValueSetConceptsWithDepth(ctx context.Context, tenant, vsID, vsURL string, inlineVS map[string]any, depth int, allowFederation bool) (string, string, []terminologyConcept, error) {
 	if depth > 5 {
 		return "", "", nil, fmt.Errorf("maximum ValueSet nesting depth exceeded")
 	}
-	var vsMap map[string]any
+	vsMap, canonVSURL, localReadErr := s.loadLocalValueSetMap(ctx, tenant, vsID, vsURL, inlineVS)
+	if localReadErr != nil && vsURL == "" && canonVSURL == "" {
+		return "", "", nil, localReadErr
+	}
+	if canonVSURL != "" {
+		vsURL = canonVSURL
+	}
+
+	if vsMap != nil {
+		resolvedURL, _ := vsMap["url"].(string)
+		if resolvedURL == "" {
+			resolvedURL = vsURL
+		}
+		resolvedName, _ := vsMap["name"].(string)
+		concepts := extractConceptsFromValueSetMap(vsMap)
+
+		if len(concepts) == 0 {
+			if allowFederation && s.txClient != nil && s.valueSetMapNeedsExternalFederation(ctx, tenant, vsMap, depth) {
+				if txVS, txErr := s.expandValueSetViaTxClient(ctx, map[string]string{"url": resolvedURL}, vsID, resolvedURL, inlineVS, vsMap); txErr == nil {
+					if txConcepts := extractConceptsFromValueSetMap(txVS); len(txConcepts) > 0 {
+						return resolvedURL, resolvedName, deduplicateTerminologyConcepts(txConcepts), nil
+					}
+				} else if ue, ok := txclient.AsUpstreamError(txErr); ok && ue.IsTransient() && !s.txClient.FailOpen() {
+					return "", "", nil, txErr
+				}
+			}
+			if compose, ok := vsMap["compose"].(map[string]any); ok {
+				if includes, ok := compose["include"].([]any); ok {
+					for _, inc := range includes {
+						incMap, ok := inc.(map[string]any)
+						if !ok {
+							continue
+						}
+						concepts = append(concepts, s.evaluateComposeConceptSet(ctx, tenant, incMap, depth, allowFederation)...)
+					}
+				}
+				if excludes, ok := compose["exclude"].([]any); ok && len(excludes) > 0 {
+					var excluded []terminologyConcept
+					for _, exc := range excludes {
+						excMap, ok := exc.(map[string]any)
+						if !ok {
+							continue
+						}
+						excluded = append(excluded, s.evaluateComposeConceptSet(ctx, tenant, excMap, depth, allowFederation)...)
+					}
+					if len(excluded) > 0 {
+						kept := make([]terminologyConcept, 0, len(concepts))
+						for _, c := range concepts {
+							isExcl := false
+							for _, ex := range excluded {
+								if ex.Code == c.Code && (ex.System == "" || c.System == "" || strings.EqualFold(ex.System, c.System)) {
+									isExcl = true
+									break
+								}
+							}
+							if !isExcl {
+								kept = append(kept, c)
+							}
+						}
+						concepts = kept
+					}
+				}
+			}
+		}
+		return resolvedURL, resolvedName, deduplicateTerminologyConcepts(concepts), nil
+	}
+
+	// Fallback to built-in ValueSet or CodeSystem URL
+	baseVSURL := stripCanonicalVersion(vsURL)
+	targetCS := builtInValueSetToCodeSystem[baseVSURL]
+	if targetCS == "" {
+		targetCS = baseVSURL
+	}
+	if csDef, ok := builtInCodeSystems[targetCS]; ok {
+		if allowFederation && s.txClient != nil && partialBuiltInCodeSystems[targetCS] && vsURL != "" {
+			if txVS, txErr := s.txClient.ExpandValueSet(ctx, map[string]string{"url": vsURL}, nil); txErr == nil {
+				txName, _ := txVS["name"].(string)
+				return vsURL, firstNonEmpty(txName, csDef.Name), deduplicateTerminologyConcepts(extractConceptsFromValueSetMap(txVS)), nil
+			} else if ue, ok := txclient.AsUpstreamError(txErr); ok && ue.IsTransient() && !s.txClient.FailOpen() {
+				return "", "", nil, txErr
+			}
+		}
+		return vsURL, csDef.Name, csDef.Concepts, nil
+	}
+
+	if allowFederation && s.txClient != nil && vsURL != "" {
+		txVS, txErr := s.txClient.ExpandValueSet(ctx, map[string]string{"url": vsURL}, nil)
+		if txErr == nil {
+			txURL, _ := txVS["url"].(string)
+			txName, _ := txVS["name"].(string)
+			return firstNonEmpty(txURL, vsURL), txName, deduplicateTerminologyConcepts(extractConceptsFromValueSetMap(txVS)), nil
+		}
+		return "", "", nil, txErr
+	}
+
+	return "", "", nil, fmt.Errorf("ValueSet %q not found", firstNonEmpty(vsURL, vsID))
+}
+
+func stripCanonicalVersion(u string) string {
+	u = strings.TrimSpace(u)
+	if pipe := strings.IndexByte(u, '|'); pipe != -1 {
+		return strings.TrimSpace(u[:pipe])
+	}
+	return u
+}
+
+func extractConceptsFromValueSetMap(vsMap map[string]any) []terminologyConcept {
+	if vsMap == nil {
+		return nil
+	}
+	exp, ok := vsMap["expansion"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	var rawContains []any
+	if list, isSlice := exp["contains"].([]any); isSlice {
+		rawContains = list
+	} else if typedList, isTyped := exp["contains"].([]map[string]any); isTyped {
+		rawContains = make([]any, len(typedList))
+		for i := range typedList {
+			rawContains[i] = typedList[i]
+		}
+	}
+	var concepts []terminologyConcept
+	var walk func(items []any)
+	walk = func(items []any) {
+		for _, c := range items {
+			cm, ok := c.(map[string]any)
+			if !ok {
+				continue
+			}
+			sys, _ := cm["system"].(string)
+			code, _ := cm["code"].(string)
+			disp, _ := cm["display"].(string)
+			abstract, _ := cm["abstract"].(bool)
+			if code != "" && !abstract {
+				concepts = append(concepts, terminologyConcept{System: sys, Code: code, Display: disp})
+			}
+			if nested, hasNested := cm["contains"].([]any); hasNested {
+				walk(nested)
+			}
+		}
+	}
+	walk(rawContains)
+	return concepts
+}
+
+func (s *Server) loadLocalValueSetMap(ctx context.Context, tenant, vsID, vsURL string, inlineVS map[string]any) (map[string]any, string, error) {
 	if inlineVS != nil {
-		vsMap = inlineVS
-	} else if vsID != "" && s.store != nil {
+		return inlineVS, vsURL, nil
+	}
+	if vsID != "" && s.store != nil {
 		rec, err := s.store.ReadResourceWithMeta(ctx, tenant, "ValueSet", vsID)
 		if err == nil {
-			if m, err := s.protoToFHIRMapWithMeta("ValueSet", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); err == nil {
-				vsMap = m
+			if m, mErr := s.protoToFHIRMapWithMeta("ValueSet", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); mErr == nil {
+				return m, vsURL, nil
 			}
 		} else if igVS := s.lookupIGValueSet(vsID, vsURL); igVS != nil {
-			vsMap = igVS
+			return igVS, vsURL, nil
 		} else {
 			for _, candURL := range []string{"http://hl7.org/fhir/ValueSet/" + vsID, "http://hl7.org/fhir/us/core/ValueSet/" + vsID} {
 				if _, ok := builtInValueSetToCodeSystem[candURL]; ok {
-					vsURL = candURL
-					break
+					return nil, candURL, nil
 				}
 			}
 			if vsURL == "" {
-				return "", "", nil, err
+				return nil, "", err
 			}
 		}
 	} else if vsURL != "" && s.store != nil {
@@ -369,91 +540,233 @@ func (s *Server) resolveValueSetConceptsWithDepth(ctx context.Context, tenant, v
 				if m, convErr := s.protoToFHIRMapWithMeta("ValueSet", res.ResourceProto, res.ResVersion, res.LastUpdated); convErr == nil {
 					mv, _ := m["version"].(string)
 					if reqVersion == "" || strings.TrimSpace(mv) == "" || strings.TrimSpace(mv) == reqVersion {
-						vsMap = m
-						break
+						return m, vsURL, nil
 					}
 				}
 			}
 		}
 	}
-	if vsMap == nil {
-		vsMap = s.lookupIGValueSet(vsID, vsURL)
+	if igVS := s.lookupIGValueSet(vsID, vsURL); igVS != nil {
+		return igVS, vsURL, nil
+	}
+	return nil, vsURL, nil
+}
+
+func (s *Server) isCompleteLocalCodeSystem(ctx context.Context, tenant, csID, systemURL string) bool {
+	isCSMapComplete := func(csMap map[string]any) bool {
+		if csMap == nil {
+			return false
+		}
+		content, _ := csMap["content"].(string)
+		content = strings.ToLower(strings.TrimSpace(content))
+		if content == "not-present" || content == "fragment" || content == "example" {
+			return false
+		}
+		concepts, hasConcepts := csMap["concept"].([]any)
+		return hasConcepts && len(concepts) > 0
 	}
 
+	if csID != "" && s.store != nil {
+		if rec, err := s.store.ReadResourceWithMeta(ctx, tenant, "CodeSystem", csID); err == nil {
+			if m, mErr := s.protoToFHIRMapWithMeta("CodeSystem", rec.ResourceProto, rec.ResVersion, rec.LastUpdated); mErr == nil && isCSMapComplete(m) {
+				return true
+			}
+		}
+	}
+	baseURL := stripCanonicalVersion(systemURL)
+	if baseURL != "" && s.store != nil {
+		if sr, err := s.store.Search(ctx, store.SearchParams{
+			TenantID: tenant,
+			ResType:  "CodeSystem",
+			URIs:     map[string]string{"url": baseURL},
+			Count:    5,
+		}); err == nil && sr != nil {
+			for _, res := range sr.Matches {
+				if m, mErr := s.protoToFHIRMapWithMeta("CodeSystem", res.ResourceProto, res.ResVersion, res.LastUpdated); mErr == nil && isCSMapComplete(m) {
+					return true
+				}
+			}
+		}
+	}
+	if igCS := s.lookupIGCodeSystem(csID, systemURL); isCSMapComplete(igCS) {
+		return true
+	}
+	if baseURL != "" {
+		if _, ok := builtInCodeSystems[baseURL]; ok {
+			return !partialBuiltInCodeSystems[baseURL]
+		}
+	}
+	return false
+}
+
+func (s *Server) valueSetNeedsExternalFederation(ctx context.Context, tenant, vsID, vsURL string, inlineVS map[string]any) (map[string]any, bool) {
+	vsMap, canonURL, err := s.loadLocalValueSetMap(ctx, tenant, vsID, vsURL, inlineVS)
+	if err != nil {
+		return nil, vsURL != ""
+	}
+	if canonURL != "" {
+		vsURL = canonURL
+	}
 	if vsMap != nil {
-		resolvedURL, _ := vsMap["url"].(string)
-		if resolvedURL == "" {
-			resolvedURL = vsURL
-		}
-		resolvedName, _ := vsMap["name"].(string)
-		var concepts []terminologyConcept
-
-		if exp, ok := vsMap["expansion"].(map[string]any); ok {
-			if contains, ok := exp["contains"].([]any); ok {
-				for _, c := range contains {
-					if cm, ok := c.(map[string]any); ok {
-						sys, _ := cm["system"].(string)
-						code, _ := cm["code"].(string)
-						disp, _ := cm["display"].(string)
-						if code != "" {
-							concepts = append(concepts, terminologyConcept{System: sys, Code: code, Display: disp})
-						}
-					}
-				}
-			}
-		}
-		if len(concepts) == 0 {
-			if compose, ok := vsMap["compose"].(map[string]any); ok {
-				if includes, ok := compose["include"].([]any); ok {
-					for _, inc := range includes {
-						incMap, ok := inc.(map[string]any)
-						if !ok {
-							continue
-						}
-						concepts = append(concepts, s.evaluateComposeConceptSet(ctx, tenant, incMap, depth)...)
-					}
-				}
-				if excludes, ok := compose["exclude"].([]any); ok && len(excludes) > 0 {
-					var excluded []terminologyConcept
-					for _, exc := range excludes {
-						excMap, ok := exc.(map[string]any)
-						if !ok {
-							continue
-						}
-						excluded = append(excluded, s.evaluateComposeConceptSet(ctx, tenant, excMap, depth)...)
-					}
-					if len(excluded) > 0 {
-						kept := make([]terminologyConcept, 0, len(concepts))
-						for _, c := range concepts {
-							isExcl := false
-							for _, ex := range excluded {
-								if ex.Code == c.Code && (ex.System == "" || c.System == "" || strings.EqualFold(ex.System, c.System)) {
-									isExcl = true
-									break
-								}
-							}
-							if !isExcl {
-								kept = append(kept, c)
-							}
-						}
-						concepts = kept
-					}
-				}
-			}
-		}
-		return resolvedURL, resolvedName, deduplicateTerminologyConcepts(concepts), nil
+		return vsMap, s.valueSetMapNeedsExternalFederation(ctx, tenant, vsMap, 0)
 	}
-
-	// Fallback to built-in ValueSet or CodeSystem URL
-	targetCS := builtInValueSetToCodeSystem[vsURL]
+	baseURL := stripCanonicalVersion(vsURL)
+	if baseURL == "" {
+		return nil, false
+	}
+	targetCS := builtInValueSetToCodeSystem[baseURL]
 	if targetCS == "" {
-		targetCS = vsURL
+		targetCS = baseURL
 	}
-	if csDef, ok := builtInCodeSystems[targetCS]; ok {
-		return vsURL, csDef.Name, csDef.Concepts, nil
+	if _, ok := builtInCodeSystems[targetCS]; ok {
+		return nil, partialBuiltInCodeSystems[targetCS]
 	}
+	return nil, true
+}
 
-	return "", "", nil, fmt.Errorf("ValueSet %q not found", firstNonEmpty(vsURL, vsID))
+func (s *Server) valueSetMapNeedsExternalFederation(ctx context.Context, tenant string, vsMap map[string]any, depth int) bool {
+	if vsMap == nil || depth > 5 {
+		return false
+	}
+	if len(extractConceptsFromValueSetMap(vsMap)) > 0 {
+		return false
+	}
+	compose, ok := vsMap["compose"].(map[string]any)
+	if !ok {
+		return false
+	}
+	checkSets := func(raw any) bool {
+		sets, ok := raw.([]any)
+		if !ok {
+			return false
+		}
+		for _, item := range sets {
+			sm, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			sys, _ := sm["system"].(string)
+			rawConcepts, _ := sm["concept"].([]any)
+			rawFilters, _ := sm["filter"].([]any)
+			if sys != "" && len(rawConcepts) == 0 && !s.isCompleteLocalCodeSystem(ctx, tenant, "", sys) {
+				return true
+			}
+			if sys != "" && len(rawFilters) > 0 && !s.isCompleteLocalCodeSystem(ctx, tenant, "", sys) {
+				return true
+			}
+			if rawVSList, ok := sm["valueSet"].([]any); ok {
+				for _, rv := range rawVSList {
+					nestedURL, _ := rv.(string)
+					if nestedURL = strings.TrimSpace(nestedURL); nestedURL != "" {
+						nestedMap, _, _ := s.loadLocalValueSetMap(ctx, tenant, "", nestedURL, nil)
+						if nestedMap != nil {
+							if s.valueSetMapNeedsExternalFederation(ctx, tenant, nestedMap, depth+1) {
+								return true
+							}
+						} else {
+							baseNested := stripCanonicalVersion(nestedURL)
+							tcs := firstNonEmpty(builtInValueSetToCodeSystem[baseNested], baseNested)
+							if _, isBuiltIn := builtInCodeSystems[tcs]; !isBuiltIn || partialBuiltInCodeSystems[tcs] {
+								return true
+							}
+						}
+					}
+				}
+			}
+		}
+		return false
+	}
+	return checkSets(compose["include"]) || checkSets(compose["exclude"])
+}
+
+func (s *Server) expandValueSetViaTxClient(ctx context.Context, params map[string]string, vsID, vsURL string, inlineVS, localVSMap map[string]any) (map[string]any, error) {
+	if s.txClient == nil {
+		return nil, fmt.Errorf("terminology client not configured")
+	}
+	if inlineVS != nil {
+		return s.txClient.ExpandValueSet(ctx, params, inlineVS)
+	}
+	targetURL := vsURL
+	if targetURL == "" && localVSMap != nil {
+		targetURL, _ = localVSMap["url"].(string)
+	}
+	q := make(map[string]string, len(params)+1)
+	for k, v := range params {
+		q[k] = v
+	}
+	if targetURL != "" && q["url"] == "" {
+		q["url"] = targetURL
+	}
+	if q["url"] != "" {
+		res, err := s.txClient.ExpandValueSet(ctx, q, nil)
+		if err == nil {
+			return res, nil
+		}
+		if ue, ok := txclient.AsUpstreamError(err); ok && ue.IsNotFound() && localVSMap != nil {
+			delete(q, "url")
+			return s.txClient.ExpandValueSet(ctx, q, localVSMap)
+		}
+		return nil, err
+	}
+	if localVSMap != nil {
+		return s.txClient.ExpandValueSet(ctx, q, localVSMap)
+	}
+	return nil, fmt.Errorf("ValueSet %q not found", firstNonEmpty(vsURL, vsID))
+}
+
+func (s *Server) validateValueSetViaTxClient(ctx context.Context, params map[string]string, vsURL string, inlineVS, localVSMap map[string]any) (map[string]any, error) {
+	if s.txClient == nil {
+		return nil, fmt.Errorf("terminology client not configured")
+	}
+	if inlineVS != nil {
+		return s.txClient.ValidateValueSetCode(ctx, params, inlineVS)
+	}
+	targetURL := vsURL
+	if targetURL == "" && localVSMap != nil {
+		targetURL, _ = localVSMap["url"].(string)
+	}
+	q := make(map[string]string, len(params)+1)
+	for k, v := range params {
+		q[k] = v
+	}
+	if targetURL != "" && q["url"] == "" {
+		q["url"] = targetURL
+	}
+	if q["url"] != "" {
+		res, err := s.txClient.ValidateValueSetCode(ctx, q, nil)
+		if err == nil {
+			return res, nil
+		}
+		if ue, ok := txclient.AsUpstreamError(err); ok && ue.IsNotFound() && localVSMap != nil {
+			delete(q, "url")
+			return s.txClient.ValidateValueSetCode(ctx, q, localVSMap)
+		}
+		return nil, err
+	}
+	if localVSMap != nil {
+		return s.txClient.ValidateValueSetCode(ctx, q, localVSMap)
+	}
+	return nil, fmt.Errorf("ValueSet %q not found", vsURL)
+}
+
+func (s *Server) writeUpstreamTerminologyError(w http.ResponseWriter, err error) {
+	if ue, ok := txclient.AsUpstreamError(err); ok {
+		if ue.IsNotFound() {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", ue.Error())
+			return
+		}
+		if ue.StatusCode == http.StatusBadRequest || ue.StatusCode == http.StatusUnprocessableEntity {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", ue.Error())
+			return
+		}
+		if ue.IsClientError() {
+			writeOperationOutcome(w, ue.StatusCode, "processing", ue.Error())
+			return
+		}
+		writeOperationOutcome(w, http.StatusBadGateway, "exception", ue.Error())
+		return
+	}
+	writeOperationOutcome(w, http.StatusBadGateway, "exception", err.Error())
 }
 
 func deduplicateTerminologyConcepts(in []terminologyConcept) []terminologyConcept {
@@ -472,7 +785,7 @@ func deduplicateTerminologyConcepts(in []terminologyConcept) []terminologyConcep
 	return out
 }
 
-func (s *Server) evaluateComposeConceptSet(ctx context.Context, tenant string, setMap map[string]any, depth int) []terminologyConcept {
+func (s *Server) evaluateComposeConceptSet(ctx context.Context, tenant string, setMap map[string]any, depth int, allowFederation bool) []terminologyConcept {
 	sys, _ := setMap["system"].(string)
 	var sysConcepts []terminologyConcept
 	hasSysCriteria := false
@@ -528,7 +841,7 @@ func (s *Server) evaluateComposeConceptSet(ctx context.Context, tenant string, s
 			if vsCanon == "" {
 				continue
 			}
-			_, _, nested, err := s.resolveValueSetConceptsWithDepth(ctx, tenant, "", vsCanon, nil, depth+1)
+			_, _, nested, err := s.resolveValueSetConceptsWithDepth(ctx, tenant, "", vsCanon, nil, depth+1, allowFederation)
 			if err != nil {
 				continue
 			}
@@ -855,12 +1168,41 @@ func (s *Server) handleValueSetExpand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resolvedURL, resolvedName, concepts, err := s.resolveValueSetConcepts(r.Context(), tenant, vsID, vsURL, inlineVS)
+	if s.txClient != nil {
+		localVSMap, needsExt := s.valueSetNeedsExternalFederation(r.Context(), tenant, vsID, vsURL, inlineVS)
+		if needsExt {
+			txVS, txErr := s.expandValueSetViaTxClient(r.Context(), params, vsID, vsURL, inlineVS, localVSMap)
+			if txErr == nil && txVS != nil {
+				if vsID != "" && txVS["id"] == nil {
+					txVS["id"] = vsID
+				}
+				s.writeTerminologyResourceResponse(w, r, "ValueSet", txVS)
+				return
+			}
+			if ue, ok := txclient.AsUpstreamError(txErr); !ok || !ue.IsTransient() || !s.txClient.FailOpen() {
+				s.writeUpstreamTerminologyError(w, txErr)
+				return
+			}
+			// Transient upstream error with FailOpen=true: try local partial fallback if available.
+			resolvedURL, resolvedName, concepts, localErr := s.resolveLocalValueSetConcepts(r.Context(), tenant, vsID, vsURL, inlineVS)
+			if localErr != nil || len(concepts) == 0 {
+				s.writeUpstreamTerminologyError(w, txErr)
+				return
+			}
+			s.writeExpandedValueSetFromConcepts(w, r, vsID, resolvedURL, resolvedName, concepts, params)
+			return
+		}
+	}
+
+	resolvedURL, resolvedName, concepts, err := s.resolveLocalValueSetConcepts(r.Context(), tenant, vsID, vsURL, inlineVS)
 	if err != nil {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", err.Error())
 		return
 	}
+	s.writeExpandedValueSetFromConcepts(w, r, vsID, resolvedURL, resolvedName, concepts, params)
+}
 
+func (s *Server) writeExpandedValueSetFromConcepts(w http.ResponseWriter, r *http.Request, vsID, resolvedURL, resolvedName string, concepts []terminologyConcept, params map[string]string) {
 	filter := strings.ToLower(strings.TrimSpace(params["filter"]))
 	var filtered []terminologyConcept
 	for _, c := range concepts {
@@ -945,19 +1287,36 @@ func (s *Server) handleValueSetValidateCode(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	_, _, concepts, err := s.resolveValueSetConcepts(r.Context(), tenant, vsID, vsURL, inlineVS)
+	_, _, concepts, err := s.resolveLocalValueSetConcepts(r.Context(), tenant, vsID, vsURL, inlineVS)
+	var matched *terminologyConcept
+	if err == nil {
+		for i := range concepts {
+			c := &concepts[i]
+			if c.Code == code && (system == "" || c.System == "" || strings.EqualFold(c.System, system)) {
+				matched = c
+				break
+			}
+		}
+	}
+
+	if matched == nil && s.txClient != nil {
+		localVSMap, needsExt := s.valueSetNeedsExternalFederation(r.Context(), tenant, vsID, vsURL, inlineVS)
+		if err != nil || needsExt {
+			txParams, txErr := s.validateValueSetViaTxClient(r.Context(), params, vsURL, inlineVS, localVSMap)
+			if txErr == nil && txParams != nil {
+				s.writeTerminologyResourceResponse(w, r, "Parameters", txParams)
+				return
+			}
+			if ue, ok := txclient.AsUpstreamError(txErr); !ok || !ue.IsTransient() || !s.txClient.FailOpen() || err != nil {
+				s.writeUpstreamTerminologyError(w, txErr)
+				return
+			}
+		}
+	}
+
 	if err != nil {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", err.Error())
 		return
-	}
-
-	var matched *terminologyConcept
-	for i := range concepts {
-		c := &concepts[i]
-		if c.Code == code && (system == "" || c.System == "" || c.System == system) {
-			matched = c
-			break
-		}
 	}
 
 	result := matched != nil
@@ -1006,6 +1365,15 @@ func (s *Server) handleCodeSystemLookup(w http.ResponseWriter, r *http.Request) 
 
 	concept, csName, ok := s.lookupCodeInSystem(r.Context(), tenant, csID, system, code)
 	if !ok {
+		if s.txClient != nil && csID == "" && system != "" && !s.isCompleteLocalCodeSystem(r.Context(), tenant, "", system) {
+			txParams, txErr := s.txClient.LookupCode(r.Context(), params)
+			if txErr == nil && txParams != nil {
+				s.writeTerminologyResourceResponse(w, r, "Parameters", txParams)
+				return
+			}
+			s.writeUpstreamTerminologyError(w, txErr)
+			return
+		}
 		writeOperationOutcome(w, http.StatusNotFound, "not-found",
 			fmt.Sprintf("code %q not found in CodeSystem %q", code, firstNonEmpty(system, csID)))
 		return
@@ -1050,19 +1418,33 @@ func (s *Server) handleCodeSystemValidateCode(w http.ResponseWriter, r *http.Req
 	}
 
 	csConcepts, _, err := s.resolveCodeSystemConceptsWithInline(r.Context(), tenant, csID, systemURL, inlineRes)
+	var matched *terminologyConcept
+	if err == nil {
+		for i := range csConcepts {
+			c := &csConcepts[i]
+			if c.Code == code {
+				matched = c
+				break
+			}
+		}
+	}
+
+	if matched == nil && s.txClient != nil && csID == "" && inlineRes == nil && !s.isCompleteLocalCodeSystem(r.Context(), tenant, "", systemURL) {
+		txParams, txErr := s.txClient.ValidateCodeSystemCode(r.Context(), params, nil)
+		if txErr == nil && txParams != nil {
+			s.writeTerminologyResourceResponse(w, r, "Parameters", txParams)
+			return
+		}
+		if ue, ok := txclient.AsUpstreamError(txErr); !ok || !ue.IsTransient() || !s.txClient.FailOpen() || err != nil {
+			s.writeUpstreamTerminologyError(w, txErr)
+			return
+		}
+	}
+
 	if err != nil {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found",
 			fmt.Sprintf("CodeSystem %q not found", firstNonEmpty(systemURL, csID)))
 		return
-	}
-
-	var matched *terminologyConcept
-	for i := range csConcepts {
-		c := &csConcepts[i]
-		if c.Code == code {
-			matched = c
-			break
-		}
 	}
 
 	result := matched != nil
@@ -1116,20 +1498,36 @@ func (s *Server) handleCodeSystemSubsumes(w http.ResponseWriter, r *http.Request
 	}
 
 	csConcepts, _, err := s.resolveCodeSystemConceptsWithInline(r.Context(), tenant, csID, systemURL, inlineRes)
+	var foundA, foundB bool
+	if err == nil {
+		for _, c := range csConcepts {
+			if c.Code == codeA {
+				foundA = true
+			}
+			if c.Code == codeB {
+				foundB = true
+			}
+		}
+	}
+
+	if s.txClient != nil && csID == "" && inlineRes == nil && !s.isCompleteLocalCodeSystem(r.Context(), tenant, "", systemURL) {
+		if err != nil || !foundA || !foundB || partialBuiltInCodeSystems[stripCanonicalVersion(systemURL)] {
+			txParams, txErr := s.txClient.Subsumes(r.Context(), params, nil)
+			if txErr == nil && txParams != nil {
+				s.writeTerminologyResourceResponse(w, r, "Parameters", txParams)
+				return
+			}
+			if ue, ok := txclient.AsUpstreamError(txErr); !ok || !ue.IsTransient() || !s.txClient.FailOpen() || err != nil || !foundA || !foundB {
+				s.writeUpstreamTerminologyError(w, txErr)
+				return
+			}
+		}
+	}
+
 	if err != nil {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found",
 			fmt.Sprintf("CodeSystem %q not found", firstNonEmpty(systemURL, csID)))
 		return
-	}
-
-	var foundA, foundB bool
-	for _, c := range csConcepts {
-		if c.Code == codeA {
-			foundA = true
-		}
-		if c.Code == codeB {
-			foundB = true
-		}
 	}
 	if !foundA || !foundB {
 		missing := codeA
