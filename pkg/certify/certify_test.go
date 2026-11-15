@@ -179,6 +179,56 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			w.Header().Set("X-TEFCA-Exchange-Purpose", pou)
 		}
 
+		// AN-56: Bidirectional HL7 FHIR R4 XML wire transport mock responses
+		if strings.Contains(r.Header.Get("Content-Type"), "fhir+xml") ||
+			strings.Contains(r.Header.Get("Accept"), "fhir+xml") ||
+			strings.Contains(q.Get("_format"), "xml") ||
+			q.Get("format") == "xml" {
+			if strings.HasSuffix(path, "/Patient/$convert") && !strings.Contains(r.Header.Get("Accept"), "fhir+xml") && q.Get("format") != "xml" {
+				w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+				_, _ = w.Write([]byte(`{"resourceType":"Patient","id":"cert-xml-pat-1","name":[{"family":"XmlWireCert","given":["Clara"]}],"gender":"female","birthDate":"1988-07-19"}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/fhir+xml; charset=utf-8")
+			w.Header().Set("X-Flint-Wire-Format", "hl7.fhir.r4.xml")
+			switch {
+			case strings.HasSuffix(path, "/Patient/cert-xml-pat-1") && r.Method == http.MethodPut:
+				if r.Header.Get("If-Match") == `W/"99999"` {
+					w.WriteHeader(http.StatusPreconditionFailed)
+					_, _ = w.Write([]byte(`<OperationOutcome xmlns="http://hl7.org/fhir"><issue><severity value="error"/><code value="conflict"/></issue></OperationOutcome>`))
+					return
+				}
+				w.Header().Set("ETag", `W/"1"`)
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`<Patient xmlns="http://hl7.org/fhir"><id value="cert-xml-pat-1"/><meta><versionId value="1"/></meta><name><family value="XmlWireCert"/><given value="Clara"/></name><gender value="female"/><birthDate value="1988-07-19"/></Patient>`))
+				return
+			case strings.HasSuffix(path, "/Patient/cert-xml-pat-1") && r.Method == http.MethodGet:
+				w.Header().Set("ETag", `W/"1"`)
+				_, _ = w.Write([]byte(`<Patient xmlns="http://hl7.org/fhir"><id value="cert-xml-pat-1"/><meta><versionId value="1"/></meta><name><family value="XmlWireCert"/><given value="Clara"/></name><gender value="female"/><birthDate value="1988-07-19"/></Patient>`))
+				return
+			case strings.HasSuffix(path, "/Patient/cert-xml-missing-404"):
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`<OperationOutcome xmlns="http://hl7.org/fhir"><issue><severity value="error"/><code value="not-found"/></issue></OperationOutcome>`))
+				return
+			case strings.HasSuffix(path, "/Patient") && r.Method == http.MethodGet:
+				_, _ = w.Write([]byte(`<Bundle xmlns="http://hl7.org/fhir"><type value="searchset"/><total value="1"/><entry><resource><Patient><id value="cert-xml-pat-1"/><name><family value="XmlWireCert"/></name></Patient></resource></entry></Bundle>`))
+				return
+			case strings.HasSuffix(path, "/Patient/$validate"):
+				_, _ = w.Write([]byte(`<OperationOutcome xmlns="http://hl7.org/fhir"><issue><severity value="information"/><code value="informational"/></issue></OperationOutcome>`))
+				return
+			case strings.HasSuffix(path, "/Observation/$validate"):
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`<OperationOutcome xmlns="http://hl7.org/fhir"><issue><severity value="error"/><code value="required"/></issue></OperationOutcome>`))
+				return
+			case strings.HasSuffix(path, "/Patient/$convert"):
+				_, _ = w.Write([]byte(`<Patient xmlns="http://hl7.org/fhir"><id value="cert-xml-pat-1"/><name><family value="XmlWireCert"/><given value="Clara"/></name></Patient>`))
+				return
+			case r.Method == http.MethodPost && strings.HasSuffix(path, "/fhir/r4/certify"):
+				_, _ = w.Write([]byte(`<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><entry><response><status value="200 OK"/><etag value="W/&quot;2&quot;"/></response></entry></Bundle>`))
+				return
+			}
+		}
+
 		// OAuth2 endpoints
 		switch path {
 		case "/oauth2/authorize":
@@ -1238,6 +1288,56 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			w.Header().Set("X-TEFCA-Exchange-Purpose", pou)
 		}
 
+		// AN-56: Bidirectional HL7 FHIR R4 XML wire transport mock responses
+		if strings.Contains(r.Header.Get("Content-Type"), "fhir+xml") ||
+			strings.Contains(r.Header.Get("Accept"), "fhir+xml") ||
+			strings.Contains(q.Get("_format"), "xml") ||
+			q.Get("format") == "xml" {
+			if strings.HasSuffix(path, "/Patient/$convert") && !strings.Contains(r.Header.Get("Accept"), "fhir+xml") && q.Get("format") != "xml" {
+				w.Header().Set("Content-Type", "application/fhir+json; charset=utf-8")
+				_, _ = w.Write([]byte(`{"resourceType":"Patient","id":"cert-xml-pat-1","name":[{"family":"XmlWireCert","given":["Clara"]}],"gender":"female","birthDate":"1988-07-19"}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/fhir+xml; charset=utf-8")
+			w.Header().Set("X-Flint-Wire-Format", "hl7.fhir.r4.xml")
+			switch {
+			case strings.HasSuffix(path, "/Patient/cert-xml-pat-1") && r.Method == http.MethodPut:
+				if r.Header.Get("If-Match") == `W/"99999"` {
+					w.WriteHeader(http.StatusPreconditionFailed)
+					_, _ = w.Write([]byte(`<OperationOutcome xmlns="http://hl7.org/fhir"><issue><severity value="error"/><code value="conflict"/></issue></OperationOutcome>`))
+					return
+				}
+				w.Header().Set("ETag", `W/"1"`)
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`<Patient xmlns="http://hl7.org/fhir"><id value="cert-xml-pat-1"/><meta><versionId value="1"/></meta><name><family value="XmlWireCert"/><given value="Clara"/></name><gender value="female"/><birthDate value="1988-07-19"/></Patient>`))
+				return
+			case strings.HasSuffix(path, "/Patient/cert-xml-pat-1") && r.Method == http.MethodGet:
+				w.Header().Set("ETag", `W/"1"`)
+				_, _ = w.Write([]byte(`<Patient xmlns="http://hl7.org/fhir"><id value="cert-xml-pat-1"/><meta><versionId value="1"/></meta><name><family value="XmlWireCert"/><given value="Clara"/></name><gender value="female"/><birthDate value="1988-07-19"/></Patient>`))
+				return
+			case strings.HasSuffix(path, "/Patient/cert-xml-missing-404"):
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`<OperationOutcome xmlns="http://hl7.org/fhir"><issue><severity value="error"/><code value="not-found"/></issue></OperationOutcome>`))
+				return
+			case strings.HasSuffix(path, "/Patient") && r.Method == http.MethodGet:
+				_, _ = w.Write([]byte(`<Bundle xmlns="http://hl7.org/fhir"><type value="searchset"/><total value="1"/><entry><resource><Patient><id value="cert-xml-pat-1"/><name><family value="XmlWireCert"/></name></Patient></resource></entry></Bundle>`))
+				return
+			case strings.HasSuffix(path, "/Patient/$validate"):
+				_, _ = w.Write([]byte(`<OperationOutcome xmlns="http://hl7.org/fhir"><issue><severity value="information"/><code value="informational"/></issue></OperationOutcome>`))
+				return
+			case strings.HasSuffix(path, "/Observation/$validate"):
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`<OperationOutcome xmlns="http://hl7.org/fhir"><issue><severity value="error"/><code value="required"/></issue></OperationOutcome>`))
+				return
+			case strings.HasSuffix(path, "/Patient/$convert"):
+				_, _ = w.Write([]byte(`<Patient xmlns="http://hl7.org/fhir"><id value="cert-xml-pat-1"/><name><family value="XmlWireCert"/><given value="Clara"/></name></Patient>`))
+				return
+			case r.Method == http.MethodPost && strings.HasSuffix(path, "/fhir/r4/certify"):
+				_, _ = w.Write([]byte(`<Bundle xmlns="http://hl7.org/fhir"><type value="transaction-response"/><entry><response><status value="200 OK"/><etag value="W/&quot;2&quot;"/></response></entry></Bundle>`))
+				return
+			}
+		}
+
 		// Search & Graph & MPI endpoints
 		if strings.HasSuffix(path, "/$graph") {
 			if strings.Contains(r.Header.Get("Accept"), "application/x-protobuf") || strings.Contains(q.Get("_format"), "protobuf") {
@@ -1307,8 +1407,8 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 137 {
-		t.Fatalf("expected all 137 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 138 {
+		t.Fatalf("expected all 138 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()

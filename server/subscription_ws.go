@@ -369,6 +369,23 @@ func (h *subscriptionWSHub) unregisterConn(c *wsSubscriberConn) {
 	}
 }
 
+func (h *subscriptionWSHub) closeAll() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	conns := make([]*wsSubscriberConn, 0, len(h.conns))
+	for _, c := range h.conns {
+		conns = append(conns, c)
+	}
+	h.conns = make(map[string]*wsSubscriberConn)
+	h.byTenantSub = make(map[string]map[string]*wsSubscriberConn)
+	h.mu.Unlock()
+	for _, c := range conns {
+		c.close()
+	}
+}
+
 func (h *subscriptionWSHub) bindConnSubscription(c *wsSubscriberConn, b *wsSubscriptionBinding) {
 	c.setBinding(b)
 	key := c.tenant + "/" + b.subID
@@ -818,14 +835,31 @@ func (s *Server) handleSubscriptionsWS(w http.ResponseWriter, r *http.Request) {
 		s.subWSHub = newSubscriptionWSHub()
 	}
 
+	if s.closed.Load() {
+		writeOperationOutcome(w, http.StatusServiceUnavailable, "transient", "server shutting down")
+		return
+	}
+
 	ws, err := upgradeWebSocket(w, r, tenant)
 	if err != nil {
 		return
 	}
+	s.bgMu.Lock()
+	if s.closed.Load() {
+		s.bgMu.Unlock()
+		ws.close()
+		return
+	}
+	s.bgWG.Add(1)
+	s.bgMu.Unlock()
+	defer s.bgWG.Done()
+
 	s.subWSHub.registerConn(ws)
 	defer s.subWSHub.unregisterConn(ws)
 
-	go s.runWSHeartbeatLoop(ws)
+	if !s.startBackgroundWorker(func() { s.runWSHeartbeatLoop(ws) }) {
+		return
+	}
 
 	requiresTokenBinding := s.tokenValidator != nil && !hasUpgradeSecCtx
 	if qSub := cleanID(strings.TrimSpace(r.URL.Query().Get("subscription"))); qSub != "" && !requiresTokenBinding {

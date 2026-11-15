@@ -497,6 +497,7 @@ func run(
 	}
 
 	srv := server.New(primaryStore, logger)
+	defer func() { _ = srv.Close() }()
 	srv.SetReferentialIntegrity(refIntegrityMode)
 	if analyticalStore != nil {
 		srv.SetAnalyticalStore(analyticalStore)

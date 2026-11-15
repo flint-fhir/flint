@@ -110,6 +110,11 @@ type Server struct {
 	internalRouter             http.Handler
 	metrics                    *serverMetrics
 	txClient                   *txclient.Client
+	bgMu                       sync.Mutex
+	bgCtx                      context.Context
+	bgCancel                   context.CancelFunc
+	bgWG                       sync.WaitGroup
+	closed                     atomic.Bool
 }
 
 // New creates a new FHIR server backed by any pluggable store.Store implementation
@@ -132,6 +137,7 @@ func New(st store.Store, logger *slog.Logger) *Server {
 	devAuth, _ := auth.NewMockTokenValidator("", "")
 	valEngine := validation.NewEngine(validation.DefaultOptions())
 	valEngine.SetFHIRPathEvaluator(evalFHIRPath)
+	bgCtx, bgCancel := context.WithCancel(context.Background())
 	srv := &Server{
 		primaryStore:    st,
 		store:           st,
@@ -153,9 +159,82 @@ func New(st store.Store, logger *slog.Logger) *Server {
 		subSem:          make(chan struct{}, 32),
 		subWSHub:        newSubscriptionWSHub(),
 		metrics:         newServerMetrics(),
+		bgCtx:           bgCtx,
+		bgCancel:        bgCancel,
 	}
 	valEngine.SetValueSetValidator(srv.validateCodeAgainstKnownValueSet)
 	return srv
+}
+
+func (s *Server) deriveBackgroundContext(reqCtx context.Context) (context.Context, context.CancelFunc) {
+	base := context.WithoutCancel(reqCtx)
+	ctx, cancel := context.WithCancel(base)
+	if s.bgCtx != nil {
+		stop := context.AfterFunc(s.bgCtx, cancel)
+		return ctx, func() {
+			stop()
+			cancel()
+		}
+	}
+	return ctx, cancel
+}
+
+func (s *Server) startBackgroundWorker(fn func()) bool {
+	s.bgMu.Lock()
+	if s.closed.Load() {
+		s.bgMu.Unlock()
+		return false
+	}
+	s.bgWG.Add(1)
+	s.bgMu.Unlock()
+	go func() {
+		defer s.bgWG.Done()
+		fn()
+	}()
+	return true
+}
+
+// Shutdown gracefully cancels background workers (async Bulk $export jobs, rest-hook
+// Subscription deliveries, and hijacked WebSocket $subscriptions-ws connections) and
+// waits for them to drain until ctx expires.
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	s.bgMu.Lock()
+	firstClose := s.closed.CompareAndSwap(false, true)
+	s.bgMu.Unlock()
+	if firstClose {
+		if s.bgCancel != nil {
+			s.bgCancel()
+		}
+		if s.subWSHub != nil {
+			s.subWSHub.closeAll()
+		}
+		s.cancelAllExportJobs()
+	}
+	done := make(chan struct{})
+	go func() {
+		s.bgWG.Wait()
+		close(done)
+	}()
+	if ctx == nil {
+		<-done
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Close cancels and drains all background server workers and hijacked WebSocket streams.
+func (s *Server) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.Shutdown(ctx)
 }
 
 // Store returns the configured operational store.Store.
