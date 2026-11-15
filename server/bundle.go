@@ -747,6 +747,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 					ResID:    resID,
 					Op:       "D",
 				})
+				s.dispatchSubscriptionDelete(r.Context(), tenant, resType, resID, delRec.ResVersion, delRec.LastUpdated)
 			}
 			responseEntries[i] = map[string]any{
 				"response": respMap,
@@ -1231,6 +1232,7 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 						ResID:    delID,
 						Op:       "D",
 					})
+					s.dispatchSubscriptionDelete(r.Context(), tenant, op.Input.ResType, delID, res.Record.ResVersion, res.Record.LastUpdated)
 				}
 				responseEntries[origIdx] = map[string]any{
 					"response": respMap,
