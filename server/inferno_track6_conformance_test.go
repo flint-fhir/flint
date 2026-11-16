@@ -144,6 +144,21 @@ func TestTrack6_IPSPlanNetAndUSDrugFormularyConformance(t *testing.T) {
 		assertSearchAtLeastOne(pnTenant, q)
 	}
 
+	// Verify escaped comma search (\,) does NOT split into OR-clauses and _lastUpdated second-precision eq matches sub-second timestamps
+	putTestResource(t, client, ts.URL, pnTenant, "Organization", "org-escaped-addr", `{"resourceType":"Organization","id":"org-escaped-addr","active":true,"name":"Cambridge Clinic","address":[{"text":"250 CambridgePark Dr, Cambridge, MA 02140, US","city":"Cambridge","state":"MA","postalCode":"02140","country":"US"}]}`)
+	putTestResource(t, client, ts.URL, pnTenant, "Organization", "org-boston-us", `{"resourceType":"Organization","id":"org-boston-us","active":true,"name":"Boston Network","address":[{"line":["100 Main St"],"city":"Boston","state":"MA","postalCode":"02110","country":"US"}]}`)
+	escapedBundle := assertSearchAtLeastOne(pnTenant, `Organization?address=250%20CambridgePark%20Dr%5C,%20Cambridge%5C,%20MA%2002140%5C,%20US`)
+	assert.Len(t, escapedBundle["entry"].([]any), 1, "escaped comma search must not split on \\, into country=US OR-clause")
+
+	epReadResp, err := client.Get(ts.URL + "/fhir/r4/" + pnTenant + "/Endpoint/ep-1")
+	require.NoError(t, err)
+	epReadBytes, _ := io.ReadAll(epReadResp.Body)
+	epReadResp.Body.Close()
+	var epReadMap map[string]any
+	require.NoError(t, json.Unmarshal(epReadBytes, &epReadMap))
+	luStr := epReadMap["meta"].(map[string]any)["lastUpdated"].(string)
+	assertSearchAtLeastOne(pnTenant, "Endpoint?_lastUpdated="+luStr)
+
 	// 4. Da Vinci US Drug Formulary v2.0.1 search & _include conformance
 	usdfTenant := "formulary-track6"
 	putTestResource(t, client, ts.URL, usdfTenant, "Location", "loc-usdf-001", `{"resourceType":"Location","id":"loc-usdf-001","status":"active","name":"MA Area","address":{"line":["100 State St"],"city":"Boston","state":"MA","postalCode":"02109"}}`)

@@ -178,7 +178,7 @@ func ParseDateOp(raw string) (DateOp, error) {
 			case "2006-01-02":
 				highTime = parsedTime.AddDate(0, 0, 1)
 			default:
-				highTime = parsedTime
+				highTime = parsedTime.Add(timestampPrecisionSpan(datePart))
 			}
 			parseErr = nil
 			break
@@ -196,6 +196,91 @@ func ParseDateOp(raw string) (DateOp, error) {
 		Value:  parsedTime,
 		High:   highTime,
 	}, nil
+}
+
+// timestampPrecisionSpan returns the implicit interval width [t, t+span) for a
+// FHIR R4 dateTime/instant search parameter (§3.1.1.4.4) based on the number of
+// fractional second digits present in datePart.
+func timestampPrecisionSpan(datePart string) time.Duration {
+	dotIdx := strings.IndexByte(datePart, '.')
+	if dotIdx == -1 {
+		return time.Second
+	}
+	digits := 0
+	for i := dotIdx + 1; i < len(datePart); i++ {
+		c := datePart[i]
+		if c < '0' || c > '9' {
+			break
+		}
+		digits++
+	}
+	switch digits {
+	case 0:
+		return time.Second
+	case 1:
+		return 100 * time.Millisecond
+	case 2:
+		return 10 * time.Millisecond
+	case 3:
+		return time.Millisecond
+	case 4:
+		return 100 * time.Microsecond
+	case 5:
+		return 10 * time.Microsecond
+	case 6:
+		return time.Microsecond
+	default:
+		return 0
+	}
+}
+
+// SplitSearchORValues splits a FHIR R4 search parameter value into OR-clauses on
+// unescaped commas (',' not preceded by an odd number of '\') per FHIR R4 §3.1.1.3.3.
+func SplitSearchORValues(raw string) []string {
+	if !strings.Contains(raw, `\`) {
+		return strings.Split(raw, ",")
+	}
+	var out []string
+	start := 0
+	backslashes := 0
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case '\\':
+			backslashes++
+		case ',':
+			if backslashes%2 == 0 {
+				out = append(out, raw[start:i])
+				start = i + 1
+			}
+			backslashes = 0
+		default:
+			backslashes = 0
+		}
+	}
+	out = append(out, raw[start:])
+	return out
+}
+
+// UnescapeFHIRSearchString unescapes FHIR R4 §3.1.1.3.3 search parameter escape
+// sequences (\, -> , | \$ -> $ | \| -> | | \\ -> \).
+func UnescapeFHIRSearchString(raw string) string {
+	if !strings.Contains(raw, `\`) {
+		return raw
+	}
+	var b strings.Builder
+	b.Grow(len(raw))
+	for i := 0; i < len(raw); i++ {
+		if raw[i] == '\\' && i+1 < len(raw) {
+			next := raw[i+1]
+			if next == ',' || next == '$' || next == '|' || next == '\\' {
+				b.WriteByte(next)
+				i++
+				continue
+			}
+		}
+		b.WriteByte(raw[i])
+	}
+	return b.String()
 }
 
 // ParseQuantityOp parses a FHIR quantity query parameter.

@@ -1390,8 +1390,8 @@ func matchStringInRow(row DorisResourceRow, spName, rawStr string) bool {
 	exact := strings.HasSuffix(spName, ":exact")
 	contains := strings.HasSuffix(spName, ":contains") || strings.HasSuffix(spName, ":text")
 	isText := strings.HasSuffix(spName, ":text")
-	for item := range strings.SplitSeq(rawStr, ",") {
-		needle := strings.ToLower(strings.TrimSpace(item))
+	for _, item := range store.SplitSearchORValues(rawStr) {
+		needle := strings.ToLower(strings.TrimSpace(store.UnescapeFHIRSearchString(item)))
 		prefix := baseName + "="
 		textPrefix := baseName + ":text="
 		for _, tok := range row.StringTokens {

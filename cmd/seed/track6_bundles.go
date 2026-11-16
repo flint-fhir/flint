@@ -326,6 +326,85 @@ func PlanNetTransactionBundleJSON() ([]byte, error) {
 			},
 		}),
 
+		putEntry("Organization/plannet-org-dept", map[string]any{
+			"resourceType": "Organization",
+			"id":           "plannet-org-dept",
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Organization"},
+			},
+			"extension": []map[string]any{
+				{
+					"url":         "http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/org-description",
+					"valueString": "Acme Cardiology Electrophysiology Department",
+				},
+				plannetQualificationExt("Organization/plannet-org-parent"),
+				{
+					"url":            "http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/location-reference",
+					"valueReference": map[string]any{"reference": "Location/plannet-loc-clinic"},
+				},
+			},
+			"identifier": []map[string]any{
+				{
+					"type": map[string]any{
+						"coding": []map[string]any{
+							{"system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "NPI", "display": "National provider identifier"},
+						},
+					},
+					"system": "http://hl7.org/fhir/sid/us-npi",
+					"value":  "1336777776",
+				},
+			},
+			"active": true,
+			"type": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/davinci-pdex-plan-net/CodeSystem/OrgTypeCS",
+							"code":    "dept",
+							"display": "Hospital Department",
+						},
+					},
+				},
+			},
+			"name":  "Acme Cardiology Electrophysiology Department",
+			"alias": []string{"Acme EP Lab"},
+			"telecom": []map[string]any{
+				{
+					"system": "phone",
+					"value":  "617-555-2250",
+					"rank":   1,
+					"extension": []map[string]any{
+						plannetAvailableTimeExt(),
+						plannetViaIntermediaryExt("Organization/plannet-org-clinic"),
+					},
+				},
+			},
+			"address": []map[string]any{
+				{
+					"type":       "both",
+					"text":       "250 CambridgePark Dr, Cambridge, MA 02140, US",
+					"line":       []string{"250 CambridgePark Dr"},
+					"city":       "Cambridge",
+					"state":      "MA",
+					"postalCode": "02140",
+					"country":    "US",
+					"extension":  []map[string]any{plannetGeoExt(42.3956, -71.1426)},
+				},
+			},
+			"partOf": map[string]any{"reference": "Organization/plannet-org-clinic"},
+			"contact": []map[string]any{
+				{
+					"name": map[string]any{"text": "EP Scheduling"},
+					"telecom": []map[string]any{
+						{"system": "phone", "value": "617-555-2251", "use": "work"},
+					},
+				},
+			},
+			"endpoint": []map[string]any{
+				{"reference": "Endpoint/plannet-ep-001"},
+			},
+		}),
+
 		putEntry("Organization/plannet-network-001", map[string]any{
 			"resourceType": "Organization",
 			"id":           "plannet-network-001",
@@ -361,7 +440,7 @@ func PlanNetTransactionBundleJSON() ([]byte, error) {
 					},
 				},
 			},
-			"name": "Acme Premier PPO Network",
+			"name": "Acme Cardiology Specialty Clinic PPO Network",
 			"telecom": []map[string]any{
 				{"system": "phone", "value": "800-555-3100"},
 			},
@@ -380,6 +459,68 @@ func PlanNetTransactionBundleJSON() ([]byte, error) {
 					"name": map[string]any{"text": "Network Helpdesk"},
 					"telecom": []map[string]any{
 						{"system": "phone", "value": "800-555-3101"},
+					},
+				},
+			},
+			"endpoint": []map[string]any{
+				{"reference": "Endpoint/plannet-ep-001"},
+			},
+		}),
+
+		putEntry("Organization/plannet-network-002", map[string]any{
+			"resourceType": "Organization",
+			"id":           "plannet-network-002",
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Network"},
+			},
+			"extension": []map[string]any{
+				{
+					"url":            "http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/location-reference",
+					"valueReference": map[string]any{"reference": "Location/plannet-loc-clinic"},
+				},
+			},
+			"identifier": []map[string]any{
+				{
+					"type": map[string]any{
+						"coding": []map[string]any{
+							{"system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "XX", "display": "Organization identifier"},
+						},
+					},
+					"system": "http://acme-health.example.org/network-id",
+					"value":  "NET-CARDIO-MA-002",
+				},
+			},
+			"active": true,
+			"type": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/davinci-pdex-plan-net/CodeSystem/OrgTypeCS",
+							"code":    "ntwk",
+							"display": "Network",
+						},
+					},
+				},
+			},
+			"name": "Acme Cardiology Specialty Clinic Regional Network",
+			"telecom": []map[string]any{
+				{"system": "phone", "value": "800-555-3200"},
+			},
+			"address": []map[string]any{
+				{
+					"line":       []string{"250 CambridgePark Dr"},
+					"city":       "Cambridge",
+					"state":      "MA",
+					"postalCode": "02140",
+					"country":    "US",
+				},
+			},
+			"partOf": map[string]any{"reference": "Organization/plannet-org-clinic"},
+			"contact": []map[string]any{
+				{
+					"name": map[string]any{"text": "Regional Network Desk"},
+					"telecom": []map[string]any{
+						{"system": "phone", "value": "800-555-3201"},
 					},
 				},
 			},
@@ -549,6 +690,87 @@ func PlanNetTransactionBundleJSON() ([]byte, error) {
 			},
 			"managingOrganization": map[string]any{"reference": "Organization/plannet-org-clinic"},
 			"partOf":               map[string]any{"reference": "Location/plannet-loc-parent"},
+			"hoursOfOperation": []map[string]any{
+				{
+					"daysOfWeek":  []string{"mon", "tue", "wed", "thu", "fri"},
+					"allDay":      false,
+					"openingTime": "08:30:00",
+					"closingTime": "17:00:00",
+				},
+			},
+			"availabilityExceptions": "Closed weekends and federal holidays",
+			"endpoint": []map[string]any{
+				{"reference": "Endpoint/plannet-ep-001"},
+			},
+		}),
+
+		putEntry("Location/plannet-loc-suite", map[string]any{
+			"resourceType": "Location",
+			"id":           "plannet-loc-suite",
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Location"},
+			},
+			"extension": []map[string]any{
+				plannetNewPatientsExt("Organization/plannet-network-001"),
+				{
+					"url": "http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/accessibility",
+					"valueCodeableConcept": map[string]any{
+						"coding": []map[string]any{
+							{
+								"system":  "http://hl7.org/fhir/us/davinci-pdex-plan-net/CodeSystem/AccessibilityCS",
+								"code":    "handiaccess",
+								"display": "handicap accessible",
+							},
+						},
+					},
+				},
+			},
+			"identifier": []map[string]any{
+				{
+					"type": map[string]any{
+						"coding": []map[string]any{
+							{"system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "FI", "display": "Facility ID"},
+						},
+					},
+					"system": "http://acme-health.example.org/location-id",
+					"value":  "LOC-CAMBRIDGE-CARDIO-RM1",
+				},
+			},
+			"status":      "active",
+			"name":        "Acme Cambridge Cardiology Exam Suite 301",
+			"alias":       []string{"Cardiology Exam Suite 301"},
+			"description": "Diagnostic echocardiography exam suite",
+			"mode":        "instance",
+			"type": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://terminology.hl7.org/CodeSystem/v3-RoleCode", "code": "CARD", "display": "Ambulatory Health Care Facilities; Clinic/Center; Cardiology"},
+					},
+				},
+			},
+			"telecom": []map[string]any{
+				{
+					"system": "phone",
+					"value":  "617-555-4105",
+					"extension": []map[string]any{
+						plannetAvailableTimeExt(),
+						plannetViaIntermediaryExt("Organization/plannet-org-clinic"),
+					},
+				},
+			},
+			"address": map[string]any{
+				"line":       []string{"250 CambridgePark Dr, Suite 301"},
+				"city":       "Cambridge",
+				"state":      "MA",
+				"postalCode": "02140",
+				"country":    "US",
+			},
+			"position": map[string]any{
+				"longitude": -71.1426,
+				"latitude":  42.3956,
+			},
+			"managingOrganization": map[string]any{"reference": "Organization/plannet-org-clinic"},
+			"partOf":               map[string]any{"reference": "Location/plannet-loc-clinic"},
 			"hoursOfOperation": []map[string]any{
 				{
 					"daysOfWeek":  []string{"mon", "tue", "wed", "thu", "fri"},
@@ -847,6 +1069,86 @@ func PlanNetTransactionBundleJSON() ([]byte, error) {
 						"start": "2026-11-10",
 						"end":   "2026-11-12",
 					},
+				},
+			},
+			"endpoint": []map[string]any{
+				{"reference": "Endpoint/plannet-ep-001"},
+			},
+		}),
+
+		putEntry("PractitionerRole/plannet-role-002", map[string]any{
+			"resourceType": "PractitionerRole",
+			"id":           "plannet-role-002",
+			"meta": map[string]any{
+				"profile": []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-PractitionerRole"},
+			},
+			"extension": []map[string]any{
+				plannetNewPatientsExt("Organization/plannet-network-001"),
+				{
+					"url":            "http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/network-reference",
+					"valueReference": map[string]any{"reference": "Organization/plannet-org-clinic"},
+				},
+				plannetQualificationExt("Organization/plannet-org-parent"),
+			},
+			"identifier": []map[string]any{
+				{
+					"type": map[string]any{
+						"coding": []map[string]any{
+							{"system": "http://terminology.hl7.org/CodeSystem/v2-0203", "code": "PRN", "display": "Provider number"},
+						},
+					},
+					"system": "http://acme-health.example.org/role-id",
+					"value":  "ROLE-CHEN-002",
+				},
+			},
+			"active": true,
+			"period": map[string]any{
+				"start": "2022-01-01",
+				"end":   "2028-12-31",
+			},
+			"practitioner": map[string]any{"reference": "Practitioner/plannet-prac-001"},
+			"organization": map[string]any{"reference": "Organization/plannet-org-clinic"},
+			"code": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{
+							"system":  "http://hl7.org/fhir/us/davinci-pdex-plan-net/CodeSystem/ProviderRoleCS",
+							"code":    "ph",
+							"display": "Physician",
+						},
+					},
+				},
+			},
+			"specialty": []map[string]any{
+				{
+					"coding": []map[string]any{
+						{"system": "http://nucc.org/provider-taxonomy", "code": "207RC0000X", "display": "Cardiovascular Disease Physician"},
+					},
+				},
+			},
+			"location": []map[string]any{
+				{"reference": "Location/plannet-loc-clinic"},
+			},
+			"healthcareService": []map[string]any{
+				{"reference": "HealthcareService/plannet-svc-001"},
+			},
+			"telecom": []map[string]any{
+				{
+					"system": "phone",
+					"value":  "617-555-4302",
+					"rank":   1,
+					"extension": []map[string]any{
+						plannetAvailableTimeExt(),
+						plannetViaIntermediaryExt("Organization/plannet-org-clinic"),
+					},
+				},
+			},
+			"availableTime": []map[string]any{
+				{
+					"daysOfWeek":         []string{"mon", "tue", "wed", "thu", "fri"},
+					"allDay":             false,
+					"availableStartTime": "09:00:00",
+					"availableEndTime":   "16:30:00",
 				},
 			},
 			"endpoint": []map[string]any{
