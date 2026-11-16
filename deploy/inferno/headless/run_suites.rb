@@ -3,7 +3,7 @@
 
 # Headless HL7 Inferno execution harness for Flint CI.
 #
-# Runs official HL7 Inferno test suites synchronously in-process (SQLite, no Redis/Sidekiq):
+# Runs official HL7 & ONC Inferno test suites synchronously in-process (SQLite, no Redis/Sidekiq):
 #   1. SMART App Launch STU2 (`smart_stu2` -> Full Suite: Discovery, Standalone Launch PKCE/OIDC/Refresh,
 #      EHR Launch Symmetric/Authorize-POST/OIDC/Refresh, Backend Services ES384, RFC 7662 Token Introspection)
 #   2. SMART App Launch STU2 Asymmetric (`smart_stu2_asymmetric` -> Confidential Asymmetric `private_key_jwt`
@@ -11,15 +11,26 @@
 #   3. FHIR Bulk Data Access v2.0.0 (`bulk_data_v200` -> SMART Backend Services + Group/Patient/System $export)
 #   4. US Core Server v6.1.0 (`us_core_v610` -> CapabilityStatement + all 26 US Core v6.1.0 FHIR API clinical profiles)
 #   5. US Core Server v7.0.0 (`us_core_v700` -> CapabilityStatement + all 26 US Core v7.0.0 / USCDI v4 FHIR API clinical profiles)
-#   6. HL7 International Patient Access v1.0.0 (`ipa_v100` -> CapabilityStatement + IPA FHIR API clinical profiles)
+#   6. US Core Server v8.0.0 (`us_core_v800` -> CapabilityStatement + all US Core v8.0.0 / USCDI v5 + ADI clinical profiles)
+#   7. HL7 International Patient Access v1.0.0 (`ipa_v100` -> CapabilityStatement + IPA FHIR API clinical profiles)
+#   8. HL7 Subscriptions R5 Backport IG v1.1.0 (`subscriptions_r5_backport_r4_server` -> Workflow, CapabilityStatement,
+#      Empty/ID-Only/Full-Resource Notifications, Handshake/Heartbeat, $status, 7 Rejection cases, PUT/PATCH/DELETE)
+#   9. ONC § 170.315(g)(10) / HTI-1 Standardized API (`g10_certification` -> Standalone, Limited, EHR Practitioner,
+#      Single Patient US Core v7, Multi-Patient Bulk Data STU2, and Group06 Authorization & Fine-Grained Scopes)
 
 require 'base64'
+require 'digest'
 require 'fileutils'
 require 'json'
 require 'net/http'
 require 'rack/mock'
+require 'securerandom'
 require 'uri'
 
+inferno_bind_port = ENV.fetch('INFERNO_PORT', '14569')
+ENV['INFERNO_HOST'] ||= '127.0.0.1'
+ENV['INFERNO_PORT'] ||= inferno_bind_port
+ENV['BASE_URL'] ||= "http://127.0.0.1:#{inferno_bind_port}"
 ENV['NO_DB'] = 'false'
 ENV['ASYNC_JOBS'] = 'false'
 ENV['INFERNO_DISABLE_TLS_TEST'] ||= 'true'
@@ -45,12 +56,53 @@ client_id         = ENV.fetch('INFERNO_CLIENT_ID', 'inferno-bulk-client')
 asym_client_id    = ENV.fetch('INFERNO_ASYM_CLIENT_ID', 'inferno-smart-asymmetric')
 ehr_client_id     = ENV.fetch('INFERNO_EHR_CLIENT_ID', 'inferno-ehr-confidential')
 ehr_client_secret = ENV.fetch('INFERNO_EHR_CLIENT_SECRET', 'inferno-ehr-secret-stu2-key')
+g10_client_id     = ENV.fetch('INFERNO_G10_CLIENT_ID', 'inferno-g10-confidential')
+g10_client_secret = ENV.fetch('INFERNO_G10_CLIENT_SECRET', 'inferno-g10-secret-stu2-key')
+g10_bulk_client   = ENV.fetch('INFERNO_G10_BULK_CLIENT_ID', 'inferno-g10-bulk-client')
 access_token      = ENV.fetch('INFERNO_ACCESS_TOKEN', '').strip
 artifacts_dir     = ENV.fetch('INFERNO_ARTIFACTS_DIR', File.expand_path('../../../artifacts/inferno', __dir__))
 
 FileUtils.mkdir_p(artifacts_dir)
 
-INFERNO_RACK_MOCK = Rack::MockRequest.new(Inferno::Web.app)
+base_uri = URI.parse(Inferno::Application['base_url'].to_s)
+base_prefix = base_uri.path.to_s.chomp('/')
+INFERNO_RACK_APP = lambda do |env|
+  if !base_prefix.empty? && env['PATH_INFO'].to_s.start_with?(base_prefix)
+    stripped = env['PATH_INFO'].to_s.sub(/\A#{Regexp.escape(base_prefix)}/, '')
+    stripped = '/' if stripped.empty?
+    env = env.merge('SCRIPT_NAME' => base_prefix, 'PATH_INFO' => stripped)
+  end
+  Inferno::Web.app.call(env)
+end
+
+INFERNO_RACK_MOCK = Rack::MockRequest.new(INFERNO_RACK_APP)
+
+def start_inferno_http_listener!(rack_app, base_uri)
+  require 'puma'
+  require 'puma/events'
+
+  listen_host = base_uri.host.to_s
+  listen_host = '127.0.0.1' if listen_host.empty? || listen_host == 'localhost'
+  listen_port = base_uri.port || 14569
+
+  puma_srv = begin
+    Puma::Server.new(rack_app, Puma::Events.strings)
+  rescue ArgumentError
+    Puma::Server.new(rack_app)
+  end
+  puma_srv.add_tcp_listener(listen_host, listen_port)
+  puma_srv.run
+
+  puts "Started in-process Inferno HTTP webhook/JWKS listener at http://#{listen_host}:#{listen_port} (base_url=#{Inferno::Application['base_url']})"
+  puma_srv
+end
+
+inferno_http_server = start_inferno_http_listener!(INFERNO_RACK_APP, base_uri)
+at_exit do
+  inferno_http_server&.stop(true)
+rescue StandardError
+  nil
+end
 
 def collect_inferno_public_jwks
   sources = []
@@ -58,6 +110,9 @@ def collect_inferno_public_jwks
   sources << JSON.parse(SMARTAppLaunch::JWKS.jwks_json) if defined?(SMARTAppLaunch::JWKS)
   if defined?(BulkDataTestKit::BulkDataV200::BulkDataTestSuite)
     sources << JSON.parse(BulkDataTestKit::BulkDataV200::BulkDataTestSuite.jwks_json)
+  end
+  if defined?(ONCCertificationG10TestKit::BulkDataJWKSHelper)
+    sources << JSON.parse(ONCCertificationG10TestKit::BulkDataJWKSHelper.public_jwks_json)
   end
 
   seen_kids = {}
@@ -85,7 +140,7 @@ def register_jwks_with_flint!(flint_base_url, client_id)
     client_name: 'HL7 Inferno Headless Asymmetric Client',
     token_endpoint_auth_method: 'private_key_jwt',
     grant_types: %w[client_credentials authorization_code refresh_token],
-    scope: 'launch/patient openid fhirUser offline_access patient/*.rs system/*.rs system/*.read system/*.cruds',
+    scope: 'launch launch/patient openid fhirUser offline_access patient/*.rs user/*.rs system/*.rs system/*.read system/*.cruds',
     jwks: { keys: keys }
   })
 
@@ -109,7 +164,7 @@ def register_symmetric_client_with_flint!(flint_base_url, client_id, client_secr
     client_name: 'HL7 Inferno Headless Confidential Symmetric Client',
     token_endpoint_auth_method: 'client_secret_basic',
     grant_types: %w[authorization_code refresh_token],
-    scope: 'launch launch/encounter openid fhirUser offline_access user/*.cruds patient/*.rs'
+    scope: 'launch launch/patient launch/encounter openid fhirUser offline_access user/*.cruds user/*.rs patient/*.rs patient/*.read'
   })
 
   resp = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 15) do |http|
@@ -120,6 +175,76 @@ def register_symmetric_client_with_flint!(flint_base_url, client_id, client_secr
   end
 
   puts "Registered confidential symmetric credentials for client_id=#{client_id}"
+end
+
+def mint_and_revoke_standalone_token_pair!(
+  flint_base_url:,
+  flint_fhir_url:,
+  client_id:,
+  client_secret:,
+  patient_id:
+)
+  verifier = SecureRandom.urlsafe_base64(32)
+  challenge = Base64.urlsafe_encode64(Digest::SHA256.digest(verifier), padding: false)
+  redirect_uri = "#{Inferno::Application['base_url']}/custom/smart/redirect"
+
+  auth_uri = URI.parse("#{flint_base_url}/oauth2/authorize")
+  auth_uri.query = URI.encode_www_form(
+    response_type: 'code',
+    client_id: client_id,
+    redirect_uri: redirect_uri,
+    scope: 'launch/patient openid fhirUser offline_access patient/Patient.rs',
+    state: SecureRandom.hex(8),
+    aud: flint_fhir_url,
+    patient: patient_id,
+    code_challenge: challenge,
+    code_challenge_method: 'S256'
+  )
+  auth_resp = Net::HTTP.get_response(auth_uri)
+  unless [302, 303].include?(auth_resp.code.to_i)
+    raise "Failed to authorize standalone token pair for revocation test (HTTP #{auth_resp.code}): #{auth_resp.body}"
+  end
+
+  cb_uri = URI.parse(auth_resp['location'].to_s)
+  code = URI.decode_www_form(cb_uri.query.to_s).to_h['code'].to_s
+  raise 'Missing authorization code for revocation test' if code.empty?
+
+  tok_uri = URI.parse("#{flint_base_url}/oauth2/token")
+  tok_req = Net::HTTP::Post.new(tok_uri)
+  tok_req.basic_auth(client_id, client_secret)
+  tok_req.set_form_data(
+    'grant_type' => 'authorization_code',
+    'code' => code,
+    'redirect_uri' => redirect_uri,
+    'code_verifier' => verifier
+  )
+  tok_resp = Net::HTTP.start(tok_uri.hostname, tok_uri.port, use_ssl: tok_uri.scheme == 'https', read_timeout: 15) do |http|
+    http.request(tok_req)
+  end
+  unless tok_resp.code.to_i == 200
+    raise "Failed to exchange token pair for revocation test (HTTP #{tok_resp.code}): #{tok_resp.body}"
+  end
+
+  tok_doc = JSON.parse(tok_resp.body)
+  rev_uri = URI.parse("#{flint_base_url}/oauth2/revoke")
+  rev_req = Net::HTTP::Post.new(rev_uri)
+  rev_req.basic_auth(client_id, client_secret)
+  rev_req.set_form_data('token' => tok_doc.fetch('access_token'))
+  rev_resp = Net::HTTP.start(rev_uri.hostname, rev_uri.port, use_ssl: rev_uri.scheme == 'https', read_timeout: 15) do |http|
+    http.request(rev_req)
+  end
+  unless rev_resp.code.to_i == 200
+    raise "Failed to revoke standalone access_token at #{rev_uri} (HTTP #{rev_resp.code}): #{rev_resp.body}"
+  end
+
+  {
+    auth_type: 'symmetric',
+    client_id: client_id,
+    client_secret: client_secret,
+    access_token: tok_doc.fetch('access_token'),
+    refresh_token: tok_doc.fetch('refresh_token'),
+    token_url: "#{flint_base_url}/oauth2/token"
+  }
 end
 
 def mint_ehr_launch_token!(flint_base_url:, flint_tenant:, patient_id:, encounter_id:)
@@ -146,7 +271,94 @@ def mint_ehr_launch_token!(flint_base_url:, flint_tenant:, patient_id:, encounte
   token
 end
 
+def trigger_subscription_encounter_event!(flint_fhir_url:, patient_id:, bearer_token:)
+  uri = URI.parse("#{flint_fhir_url}/Encounter")
+  req = Net::HTTP::Post.new(uri)
+  req['Content-Type'] = 'application/fhir+json'
+  req['Authorization'] = "Bearer #{bearer_token}" unless bearer_token.to_s.empty?
+  req.body = JSON.generate({
+    resourceType: 'Encounter',
+    status: 'in-progress',
+    class: {
+      system: 'http://terminology.hl7.org/CodeSystem/v3-ActCode',
+      code: 'IMP',
+      display: 'inpatient encounter'
+    },
+    type: [
+      {
+        coding: [
+          {
+            system: 'http://snomed.info/sct',
+            code: '32485007',
+            display: 'Hospital admission'
+          }
+        ]
+      }
+    ],
+    subject: {
+      reference: "Patient/#{patient_id}"
+    },
+    period: {
+      start: Time.now.utc.iso8601
+    }
+  })
+  resp = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 15) do |http|
+    http.request(req)
+  end
+  unless resp.code.to_i.between?(200, 299)
+    raise "Failed to create Encounter event for Subscription delivery (HTTP #{resp.code}): #{resp.body}"
+  end
+end
+
+def drive_waiting_subscription_flow!(
+  test_session_id:,
+  waiting_result:,
+  confirmation_url:,
+  flint_fhir_url:,
+  patient_id:,
+  bearer_token:,
+  expect_heartbeat: false
+)
+  requests_repo = Inferno::Repositories::Requests.new
+  created_reqs = requests_repo.tagged_requests(test_session_id, ['subscription_creation'])
+  latest_create = Array(created_reqs).select { |r| r.status.to_i == 201 }.last
+  sub_id = latest_create ? JSON.parse(latest_create.response_body.to_s)['id'].to_s : ''
+  raise 'Unable to determine created Subscription ID during NotificationDeliveryTest wait' if sub_id.empty?
+
+  puts "    [Subscriptions R5 Backport] Waiting for handshake#{expect_heartbeat ? ' + heartbeat' : ''} on Subscription/#{sub_id} ..."
+  deadline = Time.now + 8.0
+  until Time.now > deadline
+    hs = requests_repo.tagged_requests(test_session_id, ['handshake', sub_id])
+    hb = expect_heartbeat ? requests_repo.tagged_requests(test_session_id, ['heartbeat', sub_id]) : [true]
+    break if !Array(hs).empty? && !Array(hb).empty?
+
+    sleep 0.15
+  end
+
+  puts "    [Subscriptions R5 Backport] Triggering Encounter admission event for Subscription/#{sub_id} ..."
+  trigger_subscription_encounter_event!(
+    flint_fhir_url: flint_fhir_url,
+    patient_id: patient_id,
+    bearer_token: bearer_token
+  )
+
+  ev_deadline = Time.now + 8.0
+  until Time.now > ev_deadline
+    ev = requests_repo.tagged_requests(test_session_id, ['event-notification', sub_id])
+    break unless Array(ev).empty?
+
+    sleep 0.15
+  end
+
+  puts "    [Subscriptions R5 Backport] Confirming notification delivery for #{waiting_result.test_id}"
+  rack_resp = INFERNO_RACK_MOCK.get(confirmation_url)
+  unless [200, 302, 303].include?(rack_resp.status)
+    raise "Inferno subscription resume_pass route failed (HTTP #{rack_resp.status}): #{rack_resp.body}"
+  end
+end
+
 def drive_waiting_smart_flow!(
+  test_session_id:,
   test_run_id:,
   runs_repo:,
   results_repo:,
@@ -154,9 +366,12 @@ def drive_waiting_smart_flow!(
   flint_fhir_url:,
   flint_tenant:,
   patient_id:,
-  encounter_id:
+  encounter_id:,
+  bearer_token: '',
+  granted_scope_override: nil,
+  expect_heartbeat: false
 )
-  max_waits = 16
+  max_waits = 24
   waits_handled = 0
 
   while runs_repo.status_for_test_run(test_run_id).to_s == 'waiting'
@@ -172,10 +387,21 @@ def drive_waiting_smart_flow!(
       acc[entry['name'].to_s] = entry['value'].to_s
     end
 
-    launch_uri = outputs['launch_uri']
-    auth_url   = outputs['authorization_url']
+    launch_uri       = outputs['launch_uri']
+    auth_url         = outputs['authorization_url']
+    confirmation_url = outputs['confirmation_url']
 
-    if !launch_uri.nil? && !launch_uri.empty?
+    if !confirmation_url.nil? && !confirmation_url.empty?
+      drive_waiting_subscription_flow!(
+        test_session_id: test_session_id,
+        waiting_result: waiting_result,
+        confirmation_url: confirmation_url,
+        flint_fhir_url: flint_fhir_url,
+        patient_id: patient_id,
+        bearer_token: bearer_token,
+        expect_heartbeat: expect_heartbeat
+      )
+    elsif !launch_uri.nil? && !launch_uri.empty?
       target_iss = outputs['target_iss'].to_s.strip
       target_iss = flint_fhir_url if target_iss.empty?
       launch_token = mint_ehr_launch_token!(
@@ -204,13 +430,29 @@ def drive_waiting_smart_flow!(
                      post_target_str = form_hash.delete('auth_url').to_s
                      raise "Missing auth_url parameter in post_auth URI: #{auth_url}" if post_target_str.empty?
 
+                     form_hash['granted_scope'] = granted_scope_override if granted_scope_override
                      post_target = URI.parse(post_target_str)
                      puts "    [SMART Authorize POST] Submitting PKCE authorization form to #{post_target}"
                      Net::HTTP.post_form(post_target, form_hash)
                    else
+                     if granted_scope_override
+                       q_pairs = URI.decode_www_form(auth_uri.query || '')
+                       q_pairs << ['granted_scope', granted_scope_override]
+                       auth_uri.query = URI.encode_www_form(q_pairs)
+                     end
                      puts "    [SMART Authorize GET] Requesting PKCE authorization at #{auth_uri.scheme}://#{auth_uri.host}:#{auth_uri.port}#{auth_uri.path}"
                      Net::HTTP.get_response(auth_uri)
                    end
+
+      attest_fail_url = outputs['attest_launch_failed_url'].to_s.strip
+      if flint_resp.code.to_i >= 400 && !attest_fail_url.empty?
+        puts "    [SMART Invalid Launch Attestation] Flint rejected invalid launch (HTTP #{flint_resp.code}); confirming at #{URI.parse(attest_fail_url).path}"
+        rack_resp = INFERNO_RACK_MOCK.get(attest_fail_url)
+        unless [200, 302, 303].include?(rack_resp.status)
+          raise "Inferno attest_launch_failed_url route failed (HTTP #{rack_resp.status}): #{rack_resp.body}"
+        end
+        next
+      end
 
       unless [302, 303].include?(flint_resp.code.to_i)
         raise "Expected OAuth2 302/303 redirect from Flint, got HTTP #{flint_resp.code}: #{flint_resp.body}"
@@ -254,11 +496,14 @@ def execute_inferno_target(
   flint_tenant:,
   patient_id:,
   encounter_id:,
+  artifacts_dir:,
+  bearer_token: '',
   group_suffix: nil,
   runnables: nil,
   suite_options: {},
   inputs: {},
-  artifacts_dir:
+  per_runnable_hooks: {},
+  auto_radio_true: false
 )
   suites_repo   = Inferno::Repositories::TestSuites.new
   tests_repo    = Inferno::Repositories::Tests.new
@@ -312,6 +557,19 @@ def execute_inferno_target(
     available_list = available.is_a?(Hash) ? available.values : Array(available)
     puts "\n>>> Preparing #{label} [#{idx + 1}/#{target_runnables.size}] (#{runnable.id}) [inputs: #{available_list.map { |ri| "#{ri.name}:#{ri.type}" }.join(', ')}]"
 
+    if auto_radio_true
+      available_list.each do |ri|
+        next unless ri.type.to_s == 'radio'
+
+        data_repo.save(
+          test_session_id: test_session.id,
+          name: ri.name,
+          value: 'true',
+          type: ri.type
+        )
+      end
+    end
+
     inputs.each do |k, v|
       matched = available_list.find { |ri| ri.name.to_s == k.to_s }
       next unless matched
@@ -338,6 +596,11 @@ def execute_inferno_target(
       )
     end
 
+    hook_cfg = per_runnable_hooks.find { |pattern, _| runnable.id.to_s.include?(pattern.to_s) }&.last || {}
+    if hook_cfg[:before_run]
+      hook_cfg[:before_run].call(test_session, data_repo, available_list)
+    end
+
     runnable_key = runnable < Inferno::TestSuite ? :test_suite_id : :test_group_id
     test_run = runs_repo.create(
       test_session_id: test_session.id,
@@ -348,6 +611,7 @@ def execute_inferno_target(
     puts ">>> Running #{label} (#{runnable.id}) ..."
     Inferno::Jobs.perform(Inferno::Jobs::ExecuteTestRun, test_run.id, force_synchronous: true)
     drive_waiting_smart_flow!(
+      test_session_id: test_session.id,
       test_run_id: test_run.id,
       runs_repo: runs_repo,
       results_repo: results_repo,
@@ -355,7 +619,10 @@ def execute_inferno_target(
       flint_fhir_url: flint_fhir_url,
       flint_tenant: flint_tenant,
       patient_id: patient_id,
-      encounter_id: encounter_id
+      encounter_id: encounter_id,
+      bearer_token: bearer_token,
+      granted_scope_override: hook_cfg[:granted_scope],
+      expect_heartbeat: hook_cfg.fetch(:expect_heartbeat, false)
     )
 
     results = runs_repo.results_for_test_run(test_run.id)
@@ -420,7 +687,7 @@ def execute_inferno_target(
 
   File.write(File.join(artifacts_dir, "#{label}.json"), JSON.pretty_generate(artifact_payload))
   puts format(
-    '<<< %<label>-22s total=%<tot>3d pass=%<pass>3d skip=%<skip>3d omit=%<omit>2d fail=%<fail>2d error=%<err>2d (%<sec>.2fs)',
+    '<<< %<label>-34s total=%<tot>3d pass=%<pass>3d skip=%<skip>3d omit=%<omit>2d fail=%<fail>2d error=%<err>2d (%<sec>.2fs)',
     label: label,
     tot: leaf_results.size,
     pass: counts['pass'],
@@ -436,7 +703,9 @@ end
 
 register_jwks_with_flint!(flint_base_url, client_id)
 register_jwks_with_flint!(flint_base_url, asym_client_id)
+register_jwks_with_flint!(flint_base_url, g10_bulk_client)
 register_symmetric_client_with_flint!(flint_base_url, ehr_client_id, ehr_client_secret)
+register_symmetric_client_with_flint!(flint_base_url, g10_client_id, g10_client_secret)
 
 common_ctx = {
   flint_base_url: flint_base_url,
@@ -444,6 +713,7 @@ common_ctx = {
   flint_tenant: flint_tenant,
   patient_id: launch_patient_id,
   encounter_id: launch_enc_id,
+  bearer_token: access_token,
   artifacts_dir: artifacts_dir
 }
 
@@ -587,6 +857,24 @@ if Inferno::Repositories::TestSuites.new.find('us_core_v700')
   )
 end
 
+if Inferno::Repositories::TestSuites.new.find('us_core_v800')
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'us_core_v800',
+    suite_id: 'us_core_v800',
+    group_suffix: 'fhir_api',
+    suite_options: {
+      smart_app_launch_version: 'smart_app_launch_2'
+    },
+    inputs: {
+      url: flint_fhir_url,
+      patient_ids: patient_ids,
+      smart_auth_info: us_core_auth_json,
+      smart_credentials: access_token
+    }
+  )
+end
+
 ipa_suite = Inferno::Repositories::TestSuites.new.all.find do |s|
   s.id.to_s == 'ipa_v100' || s.id.to_s.start_with?('ipa')
 end
@@ -615,6 +903,333 @@ if ipa_suite && ENV['INFERNO_SKIP_IPA'] != 'true'
   )
 end
 
+subs_suite = Inferno::Repositories::TestSuites.new.find('subscriptions_r5_backport_r4_server')
+if subs_suite && ENV['INFERNO_SKIP_SUBSCRIPTIONS'] != 'true'
+  sub_notify_token = 'flint-sub-notify-token'
+  sub_channel_endpoint = "#{Inferno::Application['base_url']}/custom/subscriptions_r5_backport_r4_server/subscription/channel/notification_listener"
+
+  build_backport_sub = lambda do |content_mode, with_heartbeat: false|
+    ch_exts = [
+      {
+        url: 'http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-timeout',
+        valueUnsignedInt: 60
+      },
+      {
+        url: 'http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-max-count',
+        valuePositiveInt: 20
+      }
+    ]
+    if with_heartbeat
+      ch_exts << {
+        url: 'http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-heartbeat-period',
+        valueUnsignedInt: 1
+      }
+    end
+
+    JSON.generate({
+      resourceType: 'Subscription',
+      meta: {
+        profile: ['http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription']
+      },
+      status: 'requested',
+      end: '2099-12-31T12:00:00Z',
+      reason: "R4 Topic-Based Subscription (#{content_mode})",
+      criteria: 'https://inferno.healthit.gov/suites/custom/subscriptions_r5_backport_r4_client/topics/patient-admission',
+      _criteria: {
+        extension: [
+          {
+            url: 'http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-filter-criteria',
+            valueString: "Encounter?patient=Patient/#{launch_patient_id}"
+          }
+        ]
+      },
+      channel: {
+        extension: ch_exts,
+        type: 'rest-hook',
+        header: ["Authorization: Bearer #{sub_notify_token}"],
+        endpoint: sub_channel_endpoint,
+        payload: 'application/fhir+json',
+        _payload: {
+          extension: [
+            {
+              url: 'http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-payload-content',
+              valueCode: content_mode
+            }
+          ]
+        }
+      }
+    })
+  end
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'subscriptions_r5_backport',
+    suite_id: 'subscriptions_r5_backport_r4_server',
+    runnables: Array(subs_suite.groups),
+    inputs: {
+      url: flint_fhir_url,
+      smart_auth_info: us_core_auth_json,
+      access_token: sub_notify_token,
+      subscription_resource: build_backport_sub.call('full-resource', with_heartbeat: true),
+      empty_subscription_resource: build_backport_sub.call('empty', with_heartbeat: false),
+      id_only_subscription_resource: build_backport_sub.call('id-only', with_heartbeat: false),
+      unsupported_subscription_topic: 'http://example.org/FHIR/SubscriptionTopic/unsupported-topic',
+      unsupported_subscription_filter: 'Encounter?unsupported_search_param=123',
+      unsupported_subscription_channel_type: 'email',
+      unsupported_subscription_channel_endpoint: 'ftp://unsupported.example.org/hook',
+      unsupported_subscription_payload_type: 'application/pdf',
+      unsupported_subscription_channel_payload_combo: JSON.generate({
+        channel: 'websocket',
+        payload: 'application/cloudevents+json'
+      })
+    },
+    per_runnable_hooks: {
+      'subscriptions_r4_server_workflow' => { expect_heartbeat: true }
+    }
+  )
+end
+
+g10_suite = Inferno::Repositories::TestSuites.new.find('g10_certification')
+if g10_suite && ENV['INFERNO_SKIP_G10'] != 'true'
+  g10_standalone_scopes = ONCCertificationG10TestKit::ScopeConstants::STANDALONE_SMART_2_SCOPES
+  g10_ehr_scopes        = ONCCertificationG10TestKit::ScopeConstants::EHR_SMART_2_SCOPES
+  g10_v1_scopes         = ONCCertificationG10TestKit::ScopeConstants::STANDALONE_SMART_1_SCOPES
+
+  g10_standalone_auth_json = JSON.generate({
+    auth_type: 'symmetric',
+    use_discovery: 'true',
+    auth_request_method: 'GET',
+    pkce_support: 'enabled',
+    pkce_code_challenge_method: 'S256',
+    client_id: g10_client_id,
+    client_secret: g10_client_secret,
+    requested_scopes: g10_standalone_scopes
+  })
+
+  g10_ehr_auth_json = JSON.generate({
+    auth_type: 'symmetric',
+    use_discovery: 'true',
+    auth_request_method: 'POST',
+    pkce_support: 'enabled',
+    pkce_code_challenge_method: 'S256',
+    client_id: g10_client_id,
+    client_secret: g10_client_secret,
+    requested_scopes: g10_ehr_scopes
+  })
+
+  g10_ehr_patient_auth_json = JSON.generate({
+    auth_type: 'symmetric',
+    use_discovery: 'true',
+    auth_request_method: 'POST',
+    pkce_support: 'enabled',
+    pkce_code_challenge_method: 'S256',
+    client_id: g10_client_id,
+    client_secret: g10_client_secret,
+    requested_scopes: g10_standalone_scopes.sub('launch/patient', 'launch')
+  })
+
+  g10_public_auth_json = JSON.generate({
+    auth_type: 'public',
+    use_discovery: 'true',
+    auth_request_method: 'GET',
+    pkce_support: 'enabled',
+    pkce_code_challenge_method: 'S256',
+    client_id: 'inferno-g10-public',
+    requested_scopes: g10_standalone_scopes
+  })
+
+  g10_asym_auth_json = JSON.generate({
+    auth_type: 'asymmetric',
+    use_discovery: 'true',
+    auth_request_method: 'GET',
+    pkce_support: 'enabled',
+    pkce_code_challenge_method: 'S256',
+    encryption_algorithm: 'ES384',
+    client_id: asym_client_id,
+    requested_scopes: g10_standalone_scopes
+  })
+
+  g10_v1_auth_json = JSON.generate({
+    auth_type: 'symmetric',
+    use_discovery: 'true',
+    auth_request_method: 'GET',
+    pkce_support: 'enabled',
+    pkce_code_challenge_method: 'S256',
+    client_id: g10_client_id,
+    client_secret: g10_client_secret,
+    requested_scopes: g10_v1_scopes
+  })
+
+  g10_granular_1_scopes = [
+    'launch/patient openid fhirUser offline_access',
+    *USCoreTestKit::SmartScopesConstants::SMART_GRANULAR_SCOPES_GROUP1['v700']
+  ].join(' ')
+  g10_granular_2_scopes = [
+    'launch/patient openid fhirUser offline_access',
+    *USCoreTestKit::SmartScopesConstants::SMART_GRANULAR_SCOPES_GROUP2['v700']
+  ].join(' ')
+
+  g10_granular_1_auth_json = JSON.generate({
+    auth_type: 'symmetric',
+    use_discovery: 'true',
+    auth_request_method: 'GET',
+    pkce_support: 'enabled',
+    pkce_code_challenge_method: 'S256',
+    client_id: g10_client_id,
+    client_secret: g10_client_secret,
+    requested_scopes: g10_granular_1_scopes
+  })
+
+  g10_granular_2_auth_json = JSON.generate({
+    auth_type: 'symmetric',
+    use_discovery: 'true',
+    auth_request_method: 'GET',
+    pkce_support: 'enabled',
+    pkce_code_challenge_method: 'S256',
+    client_id: g10_client_id,
+    client_secret: g10_client_secret,
+    requested_scopes: g10_granular_2_scopes
+  })
+
+  g10_granular_selection_auth_json = JSON.generate({
+    auth_type: 'symmetric',
+    use_discovery: 'true',
+    auth_request_method: 'GET',
+    pkce_support: 'enabled',
+    pkce_code_challenge_method: 'S256',
+    client_id: g10_client_id,
+    client_secret: g10_client_secret,
+    requested_scopes: 'launch/patient openid fhirUser offline_access patient/Condition.rs patient/Observation.rs patient/Patient.rs'
+  })
+
+  g10_bulk_auth_json = JSON.generate({
+    auth_type: 'backend_services',
+    use_discovery: false,
+    token_url: "#{flint_base_url}/oauth2/token",
+    client_id: g10_bulk_client,
+    encryption_algorithm: 'ES384',
+    requested_scopes: 'system/*.rs',
+    jwks: ONCCertificationG10TestKit::BulkDataJWKSHelper.jwks_json
+  })
+
+  g10_runnables = []
+  %w[
+    g10_smart_standalone_patient_app
+    g10_smart_limited_app
+    g10_smart_ehr_practitioner_app
+    g10_single_patient_us_core_7_api
+    multi_patient_api_stu2
+  ].each do |gid|
+    found = find_group_in_suite(g10_suite, gid)
+    g10_runnables << found if found
+  end
+
+  group06 = find_group_in_suite(g10_suite, 'Group06')
+  if group06
+    %w[
+      g10_public_standalone_launch_stu2
+      g10_smart_invalid_aud
+      g10_smart_invalid_token_request_stu2
+      g10_smart_invalid_pkce_code_verifier_group
+      g10_ehr_patient_launch_stu2
+      g10_token_introspection
+      g10_asymmetric_launch
+      g10_smart_v1_scopes
+    ].each do |sub_gid|
+      found = Array(group06.groups).find { |g| g.id.to_s.end_with?(sub_gid) }
+      g10_runnables << found if found
+    end
+
+    fine_grained = Array(group06.groups).find { |g| g.id.to_s.end_with?('g10_us_core_7_smart_fine_grained_scopes') }
+    if fine_grained
+      Array(fine_grained.groups).each { |fg_child| g10_runnables << fg_child }
+    end
+
+    granular_sel = Array(group06.groups).find { |g| g.id.to_s.end_with?('g10_us_core_7_smart_granular_scope_selection') }
+    g10_runnables << granular_sel if granular_sel
+
+    tok_rev = Array(group06.groups).find { |g| g.id.to_s.end_with?('g10_token_revocation') }
+    g10_runnables << tok_rev if tok_rev
+  end
+
+  vis_group = find_group_in_suite(g10_suite, 'g10_visual_inspection_and_attestations')
+  g10_runnables << vis_group if vis_group
+
+  g10_introspect_header = "Authorization: Basic #{Base64.strict_encode64("#{g10_client_id}:#{g10_client_secret}")}"
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'onc_g10_certification',
+    suite_id: 'g10_certification',
+    runnables: g10_runnables,
+    auto_radio_true: true,
+    suite_options: {
+      us_core_version: 'us_core_7',
+      smart_app_launch_version: 'smart_app_launch_2',
+      multi_patient_version: 'multi_patient_api_stu2'
+    },
+    inputs: {
+      url: flint_fhir_url,
+      standalone_smart_auth_info: g10_standalone_auth_json,
+      expected_resources: 'patient, condition, observation',
+      ehr_smart_auth_info: g10_ehr_auth_json,
+      additional_patient_ids: '',
+      bulk_server_url: flint_fhir_url,
+      group_id: group_id,
+      bulk_timeout: '60',
+      bulk_smart_auth_info: g10_bulk_auth_json,
+      public_smart_auth_info: g10_public_auth_json,
+      ehr_patient_smart_auth_info: g10_ehr_patient_auth_json,
+      custom_authorization_header: g10_introspect_header,
+      asymmetric_smart_auth_info: g10_asym_auth_json,
+      v1_smart_auth_info: g10_v1_auth_json,
+      granular_scopes_1_auth_info: g10_granular_1_auth_json,
+      granular_scopes_2_auth_info: g10_granular_2_auth_json,
+      granular_scopes_selection_smart_auth_info: g10_granular_selection_auth_json,
+      token_revocation_attestation: 'true'
+    },
+    per_runnable_hooks: {
+      'g10_smart_limited_app' => {
+        granted_scope: 'launch/patient openid fhirUser offline_access patient/Patient.rs patient/Condition.rs patient/Observation.rs'
+      },
+      'g10_us_core_7_smart_granular_scope_selection' => {
+        granted_scope: 'launch/patient openid fhirUser offline_access patient/Patient.rs ' \
+                       'patient/Condition.rs?category=http://terminology.hl7.org/CodeSystem/condition-category|problem-list-item ' \
+                       'patient/Observation.rs?category=http://terminology.hl7.org/CodeSystem/observation-category|vital-signs'
+      },
+      'g10_token_revocation' => {
+        before_run: lambda do |test_session, data_repo, available_list|
+          revoked_info = mint_and_revoke_standalone_token_pair!(
+            flint_base_url: flint_base_url,
+            flint_fhir_url: flint_fhir_url,
+            client_id: g10_client_id,
+            client_secret: g10_client_secret,
+            patient_id: launch_patient_id
+          )
+          auth_input = available_list.find { |ri| ri.name.to_s == 'smart_auth_info' }
+          if auth_input
+            data_repo.save(
+              test_session_id: test_session.id,
+              name: auth_input.name,
+              value: JSON.generate(revoked_info),
+              type: auth_input.type
+            )
+          end
+          pat_input = available_list.find { |ri| ri.name.to_s == 'standalone_patient_id' }
+          if pat_input
+            data_repo.save(
+              test_session_id: test_session.id,
+              name: pat_input.name,
+              value: launch_patient_id,
+              type: pat_input.type
+            )
+          end
+        end
+      }
+    }
+  )
+end
+
 summary = {
   generated_at: Time.now.utc.iso8601,
   flint_fhir_url: flint_fhir_url,
@@ -633,7 +1248,7 @@ runs.each do |r|
              'FAIL'
            end
   puts format(
-    '  [%<st>s] %<lbl>-22s pass=%<pass>3d  skip=%<skip>3d  omit=%<omit>2d  fail=%<fail>2d  error=%<err>2d',
+    '  [%<st>s] %<lbl>-34s pass=%<pass>3d  skip=%<skip>3d  omit=%<omit>2d  fail=%<fail>2d  error=%<err>2d',
     st: status,
     lbl: r[:label],
     pass: c[:pass],

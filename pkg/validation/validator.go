@@ -677,8 +677,10 @@ func (e *Engine) ValidateResourceWithProfiles(expectedResType string, resMap map
 
 	for _, rawProf := range allProfiles {
 		baseProf := rawProf
+		profVer := ""
 		if pipeIdx := strings.IndexByte(rawProf, '|'); pipeIdx != -1 {
 			baseProf = strings.TrimSpace(rawProf[:pipeIdx])
+			profVer = strings.TrimSpace(rawProf[pipeIdx+1:])
 		}
 		spec, known := usCoreProfileSpecs[baseProf]
 		if !known {
@@ -716,6 +718,10 @@ func (e *Engine) ValidateResourceWithProfiles(expectedResType string, resMap map
 		}
 
 		for _, reqField := range spec.RequiredFields {
+			// US Core v8.0.0 relaxed Patient.gender from mandatory (1..1) to optional (0..1) in favor of us-core-sex.
+			if spec.Slug == "us-core-patient" && reqField == "gender" && strings.HasPrefix(profVer, "8.") {
+				continue
+			}
 			if !hasUSCoreRequiredElement(resMap, reqField) {
 				exprField := strings.TrimSuffix(reqField, "[x]")
 				if idx := strings.IndexByte(exprField, '|'); idx != -1 {
@@ -909,6 +915,10 @@ var usCoreProfileSpecs = map[string]usCoreProfileSpec{
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pediatric-weight-for-height":                               vitalSignsSpec("us-core-pediatric-weight-for-height", nil),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pediatric-bmi-for-age":                                     vitalSignsSpec("us-core-pediatric-bmi-for-age", nil),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pediatric-head-occipital-frontal-circumference-percentile": vitalSignsSpec("us-core-pediatric-head-occipital-frontal-circumference-percentile", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-head-circumference-percentile":                             vitalSignsSpec("us-core-head-circumference-percentile", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/pediatric-weight-for-height":                                       vitalSignsSpec("pediatric-weight-for-height", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/pediatric-bmi-for-age":                                             vitalSignsSpec("pediatric-bmi-for-age", nil),
+	"http://hl7.org/fhir/us/core/StructureDefinition/head-occipital-frontal-circumference-percentile":                   vitalSignsSpec("head-occipital-frontal-circumference-percentile", nil),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-blood-pressure":                                            vitalSignsSpec("us-core-blood-pressure", checkBloodPressureComponents),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-average-blood-pressure":                                    vitalSignsSpec("us-core-average-blood-pressure", checkAverageBloodPressureComponents),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-lab": {
@@ -982,6 +992,27 @@ var usCoreProfileSpecs = map[string]usCoreProfileSpec{
 		Slug:           "us-core-adi-documentreference",
 		ResourceType:   "DocumentReference",
 		RequiredFields: []string{"status", "type", "category", "subject", "content"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-adi-documentation": {
+		Slug:           "us-core-observation-adi-documentation",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "value[x]|dataAbsentReason"},
+	},
+	// HL7 Subscriptions R5 Backport IG v1.1.0 FHIR R4 profiles
+	"http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription": {
+		Slug:           "backport-subscription",
+		ResourceType:   "Subscription",
+		RequiredFields: []string{"status", "reason", "criteria", "channel"},
+	},
+	"http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription-status-r4": {
+		Slug:           "backport-subscription-status-r4",
+		ResourceType:   "Parameters",
+		RequiredFields: []string{"parameter"},
+	},
+	"http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription-notification-r4": {
+		Slug:           "backport-subscription-notification-r4",
+		ResourceType:   "Bundle",
+		RequiredFields: []string{"type", "entry"},
 	},
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns": conditionProfileSpec("us-core-condition-problems-health-concerns"),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-encounter-diagnosis":      conditionProfileSpec("us-core-condition-encounter-diagnosis"),

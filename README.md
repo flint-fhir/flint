@@ -562,7 +562,7 @@ Alongside generative Hegel tests and the built-in 138-check `$certify` suite, ev
 * **Official `FHIR/sql-on-fhir-v2` Test Vectors (`server/testdata/sql-on-fhir-v2`)**: 100% pass across all **22 official suites (144/144 test cases)** on `ViewDefinition/$run` plus live SQL execution equivalence of `ViewDefinition/$sql` on embedded SQLite and PostgreSQL.
 * **Official HL7 FHIRPath R4 `tests-fhir-r4.xml` Corpus (`server/testdata/fhirpath-r4`)**: Executes all **1,076 official HL7 FHIRPath R4 runtime & static semantic type-checking specification vectors (0 skips)** (navigation, polymorphic `.ofType()`/`.as()`/`.is()`, static `ElementDefinition` path & polymorphic choice validation, temporal arithmetic & boundaries, UCUM quantities, math, regex, aggregates, and three-valued logic).
 * **Synthea R4 US Core Multi-Topology Parity**: Verifies identical `Bundle` transaction ingestion, chained/reverse-chained/compartment search, `Patient/$everything`, `Observation/$stats`, `ViewDefinition/$run`, and `$export` across all **5 runtime topologies** (`postgres`, file-backed `modernc.org/sqlite` WAL, `doris`, `hybrid-postgres+doris`, and `hybrid-postgres+sqlite`).
-* **Headless HL7 Inferno CI ([`.github/workflows/inferno.yml`](.github/workflows/inferno.yml), [`deploy/inferno/`](deploy/inferno/))**: Runs official **`us_core_test_kit` (`us_core_v610` & `us_core_v700`)**, **`ipa_test_kit` (`ipa_v100`)**, **`smart_app_launch_test_kit` (full `smart_stu2` Standalone, EHR Launch, OIDC, PKCE, Refresh Rotation, Introspection/Revocation + `smart_stu2_asymmetric` `ES384` `private_key_jwt` — 896 passing leaf tests)**, and **`bulk_data_test_kit` (`bulk_data_v200`)** against live `flintd` across both `--store=postgres` and `--store=sqlite` (`task certify-inferno-headless`).
+* **Headless HL7 Inferno CI ([`.github/workflows/inferno.yml`](.github/workflows/inferno.yml), [`deploy/inferno/`](deploy/inferno/))**: Runs official **`us_core_test_kit` (`us_core_v610`, `us_core_v700`, & `us_core_v800` / USCDI v5)**, **`onc_certification_g10_test_kit` (`g10_certification` — ONC § 170.315(g)(10) / HTI-1 Standardized API)**, **`subscriptions_test_kit` (`subscriptions_r5_backport_r4_server` — R5 Backport `rest-hook` handshake, notification `Bundle`, `$status` & rejection)**, **`ipa_test_kit` (`ipa_v100`)**, **`smart_app_launch_test_kit` (full `smart_stu2` + `smart_stu2_asymmetric` `ES384` `private_key_jwt`)**, and **`bulk_data_test_kit` (`bulk_data_v200`)** against live `flintd` across both `--store=postgres` and `--store=sqlite` (`task certify-inferno-headless`).
 
 ---
 
@@ -610,7 +610,7 @@ flint/
 ├── bin/                  # Compiled binaries (flintd, seed, certify, loadtest; optional: worker)
 ├── cmd/
 │   ├── flintd/           # Core FHIR R4 API HTTP server (--store=postgres|sqlite|doris, --analytics-store=doris|sqlite|none)
-│   ├── seed/             # Deterministic 62-resource US Core v6.1.0/v7.0.0 & HL7 IPA cohort seeder (task seed)
+│   ├── seed/             # Deterministic US Core v6.1.0/v7.0.0/v8.0.0 & HL7 IPA cohort seeder (task seed)
 │   ├── certify/          # Automated 138-check conformance & certification CLI across 10 suites (task certify)
 │   ├── loadtest/         # High-throughput JSON & Binary Proto3 (-wire=proto) HTTP & Store load testing harness
 │   ├── worker/           # [Add-On] Temporal ingestion worker entrypoint (task build-worker)
@@ -618,7 +618,7 @@ flint/
 ├── docs/
 │   └── architecture.md   # Deep-dive on Decoupled FHIR R4 API Layer vs. Pluggable Storage Plane
 ├── deploy/
-│   ├── inferno/          # Official HL7 Inferno US Core Test Kit Docker Compose (task certify-inferno)
+│   ├── inferno/          # Official HL7 Inferno (US Core v6-v8, ONC g10, Subscriptions, IPA, SMART STU2, Bulk Data) runner
 │   ├── k3d/              # Local k3d cluster configuration
 │   └── k8s/              # Kubernetes manifests (Core: postgres.yaml, flintd.yaml; Add-Ons: worker, temporal, automq, garage, iceberg-rest)
 ├── examples/

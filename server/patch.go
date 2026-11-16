@@ -224,6 +224,10 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if err := s.validateSubscriptionResourceJSON(resType, patchedJSON); err != nil {
+			writeOperationOutcome(w, http.StatusUnprocessableEntity, "security", err.Error())
+			return
+		}
 		patchedJSON = normalizeSubscriptionOnWrite(resType, patchedJSON)
 
 		normalizedBody, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, patchedJSON)

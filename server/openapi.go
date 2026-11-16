@@ -321,7 +321,12 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "date", "type": "date"},
 			{"name": "period", "type": "date"},
 			{"name": "author", "type": "reference"},
+			{"name": "authenticator", "type": "reference"},
 			{"name": "custodian", "type": "reference"},
+			{"name": "docstatus", "type": "token"},
+			{"name": "location", "type": "uri"},
+			{"name": "contenttype", "type": "token"},
+			{"name": "relates-to", "type": "reference"},
 		},
 		"Provenance": {
 			{"name": "_id", "type": "token"},

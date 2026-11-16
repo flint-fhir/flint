@@ -66,7 +66,7 @@
         <div class="metric-card">
           <div class="metric-value">35+ HL7 IGs</div>
           <div class="metric-label">130+ Clinical Operations</div>
-          <div class="metric-sub">US Core v6/v7, SQL-on-FHIR v2, Da Vinci, CARIN, CodeX &amp; FAST</div>
+          <div class="metric-sub">US Core v6/v7/v8, ONC (g)(10), SQL-on-FHIR v2, Da Vinci, CARIN &amp; FAST</div>
         </div>
       </div>
     </section>
@@ -123,7 +123,7 @@
             <tr>
               <th>Wire &amp; Storage Format</th>
               <td>Heavy JSONB blobs or hundreds of relational tables</td>
-              <td>JSON + native binary <code>application/x-protobuf</code> HTTP wire &amp; compact <code>google/fhir</code> Proto3 storage (<strong>16× wire reduction</strong>, zero JSONB)</td>
+              <td>FHIR JSON + HL7 FHIR R4 XML (<code>application/fhir+xml</code>) + binary <code>application/x-protobuf</code> HTTP wire &amp; compact <code>google/fhir</code> Proto3 storage (<strong>16× wire reduction</strong>, zero JSONB)</td>
             </tr>
             <tr>
               <th>Search &amp; SQL-on-FHIR v2</th>
@@ -251,7 +251,7 @@
             <tr>
               <th>US Core, IPS, SDC &amp; Clinical Reasoning</th>
               <td><code>Patient/$everything</code>, <code>Encounter/$everything</code>, <code>Group/$everything</code>, <code>Patient/$summary</code> (IPS), <code>DocumentReference/$docref</code>, <code>Questionnaire/$populate</code>, <code>QuestionnaireResponse/$extract</code>, <code>PlanDefinition/$apply</code>, <code>$fhirpath</code></td>
-              <td>US Core v6.1.0 &amp; v7.0.0, HL7 IPS, HL7 SDC, CPG</td>
+              <td>US Core v6.1.0, v7.0.0 &amp; v8.0.0, ONC (g)(10), HL7 IPS, HL7 SDC, CPG</td>
               <td><code>/fhir/r4/{tenant}/Patient/{id}/$summary</code></td>
               <td>✅ Verified</td>
             </tr>
@@ -309,7 +309,7 @@
         <div class="arch-card">
           <h3>1. Storage-Agnostic FHIR R4 API Layer</h3>
           <p>
-            <code>package server</code> negotiates FHIR JSON, NDJSON, CSV/TSV, and zero-JSON binary <code>google/fhir</code> Proto3 over HTTP, executing validation, FHIRPath R4, UCUM canonicalization, and 130+ IG operations before touching persistence.
+            <code>package server</code> negotiates FHIR JSON, HL7 FHIR R4 XML (<code>application/fhir+xml</code>), NDJSON, CSV/TSV, and zero-JSON binary <code>google/fhir</code> Proto3 over HTTP, executing validation, FHIRPath R4, UCUM canonicalization, and 130+ IG operations before touching persistence.
           </p>
         </div>
         <div class="arch-card">

@@ -95,6 +95,9 @@ type Server struct {
 	subStatsMu                 sync.RWMutex
 	subStats                   map[string]*subscriptionDeliveryStats
 	subWSHub                   *subscriptionWSHub
+	subBaseURLMu               sync.RWMutex
+	subTenantBaseURL           map[string]string
+	subHbCancel                map[string]context.CancelFunc
 	disallowPrivateWebhooks    bool
 	clientJWKs                 map[string]auth.JWK
 	clientJWKSets              map[string]auth.JWKSet
@@ -403,6 +406,7 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /oauth2/introspect", s.handleOAuthIntrospect)
 	mux.HandleFunc("POST /oauth2/revoke", s.handleOAuthRevoke)
 	mux.HandleFunc("POST /oauth2/register", s.handleOAuthRegister)
+	mux.HandleFunc("GET /oauth2/smart-style.json", s.handleSMARTStyle)
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCConfig)
 	mux.HandleFunc("GET /.well-known/udap", s.handleUDAPDiscoveryWave54)
@@ -3466,6 +3470,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	resType := r.PathValue("resourceType")
+	s.recordTenantFHIRBaseURL(r, tenant)
 
 	md, ok := s.protoRegistry[resType]
 	if !ok {
@@ -3748,6 +3753,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	resType := r.PathValue("resourceType")
 	resID := r.PathValue("id")
+	s.recordTenantFHIRBaseURL(r, tenant)
 
 	md, ok := s.protoRegistry[resType]
 	if !ok {
@@ -6235,6 +6241,9 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-head-circumference-percentile",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pediatric-bmi-for-age",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-pediatric-weight-for-height",
+			"http://hl7.org/fhir/us/core/StructureDefinition/head-occipital-frontal-circumference-percentile",
+			"http://hl7.org/fhir/us/core/StructureDefinition/pediatric-bmi-for-age",
+			"http://hl7.org/fhir/us/core/StructureDefinition/pediatric-weight-for-height",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-smokingstatus",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-care-experience-preference",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-treatment-intervention-preference",
@@ -6246,6 +6255,7 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-pregnancyintent",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-pregnancystatus",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-sexual-orientation",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-adi-documentation",
 			"http://hl7.org/fhir/StructureDefinition/vitalsigns",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-observation",
 		}
@@ -6322,6 +6332,8 @@ func usCoreSupportedProfiles(rt string) []string {
 		}
 	case "RelatedPerson":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-relatedperson"}
+	case "Subscription":
+		return []string{"http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription"}
 	default:
 		return nil
 	}
@@ -7242,6 +7254,7 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 				},
 			}
 		case "Subscription":
+			entry["extension"] = s.buildSubscriptionTopicExtensions()
 			entry["operation"] = []map[string]string{
 				{
 					"name":       "status",

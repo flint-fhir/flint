@@ -244,6 +244,9 @@ func buildStoreOptions(isolationMode postgres.TenantIsolationMode, getenv func(s
 }
 
 func configureAuth(srv *server.Server, logger *slog.Logger, getenv func(string) string) error {
+	if strings.EqualFold(strings.TrimSpace(getenv("FLINT_SMART_REQUIRE_CLIENT_JWK")), "true") {
+		srv.SetRequireRegisteredClientJWK(true)
+	}
 	oidcIssuer := getenv("FLINT_OIDC_ISSUER")
 	if oidcIssuer == "" {
 		if strings.EqualFold(strings.TrimSpace(getenv("FLINT_SMART_ENFORCE_DEV_AUTH")), "true") {

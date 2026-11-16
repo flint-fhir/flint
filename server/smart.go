@@ -54,6 +54,7 @@ type authCodeEntry struct {
 
 // refreshTokenEntry stores an issued OAuth2 refresh token and its original grant context.
 type refreshTokenEntry struct {
+	GrantID     string
 	Subject     string
 	ClientID    string
 	PatientID   string
@@ -585,6 +586,8 @@ func (s *Server) handleSMARTConfig(w http.ResponseWriter, r *http.Request) {
 			"context-ehr-patient",
 			"context-ehr-encounter",
 			"context-standalone-patient",
+			"context-banner",
+			"context-style",
 			"permission-offline",
 			"permission-patient",
 			"permission-user",
@@ -635,6 +638,32 @@ func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"keys": []any{}})
 }
 
+// handleSMARTStyle serves /oauth2/smart-style.json for SMART App Launch context-style conformance.
+func (s *Server) handleSMARTStyle(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"color_background":     "#edeae3",
+		"color_error":          "#9e2d2d",
+		"color_highlight":      "#69b5ce",
+		"color_modal_backdrop": "",
+		"color_success":        "#498e49",
+		"color_text":           "#303030",
+		"dim_border_radius":    "6px",
+		"dim_font_size":        "13px",
+		"dim_spacing_size":     "20px",
+		"font_family_body":     "Georgia, Times, 'Times New Roman', serif",
+		"font_family_heading":  "'HelveticaNeue-Light', Helvetica, Arial, 'Lucida Grande', sans-serif",
+	})
+}
+
+func smartStyleURLFromConfig(cfg SMARTConfig) string {
+	if tokURL := strings.TrimRight(strings.TrimSpace(cfg.TokenEndpoint), "/"); strings.HasSuffix(tokURL, "/oauth2/token") {
+		return strings.TrimSuffix(tokURL, "/token") + "/smart-style.json"
+	}
+	return "http://localhost:8080/oauth2/smart-style.json"
+}
+
 // handleOAuthAuthorize implements GET/POST /oauth2/authorize for SMART App Launch v2.0.0 with PKCE S256.
 func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	_ = r.ParseForm()
@@ -642,6 +671,9 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 	clientID := strings.TrimSpace(r.FormValue("client_id"))
 	redirectURI := strings.TrimSpace(r.FormValue("redirect_uri"))
 	scope := strings.TrimSpace(r.FormValue("scope"))
+	if grantedScope := strings.TrimSpace(r.FormValue("granted_scope")); grantedScope != "" {
+		scope = grantedScope
+	}
 	state := r.FormValue("state")
 	nonce := r.FormValue("nonce")
 	rawAud := strings.TrimSpace(r.FormValue("aud"))
@@ -1017,12 +1049,14 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		cfg := s.resolveSMARTConfigForTenant(r, entry.Tenant)
+		grantID := uuid.NewString()
 		extra := map[string]any{
 			"iss":       cfg.Issuer,
 			"client_id": audClientID,
 			"fhirUser":  sub,
 			"encounter": entry.EncounterID,
 			"jti":       uuid.NewString(),
+			"grant_id":  grantID,
 		}
 		if entry.Tenant != "" {
 			extra["tenant_id"] = entry.Tenant
@@ -1050,6 +1084,7 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 
 		refreshToken := "flint-rt-" + uuid.NewString()
 		s.storeRefreshToken(refreshToken, refreshTokenEntry{
+			GrantID:     grantID,
 			Subject:     sub,
 			ClientID:    audClientID,
 			PatientID:   entry.PatientID,
@@ -1068,7 +1103,7 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			"patient":             entry.PatientID,
 			"encounter":           entry.EncounterID,
 			"need_patient_banner": true,
-			"smart_style_url":     "https://hl7.org/fhir/smart-app-launch/smart-styles.json",
+			"smart_style_url":     smartStyleURLFromConfig(cfg),
 			"id_token":            idToken,
 			"refresh_token":       refreshToken,
 		}
@@ -1167,12 +1202,21 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		cfg := s.resolveSMARTConfigForTenant(r, rtEntry.Tenant)
+		grantID := rtEntry.GrantID
+		if grantID == "" {
+			grantID = uuid.NewString()
+		}
+		if s.isTokenRevoked("grant:" + grantID) {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "refresh_token grant has been revoked")
+			return
+		}
 		extra := map[string]any{
 			"iss":       cfg.Issuer,
 			"client_id": audClientID,
 			"fhirUser":  rtEntry.Subject,
 			"encounter": rtEntry.EncounterID,
 			"jti":       uuid.NewString(),
+			"grant_id":  grantID,
 		}
 		if rtEntry.Tenant != "" {
 			extra["tenant_id"] = rtEntry.Tenant
@@ -1200,6 +1244,7 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 
 		nextRefreshToken := "flint-rt-" + uuid.NewString()
 		s.storeRefreshToken(nextRefreshToken, refreshTokenEntry{
+			GrantID:     grantID,
 			Subject:     rtEntry.Subject,
 			ClientID:    audClientID,
 			PatientID:   rtEntry.PatientID,
@@ -1210,14 +1255,16 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt:   time.Now().Add(24 * time.Hour),
 		})
 		resp := map[string]any{
-			"access_token":  accessToken,
-			"token_type":    "Bearer",
-			"expires_in":    3600,
-			"scope":         effectiveScope,
-			"patient":       rtEntry.PatientID,
-			"encounter":     rtEntry.EncounterID,
-			"id_token":      idToken,
-			"refresh_token": nextRefreshToken,
+			"access_token":        accessToken,
+			"token_type":          "Bearer",
+			"expires_in":          3600,
+			"scope":               effectiveScope,
+			"patient":             rtEntry.PatientID,
+			"encounter":           rtEntry.EncounterID,
+			"need_patient_banner": true,
+			"smart_style_url":     smartStyleURLFromConfig(cfg),
+			"id_token":            idToken,
+			"refresh_token":       nextRefreshToken,
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -1345,7 +1392,37 @@ func (s *Server) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	rawToken := strings.TrimSpace(r.FormValue("token"))
 	if rawToken != "" {
+		var cascadeGrantID string
+		s.oauthMu.Lock()
+		if s.refreshTokens != nil {
+			if rt, ok := s.refreshTokens[rawToken]; ok && rt.GrantID != "" {
+				cascadeGrantID = rt.GrantID
+			}
+		}
+		s.oauthMu.Unlock()
+		if cascadeGrantID == "" && strings.Contains(rawToken, ".") {
+			if parsed, err := auth.ParseJWT(rawToken); err == nil && parsed != nil {
+				if gid, ok := parsed.Payload.Extra["grant_id"].(string); ok && gid != "" {
+					cascadeGrantID = gid
+				}
+			}
+		}
 		s.revokeTokenInternal(r.Context(), rawToken, 24*time.Hour)
+		if cascadeGrantID != "" {
+			var siblingRTs []string
+			s.oauthMu.Lock()
+			for rtKey, rtVal := range s.refreshTokens {
+				if rtVal.GrantID == cascadeGrantID {
+					siblingRTs = append(siblingRTs, rtKey)
+					delete(s.refreshTokens, rtKey)
+				}
+			}
+			s.oauthMu.Unlock()
+			s.revokeTokenInternal(r.Context(), "grant:"+cascadeGrantID, 24*time.Hour)
+			for _, rtKey := range siblingRTs {
+				s.revokeTokenInternal(r.Context(), rtKey, 24*time.Hour)
+			}
+		}
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
@@ -1398,6 +1475,24 @@ func (s *Server) isTokenRevoked(rawToken string) bool {
 	if s.store != nil {
 		if dbRevoked, err := s.store.IsTokenRevoked(context.Background(), rawToken); err == nil && dbRevoked {
 			return true
+		}
+	}
+	if strings.Contains(rawToken, ".") {
+		if parsed, err := auth.ParseJWT(rawToken); err == nil && parsed != nil {
+			if gid, ok := parsed.Payload.Extra["grant_id"].(string); ok && gid != "" {
+				grantKey := "grant:" + gid
+				s.oauthMu.Lock()
+				_, gRevoked := s.revokedTokens[grantKey]
+				s.oauthMu.Unlock()
+				if gRevoked {
+					return true
+				}
+				if s.store != nil {
+					if dbRevoked, err := s.store.IsTokenRevoked(context.Background(), grantKey); err == nil && dbRevoked {
+						return true
+					}
+				}
+			}
 		}
 	}
 	return false

@@ -109,14 +109,23 @@ buf lint
 Before opening a pull request, ensure all tests and linters pass:
 
 ```bash
-# Run unit tests
-go test -short ./...
+# Run unit and property-based (Hegel) tests with race detector
+go test -race -short ./...
+go test -race ./store ./pkg/fhirxml ./pkg/txclient ./server -run TestProperty_
 
-# Run integration tests against real Postgres
-FLINT_TEST_POSTGRES_DSN="postgres://flint:flint@localhost:5432/flint?sslmode=disable" go test ./...
+# Run integration & stateful differential tests against real Postgres
+FLINT_TEST_POSTGRES_DSN="postgres://flint:flint@localhost:5432/flint?sslmode=disable" go test -race ./...
 
-# Run linter
+# Run linter and static vulnerability check
 golangci-lint run
+govulncheck ./...
+
+# Run native Go fuzz targets (smoke pass)
+go test -fuzz=FuzzXMLRoundTrip -fuzztime=10s ./pkg/fhirxml
+go test -fuzz=FuzzWebSocketFrames -fuzztime=10s ./server
+
+# Run official headless HL7 Inferno suites (US Core v6.1/v7.0/v8.0, ONC g10, IPA, SMART STU2, Bulk Data, Subscriptions)
+task certify-inferno-headless
 
 # Run high-throughput load tests
 task bench-http
