@@ -1768,14 +1768,18 @@ func evalFHIRPathFunction(current []any, scopeInput []any, ctx fhirPathContext, 
 		return nil
 
 	case "not":
-		if len(current) == 0 {
+		target := current
+		if len(args) == 1 {
+			target = evalFHIRPathExpr(current, ctx, strings.TrimSpace(args[0]))
+		}
+		if len(target) == 0 {
 			return nil
 		}
-		if len(current) > 1 {
+		if len(target) > 1 {
 			ctx.setExecErr("not() cannot be invoked on a collection with more than 1 item")
 			return nil
 		}
-		b, ok := fhirPathSingletonBool(current)
+		b, ok := fhirPathSingletonBool(target)
 		if !ok {
 			return nil
 		}

@@ -20,8 +20,10 @@ import (
 // flat HL7 FHIR R4 JSON and google/fhir wrapped protojson) into the structure expected
 // by protojson.Unmarshal for a given google/fhir R4 MessageDescriptor.
 func NormalizeFHIRJSONToProtoJSON(md protoreflect.MessageDescriptor, rawJSON []byte) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(rawJSON))
+	dec.UseNumber()
 	var root map[string]any
-	if err := json.Unmarshal(rawJSON, &root); err != nil {
+	if err := dec.Decode(&root); err != nil {
 		return nil, err
 	}
 	normalizeMessageMap(md, root)
@@ -32,6 +34,10 @@ func NormalizeFHIRJSONToProtoJSON(md protoreflect.MessageDescriptor, rawJSON []b
 // in-memory flat HL7 FHIR R4 map[string]any using protoreflect without any intermediate
 // JSON / protojson text serialization or json.Unmarshal round-trip.
 func ProtoBytesToFHIRMap(md protoreflect.MessageDescriptor, resType string, inputBytes []byte, version int, lastUpdated time.Time) (map[string]any, error) {
+	return protoBytesToFHIRMapInternal(md, resType, inputBytes, version, lastUpdated, false)
+}
+
+func protoBytesToFHIRMapInternal(md protoreflect.MessageDescriptor, resType string, inputBytes []byte, version int, lastUpdated time.Time, preserveDecimals bool) (map[string]any, error) {
 	var m map[string]any
 	trimmed := bytes.TrimSpace(inputBytes)
 	if (len(trimmed) == 0 || trimmed[0] != '{') && md != nil {
@@ -41,13 +47,19 @@ func ProtoBytesToFHIRMap(md protoreflect.MessageDescriptor, resType string, inpu
 		}
 		m = protoReflectToMap(msg.ProtoReflect())
 	} else {
-		if err := json.Unmarshal(inputBytes, &m); err != nil {
+		if preserveDecimals {
+			dec := json.NewDecoder(bytes.NewReader(inputBytes))
+			dec.UseNumber()
+			if err := dec.Decode(&m); err != nil {
+				return nil, err
+			}
+		} else if err := json.Unmarshal(inputBytes, &m); err != nil {
 			return nil, err
 		}
 	}
 
 	if md != nil {
-		denormalizeMessageMap(md, m)
+		denormalizeMessageMapWithOpts(md, m, preserveDecimals)
 	} else {
 		denormalizeUntypedMap(m)
 	}
@@ -150,7 +162,7 @@ func protoReflectValueToAny(fd protoreflect.FieldDescriptor, v protoreflect.Valu
 // flattening choice[x] containers like valueQuantity/effectiveDateTime, and injecting
 // resourceType and server meta.versionId / meta.lastUpdated).
 func DenormalizeProtoJSONToFHIRJSON(md protoreflect.MessageDescriptor, resType string, inputBytes []byte, version int, lastUpdated time.Time) ([]byte, error) {
-	m, err := ProtoBytesToFHIRMap(md, resType, inputBytes, version, lastUpdated)
+	m, err := protoBytesToFHIRMapInternal(md, resType, inputBytes, version, lastUpdated, true)
 	if err != nil {
 		return inputBytes, err
 	}
@@ -374,7 +386,10 @@ func normalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any, extMa
 		}
 		// If it wraps a Decimal where value is a string in google/fhir Decimal proto
 		if fullName == "google.fhir.r4.core.Decimal" {
-			if num, ok := v["value"].(float64); ok {
+			switch num := v["value"].(type) {
+			case json.Number:
+				v["value"] = num.String()
+			case float64:
 				v["value"] = strconv.FormatFloat(num, 'f', -1, 64)
 			}
 		}
@@ -402,6 +417,17 @@ func normalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any, extMa
 	case bool:
 		if valFD != nil {
 			out := map[string]any{"value": v}
+			mergeExtensions(out, extMap)
+			return out
+		}
+
+	case json.Number:
+		if valFD != nil {
+			wrappedVal := any(v)
+			if fullName == "google.fhir.r4.core.Decimal" || valFD.Kind() == protoreflect.StringKind {
+				wrappedVal = v.String()
+			}
+			out := map[string]any{"value": wrappedVal}
 			mergeExtensions(out, extMap)
 			return out
 		}
@@ -496,7 +522,7 @@ func normalizeChoiceField(fields protoreflect.FieldDescriptors, m map[string]any
 	return false
 }
 
-func denormalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) {
+func denormalizeMessageMapWithOpts(md protoreflect.MessageDescriptor, m map[string]any, preserveDecimals bool) {
 	if md == nil || m == nil {
 		return
 	}
@@ -529,7 +555,7 @@ func denormalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) 
 				for subKey, subVal := range choiceMap {
 					subFD := findFieldDescriptor(msgDesc.Fields(), subKey)
 					if subFD != nil && subFD.Kind() == protoreflect.MessageKind && subFD.ContainingOneof() != nil && subFD.ContainingOneof().Name() == "choice" {
-						denormSub := denormalizeSingleValue(subFD.Message(), subVal)
+						denormSub := denormalizeSingleValueWithOpts(subFD.Message(), subVal, preserveDecimals)
 						suffixName := subFD.JSONName()
 						if suffixName == "stringValue" {
 							suffixName = "string"
@@ -553,7 +579,7 @@ func denormalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) 
 				var extArr []any
 				hasAnyExt := false
 				for i, elem := range arr {
-					primVal, extOut, hasPrim := denormalizePrimitiveWrapper(msgDesc, elem)
+					primVal, extOut, hasPrim := denormalizePrimitiveWrapperWithOpts(msgDesc, elem, preserveDecimals)
 					if hasPrim {
 						arr[i] = primVal
 					} else {
@@ -573,7 +599,7 @@ func denormalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) 
 				continue
 			}
 			for i, elem := range arr {
-				arr[i] = denormalizeSingleValue(msgDesc, elem)
+				arr[i] = denormalizeSingleValueWithOpts(msgDesc, elem, preserveDecimals)
 			}
 			m[key] = arr
 		} else {
@@ -582,7 +608,7 @@ func denormalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) 
 				outKey = "class"
 			}
 			if isPrimitiveWrapperDescriptor(msgDesc) {
-				primVal, extOut, hasPrim := denormalizePrimitiveWrapper(msgDesc, val)
+				primVal, extOut, hasPrim := denormalizePrimitiveWrapperWithOpts(msgDesc, val, preserveDecimals)
 				delete(m, key)
 				if hasPrim {
 					m[outKey] = primVal
@@ -592,7 +618,7 @@ func denormalizeMessageMap(md protoreflect.MessageDescriptor, m map[string]any) 
 				}
 				continue
 			}
-			denormVal := denormalizeSingleValue(msgDesc, val)
+			denormVal := denormalizeSingleValueWithOpts(msgDesc, val, preserveDecimals)
 			delete(m, key)
 			m[outKey] = denormVal
 		}
@@ -690,7 +716,7 @@ func denormalizeUntypedValue(val any) any {
 	}
 }
 
-func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any {
+func denormalizeSingleValueWithOpts(msgDesc protoreflect.MessageDescriptor, val any, preserveDecimals bool) any {
 	if val == nil || msgDesc == nil {
 		return val
 	}
@@ -705,7 +731,7 @@ func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any
 			subFD := findFieldDescriptor(msgDesc.Fields(), subKey)
 			if subFD != nil && subFD.Kind() == protoreflect.MessageKind {
 				if subMap, ok := subVal.(map[string]any); ok {
-					denormalizeMessageMap(subFD.Message(), subMap)
+					denormalizeMessageMapWithOpts(subFD.Message(), subMap, preserveDecimals)
 					subMap["resourceType"] = string(subFD.Message().Name())
 					return subMap
 				}
@@ -720,7 +746,7 @@ func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any
 				rt = typeURL[dotIdx+1:]
 			}
 			if subMD := AllR4ResourceDescriptors()[rt]; subMD != nil {
-				denormalizeMessageMap(subMD, vMap)
+				denormalizeMessageMapWithOpts(subMD, vMap, preserveDecimals)
 			} else {
 				denormalizeUntypedMap(vMap)
 			}
@@ -739,7 +765,12 @@ func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any
 	if fullName == "google.fhir.r4.core.Decimal" {
 		if rawStr, ok := vMap["value"].(string); ok {
 			if num, err := strconv.ParseFloat(rawStr, 64); err == nil {
-				return num
+				if preserveDecimals && len(vMap) == 1 {
+					return json.Number(rawStr)
+				}
+				if len(vMap) == 1 {
+					return num
+				}
 			}
 		}
 	}
@@ -770,6 +801,16 @@ func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any
 					return strings.ToLower(strings.ReplaceAll(s, "_", "-"))
 				}
 			}
+			if fullName == "google.fhir.r4.core.Decimal" {
+				if rawStr, ok := rawVal.(string); ok {
+					if num, err := strconv.ParseFloat(rawStr, 64); err == nil {
+						if preserveDecimals {
+							return json.Number(rawStr)
+						}
+						return num
+					}
+				}
+			}
 			return rawVal
 		}
 		if len(vMap) == 0 && valFD.Kind() == protoreflect.BoolKind {
@@ -777,7 +818,7 @@ func denormalizeSingleValue(msgDesc protoreflect.MessageDescriptor, val any) any
 		}
 	}
 
-	denormalizeMessageMap(msgDesc, vMap)
+	denormalizeMessageMapWithOpts(msgDesc, vMap, preserveDecimals)
 	return vMap
 }
 
@@ -907,7 +948,7 @@ func isPrimitiveWrapperDescriptor(md protoreflect.MessageDescriptor) bool {
 	return true
 }
 
-func denormalizePrimitiveWrapper(msgDesc protoreflect.MessageDescriptor, val any) (any, map[string]any, bool) {
+func denormalizePrimitiveWrapperWithOpts(msgDesc protoreflect.MessageDescriptor, val any, preserveDecimals bool) (any, map[string]any, bool) {
 	vMap, ok := val.(map[string]any)
 	if !ok {
 		return val, nil, val != nil
@@ -917,7 +958,7 @@ func denormalizePrimitiveWrapper(msgDesc protoreflect.MessageDescriptor, val any
 	if rawID, hasID := vMap["id"]; hasID && rawID != nil {
 		extOut = make(map[string]any)
 		if idFD := msgDesc.Fields().ByName("id"); idFD != nil && idFD.Kind() == protoreflect.MessageKind {
-			extOut["id"] = denormalizeSingleValue(idFD.Message(), rawID)
+			extOut["id"] = denormalizeSingleValueWithOpts(idFD.Message(), rawID, preserveDecimals)
 		} else {
 			extOut["id"] = rawID
 		}
@@ -930,7 +971,7 @@ func denormalizePrimitiveWrapper(msgDesc protoreflect.MessageDescriptor, val any
 		denormExts := make([]any, len(rawExt))
 		for i, item := range rawExt {
 			if extFD != nil && extFD.Kind() == protoreflect.MessageKind {
-				denormExts[i] = denormalizeSingleValue(extFD.Message(), item)
+				denormExts[i] = denormalizeSingleValueWithOpts(extFD.Message(), item, preserveDecimals)
 			} else {
 				denormExts[i] = item
 			}
@@ -957,7 +998,7 @@ func denormalizePrimitiveWrapper(msgDesc protoreflect.MessageDescriptor, val any
 	valFD := msgDesc.Fields().ByName("value")
 	if valFD != nil && valFD.Kind() != protoreflect.MessageKind {
 		if _, hasVal := stripped["value"]; hasVal {
-			return denormalizeSingleValue(msgDesc, stripped), extOut, true
+			return denormalizeSingleValueWithOpts(msgDesc, stripped, preserveDecimals), extOut, true
 		}
 		if len(stripped) == 0 && len(extOut) == 0 && valFD.Kind() == protoreflect.BoolKind {
 			return false, nil, true
@@ -965,7 +1006,7 @@ func denormalizePrimitiveWrapper(msgDesc protoreflect.MessageDescriptor, val any
 		return nil, extOut, false
 	}
 
-	return denormalizeSingleValue(msgDesc, stripped), extOut, len(stripped) > 0
+	return denormalizeSingleValueWithOpts(msgDesc, stripped, preserveDecimals), extOut, len(stripped) > 0
 }
 
 func resolveEnumValueString(ed protoreflect.EnumDescriptor, s string) (string, bool) {

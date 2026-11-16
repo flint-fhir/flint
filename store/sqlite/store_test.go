@@ -33,9 +33,14 @@ func (d *stubSQLiteDriver) Open(_ string) (driver.Conn, error) {
 	return &stubSQLiteConn{execErr: d.execErr}, nil
 }
 
+type stubSQLiteTx struct{}
+
+func (stubSQLiteTx) Commit() error   { return nil }
+func (stubSQLiteTx) Rollback() error { return nil }
+
 func (c *stubSQLiteConn) Prepare(_ string) (driver.Stmt, error) { return nil, nil }
 func (c *stubSQLiteConn) Close() error                          { return nil }
-func (c *stubSQLiteConn) Begin() (driver.Tx, error)             { return nil, nil }
+func (c *stubSQLiteConn) Begin() (driver.Tx, error)             { return stubSQLiteTx{}, nil }
 func (c *stubSQLiteConn) ExecContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Result, error) {
 	if c.execErr != nil {
 		return nil, c.execErr
@@ -594,7 +599,7 @@ func (d *stubHydrationDriver) Open(_ string) (driver.Conn, error) {
 
 func (c *stubHydrationConn) Prepare(_ string) (driver.Stmt, error) { return nil, nil }
 func (c *stubHydrationConn) Close() error                          { return nil }
-func (c *stubHydrationConn) Begin() (driver.Tx, error)             { return nil, nil }
+func (c *stubHydrationConn) Begin() (driver.Tx, error)             { return stubSQLiteTx{}, nil }
 func (c *stubHydrationConn) ExecContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Result, error) {
 	return driver.RowsAffected(1), nil
 }

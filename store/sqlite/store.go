@@ -135,6 +135,8 @@ func resKey(tenantID, resType, resID string) string {
 	return tenantID + "|" + resType + "|" + resID
 }
 
+type sqliteTxKey struct{}
+
 func (s *Store) execSQLite(ctx context.Context, stmt string, args ...any) error {
 	s.mu.Lock()
 	if len(s.sqlLog) < 1024 {
@@ -144,6 +146,12 @@ func (s *Store) execSQLite(ctx context.Context, stmt string, args ...any) error 
 
 	if s.db == nil {
 		return nil
+	}
+	if ctx != nil {
+		if tx, ok := ctx.Value(sqliteTxKey{}).(*sql.Tx); ok && tx != nil {
+			_, err := tx.ExecContext(ctx, stmt, args...)
+			return err
+		}
 	}
 	_, err := s.db.ExecContext(ctx, stmt, args...)
 	return err
@@ -500,7 +508,21 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []store.Bundle
 	}
 	s.mu.RUnlock()
 
+	var sqlTx *sql.Tx
+	if s.db != nil {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite begin transaction: %w", err)
+		}
+		sqlTx = tx
+		ctx = context.WithValue(ctx, sqliteTxKey{}, sqlTx)
+	}
+
 	rollback := func() {
+		if sqlTx != nil {
+			_ = sqlTx.Rollback()
+			sqlTx = nil
+		}
 		s.mu.Lock()
 		s.resources = snapResources
 		s.history = snapHistory
@@ -630,6 +652,12 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []store.Bundle
 			Record:        rec,
 			Created:       rec.Created,
 		})
+	}
+	if sqlTx != nil {
+		if err := sqlTx.Commit(); err != nil {
+			rollback()
+			return nil, fmt.Errorf("sqlite commit transaction: %w", err)
+		}
 	}
 	return results, nil
 }
@@ -1862,6 +1890,14 @@ func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
+	type sqlMutation struct {
+		resType string
+		resID   string
+		version int
+		lastUpd time.Time
+	}
+	var sqlMutated []sqlMutation
+
 	s.mu.Lock()
 	var purged []store.ResourceRecord
 	for k, entry := range s.resources {
@@ -1871,18 +1907,22 @@ func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID
 		if hardExpunge {
 			delete(s.resources, k)
 			delete(s.history, k)
+			now := time.Now().UTC()
 			purged = append(purged, store.ResourceRecord{
 				TenantID:    tenantID,
 				ResType:     entry.resType,
 				ResID:       entry.resID,
 				ResVersion:  entry.resVersion,
-				LastUpdated: time.Now().UTC(),
+				LastUpdated: now,
 				IsDeleted:   true,
 			})
+			sqlMutated = append(sqlMutated, sqlMutation{resType: entry.resType, resID: entry.resID})
 		} else if !entry.isDeleted {
 			entry.isDeleted = true
 			entry.resVersion++
 			entry.lastUpdated = time.Now().UTC()
+			entry.resourceProto = nil
+			entry.indexes = nil
 			s.resources[k] = entry
 			rec := store.ResourceRecord{
 				TenantID:    tenantID,
@@ -1894,24 +1934,52 @@ func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID
 			}
 			s.history[k] = append(s.history[k], rec)
 			purged = append(purged, rec)
+			sqlMutated = append(sqlMutated, sqlMutation{
+				resType: entry.resType,
+				resID:   entry.resID,
+				version: entry.resVersion,
+				lastUpd: entry.lastUpdated,
+			})
 		}
 	}
 	s.mu.Unlock()
+
+	for _, mut := range sqlMutated {
+		if hardExpunge {
+			_ = s.execSQLite(ctx, `DELETE FROM fhir_resource WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, tenantID, mut.resType, mut.resID)
+			_ = s.execSQLite(ctx, `DELETE FROM fhir_resource_history WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, tenantID, mut.resType, mut.resID)
+		} else {
+			_ = s.execSQLite(ctx, `UPDATE fhir_resource SET res_version = ?, is_deleted = 1, last_updated = ?, resource_proto = X'' WHERE tenant_id = ? AND res_type = ? AND res_id = ?`,
+				mut.version, mut.lastUpd.Format(time.RFC3339Nano), tenantID, mut.resType, mut.resID)
+			_ = s.execSQLite(ctx, `INSERT INTO fhir_resource_history (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto) VALUES (?, ?, ?, ?, 1, ?, NULL)`,
+				tenantID, mut.resType, mut.resID, mut.version, mut.lastUpd.Format(time.RFC3339Nano))
+		}
+		for _, tbl := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri"} {
+			_ = s.execSQLite(ctx, fmt.Sprintf("DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ?", tbl),
+				tenantID, mut.resType, mut.resID)
+		}
+	}
 	return purged, nil
 }
 
 // ExpungeResources physically removes soft-deleted resources or historical versions.
-func (s *Store) ExpungeResources(_ context.Context, params store.ExpungeParams) (int, error) {
+func (s *Store) ExpungeResources(ctx context.Context, params store.ExpungeParams) (int, error) {
 	if !params.ExpungeDeletedResources && !params.ExpungePreviousVersions && !params.ExpungeEverything {
 		params.ExpungeDeletedResources = true
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 
+	type expungeTarget struct {
+		resType     string
+		resID       string
+		fullDelete  bool
+		keepVersion int
+	}
+	var sqlTargets []expungeTarget
+
 	expunged := 0
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	for k, entry := range s.resources {
 		if entry.tenantID != params.TenantID {
 			continue
@@ -1926,14 +1994,40 @@ func (s *Store) ExpungeResources(_ context.Context, params store.ExpungeParams) 
 			expunged += 1 + len(s.history[k])
 			delete(s.resources, k)
 			delete(s.history, k)
+			sqlTargets = append(sqlTargets, expungeTarget{
+				resType:    entry.resType,
+				resID:      entry.resID,
+				fullDelete: true,
+			})
 			continue
 		}
 		if params.ExpungePreviousVersions {
 			versions := s.history[k]
 			if len(versions) > 1 {
 				expunged += len(versions) - 1
-				s.history[k] = versions[len(versions)-1:]
+				latest := versions[len(versions)-1]
+				s.history[k] = []store.ResourceRecord{latest}
+				sqlTargets = append(sqlTargets, expungeTarget{
+					resType:     entry.resType,
+					resID:       entry.resID,
+					keepVersion: latest.ResVersion,
+				})
 			}
+		}
+	}
+	s.mu.Unlock()
+
+	for _, tgt := range sqlTargets {
+		if tgt.fullDelete {
+			_ = s.execSQLite(ctx, `DELETE FROM fhir_resource WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, params.TenantID, tgt.resType, tgt.resID)
+			_ = s.execSQLite(ctx, `DELETE FROM fhir_resource_history WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, params.TenantID, tgt.resType, tgt.resID)
+			for _, tbl := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri"} {
+				_ = s.execSQLite(ctx, fmt.Sprintf("DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ?", tbl),
+					params.TenantID, tgt.resType, tgt.resID)
+			}
+		} else if tgt.keepVersion > 0 {
+			_ = s.execSQLite(ctx, `DELETE FROM fhir_resource_history WHERE tenant_id = ? AND res_type = ? AND res_id = ? AND res_version < ?`,
+				params.TenantID, tgt.resType, tgt.resID, tgt.keepVersion)
 		}
 	}
 	return expunged, nil
