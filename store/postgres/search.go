@@ -1626,6 +1626,7 @@ var ucumLinearDimensions = [][]ucumUnitConversion{
 		{code: "[ft_i]", scale: 0.3048},
 		{code: "ft", scale: 0.3048},
 		{code: "[yd_i]", scale: 0.9144},
+		{code: "[mi_i]", scale: 1609.344},
 	},
 	// Volume (canonical base: L)
 	{

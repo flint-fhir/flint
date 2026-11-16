@@ -243,6 +243,7 @@ var ucumConversionTable = map[string]ucumFactor{
 	"[ft_i]": {dim: "length", factor: 0.3048},
 	"ft":     {dim: "length", factor: 0.3048},
 	"[yd_i]": {dim: "length", factor: 0.9144},
+	"[mi_i]": {dim: "length", factor: 1609.344},
 
 	// Volume (canonical: L)
 	"L":        {dim: "volume", factor: 1.0},

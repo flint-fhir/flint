@@ -546,14 +546,14 @@ FLINT_SMART_TOKEN_URL="https://auth.azra.dev/oauth/v2/token"
 
 ## Property-Based Testing (via Hegel)
 
-Flint leverages [Hegel](https://hegel.dev) (`hegel.dev/go/hegel`) for type-driven, generative property-based testing. Instead of checking only human-authored table cases, Hegel draws inputs across formal grammars and shrinks failures to minimal counterexamples:
+Flint leverages [Hegel](https://hegel.dev) (`hegel.dev/go/hegel`) for type-driven, generative and stateful property-based testing. Instead of checking only human-authored table cases, Hegel draws inputs across formal grammars and state machines, shrinking failures to minimal counterexamples:
 
-* **Scope Grammar Invariance**: Validates that all strings matching the formal SMART v1/v2 grammar parse deterministically.
-* **Query Filter Invariance**: Asserts that fine-grained query filters (`?category=vital-signs`) never alter base resource permissions.
-* **Search Parameter Invariance**: Verifies parser prefix and grammar preservation across generated ISO date formats, decimal quantities, units, and `_include`/`_revinclude` strings.
-* **Conditional Create (`If-None-Exist`) Invariance**: Verifies search criteria query string parsing and deterministic round-trip matching.
-* **AuditEvent Classification & Serialization Invariance**: Verifies HTTP status-to-outcome partitioning (`0`, `4`, `8`) and round-trip FHIR R4 `AuditEvent` serialization across generated inputs.
-* **No-Panic Invariance**: Fuzzes parsers with arbitrary inputs and unicode sequences to guarantee zero crashes or hangs.
+* **Stateful Differential `store.Store` Machine (`hegel.RunStateful`)**: Executes randomized command sequences (`UpsertResource`, `SoftDeleteResource`, `ExecuteTransactionBundle` with injected rollback faults, `SearchResources`, `GetCompartmentResources`, `PurgePatientCompartment`, `ExpungeResources`, and `sqlite.LoadFromDB` crash recovery) simultaneously across embedded `sqlite`, `doris`, `HybridStore`, and live PostgreSQL, asserting identical active/history projections, ETag versions, and underlying SQL table consistency after every step.
+* **4-Way Lossless Wire Isomorphism (`JSON <-> XML <-> Proto3`)**: Verifies byte-for-byte canonical equivalence across `FHIR JSON -> FHIR R4 XML -> FHIR JSON -> google/fhir Proto3 Binary -> FHIR JSON -> FHIR R4 XML` (including exact `Decimal` trailing-zero lexemes like `98.60`, `_field` primitive extensions, polymorphic `[x]` choice fields, XHTML `Narrative.div`, and `contained` resources) alongside strict DTD/ENTITY XXE rejection.
+* **SQL-on-FHIR v2 Differential Execution Oracle**: Generates polymorphic `Patient`/`Observation` cohorts and nested `forEach`/`forEachOrNull`/`unionAll` `ViewDefinition` specs, asserting row-multiset equivalence between the in-memory `protoreflect` `ViewDefinition/$run` evaluator and the `ViewDefinition/$sql?dialect=sqlite` query executed directly against real `modernc.org/sqlite` tables.
+* **FHIRPath Kleene 3-Valued Logic, UCUM & `_filter` Boolean Algebras**: Verifies HL7 FHIRPath R4 `{true, false, {}}` Kleene laws (commutativity, associativity, absorption, De Morgan's laws) and collection invariants, UCUM dimensional reflexivity/symmetry/transitivity, and RFC 7644 `_filter` `and`/`or`/`not` set-algebra identities.
+* **RFC 6455 WebSocket, Patch/Transaction Atomicity & Terminology Cache Machines**: Exercises 7-bit/16-bit/64-bit WebSocket framing, 4-byte client masking, multi-frame continuation fragmentation with mid-stream `Ping`/`Pong` interleaving, RFC 6902/7396/FHIRPath Patch rollback atomicity, `Bundle` `urn:uuid:` DAG rewriting, and `hegel.RunStateful` LRU/TTL cache verification in `pkg/txclient`.
+* **SMART Scopes, Search Grammars & AuditEvent Invariance**: Validates SMART v1/v2 scope grammars, query filter permissions, `If-None-Exist` conditional create parsing, HTTP-to-`AuditEvent` outcome partitioning, and fuzz/no-panic parser safety.
 
 ### Official External HL7 Conformance Suites
 
