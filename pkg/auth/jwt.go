@@ -35,6 +35,7 @@ type JWTHeader struct {
 	Alg string `json:"alg"`
 	Kid string `json:"kid,omitempty"`
 	Typ string `json:"typ,omitempty"`
+	Jku string `json:"jku,omitempty"`
 	Jwk *JWK   `json:"jwk,omitempty"`
 }
 
@@ -192,6 +193,9 @@ func (t *ParsedToken) VerifySignature(key any) error {
 		if !ok {
 			return fmt.Errorf("%w: expected *ecdsa.PublicKey for ES256", ErrUnsupportedKeyType)
 		}
+		if ecdsaPub.Curve != elliptic.P256() {
+			return fmt.Errorf("%w: expected P-256 curve for ES256", ErrUnsupportedKeyType)
+		}
 		if len(t.RawSignature) != 64 {
 			return ErrInvalidSignature
 		}
@@ -206,6 +210,9 @@ func (t *ParsedToken) VerifySignature(key any) error {
 		ecdsaPub, ok := key.(*ecdsa.PublicKey)
 		if !ok {
 			return fmt.Errorf("%w: expected *ecdsa.PublicKey for ES384", ErrUnsupportedKeyType)
+		}
+		if ecdsaPub.Curve != elliptic.P384() {
+			return fmt.Errorf("%w: expected P-384 curve for ES384", ErrUnsupportedKeyType)
 		}
 		if len(t.RawSignature) != 96 {
 			return ErrInvalidSignature

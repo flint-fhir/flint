@@ -339,33 +339,135 @@ func isVitalSignObservation(obs map[string]any) bool {
 	return false
 }
 
+type hrexCoverageMatch struct {
+	memberID        string
+	memberSys       string
+	assignerRef     string
+	assignerDisplay string
+}
+
+func (s *Server) writeNegotiatedOutcome(w http.ResponseWriter, r *http.Request, status int, code, message string) {
+	s.writeOperationResponse(w, r, status, "OperationOutcome", map[string]any{
+		"resourceType": "OperationOutcome",
+		"issue": []any{
+			map[string]any{
+				"severity":    "error",
+				"code":        code,
+				"diagnostics": message,
+			},
+		},
+	})
+}
+
+func parseHRexBoundTime(raw string, endOfDay bool) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return t.UTC(), true
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t.UTC(), true
+	}
+	if t, err := time.Parse("2006-01-02", raw); err == nil {
+		if endOfDay {
+			return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 999999999, time.UTC), true
+		}
+		return t.UTC(), true
+	}
+	return time.Time{}, false
+}
+
+func validateHRexMemberMatchConsent(consent map[string]any, now time.Time) (string, bool) {
+	status, _ := consent["status"].(string)
+	if strings.TrimSpace(status) != "active" {
+		return fmt.Sprintf("HRex Consent status must be 'active' for Patient/$member-match (got %q)", status), false
+	}
+	if prov, ok := consent["provision"].(map[string]any); ok {
+		if pType, _ := prov["type"].(string); strings.EqualFold(strings.TrimSpace(pType), "deny") {
+			return "HRex Consent provision.type 'deny' prohibits Patient/$member-match disclosure", false
+		}
+		if period, ok := prov["period"].(map[string]any); ok {
+			if startStr, _ := period["start"].(string); startStr != "" {
+				if startT, ok := parseHRexBoundTime(startStr, false); ok && now.Before(startT) {
+					return fmt.Sprintf("HRex Consent provision.period.start (%s) is in the future", startStr), false
+				}
+			}
+			if endStr, _ := period["end"].(string); endStr != "" {
+				if endT, ok := parseHRexBoundTime(endStr, true); ok && now.After(endT) {
+					return fmt.Sprintf("HRex Consent provision.period.end (%s) has expired", endStr), false
+				}
+			}
+		}
+	}
+	return "", true
+}
+
+func cloneShallowFHIRMap(src map[string]any) map[string]any {
+	out := make(map[string]any, len(src)+4)
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+func extractPayorAssigner(cov map[string]any) (ref, display string) {
+	payors, ok := cov["payor"].([]any)
+	if !ok {
+		return "", ""
+	}
+	for _, rawP := range payors {
+		pm, ok := rawP.(map[string]any)
+		if !ok {
+			continue
+		}
+		r, _ := pm["reference"].(string)
+		d, _ := pm["display"].(string)
+		r = strings.TrimSpace(r)
+		d = strings.TrimSpace(d)
+		if r != "" || d != "" {
+			return r, d
+		}
+	}
+	return "", ""
+}
+
 // handlePatientMemberMatch implements POST /fhir/r4/{tenant}/Patient/$member-match
-// per the HL7 Da Vinci Payer Data Exchange (PDex) / HRex Member Match specification.
+// per the HL7 Da Vinci Health Record Exchange (HRex) STU 1.0 / 1.1 Member Match specification.
 func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	if s.store == nil {
-		writeOperationOutcome(w, http.StatusServiceUnavailable, "exception", "store not configured")
+		s.writeNegotiatedOutcome(w, r, http.StatusServiceUnavailable, "exception", "store not configured")
 		return
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4*1024*1024))
 	if err != nil || len(body) == 0 {
-		writeOperationOutcome(w, http.StatusBadRequest, "required", "Parameters request body is required for Patient/$member-match")
+		s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "required", "Parameters request body is required for Patient/$member-match")
 		return
 	}
 
 	payload, err := s.decodeOperationBodyMap(r, body, "Parameters")
 	if err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed payload in Patient/$member-match: %v", err))
+		s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "structure", fmt.Sprintf("malformed payload in Patient/$member-match: %v", err))
 		return
 	}
 	if rt, _ := payload["resourceType"].(string); rt != "Parameters" {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "Patient/$member-match requires a Parameters resource body")
+		s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "invalid", "Patient/$member-match requires a Parameters resource body")
 		return
 	}
 
-	var memberPatient map[string]any
-	var coverageToMatch map[string]any
+	var (
+		memberPatient   map[string]any
+		coverageToMatch map[string]any
+		coverageToLink  map[string]any
+		consentRes      map[string]any
+		mpCount         int
+		ctmCount        int
+		ctlCount        int
+		consentCount    int
+	)
 	if paramsList, ok := payload["parameter"].([]any); ok {
 		for _, rawP := range paramsList {
 			pm, ok := rawP.(map[string]any)
@@ -374,27 +476,60 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 			}
 			name, _ := pm["name"].(string)
 			res, _ := pm["resource"].(map[string]any)
-			if res == nil {
-				continue
-			}
 			switch name {
 			case "MemberPatient":
+				mpCount++
+				if res == nil || res["resourceType"] != "Patient" {
+					s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "invalid", "MemberPatient parameter must contain a Patient resource")
+					return
+				}
 				memberPatient = res
 			case "CoverageToMatch":
+				ctmCount++
+				if res == nil || res["resourceType"] != "Coverage" {
+					s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "invalid", "CoverageToMatch parameter must contain a Coverage resource")
+					return
+				}
 				coverageToMatch = res
+			case "CoverageToLink":
+				ctlCount++
+				if res == nil || res["resourceType"] != "Coverage" {
+					s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "invalid", "CoverageToLink parameter must contain a Coverage resource")
+					return
+				}
+				coverageToLink = res
+			case "Consent":
+				consentCount++
+				if res == nil || res["resourceType"] != "Consent" {
+					s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "invalid", "Consent parameter must contain a Consent resource")
+					return
+				}
+				consentRes = res
 			}
 		}
 	}
 
+	if mpCount > 1 || ctmCount > 1 || ctlCount > 1 || consentCount > 1 {
+		s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "structure",
+			"Patient/$member-match parameters MemberPatient, CoverageToMatch, CoverageToLink, and Consent have max cardinality 1")
+		return
+	}
 	if memberPatient == nil || coverageToMatch == nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "required",
+		s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "required",
 			"Patient/$member-match requires both MemberPatient and CoverageToMatch parameters")
 		return
 	}
 
+	if consentRes != nil {
+		if reason, ok := validateHRexMemberMatchConsent(consentRes, time.Now().UTC()); !ok {
+			s.writeNegotiatedOutcome(w, r, http.StatusUnprocessableEntity, "business-rule", reason)
+			return
+		}
+	}
+
 	inDemo := extractPatientDemographics(memberPatient)
 	if inDemo.isEmpty() {
-		writeOperationOutcome(w, http.StatusBadRequest, "required",
+		s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "required",
 			"MemberPatient must include demographic attributes (name, birthDate, or identifier)")
 		return
 	}
@@ -412,6 +547,7 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 			}
 		}
 	}
+	reqPayorRef, reqPayorDisp := extractPayorAssigner(coverageToMatch)
 
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
 	patientRestricted := hasSecCtx && auth.IsPatientRestricted(secCtx)
@@ -420,9 +556,28 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 		allowedPatientID = cleanID(secCtx.GetPatientId())
 	}
 
-	// Fetch active Coverage resources in the tenant to check subscriberId / identifier links.
-	// Pre-filter via spidx_token (identifier / subscriber-id) when CoverageToMatch specifies
-	// a subscriberId or identifier, with fallback to a bounded scan for legacy/differently-cased rows.
+	if hasSecCtx {
+		if coverageToLink != nil &&
+			!auth.Allows(secCtx, "Coverage", auth.ActionCreate) &&
+			!auth.Allows(secCtx, "Coverage", auth.ActionUpdate) &&
+			!auth.Allows(secCtx, "Patient", auth.ActionCreate) &&
+			!auth.Allows(secCtx, "Patient", auth.ActionUpdate) {
+			s.writeNegotiatedOutcome(w, r, http.StatusForbidden, "forbidden",
+				"insufficient scope to persist CoverageToLink in Patient/$member-match")
+			return
+		}
+		if consentRes != nil &&
+			!auth.Allows(secCtx, "Consent", auth.ActionCreate) &&
+			!auth.Allows(secCtx, "Consent", auth.ActionUpdate) &&
+			!auth.Allows(secCtx, "Patient", auth.ActionCreate) &&
+			!auth.Allows(secCtx, "Patient", auth.ActionUpdate) {
+			s.writeNegotiatedOutcome(w, r, http.StatusForbidden, "forbidden",
+				"insufficient scope to persist Consent in Patient/$member-match")
+			return
+		}
+	}
+
+	// Fetch valid Coverage resources in the tenant to check subscriberId / identifier links.
 	covSearchParams := store.SearchParams{
 		TenantID: tenant,
 		ResType:  "Coverage",
@@ -431,63 +586,56 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 	if patientRestricted {
 		covSearchParams.References = map[string]string{"patient": "Patient/" + allowedPatientID}
 	}
-	var covTokenParts []string
-	seenCovTok := make(map[string]bool)
-	addCovTok := func(v string) {
-		v = strings.TrimSpace(v)
-		if v == "" {
-			return
-		}
-		for _, cand := range []string{v, strings.ToLower(v), strings.ToUpper(v)} {
-			if !seenCovTok[cand] {
-				seenCovTok[cand] = true
-				covTokenParts = append(covTokenParts, cand)
-			}
-		}
-	}
-	addCovTok(covSubscriberID)
-	for _, cid := range covIdentifiers {
-		addCovTok(cid)
-	}
-	var covSR *store.SearchResults
-	if len(covTokenParts) > 0 {
-		filteredCovParams := covSearchParams
-		filteredCovParams.Tokens = map[string]string{"identifier": strings.Join(covTokenParts, ",")}
-		covSR, _ = s.store.Search(r.Context(), filteredCovParams)
-	}
-	if covSR == nil || len(covSR.Matches) == 0 {
-		covSR, _ = s.store.Search(r.Context(), covSearchParams)
-	}
-	coveragePatients := make(map[string]string) // patientID -> memberIdentifierValue
-	if covSR != nil {
-		for _, m := range covSR.Matches {
+	allCovSR, _ := s.store.Search(r.Context(), covSearchParams)
+	coveragePatients := make(map[string]hrexCoverageMatch)
+	patientHasAnyCoverage := make(map[string]bool)
+	if allCovSR != nil {
+		for _, m := range allCovSR.Matches {
 			cov, err := s.protoToFHIRMapWithMeta("Coverage", m.ResourceProto, m.ResVersion, m.LastUpdated)
 			if err != nil {
+				continue
+			}
+			if covStatus, _ := cov["status"].(string); strings.EqualFold(strings.TrimSpace(covStatus), "entered-in-error") {
 				continue
 			}
 			patID := extractCoverageBeneficiaryPatientID(cov)
 			if patID == "" || (patientRestricted && cleanID(patID) != allowedPatientID) {
 				continue
 			}
+			patientHasAnyCoverage[patID] = true
+
 			subID, _ := cov["subscriberId"].(string)
 			subID = strings.TrimSpace(subID)
 			matchedCov := false
 			memberVal := subID
+			memberSys := ""
 			if covSubscriberID != "" && strings.EqualFold(subID, covSubscriberID) {
 				matchedCov = true
 			}
-			if !matchedCov && len(covIdentifiers) > 0 {
-				if cids, ok := cov["identifier"].([]any); ok {
-					for _, rawCID := range cids {
-						if cim, ok := rawCID.(map[string]any); ok {
-							v, _ := cim["value"].(string)
-							vTrim := strings.TrimSpace(v)
+			if cids, ok := cov["identifier"].([]any); ok {
+				for _, rawCID := range cids {
+					if cim, ok := rawCID.(map[string]any); ok {
+						v, _ := cim["value"].(string)
+						sys, _ := cim["system"].(string)
+						vTrim := strings.TrimSpace(v)
+						if matchedCov && memberSys == "" && sys != "" {
+							memberSys = strings.TrimSpace(sys)
+						}
+						if !matchedCov {
+							if covSubscriberID != "" && strings.EqualFold(vTrim, covSubscriberID) {
+								matchedCov = true
+								if memberVal == "" {
+									memberVal = vTrim
+								}
+								memberSys = strings.TrimSpace(sys)
+							}
 							for _, want := range covIdentifiers {
-								if strings.EqualFold(vTrim, want) || (covSubscriberID != "" && strings.EqualFold(vTrim, covSubscriberID)) {
+								if strings.EqualFold(vTrim, want) {
 									matchedCov = true
 									if memberVal == "" {
 										memberVal = vTrim
 									}
+									memberSys = strings.TrimSpace(sys)
 									break
 								}
 							}
@@ -499,7 +647,13 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 				if memberVal == "" {
 					memberVal = patID
 				}
-				coveragePatients[patID] = memberVal
+				assRef, assDisp := extractPayorAssigner(cov)
+				coveragePatients[patID] = hrexCoverageMatch{
+					memberID:        memberVal,
+					memberSys:       memberSys,
+					assignerRef:     assRef,
+					assignerDisplay: assDisp,
+				}
 			}
 		}
 	}
@@ -532,15 +686,17 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 	}
 	patCandidates, err := s.store.SearchPatientMatchCandidates(r.Context(), patCandParams)
 	if err != nil {
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to search Patients for $member-match")
+		s.writeNegotiatedOutcome(w, r, http.StatusInternalServerError, "exception", "failed to search Patients for $member-match")
 		return
 	}
 
 	type matchedMember struct {
-		patientID  string
-		memberID   string
-		memberSys  string
-		confidence float64
+		patientID       string
+		memberID        string
+		memberSys       string
+		assignerRef     string
+		assignerDisplay string
+		confidence      float64
 	}
 	var matches []matchedMember
 
@@ -556,33 +712,55 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 			continue
 		}
 		candDemo := extractPatientDemographics(candMap)
+		// Deterministic HRex birthDate guard: explicit birthDate mismatch disqualifies candidate.
+		if inDemo.birthDate != "" && candDemo.birthDate != "" && inDemo.birthDate != candDemo.birthDate {
+			continue
+		}
 		demoScore := scorePatientCandidate(inDemo, candDemo)
-		covMemberID, hasCovMatch := coveragePatients[m.ResID]
+		covMatch, hasCovMatch := coveragePatients[m.ResID]
 
-		// Require either:
-		// 1. Coverage match + demographic plausibility (score >= 0.50), OR
-		// 2. High-confidence demographic/identifier match (score >= 0.70) when no Coverage resources exist or subscriberId matches Patient identifier
 		qualifies := false
+		covMemberID := covMatch.memberID
+		covMemberSys := covMatch.memberSys
 		if hasCovMatch && demoScore >= 0.50 {
 			qualifies = true
 		} else if demoScore >= 0.70 {
-			if len(coveragePatients) == 0 || covSubscriberID == "" {
-				qualifies = true
-			} else {
-				// Also check if CoverageToMatch.subscriberId matches one of the Patient's identifiers directly
-				for _, pid := range candDemo.identifiers {
-					if pid.code == strings.ToLower(covSubscriberID) {
-						qualifies = true
-						covMemberID = covSubscriberID
+			// Check if CoverageToMatch.subscriberId or identifier matches a Patient.identifier directly
+			matchedPatID := false
+			for _, pid := range candDemo.identifiers {
+				if covSubscriberID != "" && pid.code == strings.ToLower(covSubscriberID) {
+					matchedPatID = true
+					covMemberID = covSubscriberID
+					break
+				}
+				for _, want := range covIdentifiers {
+					if pid.code == want {
+						matchedPatID = true
+						covMemberID = want
 						break
 					}
+				}
+				if matchedPatID {
+					break
+				}
+			}
+			if matchedPatID {
+				qualifies = true
+			} else if !patientHasAnyCoverage[m.ResID] && len(coveragePatients) == 0 {
+				if covSubscriberID == "" && len(covIdentifiers) == 0 {
+					qualifies = true
+				} else if demoScore >= 0.80 {
+					qualifies = true
 				}
 			}
 		}
 
 		if qualifies {
 			memVal := covMemberID
-			memSys := "http://hl7.org/fhir/sid/us-mb"
+			memSys := covMemberSys
+			if memSys == "" {
+				memSys = "http://hl7.org/fhir/sid/us-mb"
+			}
 			if ids, ok := candMap["identifier"].([]any); ok {
 				for _, rawID := range ids {
 					if im, ok := rawID.(map[string]any); ok {
@@ -592,7 +770,7 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 							if memVal == "" {
 								memVal = v
 							}
-							if sys != "" {
+							if covMemberSys == "" && sys != "" {
 								memSys = sys
 							}
 							break
@@ -607,53 +785,177 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 					memVal = m.ResID
 				}
 			}
+			assRef := covMatch.assignerRef
+			assDisp := covMatch.assignerDisplay
+			if assRef == "" && assDisp == "" {
+				assRef = reqPayorRef
+				assDisp = reqPayorDisp
+			}
 			matches = append(matches, matchedMember{
-				patientID:  m.ResID,
-				memberID:   memVal,
-				memberSys:  memSys,
-				confidence: demoScore,
+				patientID:       m.ResID,
+				memberID:        memVal,
+				memberSys:       memSys,
+				assignerRef:     assRef,
+				assignerDisplay: assDisp,
+				confidence:      demoScore,
 			})
 		}
 	}
 
 	if len(matches) == 0 {
-		writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-found",
+		s.writeNegotiatedOutcome(w, r, http.StatusUnprocessableEntity, "not-found",
 			"No matching member found for Patient/$member-match criteria")
 		return
 	}
 	if len(matches) > 1 {
-		writeOperationOutcome(w, http.StatusUnprocessableEntity, "multiple-matches",
+		s.writeNegotiatedOutcome(w, r, http.StatusUnprocessableEntity, "multiple-matches",
 			fmt.Sprintf("Multiple (%d) ambiguous member matches found for Patient/$member-match criteria", len(matches)))
 		return
 	}
 
 	winner := matches[0]
-	respParams := map[string]any{
-		"resourceType": "Parameters",
-		"parameter": []any{
-			map[string]any{
-				"name": "MemberIdentifier",
-				"valueIdentifier": map[string]any{
-					"type": map[string]any{
-						"coding": []any{
-							map[string]any{
-								"system":  "http://terminology.hl7.org/CodeSystem/v2-0203",
-								"code":    "MB",
-								"display": "Member Number",
-							},
+	setAuditPatientID(r.Context(), winner.patientID)
+
+	var linkedCoverageID string
+	if coverageToLink != nil {
+		covCopy := cloneShallowFHIRMap(coverageToLink)
+		covCopy["resourceType"] = "Coverage"
+		covCopy["beneficiary"] = map[string]any{
+			"reference": "Patient/" + winner.patientID,
+		}
+		if _, hasStatus := covCopy["status"]; !hasStatus {
+			covCopy["status"] = "active"
+		}
+		if _, hasPayor := covCopy["payor"]; !hasPayor {
+			if p, ok := coverageToMatch["payor"]; ok {
+				covCopy["payor"] = p
+			} else {
+				covCopy["payor"] = []any{map[string]any{"display": "Linked Health Plan"}}
+			}
+		}
+		persistedCovID, pErr := s.persistFHIRMapResource(r, tenant, "Coverage", covCopy)
+		if pErr != nil {
+			if errors.Is(pErr, errForbiddenCompartment) {
+				s.writeNegotiatedOutcome(w, r, http.StatusForbidden, "forbidden", pErr.Error())
+				return
+			}
+			s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid CoverageToLink resource: %v", pErr))
+			return
+		}
+		linkedCoverageID = persistedCovID
+	}
+
+	var linkedConsentID string
+	if consentRes != nil {
+		consentCopy := cloneShallowFHIRMap(consentRes)
+		consentCopy["resourceType"] = "Consent"
+		consentCopy["patient"] = map[string]any{
+			"reference": "Patient/" + winner.patientID,
+		}
+		if _, hasScope := consentCopy["scope"]; !hasScope {
+			consentCopy["scope"] = map[string]any{
+				"coding": []any{
+					map[string]any{
+						"system":  "http://terminology.hl7.org/CodeSystem/consentscope",
+						"code":    "patient-privacy",
+						"display": "Privacy Consent",
+					},
+				},
+			}
+		}
+		if _, hasCat := consentCopy["category"]; !hasCat {
+			consentCopy["category"] = []any{
+				map[string]any{
+					"coding": []any{
+						map[string]any{
+							"system":  "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+							"code":    "IDSCL",
+							"display": "Information Disclosure",
 						},
 					},
-					"system": winner.memberSys,
-					"value":  winner.memberID,
 				},
-			},
-			map[string]any{
-				"name": "Patient",
-				"valueReference": map[string]any{
-					"reference": "Patient/" + winner.patientID,
+			}
+		}
+		if _, hasPolicy := consentCopy["policy"]; !hasPolicy {
+			if _, hasPolicyRule := consentCopy["policyRule"]; !hasPolicyRule {
+				consentCopy["policyRule"] = map[string]any{
+					"coding": []any{
+						map[string]any{
+							"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+							"code":   "OPTIN",
+						},
+					},
+				}
+			}
+		}
+		persistedConsentID, cErr := s.persistFHIRMapResource(r, tenant, "Consent", consentCopy)
+		if cErr != nil {
+			if errors.Is(cErr, errForbiddenCompartment) {
+				s.writeNegotiatedOutcome(w, r, http.StatusForbidden, "forbidden", cErr.Error())
+				return
+			}
+			s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid Consent resource: %v", cErr))
+			return
+		}
+		linkedConsentID = persistedConsentID
+	}
+
+	memIdent := map[string]any{
+		"type": map[string]any{
+			"coding": []any{
+				map[string]any{
+					"system":  "http://terminology.hl7.org/CodeSystem/v2-0203",
+					"code":    "MB",
+					"display": "Member Number",
 				},
 			},
 		},
+		"system": winner.memberSys,
+		"value":  winner.memberID,
+	}
+	if winner.assignerRef != "" || winner.assignerDisplay != "" {
+		assigner := map[string]any{}
+		if winner.assignerRef != "" {
+			assigner["reference"] = winner.assignerRef
+		}
+		if winner.assignerDisplay != "" {
+			assigner["display"] = winner.assignerDisplay
+		}
+		memIdent["assigner"] = assigner
+	}
+
+	outParams := []any{
+		map[string]any{
+			"name":            "MemberIdentifier",
+			"valueIdentifier": memIdent,
+		},
+		map[string]any{
+			"name": "Patient",
+			"valueReference": map[string]any{
+				"reference": "Patient/" + winner.patientID,
+			},
+		},
+	}
+	if linkedCoverageID != "" {
+		outParams = append(outParams, map[string]any{
+			"name": "CoverageToLink",
+			"valueReference": map[string]any{
+				"reference": "Coverage/" + linkedCoverageID,
+			},
+		})
+	}
+	if linkedConsentID != "" {
+		outParams = append(outParams, map[string]any{
+			"name": "Consent",
+			"valueReference": map[string]any{
+				"reference": "Consent/" + linkedConsentID,
+			},
+		})
+	}
+
+	respParams := map[string]any{
+		"resourceType": "Parameters",
+		"parameter":    outParams,
 	}
 
 	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", respParams)

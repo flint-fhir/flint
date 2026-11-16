@@ -28,6 +28,8 @@ type auditActorHolder struct {
 	actorSubject string
 	patientID    string
 	purposeOfUse string
+	outcomeDesc  string
+	subtypeCode  string
 }
 
 // authMiddleware enforces SMART on FHIR bearer token authentication,
@@ -36,6 +38,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := strings.Trim(r.URL.Path, "/")
 		parts := strings.Split(path, "/")
+
+		// Enforce CDS Hooks 2.0 RFC 7515 Client JWS verification (with SMART bearer coexistence)
+		if isCDSHooksEndpoint(parts) {
+			if s.handleCDSHooksAuthMiddleware(w, r, parts, next) {
+				return
+			}
+		}
 
 		// Allow public endpoints (discovery, metadata, OAuth2 authorize/token/introspect, JWKS)
 		if isPublicEndpoint(parts) {
@@ -1100,7 +1109,7 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(arw, r.WithContext(ctx))
 
 		tenantID := parts[2]
-		if strings.HasPrefix(tenantID, "$") {
+		if strings.HasPrefix(tenantID, "$") || tenantID == "cds-services" {
 			tenantID = "default"
 		}
 		actionCode, subtypeCode, entityType, entityID, entityVersion := audit.ClassifyHTTPInteraction(
@@ -1161,6 +1170,12 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 		}
 
 		outcomeCode, outcomeDesc := audit.ClassifyHTTPOutcome(arw.statusCode)
+		if holder.outcomeDesc != "" {
+			outcomeDesc = holder.outcomeDesc
+		}
+		if holder.subtypeCode != "" {
+			subtypeCode = holder.subtypeCode
+		}
 
 		rec := store.AuditRecord{
 			TenantID:      tenantID,

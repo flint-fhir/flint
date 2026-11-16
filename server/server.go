@@ -105,6 +105,13 @@ type Server struct {
 	launchContexts             map[string]launchContextEntry
 	requireRegisteredClientJWK bool
 	requirePKCE                bool
+	cdsHooksMu                 sync.RWMutex
+	requireCDSHooksJWT         bool
+	cdsClientJWKS              map[string]auth.JWKSet
+	cdsAllowedJKUPrefixes      []string
+	cdsJKUCache                map[string]cdsJKUCacheEntry
+	cdsJTIReplay               map[string]time.Time
+	cdsHTTPClient              *http.Client
 	referentialIntegrity       atomic.Int32
 	igMu                       sync.RWMutex
 	igState                    *igRegistryState
@@ -156,6 +163,9 @@ func New(st store.Store, logger *slog.Logger) *Server {
 		clientJWKSets:   make(map[string]auth.JWKSet),
 		clientSecrets:   make(map[string]string),
 		launchContexts:  make(map[string]launchContextEntry),
+		cdsClientJWKS:   make(map[string]auth.JWKSet),
+		cdsJKUCache:     make(map[string]cdsJKUCacheEntry),
+		cdsJTIReplay:    make(map[string]time.Time),
 		validator:       valEngine,
 		auditRecorder:   auditRec,
 		exportJobs:      make(map[string]*exportJob),
@@ -546,6 +556,19 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				return
 			}
 			if len(parts) == 5 && parts[0] == "fhir" && parts[1] == "r4" {
+				if parts[2] == "cds-services" {
+					r.SetPathValue("serviceId", parts[3])
+					switch parts[4] {
+					case "$dsi-attributes":
+						s.handleCDSServiceDSIAttributes(w, r)
+						return
+					case "feedback":
+						if r.Method == http.MethodPost {
+							s.handleCDSServiceFeedback(w, r)
+							return
+						}
+					}
+				}
 				if isGetOrHead && parts[4] == "_history" && !strings.HasPrefix(parts[3], "$") {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("resourceType", parts[3])
@@ -7673,6 +7696,7 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			"http://hl7.org/fhir/us/core/CapabilityStatement/us-core-server",
 			"http://hl7.org/fhir/uv/ipa/CapabilityStatement/ipa-server",
 			"http://hl7.org/fhir/uv/bulkdata/CapabilityStatement/bulk-data",
+			"http://hl7.org/fhir/us/davinci-hrex/CapabilityStatement/hrex-server",
 		},
 		"format":      []string{"json", "application/fhir+json", "xml", "application/fhir+xml", "application/xml", "text/xml", "application/fhir+ndjson", "application/x-protobuf", "application/fhir+protobuf"},
 		"patchFormat": []string{"application/json-patch+json", "application/merge-patch+json", "application/fhir+json", "application/fhir+xml", "application/x-protobuf", "application/fhir+protobuf"},

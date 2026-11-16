@@ -124,6 +124,25 @@ func TestBuildStoreOptionsAndConfigureAuth(t *testing.T) {
 	// Built-in SMART v2 OAuth2 bearer enforcement branch
 	env["FLINT_SMART_ENFORCE_DEV_AUTH"] = "true"
 	require.NoError(t, configureAuth(srv, logger, getenv))
+
+	// CDS Hooks 2.0 JWS configuration branches (single-issuer, multi-issuer, JKU allowlist, and invalid inputs)
+	env["FLINT_CDS_HOOKS_REQUIRE_JWT"] = "true"
+	env["FLINT_CDS_HOOKS_JKU_ALLOWLIST"] = "https://ehr1.example.org/.well-known, https://ehr2.example.org/jwks"
+	env["FLINT_CDS_HOOKS_JWKS_JSON"] = `{"issuer":"https://ehr1.example.org","keys":[{"kty":"EC","crv":"P-256","kid":"k1","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","y":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}`
+	require.NoError(t, configureAuth(srv, logger, getenv))
+
+	env["FLINT_CDS_HOOKS_JWKS_JSON"] = `{"https://ehr1.example.org":{"keys":[{"kty":"EC","crv":"P-256","kid":"k1","x":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","y":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}]}}`
+	require.NoError(t, configureAuth(srv, logger, getenv))
+
+	env["FLINT_CDS_HOOKS_JWKS_JSON"] = `{"https://ehr1.example.org":{"keys":[]}}`
+	require.ErrorContains(t, configureAuth(srv, logger, getenv), "non-empty issuer and keys required")
+
+	env["FLINT_CDS_HOOKS_JWKS_JSON"] = `{not-json`
+	require.ErrorContains(t, configureAuth(srv, logger, getenv), "invalid FLINT_CDS_HOOKS_JWKS_JSON")
+
+	delete(env, "FLINT_CDS_HOOKS_JWKS_JSON")
+	env["FLINT_CDS_HOOKS_REQUIRE_JWT"] = "not-a-bool"
+	require.ErrorContains(t, configureAuth(srv, logger, getenv), "invalid FLINT_CDS_HOOKS_REQUIRE_JWT")
 }
 
 func TestFlintdRun_EndToEndAndErrorBranches(t *testing.T) {
