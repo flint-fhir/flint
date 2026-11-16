@@ -28,9 +28,12 @@ require 'securerandom'
 require 'uri'
 
 inferno_bind_port = ENV.fetch('INFERNO_PORT', '14569')
-ENV['INFERNO_HOST'] ||= '127.0.0.1'
-ENV['INFERNO_PORT'] ||= inferno_bind_port
-ENV['BASE_URL'] ||= "http://127.0.0.1:#{inferno_bind_port}"
+if ENV['INFERNO_HOST'].to_s.strip.empty?
+  ENV['INFERNO_HOST'] = "http://127.0.0.1:#{inferno_bind_port}"
+elsif !ENV['INFERNO_HOST'].include?('://')
+  ENV['INFERNO_HOST'] = "http://#{ENV['INFERNO_HOST']}:#{inferno_bind_port}"
+end
+ENV['BASE_URL'] ||= ENV['INFERNO_HOST']
 ENV['NO_DB'] = 'false'
 ENV['ASYNC_JOBS'] = 'false'
 ENV['INFERNO_DISABLE_TLS_TEST'] ||= 'true'
@@ -79,17 +82,12 @@ INFERNO_RACK_MOCK = Rack::MockRequest.new(INFERNO_RACK_APP)
 
 def start_inferno_http_listener!(rack_app, base_uri)
   require 'puma'
-  require 'puma/events'
 
   listen_host = base_uri.host.to_s
   listen_host = '127.0.0.1' if listen_host.empty? || listen_host == 'localhost'
   listen_port = base_uri.port || 14569
 
-  puma_srv = begin
-    Puma::Server.new(rack_app, Puma::Events.strings)
-  rescue ArgumentError
-    Puma::Server.new(rack_app)
-  end
+  puma_srv = Puma::Server.new(rack_app)
   puma_srv.add_tcp_listener(listen_host, listen_port)
   puma_srv.run
 
