@@ -78,6 +78,50 @@ artifacts_dir     = ENV.fetch('INFERNO_ARTIFACTS_DIR', File.expand_path('../../.
 
 FileUtils.mkdir_p(artifacts_dir)
 
+def build_inferno_base_rack_app
+  core_root = Gem.loaded_specs['inferno_core']&.full_gem_path
+  if core_root
+    Dir.glob(File.join(core_root, 'lib', 'inferno', 'utils', 'middleware', '*.rb')).sort.each do |mw_file|
+      require mw_file
+    end
+
+    %w[config.ru lib/inferno/config.ru lib/inferno/apps/web/config.ru].each do |rel|
+      ru_path = File.join(core_root, rel)
+      next unless File.file?(ru_path)
+
+      begin
+        parsed = Rack::Builder.parse_file(ru_path)
+        puts "Loaded Inferno Rack stack from #{ru_path}"
+        return parsed.is_a?(Array) ? parsed.first : parsed
+      rescue StandardError => e
+        warn "Fallback from #{ru_path}: #{e.message}"
+      end
+    end
+  end
+
+  app = Inferno::Web.app
+  mounted = []
+  if defined?(Inferno::Utils::Middleware)
+    Inferno::Utils::Middleware.constants.sort.each do |const_name|
+      mw = Inferno::Utils::Middleware.const_get(const_name)
+      next unless mw.is_a?(Class) && mw.instance_methods.include?(:call)
+
+      arity = mw.instance_method(:initialize).arity
+      next unless [1, -1, -2].include?(arity)
+
+      app = mw.new(app)
+      mounted << const_name.to_s
+    end
+  end
+  puts "Mounted Inferno Rack middlewares: #{mounted.empty? ? '(none)' : mounted.join(', ')}"
+  app
+end
+
+INFERNO_BASE_APP = build_inferno_base_rack_app
+SUITE_ENDPOINT_LOC = Inferno::DSL::SuiteEndpoint.instance_method(:add_persistence_callback).source_location
+SUITE_ENDPOINT_SRC = SUITE_ENDPOINT_LOC && File.file?(SUITE_ENDPOINT_LOC.first) ? File.read(SUITE_ENDPOINT_LOC.first) : ''
+SUITE_ENDPOINT_ENV_KEYS = SUITE_ENDPOINT_SRC.scan(/response_headers\s*=\s*(?:request\.)?env\[['"]([^'"]+)['"]\]/).flatten.uniq
+
 base_uri = URI.parse(Inferno::Application['base_url'].to_s)
 base_prefix = base_uri.path.to_s.chomp('/')
 INFERNO_RACK_MUTEX = Mutex.new
@@ -94,8 +138,9 @@ INFERNO_RACK_APP = lambda do |env|
       stripped = '/' if stripped.empty?
       inner_env = inner_env.merge('SCRIPT_NAME' => base_prefix, 'PATH_INFO' => stripped)
     end
-    status, headers, body = Inferno::Web.app.call(inner_env)
+    status, headers, body = INFERNO_BASE_APP.call(inner_env)
     safe_headers = (headers || {}).to_h
+    SUITE_ENDPOINT_ENV_KEYS.each { |k| inner_env[k] ||= safe_headers }
     response_finished.each do |cb|
       if cb.arity.zero?
         cb.call
@@ -104,10 +149,21 @@ INFERNO_RACK_APP = lambda do |env|
       end
     end
     after_reply.each do |cb|
-      if cb.arity.zero?
-        cb.call
-      else
-        cb.call(inner_env, status, safe_headers, nil)
+      begin
+        if cb.arity.zero?
+          cb.call
+        else
+          cb.call(inner_env, status, safe_headers, nil)
+        end
+      rescue StandardError => e
+        if SUITE_ENDPOINT_LOC && File.file?(SUITE_ENDPOINT_LOC.first)
+          lines = File.readlines(SUITE_ENDPOINT_LOC.first)
+          from_ln = [SUITE_ENDPOINT_LOC[1] - 5, 0].max
+          to_ln = [from_ln + 45, lines.size - 1].min
+          warn "--- suite_endpoint.rb (#{from_ln + 1}..#{to_ln + 1}) ---"
+          (from_ln..to_ln).each { |idx| warn format('%4d: %s', idx + 1, lines[idx].to_s.chomp) }
+        end
+        raise e
       end
     end
     [status, safe_headers, body]
