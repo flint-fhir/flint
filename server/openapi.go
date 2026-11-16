@@ -951,23 +951,25 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		"/cds-services": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"CDS Hooks v2.0"},
-				"summary":     "Discover built-in HL7 CDS Hooks v2.0 Clinical Decision Support services",
+				"summary":     "Discover built-in HL7 CDS Hooks v2.0 Clinical Decision Support services (supports RFC 7515 ES256/ES384/RS256 CDS Client JWS)",
 				"operationId": "discoverCDSServices",
 				"responses": map[string]any{
 					"200": map[string]any{"description": "CDS Hooks v2.0 Service Discovery List"},
+					"401": map[string]any{"description": "Missing or invalid CDS Hooks 2.0 Client Bearer JWS"},
 				},
 			},
 		},
 		"/cds-services/{serviceId}": map[string]any{
 			"post": map[string]any{
 				"tags":        []string{"CDS Hooks v2.0"},
-				"summary":     "Invoke an HL7 CDS Hooks v2.0 service (patient-view, order-select) with automatic prefetch hydration",
+				"summary":     "Invoke an HL7 CDS Hooks v2.0 service (patient-view, order-select) with automatic prefetch hydration and RFC 7515 Client JWS verification",
 				"operationId": "invokeCDSService",
 				"parameters": []map[string]any{
 					{"name": "serviceId", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "CDS Hooks v2.0 Cards response"},
+					"401": map[string]any{"description": "Missing, expired, replayed (jti), or untrusted CDS Hooks 2.0 Client Bearer JWS"},
 				},
 			},
 		},
@@ -1794,6 +1796,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "ONC HTI-1 (b)(11) DSI source attribute metadata"},
+					"401": map[string]any{"description": "Missing or invalid CDS Hooks 2.0 Client Bearer JWS"},
 				},
 			},
 		},
@@ -1807,6 +1810,7 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "Feedback recorded confirmation"},
+					"401": map[string]any{"description": "Missing or invalid CDS Hooks 2.0 Client Bearer JWS"},
 				},
 			},
 		},
@@ -1870,11 +1874,12 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		"/Patient/$member-match": map[string]any{
 			"post": map[string]any{
 				"tags":        []string{"Patient"},
-				"summary":     "HL7 Da Vinci PDex/HRex $member-match operation matching MemberPatient and CoverageToMatch",
+				"summary":     "HL7 Da Vinci HRex $member-match operation matching MemberPatient, CoverageToMatch, optional CoverageToLink, and optional Consent",
 				"operationId": "patientMemberMatch",
 				"responses": map[string]any{
-					"200": map[string]any{"description": "Parameters containing matched MemberIdentifier and Patient reference"},
-					"422": map[string]any{"description": "Zero or multiple ambiguous member matches"},
+					"200": map[string]any{"description": "Parameters containing matched MemberIdentifier, Patient reference, and optional persisted CoverageToLink / Consent references"},
+					"400": map[string]any{"description": "Invalid Parameters cardinality or malformed resource structure"},
+					"422": map[string]any{"description": "Zero matches, multiple ambiguous member matches, or inactive/denied/expired HRex Consent"},
 				},
 			},
 		},

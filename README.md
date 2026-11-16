@@ -529,7 +529,8 @@ Flint protects endpoints through a pluggable interface:
    * Missing `patient_id` claims on `patient/*` tokens fail closed with `403 Forbidden`.
    * Reading, searching, or mutating records of another patient returns `403 Forbidden`.
    * Patient-scoped tokens are blocked from mutating shared non-compartment resources such as `Practitioner`.
-4. **HIPAA / ONC Security Audit Logging (`AuditEvent`)**: Every clinical REST interaction (`read`, `vread`, `update`, `delete`, `history-instance`, `create`, `search-type`, `batch`, `everything`, `validate`) and security rejection (`401 Unauthorized` / `403 Forbidden`) is recorded in `fhir_audit_event` with actor identity, patient compartment attribution, client IP, and target entity reference, and is queryable via `GET /fhir/r4/{tenant}/AuditEvent`.
+4. **HIPAA / ONC Security Audit Logging (`AuditEvent`)**: Every clinical REST interaction (`read`, `vread`, `update`, `delete`, `history-instance`, `create`, `search-type`, `batch`, `everything`, `validate`, `member-match`) and security rejection (`401 Unauthorized` / `403 Forbidden`, including CDS Hooks 2.0 JWS caller verification failures) is recorded in `fhir_audit_event` with actor identity, patient compartment attribution, client IP, and target entity reference, and is queryable via `GET /fhir/r4/{tenant}/AuditEvent`.
+5. **HL7 CDS Hooks 2.0 Cryptographic JWS Caller Verification**: Enforces RFC 7515 asymmetric `ES256`, `ES384`, and `RS256` signature verification, `iss`/`aud`/`exp`/`iat` claims checks, atomic `jti` replay protection, static JWKS registration (`FLINT_CDS_HOOKS_JWKS_JSON`), and SSRF-hardened `jku` allowlists (`FLINT_CDS_HOOKS_JKU_ALLOWLIST`) across `/cds-services`, service invocation, `$dsi-attributes`, and `/feedback`.
 
 ### Environment Configuration
 ```bash
@@ -540,6 +541,10 @@ FLINT_AUTH_PROVIDER="zitadel"
 FLINT_ZITADEL_TENANT_FROM_DOMAIN="true"
 FLINT_SMART_AUTH_URL="https://auth.azra.dev/oauth/v2/authorize"
 FLINT_SMART_TOKEN_URL="https://auth.azra.dev/oauth/v2/token"
+
+# Optional: Enforce strict HL7 CDS Hooks 2.0 Client JWS verification
+FLINT_CDS_HOOKS_REQUIRE_JWT="true"
+FLINT_CDS_HOOKS_JKU_ALLOWLIST="https://ehr.example.org/.well-known"
 ```
 
 ---

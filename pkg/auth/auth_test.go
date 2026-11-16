@@ -584,6 +584,7 @@ func TestGranularScopeConstraintsAndMockAndAlgorithmsWave55(t *testing.T) {
 	}
 	require.NoError(t, tokES256.VerifySignature(&ec256.PublicKey))
 	require.ErrorIs(t, tokES256.VerifySignature([]byte("wrong-type")), auth.ErrUnsupportedKeyType)
+	require.ErrorIs(t, tokES256.VerifySignature(parsedPub384), auth.ErrUnsupportedKeyType)
 
 	tokES384 := &auth.ParsedToken{
 		Header:       auth.JWTHeader{Alg: "ES384"},
@@ -591,6 +592,14 @@ func TestGranularScopeConstraintsAndMockAndAlgorithmsWave55(t *testing.T) {
 		RawSignature: make([]byte, 10), // wrong length -> ErrInvalidSignature
 	}
 	require.ErrorIs(t, tokES384.VerifySignature(parsedPub384), auth.ErrInvalidSignature)
+	require.ErrorIs(t, tokES384.VerifySignature(&ec256.PublicKey), auth.ErrUnsupportedKeyType)
+
+	jkuHdr := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","kid":"k1","jku":"https://ehr.example.org/.well-known/jwks.json"}`))
+	jkuPay := base64.RawURLEncoding.EncodeToString([]byte(`{"iss":"https://ehr.example.org","jti":"nonce-1"}`))
+	parsedJKU, err := auth.ParseJWT(jkuHdr + "." + jkuPay + "." + base64.RawURLEncoding.EncodeToString(sig256))
+	require.NoError(t, err)
+	assert.Equal(t, "https://ehr.example.org/.well-known/jwks.json", parsedJKU.Header.Jku)
+	assert.Equal(t, "nonce-1", parsedJKU.Payload.JTI)
 
 	// Zitadel fallback to OrgID and encounter_id metadata
 	mockZ, err := auth.NewMockTokenValidator("https://zitadel.example", "aud")

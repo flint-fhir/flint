@@ -15,6 +15,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -243,7 +244,61 @@ func buildStoreOptions(isolationMode postgres.TenantIsolationMode, getenv func(s
 	return storeOpts
 }
 
+func configureCDSHooksAuth(srv *server.Server, logger *slog.Logger, getenv func(string) string) error {
+	if rawReq := strings.TrimSpace(getenv("FLINT_CDS_HOOKS_REQUIRE_JWT")); rawReq != "" {
+		req, err := strconv.ParseBool(rawReq)
+		if err != nil {
+			return fmt.Errorf("invalid FLINT_CDS_HOOKS_REQUIRE_JWT %q: %w", rawReq, err)
+		}
+		srv.SetCDSHooksRequireJWT(req)
+		if req {
+			logger.Info("CDS Hooks 2.0 strict RFC 7515 Client JWS enforcement enabled")
+		}
+	}
+
+	if rawAllow := strings.TrimSpace(getenv("FLINT_CDS_HOOKS_JKU_ALLOWLIST")); rawAllow != "" {
+		var prefixes []string
+		for part := range strings.SplitSeq(rawAllow, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				prefixes = append(prefixes, trimmed)
+			}
+		}
+		if len(prefixes) > 0 {
+			srv.SetCDSHooksAllowedJKUPrefixes(prefixes)
+			logger.Info("CDS Hooks 2.0 JKU allowlist configured", "count", len(prefixes))
+		}
+	}
+
+	if rawJWKS := strings.TrimSpace(getenv("FLINT_CDS_HOOKS_JWKS_JSON")); rawJWKS != "" {
+		var single struct {
+			Issuer string     `json:"issuer"`
+			Keys   []auth.JWK `json:"keys"`
+		}
+		if err := json.Unmarshal([]byte(rawJWKS), &single); err == nil && strings.TrimSpace(single.Issuer) != "" && len(single.Keys) > 0 {
+			srv.RegisterCDSClientJWKS(single.Issuer, auth.JWKSet{Keys: single.Keys})
+			logger.Info("CDS Hooks 2.0 static client JWKS registered", "issuer", single.Issuer)
+			return nil
+		}
+
+		var multi map[string]auth.JWKSet
+		if err := json.Unmarshal([]byte(rawJWKS), &multi); err != nil {
+			return fmt.Errorf("invalid FLINT_CDS_HOOKS_JWKS_JSON: %w", err)
+		}
+		for iss, set := range multi {
+			if strings.TrimSpace(iss) == "" || len(set.Keys) == 0 {
+				return fmt.Errorf("invalid FLINT_CDS_HOOKS_JWKS_JSON entry for issuer %q: non-empty issuer and keys required", iss)
+			}
+			srv.RegisterCDSClientJWKS(iss, set)
+		}
+		logger.Info("CDS Hooks 2.0 static client JWKS map registered", "issuers", len(multi))
+	}
+	return nil
+}
+
 func configureAuth(srv *server.Server, logger *slog.Logger, getenv func(string) string) error {
+	if err := configureCDSHooksAuth(srv, logger, getenv); err != nil {
+		return err
+	}
 	if strings.EqualFold(strings.TrimSpace(getenv("FLINT_SMART_REQUIRE_CLIENT_JWK")), "true") {
 		srv.SetRequireRegisteredClientJWK(true)
 	}
