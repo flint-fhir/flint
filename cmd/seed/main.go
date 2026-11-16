@@ -25,6 +25,7 @@ import (
 type Config struct {
 	BaseURL     string
 	Tenant      string
+	Suite       string
 	BearerToken string
 	HTTPClient  *http.Client
 	Out         io.Writer
@@ -39,12 +40,14 @@ func parseSeedConfig(args []string, getenv func(string) string) (Config, error) 
 	if defaultTenant == "" {
 		defaultTenant = "demo"
 	}
+	defaultSuite := getenv("FLINT_SEED_SUITE")
 	defaultToken := getenv("FLINT_TOKEN")
 
 	fs := flag.NewFlagSet("seed", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	urlFlag := fs.String("url", defaultURL, "Flint server base URL")
 	tenantFlag := fs.String("tenant", defaultTenant, "Target FHIR tenant ID")
+	suiteFlag := fs.String("suite", defaultSuite, "Seed suite: uscore (default), plannet, or formulary")
 	tokenFlag := fs.String("token", defaultToken, "Optional SMART on FHIR Bearer token")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -53,6 +56,7 @@ func parseSeedConfig(args []string, getenv func(string) string) (Config, error) 
 	return Config{
 		BaseURL:     *urlFlag,
 		Tenant:      *tenantFlag,
+		Suite:       *suiteFlag,
 		BearerToken: *tokenFlag,
 		HTTPClient:  &http.Client{Timeout: 30 * time.Second},
 		Out:         os.Stdout,
@@ -92,7 +96,19 @@ func Run(ctx context.Context, cfg Config) error {
 		out = io.Discard
 	}
 
-	bundleBytes, err := CohortTransactionBundleJSON()
+	var bundleBytes []byte
+	var err error
+	suite := strings.ToLower(strings.TrimSpace(cfg.Suite))
+	switch suite {
+	case "", "uscore", "default":
+		bundleBytes, err = CohortTransactionBundleJSON()
+	case "plannet", "plan-net":
+		bundleBytes, err = PlanNetTransactionBundleJSON()
+	case "formulary", "usdf":
+		bundleBytes, err = DrugFormularyTransactionBundleJSON()
+	default:
+		return fmt.Errorf("unknown seed suite %q (expected uscore, plannet, or formulary)", cfg.Suite)
+	}
 	if err != nil {
 		return fmt.Errorf("build cohort bundle: %w", err)
 	}

@@ -428,6 +428,26 @@ func ExtractPractitioner(tenantID string, resID string, protoBytes []byte) (*Sea
 	idx := normalizeSearchIndexes(gensearchidx.ExtractPractitionerIndexes(tenantID, &r))
 	appendMetaIndexes(idx, tenantID, "Practitioner", effID, r.GetMeta())
 	appendTokenTextFromMessage(idx, tenantID, "Practitioner", effID, r.ProtoReflect(), "", 0)
+	for _, nm := range r.GetName() {
+		if nm == nil {
+			continue
+		}
+		for _, pfx := range nm.GetPrefix() {
+			if norm := fhirutil.NormalizeString(pfx.GetValue()); norm != "" {
+				idx.Strings = append(idx.Strings, SpidxString{TenantID: tenantID, ResType: "Practitioner", ResID: effID, SpName: "name", SpValue: norm})
+			}
+		}
+		for _, sfx := range nm.GetSuffix() {
+			if norm := fhirutil.NormalizeString(sfx.GetValue()); norm != "" {
+				idx.Strings = append(idx.Strings, SpidxString{TenantID: tenantID, ResType: "Practitioner", ResID: effID, SpName: "name", SpValue: norm})
+			}
+		}
+	}
+	for _, addr := range r.GetAddress() {
+		if addr != nil {
+			extractAddressStrings(idx, tenantID, "Practitioner", effID, addr.ProtoReflect())
+		}
+	}
 	return idx, nil
 }
 
@@ -535,6 +555,11 @@ func ExtractOrganization(tenantID string, resID string, protoBytes []byte) (*Sea
 			})
 		}
 	}
+	for _, addr := range r.GetAddress() {
+		if addr != nil {
+			extractAddressStrings(idx, tenantID, "Organization", effectiveID, addr.ProtoReflect())
+		}
+	}
 	return idx, nil
 }
 
@@ -567,6 +592,14 @@ func ExtractLocation(tenantID string, resID string, protoBytes []byte) (*SearchI
 	idx := normalizeSearchIndexes(gensearchidx.ExtractLocationIndexes(tenantID, &r))
 	appendMetaIndexes(idx, tenantID, "Location", effID, r.GetMeta())
 	appendTokenTextFromMessage(idx, tenantID, "Location", effID, r.ProtoReflect(), "", 0)
+	if addr := r.GetAddress(); addr != nil {
+		extractAddressStrings(idx, tenantID, "Location", effID, addr.ProtoReflect())
+	}
+	for _, ep := range r.GetEndpoint() {
+		if ep != nil {
+			extractReferenceIndex(idx, tenantID, "Location", effID, ep.ProtoReflect(), []string{"endpoint"})
+		}
+	}
 	return idx, nil
 }
 

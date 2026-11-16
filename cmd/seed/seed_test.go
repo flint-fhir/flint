@@ -291,4 +291,28 @@ func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
 	adiObsBytes := getRaw("/fhir/r4/demo/Observation/obs-alice-adi-doc")
 	adiObsOutcome := engine.ValidateJSONWithProfiles("Observation", adiObsBytes, []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-adi-documentation|8.0.0"}, "")
 	assert.True(t, adiObsOutcome.IsValid(), "Observation ADI Documentation v8.0.0 validation failed: %+v", adiObsOutcome.Issues)
+
+	// 8. Seed Da Vinci Plan-Net (plannet) & US Drug Formulary (formulary) cohorts and validate every resource
+	require.NoError(t, Run(t.Context(), Config{
+		BaseURL:    ts.URL,
+		Tenant:     "plannet",
+		Suite:      "plannet",
+		HTTPClient: ts.Client(),
+		Out:        io.Discard,
+	}))
+	require.NoError(t, Run(t.Context(), Config{
+		BaseURL:    ts.URL,
+		Tenant:     "formulary",
+		Suite:      "formulary",
+		HTTPClient: ts.Client(),
+		Out:        io.Discard,
+	}))
+	badErr := Run(t.Context(), Config{
+		BaseURL:    ts.URL,
+		Tenant:     "demo",
+		Suite:      "nonexistent-suite",
+		HTTPClient: ts.Client(),
+		Out:        io.Discard,
+	})
+	assert.Error(t, badErr)
 }

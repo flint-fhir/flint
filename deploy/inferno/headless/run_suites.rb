@@ -994,6 +994,88 @@ if ipa_suite && ENV['INFERNO_SKIP_IPA'] != 'true'
   )
 end
 
+ips_suite = Inferno::Repositories::TestSuites.new.find('ips')
+if ips_suite && ENV['INFERNO_SKIP_IPS'] != 'true'
+  unless access_token.empty?
+    auth_hdr = { 'Authorization' => "Bearer #{access_token}" }
+    Array(ips_suite.groups).each do |grp|
+      next if !grp.respond_to?(:fhir_client_definitions) || grp.fhir_client_definitions.empty?
+
+      grp.fhir_client do
+        url :url
+        headers auth_hdr
+      end
+    end
+  end
+
+  ips_summary_uri = URI.parse("#{flint_fhir_url}/Patient/#{launch_patient_id}/$summary")
+  ips_summary_req = Net::HTTP::Get.new(ips_summary_uri)
+  ips_summary_req['Accept'] = 'application/fhir+json'
+  ips_summary_req['Authorization'] = "Bearer #{access_token}" unless access_token.empty?
+  ips_summary_resp = Net::HTTP.start(ips_summary_uri.hostname, ips_summary_uri.port, use_ssl: ips_summary_uri.scheme == 'https', read_timeout: 20) do |http|
+    http.request(ips_summary_req)
+  end
+  ips_bundle_json = ips_summary_resp.code.to_i == 200 ? ips_summary_resp.body.to_s : ''
+
+  ips_runnables = Array(ips_suite.groups).reject do |g|
+    g.title.to_s.include?('Read and Validate')
+  end
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'ips_v110',
+    suite_id: 'ips',
+    runnables: ips_runnables,
+    inputs: {
+      url: flint_fhir_url,
+      patient_id: launch_patient_id,
+      bundle_content: ips_bundle_json
+    }
+  )
+end
+
+plannet_suite = Inferno::Repositories::TestSuites.new.find('davinci_plan_net_server_v110')
+if plannet_suite && ENV['INFERNO_SKIP_PLANNET'] != 'true'
+  plannet_tenant = ENV.fetch('FLINT_PLANNET_TENANT', 'plannet')
+  plannet_fhir_url = "#{flint_base_url}/fhir/r4/#{plannet_tenant}"
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    flint_fhir_url: plannet_fhir_url,
+    flint_tenant: plannet_tenant,
+    label: 'davinci_plan_net_v110',
+    suite_id: 'davinci_plan_net_server_v110',
+    inputs: {
+      url: plannet_fhir_url,
+      smart_auth_info: us_core_auth_json,
+      no_param_search: 'true'
+    }
+  )
+end
+
+usdf_suite = Inferno::Repositories::TestSuites.new.find('davinci_us_drug_formulary_v201')
+if usdf_suite && ENV['INFERNO_SKIP_USDF'] != 'true'
+  formulary_tenant = ENV.fetch('FLINT_FORMULARY_TENANT', 'formulary')
+  formulary_fhir_url = "#{flint_base_url}/fhir/r4/#{formulary_tenant}"
+  usdf_runnables = Array(usdf_suite.groups).reject do |g|
+    g.id.to_s.include?('visual_inspection_and_attestation')
+  end
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    flint_fhir_url: formulary_fhir_url,
+    flint_tenant: formulary_tenant,
+    label: 'davinci_usdf_v201',
+    suite_id: 'davinci_us_drug_formulary_v201',
+    runnables: usdf_runnables,
+    inputs: {
+      url: formulary_fhir_url,
+      smart_auth_info: us_core_auth_json,
+      input_ids: 'loc-usdf-001'
+    }
+  )
+end
+
 subs_suite = Inferno::Repositories::TestSuites.new.find('subscriptions_r5_backport_r4_server')
 if subs_suite && ENV['INFERNO_SKIP_SUBSCRIPTIONS'] != 'true'
   sub_notify_token = 'flint-sub-notify-token'

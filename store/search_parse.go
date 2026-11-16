@@ -345,10 +345,17 @@ func inferChainedTargetType(refParam string) string {
 		return "Encounter"
 	case "performer", "general-practitioner", "requester", "asserter", "recorder", "results-interpreter", "collector", "practitioner", "author", "agent", "individual", "participant":
 		return "Practitioner"
-	case "organization", "partof", "part-of", "manufacturer", "intended-dispenser", "payor", "custodian", "service-provider":
+	case "organization", "manufacturer", "intended-dispenser", "payor", "custodian", "service-provider",
+		"administered-by", "owned-by", "primary-organization", "participating-organization", "network":
 		return "Organization"
-	case "location":
+	case "location", "coverage-area":
 		return "Location"
+	case "endpoint":
+		return "Endpoint"
+	case "service", "healthcare-service":
+		return "HealthcareService"
+	case "formulary", "formulary-coverage":
+		return "InsurancePlan"
 	case "medication":
 		return "Medication"
 	case "device":
@@ -604,7 +611,7 @@ var (
 		"address-postalcode": true, "address-country": true,
 		"phonetic": true, "lot-number": true, "series": true,
 		"title": true, "description": true, "udi-carrier": true, "device-name": true,
-		"value-string": true,
+		"value-string": true, "drug-name": true,
 	}
 	knownTokenSearchParams = map[string]bool{
 		"identifier": true, "gender": true, "active": true,
@@ -612,6 +619,10 @@ var (
 		"deceased": true, "status": true, "code": true,
 		"component-code": true, "combo-code": true,
 		"category": true, "type": true, "class": true,
+		"plan-type": true, "coverage-type": true,
+		"service-category": true, "service-type": true,
+		"doseform": true, "dose-form": true,
+		"pharmacy-benefit-type": true, "drug-tier": true,
 		"clinical-status": true, "verification-status": true,
 		"lifecycle-status": true, "docstatus": true, "mode": true,
 		"intent": true, "priority": true, "criticality": true,
@@ -643,6 +654,10 @@ var (
 		"questionnaire": true, "source": true, "care-team": true, "goal": true,
 		"focus": true, "owner": true, "for": true, "actor": true,
 		"item": true, "member": true, "entity": true, "service-provider": true,
+		"administered-by": true, "owned-by": true, "coverage-area": true,
+		"primary-organization": true, "participating-organization": true,
+		"service": true, "healthcare-service": true, "network": true,
+		"formulary": true, "formulary-coverage": true,
 	}
 	knownDateSearchParams = map[string]bool{
 		"birthdate": true, "date": true, "onset-date": true,
@@ -735,6 +750,87 @@ var (
 			Type:        "token",
 			Expression:  "Patient.extension.where(url = 'http://hl7.org/fhir/us/core/StructureDefinition/us-core-birthsex')",
 			Description: "Returns patients with a birthsex extension matching the specified code.",
+		},
+		{
+			ID:          "plannet-practitionerrole-network",
+			URL:         "http://hl7.org/fhir/us/davinci-pdex-plan-net/SearchParameter/practitionerrole-network",
+			Code:        "network",
+			Base:        []string{"PractitionerRole"},
+			Type:        "reference",
+			Expression:  "PractitionerRole.extension.where(url='http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/network-reference')",
+			Description: "Select PractitionerRoles where the practitioner is a member of the specified health insurance network.",
+		},
+		{
+			ID:          "plannet-organization-coverage-area",
+			URL:         "http://hl7.org/fhir/us/davinci-pdex-plan-net/SearchParameter/organization-coverage-area",
+			Code:        "coverage-area",
+			Base:        []string{"Organization"},
+			Type:        "reference",
+			Expression:  "Organization.extension.where(url='http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/location-reference')",
+			Description: "Select health insurance provider networks available in a region described by the specified location.",
+		},
+		{
+			ID:          "usdf-insuranceplan-formulary-coverage",
+			URL:         "http://hl7.org/fhir/us/davinci-drug-formulary/SearchParameter/InsurancePlan-formulary-coverage",
+			Code:        "formulary-coverage",
+			Base:        []string{"InsurancePlan"},
+			Type:        "reference",
+			Expression:  "InsurancePlan.coverage.extension.where(url='http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-FormularyReference-extension')",
+			Description: "Select Payer InsurancePlans referencing a Drug Formulary InsurancePlan.",
+		},
+		{
+			ID:          "usdf-basic-formulary",
+			URL:         "http://hl7.org/fhir/us/davinci-drug-formulary/SearchParameter/Basic-formulary",
+			Code:        "formulary",
+			Base:        []string{"Basic"},
+			Type:        "reference",
+			Expression:  "Basic.extension.where(url='http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-FormularyReference-extension')",
+			Description: "Select FormularyItem Basic resources belonging to a Drug Formulary InsurancePlan.",
+		},
+		{
+			ID:          "usdf-basic-status",
+			URL:         "http://hl7.org/fhir/us/davinci-drug-formulary/SearchParameter/Basic-status",
+			Code:        "status",
+			Base:        []string{"Basic"},
+			Type:        "token",
+			Expression:  "Basic.extension.where(url='http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-AvailabilityStatus-extension')",
+			Description: "Select FormularyItem Basic resources by availability status.",
+		},
+		{
+			ID:          "usdf-basic-period",
+			URL:         "http://hl7.org/fhir/us/davinci-drug-formulary/SearchParameter/Basic-period",
+			Code:        "period",
+			Base:        []string{"Basic"},
+			Type:        "date",
+			Expression:  "Basic.extension.where(url='http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-AvailabilityPeriod-extension')",
+			Description: "Select FormularyItem Basic resources by availability period.",
+		},
+		{
+			ID:          "usdf-basic-pharmacy-benefit-type",
+			URL:         "http://hl7.org/fhir/us/davinci-drug-formulary/SearchParameter/Basic-pharmacy-benefit-type",
+			Code:        "pharmacy-benefit-type",
+			Base:        []string{"Basic"},
+			Type:        "token",
+			Expression:  "Basic.extension.where(url='http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-PharmacyBenefitType-extension')",
+			Description: "Select FormularyItem Basic resources by pharmacy benefit type.",
+		},
+		{
+			ID:          "usdf-basic-drug-tier",
+			URL:         "http://hl7.org/fhir/us/davinci-drug-formulary/SearchParameter/Basic-drug-tier",
+			Code:        "drug-tier",
+			Base:        []string{"Basic"},
+			Type:        "token",
+			Expression:  "Basic.extension.where(url='http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-DrugTierID-extension')",
+			Description: "Select FormularyItem Basic resources by drug tier.",
+		},
+		{
+			ID:          "usdf-medicationknowledge-drug-name",
+			URL:         "http://hl7.org/fhir/us/davinci-drug-formulary/SearchParameter/MedicationKnowledge-drug-name",
+			Code:        "drug-name",
+			Base:        []string{"MedicationKnowledge"},
+			Type:        "string",
+			Expression:  "MedicationKnowledge.code.coding.display | MedicationKnowledge.synonym",
+			Description: "Select FormularyDrug MedicationKnowledge resources by display name or synonym.",
 		},
 	}
 )

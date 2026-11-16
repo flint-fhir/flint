@@ -757,7 +757,7 @@ func denormalizeSingleValueWithOpts(msgDesc protoreflect.MessageDescriptor, val 
 		}
 	}
 	if isTemporalMessage(fullName) {
-		if formatted := formatProtoTemporalToISO(vMap); formatted != "" {
+		if formatted := formatProtoTemporalToISOWithType(fullName, vMap); formatted != "" {
 			return formatted
 		}
 	}
@@ -861,6 +861,18 @@ func denormalizeReferenceMap(md protoreflect.MessageDescriptor, m map[string]any
 }
 
 func formatProtoTemporalToISO(vMap map[string]any) string {
+	_, hasTZ := vMap["timezone"]
+	if !hasTZ {
+		if rawStr, ok := vMap["valueUs"].(string); ok {
+			if us, err := strconv.ParseInt(rawStr, 10, 64); err == nil && us >= 0 && us < 86_400_000_000 {
+				return formatProtoTemporalToISOWithType("google.fhir.r4.core.Time", vMap)
+			}
+		}
+	}
+	return formatProtoTemporalToISOWithType("", vMap)
+}
+
+func formatProtoTemporalToISOWithType(fullName string, vMap map[string]any) string {
 	var us int64
 	switch raw := vMap["valueUs"].(type) {
 	case string:
@@ -877,6 +889,16 @@ func formatProtoTemporalToISO(vMap map[string]any) string {
 
 	t := time.UnixMicro(us).UTC()
 	precision, _ := vMap["precision"].(string)
+	if fullName == "google.fhir.r4.core.Time" {
+		switch precision {
+		case "MILLISECOND":
+			return t.Format("15:04:05.000")
+		case "MICROSECOND":
+			return t.Format("15:04:05.000000")
+		default:
+			return t.Format("15:04:05")
+		}
+	}
 	switch precision {
 	case "YEAR":
 		return t.Format("2006")
@@ -989,7 +1011,7 @@ func denormalizePrimitiveWrapperWithOpts(msgDesc protoreflect.MessageDescriptor,
 
 	fullName := string(msgDesc.FullName())
 	if isTemporalMessage(fullName) {
-		if formatted := formatProtoTemporalToISO(stripped); formatted != "" {
+		if formatted := formatProtoTemporalToISOWithType(fullName, stripped); formatted != "" {
 			return formatted, extOut, true
 		}
 		return nil, extOut, false
@@ -1040,7 +1062,7 @@ func resolveEnumValueString(ed protoreflect.EnumDescriptor, s string) (string, b
 
 func isTemporalMessage(fullName string) bool {
 	switch fullName {
-	case "google.fhir.r4.core.Date", "google.fhir.r4.core.DateTime", "google.fhir.r4.core.Instant":
+	case "google.fhir.r4.core.Date", "google.fhir.r4.core.DateTime", "google.fhir.r4.core.Instant", "google.fhir.r4.core.Time":
 		return true
 	default:
 		return false
@@ -1051,6 +1073,32 @@ func parseTemporalToProtoMap(fullName, s string, extMap map[string]any) map[stri
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil
+	}
+
+	if fullName == "google.fhir.r4.core.Time" {
+		t, err := time.Parse("15:04:05.999999999", s)
+		if err != nil {
+			t, err = time.Parse("15:04:05", s)
+		}
+		if err != nil {
+			return nil
+		}
+		precision := "SECOND"
+		if dotIdx := strings.IndexByte(s, '.'); dotIdx != -1 {
+			fracLen := len(s) - dotIdx - 1
+			if fracLen > 3 {
+				precision = "MICROSECOND"
+			} else {
+				precision = "MILLISECOND"
+			}
+		}
+		us := int64(t.Hour())*3_600_000_000 + int64(t.Minute())*60_000_000 + int64(t.Second())*1_000_000 + int64(t.Nanosecond())/1000
+		out := map[string]any{
+			"valueUs":   strconv.FormatInt(us, 10),
+			"precision": precision,
+		}
+		mergeExtensions(out, extMap)
+		return out
 	}
 
 	var t time.Time

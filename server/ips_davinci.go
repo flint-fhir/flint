@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/sha1"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -134,9 +135,48 @@ func (s *Server) assembleIPSSummaryBundle(r *http.Request, tenant, patientID str
 		vitalRefs      []map[string]any
 		resultRefs     []map[string]any
 		planRefs       []map[string]any
+		deviceRefs     []map[string]any
 		authorRef      string
 		clinicalBundle []map[string]any
 	)
+
+	fhirBaseURL := strings.TrimRight(requestBaseURL(r), "/") + "/fhir/r4/" + tenant
+	entryFullURL := func(rt, id string) string {
+		return fmt.Sprintf("%s/%s/%s", fhirBaseURL, rt, id)
+	}
+	seenEntries := map[string]bool{
+		"Patient/" + patientID: true,
+	}
+	addBundleEntry := func(rt, id string, res map[string]any) {
+		if rt == "" || id == "" || res == nil {
+			return
+		}
+		key := rt + "/" + id
+		if seenEntries[key] {
+			return
+		}
+		seenEntries[key] = true
+		clinicalBundle = append(clinicalBundle, map[string]any{
+			"fullUrl":  entryFullURL(rt, id),
+			"resource": res,
+		})
+	}
+
+	// Pre-scan Conditions to determine whether problem-list Conditions exist.
+	hasProblemListCond := false
+	for _, inc := range sr.Includes {
+		if inc.ResType != "Condition" {
+			continue
+		}
+		res, err := s.protoToFHIRMapWithMeta(inc.ResType, inc.ResourceProto, inc.ResVersion, inc.LastUpdated)
+		if err == nil && isIPSProblemListCondition(res, true) {
+			hasProblemListCond = true
+			break
+		}
+	}
+
+	var authorRes map[string]any
+	var authorRT, authorID string
 
 	for _, inc := range sr.Includes {
 		res, err := s.protoToFHIRMapWithMeta(inc.ResType, inc.ResourceProto, inc.ResVersion, inc.LastUpdated)
@@ -146,41 +186,87 @@ func (s *Server) assembleIPSSummaryBundle(r *http.Request, tenant, patientID str
 		ref := map[string]any{
 			"reference": fmt.Sprintf("%s/%s", inc.ResType, inc.ResID),
 		}
-		clinicalBundle = append(clinicalBundle, map[string]any{
-			"fullUrl":  fmt.Sprintf("%s/%s", inc.ResType, inc.ResID),
-			"resource": res,
-		})
 
 		switch inc.ResType {
 		case "MedicationRequest", "MedicationStatement", "MedicationAdministration", "MedicationDispense":
 			medRefs = append(medRefs, ref)
+			addBundleEntry(inc.ResType, inc.ResID, res)
 		case "AllergyIntolerance":
 			allergyRefs = append(allergyRefs, ref)
+			addBundleEntry(inc.ResType, inc.ResID, res)
 		case "Condition":
-			problemRefs = append(problemRefs, ref)
+			if isIPSProblemListCondition(res, hasProblemListCond) {
+				problemRefs = append(problemRefs, ref)
+				addBundleEntry(inc.ResType, inc.ResID, res)
+			}
 		case "Procedure":
 			procedureRefs = append(procedureRefs, ref)
+			addBundleEntry(inc.ResType, inc.ResID, res)
 		case "Immunization":
 			immunRefs = append(immunRefs, ref)
+			addBundleEntry(inc.ResType, inc.ResID, res)
 		case "Observation":
+			if _, hasDAR := res["dataAbsentReason"]; hasDAR && res["valueQuantity"] == nil && res["valueCodeableConcept"] == nil && res["valueString"] == nil && res["component"] == nil {
+				continue
+			}
 			if isVitalSignObservation(res) {
 				vitalRefs = append(vitalRefs, ref)
 			} else {
 				resultRefs = append(resultRefs, ref)
 			}
+			addBundleEntry(inc.ResType, inc.ResID, res)
 		case "DiagnosticReport":
 			resultRefs = append(resultRefs, ref)
+			addBundleEntry(inc.ResType, inc.ResID, res)
 		case "CarePlan", "Goal", "ServiceRequest":
 			planRefs = append(planRefs, ref)
+			addBundleEntry(inc.ResType, inc.ResID, res)
+		case "DeviceUseStatement":
+			deviceRefs = append(deviceRefs, ref)
+			addBundleEntry(inc.ResType, inc.ResID, res)
 		case "Practitioner", "Organization":
 			if authorRef == "" {
 				authorRef = fmt.Sprintf("%s/%s", inc.ResType, inc.ResID)
+				authorRT = inc.ResType
+				authorID = inc.ResID
+				authorRes = res
 			}
 		}
 	}
 
 	if authorRef == "" {
 		authorRef = fmt.Sprintf("Patient/%s", patientID)
+	} else if authorRes != nil {
+		addBundleEntry(authorRT, authorID, authorRes)
+	}
+
+	// Resolve 1-hop relative references (e.g., Medication, Practitioner, Organization, Location, Specimen, Device, Encounter)
+	// referenced inside included clinical entries so the FHIR document Bundle satisfies reference closure.
+	var extraRefs []string
+	collectRelativeRefsFromMap(patientRes, &extraRefs)
+	for _, cb := range clinicalBundle {
+		if rm, ok := cb["resource"].(map[string]any); ok {
+			collectRelativeRefsFromMap(rm, &extraRefs)
+		}
+	}
+	for _, relRef := range extraRefs {
+		if seenEntries[relRef] {
+			continue
+		}
+		parts := strings.SplitN(relRef, "/", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			continue
+		}
+		if hasSecCtx && !auth.Allows(secCtx, parts[0], auth.ActionRead) {
+			continue
+		}
+		stored, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, parts[0], parts[1])
+		if gErr != nil || stored == nil || stored.IsDeleted {
+			continue
+		}
+		if rm, mErr := s.protoToFHIRMapWithMeta(parts[0], stored.ResourceProto, stored.ResVersion, stored.LastUpdated); mErr == nil {
+			addBundleEntry(parts[0], parts[1], rm)
+		}
 	}
 
 	makeSection := func(title, loincCode, loincDisplay string, entries []map[string]any, required bool) (map[string]any, bool) {
@@ -235,6 +321,9 @@ func (s *Server) assembleIPSSummaryBundle(r *http.Request, tenant, patientID str
 	if sec, ok := makeSection("Immunizations", "11369-6", "History of Immunization Narrative", immunRefs, false); ok {
 		sections = append(sections, sec)
 	}
+	if sec, ok := makeSection("History of Medical Device Use", "46264-8", "History of medical device use", deviceRefs, false); ok {
+		sections = append(sections, sec)
+	}
 	if sec, ok := makeSection("Vital Signs", "8716-3", "Vital signs", vitalRefs, false); ok {
 		sections = append(sections, sec)
 	}
@@ -252,6 +341,10 @@ func (s *Server) assembleIPSSummaryBundle(r *http.Request, tenant, patientID str
 		"id":           compID,
 		"meta": map[string]any{
 			"profile": []string{"http://hl7.org/fhir/uv/ips/StructureDefinition/Composition-uv-ips"},
+		},
+		"text": map[string]any{
+			"status": "generated",
+			"div":    fmt.Sprintf(`<div xmlns="http://www.w3.org/1999/xhtml">International Patient Summary for Patient/%s</div>`, patientID),
 		},
 		"status": "final",
 		"type": map[string]any{
@@ -279,11 +372,11 @@ func (s *Server) assembleIPSSummaryBundle(r *http.Request, tenant, patientID str
 	entries := make([]any, 0, 2+len(clinicalBundle))
 	entries = append(entries,
 		map[string]any{
-			"fullUrl":  "Composition/" + compID,
+			"fullUrl":  entryFullURL("Composition", compID),
 			"resource": composition,
 		},
 		map[string]any{
-			"fullUrl":  "Patient/" + patientID,
+			"fullUrl":  entryFullURL("Patient", patientID),
 			"resource": patientRes,
 		},
 	)
@@ -299,13 +392,82 @@ func (s *Server) assembleIPSSummaryBundle(r *http.Request, tenant, patientID str
 		},
 		"identifier": map[string]any{
 			"system": "urn:ietf:rfc:3986",
-			"value":  "urn:uuid:ips-" + patientID,
+			"value":  "urn:uuid:" + deterministicIPSUUID(tenant, patientID),
 		},
 		"type":      "document",
 		"timestamp": nowStr,
 		"entry":     entries,
 	}
 	return bundle, http.StatusOK, "", ""
+}
+
+func deterministicIPSUUID(tenant, patientID string) string {
+	sum := sha1.Sum([]byte("flint-ips-v1:" + tenant + ":" + patientID))
+	sum[6] = (sum[6] & 0x0f) | 0x50 // version 5
+	sum[8] = (sum[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+		sum[0:4], sum[4:6], sum[6:8], sum[8:10], sum[10:16])
+}
+
+func isIPSProblemListCondition(cond map[string]any, strictProblemCategory bool) bool {
+	if cond == nil {
+		return false
+	}
+	if _, hasClinicalStatus := cond["clinicalStatus"]; !hasClinicalStatus {
+		return false
+	}
+	cats, hasCats := cond["category"].([]any)
+	if !hasCats || len(cats) == 0 {
+		return true
+	}
+	if !strictProblemCategory {
+		return true
+	}
+	for _, rawC := range cats {
+		cm, ok := rawC.(map[string]any)
+		if !ok {
+			continue
+		}
+		codings, _ := cm["coding"].([]any)
+		for _, rawCoding := range codings {
+			cd, ok := rawCoding.(map[string]any)
+			if !ok {
+				continue
+			}
+			code, _ := cd["code"].(string)
+			if code == "problem-list-item" || code == "75326-9" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func collectRelativeRefsFromMap(v any, out *[]string) {
+	switch tv := v.(type) {
+	case map[string]any:
+		if ref, ok := tv["reference"].(string); ok {
+			ref = strings.TrimSpace(ref)
+			if ref != "" && !strings.HasPrefix(ref, "#") && !strings.Contains(ref, "://") && !strings.HasPrefix(ref, "urn:") {
+				if idx := strings.Index(ref, "/_history/"); idx != -1 {
+					ref = ref[:idx]
+				}
+				if strings.Count(ref, "/") == 1 {
+					*out = append(*out, ref)
+				}
+			}
+		}
+		for k, child := range tv {
+			if k == "contained" {
+				continue
+			}
+			collectRelativeRefsFromMap(child, out)
+		}
+	case []any:
+		for _, elem := range tv {
+			collectRelativeRefsFromMap(elem, out)
+		}
+	}
 }
 
 func isVitalSignObservation(obs map[string]any) bool {

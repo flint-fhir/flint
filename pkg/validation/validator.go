@@ -1207,6 +1207,239 @@ var usCoreProfileSpecs = map[string]usCoreProfileSpec{
 		ResourceType:   "PractitionerRole",
 		RequiredFields: []string{"practitioner|organization|code|specialty"},
 	},
+	// HL7 International Patient Summary (IPS) v1.1.0 profiles
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Bundle-uv-ips": {
+		Slug:           "Bundle-uv-ips",
+		ResourceType:   "Bundle",
+		RequiredFields: []string{"identifier", "type", "timestamp", "entry"},
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			if bType, _ := resMap["type"].(string); bType != "document" {
+				outcome.AddError(CodeInvalid, "IPS Bundle-uv-ips requires Bundle.type = 'document'", "Bundle.type")
+			}
+			entries, _ := resMap["entry"].([]any)
+			if len(entries) == 0 {
+				outcome.AddError(CodeRequired, "IPS Bundle-uv-ips requires Composition as first entry", "Bundle.entry")
+				return
+			}
+			firstEntry, _ := entries[0].(map[string]any)
+			firstRes, _ := firstEntry["resource"].(map[string]any)
+			if rt, _ := firstRes["resourceType"].(string); rt != "Composition" {
+				outcome.AddError(CodeInvalid, "IPS Bundle-uv-ips first entry must be a Composition resource", "Bundle.entry[0].resource")
+			}
+		},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Composition-uv-ips": {
+		Slug:           "Composition-uv-ips",
+		ResourceType:   "Composition",
+		RequiredFields: []string{"status", "type", "subject", "date", "author", "title", "section"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Patient-uv-ips": {
+		Slug:           "Patient-uv-ips",
+		ResourceType:   "Patient",
+		RequiredFields: []string{"name", "birthDate"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/AllergyIntolerance-uv-ips": {
+		Slug:           "AllergyIntolerance-uv-ips",
+		ResourceType:   "AllergyIntolerance",
+		RequiredFields: []string{"patient"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Condition-uv-ips": {
+		Slug:           "Condition-uv-ips",
+		ResourceType:   "Condition",
+		RequiredFields: []string{"clinicalStatus", "code", "subject"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/MedicationStatement-uv-ips": {
+		Slug:           "MedicationStatement-uv-ips",
+		ResourceType:   "MedicationStatement",
+		RequiredFields: []string{"status", "medication[x]", "subject", "effective[x]"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/MedicationRequest-uv-ips": {
+		Slug:           "MedicationRequest-uv-ips",
+		ResourceType:   "MedicationRequest",
+		RequiredFields: []string{"status", "intent", "medication[x]", "subject"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Medication-uv-ips": {
+		Slug:           "Medication-uv-ips",
+		ResourceType:   "Medication",
+		RequiredFields: []string{"code"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Immunization-uv-ips": {
+		Slug:           "Immunization-uv-ips",
+		ResourceType:   "Immunization",
+		RequiredFields: []string{"status", "vaccineCode", "patient", "occurrence[x]"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Procedure-uv-ips": {
+		Slug:           "Procedure-uv-ips",
+		ResourceType:   "Procedure",
+		RequiredFields: []string{"status", "code", "subject", "performed[x]"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/DiagnosticReport-uv-ips": {
+		Slug:           "DiagnosticReport-uv-ips",
+		ResourceType:   "DiagnosticReport",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Device-uv-ips": {
+		Slug:           "Device-uv-ips",
+		ResourceType:   "Device",
+		RequiredFields: []string{"type"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Device-observer-uv-ips": {
+		Slug:           "Device-observer-uv-ips",
+		ResourceType:   "Device",
+		RequiredFields: []string{"type"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/DeviceUseStatement-uv-ips": {
+		Slug:           "DeviceUseStatement-uv-ips",
+		ResourceType:   "DeviceUseStatement",
+		RequiredFields: []string{"status", "subject", "device"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/ImagingStudy-uv-ips": {
+		Slug:           "ImagingStudy-uv-ips",
+		ResourceType:   "ImagingStudy",
+		RequiredFields: []string{"status", "subject"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Media-observation-uv-ips": {
+		Slug:           "Media-observation-uv-ips",
+		ResourceType:   "Media",
+		RequiredFields: []string{"status", "subject", "content"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-alcoholuse-uv-ips": {
+		Slug:           "Observation-alcoholuse-uv-ips",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-pregnancy-edd-uv-ips": {
+		Slug:           "Observation-pregnancy-edd-uv-ips",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-pregnancy-outcome-uv-ips": {
+		Slug:           "Observation-pregnancy-outcome-uv-ips",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-pregnancy-status-uv-ips": {
+		Slug:           "Observation-pregnancy-status-uv-ips",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-tobaccouse-uv-ips": {
+		Slug:           "Observation-tobaccouse-uv-ips",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-results-uv-ips": {
+		Slug:           "Observation-results-uv-ips",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-results-laboratory-uv-ips": {
+		Slug:           "Observation-results-laboratory-uv-ips",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-results-pathology-uv-ips": {
+		Slug:           "Observation-results-pathology-uv-ips",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-results-radiology-uv-ips": {
+		Slug:           "Observation-results-radiology-uv-ips",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Organization-uv-ips": {
+		Slug:           "Organization-uv-ips",
+		ResourceType:   "Organization",
+		RequiredFields: []string{"name"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Practitioner-uv-ips": {
+		Slug:           "Practitioner-uv-ips",
+		ResourceType:   "Practitioner",
+		RequiredFields: []string{"name"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/PractitionerRole-uv-ips": {
+		Slug:           "PractitionerRole-uv-ips",
+		ResourceType:   "PractitionerRole",
+		RequiredFields: []string{"practitioner|organization"},
+	},
+	"http://hl7.org/fhir/uv/ips/StructureDefinition/Specimen-uv-ips": {
+		Slug:           "Specimen-uv-ips",
+		ResourceType:   "Specimen",
+		RequiredFields: []string{"type", "subject"},
+	},
+	// HL7 Da Vinci PDex Plan-Net v1.1.0 profiles
+	"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Endpoint": {
+		Slug:           "plannet-Endpoint",
+		ResourceType:   "Endpoint",
+		RequiredFields: []string{"status", "connectionType", "payloadType", "address"},
+	},
+	"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-HealthcareService": {
+		Slug:           "plannet-HealthcareService",
+		ResourceType:   "HealthcareService",
+		RequiredFields: []string{"active", "category"},
+	},
+	"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-InsurancePlan": {
+		Slug:           "plannet-InsurancePlan",
+		ResourceType:   "InsurancePlan",
+		RequiredFields: []string{"status", "type", "ownedBy"},
+	},
+	"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Location": {
+		Slug:           "plannet-Location",
+		ResourceType:   "Location",
+		RequiredFields: []string{"status", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Network": {
+		Slug:           "plannet-Network",
+		ResourceType:   "Organization",
+		RequiredFields: []string{"active", "type", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Organization": {
+		Slug:           "plannet-Organization",
+		ResourceType:   "Organization",
+		RequiredFields: []string{"active", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-OrganizationAffiliation": {
+		Slug:           "plannet-OrganizationAffiliation",
+		ResourceType:   "OrganizationAffiliation",
+		RequiredFields: []string{"active"},
+	},
+	"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Practitioner": {
+		Slug:           "plannet-Practitioner",
+		ResourceType:   "Practitioner",
+		RequiredFields: []string{"active", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-PractitionerRole": {
+		Slug:           "plannet-PractitionerRole",
+		ResourceType:   "PractitionerRole",
+		RequiredFields: []string{"active"},
+	},
+	// HL7 Da Vinci PDex US Drug Formulary v2.0.1 profiles
+	"http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-PayerInsurancePlan": {
+		Slug:           "usdf-PayerInsurancePlan",
+		ResourceType:   "InsurancePlan",
+		RequiredFields: []string{"identifier", "status", "type", "coverage", "plan"},
+	},
+	"http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-Formulary": {
+		Slug:           "usdf-Formulary",
+		ResourceType:   "InsurancePlan",
+		RequiredFields: []string{"identifier", "status", "type"},
+	},
+	"http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-FormularyItem": {
+		Slug:           "usdf-FormularyItem",
+		ResourceType:   "Basic",
+		RequiredFields: []string{"code", "subject", "extension"},
+	},
+	"http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-FormularyDrug": {
+		Slug:           "usdf-FormularyDrug",
+		ResourceType:   "MedicationKnowledge",
+		RequiredFields: []string{"code", "status"},
+	},
+	"http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-InsurancePlanLocation": {
+		Slug:           "usdf-InsurancePlanLocation",
+		ResourceType:   "Location",
+		RequiredFields: []string{"address|extension"},
+	},
 }
 
 func vitalSignsSpec(slug string, extra func(resType string, resMap map[string]any, outcome *Outcome)) usCoreProfileSpec {
