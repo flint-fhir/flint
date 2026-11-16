@@ -593,7 +593,8 @@ def execute_inferno_target(
   suite_options: {},
   inputs: {},
   per_runnable_hooks: {},
-  auto_radio_true: false
+  auto_radio_true: false,
+  populate_defaults: false
 )
   suites_repo   = Inferno::Repositories::TestSuites.new
   tests_repo    = Inferno::Repositories::Tests.new
@@ -646,6 +647,20 @@ def execute_inferno_target(
     available = runnable.available_inputs
     available_list = available.is_a?(Hash) ? available.values : Array(available)
     puts "\n>>> Preparing #{label} [#{idx + 1}/#{target_runnables.size}] (#{runnable.id}) [inputs: #{available_list.map { |ri| "#{ri.name}:#{ri.type}" }.join(', ')}]"
+
+    if populate_defaults && idx.zero?
+      available_list.each do |ri|
+        next if ri.respond_to?(:locked) && ri.locked
+        next unless ri.respond_to?(:default) && !ri.default.nil? && !ri.default.to_s.empty?
+
+        data_repo.save(
+          test_session_id: test_session.id,
+          name: ri.name,
+          value: ri.default.to_s,
+          type: ri.type
+        )
+      end
+    end
 
     if auto_radio_true
       available_list.each do |ri|
@@ -1045,10 +1060,13 @@ if plannet_suite && ENV['INFERNO_SKIP_PLANNET'] != 'true'
     flint_tenant: plannet_tenant,
     label: 'davinci_plan_net_v110',
     suite_id: 'davinci_plan_net_server_v110',
+    populate_defaults: true,
     inputs: {
       url: plannet_fhir_url,
       smart_auth_info: us_core_auth_json,
-      no_param_search: 'true'
+      no_param_search: 'true',
+      max_instances: '200',
+      max_pages: '20'
     }
   )
 end
