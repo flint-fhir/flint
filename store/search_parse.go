@@ -624,7 +624,8 @@ var (
 		"role": true, "relationship": true, "subscriber-id": true,
 		"value-concept": true, "component-value-concept": true, "combo-value-concept": true,
 		"race": true, "ethnicity": true, "birthsex": true, "marital-status": true,
-		"_tag": true, "_security": true,
+		"contenttype": true,
+		"_tag":        true, "_security": true,
 	}
 	knownRefSearchParams = map[string]bool{
 		"organization": true, "general-practitioner": true,
@@ -637,6 +638,7 @@ var (
 		"specimen": true, "collector": true, "media": true, "manufacturer": true,
 		"reaction": true, "endpoint": true, "instantiates-canonical": true,
 		"target": true, "agent": true, "author": true, "custodian": true,
+		"authenticator": true, "relates-to": true,
 		"payor": true, "subscriber": true, "practitioner": true, "device": true,
 		"questionnaire": true, "source": true, "care-team": true, "goal": true,
 		"focus": true, "owner": true, "for": true, "actor": true,

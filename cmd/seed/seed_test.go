@@ -37,7 +37,7 @@ func TestCohortTransactionBundle_ValidatesAllResources(t *testing.T) {
 	require.NoError(t, json.Unmarshal(bundleBytes, &bundle))
 	assert.Equal(t, "Bundle", bundle.ResourceType)
 	assert.Equal(t, "transaction", bundle.Type)
-	assert.Len(t, bundle.Entry, 62)
+	assert.Len(t, bundle.Entry, 68)
 
 	engine := validation.NewEngine(validation.DefaultOptions())
 	seenTypes := make(map[string]bool)
@@ -72,7 +72,7 @@ func TestSeedRun_UnitHTTP(t *testing.T) {
 		var b map[string]any
 		require.NoError(t, json.Unmarshal(body, &b))
 		entries := b["entry"].([]any)
-		assert.Len(t, entries, 62)
+		assert.Len(t, entries, 68)
 
 		respEntries := make([]map[string]any, len(entries))
 		for i, rawEntry := range entries {
@@ -106,7 +106,7 @@ func TestSeedRun_UnitHTTP(t *testing.T) {
 		Out:         &buf,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, buf.String(), `Seeded 62 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "demo"`)
+	assert.Contains(t, buf.String(), `Seeded 68 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "demo"`)
 	assert.Contains(t, buf.String(), "Practitioner/prac-cardiology-1")
 	assert.Contains(t, buf.String(), "Patient/pat-alice-001/$everything")
 }
@@ -189,7 +189,7 @@ func TestSeedRun_EndToEndIntegration(t *testing.T) {
 		Out:        &buf,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, buf.String(), `Seeded 62 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "test-seed"`)
+	assert.Contains(t, buf.String(), `Seeded 68 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "test-seed"`)
 
 	// Verify Patient/$everything for Alice returns full longitudinal chart across all linked US Core & IPA profiles
 	resp, err := http.Get(ts.URL + "/fhir/r4/test-seed/Patient/pat-alice-001/$everything")
@@ -199,7 +199,7 @@ func TestSeedRun_EndToEndIntegration(t *testing.T) {
 
 	var evBundle map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&evBundle))
-	assert.Equal(t, 47, int(evBundle["total"].(float64)))
+	assert.Equal(t, 53, int(evBundle["total"].(float64)))
 }
 
 func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
@@ -219,7 +219,7 @@ func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
 		HTTPClient: ts.Client(),
 		Out:        &buf,
 	}))
-	assert.Contains(t, buf.String(), `Seeded 62 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "demo"`)
+	assert.Contains(t, buf.String(), `Seeded 68 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "demo"`)
 
 	engine := validation.NewEngine(validation.DefaultOptions())
 
@@ -277,9 +277,18 @@ func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
 		assert.Equal(t, 1, int(b["total"].(float64)), "expected exact timestamp search %s to return 1 resource", query)
 	}
 
-	// 6. Patient/$everything for Alice returns all 47 longitudinal resources
+	// 6. Patient/$everything for Alice returns all 53 longitudinal resources
 	evBytes := getRaw("/fhir/r4/demo/Patient/pat-alice-001/$everything")
 	var evBundle map[string]any
 	require.NoError(t, json.Unmarshal(evBytes, &evBundle))
-	assert.Equal(t, 47, int(evBundle["total"].(float64)))
+	assert.Equal(t, 53, int(evBundle["total"].(float64)))
+
+	// 7. US Core v8.0.0 ADI DocumentReference & Observation ADI Documentation round-trip & profile validation
+	adiDocBytes := getRaw("/fhir/r4/demo/DocumentReference/docref-alice-adi")
+	adiDocOutcome := engine.ValidateJSONWithProfiles("DocumentReference", adiDocBytes, []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-adi-documentreference|8.0.0"}, "")
+	assert.True(t, adiDocOutcome.IsValid(), "ADI DocumentReference v8.0.0 validation failed: %+v", adiDocOutcome.Issues)
+
+	adiObsBytes := getRaw("/fhir/r4/demo/Observation/obs-alice-adi-doc")
+	adiObsOutcome := engine.ValidateJSONWithProfiles("Observation", adiObsBytes, []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-adi-documentation|8.0.0"}, "")
+	assert.True(t, adiObsOutcome.IsValid(), "Observation ADI Documentation v8.0.0 validation failed: %+v", adiObsOutcome.Issues)
 }

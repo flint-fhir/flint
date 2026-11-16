@@ -874,8 +874,10 @@ func mapEnumSpNames(fieldName, parentField string) []string {
 		base = parentField + "_" + fieldName
 	}
 	switch base {
-	case "status", "doc_status":
+	case "status":
 		return []string{"status"}
+	case "doc_status":
+		return []string{"docstatus"}
 	case "lifecycle_status":
 		return []string{"lifecycle-status", "status"}
 	case "clinical_status":
@@ -969,8 +971,14 @@ func mapReferenceSpNames(resType, fieldName, parentField string) []string {
 		return []string{"encounter"}
 	case "practitioner", "Actor", "participant_individual":
 		return []string{"practitioner"}
-	case "organization", "managing_organization", "service_provider", "custodian":
+	case "organization", "managing_organization", "service_provider":
 		return []string{"organization"}
+	case "custodian":
+		return []string{"custodian", "organization"}
+	case "authenticator":
+		return []string{"authenticator"}
+	case "relates_to_target":
+		return []string{"relates-to"}
 	case "location":
 		return []string{"location"}
 	case "performer", "performer_actor":

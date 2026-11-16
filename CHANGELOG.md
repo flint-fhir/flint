@@ -5,6 +5,26 @@ All notable changes to **Flint** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Expanded Headless HL7 Inferno Conformance CI — US Core v8.0.0, ONC `(g)(10)` HTI-1 & Subscriptions R5 Backport ([`.github/workflows/inferno.yml`](.github/workflows/inferno.yml), [`deploy/inferno/headless/`](deploy/inferno/headless/))**:
+  - Added **US Core Server v8.0.0 (USCDI v5)** (`us_core_v800` in `us_core_test_kit ~> 1.2`), including `us-core-adi-documentreference` and `us-core-observation-adi-documentation` profile validation, `CapabilityStatement` advertisement, and deterministic cohort fixtures (`cmd/seed`).
+  - Added **ONC § 170.315(g)(10) Standardized API Certification** (`g10_certification` in `onc_certification_g10_test_kit ~> 8.1`) across standalone/EHR launches, token revocation, invalid `aud`/PKCE rejection, SMART v2 fine-grained scopes, asymmetric launch, and Bulk Data v2.0.0.
+  - Added **HL7 Subscriptions R5 Backport IG v1.1.0 FHIR R4 Server Suite** (`subscriptions_r5_backport_r4_server` in `subscriptions_test_kit ~> 0.13`) verifying live `rest-hook` handshake/heartbeat/event-notification `Bundle` delivery, `CapabilityStatement` topic discovery, `$status`, and invalid subscription rejection across PostgreSQL and SQLite.
+- **Stateful Differential & Wire-Isomorphism Property-Based Testing (`store/`, `pkg/fhirxml`, `pkg/txclient`, `server/`)**:
+  - Added `hegel.RunStateful` differential state-machine verification across `postgres`, `sqlite` (including `LoadFromDB` crash recovery), `doris`, and `HybridStore`, plus UCUM and `_filter` Boolean algebra PBTs (`store/differential_property_test.go`).
+  - Added 4-way lossless `FHIR JSON <-> FHIR R4 XML <-> google/fhir Proto3` wire isomorphism PBTs (including exact `Decimal` trailing-zero lexeme preservation) and DTD/ENTITY XXE rejection (`pkg/fhirxml/property_test.go`, `pkg/fhirutil/json_codec.go`).
+  - Added live SQL-on-FHIR v2 `ViewDefinition/$run` vs `ViewDefinition/$sql?dialect=sqlite` differential execution oracle, FHIRPath Kleene 3-valued logic laws, RFC 6455 WebSocket framing/fragmentation PBTs, Patch/Transaction atomicity PBTs, and `pkg/txclient` stateful LRU/TTL cache verification.
+- **Continuous Native Fuzzing, Concurrency Contention, `govulncheck` & XML `$certify` Hardening (`.github/workflows/ci.yml`, `.github/workflows/fuzz.yml`, `server/concurrency_hardening_test.go`, `pkg/certify`)**:
+  - Wired `FuzzXMLRoundTrip` and `FuzzWebSocketFrames` into CI alongside a scheduled deep-fuzz workflow, `govulncheck ./...` static vulnerability gate, parallel `-race` optimistic locking (`If-Match` / `CreateOnly` / `If-None-Exist`) contention tests, and `application/fhir+xml` `$certify` checks.
+
+### Fixed
+
+- Wrapped `sqlite.Store.ExecuteTransactionBundle` in an explicit ACID `sql.Tx` and synchronized SQLite SQL table deletes in `PurgePatientCompartment` and `ExpungeResources` so aborted bundle rollbacks and `LoadFromDB` crash recovery match in-memory state identically (`store/sqlite/store.go`).
+- Fixed prefix `not(expr)` evaluation in `evalFHIRPathExpr` (`ViewDefinition/$run`) to match `ViewDefinition/$sql` `NOT (...)` transpilation (`server/fhirpath_engine.go`).
+
 ## [0.5.0] - 2026-11-14
 
 ### Added

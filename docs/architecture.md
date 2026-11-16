@@ -20,9 +20,9 @@ flowchart TB
 
   subgraph APILayer["Plane 1: Storage-Agnostic FHIR R4 API & Interoperability Layer (server/, pkg/*)"]
     direction TB
-    Wire["Wire Transcoder & Content Negotiation\n(jsonformat ↔ google.fhir.r4.core.* proto.Message / protoreflect)"]
+    Wire["Wire Transcoder & Content Negotiation\n(JSON / FHIR R4 XML / CSV ↔ google.fhir.r4.core.* proto.Message)"]
     Auth["Security, SMART v2 OAuth2/PKCE, UDAP & Audit\n(pkg/auth, Compartment & Sub-Resource Scopes, pkg/audit)"]
-    Validate["Profile, Terminology & FHIRPath R4 Validation\n(pkg/validation, 26 US Core v6.1/v7.0 Profiles)"]
+    Validate["Profile, Terminology & FHIRPath R4 Validation\n(pkg/validation, US Core v6.1/v7.0/v8.0 Profiles & Tx Federation)"]
     Clinical["Clinical, REST & 35+ National IG Engine\n(ACID Bundle Coordinator, 130+ $ Operations, CDS Hooks v2, eCQM, SDC, IPS, Subscriptions, $certify)"]
     Extract["Search Extractor & UCUM Unit Normalizer\n(Extracts typed store.SearchIndexEntry slices before persistence)"]
     SOF["HL7 SQL-on-FHIR v2 Engine\n(ViewDefinition/$run via protoreflect + Multi-Dialect $sql Compiler)"]
@@ -89,7 +89,7 @@ Flint inverts this model through three architectural invariants:
 | :--- | :--- | :--- |
 | **Wire & Content Negotiation** | [`server/`](../server/server.go), [`pkg/fhirutil`](../pkg/fhirutil), [`pkg/fhirxml`](../pkg/fhirxml) | Negotiates `application/fhir+json`, `application/fhir+xml` (`_format=xml`), `application/fhir+ndjson`, `text/csv`, `text/tab-separated-values`, `application/x-protobuf`, and `application/fhir+protobuf`; handles `_summary`, `_elements` (`SUBSETTED`), `Prefer`, `$convert`, and RFC 6902 / RFC 7396 / FHIRPath `PATCH`. |
 | **Identity, SMART v2 & UDAP** | [`pkg/auth`](../pkg/auth), `server/smart_*.go` | Built-in SMART App Launch v2.0.0 OAuth2 server (`S256` PKCE, standalone & EHR launch, OIDC `id_token` / `fhirUser`, Backend Services & confidential asymmetric `private_key_jwt` RFC 7523, token introspection/revocation), UDAP dynamic client registration, external OIDC/Zitadel JWT validation, patient compartment enforcement, and v2 sub-resource scope filtering (`?category=vital-signs`). |
-| **Validation, Terminology & FHIRPath R4** | [`pkg/validation`](../pkg/validation), [`pkg/txclient`](../pkg/txclient) | Validates cardinality, slicing discriminators, choice-type invariants, terminology bindings (with optional LRU/TTL cached external terminology server federation via `FLINT_TX_SERVER_URL`), regex patterns, reference targets, and FHIRPath constraints across all 146 FHIR R4 resources and 26 built-in US Core v6.1.0 & v7.0.0 profiles (`$validate` + write-time enforcement). |
+| **Validation, Terminology & FHIRPath R4** | [`pkg/validation`](../pkg/validation), [`pkg/txclient`](../pkg/txclient) | Validates cardinality, slicing discriminators, choice-type invariants, terminology bindings (with optional LRU/TTL cached external terminology server federation via `FLINT_TX_SERVER_URL`), regex patterns, reference targets, and FHIRPath constraints across all 146 FHIR R4 resources and built-in US Core v6.1.0, v7.0.0 & v8.0.0 profiles (`$validate` + write-time enforcement). |
 | **Search & UCUM Engine** | `server/search_*.go`, [`store/`](../store/search_eval.go) | Parses FHIR R4 search queries (chained parameters, recursive `_has`, composites, `:in`/`:not-in`/`:below`/`:above` terminology modifiers, `_filter` ASTs, `_include`/`_revinclude:iterate`) into backend-neutral [`store.SearchParams`](../store/store.go) structs and normalizes UCUM quantities. |
 | **Clinical, Subscriptions & National IGs** | `server/*_ops.go`, `server/subscriptions.go` | Implements 35+ HL7 IGs & 130+ operations (`$everything`, `$summary` IPS, `$docref`, `$populate`/`$extract` SDC, `$evaluate-measure`/`$care-gaps`, `PlanDefinition/$apply`, Da Vinci suite, CARIN BB, FAST, Gravity SDOH, mCODE, PACIO, Public Health, Vulcan, RFC 6455 WebSocket `$subscriptions-ws` & CloudEvents v1.0 Subscriptions, CDS Hooks v2.0). |
 | **SQL-on-FHIR v2** | `server/sqlonfhir.go` | Evaluates `ViewDefinition/$run` and `$export` in-memory over `protoreflect` against *any* `store.Store`, and compiles `ViewDefinition/$sql` into native zero-JSON SQL for `postgres`, `sqlite`, and `doris`. |
@@ -103,12 +103,12 @@ Flint inverts this model through three architectural invariants:
 
 [`store.Store`](../store/store.go) is the single operational persistence interface injected into `server.New(st, logger)`:
 
-- **Lifecycle & Concurrency-Safe CRUD**: `WriteResourceWithMeta`, `GetResource`, `DeleteResource`, `ConditionalCreateResource`, `ConditionalUpdateResource`, `ConditionalDeleteResource`, `ConditionalDeleteResources` — enforcing optimistic concurrency (`If-Match: W/"<version>"` → `store.ErrConflict` → HTTP `412 Precondition Failed`).
+- **Lifecycle & Concurrency-Safe CRUD**: `WriteResourceWithMeta`, `ReadResourceWithMeta`, `DeleteResourceWithMeta`, `DeleteResourceWithExpectedVersion`, `ConditionalCreateResource`, `ConditionalUpdateResource`, `ConditionalDeleteResource`, `ConditionalDeleteResources` — enforcing optimistic concurrency (`If-Match: W/"<version>"` → `store.ErrVersionConflict` → HTTP `412 Precondition Failed`).
 - **Atomic ACID Bundles**: `ExecuteTransactionBundle` executes ordered `DELETE → POST → PUT/PATCH` mutations inside an isolated backend transaction with `urn:uuid:` and conditional reference resolution, rolling back atomically on any conflict or error.
-- **Versioning & History**: `GetResourceVersion`, `ListResourceHistory`, `ListTypeHistory`, `ListSystemHistory`, and administrative `$expunge` (`Expunge`).
-- **6-Type Covering Search**: `SearchResources` evaluates [`store.SearchParams`](../store/store.go) (`string`, `token`, `reference`, `date`, `number`, `quantity`, `_has`, chains, composites, `_filter`, `_include`, `_revinclude`, sorting, and offset/count pagination) and returns raw Proto3 blobs + version metadata.
-- **Compartment & Graph Traversal**: `GetPatientEverything`, `GetEncounterEverything`, and `TraverseGraph` (`$graph` / `Composition/$document`).
-- **Streaming Bulk Export, Audit & OAuth2 State**: `ExportResources` (cursor/streamed NDJSON emission), `CreateExportJob`/`GetExportJob`/`UpdateExportJob`, `RecordAuditEvent`/`QueryAuditEvents`, and SMART OAuth2 auth-code / refresh-token persistence.
+- **Versioning, History & Lifecycle Purge**: `ReadResourceVersion`, `ListResourceHistory`, `ListHistoryWithParams`, `PurgePatientCompartment`, `ExpungeResources` (`$expunge`), and `Reindex` (`$reindex`).
+- **6-Type Covering Search**: `Search` evaluates [`store.SearchParams`](../store/store.go) (`string`, `token`, `reference`, `date`, `quantity`, `uri`, `_has`, chains, composites, `_filter`, `_include`, `_revinclude`, sorting, and offset/count pagination) and returns raw Proto3 blobs + version metadata.
+- **Compartment, MPI & Graph Traversal**: `PatientEverything`, `EncounterEverything`, `GroupEverything`, `BelongsToPatientCompartment`, `SearchPatientMatchCandidates`, and `ResourceGraph` (`$graph` / `Composition/$document`).
+- **Streaming Bulk Export, Audit & OAuth2 State**: `StreamExportResources`, `SaveExportJob`/`GetExportJob`/`DeleteExportJob`, `RecordAuditEvent`/`ReadAuditEvent`/`QueryAuditEvents`, and SMART OAuth2 `SaveAuthCode`/`ConsumeAuthCode`/`SaveRefreshToken`/`ConsumeRefreshToken`/`RevokeToken`/`IsTokenRevoked`.
 
 ### 4.2 `store.AnalyticalStore` (Optional Columnar OLAP Pushdown Contract)
 
@@ -135,6 +135,14 @@ Flint enforces physical Go package decoupling across the repository:
 - **Pure Leaf Storage Adapters (`store/postgres`, `store/sqlite`, `store/doris`)**: Each storage adapter depends downward on `store` and never imports a sibling backend.
 - **Automated CI Enforcement**: [`TestArchitecture_ZeroCrossBackendImports`](../store/architecture_test.go) inspects `go list -Deps` in CI to guarantee `server/`, `pkg/*`, `ingest/activity`, and `store/` remain free of backend/driver coupling and no cross-backend imports can regress.
 
+### 4.5 Stateful Differential, Property-Based & Fuzz Verification
+
+To guarantee zero semantic drift across storage planes and wire formats, Flint enforces multi-layer verification on every commit:
+
+- **Stateful Differential `store.Store` Machine ([`store/differential_property_test.go`](../store/differential_property_test.go))**: Uses [Hegel](https://hegel.dev) (`hegel.RunStateful`) to drive randomized `WriteResourceWithMeta`, `DeleteResourceWithMeta`, fault-injected `ExecuteTransactionBundle` rollbacks, `Search`, `PurgePatientCompartment`, `ExpungeResources`, and `sqlite.LoadFromDB` crash-recovery sequences simultaneously across `postgres`, `sqlite`, `doris`, and `HybridStore`.
+- **4-Way Wire Isomorphism & SQL-on-FHIR Differential Oracles ([`pkg/fhirxml/property_test.go`](../pkg/fhirxml/property_test.go), [`server/engine_property_test.go`](../server/engine_property_test.go))**: Verifies byte-exact canonical equivalence across `FHIR JSON <-> FHIR R4 XML <-> google/fhir Proto3` and live row-multiset equivalence between `ViewDefinition/$run` (`protoreflect`) and `ViewDefinition/$sql` executed against SQLite.
+- **Native Go Fuzzing, Concurrency Contention & Headless HL7 Inferno CI**: Exercises 15 native Go fuzz targets (`XML`, `.tgz` IG loader, search/`_filter`/FHIRPath/patch parsers, RFC 6455 WebSocket frames), parallel `-race` optimistic locking contention, `govulncheck`, and official headless HL7 Inferno suites (`US Core v6.1.0/v7.0.0/v8.0.0`, `ONC (g)(10)`, `HL7 IPA v1.0.0`, `SMART STU2`, `Bulk Data v2.0.0`, and `Subscriptions R5 Backport`) across both `--store=postgres` and `--store=sqlite`.
+
 ---
 
 ## 5. Plane 2: Pluggable Storage Topologies & When to Choose Each
@@ -159,12 +167,12 @@ Orthogonal to `store.Store`, `flintd` can publish committed Protobuf mutations v
 ## 6. End-to-End Request Lifecycle Walkthrough
 
 ### Write Path (`POST /fhir/r4/acme/Observation`)
-1. **Wire Decode (`server/`)**: If `Content-Type` is `application/x-protobuf`, `proto.Unmarshal` decodes directly into `*obspb.Observation` (zero JSON allocation). If `application/fhir+json`, `jsonformat.Unmarshaller` parses into `*obspb.Observation`.
+1. **Wire Decode (`server/`, `pkg/fhirxml`)**: If `Content-Type` is `application/x-protobuf`, `proto.Unmarshal` decodes directly into `*obspb.Observation` (zero JSON allocation). If `application/fhir+xml`, `fhirxml.XMLToJSON` transcodes FHIR R4 XML cleanly before unmarshaling; if `application/fhir+json`, `jsonformat.Unmarshaller` parses into `*obspb.Observation`.
 2. **Auth & Scope Check (`pkg/auth`)**: Validates SMART v2 JWT, tenant claim (`acme`), patient compartment, and granular write scope (`user/Observation.cu` or `system/*.cruds`).
-3. **Profile & FHIRPath Validation (`pkg/validation`)**: Enforces FHIR R4 structural invariants and declared `meta.profile` constraints (e.g., US Core Vital Signs).
-4. **Search Index & UCUM Extraction (`server/`)**: Assigns `id`, `meta.versionId`, and `meta.lastUpdated`, serializes deterministic Proto3 bytes, normalizes `valueQuantity` via `pkg/ucum`, and builds `[]store.SearchIndexEntry`.
+3. **Profile & FHIRPath Validation (`pkg/validation`, `pkg/txclient`)**: Enforces FHIR R4 structural invariants, terminology bindings (with optional `FLINT_TX_SERVER_URL` federation), and declared `meta.profile` constraints (e.g., US Core Vital Signs).
+4. **Search Index & UCUM Extraction (`server/`, `store/`)**: Assigns `id`, `meta.versionId`, and `meta.lastUpdated`, serializes deterministic Proto3 bytes, normalizes `valueQuantity` via UCUM canonicalization, and builds typed `store.SearchIndexes`.
 5. **Pluggable Persistence (`store.Store`)**: Calls `st.WriteResourceWithMeta(ctx, input)`. PostgreSQL writes to `tenant_acme.fhir_resources` + `spidx_*`; SQLite writes to WAL tables; Doris upserts into Unique Key MoW tables; `HybridStore` replicates to the `AnalyticalStore`.
-6. **Side Effects (`server/`)**: Records an ASTM E2147 `AuditEvent`, evaluates active `Subscription` criteria for `rest-hook` delivery, optionally emits CDC to AutoMQ, and serializes the HTTP `201 Created` response in the caller's `Accept` wire format (`JSON` or `Proto3`).
+6. **Side Effects (`server/`)**: Records an ASTM E2147 `AuditEvent`, evaluates active `Subscription` criteria for `rest-hook` (FHIR `Bundle` or CloudEvents v1.0) and RFC 6455 WebSocket (`$subscriptions-ws`) push delivery, optionally emits CDC to AutoMQ, and serializes the HTTP `201 Created` response in the caller's negotiated wire format (`JSON`, `FHIR R4 XML`, or `Proto3`).
 
 ### Analytical Pushdown Path (`GET /fhir/r4/acme/Observation/$stats` or `ViewDefinition/$sql`)
 - For `Observation/$stats` and Bulk `$export`, `server.Server` checks `s.analyticalStore`: when present (`doris` or `sqlite`), execution is pushed directly into columnar/SQL aggregation via `AnalyticalStore` and tagged with `X-Flint-Analytics-Backend`.

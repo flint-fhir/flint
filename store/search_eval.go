@@ -189,9 +189,9 @@ func MatchDateRange(spLow, spHigh time.Time, op DateOp) bool {
 		return !spHigh.Before(low)
 	case "ne":
 		if high.After(low) {
-			return spHigh.Before(low) || !spLow.Before(high)
+			return spLow.Before(low) || !spLow.Before(high) || spHigh.After(high)
 		}
-		return spHigh.Before(low) || spLow.After(low)
+		return spLow.Before(low) || spHigh.After(low)
 	case "ap":
 		effHigh := high
 		if !effHigh.After(low) {
@@ -203,11 +203,11 @@ func MatchDateRange(spLow, spHigh time.Time, op DateOp) bool {
 		apLow := low.Add(-margin)
 		apHigh := effHigh.Add(margin)
 		return !spLow.After(apHigh) && !spHigh.Before(apLow)
-	default: // "", "eq"
+	default: // "", "eq" — search interval fully contains target interval [spLow, spHigh]
 		if high.After(low) {
-			return spLow.Before(high) && !spHigh.Before(low)
+			return !spLow.Before(low) && spLow.Before(high) && !spHigh.After(high)
 		}
-		return !spLow.After(low) && !spHigh.Before(low)
+		return !spLow.Before(low) && !spHigh.After(low)
 	}
 }
 

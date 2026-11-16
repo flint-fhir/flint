@@ -112,11 +112,13 @@ server.mount_proc '/igs' do |_req, res|
   res['Content-Type'] = 'application/json'
   res.body = JSON.generate({
     'id' => 'hl7.fhir.us.core',
-    'version' => '7.0.0',
+    'version' => '8.0.0',
     'igs' => [
       'hl7.fhir.us.core#6.1.0',
       'hl7.fhir.us.core#7.0.0',
-      'hl7.fhir.uv.ipa#1.0.0'
+      'hl7.fhir.us.core#8.0.0',
+      'hl7.fhir.uv.ipa#1.0.0',
+      'hl7.fhir.uv.subscriptions-backport#1.1.0'
     ],
     'profiles' => {}
   })

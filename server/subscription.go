@@ -13,14 +13,201 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/store"
 	"github.com/google/uuid"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/dynamicpb"
 )
+
+const (
+	backportSubscriptionProfileURL        = "http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription"
+	backportNotificationBundleProfileURL  = "http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription-notification-r4"
+	backportSubscriptionStatusProfileURL  = "http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription-status-r4"
+	backportFilterCriteriaExtURL          = "http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-filter-criteria"
+	backportCapStatementTopicCanonicalURL = "http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/capabilitystatement-subscriptiontopic-canonical"
+)
+
+var supportedBackportTopics = map[string]string{
+	"https://inferno.healthit.gov/suites/custom/subscriptions_r5_backport_r4_client/topics/patient-admission": "Encounter",
+	"http://inferno.healthit.gov/suites/custom/subscriptions_r5_backport_r4_client/topics/patient-admission":  "Encounter",
+	"http://example.org/FHIR/SubscriptionTopic/encounter-complete":                                            "Encounter",
+	"http://example.org/FHIR/R5/SubscriptionTopic/encounter-start":                                            "Encounter",
+	"http://hl7.org/fhir/uv/subscriptions-backport/SubscriptionTopic/r5-encounter-complete":                   "Encounter",
+	"http://hl7.org/SubscriptionTopic/admission":                                                              "Encounter",
+	"http://example.org/FHIR/SubscriptionTopic/observation-vital-signs":                                       "Observation",
+}
+
+func (s *Server) buildSubscriptionTopicExtensions() []map[string]any {
+	topics := make([]string, 0, len(supportedBackportTopics))
+	for k := range supportedBackportTopics {
+		topics = append(topics, k)
+	}
+	sort.Strings(topics)
+	exts := make([]map[string]any, 0, len(topics))
+	for _, t := range topics {
+		exts = append(exts, map[string]any{
+			"url":            backportCapStatementTopicCanonicalURL,
+			"valueCanonical": t,
+		})
+	}
+	return exts
+}
+
+func (s *Server) recordTenantFHIRBaseURL(r *http.Request, tenant string) {
+	if r == nil || strings.TrimSpace(tenant) == "" {
+		return
+	}
+	scheme := "http"
+	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		scheme = "https"
+	}
+	host := strings.TrimSpace(r.Host)
+	if fwdHost := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); fwdHost != "" {
+		host = fwdHost
+	}
+	if host == "" {
+		return
+	}
+	base := fmt.Sprintf("%s://%s/fhir/r4/%s", scheme, host, strings.TrimSpace(tenant))
+	s.subBaseURLMu.Lock()
+	if s.subTenantBaseURL == nil {
+		s.subTenantBaseURL = make(map[string]string)
+	}
+	s.subTenantBaseURL[tenant] = base
+	s.subBaseURLMu.Unlock()
+}
+
+func (s *Server) resolveTenantFHIRBaseURL(tenant string) string {
+	s.subBaseURLMu.RLock()
+	base := s.subTenantBaseURL[tenant]
+	s.subBaseURLMu.RUnlock()
+	if base != "" {
+		return strings.TrimRight(base, "/")
+	}
+	if s.smartConfig != nil && strings.TrimSpace(s.smartConfig.Issuer) != "" {
+		return strings.TrimRight(strings.TrimSpace(s.smartConfig.Issuer), "/")
+	}
+	if strings.TrimSpace(tenant) == "" {
+		tenant = "default"
+	}
+	return "http://127.0.0.1:8080/fhir/r4/" + tenant
+}
+
+func isBackportSubscription(subMap map[string]any) bool {
+	if subMap == nil {
+		return false
+	}
+	if meta, ok := subMap["meta"].(map[string]any); ok {
+		if profs, ok := meta["profile"].([]any); ok {
+			for _, p := range profs {
+				if ps, _ := p.(string); strings.Contains(ps, "subscriptions-backport") {
+					return true
+				}
+			}
+		}
+	}
+	if criteria, _ := subMap["criteria"].(string); strings.HasPrefix(strings.TrimSpace(criteria), "http://") || strings.HasPrefix(strings.TrimSpace(criteria), "https://") {
+		return true
+	}
+	return false
+}
+
+func findCrossVersionExtensionURL(v any) string {
+	switch val := v.(type) {
+	case map[string]any:
+		for k, child := range val {
+			if k == "extension" {
+				if arr, ok := child.([]any); ok {
+					for _, it := range arr {
+						if em, ok := it.(map[string]any); ok {
+							if u, _ := em["url"].(string); isCrossVersionFHIRExtensionURL(u) {
+								return u
+							}
+						}
+					}
+				}
+			}
+			if found := findCrossVersionExtensionURL(child); found != "" {
+				return found
+			}
+		}
+	case []any:
+		for _, child := range val {
+			if found := findCrossVersionExtensionURL(child); found != "" {
+				return found
+			}
+		}
+	}
+	return ""
+}
+
+func isCrossVersionFHIRExtensionURL(rawURL string) bool {
+	u := strings.TrimSpace(rawURL)
+	for _, prefix := range []string{"http://hl7.org/fhir/", "https://hl7.org/fhir/"} {
+		if rest, ok := strings.CutPrefix(u, prefix); ok {
+			slash := strings.IndexByte(rest, '/')
+			if slash > 0 {
+				verSeg := rest[:slash]
+				if dot := strings.IndexByte(verSeg, '.'); dot > 0 && dot < len(verSeg)-1 {
+					allDigits := true
+					for i := range len(verSeg) {
+						if i == dot {
+							continue
+						}
+						if verSeg[i] < '0' || verSeg[i] > '9' {
+							allDigits = false
+							break
+						}
+					}
+					if allDigits {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func extractBackportFilterCriteria(subMap map[string]any) []string {
+	var out []string
+	critMeta, _ := subMap["_criteria"].(map[string]any)
+	if critMeta == nil {
+		return nil
+	}
+	exts, _ := critMeta["extension"].([]any)
+	for _, it := range exts {
+		em, _ := it.(map[string]any)
+		u, _ := em["url"].(string)
+		if u == backportFilterCriteriaExtURL || strings.HasSuffix(u, "/backport-filter-criteria") {
+			if vs, _ := em["valueString"].(string); strings.TrimSpace(vs) != "" {
+				out = append(out, strings.TrimSpace(vs))
+			}
+		}
+	}
+	return out
+}
+
+func normalizeBackportFilterString(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || strings.Contains(trimmed, "?") {
+		return trimmed
+	}
+	eqIdx := strings.IndexByte(trimmed, '=')
+	dotIdx := strings.IndexByte(trimmed, '.')
+	if dotIdx > 0 && (eqIdx == -1 || dotIdx < eqIdx) {
+		return trimmed[:dotIdx] + "?" + trimmed[dotIdx+1:]
+	}
+	return trimmed
+}
 
 type subscriptionEventRecord struct {
 	EventNumber int64
@@ -208,19 +395,131 @@ func (s *Server) validateSubscriptionResourceJSON(resType string, rawJSON []byte
 	if err := json.Unmarshal(rawJSON, &m); err != nil {
 		return nil
 	}
-	if criteria, _ := m["criteria"].(string); strings.TrimSpace(criteria) != "" {
-		if err := s.validateSubscriptionCriteria(criteria); err != nil {
+	if badExt := findCrossVersionExtensionURL(m); badExt != "" {
+		return fmt.Errorf("unsupported cross-version extension %q on R4 Subscription", badExt)
+	}
+	criteria, _ := m["criteria"].(string)
+	trimmedCriteria := strings.TrimSpace(criteria)
+	expectedTopicResType := ""
+	if trimmedCriteria != "" {
+		if strings.HasPrefix(trimmedCriteria, "http://") || strings.HasPrefix(trimmedCriteria, "https://") {
+			rt, ok := supportedBackportTopics[trimmedCriteria]
+			if !ok {
+				return fmt.Errorf("unsupported SubscriptionTopic canonical URL %q", trimmedCriteria)
+			}
+			expectedTopicResType = rt
+		} else {
+			if err := s.validateSubscriptionCriteria(trimmedCriteria); err != nil {
+				return err
+			}
+		}
+	}
+	for _, rawFilter := range extractBackportFilterCriteria(m) {
+		if err := s.validateBackportFilterCriteria(expectedTopicResType, rawFilter); err != nil {
 			return err
 		}
 	}
+
 	ch, _ := m["channel"].(map[string]any)
 	if ch == nil {
 		return nil
 	}
-	chType, _ := ch["type"].(string)
-	endpoint, _ := ch["endpoint"].(string)
-	if strings.EqualFold(chType, "rest-hook") && strings.TrimSpace(endpoint) != "" {
+	chType := strings.ToLower(strings.TrimSpace(stringField(ch, "type")))
+	if chType != "" && chType != "rest-hook" && chType != "websocket" {
+		return fmt.Errorf("unsupported Subscription channel.type %q: only rest-hook and websocket are supported", chType)
+	}
+	rawPayload := strings.TrimSpace(stringField(ch, "payload"))
+	mediaPayload := strings.ToLower(rawPayload)
+	if semi := strings.IndexByte(mediaPayload, ';'); semi >= 0 {
+		mediaPayload = strings.TrimSpace(mediaPayload[:semi])
+	}
+	switch mediaPayload {
+	case "", "application/fhir+json", "application/json", "application/fhir+xml", "application/xml",
+		"application/cloudevents+json", "application/cloudevents-batch+json", "application/x-protobuf",
+		"empty", "id-only", "full-resource":
+	default:
+		return fmt.Errorf("unsupported Subscription channel.payload MIME type %q", rawPayload)
+	}
+	if chType == "websocket" && (mediaPayload == "application/cloudevents+json" || mediaPayload == "application/cloudevents-batch+json") {
+		return fmt.Errorf("unsupported Subscription channel.type %q and payload %q combination", chType, rawPayload)
+	}
+	if payloadMeta, ok := ch["_payload"].(map[string]any); ok {
+		if exts, ok := payloadMeta["extension"].([]any); ok {
+			for _, it := range exts {
+				em, _ := it.(map[string]any)
+				u, _ := em["url"].(string)
+				if u == backportPayloadContentExtURL || strings.HasSuffix(u, "/backport-payload-content") {
+					vc := strings.ToLower(strings.TrimSpace(stringField(em, "valueCode")))
+					if vc == "" {
+						vc = strings.ToLower(strings.TrimSpace(stringField(em, "valueString")))
+					}
+					if vc != "empty" && vc != "id-only" && vc != "full-resource" {
+						return fmt.Errorf("unsupported backport-payload-content code %q", vc)
+					}
+				}
+			}
+		}
+	}
+	endpoint := strings.TrimSpace(stringField(ch, "endpoint"))
+	if chType == "rest-hook" && (endpoint != "" || isBackportSubscription(m)) {
 		return ValidateSubscriptionEndpoint(endpoint, s.disallowPrivateWebhooks)
+	}
+	return nil
+}
+
+func (s *Server) validateBackportFilterCriteria(expectedResType, rawFilter string) error {
+	norm := normalizeBackportFilterString(rawFilter)
+	qIdx := strings.IndexByte(norm, '?')
+	targetType := strings.TrimSpace(norm)
+	queryPart := ""
+	if qIdx != -1 {
+		targetType = strings.TrimSpace(norm[:qIdx])
+		queryPart = strings.TrimSpace(norm[qIdx+1:])
+	}
+	if targetType == "" {
+		return fmt.Errorf("invalid backport-filter-criteria %q: missing resource type", rawFilter)
+	}
+	if expectedResType != "" && !strings.EqualFold(targetType, expectedResType) {
+		return fmt.Errorf("backport-filter-criteria resource %q does not match topic target %q", targetType, expectedResType)
+	}
+	if len(s.protoRegistry) > 0 {
+		if _, ok := s.protoRegistry[targetType]; !ok {
+			return fmt.Errorf("backport-filter-criteria target resource type %q is not supported", targetType)
+		}
+	}
+	if queryPart == "" {
+		return fmt.Errorf("backport-filter-criteria %q is missing search filter parameters", rawFilter)
+	}
+	vals, err := url.ParseQuery(queryPart)
+	if err != nil {
+		return fmt.Errorf("invalid backport-filter-criteria %q: %w", rawFilter, err)
+	}
+	if err := store.ValidateSearchQuery(vals); err != nil {
+		return fmt.Errorf("unsupported search parameter in backport-filter-criteria %q: %w", rawFilter, err)
+	}
+	allowedDefs := resourceSearchParamDefs()[targetType]
+	for rawKey := range vals {
+		baseKey := rawKey
+		if cIdx := strings.IndexByte(baseKey, ':'); cIdx != -1 {
+			baseKey = baseKey[:cIdx]
+		}
+		if dIdx := strings.IndexByte(baseKey, '.'); dIdx != -1 {
+			baseKey = baseKey[:dIdx]
+		}
+		baseKey = strings.TrimSpace(baseKey)
+		if baseKey == "_id" || baseKey == "_lastUpdated" || baseKey == "_tag" || baseKey == "_profile" || baseKey == "_security" {
+			continue
+		}
+		matchedDef := false
+		for _, def := range allowedDefs {
+			if def["name"] == baseKey {
+				matchedDef = true
+				break
+			}
+		}
+		if !matchedDef {
+			return fmt.Errorf("unsupported search parameter %q for resource %s in backport-filter-criteria %q", baseKey, targetType, rawFilter)
+		}
 	}
 	return nil
 }
@@ -271,7 +570,8 @@ func subscriptionIsExpired(subMap map[string]any, now time.Time) bool {
 }
 
 // normalizeSubscriptionOnWrite transitions a newly requested FHIR R4 Subscription
-// ("status": "requested") to "active" per FHIR R4 §2.46.7.1.
+// ("status": "requested") to "active" per FHIR R4 §2.46.7.1, except for HL7 R5 Backport
+// rest-hook Subscriptions which remain "requested" until the async handshake succeeds.
 func normalizeSubscriptionOnWrite(resType string, rawJSON []byte) []byte {
 	if resType != "Subscription" || len(rawJSON) == 0 {
 		return rawJSON
@@ -283,6 +583,12 @@ func normalizeSubscriptionOnWrite(resType string, rawJSON []byte) []byte {
 	if status, _ := m["status"].(string); strings.EqualFold(status, "requested") {
 		if subscriptionIsExpired(m, time.Now().UTC()) {
 			m["status"] = "off"
+		} else if isBackportSubscription(m) {
+			ch, _ := m["channel"].(map[string]any)
+			if strings.EqualFold(strings.TrimSpace(stringField(ch, "type")), "rest-hook") {
+				return rawJSON
+			}
+			m["status"] = "active"
 		} else {
 			m["status"] = "active"
 		}
@@ -308,6 +614,7 @@ func (s *Server) dispatchSubscriptions(ctx context.Context, tenant, resType, res
 // and unbinds WebSocket streams when a Subscription itself is deleted.
 func (s *Server) dispatchSubscriptionDelete(ctx context.Context, tenant, resType, resID string, resVersion int, lastUpdated time.Time) {
 	if strings.EqualFold(resType, "Subscription") {
+		s.cancelBackportHeartbeat(tenant, resID)
 		s.syncSubscriptionWebSocketLifecycle(tenant, resID, nil)
 		return
 	}
@@ -398,6 +705,7 @@ func buildCloudEventNotification(
 func (s *Server) dispatchSubscriptionsWithAction(ctx context.Context, tenant, resType, resID string, resourceProto []byte, resVersion int, lastUpdated time.Time, idx *store.SearchIndexes, action string) {
 	if strings.EqualFold(resType, "Subscription") {
 		s.syncSubscriptionWebSocketLifecycle(tenant, resID, resourceProto)
+		s.syncBackportSubscriptionLifecycle(ctx, tenant, resID, resourceProto, resVersion, lastUpdated)
 		return
 	}
 	if s.store == nil || strings.EqualFold(resType, "AuditEvent") {
@@ -432,7 +740,7 @@ func (s *Server) dispatchSubscriptionsWithAction(ctx context.Context, tenant, re
 		}
 
 		criteria, _ := subMap["criteria"].(string)
-		if !subscriptionMatchesResourceWithMeta(criteria, resType, resID, lastUpdated, idx) {
+		if !subscriptionMatchesSubscriptionMap(subMap, resType, resID, lastUpdated, idx) {
 			continue
 		}
 
@@ -497,6 +805,13 @@ func (s *Server) dispatchSubscriptionsWithAction(ctx context.Context, tenant, re
 			ce := buildCloudEventNotification(tenant, subRes.ResID, resType, resID, resVersion, lastUpdated, action, contentMode, ev.Resource)
 			bodyBytes, _ = json.Marshal([]map[string]any{ce})
 			payloadType = "application/cloudevents-batch+json; charset=utf-8"
+		case isBackportSubscription(subMap) && (mediaPayload == "" || strings.Contains(mediaPayload, "json")):
+			fhirBase := s.resolveTenantFHIRBaseURL(tenant)
+			bundle := s.buildBackportNotificationBundle(fhirBase, tenant, subRes.ResID, criteria, "active", "event-notification", contentMode, []subscriptionEventRecord{ev})
+			bodyBytes, _ = json.Marshal(bundle)
+			if strings.TrimSpace(payloadType) == "" {
+				payloadType = "application/fhir+json"
+			}
 		case mediaPayload == "empty" || (explicitContent && contentMode == "empty"):
 			bodyBytes = nil
 		case mediaPayload == "id-only" || (explicitContent && contentMode == "id-only") || (action == "delete" && strings.Contains(mediaPayload, "json")):
@@ -551,6 +866,348 @@ func (s *Server) dispatchSubscriptionsWithAction(ctx context.Context, tenant, re
 				s.deliverRestHook(asyncCtx, tenant, sid, ep, pt, hdrs, body)
 			})
 		}
+	}
+}
+
+func subscriptionMatchesSubscriptionMap(subMap map[string]any, resType, resID string, lastUpdated time.Time, idx *store.SearchIndexes) bool {
+	criteria, _ := subMap["criteria"].(string)
+	trimmed := strings.TrimSpace(criteria)
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		topicTarget, ok := supportedBackportTopics[trimmed]
+		if !ok || !strings.EqualFold(topicTarget, resType) {
+			return false
+		}
+		filters := extractBackportFilterCriteria(subMap)
+		if len(filters) == 0 {
+			return true
+		}
+		for _, f := range filters {
+			norm := normalizeBackportFilterString(f)
+			if !subscriptionMatchesResourceWithMeta(norm, resType, resID, lastUpdated, idx) {
+				return false
+			}
+		}
+		return true
+	}
+	filters := extractBackportFilterCriteria(subMap)
+	if !subscriptionMatchesResourceWithMeta(trimmed, resType, resID, lastUpdated, idx) {
+		return false
+	}
+	for _, f := range filters {
+		norm := normalizeBackportFilterString(f)
+		if !subscriptionMatchesResourceWithMeta(norm, resType, resID, lastUpdated, idx) {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) cancelBackportHeartbeat(tenant, subID string) {
+	key := tenant + "/" + subID
+	s.subBaseURLMu.Lock()
+	if s.subHbCancel != nil {
+		if fn, ok := s.subHbCancel[key]; ok {
+			fn()
+			delete(s.subHbCancel, key)
+		}
+	}
+	s.subBaseURLMu.Unlock()
+}
+
+func (s *Server) syncBackportSubscriptionLifecycle(ctx context.Context, tenant, subID string, resourceProto []byte, resVersion int, lastUpdated time.Time) {
+	if s.store == nil || len(resourceProto) == 0 {
+		s.cancelBackportHeartbeat(tenant, subID)
+		return
+	}
+	subMap, err := s.protoToFHIRMapWithMeta("Subscription", resourceProto, resVersion, lastUpdated)
+	if err != nil || !isBackportSubscription(subMap) {
+		return
+	}
+	status := strings.ToLower(strings.TrimSpace(stringField(subMap, "status")))
+	ch, _ := subMap["channel"].(map[string]any)
+	chType := strings.ToLower(strings.TrimSpace(stringField(ch, "type")))
+	endpoint := strings.TrimSpace(stringField(ch, "endpoint"))
+	if chType != "rest-hook" || endpoint == "" || subscriptionIsExpired(subMap, time.Now().UTC()) || (status != "requested" && status != "active") {
+		s.cancelBackportHeartbeat(tenant, subID)
+		return
+	}
+	if status != "requested" {
+		return
+	}
+
+	s.cancelBackportHeartbeat(tenant, subID)
+	payloadType := strings.TrimSpace(stringField(ch, "payload"))
+	if payloadType == "" {
+		payloadType = "application/fhir+json"
+	}
+	var headers []string
+	if rawHeaders, ok := ch["header"].([]any); ok {
+		for _, h := range rawHeaders {
+			if hs, ok := h.(string); ok && strings.TrimSpace(hs) != "" {
+				headers = append(headers, hs)
+			}
+		}
+	}
+	criteria := strings.TrimSpace(stringField(subMap, "criteria"))
+	contentMode, explicitContent := extractSubscriptionChannelContentMode(subMap)
+	if !explicitContent {
+		contentMode = "full-resource"
+	}
+	hbPeriod := extractSubscriptionHeartbeatPeriod(subMap, 0)
+	fhirBase := s.resolveTenantFHIRBaseURL(tenant)
+
+	hbCtx, hbCancel := s.deriveBackgroundContext(ctx)
+	key := tenant + "/" + subID
+	s.subBaseURLMu.Lock()
+	if s.subHbCancel == nil {
+		s.subHbCancel = make(map[string]context.CancelFunc)
+	}
+	s.subHbCancel[key] = hbCancel
+	s.subBaseURLMu.Unlock()
+
+	started := s.startBackgroundWorker(func() {
+		// Brief delay allows synchronous REST callers (e.g. HL7 Inferno NotificationDeliveryTest)
+		// to receive the 201 Created ("requested") response and arm their webhook listener.
+		timer := time.NewTimer(250 * time.Millisecond)
+		select {
+		case <-hbCtx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		hsBundle := s.buildBackportNotificationBundle(fhirBase, tenant, subID, criteria, "requested", "handshake", contentMode, nil)
+		hsBytes, _ := json.Marshal(hsBundle)
+		ok := s.deliverRestHookWithStatus(hbCtx, tenant, subID, endpoint, payloadType, headers, hsBytes, false)
+		if !ok {
+			_ = s.updateStoredSubscriptionStatus(hbCtx, tenant, subID, "error", "rest-hook handshake failed")
+			return
+		}
+		_ = s.updateStoredSubscriptionStatus(hbCtx, tenant, subID, "active", "")
+
+		if hbPeriod <= 0 {
+			return
+		}
+		ticker := time.NewTicker(hbPeriod)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-hbCtx.Done():
+				return
+			case <-ticker.C:
+				rec, rErr := s.store.ReadResourceWithMeta(hbCtx, tenant, "Subscription", subID)
+				if rErr != nil {
+					return
+				}
+				curMap, mErr := s.protoToFHIRMapWithMeta("Subscription", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+				if mErr != nil || subscriptionIsExpired(curMap, time.Now().UTC()) || !strings.EqualFold(stringField(curMap, "status"), "active") {
+					return
+				}
+				hbBundle := s.buildBackportNotificationBundle(fhirBase, tenant, subID, criteria, "active", "heartbeat", contentMode, nil)
+				hbBytes, _ := json.Marshal(hbBundle)
+				s.deliverRestHookWithStatus(hbCtx, tenant, subID, endpoint, payloadType, headers, hbBytes, false)
+			}
+		}
+	})
+	if !started {
+		s.cancelBackportHeartbeat(tenant, subID)
+	}
+}
+
+func (s *Server) updateStoredSubscriptionStatus(ctx context.Context, tenant, subID, newStatus, errMsg string) error {
+	if s.store == nil {
+		return nil
+	}
+	md, ok := s.protoRegistry["Subscription"]
+	if !ok {
+		return nil
+	}
+	rec, err := s.store.ReadResourceWithMeta(ctx, tenant, "Subscription", subID)
+	if err != nil {
+		return err
+	}
+	subMap, err := s.protoToFHIRMap("Subscription", rec.ResourceProto)
+	if err != nil {
+		return err
+	}
+	subMap["id"] = subID
+	subMap["status"] = newStatus
+	if errMsg != "" {
+		subMap["error"] = errMsg
+	} else {
+		delete(subMap, "error")
+	}
+	rawJSON, err := json.Marshal(subMap)
+	if err != nil {
+		return err
+	}
+	normJSON, err := fhirutil.NormalizeFHIRJSONToProtoJSON(md, rawJSON)
+	if err != nil {
+		return err
+	}
+	msg := dynamicpb.NewMessage(md)
+	if err := (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(normJSON, msg); err != nil {
+		return err
+	}
+	setProtoResourceID(msg, subID)
+	protoBytes, err := proto.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	var idx *store.SearchIndexes
+	if extractor, hasExt := s.extractors["Subscription"]; hasExt {
+		idx, _ = extractor(tenant, subID, protoBytes)
+	}
+	_, err = s.store.WriteResourceWithMeta(ctx, store.ResourceInput{
+		TenantID:      tenant,
+		ResType:       "Subscription",
+		ResID:         subID,
+		ResourceProto: protoBytes,
+		SearchIndexes: idx,
+	})
+	return err
+}
+
+func (s *Server) buildBackportNotificationBundle(
+	fhirBase, tenant, subID, topicCanonical, status, notificationType, contentMode string,
+	matched []subscriptionEventRecord,
+) map[string]any {
+	fhirBase = strings.TrimRight(strings.TrimSpace(fhirBase), "/")
+	if fhirBase == "" {
+		fhirBase = s.resolveTenantFHIRBaseURL(tenant)
+	}
+	stats := s.getSubscriptionDeliveryStats(tenant, subID)
+	totalEvents := stats.eventsDelivered
+	if n := len(stats.events); n > 0 && stats.events[n-1].EventNumber > totalEvents {
+		totalEvents = stats.events[n-1].EventNumber
+	}
+	if notificationType == "handshake" {
+		totalEvents = 0
+	}
+
+	statusParams := []map[string]any{
+		{
+			"name": "subscription",
+			"valueReference": map[string]any{
+				"reference": fhirBase + "/Subscription/" + subID,
+			},
+		},
+	}
+	if topicCanonical != "" && (strings.HasPrefix(topicCanonical, "http://") || strings.HasPrefix(topicCanonical, "https://")) && contentMode != "empty" {
+		statusParams = append(statusParams, map[string]any{
+			"name":           "topic",
+			"valueCanonical": topicCanonical,
+		})
+	}
+	statusParams = append(statusParams,
+		map[string]any{
+			"name":      "status",
+			"valueCode": status,
+		},
+		map[string]any{
+			"name":      "type",
+			"valueCode": notificationType,
+		},
+		map[string]any{
+			"name":        "events-since-subscription-start",
+			"valueString": strconv.FormatInt(totalEvents, 10),
+		},
+	)
+
+	if notificationType == "event-notification" {
+		for _, ev := range matched {
+			parts := []map[string]any{
+				{
+					"name":        "event-number",
+					"valueString": strconv.FormatInt(ev.EventNumber, 10),
+				},
+				{
+					"name":         "timestamp",
+					"valueInstant": ev.Timestamp.UTC().Format(time.RFC3339),
+				},
+			}
+			if contentMode != "empty" {
+				parts = append(parts, map[string]any{
+					"name": "focus",
+					"valueReference": map[string]any{
+						"reference": fhirBase + "/" + ev.ResType + "/" + ev.ResID,
+					},
+				})
+			}
+			statusParams = append(statusParams, map[string]any{
+				"name": "notification-event",
+				"part": parts,
+			})
+		}
+	}
+
+	statusID := uuid.NewString()
+	statusRes := map[string]any{
+		"resourceType": "Parameters",
+		"id":           statusID,
+		"meta": map[string]any{
+			"profile": []string{backportSubscriptionStatusProfileURL},
+		},
+		"parameter": statusParams,
+	}
+
+	entries := []map[string]any{
+		{
+			"fullUrl":  "urn:uuid:" + statusID,
+			"resource": statusRes,
+			"request": map[string]any{
+				"method": "GET",
+				"url":    fhirBase + "/Subscription/" + subID + "/$status",
+			},
+			"response": map[string]any{
+				"status": "200",
+			},
+		},
+	}
+
+	if notificationType == "event-notification" && contentMode != "empty" {
+		for _, ev := range matched {
+			reqMethod := "PUT"
+			reqURL := ev.ResType + "/" + ev.ResID
+			respStatus := "200"
+			switch ev.Action {
+			case "create":
+				reqMethod = "POST"
+				reqURL = ev.ResType
+				respStatus = "201"
+			case "delete":
+				reqMethod = "DELETE"
+				respStatus = "204"
+			}
+			entry := map[string]any{
+				"fullUrl": fhirBase + "/" + ev.ResType + "/" + ev.ResID,
+				"request": map[string]any{
+					"method": reqMethod,
+					"url":    reqURL,
+				},
+				"response": map[string]any{
+					"status": respStatus,
+				},
+			}
+			if contentMode == "full-resource" && ev.Action != "delete" && ev.Resource != nil {
+				entry["resource"] = ev.Resource
+			}
+			entries = append(entries, entry)
+		}
+	}
+
+	return map[string]any{
+		"resourceType": "Bundle",
+		"id":           uuid.NewString(),
+		"meta": map[string]any{
+			"profile": []string{backportNotificationBundleProfileURL},
+		},
+		"type":      "history",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"entry":     entries,
 	}
 }
 
@@ -995,18 +1652,18 @@ func matchSubscriptionDateOp(spLow, spHigh time.Time, op store.DateOp) bool {
 		return !spHigh.Before(low)
 	case "ne":
 		if hasInterval {
-			return spHigh.Before(low) || !spLow.Before(high)
+			return spLow.Before(low) || !spLow.Before(high) || spHigh.After(high)
 		}
-		return !spLow.Equal(low) || !spHigh.Equal(low)
+		return spLow.Before(low) || spHigh.After(low)
 	case "ap":
 		approxLow := low.Add(-24 * time.Hour)
 		approxHigh := high.Add(24 * time.Hour)
 		return !spLow.After(approxHigh) && !spHigh.Before(approxLow)
 	default: // "eq"
 		if hasInterval {
-			return spLow.Before(high) && !spHigh.Before(low)
+			return !spLow.Before(low) && spLow.Before(high) && !spHigh.After(high)
 		}
-		return !spLow.After(low) && !spHigh.Before(low)
+		return !spLow.Before(low) && !spHigh.After(low)
 	}
 }
 
@@ -1076,12 +1733,16 @@ func matchSubscriptionCompositeTokenQuantity(idx *store.SearchIndexes, cp store.
 }
 
 func (s *Server) deliverRestHook(ctx context.Context, tenant, subID, endpoint, payloadType string, headers []string, bodyBytes []byte) {
+	_ = s.deliverRestHookWithStatus(ctx, tenant, subID, endpoint, payloadType, headers, bodyBytes, true)
+}
+
+func (s *Server) deliverRestHookWithStatus(ctx context.Context, tenant, subID, endpoint, payloadType string, headers []string, bodyBytes []byte, countEvent bool) bool {
 	if err := ValidateSubscriptionEndpoint(endpoint, s.disallowPrivateWebhooks); err != nil {
 		s.recordSubscriptionDelivery(tenant, subID, false, err.Error())
 		if s.metrics != nil {
 			s.metrics.subscriptionDeliveryErrorsTotal.Add(1)
 		}
-		return
+		return false
 	}
 
 	disallowPrivate := s.disallowPrivateWebhooks
@@ -1122,14 +1783,14 @@ func (s *Server) deliverRestHook(ctx context.Context, tenant, subID, endpoint, p
 
 	for attempt := range maxAttempts {
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		if attempt > 0 {
 			timer := time.NewTimer(50 * time.Millisecond)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
-				return
+				return false
 			case <-timer.C:
 			}
 		}
@@ -1171,11 +1832,13 @@ func (s *Server) deliverRestHook(ctx context.Context, tenant, subID, endpoint, p
 		lastStatus = resp.StatusCode
 		lastErr = nil
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			s.recordSubscriptionDelivery(tenant, subID, true, "")
+			if countEvent {
+				s.recordSubscriptionDelivery(tenant, subID, true, "")
+			}
 			if s.metrics != nil {
 				s.metrics.subscriptionsDeliveredTotal.Add(1)
 			}
-			return
+			return true
 		}
 		if resp.StatusCode < 500 {
 			break
@@ -1193,6 +1856,7 @@ func (s *Server) deliverRestHook(ctx context.Context, tenant, subID, endpoint, p
 	if s.logger != nil {
 		s.logger.Warn("subscription rest-hook delivery failed", "endpoint", endpoint, "status", lastStatus, "error", lastErr)
 	}
+	return false
 }
 
 // handleSubscriptionStatus handles GET/POST /fhir/r4/{tenant}/Subscription/{id}/$status
@@ -1261,6 +1925,30 @@ func (s *Server) handleSubscriptionStatus(w http.ResponseWriter, r *http.Request
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to read Subscription")
 			return
 		}
+		s.recordTenantFHIRBaseURL(r, tenant)
+		subMap, mapErr := s.protoToFHIRMapWithMeta("Subscription", rec.ResourceProto, rec.ResVersion, rec.LastUpdated)
+		wantsProto, _ := wantsProtoResponse(r)
+		if mapErr == nil && isBackportSubscription(subMap) && !wantsProto {
+			statusParams := s.buildBackportQueryStatusParameters(tenant, subID, subMap, now)
+			statusID, _ := statusParams["id"].(string)
+			bundle := map[string]any{
+				"resourceType": "Bundle",
+				"id":           uuid.NewString(),
+				"type":         "searchset",
+				"total":        1,
+				"entry": []map[string]any{
+					{
+						"fullUrl":  "urn:uuid:" + statusID,
+						"resource": statusParams,
+						"search": map[string]any{
+							"mode": "match",
+						},
+					},
+				},
+			}
+			s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
+			return
+		}
 		statusParams, err := s.buildSubscriptionStatusParameters(tenant, subID, rec.ResourceProto, rec.ResVersion, rec.LastUpdated, now)
 		if err != nil {
 			writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to format Subscription status")
@@ -1302,6 +1990,69 @@ func (s *Server) handleSubscriptionStatus(w http.ResponseWriter, r *http.Request
 		"entry":        entries,
 	}
 	s.writeOperationResponse(w, r, http.StatusOK, "Bundle", bundle)
+}
+
+func (s *Server) buildBackportQueryStatusParameters(tenant, subID string, subMap map[string]any, now time.Time) map[string]any {
+	fhirBase := s.resolveTenantFHIRBaseURL(tenant)
+	status, _ := subMap["status"].(string)
+	if status == "" {
+		status = "active"
+	}
+	if subscriptionIsExpired(subMap, now) {
+		status = "off"
+	}
+	criteria := strings.TrimSpace(stringField(subMap, "criteria"))
+	stats := s.getSubscriptionDeliveryStats(tenant, subID)
+	totalEvents := stats.eventsDelivered
+	if n := len(stats.events); n > 0 && stats.events[n-1].EventNumber > totalEvents {
+		totalEvents = stats.events[n-1].EventNumber
+	}
+
+	params := []map[string]any{
+		{
+			"name": "subscription",
+			"valueReference": map[string]any{
+				"reference": fhirBase + "/Subscription/" + subID,
+			},
+		},
+	}
+	if criteria != "" && (strings.HasPrefix(criteria, "http://") || strings.HasPrefix(criteria, "https://")) {
+		params = append(params, map[string]any{
+			"name":           "topic",
+			"valueCanonical": criteria,
+		})
+	}
+	params = append(params,
+		map[string]any{
+			"name":      "status",
+			"valueCode": status,
+		},
+		map[string]any{
+			"name":      "type",
+			"valueCode": "query-status",
+		},
+		map[string]any{
+			"name":        "events-since-subscription-start",
+			"valueString": strconv.FormatInt(totalEvents, 10),
+		},
+	)
+	if effectiveErr := strings.TrimSpace(stats.lastError); effectiveErr != "" {
+		params = append(params, map[string]any{
+			"name": "error",
+			"valueCodeableConcept": map[string]any{
+				"text": effectiveErr,
+			},
+		})
+	}
+	statusID := uuid.NewString()
+	return map[string]any{
+		"resourceType": "Parameters",
+		"id":           statusID,
+		"meta": map[string]any{
+			"profile": []string{backportSubscriptionStatusProfileURL},
+		},
+		"parameter": params,
+	}
 }
 
 func (s *Server) buildSubscriptionStatusParameters(

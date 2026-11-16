@@ -11,7 +11,7 @@ on:
 
 jobs:
   inferno:
-    name: HL7 Inferno (US Core v6.1.0/v7.0.0 + IPA v1.0.0 + SMART STU2 + Bulk Data v2.0.0) [${{ matrix.store }}]
+    name: HL7 Inferno (ONC g10 + US Core v6.1/v7.0/v8.0 + Subscriptions R5 Backport + IPA + SMART STU2 + Bulk Data) [${{ matrix.store }}]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -72,6 +72,7 @@ jobs:
           FLINT_POSTGRES_DSN: "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
           FLINT_ADDR: "127.0.0.1:18080"
           FLINT_SMART_ENFORCE_DEV_AUTH: "true"
+          FLINT_SMART_REQUIRE_CLIENT_JWK: "true"
           FLINT_BASE_URL: "http://127.0.0.1:18080"
           FLINT_TENANT: "demo"
           INFERNO_ARTIFACTS_DIR: "${{ github.workspace }}/artifacts/inferno-${{ matrix.store }}"
