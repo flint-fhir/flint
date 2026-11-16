@@ -1575,20 +1575,19 @@ func buildDateCondition(alias string, op DateOp, startIdx int) (string, []any) {
 		return fmt.Sprintf("%s.sp_low > $%d", alias, startIdx+1), []any{low}
 	case "ge": // greater or equal
 		return fmt.Sprintf("%s.sp_high >= $%d", alias, startIdx+1), []any{low}
-	case "ne": // not equal
+	case "ne": // not equal (negation of eq containment)
 		if high.After(low) {
-			return fmt.Sprintf("(%s.sp_high < $%d OR %s.sp_low >= $%d)", alias, startIdx+1, alias, startIdx+2), []any{low, high}
+			return fmt.Sprintf("(%s.sp_low < $%d OR %s.sp_low >= $%d OR %s.sp_high > $%d)", alias, startIdx+1, alias, startIdx+2, alias, startIdx+2), []any{low, high}
 		}
-		return fmt.Sprintf("(%s.sp_high < $%d OR %s.sp_low > $%d)", alias, startIdx+1, alias, startIdx+1), []any{low}
+		return fmt.Sprintf("(%s.sp_low < $%d OR %s.sp_high > $%d)", alias, startIdx+1, alias, startIdx+1), []any{low}
 	case "ap": // approximately
 		apLow, apHigh := approximateDateBounds(low, high)
 		return fmt.Sprintf("%s.sp_low <= $%d AND %s.sp_high >= $%d", alias, startIdx+1, alias, startIdx+2), []any{apHigh, apLow}
-	default: // "eq" (or unspecified)
-		// Overlaps the target date interval [low, high) or point [low, low]
+	default: // "eq" (or unspecified) — search interval fully contains target interval [sp_low, sp_high]
 		if high.After(low) {
-			return fmt.Sprintf("%s.sp_low < $%d AND %s.sp_high >= $%d", alias, startIdx+1, alias, startIdx+2), []any{high, low}
+			return fmt.Sprintf("%s.sp_low >= $%d AND %s.sp_low < $%d AND %s.sp_high <= $%d", alias, startIdx+1, alias, startIdx+2, alias, startIdx+2), []any{low, high}
 		}
-		return fmt.Sprintf("%s.sp_low <= $%d AND %s.sp_high >= $%d", alias, startIdx+1, alias, startIdx+1), []any{low}
+		return fmt.Sprintf("%s.sp_low >= $%d AND %s.sp_high <= $%d", alias, startIdx+1, alias, startIdx+1), []any{low}
 	}
 }
 

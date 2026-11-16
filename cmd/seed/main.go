@@ -377,7 +377,17 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 		putEntry("Encounter/enc-alice-001", map[string]any{
 			"resourceType": "Encounter",
 			"id":           "enc-alice-001",
-			"status":       "finished",
+			"extension": []map[string]any{
+				{
+					"url": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-interpreter-needed",
+					"valueCoding": map[string]any{
+						"system":  "http://snomed.info/sct",
+						"code":    "373067005",
+						"display": "No (qualifier value)",
+					},
+				},
+			},
+			"status": "finished",
 			"class": map[string]any{
 				"system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
 				"code":   "AMB",

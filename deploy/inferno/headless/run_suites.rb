@@ -47,6 +47,17 @@ Inferno::Application.finalize!
 require 'flint_inferno_headless' if Inferno::Repositories::TestSuites.new.all.empty?
 require 'inferno/apps/web/application'
 
+if defined?(SubscriptionsTestKit::SubscriptionRestHookEndpoint)
+  SubscriptionsTestKit::SubscriptionRestHookEndpoint.prepend(
+    Module.new do
+      def make_response
+        response.format = :json
+        super
+      end
+    end
+  )
+end
+
 flint_base_url    = ENV.fetch('FLINT_BASE_URL', 'http://127.0.0.1:18080').chomp('/')
 flint_tenant      = ENV.fetch('FLINT_TENANT', 'demo')
 flint_fhir_url    = ENV.fetch('FLINT_FHIR_URL', "#{flint_base_url}/fhir/r4/#{flint_tenant}").chomp('/')
@@ -69,13 +80,38 @@ FileUtils.mkdir_p(artifacts_dir)
 
 base_uri = URI.parse(Inferno::Application['base_url'].to_s)
 base_prefix = base_uri.path.to_s.chomp('/')
+INFERNO_RACK_MUTEX = Mutex.new
 INFERNO_RACK_APP = lambda do |env|
-  if !base_prefix.empty? && env['PATH_INFO'].to_s.start_with?(base_prefix)
-    stripped = env['PATH_INFO'].to_s.sub(/\A#{Regexp.escape(base_prefix)}/, '')
-    stripped = '/' if stripped.empty?
-    env = env.merge('SCRIPT_NAME' => base_prefix, 'PATH_INFO' => stripped)
+  INFERNO_RACK_MUTEX.synchronize do
+    after_reply = []
+    response_finished = []
+    inner_env = env.merge(
+      'rack.after_reply' => after_reply,
+      'rack.response_finished' => response_finished
+    )
+    if !base_prefix.empty? && inner_env['PATH_INFO'].to_s.start_with?(base_prefix)
+      stripped = inner_env['PATH_INFO'].to_s.sub(/\A#{Regexp.escape(base_prefix)}/, '')
+      stripped = '/' if stripped.empty?
+      inner_env = inner_env.merge('SCRIPT_NAME' => base_prefix, 'PATH_INFO' => stripped)
+    end
+    status, headers, body = Inferno::Web.app.call(inner_env)
+    safe_headers = (headers || {}).to_h
+    response_finished.each do |cb|
+      if cb.arity.zero?
+        cb.call
+      else
+        cb.call(inner_env, status, safe_headers, nil)
+      end
+    end
+    after_reply.each do |cb|
+      if cb.arity.zero?
+        cb.call
+      else
+        cb.call(inner_env, status, safe_headers, nil)
+      end
+    end
+    [status, safe_headers, body]
   end
-  Inferno::Web.app.call(env)
 end
 
 INFERNO_RACK_MOCK = Rack::MockRequest.new(INFERNO_RACK_APP)
@@ -558,6 +594,7 @@ def execute_inferno_target(
     if auto_radio_true
       available_list.each do |ri|
         next unless ri.type.to_s == 'radio'
+        next if ri.respond_to?(:locked) && ri.locked
 
         data_repo.save(
           test_session_id: test_session.id,
@@ -1184,7 +1221,8 @@ if g10_suite && ENV['INFERNO_SKIP_G10'] != 'true'
       granular_scopes_1_auth_info: g10_granular_1_auth_json,
       granular_scopes_2_auth_info: g10_granular_2_auth_json,
       granular_scopes_selection_smart_auth_info: g10_granular_selection_auth_json,
-      token_revocation_attestation: 'true'
+      token_revocation_attestation: 'true',
+      tls_version_attestation_notes: 'Flint enforces TLS 1.2+ (MinVersion: tls.VersionTLS12) across all HTTPS and ingress listeners.'
     },
     per_runnable_hooks: {
       'g10_smart_limited_app' => {

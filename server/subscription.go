@@ -1652,18 +1652,18 @@ func matchSubscriptionDateOp(spLow, spHigh time.Time, op store.DateOp) bool {
 		return !spHigh.Before(low)
 	case "ne":
 		if hasInterval {
-			return spHigh.Before(low) || !spLow.Before(high)
+			return spLow.Before(low) || !spLow.Before(high) || spHigh.After(high)
 		}
-		return !spLow.Equal(low) || !spHigh.Equal(low)
+		return spLow.Before(low) || spHigh.After(low)
 	case "ap":
 		approxLow := low.Add(-24 * time.Hour)
 		approxHigh := high.Add(24 * time.Hour)
 		return !spLow.After(approxHigh) && !spHigh.Before(approxLow)
 	default: // "eq"
 		if hasInterval {
-			return spLow.Before(high) && !spHigh.Before(low)
+			return !spLow.Before(low) && spLow.Before(high) && !spHigh.After(high)
 		}
-		return !spLow.After(low) && !spHigh.Before(low)
+		return !spLow.Before(low) && !spHigh.After(low)
 	}
 }
 
