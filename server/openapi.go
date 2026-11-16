@@ -871,13 +871,14 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		"/Measure/{id}/$evaluate-measure": map[string]any{
 			"get": map[string]any{
 				"tags":        []string{"Clinical Quality Measures (eCQM)"},
-				"summary":     "Evaluate a Clinical Quality Measure by Measure ID (e.g. cms165-bp-control, cms122-diabetes-hba1c)",
+				"summary":     "Evaluate a Clinical Quality Measure by Measure ID (supports single/multi-component stratifiers, sde-* supplemental data, and individual/subject-list/summary reports)",
 				"operationId": "evaluateMeasureByIdGet",
 				"parameters": []map[string]any{
 					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
 					{"name": "periodStart", "in": "query", "required": false, "schema": map[string]any{"type": "string", "format": "date"}},
 					{"name": "periodEnd", "in": "query", "required": false, "schema": map[string]any{"type": "string", "format": "date"}},
 					{"name": "subject", "in": "query", "required": false, "schema": map[string]any{"type": "string"}},
+					{"name": "reportType", "in": "query", "required": false, "schema": map[string]any{"type": "string", "enum": []string{"individual", "summary", "subject-list"}}},
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "HL7 FHIR R4 MeasureReport resource"},

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -31,45 +30,20 @@ type measureSpec struct {
 	title               string
 	improvementNotation string // "increase" or "decrease"
 	kind                string // "cms165", "cms122", "custom"
+	groups              []measureGroupSpec
+	supplementalData    []measureSupplementalDataSpec
 }
 
 func resolveMeasureSpec(ctx context.Context, s *Server, tenant, rawMeasure string) (*measureSpec, error) {
-	norm := strings.ToLower(strings.TrimSpace(rawMeasure))
-	norm = strings.TrimPrefix(norm, "measure/")
-	switch norm {
-	case "cms165", "cms165v12", "cms165-bp-control", "controlling-high-blood-pressure",
-		strings.ToLower(MeasureURLCMS165):
-		return &measureSpec{
-			id:                  MeasureIDCMS165,
-			url:                 MeasureURLCMS165,
-			title:               "CMS165v12: Controlling High Blood Pressure",
-			improvementNotation: "increase",
-			kind:                "cms165",
-		}, nil
-	case "cms122", "cms122v12", "cms122-diabetes-hba1c", "diabetes-hba1c-poor-control",
-		strings.ToLower(MeasureURLCMS122):
-		return &measureSpec{
-			id:                  MeasureIDCMS122,
-			url:                 MeasureURLCMS122,
-			title:               "CMS122v12: Diabetes: Hemoglobin A1c (HbA1c) Poor Control (> 9%)",
-			improvementNotation: "decrease",
-			kind:                "cms122",
-		}, nil
-	}
-
-	if s.store == nil {
-		return nil, sql.ErrNoRows
-	}
-
-	// Try reading Measure/{id} from Postgres operational store
-	candID := strings.TrimPrefix(strings.TrimSpace(rawMeasure), "Measure/")
-	if rec, err := s.store.ReadResourceWithMeta(ctx, tenant, "Measure", candID); err == nil {
-		return measureSpecFromRecord(s, rec)
-	}
-
-	// Try searching Measure by indexed canonical url (spidx_uri) or identifier (spidx_token) first
 	rawTrimmed := strings.TrimSpace(rawMeasure)
-	if rawTrimmed != "" {
+	candID := strings.TrimPrefix(rawTrimmed, "Measure/")
+
+	// Prefer an explicitly stored Measure resource in the tenant when present so custom
+	// stratifiers, supplementalData, or FHIRPath population criteria override built-in defaults.
+	if s.store != nil && candID != "" {
+		if rec, err := s.store.ReadResourceWithMeta(ctx, tenant, "Measure", candID); err == nil {
+			return measureSpecFromRecord(s, rec)
+		}
 		if sr, err := s.store.Search(ctx, store.SearchParams{
 			TenantID: tenant,
 			ResType:  "Measure",
@@ -90,6 +64,47 @@ func resolveMeasureSpec(ctx context.Context, s *Server, tenant, rawMeasure strin
 				return spec, nil
 			}
 		}
+	}
+
+	norm := strings.ToLower(rawTrimmed)
+	norm = strings.TrimPrefix(norm, "measure/")
+	switch norm {
+	case "cms165", "cms165v12", "cms165-bp-control", "controlling-high-blood-pressure",
+		strings.ToLower(MeasureURLCMS165):
+		return &measureSpec{
+			id:                  MeasureIDCMS165,
+			url:                 MeasureURLCMS165,
+			title:               "CMS165v12: Controlling High Blood Pressure",
+			improvementNotation: "increase",
+			kind:                "cms165",
+			groups: []measureGroupSpec{
+				{
+					id:          "group-1",
+					stratifiers: defaultBuiltInStratifiers(),
+				},
+			},
+			supplementalData: defaultBuiltInSupplementalData(),
+		}, nil
+	case "cms122", "cms122v12", "cms122-diabetes-hba1c", "diabetes-hba1c-poor-control",
+		strings.ToLower(MeasureURLCMS122):
+		return &measureSpec{
+			id:                  MeasureIDCMS122,
+			url:                 MeasureURLCMS122,
+			title:               "CMS122v12: Diabetes: Hemoglobin A1c (HbA1c) Poor Control (> 9%)",
+			improvementNotation: "decrease",
+			kind:                "cms122",
+			groups: []measureGroupSpec{
+				{
+					id:          "group-1",
+					stratifiers: defaultBuiltInStratifiers(),
+				},
+			},
+			supplementalData: defaultBuiltInSupplementalData(),
+		}, nil
+	}
+
+	if s.store == nil {
+		return nil, sql.ErrNoRows
 	}
 
 	// Fallback scan for legacy/differently-cased Measure resources
@@ -145,22 +160,34 @@ func measureSpecFromProto(s *Server, resID string, protoBytes []byte, version in
 	if kind == "cms122" {
 		notation = "decrease"
 	}
-	return &measureSpec{
+	spec := &measureSpec{
 		id:                  resID,
 		url:                 urlStr,
 		title:               titleStr,
 		improvementNotation: notation,
 		kind:                kind,
-	}, nil
+	}
+	parseMeasureDetailsFromMap(m, spec)
+	if len(spec.groups) == 0 {
+		gs := measureGroupSpec{id: "group-1"}
+		if kind == "cms165" || kind == "cms122" {
+			gs.stratifiers = defaultBuiltInStratifiers()
+		}
+		spec.groups = []measureGroupSpec{gs}
+	}
+	if len(spec.supplementalData) == 0 && (kind == "cms165" || kind == "cms122") {
+		spec.supplementalData = defaultBuiltInSupplementalData()
+	}
+	return spec, nil
 }
 
 // handleEvaluateMeasure implements GET/POST /fhir/r4/{tenant}/Measure/$evaluate-measure
-// and GET/POST /fhir/r4/{tenant}/Measure/{id}/$evaluate-measure per HL7 FHIR R4.
+// and GET/POST /fhir/r4/{tenant}/Measure/{id}/$evaluate-measure per HL7 FHIR R4 and Da Vinci DEQM.
 func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	measureRef := strings.TrimSpace(r.PathValue("id"))
 	if s.store == nil {
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "operational store is not configured")
+		s.writeNegotiatedOutcome(w, r, http.StatusInternalServerError, "exception", "operational store is not configured")
 		return
 	}
 
@@ -181,7 +208,7 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 		if err == nil && len(strings.TrimSpace(string(body))) > 0 {
 			payload, err := s.decodeOperationBodyMap(r, body, "Parameters")
 			if err != nil {
-				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for Measure/$evaluate-measure")
+				s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "invalid", "invalid body for Measure/$evaluate-measure")
 				return
 			}
 			if payload["resourceType"] == "Parameters" {
@@ -222,7 +249,7 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if measureRef == "" {
-		writeOperationOutcome(w, http.StatusBadRequest, "required", "Measure/$evaluate-measure requires a measure ID in the path or a 'measure' parameter")
+		s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "required", "Measure/$evaluate-measure requires a measure ID in the path or a 'measure' parameter")
 		return
 	}
 
@@ -234,45 +261,107 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 	}
 	periodStart, err := parseFlexibleDate(periodStartStr, false)
 	if err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid periodStart %q: %v", periodStartStr, err))
+		s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid periodStart %q: %v", periodStartStr, err))
 		return
 	}
 	periodEnd, err := parseFlexibleDate(periodEndStr, true)
 	if err != nil {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid periodEnd %q: %v", periodEndStr, err))
+		s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid periodEnd %q: %v", periodEndStr, err))
 		return
 	}
 	if periodEnd.Before(periodStart) {
-		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "periodEnd must not be before periodStart")
+		s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "invalid", "periodEnd must not be before periodStart")
 		return
 	}
 
 	// Enforce patient compartment restriction if caller is patient-scoped
 	var targetPatientID string
-	if subjectRef != "" {
+	var targetGroupID string
+	if strings.HasPrefix(strings.ToLower(subjectRef), "group/") {
+		targetGroupID = cleanID(subjectRef)
+	} else if subjectRef != "" {
 		targetPatientID = cleanID(subjectRef)
 	}
 	if secCtx, ok := auth.FromContext(r.Context()); ok && auth.IsPatientRestricted(secCtx) {
 		allowedPat := cleanID(secCtx.GetPatientId())
 		if allowedPat == "" {
-			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token is missing patient_id")
+			s.writeNegotiatedOutcome(w, r, http.StatusForbidden, "forbidden", "patient-scoped token is missing patient_id")
+			return
+		}
+		if targetGroupID != "" {
+			s.writeNegotiatedOutcome(w, r, http.StatusForbidden, "forbidden", "patient-scoped token cannot evaluate multi-patient Group measures")
 			return
 		}
 		if targetPatientID != "" && targetPatientID != allowedPat {
-			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token cannot evaluate measures for another patient")
+			s.writeNegotiatedOutcome(w, r, http.StatusForbidden, "forbidden", "patient-scoped token cannot evaluate measures for another patient")
 			return
 		}
 		targetPatientID = allowedPat
 	}
 
+	normReportType := strings.ToLower(strings.TrimSpace(reportType))
+	var effectiveType string
+	switch normReportType {
+	case "":
+		if targetPatientID != "" {
+			effectiveType = "individual"
+		} else {
+			effectiveType = "summary"
+		}
+	case "individual", "subject":
+		if targetPatientID == "" {
+			s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "required", "Measure/$evaluate-measure reportType 'individual' requires a 'subject' Patient parameter")
+			return
+		}
+		effectiveType = "individual"
+	case "subject-list":
+		effectiveType = "subject-list"
+	case "summary", "population":
+		effectiveType = "summary"
+	default:
+		s.writeNegotiatedOutcome(w, r, http.StatusBadRequest, "code-invalid",
+			fmt.Sprintf("invalid reportType %q: expected 'individual', 'subject-list', or 'summary'", reportType))
+		return
+	}
+
 	spec, err := resolveMeasureSpec(r.Context(), s, tenant, measureRef)
 	if errors.Is(err, sql.ErrNoRows) || spec == nil {
-		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Measure %q not found", measureRef))
+		s.writeNegotiatedOutcome(w, r, http.StatusNotFound, "not-found", fmt.Sprintf("Measure %q not found", measureRef))
 		return
 	}
 	if err != nil {
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to resolve Measure")
+		s.writeNegotiatedOutcome(w, r, http.StatusInternalServerError, "exception", "failed to resolve Measure")
 		return
+	}
+
+	var allowedGroupMembers map[string]bool
+	if targetGroupID != "" {
+		grpRec, gErr := s.store.ReadResourceWithMeta(r.Context(), tenant, "Group", targetGroupID)
+		if errors.Is(gErr, sql.ErrNoRows) || errors.Is(gErr, store.ErrResourceDeleted) || grpRec == nil {
+			s.writeNegotiatedOutcome(w, r, http.StatusNotFound, "not-found", fmt.Sprintf("Group/%s not found", targetGroupID))
+			return
+		}
+		if gErr != nil {
+			s.writeNegotiatedOutcome(w, r, http.StatusInternalServerError, "exception", "failed to read Group for Measure/$evaluate-measure")
+			return
+		}
+		allowedGroupMembers = make(map[string]bool)
+		if grpMap, mErr := s.protoToFHIRMapWithMeta("Group", grpRec.ResourceProto, grpRec.ResVersion, grpRec.LastUpdated); mErr == nil {
+			if members, ok := grpMap["member"].([]any); ok {
+				for _, rawM := range members {
+					if mm, ok := rawM.(map[string]any); ok {
+						if inactive, _ := mm["inactive"].(bool); inactive {
+							continue
+						}
+						if ent, ok := mm["entity"].(map[string]any); ok {
+							if ref, _ := ent["reference"].(string); ref != "" {
+								allowedGroupMembers[cleanID(ref)] = true
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Fetch candidate Patient(s)
@@ -286,24 +375,34 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 	}
 	patResults, err := s.store.Search(r.Context(), patSearch)
 	if err != nil {
-		writeOperationOutcome(w, http.StatusInternalServerError, "exception", "failed to query patients for Measure/$evaluate-measure")
+		s.writeNegotiatedOutcome(w, r, http.StatusInternalServerError, "exception", "failed to query patients for Measure/$evaluate-measure")
 		return
 	}
 	if targetPatientID != "" && len(patResults.Matches) == 0 {
-		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", targetPatientID))
+		s.writeNegotiatedOutcome(w, r, http.StatusNotFound, "not-found", fmt.Sprintf("Patient/%s not found", targetPatientID))
 		return
 	}
 
+	patIDs := make([]string, 0, len(patResults.Matches))
+	patMaps := make(map[string]map[string]any, len(patResults.Matches))
+	for _, patRec := range patResults.Matches {
+		if allowedGroupMembers != nil && !allowedGroupMembers[patRec.ResID] {
+			continue
+		}
+		patIDs = append(patIDs, patRec.ResID)
+		if pm, pErr := s.protoToFHIRMapWithMeta("Patient", patRec.ResourceProto, patRec.ResVersion, patRec.LastUpdated); pErr == nil {
+			patMaps[patRec.ResID] = pm
+		}
+	}
+
+	needProc, needMedReq := measureNeedsExtraResources(spec)
+	cohortSnaps := s.loadCohortClinicalSnapshotsWithExtras(r.Context(), tenant, patIDs, patMaps, needProc, needMedReq)
+
 	var (
-		initialPop     int
-		denominator    int
-		denomExclusion int
-		numerator      int
-		initPopIDs     []string
-		denomIDs       []string
-		exclIDs        []string
-		numIDs         []string
-		evaluatedRefs  []map[string]any
+		reportGroups  []map[string]any
+		containedRes  []map[string]any
+		evaluatedRefs []map[string]any
+		firstOutcomes []evaluatedSubjectOutcome
 	)
 	seenEvalRefs := make(map[string]bool)
 	addEvalRef := func(ref string) {
@@ -313,56 +412,76 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	patIDs := make([]string, 0, len(patResults.Matches))
-	for _, patRec := range patResults.Matches {
-		patIDs = append(patIDs, patRec.ResID)
+	groupsToEval := spec.groups
+	if len(groupsToEval) == 0 {
+		groupsToEval = []measureGroupSpec{{id: "group-1"}}
 	}
-	cohortSnaps := s.loadCohortClinicalSnapshots(r.Context(), tenant, patIDs)
 
-	for _, patID := range patIDs {
-		snap := cohortSnaps[patID]
-		inInitPop, inDenom, inExcl, inNum, refs := evaluatePatientForMeasure(spec.kind, snap, periodStart, periodEnd)
-		if inInitPop {
-			initialPop++
-			initPopIDs = append(initPopIDs, patID)
-		}
-		if inDenom {
-			denominator++
-			denomIDs = append(denomIDs, patID)
-		}
-		if inExcl {
-			denomExclusion++
-			exclIDs = append(exclIDs, patID)
-		}
-		if inNum {
-			numerator++
-			numIDs = append(numIDs, patID)
-		}
-		if targetPatientID != "" {
-			for _, ref := range refs {
-				addEvalRef(ref)
+	for gIdx, gSpec := range groupsToEval {
+		var acc popAccumulator
+		outcomes := make([]evaluatedSubjectOutcome, 0, len(patIDs))
+		for _, patID := range patIDs {
+			o := evaluateSubjectAgainstGroup(spec, gSpec, cohortSnaps[patID], periodStart, periodEnd)
+			acc.add(o)
+			outcomes = append(outcomes, o)
+			if targetPatientID != "" {
+				for _, ref := range o.evalRefs {
+					addEvalRef(ref)
+				}
 			}
 		}
+		if gIdx == 0 {
+			firstOutcomes = outcomes
+		}
+
+		groupPrefix := ""
+		if gIdx > 0 {
+			groupPrefix = sanitizeFHIRID(gSpec.id)
+		}
+		pops, groupLists := buildPopulationsSliceAndLists(
+			acc,
+			gSpec.hasDenomException,
+			gSpec.hasNumExclusion,
+			effectiveType == "subject-list",
+			groupPrefix,
+		)
+		containedRes = append(containedRes, groupLists...)
+
+		groupObj := map[string]any{
+			"id":         gSpec.id,
+			"population": pops,
+			"measureScore": map[string]any{
+				"value": acc.proportionScore(),
+			},
+		}
+		if gSpec.code != nil {
+			groupObj["code"] = gSpec.code
+		}
+
+		if len(gSpec.stratifiers) > 0 {
+			stratReports := make([]map[string]any, 0, len(gSpec.stratifiers))
+			for _, stratSpec := range gSpec.stratifiers {
+				stratMap, stratLists := evaluateStratifierReport(
+					stratSpec,
+					outcomes,
+					gSpec.hasDenomException,
+					gSpec.hasNumExclusion,
+					effectiveType == "subject-list",
+					groupPrefix,
+				)
+				stratReports = append(stratReports, stratMap)
+				containedRes = append(containedRes, stratLists...)
+			}
+			groupObj["stratifier"] = stratReports
+		}
+
+		reportGroups = append(reportGroups, groupObj)
 	}
 
-	effectiveDenom := denominator - denomExclusion
-	score := 0.0
-	if effectiveDenom > 0 {
-		score = math.Round((float64(numerator)/float64(effectiveDenom))*10000) / 10000
-	}
-
-	effectiveType := "summary"
-	if targetPatientID != "" || reportType == "individual" || reportType == "subject" {
-		effectiveType = "individual"
-	} else if reportType == "subject-list" {
-		effectiveType = "subject-list"
-	}
-
-	pops := []map[string]any{
-		buildMeasurePopulation("initial-population", "Initial Population", initialPop, effectiveType == "subject-list"),
-		buildMeasurePopulation("denominator", "Denominator", denominator, effectiveType == "subject-list"),
-		buildMeasurePopulation("denominator-exclusion", "Denominator Exclusion", denomExclusion, effectiveType == "subject-list"),
-		buildMeasurePopulation("numerator", "Numerator", numerator, effectiveType == "subject-list"),
+	if len(spec.supplementalData) > 0 && len(firstOutcomes) > 0 {
+		sdeObs, sdeRefs := evaluateSupplementalDataObservations(spec, spec.supplementalData, firstOutcomes, effectiveType, targetPatientID)
+		containedRes = append(containedRes, sdeObs...)
+		evaluatedRefs = append(evaluatedRefs, sdeRefs...)
 	}
 
 	report := map[string]any{
@@ -384,38 +503,29 @@ func (s *Server) handleEvaluateMeasure(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		},
-		"group": []map[string]any{
-			{
-				"id":         "group-1",
-				"population": pops,
-				"measureScore": map[string]any{
-					"value": score,
-				},
-			},
-		},
+		"group": reportGroups,
 	}
-	if effectiveType == "subject-list" {
-		report["contained"] = []map[string]any{
-			buildSubjectListResource("initial-population", "Initial Population", initPopIDs),
-			buildSubjectListResource("denominator", "Denominator", denomIDs),
-			buildSubjectListResource("denominator-exclusion", "Denominator Exclusion", exclIDs),
-			buildSubjectListResource("numerator", "Numerator", numIDs),
-		}
+	if len(containedRes) > 0 {
+		report["contained"] = containedRes
 	}
 	if targetPatientID != "" {
 		report["subject"] = map[string]any{
 			"reference": "Patient/" + targetPatientID,
 		}
-		if len(evaluatedRefs) > 0 {
-			report["evaluatedResource"] = evaluatedRefs
+	} else if targetGroupID != "" {
+		report["subject"] = map[string]any{
+			"reference": "Group/" + targetGroupID,
 		}
+	}
+	if len(evaluatedRefs) > 0 {
+		report["evaluatedResource"] = evaluatedRefs
 	}
 
 	if s.analyticalStore != nil && !store.IsNil(s.analyticalStore) {
 		_, _ = s.analyticalStore.EvaluateCohortCounts(r.Context(), tenant, []string{"Patient", "Condition", "Observation", "Encounter", "MedicationRequest"})
 		w.Header().Set("X-Flint-Analytical-Backend", s.analyticalStore.BackendName())
 	}
-	s.writeTerminologyResourceResponse(w, r, "MeasureReport", report)
+	s.writeOperationResponse(w, r, http.StatusOK, "MeasureReport", report)
 }
 
 func buildMeasurePopulation(code, display string, count int, withSubjectList bool) map[string]any {
@@ -437,25 +547,6 @@ func buildMeasurePopulation(code, display string, count int, withSubjectList boo
 		}
 	}
 	return pop
-}
-
-func buildSubjectListResource(code, title string, patIDs []string) map[string]any {
-	entries := make([]map[string]any, 0, len(patIDs))
-	for _, pid := range patIDs {
-		entries = append(entries, map[string]any{
-			"item": map[string]any{
-				"reference": "Patient/" + pid,
-			},
-		})
-	}
-	return map[string]any{
-		"resourceType": "List",
-		"id":           code + "-list",
-		"status":       "current",
-		"mode":         "snapshot",
-		"title":        title,
-		"entry":        entries,
-	}
 }
 
 // handleCareGaps implements GET/POST /fhir/r4/{tenant}/Measure/$care-gaps
@@ -850,14 +941,18 @@ func (s *Server) handleCareGaps(w http.ResponseWriter, r *http.Request) {
 
 type patientClinicalSnapshot struct {
 	patientID    string
+	patient      map[string]any
 	conditions   []map[string]any
 	encounters   []map[string]any
 	observations []map[string]any
 	allergies    []map[string]any
+	coverages    []map[string]any
+	procedures   []map[string]any
+	medRequests  []map[string]any
 }
 
 func extractClinicalSubjectPatientID(res map[string]any) string {
-	for _, key := range []string{"subject", "patient"} {
+	for _, key := range []string{"subject", "patient", "beneficiary"} {
 		if refObj, ok := res[key].(map[string]any); ok {
 			if ref, _ := refObj["reference"].(string); ref != "" {
 				return cleanID(ref)
@@ -867,12 +962,26 @@ func extractClinicalSubjectPatientID(res map[string]any) string {
 	return ""
 }
 
-// loadCohortClinicalSnapshots loads Condition, Encounter, and Observation resources for a cohort
-// of patient IDs in 3 batch SQL queries instead of 4*N individual queries.
+// loadCohortClinicalSnapshots loads Condition, Encounter, Observation, and Coverage resources for a cohort
+// of patient IDs in batch SQL queries.
 func (s *Server) loadCohortClinicalSnapshots(ctx context.Context, tenant string, patIDs []string) map[string]patientClinicalSnapshot {
+	return s.loadCohortClinicalSnapshotsWithExtras(ctx, tenant, patIDs, nil, false, false)
+}
+
+func (s *Server) loadCohortClinicalSnapshotsWithExtras(
+	ctx context.Context,
+	tenant string,
+	patIDs []string,
+	patMaps map[string]map[string]any,
+	loadProc, loadMedReq bool,
+) map[string]patientClinicalSnapshot {
 	out := make(map[string]patientClinicalSnapshot, len(patIDs))
 	for _, pid := range patIDs {
-		out[pid] = patientClinicalSnapshot{patientID: pid}
+		snap := patientClinicalSnapshot{patientID: pid}
+		if patMaps != nil {
+			snap.patient = patMaps[pid]
+		}
+		out[pid] = snap
 	}
 	if s.store == nil || len(patIDs) == 0 {
 		return out
@@ -924,6 +1033,19 @@ func (s *Server) loadCohortClinicalSnapshots(ctx context.Context, tenant string,
 	loadBatch("Observation", func(snap *patientClinicalSnapshot, m map[string]any) {
 		snap.observations = append(snap.observations, m)
 	})
+	loadBatch("Coverage", func(snap *patientClinicalSnapshot, m map[string]any) {
+		snap.coverages = append(snap.coverages, m)
+	})
+	if loadProc {
+		loadBatch("Procedure", func(snap *patientClinicalSnapshot, m map[string]any) {
+			snap.procedures = append(snap.procedures, m)
+		})
+	}
+	if loadMedReq {
+		loadBatch("MedicationRequest", func(snap *patientClinicalSnapshot, m map[string]any) {
+			snap.medRequests = append(snap.medRequests, m)
+		})
+	}
 	return out
 }
 
