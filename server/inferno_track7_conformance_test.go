@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -43,6 +44,8 @@ func TestTrack7_C4BBPDexAndPASConformance(t *testing.T) {
 		"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-medicationdispense",
 		"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle",
 		"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse",
+		"/oauth2/register",
+		"/oauth2/revoke",
 	} {
 		assert.Contains(t, metaStr, want)
 	}
@@ -390,5 +393,35 @@ func TestTrack7_C4BBPDexAndPASConformance(t *testing.T) {
 		respErr.Body.Close()
 		assert.Equal(t, http.StatusBadRequest, respErr.StatusCode, ep)
 		assert.Contains(t, string(errBytes), `"OperationOutcome"`)
+	}
+
+	// 5. Verify Inferno FHIRPath evaluation mode (`POST /$fhirpath?mode=inferno&expression=...`) for PAS & DTR
+	fpClaim := `{
+		"resourceType":"Claim",
+		"id":"fp-claim-1",
+		"extension":[{"url":"http://hl7.org/fhir/5.0/StructureDefinition/extension-Claim.encounter","valueReference":{"reference":"urn:uuid:11111111-1111-4111-8111-000000000009"}}],
+		"patient":{"reference":"urn:uuid:11111111-1111-4111-8111-000000000003"},
+		"item":[{"sequence":1,"extension":[{"url":"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/extension-requestedService","valueReference":{"reference":"urn:uuid:11111111-1111-4111-8111-000000000008"}}]}]
+	}`
+	for _, fpTC := range []struct {
+		expr    string
+		wantRef string
+	}{
+		{"Claim.patient", "urn:uuid:11111111-1111-4111-8111-000000000003"},
+		{"Claim.item.extension.value", "urn:uuid:11111111-1111-4111-8111-000000000008"},
+		{"Claim.extension.where(url = 'http://hl7.org/fhir/5.0/StructureDefinition/extension-Claim.encounter').value", "urn:uuid:11111111-1111-4111-8111-000000000009"},
+	} {
+		fpURL := ts.URL + "/fhir/r4/" + pasTenant + "/$fhirpath?mode=inferno&expression=" + url.QueryEscape(fpTC.expr)
+		respFP, fpErr := client.Post(fpURL, "application/fhir+json", strings.NewReader(fpClaim))
+		require.NoError(t, fpErr, fpTC.expr)
+		fpBytes, _ := io.ReadAll(respFP.Body)
+		respFP.Body.Close()
+		require.Equal(t, http.StatusOK, respFP.StatusCode, string(fpBytes))
+		var fpArr []map[string]any
+		require.NoError(t, json.Unmarshal(fpBytes, &fpArr))
+		require.Len(t, fpArr, 1, fpTC.expr)
+		assert.Equal(t, "Reference", fpArr[0]["type"], fpTC.expr)
+		elemMap, _ := fpArr[0]["element"].(map[string]any)
+		assert.Equal(t, fpTC.wantRef, elemMap["reference"], fpTC.expr)
 	}
 }

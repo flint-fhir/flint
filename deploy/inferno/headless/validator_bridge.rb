@@ -171,6 +171,30 @@ server.mount_proc '/validate' do |req, res|
   end
 end
 
+server.mount_proc '/evaluate' do |req, res|
+  query_params = URI.decode_www_form(req.query_string.to_s)
+  path_expr = query_params.find { |k, _| k == 'path' }&.last.to_s
+  endpoint = "#{flint_fhir_url}/$fhirpath?mode=inferno&expression=#{URI.encode_www_form_component(path_expr)}"
+  uri = URI.parse(endpoint)
+  f_req = Net::HTTP::Post.new(uri)
+  f_req['Content-Type'] = 'application/fhir+json'
+  f_req['Accept'] = 'application/json'
+  f_req['Authorization'] = "Bearer #{bearer_token}" unless bearer_token.empty?
+  f_req.body = req.body.to_s
+
+  resp = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) do |http|
+    http.request(f_req)
+  end
+
+  res.status = resp.code.to_i
+  res['Content-Type'] = 'application/json'
+  res.body = resp.body
+rescue StandardError => e
+  res.status = 500
+  res['Content-Type'] = 'application/json'
+  res.body = JSON.generate({ error: e.message })
+end
+
 trap('INT') { server.shutdown }
 trap('TERM') { server.shutdown }
 

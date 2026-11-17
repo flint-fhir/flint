@@ -38,6 +38,7 @@ ENV['NO_DB'] = 'false'
 ENV['ASYNC_JOBS'] = 'false'
 ENV['INFERNO_DISABLE_TLS_TEST'] ||= 'true'
 ENV['FHIR_RESOURCE_VALIDATOR_URL'] ||= 'http://127.0.0.1:14568'
+ENV['FHIRPATH_URL'] ||= ENV['FHIR_RESOURCE_VALIDATOR_URL']
 
 FileUtils.mkdir_p(File.join(__dir__, 'data'))
 $LOAD_PATH.unshift(File.join(__dir__, 'lib')) unless $LOAD_PATH.include?(File.join(__dir__, 'lib'))
@@ -54,6 +55,16 @@ if defined?(SubscriptionsTestKit::SubscriptionRestHookEndpoint)
       def make_response
         response.format = :json
         super
+      end
+    end
+  )
+end
+
+if defined?(Inferno::DSL::FhirpathEvaluation::Evaluator)
+  Inferno::DSL::FhirpathEvaluation::Evaluator.prepend(
+    Module.new do
+      def call_fhirpath_service(fhir_resource, fhirpath_expression)
+        super(fhir_resource, URI.encode_www_form_component(fhirpath_expression.to_s))
       end
     end
   )

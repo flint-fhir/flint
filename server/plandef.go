@@ -1910,6 +1910,9 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 	resType := strings.TrimSpace(r.PathValue("resourceType"))
 	resID := strings.TrimSpace(r.PathValue("id"))
 	expr := strings.TrimSpace(r.URL.Query().Get("expression"))
+	if expr == "" {
+		expr = strings.TrimSpace(r.URL.Query().Get("path"))
+	}
 	evalMode := strings.TrimSpace(r.URL.Query().Get("mode"))
 	contextExpr := strings.TrimSpace(r.URL.Query().Get("context"))
 	contextType := strings.TrimSpace(r.URL.Query().Get("contextType"))
@@ -1937,7 +1940,7 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for $fhirpath")
 				return
 			}
-			if rt, _ := raw["resourceType"].(string); rt == "Parameters" {
+			if rt, _ := raw["resourceType"].(string); rt == "Parameters" && !strings.EqualFold(evalMode, "inferno") {
 				if params, ok := raw["parameter"].([]any); ok {
 					for _, p := range params {
 						pm, ok := p.(map[string]any)
@@ -2056,6 +2059,25 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if strings.EqualFold(evalMode, "inferno") {
+		typedVals, evalErr := EvalFHIRPathTypedWithContextExpr(targetMap, contextExpr, expr)
+		if evalErr != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", evalErr.Error())
+			return
+		}
+		infernoItems := make([]map[string]any, 0, len(typedVals))
+		for _, tv := range typedVals {
+			infernoItems = append(infernoItems, map[string]any{
+				"type":    inferInfernoFHIRDatatype(tv.FHIRType, tv.Value),
+				"element": tv.Value,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(infernoItems)
+		return
+	}
+
 	results := evaluateFHIRPathOnResource(targetMap, expr)
 	paramEntries := []map[string]any{
 		{
@@ -2129,6 +2151,110 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 
 func evaluateFHIRPathOnResource(root map[string]any, expr string) []any {
 	return evalFHIRPath(root, expr)
+}
+
+func inferInfernoFHIRDatatype(ft string, val any) string {
+	if ft != "" {
+		return ft
+	}
+	switch v := val.(type) {
+	case bool:
+		return "boolean"
+	case int, int64:
+		return "integer"
+	case float64:
+		return "decimal"
+	case string:
+		return "string"
+	case map[string]any:
+		if rt, _ := v["resourceType"].(string); rt != "" {
+			return rt
+		}
+		if _, ok := v["reference"]; ok {
+			return "Reference"
+		}
+		if _, ok := v["coding"]; ok {
+			return "CodeableConcept"
+		}
+		if _, ok := v["family"]; ok {
+			return "HumanName"
+		}
+		if _, ok := v["given"]; ok {
+			return "HumanName"
+		}
+		if _, ok := v["line"]; ok {
+			return "Address"
+		}
+		if _, ok := v["city"]; ok {
+			return "Address"
+		}
+		if _, ok := v["postalCode"]; ok {
+			return "Address"
+		}
+		if _, hasVal := v["value"]; hasVal {
+			if _, ok := v["unit"]; ok {
+				return "Quantity"
+			}
+			if _, ok := v["comparator"]; ok {
+				return "Quantity"
+			}
+			if _, ok := v["currency"]; ok {
+				return "Money"
+			}
+			if sys, ok := v["system"].(string); ok {
+				switch sys {
+				case "phone", "fax", "email", "pager", "url", "sms", "other":
+					return "ContactPoint"
+				}
+				if _, okCode := v["code"]; okCode {
+					return "Quantity"
+				}
+				return "Identifier"
+			}
+			if _, ok := v["code"]; ok {
+				return "Quantity"
+			}
+		}
+		if _, ok := v["currency"]; ok {
+			return "Money"
+		}
+		if _, ok := v["start"]; ok {
+			return "Period"
+		}
+		if _, ok := v["end"]; ok {
+			return "Period"
+		}
+		if _, hasSys := v["system"]; hasSys {
+			if _, ok := v["code"]; ok {
+				return "Coding"
+			}
+		}
+		if _, ok := v["display"]; ok {
+			if _, okCode := v["code"]; okCode {
+				return "Coding"
+			}
+			return "Reference"
+		}
+		if _, ok := v["identifier"]; ok && len(v) <= 3 {
+			if _, hasStatus := v["status"]; !hasStatus {
+				return "Reference"
+			}
+		}
+		if _, ok := v["url"]; ok {
+			return "Extension"
+		}
+		if _, ok := v["contentType"]; ok {
+			return "Attachment"
+		}
+		if _, ok := v["versionId"]; ok {
+			return "Meta"
+		}
+		if _, ok := v["profile"]; ok {
+			return "Meta"
+		}
+		return "Element"
+	}
+	return "Element"
 }
 
 func isAllDigits(s string) bool {

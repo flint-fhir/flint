@@ -163,6 +163,10 @@ module FlintTrack7Payloads
           }
         },
         {
+          name: 'CoverageToLink',
+          resource: minimal_coverage_to_link
+        },
+        {
           name: 'Consent',
           resource: consent_for.call('1')
         }
@@ -208,6 +212,10 @@ module FlintTrack7Payloads
               { identifier: { system: 'http://hl7.org/fhir/sid/us-npi', value: '1122334455' }, display: 'Flint Medical Center' }
             ]
           }
+        },
+        {
+          name: 'CoverageToLink',
+          resource: minimal_coverage_to_link
         },
         {
           name: 'Consent',

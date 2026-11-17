@@ -7881,6 +7881,8 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 								{"url": "authorize", "valueUri": smartCfg.AuthorizationEndpoint},
 								{"url": "token", "valueUri": smartCfg.TokenEndpoint},
 								{"url": "introspect", "valueUri": smartCfg.IntrospectionEndpoint},
+								{"url": "register", "valueUri": smartCfg.RegistrationEndpoint},
+								{"url": "revoke", "valueUri": smartCfg.RevocationEndpoint},
 							},
 						},
 					},

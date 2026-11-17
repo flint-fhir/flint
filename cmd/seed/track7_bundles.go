@@ -403,7 +403,6 @@ func C4BBTransactionBundleJSON() ([]byte, error) {
 			"outcome":        "complete",
 			"related": []map[string]any{
 				{
-					"claim": map[string]any{"reference": "ExplanationOfBenefit/eob-c4bb-02-outpatient"},
 					"relationship": map[string]any{
 						"coding": []map[string]any{
 							{"system": "http://hl7.org/fhir/us/carin-bb/CodeSystem/C4BBRelatedClaimRelationshipCodes", "code": "prior"},

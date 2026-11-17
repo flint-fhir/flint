@@ -99,6 +99,7 @@ if [[ -z "${FHIR_RESOURCE_VALIDATOR_URL:-}" ]]; then
   curl -fsS "http://127.0.0.1:${VALIDATOR_BRIDGE_PORT}/health" >/dev/null
   export FHIR_RESOURCE_VALIDATOR_URL="http://127.0.0.1:${VALIDATOR_BRIDGE_PORT}"
 fi
+export FHIRPATH_URL="${FHIRPATH_URL:-${FHIR_RESOURCE_VALIDATOR_URL}}"
 
 echo "==> Running Inferno SQLite schema migrations"
 rm -f "${HEADLESS_DIR}/data/inferno_ci.db" "${HEADLESS_DIR}/data/inferno_ci.db-shm" "${HEADLESS_DIR}/data/inferno_ci.db-wal"
