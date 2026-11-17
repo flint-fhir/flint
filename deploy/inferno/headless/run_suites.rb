@@ -71,12 +71,17 @@ if defined?(Inferno::DSL::FhirpathEvaluation::Evaluator)
   )
 end
 
+$active_crd_job_threads = []
+$active_crd_job_threads_mutex = Mutex.new
+
 if defined?(DaVinciCRDTestKit::Jobs::InvokeHook)
   Inferno::Jobs.singleton_class.prepend(
     Module.new do
       def perform(job_class, *args, **kwargs)
         if job_class.is_a?(Class) && job_class <= DaVinciCRDTestKit::Jobs::InvokeHook
-          Thread.new { super(job_class, *args, **kwargs) }
+          thr = Thread.new { super(job_class, *args, **kwargs) }
+          $active_crd_job_threads_mutex.synchronize { $active_crd_job_threads << thr }
+          thr
         else
           super
         end
@@ -592,19 +597,25 @@ def drive_waiting_smart_flow!(
     elsif (!continuation_url.nil? && !continuation_url.empty?) || waiting_result.test_id.to_s.include?('invoke_hook')
       puts "    [CRD InvokeHook] Waiting for async CRD hook worker to complete #{waiting_result.test_id} ..."
       crd_deadline = Time.now + 45.0
-      while runs_repo.status_for_test_run(test_run_id).to_s == 'waiting' && Time.now <= crd_deadline
+      while %w[waiting queued running].include?(runs_repo.status_for_test_run(test_run_id).to_s) && Time.now <= crd_deadline
         sleep 0.15
       end
-      if runs_repo.status_for_test_run(test_run_id).to_s == 'waiting'
+      pending_threads = $active_crd_job_threads_mutex.synchronize do
+        copy = $active_crd_job_threads.dup
+        $active_crd_job_threads.clear
+        copy
+      end
+      pending_threads.each { |thr| thr.join(15.0) }
+      if %w[waiting queued running].include?(runs_repo.status_for_test_run(test_run_id).to_s)
         raise "Timed out waiting for async CRD InvokeHook completion on #{waiting_result.test_id}"
       end
     elsif waiting_result.test_id.to_s.include?('subscription_notification_wait')
       puts "    [PAS Pended Notification] Waiting for async PASSubscriptionTopic rest-hook webhook to resume #{waiting_result.test_id} ..."
       pas_deadline = Time.now + 30.0
-      while runs_repo.status_for_test_run(test_run_id).to_s == 'waiting' && Time.now <= pas_deadline
+      while %w[waiting queued running].include?(runs_repo.status_for_test_run(test_run_id).to_s) && Time.now <= pas_deadline
         sleep 0.15
       end
-      if runs_repo.status_for_test_run(test_run_id).to_s == 'waiting'
+      if %w[waiting queued running].include?(runs_repo.status_for_test_run(test_run_id).to_s)
         raise "Timed out waiting for async PAS pended rest-hook notification on #{waiting_result.test_id}"
       end
     else

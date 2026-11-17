@@ -383,6 +383,10 @@ module FlintTrack8Payloads
         crd_coverage('cov-crd-cond', pat_cond),
         crd_service_request('sr-crd-1', pat_main),
         crd_service_request('sr-crd-dispatch-1', pat_main),
+        crd_service_request('sr-pat-tech-error', 'pat-tech-error'),
+        crd_service_request('sr-pat-unknown-member', 'pat-unknown-member'),
+        crd_service_request('sr-pat-no-coverage', 'pat-no-coverage'),
+        crd_service_request('sr-pat-inactive-coverage', 'pat-inactive-coverage'),
         crd_device_request('dr-crd-cond-1', pat_cond),
         crd_appointment('appt-crd-1', pat_main)
       ].map { |res| { resource: res } }
@@ -592,7 +596,7 @@ module FlintTrack8Payloads
       parameter: [
         { name: 'coverage', resource: cov },
         { name: 'order', resource: order },
-        { name: 'questionnaire', valueCanonical: 'http://flint.health/fhir/Questionnaire/dtr-home-oxygen|2.2.0' }
+        { name: 'questionnaire', valueCanonical: 'http://flint.health/fhir/Questionnaire/dtr-home-oxygen|2.0.1' }
       ]
     }
 

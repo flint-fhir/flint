@@ -1944,20 +1944,27 @@ func (e *Engine) validateCRDLogicalModels(resMap map[string]any, profiles []stri
 					outcome.AddError(CodeRequired, fmt.Sprintf("CRDHooksRequest requires %q", reqKey), "CRDHooksRequest."+reqKey)
 				}
 			}
-		case "CRDHooksResponseBase",
-			"CRDHooksResponse-additionalOrders",
+		case "CRDHooksResponseBase":
+			_, hasCards := resMap["cards"].([]any)
+			_, hasActions := resMap["systemActions"].([]any)
+			if !hasCards && !hasActions {
+				outcome.AddError(CodeRequired, "CRDHooksResponseBase requires \"cards\" or \"systemActions\" array", slug+".cards")
+			}
+		case "CRDHooksResponse-additionalOrders",
 			"CRDHooksResponse-adjustCoverage",
 			"CRDHooksResponse-alternateRequest",
 			"CRDHooksResponse-externalReference",
 			"CRDHooksResponse-formCompletion",
 			"CRDHooksResponse-instructions",
 			"CRDHooksResponse-launchSMART":
-			if _, ok := resMap["cards"]; !ok {
+			if _, ok := resMap["cards"].([]any); !ok {
 				outcome.AddError(CodeRequired, fmt.Sprintf("%s requires \"cards\" array", slug), slug+".cards")
 			}
 		case "CRDHooksResponse-coverageInformation":
-			if _, ok := resMap["cards"]; !ok {
-				outcome.AddError(CodeRequired, "CRDHooksResponse-coverageInformation requires \"cards\" array", slug+".cards")
+			if rawCards, hasCards := resMap["cards"]; hasCards {
+				if _, ok := rawCards.([]any); !ok {
+					outcome.AddError(CodeRequired, "CRDHooksResponse-coverageInformation \"cards\" must be an array", slug+".cards")
+				}
 			}
 			if v, ok := resMap["systemActions"]; !ok || v == nil || isEmptyValue(v) {
 				outcome.AddError(CodeRequired, "CRDHooksResponse-coverageInformation requires non-empty \"systemActions\"", slug+".systemActions")

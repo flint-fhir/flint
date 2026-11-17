@@ -44,6 +44,20 @@ func TestTrack8CRDLogicalModelsAndProfiles(t *testing.T) {
 		t.Fatalf("expected valid CRDHooksResponse-coverageInformation, got: %+v", covOut.Issues)
 	}
 
+	// Inferno DaVinciCRDTestKit validates individual systemActions wrapped as {"systemActions": [action]} without "cards".
+	sysActionOnly := map[string]any{
+		"systemActions": []any{
+			map[string]any{"type": "update"},
+		},
+	}
+	sysActionOut := eng.ValidateResourceWithProfiles("", sysActionOnly, []string{
+		"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/CRDHooksResponseBase|2.2.1",
+		"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/CRDHooksResponse-coverageInformation|2.2.1",
+	}, "")
+	if !sysActionOut.IsValid() {
+		t.Fatalf("expected valid systemActions-only CRDHooksResponse-coverageInformation, got: %+v", sysActionOut.Issues)
+	}
+
 	missingSysActions := map[string]any{"cards": []any{}}
 	missingOut := eng.ValidateResourceWithProfiles("", missingSysActions, []string{
 		"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/CRDHooksResponse-coverageInformation",

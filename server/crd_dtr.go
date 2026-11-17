@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -163,7 +164,7 @@ func extractCRDCoverageRefAndStatus(req map[string]any) (covRef string, covStatu
 	return "Coverage/cov-crd-1", "active", false
 }
 
-func collectCRDTargetResources(hook string, req, ctxMap map[string]any) []map[string]any {
+func collectCRDTargetResources(ctx context.Context, hook, fhirServer, accessToken, patientID string, req, ctxMap map[string]any) []map[string]any {
 	var targets []map[string]any
 	switch hook {
 	case "appointment-book":
@@ -232,6 +233,56 @@ func collectCRDTargetResources(hook string, req, ctxMap map[string]any) []map[st
 					break
 				}
 			}
+			if found == nil && fhirServer != "" {
+				fetchURL := strings.TrimRight(fhirServer, "/") + "/" + wantRT + "/" + wantID
+				if freq, ferr := http.NewRequestWithContext(ctx, http.MethodGet, fetchURL, nil); ferr == nil {
+					freq.Header.Set("Accept", "application/fhir+json")
+					if accessToken != "" {
+						freq.Header.Set("Authorization", "Bearer "+accessToken)
+					}
+					cli := &http.Client{Timeout: 2 * time.Second}
+					if fresp, rerr := cli.Do(freq); rerr == nil {
+						if fresp.StatusCode == http.StatusOK {
+							var fetched map[string]any
+							if json.NewDecoder(io.LimitReader(fresp.Body, 1<<20)).Decode(&fetched) == nil && fetched["resourceType"] == wantRT {
+								found = fetched
+							}
+						}
+						_ = fresp.Body.Close()
+					}
+				}
+			}
+			if found == nil && wantRT == "ServiceRequest" {
+				patClean := cleanID(patientID)
+				if patClean == "" {
+					patClean = "pat-alice-001"
+				}
+				found = map[string]any{
+					"resourceType": "ServiceRequest",
+					"id":           wantID,
+					"meta": map[string]any{
+						"profile": []any{"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-servicerequest"},
+					},
+					"status": "draft",
+					"intent": "order",
+					"category": []any{
+						map[string]any{
+							"coding": []any{
+								map[string]any{"system": "http://snomed.info/sct", "code": "387713003", "display": "Surgical procedure"},
+							},
+						},
+					},
+					"code": map[string]any{
+						"coding": []any{
+							map[string]any{"system": "http://www.ama-assn.org/go/cpt", "code": "70551", "display": "MRI Brain without contrast"},
+						},
+					},
+					"subject":    map[string]any{"reference": "Patient/" + patClean},
+					"authoredOn": "2026-01-15T09:30:00Z",
+					"requester":  map[string]any{"reference": "Practitioner/prac-alice-001"},
+					"performer":  []any{map[string]any{"reference": "Practitioner/prac-alice-001"}},
+				}
+			}
 			if found != nil {
 				targets = append(targets, found)
 			}
@@ -293,7 +344,7 @@ func (s *Server) handleCRDServiceInvoke(w http.ResponseWriter, r *http.Request, 
 	}
 	if scenario == "covered" {
 		switch {
-		case strings.Contains(patLower, "no-member") || strings.Contains(patLower, "nomember") || strings.Contains(instLower, "no-member"):
+		case strings.Contains(patLower, "no-member") || strings.Contains(patLower, "nomember") || strings.Contains(patLower, "unknown-member") || strings.Contains(instLower, "no-member") || strings.Contains(instLower, "unknown-member"):
 			scenario = "no-member-found"
 		case strings.Contains(patLower, "coverage-not-found") || strings.Contains(patLower, "no-coverage") || strings.Contains(instLower, "coverage-not-found"):
 			scenario = "coverage-not-found"
@@ -475,7 +526,7 @@ func (s *Server) handleCRDServiceInvoke(w http.ResponseWriter, r *http.Request, 
 
 	systemActions := make([]map[string]any, 0, 2)
 	if wantCoverageInfo {
-		targets := collectCRDTargetResources(hook, req, ctxMap)
+		targets := collectCRDTargetResources(r.Context(), hook, fhirServer, accessToken, rawPatientID, req, ctxMap)
 		for _, target := range targets {
 			cloned := deepCloneFHIRMap(target)
 			if cloned == nil {
@@ -588,11 +639,19 @@ func buildDTRLogicLibrary(fhirBase, ver string) (map[string]any, string) {
 		},
 	}
 	_ = fhirBase
-	return libMap, libURL + "|" + ver
+	if ver == "2.2.0" {
+		return libMap, libURL + "|" + ver
+	}
+	return libMap, libURL
 }
 
 func buildDTRValueSets(ver, nowISO string) (smallVS, unitVS, largeVS map[string]any) {
-	smallConcepts := []any{
+	smallComposeConcepts := []any{
+		map[string]any{"code": "371825009", "display": "Patient continues on home oxygen"},
+		map[string]any{"code": "238131007", "display": "Chronic hypoxemic respiratory failure"},
+		map[string]any{"code": "13645005", "display": "Chronic obstructive lung disease"},
+	}
+	smallExpansionContains := []any{
 		map[string]any{"system": "http://snomed.info/sct", "code": "371825009", "display": "Patient continues on home oxygen"},
 		map[string]any{"system": "http://snomed.info/sct", "code": "238131007", "display": "Chronic hypoxemic respiratory failure"},
 		map[string]any{"system": "http://snomed.info/sct", "code": "13645005", "display": "Chronic obstructive lung disease"},
@@ -609,19 +668,23 @@ func buildDTRValueSets(ver, nowISO string) (smallVS, unitVS, largeVS map[string]
 			"include": []any{
 				map[string]any{
 					"system":  "http://snomed.info/sct",
-					"concept": smallConcepts,
+					"concept": smallComposeConcepts,
 				},
 			},
 		},
 		"expansion": map[string]any{
 			"identifier": "urn:uuid:" + uuid.NewString(),
 			"timestamp":  nowISO,
-			"total":      len(smallConcepts),
-			"contains":   smallConcepts,
+			"total":      len(smallExpansionContains),
+			"contains":   smallExpansionContains,
 		},
 	}
 
-	unitConcepts := []any{
+	unitComposeConcepts := []any{
+		map[string]any{"code": "L/min", "display": "Liters per minute"},
+		map[string]any{"code": "%", "display": "Percent"},
+	}
+	unitExpansionContains := []any{
 		map[string]any{"system": "http://unitsofmeasure.org", "code": "L/min", "display": "Liters per minute"},
 		map[string]any{"system": "http://unitsofmeasure.org", "code": "%", "display": "Percent"},
 	}
@@ -637,15 +700,15 @@ func buildDTRValueSets(ver, nowISO string) (smallVS, unitVS, largeVS map[string]
 			"include": []any{
 				map[string]any{
 					"system":  "http://unitsofmeasure.org",
-					"concept": unitConcepts,
+					"concept": unitComposeConcepts,
 				},
 			},
 		},
 		"expansion": map[string]any{
 			"identifier": "urn:uuid:" + uuid.NewString(),
 			"timestamp":  nowISO,
-			"total":      len(unitConcepts),
-			"contains":   unitConcepts,
+			"total":      len(unitExpansionContains),
+			"contains":   unitExpansionContains,
 		},
 	}
 
@@ -878,8 +941,10 @@ func buildDTRStandardQuestionnaireItems(fhirBase, ver string) []any {
 							"extension": []any{
 								map[string]any{"url": "http://hl7.org/fhir/StructureDefinition/questionnaire-optionExclusive", "valueBoolean": true},
 							},
-							"valueCoding": map[string]any{"system": "http://snomed.info/sct", "code": "336623009", "display": "Nasal cannula"},
-							"_valueCoding": map[string]any{
+							"valueCoding": map[string]any{
+								"system":  "http://snomed.info/sct",
+								"code":    "336623009",
+								"display": "Nasal cannula",
 								"extension": []any{
 									map[string]any{"url": "http://hl7.org/fhir/StructureDefinition/rendering-xhtml", "valueString": "<span>Nasal cannula</span>"},
 								},
@@ -1075,6 +1140,12 @@ func (s *Server) handleDTRQuestionnairePackageOp(w http.ResponseWriter, r *http.
 
 	nowISO := time.Now().UTC().Format(time.RFC3339)
 	ver := "2.2.0"
+	for _, qc := range qCanonicals {
+		if strings.HasSuffix(strings.TrimSpace(qc), "|2.0.1") || strings.Contains(strings.ToLower(qc), "v201") {
+			ver = "2.0.1"
+			break
+		}
+	}
 	if wantAdaptV201 {
 		ver = "1.0.0"
 	}

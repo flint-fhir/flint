@@ -1386,8 +1386,8 @@ func (s *Server) handleCDSServicesDiscovery(w http.ResponseWriter, _ *http.Reque
 	dmDSI, _ := buildDSISourceAttributes("flint-diabetes-a1c-care-gap")
 	allergyDSI, _ := buildDSISourceAttributes("flint-medication-allergy-check")
 
-	services := []map[string]any{
-		{
+	services := append(buildCRDServiceDefinitions(),
+		map[string]any{
 			"hook":        "patient-view",
 			"id":          "flint-hypertension-care-gap",
 			"title":       "CMS165 Controlling High Blood Pressure Care Gap Advisor",
@@ -1402,7 +1402,7 @@ func (s *Server) handleCDSServicesDiscovery(w http.ResponseWriter, _ *http.Reque
 				"onc-hti1-dsi-source-attributes": htnDSI,
 			},
 		},
-		{
+		map[string]any{
 			"hook":        "patient-view",
 			"id":          "flint-diabetes-a1c-care-gap",
 			"title":       "CMS122 Diabetes HbA1c Control Care Gap Advisor",
@@ -1417,7 +1417,7 @@ func (s *Server) handleCDSServicesDiscovery(w http.ResponseWriter, _ *http.Reque
 				"onc-hti1-dsi-source-attributes": dmDSI,
 			},
 		},
-		{
+		map[string]any{
 			"hook":        "order-select",
 			"id":          "flint-medication-allergy-check",
 			"title":       "Medication-Allergy Contraindication Safety Check",
@@ -1431,8 +1431,7 @@ func (s *Server) handleCDSServicesDiscovery(w http.ResponseWriter, _ *http.Reque
 				"onc-hti1-dsi-source-attributes": allergyDSI,
 			},
 		},
-	}
-	services = append(services, buildCRDServiceDefinitions()...)
+	)
 	resp := map[string]any{
 		"services": services,
 	}
