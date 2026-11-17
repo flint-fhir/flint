@@ -118,7 +118,10 @@ server.mount_proc '/igs' do |_req, res|
       'hl7.fhir.us.core#7.0.0',
       'hl7.fhir.us.core#8.0.0',
       'hl7.fhir.uv.ipa#1.0.0',
-      'hl7.fhir.uv.subscriptions-backport#1.1.0'
+      'hl7.fhir.uv.ips#1.1.0',
+      'hl7.fhir.uv.subscriptions-backport#1.1.0',
+      'hl7.fhir.us.davinci-pdex-plan-net#1.1.0',
+      'hl7.fhir.us.davinci-drug-formulary#2.0.1'
     ],
     'profiles' => {}
   })

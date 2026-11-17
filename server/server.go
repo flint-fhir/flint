@@ -6237,6 +6237,7 @@ func usCoreSupportedProfiles(rt string) []string {
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-patient",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Patient-uv-ips",
 		}
 	case "Encounter":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-encounter"}
@@ -6246,6 +6247,7 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-encounter-diagnosis",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-condition",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-problem-list-item",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Condition-uv-ips",
 		}
 	case "Observation":
 		return []string{
@@ -6281,44 +6283,75 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-adi-documentation",
 			"http://hl7.org/fhir/StructureDefinition/vitalsigns",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-observation",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-results-uv-ips",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-results-laboratory-uv-ips",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-results-pathology-uv-ips",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-results-radiology-uv-ips",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-tobaccouse-uv-ips",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-alcoholuse-uv-ips",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-pregnancy-status-uv-ips",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-pregnancy-edd-uv-ips",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-pregnancy-outcome-uv-ips",
 		}
 	case "Practitioner":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitioner",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-practitioner",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Practitioner-uv-ips",
+			"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Practitioner",
 		}
 	case "MedicationRequest":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medicationrequest",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-medicationrequest",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/MedicationRequest-uv-ips",
 		}
 	case "MedicationStatement":
 		return []string{
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-medicationstatement",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/MedicationStatement-uv-ips",
 		}
 	case "AllergyIntolerance":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-allergyintolerance",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-allergyintolerance",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/AllergyIntolerance-uv-ips",
 		}
 	case "Procedure":
-		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-procedure"}
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-procedure",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Procedure-uv-ips",
+		}
 	case "DiagnosticReport":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-lab",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/DiagnosticReport-uv-ips",
 		}
 	case "Immunization":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-immunization",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-immunization",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Immunization-uv-ips",
 		}
 	case "Organization":
-		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-organization"}
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-organization",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Organization-uv-ips",
+			"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Organization",
+			"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Network",
+		}
 	case "Specimen":
-		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-specimen"}
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-specimen",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Specimen-uv-ips",
+		}
 	case "Location":
-		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-location"}
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-location",
+			"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Location",
+			"http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-InsurancePlanLocation",
+		}
 	case "DocumentReference":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-documentreference",
@@ -6345,18 +6378,45 @@ func usCoreSupportedProfiles(rt string) []string {
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medication",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-medication",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Medication-uv-ips",
 		}
 	case "Device":
-		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-implantable-device"}
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-implantable-device",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Device-uv-ips",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/Device-observer-uv-ips",
+		}
 	case "PractitionerRole":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitionerrole",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-practitionerrole",
+			"http://hl7.org/fhir/uv/ips/StructureDefinition/PractitionerRole-uv-ips",
+			"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-PractitionerRole",
 		}
 	case "RelatedPerson":
 		return []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-relatedperson"}
 	case "Subscription":
 		return []string{"http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription"}
+	case "Endpoint":
+		return []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Endpoint"}
+	case "HealthcareService":
+		return []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-HealthcareService"}
+	case "OrganizationAffiliation":
+		return []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-OrganizationAffiliation"}
+	case "InsurancePlan":
+		return []string{
+			"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-InsurancePlan",
+			"http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-PayerInsurancePlan",
+			"http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-Formulary",
+		}
+	case "Basic":
+		return []string{"http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-FormularyItem"}
+	case "MedicationKnowledge":
+		return []string{"http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-FormularyDrug"}
+	case "Bundle":
+		return []string{"http://hl7.org/fhir/uv/ips/StructureDefinition/Bundle-uv-ips"}
+	case "Composition":
+		return []string{"http://hl7.org/fhir/uv/ips/StructureDefinition/Composition-uv-ips"}
 	default:
 		return nil
 	}
@@ -7695,8 +7755,11 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 		"instantiates": []string{
 			"http://hl7.org/fhir/us/core/CapabilityStatement/us-core-server",
 			"http://hl7.org/fhir/uv/ipa/CapabilityStatement/ipa-server",
+			"http://hl7.org/fhir/uv/ips/CapabilityStatement/ips-server",
 			"http://hl7.org/fhir/uv/bulkdata/CapabilityStatement/bulk-data",
 			"http://hl7.org/fhir/us/davinci-hrex/CapabilityStatement/hrex-server",
+			"http://hl7.org/fhir/us/davinci-pdex-plan-net/CapabilityStatement/plan-net",
+			"http://hl7.org/fhir/us/davinci-drug-formulary/CapabilityStatement/usdf-server",
 		},
 		"format":      []string{"json", "application/fhir+json", "xml", "application/fhir+xml", "application/xml", "text/xml", "application/fhir+ndjson", "application/x-protobuf", "application/fhir+protobuf"},
 		"patchFormat": []string{"application/json-patch+json", "application/merge-patch+json", "application/fhir+json", "application/fhir+xml", "application/x-protobuf", "application/fhir+protobuf"},

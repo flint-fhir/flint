@@ -55,6 +55,17 @@ if [[ -z "${INFERNO_PATIENT_IDS:-}" ]]; then
   INFERNO_PATIENT_IDS="pat-alice-001,pat-robert-002,pat-elena-003"
 fi
 
+PLANNET_TENANT="${FLINT_PLANNET_TENANT:-plannet}"
+FORMULARY_TENANT="${FLINT_FORMULARY_TENANT:-formulary}"
+echo "==> Seeding Da Vinci Plan-Net v1.1.0 ('${PLANNET_TENANT}') & US Drug Formulary v2.0.1 ('${FORMULARY_TENANT}') cohorts"
+if [[ -x "${REPO_ROOT}/bin/seed" ]]; then
+  "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${PLANNET_TENANT}" -suite plannet -token "${ACCESS_TOKEN}" >/dev/null
+  "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${FORMULARY_TENANT}" -suite formulary -token "${ACCESS_TOKEN}" >/dev/null
+else
+  (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${PLANNET_TENANT}" -suite plannet -token "${ACCESS_TOKEN}" >/dev/null)
+  (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${FORMULARY_TENANT}" -suite formulary -token "${ACCESS_TOKEN}" >/dev/null)
+fi
+
 cd "${HEADLESS_DIR}"
 
 if ! bundle check >/dev/null 2>&1; then

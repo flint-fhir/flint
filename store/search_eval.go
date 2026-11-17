@@ -660,10 +660,11 @@ func MatchIndexString(idx *SearchIndexes, spName, rawStr string) bool {
 	exact := strings.HasSuffix(spName, ":exact")
 	contains := strings.HasSuffix(spName, ":contains") || strings.HasSuffix(spName, ":text")
 	isText := strings.HasSuffix(spName, ":text")
-	for item := range strings.SplitSeq(rawStr, ",") {
-		needle := strings.ToLower(strings.TrimSpace(item))
+	for _, item := range SplitSearchORValues(rawStr) {
+		unescaped := UnescapeFHIRSearchString(item)
+		needle := strings.ToLower(strings.TrimSpace(unescaped))
 		if exact {
-			needle = strings.TrimSpace(item)
+			needle = strings.TrimSpace(unescaped)
 		}
 		for _, st := range idx.Strings {
 			if st.SpName != baseName && (!isText || st.SpName != baseName+":text") {

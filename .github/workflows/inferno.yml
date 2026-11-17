@@ -11,7 +11,7 @@ on:
 
 jobs:
   inferno:
-    name: HL7 Inferno (ONC g10 + US Core v6.1/v7.0/v8.0 + Subscriptions R5 Backport + IPA + SMART STU2 + Bulk Data) [${{ matrix.store }}]
+    name: HL7 Inferno (ONC g10 + US Core v6.1/v7/v8 + IPS + Plan-Net + USDF + Subscriptions + IPA + SMART + Bulk) [${{ matrix.store }}]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

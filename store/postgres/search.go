@@ -115,8 +115,8 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 				args = append(args, baseName)
 				spNameCond = fmt.Sprintf("%s.sp_name = $%d", alias, spIdx)
 			}
-			for part := range strings.SplitSeq(rawVal, ",") {
-				v := strings.ToLower(strings.TrimSpace(part))
+			for _, part := range store.SplitSearchORValues(rawVal) {
+				v := strings.ToLower(strings.TrimSpace(store.UnescapeFHIRSearchString(part)))
 				if v == "" {
 					continue
 				}
@@ -695,8 +695,8 @@ func (s *Store) searchWithExecutor(ctx context.Context, exec queryExecer, params
 				spNameCond = fmt.Sprintf("%s.sp_name = $%d", targetAlias, spIdx)
 			}
 			var orConds []string
-			for part := range strings.SplitSeq(chained.Value, ",") {
-				v := strings.ToLower(strings.TrimSpace(part))
+			for _, part := range store.SplitSearchORValues(chained.Value) {
+				v := strings.ToLower(strings.TrimSpace(store.UnescapeFHIRSearchString(part)))
 				if v == "" {
 					continue
 				}
@@ -1219,9 +1219,10 @@ func buildHasExistsConditionWithAlias(hp HasParam, parentAlias string, depth int
 
 	switch paramType {
 	case "string":
-		likePattern := escapeLikePattern(strings.ToLower(strings.TrimSpace(hp.Value))) + "%"
+		unescapedHP := strings.ToLower(strings.TrimSpace(store.UnescapeFHIRSearchString(hp.Value)))
+		likePattern := escapeLikePattern(unescapedHP) + "%"
 		if searchMod == "contains" || searchMod == "text" {
-			likePattern = "%" + escapeLikePattern(strings.ToLower(strings.TrimSpace(hp.Value))) + "%"
+			likePattern = "%" + escapeLikePattern(unescapedHP) + "%"
 		}
 		args = append(args, likePattern)
 		valIdx := startIdx + len(args)

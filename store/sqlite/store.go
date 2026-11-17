@@ -1276,8 +1276,8 @@ func matchString(idx *store.SearchIndexes, spName, rawStr string) bool {
 	exact := strings.HasSuffix(spName, ":exact")
 	contains := strings.HasSuffix(spName, ":contains") || strings.HasSuffix(spName, ":text")
 	isText := strings.HasSuffix(spName, ":text")
-	for item := range strings.SplitSeq(rawStr, ",") {
-		needle := strings.ToLower(strings.TrimSpace(item))
+	for _, item := range store.SplitSearchORValues(rawStr) {
+		needle := strings.ToLower(strings.TrimSpace(store.UnescapeFHIRSearchString(item)))
 		for _, st := range idx.Strings {
 			if st.SpName != baseName && (!isText || st.SpName != baseName+":text") {
 				continue

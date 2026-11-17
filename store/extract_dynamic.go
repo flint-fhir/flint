@@ -219,7 +219,9 @@ func extractSingleFieldValue(
 		extractReferenceIndex(idx, tenantID, resType, resID, subMsg, spNames)
 
 	case "google.fhir.r4.core.HumanName":
-		extractHumanNameStrings(idx, tenantID, resType, resID, subMsg)
+		if parentField == "" {
+			extractHumanNameStrings(idx, tenantID, resType, resID, subMsg)
+		}
 
 	case "google.fhir.r4.core.ContactPoint":
 		extractContactPointTokens(idx, tenantID, resType, resID, subMsg)
@@ -820,13 +822,26 @@ func extractAddressStrings(idx *SearchIndexes, tenantID, resType, resID string, 
 		if norm == "" {
 			return
 		}
+		if spName != "" && spName != "address" {
+			idx.Strings = append(idx.Strings,
+				SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: norm},
+			)
+		}
 		idx.Strings = append(idx.Strings,
-			SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: spName, SpValue: norm},
 			SpidxString{TenantID: tenantID, ResType: resType, ResID: resID, SpName: "address", SpValue: norm},
 		)
 	}
+	if fd := addrMsg.Descriptor().Fields().ByName("line"); fd != nil && addrMsg.Has(fd) && fd.IsList() {
+		list := addrMsg.Get(fd).List()
+		for i := 0; i < list.Len(); i++ {
+			addStr("address", extractWrappedString(list.Get(i).Message()))
+		}
+	}
 	if fd := addrMsg.Descriptor().Fields().ByName("city"); fd != nil && addrMsg.Has(fd) {
 		addStr("address-city", extractWrappedString(addrMsg.Get(fd).Message()))
+	}
+	if fd := addrMsg.Descriptor().Fields().ByName("district"); fd != nil && addrMsg.Has(fd) {
+		addStr("address", extractWrappedString(addrMsg.Get(fd).Message()))
 	}
 	if fd := addrMsg.Descriptor().Fields().ByName("state"); fd != nil && addrMsg.Has(fd) {
 		addStr("address-state", extractWrappedString(addrMsg.Get(fd).Message()))
@@ -836,6 +851,9 @@ func extractAddressStrings(idx *SearchIndexes, tenantID, resType, resID string, 
 	}
 	if fd := addrMsg.Descriptor().Fields().ByName("country"); fd != nil && addrMsg.Has(fd) {
 		addStr("address-country", extractWrappedString(addrMsg.Get(fd).Message()))
+	}
+	if fd := addrMsg.Descriptor().Fields().ByName("text"); fd != nil && addrMsg.Has(fd) {
+		addStr("address", extractWrappedString(addrMsg.Get(fd).Message()))
 	}
 }
 
@@ -912,6 +930,9 @@ func mapCodeableConceptSpNames(resType, fieldName, parentField string) []string 
 			}
 			return []string{"code", "combo-code"}
 		}
+		if (resType == "PractitionerRole" || resType == "OrganizationAffiliation") && effective == "code" && parentField == "" {
+			return []string{"role", "code"}
+		}
 		return []string{"code"}
 	case "vaccine_code":
 		return []string{"vaccine-code", "code"}
@@ -922,9 +943,29 @@ func mapCodeableConceptSpNames(resType, fieldName, parentField string) []string 
 	case "performer_type":
 		return []string{"intended-performertype", "performer-type"}
 	case "type":
+		if resType == "HealthcareService" && parentField == "" {
+			return []string{"service-type", "type"}
+		}
+		if resType == "InsurancePlan" {
+			switch parentField {
+			case "":
+				return []string{"type"}
+			case "plan":
+				return []string{"plan-type"}
+			case "coverage":
+				return []string{"coverage-type"}
+			default:
+				return nil
+			}
+		}
 		return []string{"type"}
 	case "category":
+		if resType == "HealthcareService" && parentField == "" {
+			return []string{"service-category", "category"}
+		}
 		return []string{"category"}
+	case "dose_form":
+		return []string{"doseform", "dose-form"}
 	case "clinical_status":
 		return []string{"clinical-status"}
 	case "verification_status":
@@ -971,8 +1012,23 @@ func mapReferenceSpNames(resType, fieldName, parentField string) []string {
 		return []string{"encounter"}
 	case "practitioner", "Actor", "participant_individual":
 		return []string{"practitioner"}
-	case "organization", "managing_organization", "service_provider":
+	case "organization", "managing_organization", "service_provider", "provided_by":
+		if resType == "OrganizationAffiliation" && effective == "organization" {
+			return []string{"primary-organization", "organization"}
+		}
 		return []string{"organization"}
+	case "healthcare_service":
+		return []string{"service", "healthcare-service"}
+	case "coverage_area":
+		if resType == "InsurancePlan" && parentField != "" {
+			return nil
+		}
+		return []string{"coverage-area"}
+	case "network":
+		if resType == "InsurancePlan" && parentField != "" {
+			return nil
+		}
+		return []string{"network"}
 	case "custodian":
 		return []string{"custodian", "organization"}
 	case "authenticator":
@@ -1053,6 +1109,9 @@ func mapDateSpNames(resType, fieldName, parentField string) []string {
 }
 
 func mapStringSpNames(fieldName, parentField string) []string {
+	if parentField != "" && parentField != "value" {
+		return nil
+	}
 	switch fieldName {
 	case "name", "alias", "title", "description":
 		return []string{"name", fieldName}
