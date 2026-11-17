@@ -47,7 +47,7 @@ func parseSeedConfig(args []string, getenv func(string) string) (Config, error) 
 	fs.SetOutput(io.Discard)
 	urlFlag := fs.String("url", defaultURL, "Flint server base URL")
 	tenantFlag := fs.String("tenant", defaultTenant, "Target FHIR tenant ID")
-	suiteFlag := fs.String("suite", defaultSuite, "Seed suite: uscore (default), plannet, or formulary")
+	suiteFlag := fs.String("suite", defaultSuite, "Seed suite: uscore (default), plannet, formulary, c4bb, pdex, or pas")
 	tokenFlag := fs.String("token", defaultToken, "Optional SMART on FHIR Bearer token")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -106,8 +106,14 @@ func Run(ctx context.Context, cfg Config) error {
 		bundleBytes, err = PlanNetTransactionBundleJSON()
 	case "formulary", "usdf":
 		bundleBytes, err = DrugFormularyTransactionBundleJSON()
+	case "c4bb", "carin", "carin-bb":
+		bundleBytes, err = C4BBTransactionBundleJSON()
+	case "pdex":
+		bundleBytes, err = PDexTransactionBundleJSON()
+	case "pas":
+		bundleBytes, err = PASTransactionBundleJSON()
 	default:
-		return fmt.Errorf("unknown seed suite %q (expected uscore, plannet, or formulary)", cfg.Suite)
+		return fmt.Errorf("unknown seed suite %q (expected uscore, plannet, formulary, c4bb, pdex, or pas)", cfg.Suite)
 	}
 	if err != nil {
 		return fmt.Errorf("build cohort bundle: %w", err)
@@ -195,8 +201,11 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 					},
 				},
 			},
+			"telecom": []map[string]any{
+				{"system": "phone", "value": "415-555-0100", "use": "work"},
+			},
 			"address": []map[string]any{
-				{"line": []string{"500 Parnassus Ave"}, "city": "San Francisco", "state": "CA", "postalCode": "94143"},
+				{"line": []string{"500 Parnassus Ave"}, "city": "San Francisco", "state": "CA", "postalCode": "94143", "country": "US"},
 			},
 		}),
 		putEntry("Location/loc-flint-cardiology", map[string]any{
@@ -1290,6 +1299,7 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 				"code":   "TAB",
 			},
 			"whenHandedOver": "2026-01-15T10:30:00Z",
+			"substitution":   map[string]any{"wasSubstituted": false},
 			"dosageInstruction": []map[string]any{
 				{
 					"text": "Take 1 tablet (10 mg) by mouth once daily",
@@ -1523,12 +1533,16 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 				{
 					"deviceIdentifier": "00844588003288",
 					"carrierHRF":       "(01)00844588003288(11)240101(17)290101(10)LOT1(21)SER1",
+					"carrierAIDC":      "KDAxKTAwODQ0NTg4MDAzMjg4",
 				},
 			},
 			"status":       "active",
 			"manufacturer": "Acme Cardiac Devices",
 			"lotNumber":    "LOT1",
 			"serialNumber": "SER1",
+			"deviceName": []map[string]any{
+				{"name": "Acme Cardiac Pacemaker", "type": "udi-label-name"},
+			},
 			"type": map[string]any{
 				"coding": []map[string]any{
 					{"system": "http://snomed.info/sct", "code": "14106009", "display": "Cardiac pacemaker, device"},
@@ -1909,6 +1923,7 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
 			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
 			"effectiveDateTime": "2026-01-15T09:16:00Z",
+			"issued":            "2026-01-15T09:16:00Z",
 			"valueCodeableConcept": map[string]any{
 				"coding": []map[string]any{
 					{"system": "http://snomed.info/sct", "code": "266919005", "display": "Never smoked tobacco"},

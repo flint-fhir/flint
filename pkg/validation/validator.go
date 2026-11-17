@@ -1014,6 +1014,7 @@ var usCoreProfileSpecs = map[string]usCoreProfileSpec{
 		ResourceType:   "Bundle",
 		RequiredFields: []string{"type", "entry"},
 	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition":                          conditionV311ProfileSpec("us-core-condition"),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-problems-health-concerns": conditionProfileSpec("us-core-condition-problems-health-concerns"),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-condition-encounter-diagnosis":      conditionProfileSpec("us-core-condition-encounter-diagnosis"),
 	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-encounter": {
@@ -1440,6 +1441,228 @@ var usCoreProfileSpecs = map[string]usCoreProfileSpec{
 		ResourceType:   "Location",
 		RequiredFields: []string{"address|extension"},
 	},
+	// HL7 CARIN IG for Blue Button (C4BB) v2.0.0 profiles
+	"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-Patient": {
+		Slug:           "C4BB-Patient",
+		ResourceType:   "Patient",
+		RequiredFields: []string{"identifier", "name", "gender"},
+	},
+	"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-Coverage": {
+		Slug:           "C4BB-Coverage",
+		ResourceType:   "Coverage",
+		RequiredFields: []string{"status", "subscriberId", "beneficiary", "relationship", "payor"},
+	},
+	"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-Organization": {
+		Slug:           "C4BB-Organization",
+		ResourceType:   "Organization",
+		RequiredFields: []string{"active", "name"},
+	},
+	"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-Practitioner": {
+		Slug:           "C4BB-Practitioner",
+		ResourceType:   "Practitioner",
+		RequiredFields: []string{"identifier", "name"},
+	},
+	"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-RelatedPerson": {
+		Slug:           "C4BB-RelatedPerson",
+		ResourceType:   "RelatedPerson",
+		RequiredFields: []string{"active", "patient", "relationship", "name"},
+	},
+	"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-ExplanationOfBenefit":                           c4bbEOBProfileSpec("C4BB-ExplanationOfBenefit", "", ""),
+	"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-ExplanationOfBenefit-Inpatient-Institutional":   c4bbEOBProfileSpec("C4BB-ExplanationOfBenefit-Inpatient-Institutional", "institutional", "inpatient"),
+	"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-ExplanationOfBenefit-Outpatient-Institutional":  c4bbEOBProfileSpec("C4BB-ExplanationOfBenefit-Outpatient-Institutional", "institutional", "outpatient"),
+	"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-ExplanationOfBenefit-Oral":                      c4bbEOBProfileSpec("C4BB-ExplanationOfBenefit-Oral", "oral", ""),
+	"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-ExplanationOfBenefit-Pharmacy":                  c4bbEOBProfileSpec("C4BB-ExplanationOfBenefit-Pharmacy", "pharmacy", ""),
+	"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-ExplanationOfBenefit-Professional-NonClinician": c4bbEOBProfileSpec("C4BB-ExplanationOfBenefit-Professional-NonClinician", "professional", ""),
+	// HL7 Da Vinci HRex v1.0.0 & Payer Data Exchange (PDex) v2.0.0 profiles
+	"http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-parameters-member-match-in": {
+		Slug:           "hrex-parameters-member-match-in",
+		ResourceType:   "Parameters",
+		RequiredFields: []string{"parameter"},
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			params, _ := resMap["parameter"].([]any)
+			hasMP := false
+			hasCTM := false
+			for _, rawP := range params {
+				if pm, ok := rawP.(map[string]any); ok {
+					switch extractStringOrWrapped(pm["name"]) {
+					case "MemberPatient":
+						hasMP = true
+					case "CoverageToMatch":
+						hasCTM = true
+					}
+				}
+			}
+			if !hasMP || !hasCTM {
+				outcome.AddError(CodeRequired, "HRex hrex-parameters-member-match-in requires MemberPatient and CoverageToMatch parameters", "Parameters.parameter")
+			}
+		},
+	},
+	"http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-parameters-member-match-out": {
+		Slug:           "hrex-parameters-member-match-out",
+		ResourceType:   "Parameters",
+		RequiredFields: []string{"parameter"},
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			params, _ := resMap["parameter"].([]any)
+			if len(params) != 1 {
+				outcome.AddError(CodeInvalid, "HRex hrex-parameters-member-match-out requires exactly 1 MemberIdentifier parameter", "Parameters.parameter")
+				return
+			}
+			pm, _ := params[0].(map[string]any)
+			if extractStringOrWrapped(pm["name"]) != "MemberIdentifier" || pm["valueIdentifier"] == nil {
+				outcome.AddError(CodeRequired, "HRex hrex-parameters-member-match-out parameter must be MemberIdentifier with valueIdentifier", "Parameters.parameter[0]")
+			}
+		},
+	},
+	"http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-coverage": {
+		Slug:           "hrex-coverage",
+		ResourceType:   "Coverage",
+		RequiredFields: []string{"status", "beneficiary", "payor"},
+	},
+	"http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-consent": {
+		Slug:           "hrex-consent",
+		ResourceType:   "Consent",
+		RequiredFields: []string{"status", "scope", "category", "patient", "provision"},
+	},
+	"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-consent": {
+		Slug:           "pdex-consent",
+		ResourceType:   "Consent",
+		RequiredFields: []string{"status", "scope", "category", "patient", "provision"},
+	},
+	"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-priorauthorization": {
+		Slug:           "pdex-priorauthorization",
+		ResourceType:   "ExplanationOfBenefit",
+		RequiredFields: []string{"status", "type", "use", "patient", "created", "insurer", "provider", "outcome", "insurance", "item"},
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			if use := extractStringOrWrapped(resMap["use"]); use != "" && use != "preauthorization" {
+				outcome.AddError(CodeInvalid, "PDex pdex-priorauthorization requires ExplanationOfBenefit.use = 'preauthorization'", "ExplanationOfBenefit.use")
+			}
+		},
+	},
+	"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-device": {
+		Slug:           "pdex-device",
+		ResourceType:   "Device",
+		RequiredFields: []string{"type", "patient"},
+	},
+	"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-medicationdispense": {
+		Slug:           "pdex-medicationdispense",
+		ResourceType:   "MedicationDispense",
+		RequiredFields: []string{"status", "medication[x]", "subject"},
+	},
+	"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-provenance": {
+		Slug:           "pdex-provenance",
+		ResourceType:   "Provenance",
+		RequiredFields: []string{"target", "recorded", "agent"},
+	},
+	// HL7 Da Vinci Prior Authorization Support (PAS) v2.0.1 / v2.2.1 profiles
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-subscription": {
+		Slug:           "profile-subscription",
+		ResourceType:   "Subscription",
+		RequiredFields: []string{"status", "reason", "criteria", "channel"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle":          pasBundleProfileSpec("profile-pas-request-bundle", true),
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle":         pasBundleProfileSpec("profile-pas-response-bundle", false),
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-inquiry-request-bundle":  pasBundleProfileSpec("profile-pas-inquiry-request-bundle", true),
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-inquiry-response-bundle": pasBundleProfileSpec("profile-pas-inquiry-response-bundle", false),
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim": {
+		Slug:           "profile-claim",
+		ResourceType:   "Claim",
+		RequiredFields: []string{"identifier", "status", "type", "use", "patient", "created", "insurer", "provider", "priority", "insurance", "item"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim-update": {
+		Slug:           "profile-claim-update",
+		ResourceType:   "Claim",
+		RequiredFields: []string{"identifier", "status", "type", "use", "patient", "created", "insurer", "provider", "priority", "insurance"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim-inquiry": {
+		Slug:           "profile-claim-inquiry",
+		ResourceType:   "Claim",
+		RequiredFields: []string{"status", "type", "use", "patient", "created", "insurer", "provider", "priority", "insurance"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claimresponse": {
+		Slug:           "profile-claimresponse",
+		ResourceType:   "ClaimResponse",
+		RequiredFields: []string{"identifier", "status", "type", "use", "patient", "created", "insurer", "outcome"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claiminquiryresponse": {
+		Slug:           "profile-claiminquiryresponse",
+		ResourceType:   "ClaimResponse",
+		RequiredFields: []string{"identifier", "status", "type", "use", "patient", "created", "insurer", "outcome"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-communicationrequest": {
+		Slug:           "profile-communicationrequest",
+		ResourceType:   "CommunicationRequest",
+		RequiredFields: []string{"status", "category", "payload"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-task": {
+		Slug:           "profile-task",
+		ResourceType:   "Task",
+		RequiredFields: []string{"status", "intent", "code"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-insurer": {
+		Slug:           "profile-insurer",
+		ResourceType:   "Organization",
+		RequiredFields: []string{"identifier", "active", "type", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-requestor": {
+		Slug:           "profile-requestor",
+		ResourceType:   "Organization",
+		RequiredFields: []string{"identifier", "active", "type", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-beneficiary": {
+		Slug:           "profile-beneficiary",
+		ResourceType:   "Patient",
+		RequiredFields: []string{"identifier", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-subscriber": {
+		Slug:           "profile-subscriber",
+		ResourceType:   "Patient",
+		RequiredFields: []string{"identifier", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-coverage": {
+		Slug:           "profile-coverage",
+		ResourceType:   "Coverage",
+		RequiredFields: []string{"status", "beneficiary", "payor"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-encounter": {
+		Slug:           "profile-encounter",
+		ResourceType:   "Encounter",
+		RequiredFields: []string{"status", "class", "subject"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-practitioner": {
+		Slug:           "profile-practitioner",
+		ResourceType:   "Practitioner",
+		RequiredFields: []string{"identifier", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-practitionerrole": {
+		Slug:           "profile-practitionerrole",
+		ResourceType:   "PractitionerRole",
+		RequiredFields: []string{"practitioner|organization|code|specialty"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-location": {
+		Slug:           "profile-location",
+		ResourceType:   "Location",
+		RequiredFields: []string{"name|address"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-servicerequest": {
+		Slug:           "profile-servicerequest",
+		ResourceType:   "ServiceRequest",
+		RequiredFields: []string{"status", "intent", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-devicerequest": {
+		Slug:           "profile-devicerequest",
+		ResourceType:   "DeviceRequest",
+		RequiredFields: []string{"status", "intent", "subject"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-medicationrequest": {
+		Slug:           "profile-medicationrequest",
+		ResourceType:   "MedicationRequest",
+		RequiredFields: []string{"status", "intent", "medication[x]", "subject"},
+	},
+	"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-nutritionorder": {
+		Slug:           "profile-nutritionorder",
+		ResourceType:   "NutritionOrder",
+		RequiredFields: []string{"status", "intent", "patient", "dateTime"},
+	},
 }
 
 func vitalSignsSpec(slug string, extra func(resType string, resMap map[string]any, outcome *Outcome)) usCoreProfileSpec {
@@ -1519,6 +1742,82 @@ func checkAverageBloodPressureComponents(resType string, resMap map[string]any, 
 		outcome.AddError(CodeRequired,
 			"US Core average blood pressure profile requires both mean systolic (96608-5) and mean diastolic (96609-3) components",
 			"Observation.component")
+	}
+}
+
+func conditionV311ProfileSpec(slug string) usCoreProfileSpec {
+	return usCoreProfileSpec{
+		Slug:           slug,
+		ResourceType:   "Condition",
+		RequiredFields: []string{"code", "subject"},
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			if !verificationStatusIsEnteredInError(resMap) && !hasUSCoreRequiredElement(resMap, "clinicalStatus") {
+				outcome.AddError(CodeRequired,
+					fmt.Sprintf("US Core profile %s requires element \"clinicalStatus\" unless verificationStatus is entered-in-error", slug),
+					"Condition.clinicalStatus")
+			}
+		},
+	}
+}
+
+func c4bbEOBProfileSpec(slug, matchType, matchSubType string) usCoreProfileSpec {
+	return usCoreProfileSpec{
+		Slug:           slug,
+		ResourceType:   "ExplanationOfBenefit",
+		RequiredFields: []string{"identifier", "status", "type", "use", "patient", "created", "insurer", "outcome", "insurance"},
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			if use := extractStringOrWrapped(resMap["use"]); use != "" && use != "claim" {
+				outcome.AddError(CodeInvalid, fmt.Sprintf("C4BB profile %s requires ExplanationOfBenefit.use = 'claim'", slug), "ExplanationOfBenefit.use")
+			}
+			if out := extractStringOrWrapped(resMap["outcome"]); out != "" && out != "complete" {
+				outcome.AddError(CodeInvalid, fmt.Sprintf("C4BB profile %s requires ExplanationOfBenefit.outcome = 'complete'", slug), "ExplanationOfBenefit.outcome")
+			}
+			if matchType == "" {
+				return
+			}
+			hasType := false
+			for _, c := range extractCodesFromElement(resMap["type"]) {
+				if strings.EqualFold(c, matchType) || (matchType == "professional" && strings.EqualFold(c, "vision")) {
+					hasType = true
+					break
+				}
+			}
+			if !hasType {
+				return
+			}
+			if matchSubType != "" {
+				hasSub := false
+				for _, sc := range extractCodesFromElement(resMap["subType"]) {
+					if strings.EqualFold(sc, matchSubType) {
+						hasSub = true
+						break
+					}
+				}
+				if !hasSub {
+					return
+				}
+			}
+			if matchType == "institutional" && !hasUSCoreRequiredElement(resMap, "diagnosis") {
+				outcome.AddError(CodeRequired, fmt.Sprintf("C4BB profile %s requires diagnosis", slug), "ExplanationOfBenefit.diagnosis")
+			}
+		},
+	}
+}
+
+func pasBundleProfileSpec(slug string, requireIdentifier bool) usCoreProfileSpec {
+	reqs := []string{"type", "timestamp", "entry"}
+	if requireIdentifier {
+		reqs = append([]string{"identifier"}, reqs...)
+	}
+	return usCoreProfileSpec{
+		Slug:           slug,
+		ResourceType:   "Bundle",
+		RequiredFields: reqs,
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			if bType := extractStringOrWrapped(resMap["type"]); bType != "collection" {
+				outcome.AddError(CodeInvalid, fmt.Sprintf("PAS Bundle profile %s requires Bundle.type = 'collection'", slug), "Bundle.type")
+			}
+		},
 	}
 }
 

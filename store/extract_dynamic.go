@@ -41,6 +41,9 @@ func extractFromMessage(idx *SearchIndexes, tenantID, resType, resID string, msg
 	}
 	if depth == 0 && !strings.Contains(resID, "#") {
 		extractExtensionsContainedAndCustomFromRoot(idx, tenantID, resType, resID, msg)
+		if resType == "ExplanationOfBenefit" {
+			extractExplanationOfBenefitDates(idx, tenantID, resType, resID, msg)
+		}
 	}
 
 	msg.Range(func(fd protoreflect.FieldDescriptor, val protoreflect.Value) bool {
@@ -599,6 +602,9 @@ func appendTokenTextFromMessage(idx *SearchIndexes, tenantID, resType, resID str
 	}
 	if depth == 0 && !strings.Contains(resID, "#") {
 		extractExtensionsContainedAndCustomFromRoot(idx, tenantID, resType, resID, msg)
+		if resType == "ExplanationOfBenefit" {
+			extractExplanationOfBenefitDates(idx, tenantID, resType, resID, msg)
+		}
 	}
 	msg.Range(func(fd protoreflect.FieldDescriptor, val protoreflect.Value) bool {
 		fieldName := string(fd.Name())
@@ -886,6 +892,115 @@ func extractPeriodTimes(msg protoreflect.Message) (time.Time, time.Time, bool) {
 	return startT, endT, true
 }
 
+func extractExplanationOfBenefitDates(idx *SearchIndexes, tenantID, resType, resID string, msg protoreflect.Message) {
+	if idx == nil || !msg.IsValid() {
+		return
+	}
+	md := msg.Descriptor()
+	if bpFD := md.Fields().ByName("billable_period"); bpFD != nil && msg.Has(bpFD) && bpFD.Kind() == protoreflect.MessageKind {
+		bpMsg := msg.Get(bpFD).Message()
+		if startT, endT, ok := extractPeriodTimes(bpMsg); ok {
+			idx.Dates = append(idx.Dates, SpidxDate{
+				TenantID: tenantID,
+				ResType:  resType,
+				ResID:    resID,
+				SpName:   "service-date",
+				SpLow:    startT,
+				SpHigh:   endT,
+			})
+		}
+		if sFD := bpMsg.Descriptor().Fields().ByName("start"); sFD != nil && bpMsg.Has(sFD) && sFD.Kind() == protoreflect.MessageKind {
+			if st, ok := extractTemporalTime(bpMsg.Get(sFD).Message()); ok {
+				idx.Dates = append(idx.Dates,
+					SpidxDate{
+						TenantID: tenantID,
+						ResType:  resType,
+						ResID:    resID,
+						SpName:   "service-start-date",
+						SpLow:    st,
+						SpHigh:   st,
+					},
+					SpidxDate{
+						TenantID: tenantID,
+						ResType:  resType,
+						ResID:    resID,
+						SpName:   "billable-period-start",
+						SpLow:    st,
+						SpHigh:   st,
+					},
+				)
+			}
+		}
+	}
+
+	itemFD := md.Fields().ByName("item")
+	if itemFD == nil || !msg.Has(itemFD) || !itemFD.IsList() || itemFD.Kind() != protoreflect.MessageKind {
+		return
+	}
+	items := msg.Get(itemFD).List()
+	for i := 0; i < items.Len(); i++ {
+		itemMsg := items.Get(i).Message()
+		if !itemMsg.IsValid() {
+			continue
+		}
+		servFD := itemMsg.Descriptor().Fields().ByName("serviced")
+		if servFD == nil || !itemMsg.Has(servFD) || servFD.Kind() != protoreflect.MessageKind {
+			continue
+		}
+		servMsg := itemMsg.Get(servFD).Message()
+		if !servMsg.IsValid() {
+			continue
+		}
+		if dFD := servMsg.Descriptor().Fields().ByName("date"); dFD != nil && servMsg.Has(dFD) && dFD.Kind() == protoreflect.MessageKind {
+			if dt, ok := extractTemporalTime(servMsg.Get(dFD).Message()); ok {
+				idx.Dates = append(idx.Dates,
+					SpidxDate{
+						TenantID: tenantID,
+						ResType:  resType,
+						ResID:    resID,
+						SpName:   "service-date",
+						SpLow:    dt,
+						SpHigh:   dt,
+					},
+					SpidxDate{
+						TenantID: tenantID,
+						ResType:  resType,
+						ResID:    resID,
+						SpName:   "service-start-date",
+						SpLow:    dt,
+						SpHigh:   dt,
+					},
+				)
+			}
+		}
+		if pFD := servMsg.Descriptor().Fields().ByName("period"); pFD != nil && servMsg.Has(pFD) && pFD.Kind() == protoreflect.MessageKind {
+			pMsg := servMsg.Get(pFD).Message()
+			if startT, endT, ok := extractPeriodTimes(pMsg); ok {
+				idx.Dates = append(idx.Dates, SpidxDate{
+					TenantID: tenantID,
+					ResType:  resType,
+					ResID:    resID,
+					SpName:   "service-date",
+					SpLow:    startT,
+					SpHigh:   endT,
+				})
+			}
+			if sFD := pMsg.Descriptor().Fields().ByName("start"); sFD != nil && pMsg.Has(sFD) && sFD.Kind() == protoreflect.MessageKind {
+				if st, ok := extractTemporalTime(pMsg.Get(sFD).Message()); ok {
+					idx.Dates = append(idx.Dates, SpidxDate{
+						TenantID: tenantID,
+						ResType:  resType,
+						ResID:    resID,
+						SpName:   "service-start-date",
+						SpLow:    st,
+						SpHigh:   st,
+					})
+				}
+			}
+		}
+	}
+}
+
 func mapEnumSpNames(fieldName, parentField string) []string {
 	base := fieldName
 	if parentField != "" && (fieldName == "status" || fieldName == "code") {
@@ -994,6 +1109,12 @@ func mapCodeableConceptSpNames(resType, fieldName, parentField string) []string 
 }
 
 func mapReferenceSpNames(resType, fieldName, parentField string) []string {
+	if parentField == "payee" && fieldName == "party" {
+		return []string{"payee"}
+	}
+	if parentField == "care_team" && fieldName == "provider" {
+		return []string{"care-team"}
+	}
 	effective := fieldName
 	if fieldName == "reference" && parentField != "" {
 		effective = parentField

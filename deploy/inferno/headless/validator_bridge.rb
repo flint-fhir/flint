@@ -114,6 +114,7 @@ server.mount_proc '/igs' do |_req, res|
     'id' => 'hl7.fhir.us.core',
     'version' => '8.0.0',
     'igs' => [
+      'hl7.fhir.us.core#3.1.1',
       'hl7.fhir.us.core#6.1.0',
       'hl7.fhir.us.core#7.0.0',
       'hl7.fhir.us.core#8.0.0',
@@ -121,7 +122,12 @@ server.mount_proc '/igs' do |_req, res|
       'hl7.fhir.uv.ips#1.1.0',
       'hl7.fhir.uv.subscriptions-backport#1.1.0',
       'hl7.fhir.us.davinci-pdex-plan-net#1.1.0',
-      'hl7.fhir.us.davinci-drug-formulary#2.0.1'
+      'hl7.fhir.us.davinci-drug-formulary#2.0.1',
+      'hl7.fhir.us.carin-bb#2.0.0',
+      'hl7.fhir.us.davinci-pdex#2.0.0',
+      'hl7.fhir.us.davinci-hrex#1.0.0',
+      'hl7.fhir.us.davinci-pas#2.0.1',
+      'hl7.fhir.us.davinci-pas#2.2.1'
     ],
     'profiles' => {}
   })

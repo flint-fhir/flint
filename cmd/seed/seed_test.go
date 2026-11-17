@@ -292,21 +292,37 @@ func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
 	adiObsOutcome := engine.ValidateJSONWithProfiles("Observation", adiObsBytes, []string{"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-adi-documentation|8.0.0"}, "")
 	assert.True(t, adiObsOutcome.IsValid(), "Observation ADI Documentation v8.0.0 validation failed: %+v", adiObsOutcome.Issues)
 
-	// 8. Seed Da Vinci Plan-Net (plannet) & US Drug Formulary (formulary) cohorts and validate every resource
-	require.NoError(t, Run(t.Context(), Config{
-		BaseURL:    ts.URL,
-		Tenant:     "plannet",
-		Suite:      "plannet",
-		HTTPClient: ts.Client(),
-		Out:        io.Discard,
-	}))
-	require.NoError(t, Run(t.Context(), Config{
-		BaseURL:    ts.URL,
-		Tenant:     "formulary",
-		Suite:      "formulary",
-		HTTPClient: ts.Client(),
-		Out:        io.Discard,
-	}))
+	// 8. Seed Da Vinci Plan-Net (plannet), US Drug Formulary (formulary), CARIN Blue Button (c4bb),
+	// Da Vinci PDex (pdex), & Da Vinci PAS (pas) cohorts and validate every resource
+	for _, suiteName := range []string{"plannet", "formulary", "c4bb", "pdex", "pas"} {
+		require.NoError(t, Run(t.Context(), Config{
+			BaseURL:    ts.URL,
+			Tenant:     suiteName,
+			Suite:      suiteName,
+			HTTPClient: ts.Client(),
+			Out:        io.Discard,
+		}), "seed suite %s failed under strict referential integrity", suiteName)
+	}
+	for _, fn := range []func() ([]byte, error){
+		C4BBTransactionBundleJSON,
+		PDexTransactionBundleJSON,
+		PASTransactionBundleJSON,
+	} {
+		rawBundle, err := fn()
+		require.NoError(t, err)
+		var parsed struct {
+			Entry []struct {
+				FullURL  string          `json:"fullUrl"`
+				Resource json.RawMessage `json:"resource"`
+			} `json:"entry"`
+		}
+		require.NoError(t, json.Unmarshal(rawBundle, &parsed))
+		require.NotEmpty(t, parsed.Entry)
+		for _, entry := range parsed.Entry {
+			out := engine.ValidateJSON("", entry.Resource)
+			assert.True(t, out.IsValid(), "Track 7 seed resource %s failed FHIR R4 + profile validation: %+v", entry.FullURL, out.Issues)
+		}
+	}
 	badErr := Run(t.Context(), Config{
 		BaseURL:    ts.URL,
 		Tenant:     "demo",

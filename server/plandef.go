@@ -5383,13 +5383,20 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 	identifierParam := strings.TrimSpace(q.Get("identifier"))
 
 	var inlineClaim map[string]any
+	var pasInqBundle map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
 		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
-			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Claim"); err == nil && bodyMap != nil {
+			bodyMap, decErr := s.decodeOperationBodyMap(r, rawBody, "Claim")
+			if decErr != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed payload in Claim/$inquire: %v", decErr))
+				return
+			}
+			if bodyMap != nil {
 				switch bodyMap["resourceType"] {
 				case "Claim":
 					inlineClaim = bodyMap
 				case "Bundle":
+					pasInqBundle = bodyMap
 					if entries, ok := bodyMap["entry"].([]any); ok {
 						for _, rawE := range entries {
 							if em, ok := rawE.(map[string]any); ok {
@@ -5414,6 +5421,7 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 									if res["resourceType"] == "Claim" {
 										inlineClaim = res
 									} else if res["resourceType"] == "Bundle" {
+										pasInqBundle = res
 										if entries, ok := res["entry"].([]any); ok {
 											for _, rawE := range entries {
 												if em, ok := rawE.(map[string]any); ok {
@@ -5445,6 +5453,26 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+		}
+	}
+
+	if pasInqBundle != nil {
+		bType, _ := pasInqBundle["type"].(string)
+		if bType != "collection" || inlineClaim == nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				"PAS Claim/$inquire requires a collection Bundle containing a Claim entry")
+			return
+		}
+		patMap, _ := inlineClaim["patient"].(map[string]any)
+		provMap, _ := inlineClaim["provider"].(map[string]any)
+		insMap, _ := inlineClaim["insurer"].(map[string]any)
+		patRef, _ := patMap["reference"].(string)
+		provRef, _ := provMap["reference"].(string)
+		insRef, _ := insMap["reference"].(string)
+		if strings.TrimSpace(patRef) == "" || strings.TrimSpace(provRef) == "" || strings.TrimSpace(insRef) == "" {
+			writeOperationOutcome(w, http.StatusBadRequest, "required",
+				"PAS Claim/$inquire Claim must include patient, provider, and insurer references")
+			return
 		}
 	}
 
@@ -5481,6 +5509,26 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token cannot invoke Claim/$inquire outside own patient compartment")
 			return
 		}
+	}
+
+	if pasInqBundle != nil && inlineClaim != nil {
+		respBundle, _, _, _, _, _ := s.buildPASResponseBundle(tenant, "inquire", pasInqBundle, inlineClaim, claimID, "", "")
+		_, bundleVer := resourceDeclaresProfilePrefix(pasInqBundle, pasInquiryRequestBundleProfileURL)
+		_, claimVer := resourceDeclaresProfilePrefix(inlineClaim, "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim-inquiry")
+		if bundleVer == "2.0.1" || claimVer == "2.0.1" {
+			s.writeOperationResponse(w, r, http.StatusOK, "Bundle", respBundle)
+			return
+		}
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []any{
+				map[string]any{
+					"name":     "return",
+					"resource": respBundle,
+				},
+			},
+		})
+		return
 	}
 
 	var matchedResponses []map[string]any
@@ -5621,7 +5669,6 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 		"id":           "pas-inquiry-response-" + firstNonEmptyStr(claimID, preAuthRef, "bundle"),
 		"type":         "collection",
 		"timestamp":    time.Now().UTC().Format(time.RFC3339),
-		"total":        len(entries),
 		"entry":        entries,
 	})
 }

@@ -41,6 +41,7 @@ ENV['FHIR_RESOURCE_VALIDATOR_URL'] ||= 'http://127.0.0.1:14568'
 
 FileUtils.mkdir_p(File.join(__dir__, 'data'))
 $LOAD_PATH.unshift(File.join(__dir__, 'lib')) unless $LOAD_PATH.include?(File.join(__dir__, 'lib'))
+require 'pas_payloads'
 
 require 'inferno'
 Inferno::Application.finalize!
@@ -425,19 +426,21 @@ def drive_waiting_subscription_flow!(
     sleep 0.15
   end
 
-  puts "    [Subscriptions R5 Backport] Triggering Encounter admission event for Subscription/#{sub_id} ..."
-  trigger_subscription_encounter_event!(
-    flint_fhir_url: flint_fhir_url,
-    patient_id: patient_id,
-    bearer_token: bearer_token
-  )
+  unless waiting_result.test_id.to_s.include?('pas_server')
+    puts "    [Subscriptions R5 Backport] Triggering Encounter admission event for Subscription/#{sub_id} ..."
+    trigger_subscription_encounter_event!(
+      flint_fhir_url: flint_fhir_url,
+      patient_id: patient_id,
+      bearer_token: bearer_token
+    )
 
-  ev_deadline = Time.now + 8.0
-  until Time.now > ev_deadline
-    ev = requests_repo.tagged_requests(test_session_id, ['event-notification', sub_id])
-    break unless Array(ev).empty?
+    ev_deadline = Time.now + 8.0
+    until Time.now > ev_deadline
+      ev = requests_repo.tagged_requests(test_session_id, ['event-notification', sub_id])
+      break unless Array(ev).empty?
 
-    sleep 0.15
+      sleep 0.15
+    end
   end
 
   puts "    [Subscriptions R5 Backport] Confirming notification delivery for #{waiting_result.test_id}"
@@ -556,6 +559,15 @@ def drive_waiting_smart_flow!(
       unless [200, 302, 303].include?(rack_resp.status)
         raise "Inferno redirect resume route failed (HTTP #{rack_resp.status}): #{rack_resp.body}"
       end
+    elsif waiting_result.test_id.to_s.include?('subscription_notification_wait')
+      puts "    [PAS Pended Notification] Waiting for async PASSubscriptionTopic rest-hook webhook to resume #{waiting_result.test_id} ..."
+      pas_deadline = Time.now + 30.0
+      while runs_repo.status_for_test_run(test_run_id).to_s == 'waiting' && Time.now <= pas_deadline
+        sleep 0.15
+      end
+      if runs_repo.status_for_test_run(test_run_id).to_s == 'waiting'
+        raise "Timed out waiting for async PAS pended rest-hook notification on #{waiting_result.test_id}"
+      end
     else
       raise "Unhandled Inferno waiting state on test #{waiting_result.test_id} (outputs: #{outputs.keys.join(', ')})"
     end
@@ -648,10 +660,19 @@ def execute_inferno_target(
     available_list = available.is_a?(Hash) ? available.values : Array(available)
     puts "\n>>> Preparing #{label} [#{idx + 1}/#{target_runnables.size}] (#{runnable.id}) [inputs: #{available_list.map { |ri| "#{ri.name}:#{ri.type}" }.join(', ')}]"
 
-    if populate_defaults && idx.zero?
+    if populate_defaults
       available_list.each do |ri|
         next if ri.respond_to?(:locked) && ri.locked
         next unless ri.respond_to?(:default) && !ri.default.nil? && !ri.default.to_s.empty?
+
+        if idx.positive?
+          existing = begin
+            data_repo.load(test_session_id: test_session.id, name: ri.name)
+          rescue StandardError
+            nil
+          end
+          next unless existing.nil? || existing.to_s.strip.empty?
+        end
 
         data_repo.save(
           test_session_id: test_session.id,
@@ -1090,6 +1111,113 @@ if usdf_suite && ENV['INFERNO_SKIP_USDF'] != 'true'
       url: formulary_fhir_url,
       smart_auth_info: us_core_auth_json,
       input_ids: 'loc-usdf-001'
+    }
+  )
+end
+
+c4bb_suite = Inferno::Repositories::TestSuites.new.find('c4bb_v200')
+if c4bb_suite && ENV['INFERNO_SKIP_C4BB'] != 'true'
+  c4bb_tenant = ENV.fetch('FLINT_C4BB_TENANT', 'c4bb')
+  c4bb_fhir_url = "#{flint_base_url}/fhir/r4/#{c4bb_tenant}"
+  c4bb_runnables = Array(c4bb_suite.groups).reject do |g|
+    g.id.to_s.include?('visual_inspection_and_attestation')
+  end
+  c4bb_auth_json = JSON.generate({
+    auth_type: 'public',
+    use_discovery: 'true',
+    auth_request_method: 'GET',
+    pkce_support: 'enabled',
+    pkce_code_challenge_method: 'S256',
+    client_id: 'inferno-c4bb-public',
+    requested_scopes: [
+      'openid fhirUser offline_access launch/patient',
+      'patient/ExplanationOfBenefit.read patient/Coverage.read patient/Patient.read',
+      'patient/Organization.read patient/Practitioner.read patient/RelatedPerson.read',
+      'patient/PractitionerRole.read patient/Location.read',
+      'user/ExplanationOfBenefit.read user/Coverage.read user/Patient.read',
+      'user/Organization.read user/Practitioner.read user/RelatedPerson.read',
+      'user/PractitionerRole.read user/Location.read'
+    ].join(' ')
+  })
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    flint_fhir_url: c4bb_fhir_url,
+    flint_tenant: c4bb_tenant,
+    label: 'c4bb_v200',
+    suite_id: 'c4bb_v200',
+    runnables: c4bb_runnables,
+    inputs: {
+      url: c4bb_fhir_url,
+      smart_auth_info: c4bb_auth_json,
+      patient_ids: 'pat-alice-001'
+    }
+  )
+end
+
+pdex_suite = Inferno::Repositories::TestSuites.new.find('pdex_payer_server')
+if pdex_suite && ENV['INFERNO_SKIP_PDEX'] != 'true'
+  pdex_tenant = ENV.fetch('FLINT_PDEX_TENANT', 'pdex')
+  pdex_fhir_url = "#{flint_base_url}/fhir/r4/#{pdex_tenant}"
+  pdex_runnables = Array(pdex_suite.groups).reject do |g|
+    g.id.to_s.include?('visual_inspection_and_attestation')
+  end
+  pdex_bulk_auth_json = JSON.generate({
+    auth_type: 'backend_services',
+    access_token: access_token
+  })
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    flint_fhir_url: pdex_fhir_url,
+    flint_tenant: pdex_tenant,
+    label: 'davinci_pdex_v200',
+    suite_id: 'pdex_payer_server',
+    runnables: pdex_runnables,
+    populate_defaults: true,
+    inputs: {
+      url: pdex_fhir_url,
+      smart_auth_info: us_core_auth_json,
+      bulk_server_url: pdex_fhir_url,
+      bulk_auth_info: pdex_bulk_auth_json,
+      bulk_timeout: '60',
+      patient_id: 'pat-alice-001',
+      patient_ids: 'pat-alice-001',
+      implantable_device_codes: '14106009',
+      **FlintTrack7Payloads.pdex_member_match_payloads
+    }
+  )
+end
+
+pas_suite = Inferno::Repositories::TestSuites.new.find('davinci_pas_server_suite_v221')
+if pas_suite && ENV['INFERNO_SKIP_PAS'] != 'true'
+  pas_tenant = ENV.fetch('FLINT_PAS_TENANT', 'pas')
+  pas_fhir_url = "#{flint_base_url}/fhir/r4/#{pas_tenant}"
+  pas_notify_token = 'flint-pas-notify-token'
+  pas_notify_endpoint = "#{Inferno::Application['base_url']}/custom/subscriptions_r5_backport_r4_server/subscription/channel/notification_listener"
+  pas_auth_json = JSON.generate({
+    auth_type: 'backend_services',
+    access_token: access_token
+  })
+  pas_runnables = Array(pas_suite.groups).flat_map do |g|
+    g.title.to_s.include?('Scenario Support') ? Array(g.groups) : [g]
+  end
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    flint_fhir_url: pas_fhir_url,
+    flint_tenant: pas_tenant,
+    label: 'davinci_pas_v221',
+    suite_id: 'davinci_pas_server_suite_v221',
+    runnables: pas_runnables,
+    inputs: {
+      server_endpoint: pas_fhir_url,
+      smart_credentials: pas_auth_json,
+      access_token: pas_notify_token,
+      **FlintTrack7Payloads.pas_v221_inputs(
+        notify_endpoint: pas_notify_endpoint,
+        notify_token: pas_notify_token
+      )
     }
   )
 end
