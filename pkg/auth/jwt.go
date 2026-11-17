@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -32,11 +33,12 @@ var (
 
 // JWTHeader holds common JWT JOSE header fields.
 type JWTHeader struct {
-	Alg string `json:"alg"`
-	Kid string `json:"kid,omitempty"`
-	Typ string `json:"typ,omitempty"`
-	Jku string `json:"jku,omitempty"`
-	Jwk *JWK   `json:"jwk,omitempty"`
+	Alg string   `json:"alg"`
+	Kid string   `json:"kid,omitempty"`
+	Typ string   `json:"typ,omitempty"`
+	Jku string   `json:"jku,omitempty"`
+	Jwk *JWK     `json:"jwk,omitempty"`
+	X5c []string `json:"x5c,omitempty"`
 }
 
 // JWTPayload holds standard OIDC / SMART claims.
@@ -371,4 +373,59 @@ func (set *JWKSet) FindKey(kid string) (*JWK, error) {
 func decodeBase64URL(s string) ([]byte, error) {
 	// Support unpadded or padded base64url
 	return base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))
+}
+
+// SignRS256WithX5C creates a compact RS256 JWS string carrying an RFC 7515 §4.1.6 x5c certificate chain header.
+func SignRS256WithX5C(payload map[string]any, priv *rsa.PrivateKey, x5c []string) (string, error) {
+	if priv == nil {
+		return "", errors.New("nil RSA private key")
+	}
+	hdr := map[string]any{
+		"alg": "RS256",
+		"x5c": x5c,
+	}
+	hdrJSON, err := json.Marshal(hdr)
+	if err != nil {
+		return "", err
+	}
+	payJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	signingInput := base64.RawURLEncoding.EncodeToString(hdrJSON) + "." + base64.RawURLEncoding.EncodeToString(payJSON)
+	digest := sha256.Sum256([]byte(signingInput))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA256, digest[:])
+	if err != nil {
+		return "", err
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// SignRS384 creates a compact RS384 JWS string (used by HL7 CDS Hooks 2.0 & SMART Backend Services).
+func SignRS384(payload map[string]any, priv *rsa.PrivateKey, kid string) (string, error) {
+	if priv == nil {
+		return "", errors.New("nil RSA private key")
+	}
+	hdr := map[string]any{
+		"alg": "RS384",
+		"typ": "JWT",
+	}
+	if strings.TrimSpace(kid) != "" {
+		hdr["kid"] = strings.TrimSpace(kid)
+	}
+	hdrJSON, err := json.Marshal(hdr)
+	if err != nil {
+		return "", err
+	}
+	payJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	signingInput := base64.RawURLEncoding.EncodeToString(hdrJSON) + "." + base64.RawURLEncoding.EncodeToString(payJSON)
+	digest := sha512.Sum384([]byte(signingInput))
+	sig, err := rsa.SignPKCS1v15(rand.Reader, priv, crypto.SHA384, digest[:])
+	if err != nil {
+		return "", err
+	}
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig), nil
 }

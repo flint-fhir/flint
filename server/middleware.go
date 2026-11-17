@@ -1477,7 +1477,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Claim") && (parts[4] == "$inquire" || parts[4] == "$predetermine" || parts[4] == "$gfe-submit" || parts[4] == "$rtpbc-submit" || parts[4] == "$pas-inquire") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Questionnaire") && (parts[4] == "$package" || parts[4] == "$dtr-questionnaire-package") {
+		if strings.EqualFold(parts[3], "Questionnaire") && (parts[4] == "$package" || parts[4] == "$dtr-questionnaire-package" || parts[4] == "$questionnaire-package" || parts[4] == "$next-question" || parts[4] == "$log-questionnaire-errors") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "List") && parts[4] == "$find" {
@@ -1645,7 +1645,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Claim") && (parts[5] == "$inquire" || parts[5] == "$predetermine" || parts[5] == "$rtpbc-submit" || parts[5] == "$pas-inquire") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Questionnaire") && (parts[5] == "$package" || parts[5] == "$dtr-questionnaire-package") {
+		if strings.EqualFold(parts[3], "Questionnaire") && (parts[5] == "$package" || parts[5] == "$dtr-questionnaire-package" || parts[5] == "$questionnaire-package" || parts[5] == "$next-question" || parts[5] == "$log-questionnaire-errors") {
 			return true
 		}
 		if parts[5] == "$fhirpath" {

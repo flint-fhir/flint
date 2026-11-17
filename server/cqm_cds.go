@@ -1386,53 +1386,55 @@ func (s *Server) handleCDSServicesDiscovery(w http.ResponseWriter, _ *http.Reque
 	dmDSI, _ := buildDSISourceAttributes("flint-diabetes-a1c-care-gap")
 	allergyDSI, _ := buildDSISourceAttributes("flint-medication-allergy-check")
 
-	resp := map[string]any{
-		"services": []map[string]any{
-			{
-				"hook":        "patient-view",
-				"id":          "flint-hypertension-care-gap",
-				"title":       "CMS165 Controlling High Blood Pressure Care Gap Advisor",
-				"description": "Evaluates essential hypertension control (< 140/90 mmHg) and recommends follow-up blood pressure monitoring when uncontrolled or overdue.",
-				"prefetch": map[string]any{
-					"patient":      "Patient/{{context.patientId}}",
-					"conditions":   "Condition?patient={{context.patientId}}",
-					"observations": "Observation?patient={{context.patientId}}",
-				},
-				"dsiSourceAttributes": htnDSI,
-				"extension": map[string]any{
-					"onc-hti1-dsi-source-attributes": htnDSI,
-				},
+	services := []map[string]any{
+		{
+			"hook":        "patient-view",
+			"id":          "flint-hypertension-care-gap",
+			"title":       "CMS165 Controlling High Blood Pressure Care Gap Advisor",
+			"description": "Evaluates essential hypertension control (< 140/90 mmHg) and recommends follow-up blood pressure monitoring when uncontrolled or overdue.",
+			"prefetch": map[string]any{
+				"patient":      "Patient/{{context.patientId}}",
+				"conditions":   "Condition?patient={{context.patientId}}",
+				"observations": "Observation?patient={{context.patientId}}",
 			},
-			{
-				"hook":        "patient-view",
-				"id":          "flint-diabetes-a1c-care-gap",
-				"title":       "CMS122 Diabetes HbA1c Control Care Gap Advisor",
-				"description": "Identifies patients with diabetes whose Hemoglobin A1c is elevated (> 9.0%) or overdue and suggests a LOINC 4548-4 HbA1c order.",
-				"prefetch": map[string]any{
-					"patient":      "Patient/{{context.patientId}}",
-					"conditions":   "Condition?patient={{context.patientId}}",
-					"observations": "Observation?patient={{context.patientId}}",
-				},
-				"dsiSourceAttributes": dmDSI,
-				"extension": map[string]any{
-					"onc-hti1-dsi-source-attributes": dmDSI,
-				},
-			},
-			{
-				"hook":        "order-select",
-				"id":          "flint-medication-allergy-check",
-				"title":       "Medication-Allergy Contraindication Safety Check",
-				"description": "Screens draft MedicationRequest orders against active patient AllergyIntolerance records.",
-				"prefetch": map[string]any{
-					"patient":   "Patient/{{context.patientId}}",
-					"allergies": "AllergyIntolerance?patient={{context.patientId}}",
-				},
-				"dsiSourceAttributes": allergyDSI,
-				"extension": map[string]any{
-					"onc-hti1-dsi-source-attributes": allergyDSI,
-				},
+			"dsiSourceAttributes": htnDSI,
+			"extension": map[string]any{
+				"onc-hti1-dsi-source-attributes": htnDSI,
 			},
 		},
+		{
+			"hook":        "patient-view",
+			"id":          "flint-diabetes-a1c-care-gap",
+			"title":       "CMS122 Diabetes HbA1c Control Care Gap Advisor",
+			"description": "Identifies patients with diabetes whose Hemoglobin A1c is elevated (> 9.0%) or overdue and suggests a LOINC 4548-4 HbA1c order.",
+			"prefetch": map[string]any{
+				"patient":      "Patient/{{context.patientId}}",
+				"conditions":   "Condition?patient={{context.patientId}}",
+				"observations": "Observation?patient={{context.patientId}}",
+			},
+			"dsiSourceAttributes": dmDSI,
+			"extension": map[string]any{
+				"onc-hti1-dsi-source-attributes": dmDSI,
+			},
+		},
+		{
+			"hook":        "order-select",
+			"id":          "flint-medication-allergy-check",
+			"title":       "Medication-Allergy Contraindication Safety Check",
+			"description": "Screens draft MedicationRequest orders against active patient AllergyIntolerance records.",
+			"prefetch": map[string]any{
+				"patient":   "Patient/{{context.patientId}}",
+				"allergies": "AllergyIntolerance?patient={{context.patientId}}",
+			},
+			"dsiSourceAttributes": allergyDSI,
+			"extension": map[string]any{
+				"onc-hti1-dsi-source-attributes": allergyDSI,
+			},
+		},
+	}
+	services = append(services, buildCRDServiceDefinitions()...)
+	resp := map[string]any{
+		"services": services,
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -1449,8 +1451,10 @@ func (s *Server) handleCDSServiceInvoke(w http.ResponseWriter, r *http.Request) 
 	switch serviceID {
 	case "flint-hypertension-care-gap", "flint-diabetes-a1c-care-gap", "flint-medication-allergy-check":
 	default:
-		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("CDS service %q not found", serviceID))
-		return
+		if !isCRDServiceID(serviceID) {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("CDS service %q not found", serviceID))
+			return
+		}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, 4<<20))
@@ -1501,6 +1505,11 @@ func (s *Server) handleCDSServiceInvoke(w http.ResponseWriter, r *http.Request) 
 			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token cannot invoke CDS Hooks for another patient")
 			return
 		}
+	}
+
+	if isCRDServiceID(serviceID) {
+		s.handleCRDServiceInvoke(w, r, serviceID, tenant, req, ctxMap)
+		return
 	}
 
 	// Hydrate clinical snapshot from operational store and merge any inline prefetch resources

@@ -309,9 +309,9 @@ func (s *Server) verifyCDSClientJWT(r *http.Request, rawToken string) (string, e
 	}
 
 	switch parsed.Header.Alg {
-	case "ES256", "ES384", "RS256":
+	case "ES256", "ES384", "RS256", "RS384":
 	default:
-		return "", fmt.Errorf("%w: CDS Hooks 2.0 requires ES256, ES384, or RS256 (got %q)", auth.ErrUnsupportedAlg, parsed.Header.Alg)
+		return "", fmt.Errorf("%w: CDS Hooks 2.0 requires ES256, ES384, RS256, or RS384 (got %q)", auth.ErrUnsupportedAlg, parsed.Header.Alg)
 	}
 
 	if parsed.Header.Jwk != nil {
@@ -432,10 +432,10 @@ func (s *Server) resolveCDSClientSigningKey(ctx context.Context, parsed *auth.Pa
 	if err != nil {
 		return nil, err
 	}
-	if parsed.Header.Alg == "RS256" {
+	if parsed.Header.Alg == "RS256" || parsed.Header.Alg == "RS384" {
 		rsaPub, ok := pubKey.(*rsa.PublicKey)
 		if !ok || rsaPub.N.BitLen() < 2048 {
-			return nil, fmt.Errorf("%w: RS256 CDS Hooks key must be >= 2048 bits", auth.ErrUnsupportedKeyType)
+			return nil, fmt.Errorf("%w: %s CDS Hooks key must be >= 2048 bits", auth.ErrUnsupportedKeyType, parsed.Header.Alg)
 		}
 	}
 	return pubKey, nil

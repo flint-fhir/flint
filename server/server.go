@@ -13,6 +13,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -112,6 +114,14 @@ type Server struct {
 	cdsJKUCache                map[string]cdsJKUCacheEntry
 	cdsJTIReplay               map[string]time.Time
 	cdsHTTPClient              *http.Client
+	udapMu                     sync.RWMutex
+	udapRootCert               *x509.Certificate
+	udapRootKey                *rsa.PrivateKey
+	udapRootPEM                []byte
+	udapTrustAnchors           []*x509.Certificate
+	udapServerCerts            map[string]udapServerLeaf
+	udapClients                map[string]udapClientEntry
+	udapClientsByISS           map[string]string
 	referentialIntegrity       atomic.Int32
 	igMu                       sync.RWMutex
 	igState                    *igRegistryState
@@ -149,31 +159,34 @@ func New(st store.Store, logger *slog.Logger) *Server {
 	valEngine.SetFHIRPathEvaluator(evalFHIRPath)
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	srv := &Server{
-		primaryStore:    st,
-		store:           st,
-		analyticalStore: analytical,
-		logger:          logger,
-		protoRegistry:   make(map[string]protoreflect.MessageDescriptor),
-		extractors:      store.DefaultIndexExtractors(),
-		devAuth:         devAuth,
-		oauthCodes:      make(map[string]authCodeEntry),
-		refreshTokens:   make(map[string]refreshTokenEntry),
-		revokedTokens:   make(map[string]time.Time),
-		clientJWKs:      make(map[string]auth.JWK),
-		clientJWKSets:   make(map[string]auth.JWKSet),
-		clientSecrets:   make(map[string]string),
-		launchContexts:  make(map[string]launchContextEntry),
-		cdsClientJWKS:   make(map[string]auth.JWKSet),
-		cdsJKUCache:     make(map[string]cdsJKUCacheEntry),
-		cdsJTIReplay:    make(map[string]time.Time),
-		validator:       valEngine,
-		auditRecorder:   auditRec,
-		exportJobs:      make(map[string]*exportJob),
-		subSem:          make(chan struct{}, 32),
-		subWSHub:        newSubscriptionWSHub(),
-		metrics:         newServerMetrics(),
-		bgCtx:           bgCtx,
-		bgCancel:        bgCancel,
+		primaryStore:     st,
+		store:            st,
+		analyticalStore:  analytical,
+		logger:           logger,
+		protoRegistry:    make(map[string]protoreflect.MessageDescriptor),
+		extractors:       store.DefaultIndexExtractors(),
+		devAuth:          devAuth,
+		oauthCodes:       make(map[string]authCodeEntry),
+		refreshTokens:    make(map[string]refreshTokenEntry),
+		revokedTokens:    make(map[string]time.Time),
+		clientJWKs:       make(map[string]auth.JWK),
+		clientJWKSets:    make(map[string]auth.JWKSet),
+		clientSecrets:    make(map[string]string),
+		launchContexts:   make(map[string]launchContextEntry),
+		cdsClientJWKS:    make(map[string]auth.JWKSet),
+		cdsJKUCache:      make(map[string]cdsJKUCacheEntry),
+		cdsJTIReplay:     make(map[string]time.Time),
+		udapServerCerts:  make(map[string]udapServerLeaf),
+		udapClients:      make(map[string]udapClientEntry),
+		udapClientsByISS: make(map[string]string),
+		validator:        valEngine,
+		auditRecorder:    auditRec,
+		exportJobs:       make(map[string]*exportJob),
+		subSem:           make(chan struct{}, 32),
+		subWSHub:         newSubscriptionWSHub(),
+		metrics:          newServerMetrics(),
+		bgCtx:            bgCtx,
+		bgCancel:         bgCancel,
 	}
 	valEngine.SetValueSetValidator(srv.validateCodeAgainstKnownValueSet)
 	return srv
@@ -416,6 +429,9 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /oauth2/introspect", s.handleOAuthIntrospect)
 	mux.HandleFunc("POST /oauth2/revoke", s.handleOAuthRevoke)
 	mux.HandleFunc("POST /oauth2/register", s.handleOAuthRegister)
+	mux.HandleFunc("GET /oauth2/udap-ca.pem", s.handleUDAPRootCA)
+	mux.HandleFunc("GET /oauth2/udap.crl", s.handleUDAPCRL)
+	mux.HandleFunc("POST /oauth2/udap-trust-anchor", s.handleUDAPTrustAnchorRegister)
 	mux.HandleFunc("GET /oauth2/smart-style.json", s.handleSMARTStyle)
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCConfig)
@@ -710,6 +726,21 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$package" {
 					r.SetPathValue("tenant", parts[2])
 					s.handleQuestionnairePackage(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$questionnaire-package" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDTRQuestionnairePackageOp(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$next-question" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDTRNextQuestion(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$log-questionnaire-errors" {
+					r.SetPathValue("tenant", parts[2])
+					s.handleDTRLogQuestionnaireErrors(w, r)
 					return
 				}
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "QuestionnaireResponse") && parts[4] == "$extract" {
@@ -2718,6 +2749,24 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handleQuestionnairePackage(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Questionnaire") && parts[5] == "$questionnaire-package" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDTRQuestionnairePackageOp(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Questionnaire") && parts[5] == "$next-question" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDTRNextQuestion(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Questionnaire") && parts[5] == "$log-questionnaire-errors" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handleDTRLogQuestionnaireErrors(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "Claim") && parts[5] == "$inquire" {
@@ -7282,6 +7331,18 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"definition": "http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/questionnaire-package",
 				},
 				{
+					"name":       "questionnaire-package",
+					"definition": "http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/questionnaire-package",
+				},
+				{
+					"name":       "next-question",
+					"definition": "http://hl7.org/fhir/uv/sdc/OperationDefinition/Questionnaire-next-question",
+				},
+				{
+					"name":       "log-questionnaire-errors",
+					"definition": "http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/log-questionnaire-errors",
+				},
+				{
 					"name":       "dtr-questionnaire-package",
 					"definition": "http://hl7.org/fhir/us/davinci-dtr/OperationDefinition/Questionnaire-dtr-questionnaire-package",
 				},
@@ -7850,6 +7911,7 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			"http://hl7.org/fhir/us/carin-bb/CapabilityStatement/c4bb",
 			"http://hl7.org/fhir/us/davinci-pdex/CapabilityStatement/pdex-server",
 			"http://hl7.org/fhir/us/davinci-pas/CapabilityStatement/pas-server",
+			"http://hl7.org/fhir/us/davinci-dtr/CapabilityStatement/dtr-payer-service",
 		},
 		"format":      []string{"json", "application/fhir+json", "xml", "application/fhir+xml", "application/xml", "text/xml", "application/fhir+ndjson", "application/x-protobuf", "application/fhir+protobuf"},
 		"patchFormat": []string{"application/json-patch+json", "application/merge-patch+json", "application/fhir+json", "application/fhir+xml", "application/x-protobuf", "application/fhir+protobuf"},

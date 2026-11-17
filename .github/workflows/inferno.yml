@@ -11,7 +11,7 @@ on:
 
 jobs:
   inferno:
-    name: HL7 Inferno 15-Suite Matrix (ONC g10 + US Core + C4BB + PDex + PAS + Plan-Net + USDF + IPS + IPA + Subs + SMART + Bulk) [${{ matrix.store }}]
+    name: HL7 Inferno 20-Suite Matrix (ONC g10 + US Core + UDAP + CRD + DTR + PAS + PDex + C4BB + Plan-Net + USDF + IPS + IPA + Subs + SMART + Bulk) [${{ matrix.store }}]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -73,6 +73,7 @@ jobs:
           FLINT_ADDR: "127.0.0.1:18080"
           FLINT_SMART_ENFORCE_DEV_AUTH: "true"
           FLINT_SMART_REQUIRE_CLIENT_JWK: "true"
+          FLINT_CDS_HOOKS_JKU_ALLOWLIST: "http://127.0.0.1:14569/"
           FLINT_BASE_URL: "http://127.0.0.1:18080"
           FLINT_TENANT: "demo"
           INFERNO_ARTIFACTS_DIR: "${{ github.workspace }}/artifacts/inferno-${{ matrix.store }}"
