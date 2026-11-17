@@ -4,6 +4,9 @@
 # Inferno test suites (us_core_v610, us_core_v700, us_core_v800, ipa_v100,
 # smart_stu2, bulk_data_v200, g10_certification, subscriptions_r5_backport_r4_server)
 # register into Inferno::Repositories::TestSuites automatically.
+# DaVinciDTRTestKit::MockEHR reads ENV.fetch('FHIR_REFERENCE_SERVER') at gem load time.
+ENV['FHIR_REFERENCE_SERVER'] = ENV.fetch('FLINT_FHIR_URL', 'http://127.0.0.1:8080/fhir/r4/demo') if ENV['FHIR_REFERENCE_SERVER'].to_s.strip.empty?
+
 require 'us_core_test_kit'
 require 'ipa_test_kit'
 require 'smart_app_launch_test_kit'
