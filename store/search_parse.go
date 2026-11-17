@@ -430,10 +430,12 @@ func inferChainedTargetType(refParam string) string {
 		return "Encounter"
 	case "performer", "general-practitioner", "requester", "asserter", "recorder", "results-interpreter", "collector", "practitioner", "author", "agent", "individual", "participant":
 		return "Practitioner"
-	case "organization", "manufacturer", "intended-dispenser", "payor", "custodian", "service-provider",
+	case "organization", "manufacturer", "intended-dispenser", "payor", "insurer", "custodian", "service-provider",
 		"administered-by", "owned-by", "primary-organization", "participating-organization", "network":
 		return "Organization"
-	case "location", "coverage-area":
+	case "coverage":
+		return "Coverage"
+	case "location", "coverage-area", "facility":
 		return "Location"
 	case "endpoint":
 		return "Endpoint"
@@ -743,6 +745,8 @@ var (
 		"primary-organization": true, "participating-organization": true,
 		"service": true, "healthcare-service": true, "network": true,
 		"formulary": true, "formulary-coverage": true,
+		"provider": true, "insurer": true, "payee": true, "coverage": true,
+		"enterer": true, "facility": true, "claim": true, "request": true, "requestor": true,
 	}
 	knownDateSearchParams = map[string]bool{
 		"birthdate": true, "date": true, "onset-date": true,
@@ -750,7 +754,8 @@ var (
 		"collected": true, "period": true, "recorded": true, "created": true,
 		"indexed": true, "target-date": true, "start-date": true,
 		"occurrence": true, "whenhandedover": true, "whenprepared": true,
-		"value-date": true,
+		"value-date":   true,
+		"service-date": true, "service-start-date": true, "billable-period-start": true,
 	}
 	knownQuantitySearchParams = map[string]bool{
 		"value-quantity":           true,

@@ -1910,6 +1910,9 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 	resType := strings.TrimSpace(r.PathValue("resourceType"))
 	resID := strings.TrimSpace(r.PathValue("id"))
 	expr := strings.TrimSpace(r.URL.Query().Get("expression"))
+	if expr == "" {
+		expr = strings.TrimSpace(r.URL.Query().Get("path"))
+	}
 	evalMode := strings.TrimSpace(r.URL.Query().Get("mode"))
 	contextExpr := strings.TrimSpace(r.URL.Query().Get("context"))
 	contextType := strings.TrimSpace(r.URL.Query().Get("contextType"))
@@ -1937,7 +1940,7 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 				writeOperationOutcome(w, http.StatusBadRequest, "invalid", "invalid JSON body for $fhirpath")
 				return
 			}
-			if rt, _ := raw["resourceType"].(string); rt == "Parameters" {
+			if rt, _ := raw["resourceType"].(string); rt == "Parameters" && !strings.EqualFold(evalMode, "inferno") {
 				if params, ok := raw["parameter"].([]any); ok {
 					for _, p := range params {
 						pm, ok := p.(map[string]any)
@@ -2056,6 +2059,25 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if strings.EqualFold(evalMode, "inferno") {
+		typedVals, evalErr := EvalFHIRPathTypedWithContextExpr(targetMap, contextExpr, expr)
+		if evalErr != nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid", evalErr.Error())
+			return
+		}
+		infernoItems := make([]map[string]any, 0, len(typedVals))
+		for _, tv := range typedVals {
+			infernoItems = append(infernoItems, map[string]any{
+				"type":    inferInfernoFHIRDatatype(tv.FHIRType, tv.Value),
+				"element": tv.Value,
+			})
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(infernoItems)
+		return
+	}
+
 	results := evaluateFHIRPathOnResource(targetMap, expr)
 	paramEntries := []map[string]any{
 		{
@@ -2129,6 +2151,110 @@ func (s *Server) handleFHIRPath(w http.ResponseWriter, r *http.Request) {
 
 func evaluateFHIRPathOnResource(root map[string]any, expr string) []any {
 	return evalFHIRPath(root, expr)
+}
+
+func inferInfernoFHIRDatatype(ft string, val any) string {
+	if ft != "" {
+		return ft
+	}
+	switch v := val.(type) {
+	case bool:
+		return "boolean"
+	case int, int64:
+		return "integer"
+	case float64:
+		return "decimal"
+	case string:
+		return "string"
+	case map[string]any:
+		if rt, _ := v["resourceType"].(string); rt != "" {
+			return rt
+		}
+		if _, ok := v["reference"]; ok {
+			return "Reference"
+		}
+		if _, ok := v["coding"]; ok {
+			return "CodeableConcept"
+		}
+		if _, ok := v["family"]; ok {
+			return "HumanName"
+		}
+		if _, ok := v["given"]; ok {
+			return "HumanName"
+		}
+		if _, ok := v["line"]; ok {
+			return "Address"
+		}
+		if _, ok := v["city"]; ok {
+			return "Address"
+		}
+		if _, ok := v["postalCode"]; ok {
+			return "Address"
+		}
+		if _, hasVal := v["value"]; hasVal {
+			if _, ok := v["unit"]; ok {
+				return "Quantity"
+			}
+			if _, ok := v["comparator"]; ok {
+				return "Quantity"
+			}
+			if _, ok := v["currency"]; ok {
+				return "Money"
+			}
+			if sys, ok := v["system"].(string); ok {
+				switch sys {
+				case "phone", "fax", "email", "pager", "url", "sms", "other":
+					return "ContactPoint"
+				}
+				if _, okCode := v["code"]; okCode {
+					return "Quantity"
+				}
+				return "Identifier"
+			}
+			if _, ok := v["code"]; ok {
+				return "Quantity"
+			}
+		}
+		if _, ok := v["currency"]; ok {
+			return "Money"
+		}
+		if _, ok := v["start"]; ok {
+			return "Period"
+		}
+		if _, ok := v["end"]; ok {
+			return "Period"
+		}
+		if _, hasSys := v["system"]; hasSys {
+			if _, ok := v["code"]; ok {
+				return "Coding"
+			}
+		}
+		if _, ok := v["display"]; ok {
+			if _, okCode := v["code"]; okCode {
+				return "Coding"
+			}
+			return "Reference"
+		}
+		if _, ok := v["identifier"]; ok && len(v) <= 3 {
+			if _, hasStatus := v["status"]; !hasStatus {
+				return "Reference"
+			}
+		}
+		if _, ok := v["url"]; ok {
+			return "Extension"
+		}
+		if _, ok := v["contentType"]; ok {
+			return "Attachment"
+		}
+		if _, ok := v["versionId"]; ok {
+			return "Meta"
+		}
+		if _, ok := v["profile"]; ok {
+			return "Meta"
+		}
+		return "Element"
+	}
+	return "Element"
 }
 
 func isAllDigits(s string) bool {
@@ -5383,13 +5509,20 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 	identifierParam := strings.TrimSpace(q.Get("identifier"))
 
 	var inlineClaim map[string]any
+	var pasInqBundle map[string]any
 	if r.Method == http.MethodPost && r.Body != nil {
 		if rawBody, err := io.ReadAll(io.LimitReader(r.Body, 4<<20)); err == nil && len(rawBody) > 0 {
-			if bodyMap, err := s.decodeOperationBodyMap(r, rawBody, "Claim"); err == nil && bodyMap != nil {
+			bodyMap, decErr := s.decodeOperationBodyMap(r, rawBody, "Claim")
+			if decErr != nil {
+				writeOperationOutcome(w, http.StatusBadRequest, "structure", fmt.Sprintf("malformed payload in Claim/$inquire: %v", decErr))
+				return
+			}
+			if bodyMap != nil {
 				switch bodyMap["resourceType"] {
 				case "Claim":
 					inlineClaim = bodyMap
 				case "Bundle":
+					pasInqBundle = bodyMap
 					if entries, ok := bodyMap["entry"].([]any); ok {
 						for _, rawE := range entries {
 							if em, ok := rawE.(map[string]any); ok {
@@ -5414,6 +5547,7 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 									if res["resourceType"] == "Claim" {
 										inlineClaim = res
 									} else if res["resourceType"] == "Bundle" {
+										pasInqBundle = res
 										if entries, ok := res["entry"].([]any); ok {
 											for _, rawE := range entries {
 												if em, ok := rawE.(map[string]any); ok {
@@ -5445,6 +5579,26 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+		}
+	}
+
+	if pasInqBundle != nil {
+		bType, _ := pasInqBundle["type"].(string)
+		if bType != "collection" || inlineClaim == nil {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				"PAS Claim/$inquire requires a collection Bundle containing a Claim entry")
+			return
+		}
+		patMap, _ := inlineClaim["patient"].(map[string]any)
+		provMap, _ := inlineClaim["provider"].(map[string]any)
+		insMap, _ := inlineClaim["insurer"].(map[string]any)
+		patRef, _ := patMap["reference"].(string)
+		provRef, _ := provMap["reference"].(string)
+		insRef, _ := insMap["reference"].(string)
+		if strings.TrimSpace(patRef) == "" || strings.TrimSpace(provRef) == "" || strings.TrimSpace(insRef) == "" {
+			writeOperationOutcome(w, http.StatusBadRequest, "required",
+				"PAS Claim/$inquire Claim must include patient, provider, and insurer references")
+			return
 		}
 	}
 
@@ -5481,6 +5635,26 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token cannot invoke Claim/$inquire outside own patient compartment")
 			return
 		}
+	}
+
+	if pasInqBundle != nil && inlineClaim != nil {
+		respBundle, _, _, _, _, _ := s.buildPASResponseBundle(tenant, "inquire", pasInqBundle, inlineClaim, claimID, "", "")
+		_, bundleVer := resourceDeclaresProfilePrefix(pasInqBundle, pasInquiryRequestBundleProfileURL)
+		_, claimVer := resourceDeclaresProfilePrefix(inlineClaim, "http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-claim-inquiry")
+		if bundleVer == "2.0.1" || claimVer == "2.0.1" {
+			s.writeOperationResponse(w, r, http.StatusOK, "Bundle", respBundle)
+			return
+		}
+		s.writeOperationResponse(w, r, http.StatusOK, "Parameters", map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []any{
+				map[string]any{
+					"name":     "return",
+					"resource": respBundle,
+				},
+			},
+		})
+		return
 	}
 
 	var matchedResponses []map[string]any
@@ -5621,7 +5795,6 @@ func (s *Server) handleClaimInquire(w http.ResponseWriter, r *http.Request) {
 		"id":           "pas-inquiry-response-" + firstNonEmptyStr(claimID, preAuthRef, "bundle"),
 		"type":         "collection",
 		"timestamp":    time.Now().UTC().Format(time.RFC3339),
-		"total":        len(entries),
 		"entry":        entries,
 	})
 }

@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	_ "github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
@@ -514,7 +515,12 @@ func assertLiveSQLCellMatchesRun(t *testing.T, col string, expVal, gotVal any, c
 		}
 		assert.InDelta(t, ev, gf, 1e-6, "column %s", col)
 	case string:
-		gs := fmt.Sprintf("%v", gotVal)
+		var gs string
+		if tv, ok := gotVal.(time.Time); ok {
+			gs = tv.UTC().Format(time.RFC3339Nano)
+		} else {
+			gs = fmt.Sprintf("%v", gotVal)
+		}
 		// Normalize date prefix if SQL stored RFC3339 timestamp for date search index
 		if len(ev) == 10 && len(gs) > 10 && strings.HasPrefix(gs, ev) {
 			gs = gs[:10]

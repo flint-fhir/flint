@@ -57,13 +57,22 @@ fi
 
 PLANNET_TENANT="${FLINT_PLANNET_TENANT:-plannet}"
 FORMULARY_TENANT="${FLINT_FORMULARY_TENANT:-formulary}"
-echo "==> Seeding Da Vinci Plan-Net v1.1.0 ('${PLANNET_TENANT}') & US Drug Formulary v2.0.1 ('${FORMULARY_TENANT}') cohorts"
+C4BB_TENANT="${FLINT_C4BB_TENANT:-c4bb}"
+PDEX_TENANT="${FLINT_PDEX_TENANT:-pdex}"
+PAS_TENANT="${FLINT_PAS_TENANT:-pas}"
+echo "==> Seeding Plan-Net ('${PLANNET_TENANT}'), Formulary ('${FORMULARY_TENANT}'), CARIN BB ('${C4BB_TENANT}'), PDex ('${PDEX_TENANT}'), & PAS ('${PAS_TENANT}') cohorts"
 if [[ -x "${REPO_ROOT}/bin/seed" ]]; then
   "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${PLANNET_TENANT}" -suite plannet -token "${ACCESS_TOKEN}" >/dev/null
   "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${FORMULARY_TENANT}" -suite formulary -token "${ACCESS_TOKEN}" >/dev/null
+  "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${C4BB_TENANT}" -suite c4bb -token "${ACCESS_TOKEN}" >/dev/null
+  "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${PDEX_TENANT}" -suite pdex -token "${ACCESS_TOKEN}" >/dev/null
+  "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${PAS_TENANT}" -suite pas -token "${ACCESS_TOKEN}" >/dev/null
 else
   (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${PLANNET_TENANT}" -suite plannet -token "${ACCESS_TOKEN}" >/dev/null)
   (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${FORMULARY_TENANT}" -suite formulary -token "${ACCESS_TOKEN}" >/dev/null)
+  (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${C4BB_TENANT}" -suite c4bb -token "${ACCESS_TOKEN}" >/dev/null)
+  (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${PDEX_TENANT}" -suite pdex -token "${ACCESS_TOKEN}" >/dev/null)
+  (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${PAS_TENANT}" -suite pas -token "${ACCESS_TOKEN}" >/dev/null)
 fi
 
 cd "${HEADLESS_DIR}"
@@ -90,6 +99,7 @@ if [[ -z "${FHIR_RESOURCE_VALIDATOR_URL:-}" ]]; then
   curl -fsS "http://127.0.0.1:${VALIDATOR_BRIDGE_PORT}/health" >/dev/null
   export FHIR_RESOURCE_VALIDATOR_URL="http://127.0.0.1:${VALIDATOR_BRIDGE_PORT}"
 fi
+export FHIRPATH_URL="${FHIRPATH_URL:-${FHIR_RESOURCE_VALIDATOR_URL}}"
 
 echo "==> Running Inferno SQLite schema migrations"
 rm -f "${HEADLESS_DIR}/data/inferno_ci.db" "${HEADLESS_DIR}/data/inferno_ci.db-shm" "${HEADLESS_DIR}/data/inferno_ci.db-wal"

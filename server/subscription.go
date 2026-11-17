@@ -33,6 +33,7 @@ const (
 	backportSubscriptionStatusProfileURL  = "http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-subscription-status-r4"
 	backportFilterCriteriaExtURL          = "http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/backport-filter-criteria"
 	backportCapStatementTopicCanonicalURL = "http://hl7.org/fhir/uv/subscriptions-backport/StructureDefinition/capabilitystatement-subscriptiontopic-canonical"
+	pasSubscriptionTopicURL               = "http://hl7.org/fhir/us/davinci-pas/SubscriptionTopic/PASSubscriptionTopic"
 )
 
 var supportedBackportTopics = map[string]string{
@@ -43,6 +44,7 @@ var supportedBackportTopics = map[string]string{
 	"http://hl7.org/fhir/uv/subscriptions-backport/SubscriptionTopic/r5-encounter-complete":                   "Encounter",
 	"http://hl7.org/SubscriptionTopic/admission":                                                              "Encounter",
 	"http://example.org/FHIR/SubscriptionTopic/observation-vital-signs":                                       "Observation",
+	pasSubscriptionTopicURL: "Bundle",
 }
 
 func (s *Server) buildSubscriptionTopicExtensions() []map[string]any {
@@ -290,6 +292,152 @@ func (s *Server) recordSubscriptionEventWithAction(tenant, subID, resType, resID
 	return ev
 }
 
+func (s *Server) recordSubscriptionMapEvent(tenant, subID, resType, resID, action string, resMap map[string]any) subscriptionEventRecord {
+	if subID == "" {
+		return subscriptionEventRecord{}
+	}
+	if action == "" {
+		action = "create"
+	}
+	ts := time.Now().UTC()
+	key := tenant + "/" + subID
+	s.subStatsMu.Lock()
+	defer s.subStatsMu.Unlock()
+	if s.subStats == nil {
+		s.subStats = make(map[string]*subscriptionDeliveryStats)
+	}
+	st, ok := s.subStats[key]
+	if !ok {
+		st = &subscriptionDeliveryStats{}
+		s.subStats[key] = st
+	}
+	nextNum := int64(1)
+	if n := len(st.events); n > 0 {
+		nextNum = st.events[n-1].EventNumber + 1
+	}
+	ev := subscriptionEventRecord{
+		EventNumber: nextNum,
+		Timestamp:   ts,
+		ResType:     resType,
+		ResID:       resID,
+		ResVersion:  1,
+		Action:      action,
+		Resource:    resMap,
+	}
+	st.events = append(st.events, ev)
+	if len(st.events) > 500 {
+		st.events = st.events[len(st.events)-500:]
+	}
+	return ev
+}
+
+func (s *Server) dispatchPASBundleNotification(ctx context.Context, tenant, bundleID, claimRespID string, pasRespBundle map[string]any, orgIdentifiers []string) {
+	if s.store == nil || pasRespBundle == nil {
+		return
+	}
+	sr, err := s.store.Search(ctx, store.SearchParams{
+		TenantID: tenant,
+		ResType:  "Subscription",
+		Tokens:   map[string]string{"status": "active"},
+		Count:    100,
+	})
+	if err != nil || sr == nil || len(sr.Matches) == 0 {
+		return
+	}
+	now := time.Now().UTC()
+	for _, subRes := range sr.Matches {
+		subMap, mErr := s.protoToFHIRMapWithMeta("Subscription", subRes.ResourceProto, subRes.ResVersion, subRes.LastUpdated)
+		if mErr != nil || subMap == nil {
+			continue
+		}
+		if subscriptionIsExpired(subMap, now) {
+			continue
+		}
+		criteria := strings.TrimSpace(stringField(subMap, "criteria"))
+		if criteria != pasSubscriptionTopicURL {
+			continue
+		}
+		filterMatched := true
+		for _, rawF := range extractBackportFilterCriteria(subMap) {
+			trimmedF := strings.TrimSpace(rawF)
+			for _, pfx := range []string{"org-identifier=", "identifier="} {
+				if wantOrg, ok := strings.CutPrefix(trimmedF, pfx); ok && wantOrg != "" && len(orgIdentifiers) > 0 {
+					foundOrg := false
+					for _, got := range orgIdentifiers {
+						if strings.EqualFold(strings.TrimSpace(got), wantOrg) {
+							foundOrg = true
+							break
+						}
+					}
+					if !foundOrg {
+						filterMatched = false
+					}
+				}
+			}
+		}
+		if !filterMatched {
+			continue
+		}
+
+		channel, _ := subMap["channel"].(map[string]any)
+		if channel == nil {
+			continue
+		}
+		chType := strings.TrimSpace(stringField(channel, "type"))
+		endpoint := strings.TrimSpace(stringField(channel, "endpoint"))
+		if !strings.EqualFold(chType, "rest-hook") || endpoint == "" {
+			continue
+		}
+		if vErr := ValidateSubscriptionEndpoint(endpoint, s.disallowPrivateWebhooks); vErr != nil {
+			s.recordSubscriptionDelivery(tenant, subRes.ResID, false, vErr.Error())
+			continue
+		}
+		payloadType := strings.TrimSpace(stringField(channel, "payload"))
+		if payloadType == "" {
+			payloadType = "application/fhir+json"
+		}
+		var headers []string
+		if rawHeaders, ok := channel["header"].([]any); ok {
+			for _, h := range rawHeaders {
+				if hs, ok := h.(string); ok && strings.TrimSpace(hs) != "" {
+					headers = append(headers, hs)
+				}
+			}
+		}
+		contentMode, explicitContent := extractSubscriptionChannelContentMode(subMap)
+		if !explicitContent {
+			contentMode = "full-resource"
+		}
+		focusType := "Bundle"
+		focusID := bundleID
+		if contentMode == "id-only" && claimRespID != "" {
+			focusType = "ClaimResponse"
+			focusID = claimRespID
+		}
+		ev := s.recordSubscriptionMapEvent(tenant, subRes.ResID, focusType, focusID, "create", pasRespBundle)
+		fhirBase := s.resolveTenantFHIRBaseURL(tenant)
+		notifBundle := s.buildBackportNotificationBundle(fhirBase, tenant, subRes.ResID, pasSubscriptionTopicURL, "active", "event-notification", contentMode, []subscriptionEventRecord{ev})
+		bodyBytes, _ := json.Marshal(notifBundle)
+		for attempt := range 12 {
+			if ctx.Err() != nil {
+				break
+			}
+			if attempt > 0 {
+				retryTimer := time.NewTimer(350 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					retryTimer.Stop()
+					return
+				case <-retryTimer.C:
+				}
+			}
+			if s.deliverRestHookWithStatus(ctx, tenant, subRes.ResID, endpoint, payloadType, headers, bodyBytes, true) {
+				break
+			}
+		}
+	}
+}
+
 func (s *Server) recordSubscriptionDelivery(tenant, subID string, delivered bool, errMsg string) {
 	if subID == "" {
 		return
@@ -468,6 +616,18 @@ func (s *Server) validateSubscriptionResourceJSON(resType string, rawJSON []byte
 }
 
 func (s *Server) validateBackportFilterCriteria(expectedResType, rawFilter string) error {
+	trimmedRaw := strings.TrimSpace(rawFilter)
+	if expectedResType == "Bundle" {
+		// HL7 Da Vinci PAS SubscriptionTopic uses org-identifier=<non-whitespace> (v2.2.1) or identifier=<val> (v2.0.1).
+		for _, prefix := range []string{"org-identifier=", "identifier="} {
+			if val, ok := strings.CutPrefix(trimmedRaw, prefix); ok {
+				if val != "" && !strings.ContainsAny(val, " \t\r\n") {
+					return nil
+				}
+				return fmt.Errorf("invalid PAS backport-filter-criteria %q: expected %s<non-whitespace>", rawFilter, prefix)
+			}
+		}
+	}
 	norm := normalizeBackportFilterString(rawFilter)
 	qIdx := strings.IndexByte(norm, '?')
 	targetType := strings.TrimSpace(norm)

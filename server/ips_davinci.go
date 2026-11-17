@@ -718,7 +718,9 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 		allowedPatientID = cleanID(secCtx.GetPatientId())
 	}
 
-	if hasSecCtx {
+	strictHRexProfile, _ := resourceDeclaresProfilePrefix(payload, "http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-parameters-member-match-in")
+
+	if hasSecCtx && !strictHRexProfile {
 		if coverageToLink != nil &&
 			!auth.Allows(secCtx, "Coverage", auth.ActionCreate) &&
 			!auth.Allows(secCtx, "Coverage", auth.ActionUpdate) &&
@@ -929,10 +931,12 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 						v, _ := im["value"].(string)
 						sys, _ := im["system"].(string)
 						if v != "" {
-							if memVal == "" {
+							if strictHRexProfile || memVal == "" {
 								memVal = v
 							}
-							if covMemberSys == "" && sys != "" {
+							if strictHRexProfile && sys != "" {
+								memSys = sys
+							} else if covMemberSys == "" && sys != "" {
 								memSys = sys
 							}
 							break
@@ -979,7 +983,7 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 	setAuditPatientID(r.Context(), winner.patientID)
 
 	var linkedCoverageID string
-	if coverageToLink != nil {
+	if coverageToLink != nil && !strictHRexProfile {
 		covCopy := cloneShallowFHIRMap(coverageToLink)
 		covCopy["resourceType"] = "Coverage"
 		covCopy["beneficiary"] = map[string]any{
@@ -1008,7 +1012,7 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 	}
 
 	var linkedConsentID string
-	if consentRes != nil {
+	if consentRes != nil && !strictHRexProfile {
 		consentCopy := cloneShallowFHIRMap(consentRes)
 		consentCopy["resourceType"] = "Consent"
 		consentCopy["patient"] = map[string]any{
@@ -1091,33 +1095,38 @@ func (s *Server) handlePatientMemberMatch(w http.ResponseWriter, r *http.Request
 			"name":            "MemberIdentifier",
 			"valueIdentifier": memIdent,
 		},
-		map[string]any{
+	}
+	if !strictHRexProfile {
+		outParams = append(outParams, map[string]any{
 			"name": "Patient",
 			"valueReference": map[string]any{
 				"reference": "Patient/" + winner.patientID,
 			},
-		},
-	}
-	if linkedCoverageID != "" {
-		outParams = append(outParams, map[string]any{
-			"name": "CoverageToLink",
-			"valueReference": map[string]any{
-				"reference": "Coverage/" + linkedCoverageID,
-			},
 		})
-	}
-	if linkedConsentID != "" {
-		outParams = append(outParams, map[string]any{
-			"name": "Consent",
-			"valueReference": map[string]any{
-				"reference": "Consent/" + linkedConsentID,
-			},
-		})
+		if linkedCoverageID != "" {
+			outParams = append(outParams, map[string]any{
+				"name": "CoverageToLink",
+				"valueReference": map[string]any{
+					"reference": "Coverage/" + linkedCoverageID,
+				},
+			})
+		}
+		if linkedConsentID != "" {
+			outParams = append(outParams, map[string]any{
+				"name": "Consent",
+				"valueReference": map[string]any{
+					"reference": "Consent/" + linkedConsentID,
+				},
+			})
+		}
 	}
 
 	respParams := map[string]any{
 		"resourceType": "Parameters",
-		"parameter":    outParams,
+		"meta": map[string]any{
+			"profile": []any{"http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-parameters-member-match-out"},
+		},
+		"parameter": outParams,
 	}
 
 	s.writeOperationResponse(w, r, http.StatusOK, "Parameters", respParams)
@@ -1152,12 +1161,19 @@ func (s *Server) handleClaimSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var claimMap map[string]any
+	var pasReqBundle map[string]any
 	var supportingResources []map[string]any
 
 	switch payload["resourceType"] {
 	case "Claim":
 		claimMap = payload
 	case "Bundle":
+		pasReqBundle = payload
+		if bType, _ := payload["type"].(string); bType != "" && bType != "collection" {
+			writeOperationOutcome(w, http.StatusBadRequest, "invalid",
+				fmt.Sprintf("PAS Claim/$submit Bundle must have type 'collection', got %q", bType))
+			return
+		}
 		claimMap, supportingResources = extractClaimFromBundle(payload)
 	case "Parameters":
 		if paramsList, ok := payload["parameter"].([]any); ok {
@@ -1174,6 +1190,7 @@ func (s *Server) handleClaimSubmit(w http.ResponseWriter, r *http.Request) {
 				case "Claim":
 					claimMap = res
 				case "Bundle":
+					pasReqBundle = res
 					claimMap, supportingResources = extractClaimFromBundle(res)
 				}
 			}
@@ -1251,6 +1268,16 @@ func (s *Server) handleClaimSubmit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", fmt.Sprintf("invalid Claim resource: %v", err))
+		return
+	}
+
+	if pasReqBundle != nil {
+		respBundle, _, pasCR, _, isPended, _ := s.buildPASResponseBundle(tenant, "submit", pasReqBundle, claimMap, claimID, "", "")
+		_, _ = s.persistFHIRMapResource(r, tenant, "ClaimResponse", pasCR)
+		if isPended {
+			s.schedulePASPendedFinalization(r.Context(), tenant, pasReqBundle, claimMap, claimID)
+		}
+		s.writeOperationResponse(w, r, http.StatusOK, "Bundle", respBundle)
 		return
 	}
 

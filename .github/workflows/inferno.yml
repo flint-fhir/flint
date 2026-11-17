@@ -11,7 +11,7 @@ on:
 
 jobs:
   inferno:
-    name: HL7 Inferno (ONC g10 + US Core v6.1/v7/v8 + IPS + Plan-Net + USDF + Subscriptions + IPA + SMART + Bulk) [${{ matrix.store }}]
+    name: HL7 Inferno 15-Suite Matrix (ONC g10 + US Core + C4BB + PDex + PAS + Plan-Net + USDF + IPS + IPA + Subs + SMART + Bulk) [${{ matrix.store }}]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
