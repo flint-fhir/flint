@@ -15,6 +15,7 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/flint-fhir/flint/pkg/auth"
@@ -1265,7 +1266,7 @@ func ApplyFHIRPatch(docJSON []byte, patchJSON []byte) ([]byte, int, error) {
 			opMaps = append(opMaps, pm)
 		}
 	}
-	if len(opMaps) == 0 {
+	if len(rawParams) > 0 && len(opMaps) == 0 {
 		return nil, http.StatusBadRequest, fmt.Errorf("FHIRPath Patch Parameters must contain at least one 'operation' parameter")
 	}
 
@@ -1278,6 +1279,7 @@ func ApplyFHIRPatch(docJSON []byte, patchJSON []byte) ([]byte, int, error) {
 		return nil, http.StatusInternalServerError, fmt.Errorf("target document is not a JSON object")
 	}
 	rootResType, _ := docMap["resourceType"].(string)
+	rootMD := fhirutil.AllR4ResourceDescriptors()[rootResType]
 	origID, _ := docMap["id"].(string)
 
 	for i, opMap := range opMaps {
@@ -1286,6 +1288,7 @@ func ApplyFHIRPatch(docJSON []byte, patchJSON []byte) ([]byte, int, error) {
 		var index, source, destination int
 		var hasIndex, hasSource, hasDest, hasValue bool
 		var val any
+		var rawValuePart map[string]any
 
 		for _, rp := range rawParts {
 			pm, ok := rp.(map[string]any)
@@ -1307,7 +1310,8 @@ func ApplyFHIRPatch(docJSON []byte, patchJSON []byte) ([]byte, int, error) {
 			case "destination":
 				destination, hasDest = extractFHIRPatchInt(pm)
 			case "value":
-				val, hasValue = extractFHIRPatchValue(pm)
+				rawValuePart = pm
+				val, hasValue = extractFHIRPatchValueWithDesc(pm, nil)
 			}
 		}
 
@@ -1326,6 +1330,16 @@ func ApplyFHIRPatch(docJSON []byte, patchJSON []byte) ([]byte, int, error) {
 			}
 			if propName == "" {
 				return nil, http.StatusBadRequest, fmt.Errorf("fhirpatch op[%d] (add): missing required 'name' part", i)
+			}
+			containerMD := resolvePatchContainerDesc(rootMD, tokens)
+			var propMD protoreflect.MessageDescriptor
+			if fd := lookupPatchFieldDesc(containerMD, propName); fd != nil && fd.Kind() == protoreflect.MessageKind {
+				propMD = fd.Message()
+			}
+			if rawValuePart != nil && propMD != nil {
+				if typedVal, ok := extractFHIRPatchValueWithDesc(rawValuePart, propMD); ok {
+					val = typedVal
+				}
 			}
 			containerRaw, err := jsonPointerGet(doc, tokens)
 			if err != nil {
@@ -1346,7 +1360,7 @@ func ApplyFHIRPatch(docJSON []byte, patchJSON []byte) ([]byte, int, error) {
 					container[propName] = val
 				}
 			} else {
-				if _, valIsSlice := val.([]any); !valIsSlice && knownRepeatingFHIRFields[propName] {
+				if _, valIsSlice := val.([]any); !valIsSlice && isRepeatingPatchField(containerMD, propName) {
 					container[propName] = []any{val}
 				} else {
 					container[propName] = val
@@ -1552,9 +1566,70 @@ func extractFHIRPatchInt(pm map[string]any) (int, bool) {
 	return 0, false
 }
 
-func extractFHIRPatchValue(pm map[string]any) (any, bool) {
+func lookupPatchFieldDesc(md protoreflect.MessageDescriptor, name string) protoreflect.FieldDescriptor {
+	if md == nil || name == "" {
+		return nil
+	}
+	fields := md.Fields()
+	if fd := fields.ByJSONName(name); fd != nil {
+		return fd
+	}
+	if fd := fields.ByName(protoreflect.Name(name)); fd != nil {
+		return fd
+	}
+	if fd := fields.ByJSONName(name + "Value"); fd != nil {
+		return fd
+	}
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if fd.Kind() != protoreflect.MessageKind || fd.Message().Oneofs().ByName("choice") == nil {
+			continue
+		}
+		prefix := fd.JSONName()
+		if !strings.HasPrefix(name, prefix) || len(name) <= len(prefix) {
+			continue
+		}
+		suffix := strings.ToLower(name[len(prefix):len(prefix)+1]) + name[len(prefix)+1:]
+		if subFD := fd.Message().Fields().ByJSONName(suffix); subFD != nil {
+			return subFD
+		}
+		if suffix == "string" {
+			if subFD := fd.Message().Fields().ByJSONName("stringValue"); subFD != nil {
+				return subFD
+			}
+		}
+	}
+	return nil
+}
+
+func resolvePatchContainerDesc(rootMD protoreflect.MessageDescriptor, tokens []string) protoreflect.MessageDescriptor {
+	cur := rootMD
+	for _, tok := range tokens {
+		if cur == nil {
+			return nil
+		}
+		if _, err := strconv.Atoi(tok); err == nil {
+			continue
+		}
+		fd := lookupPatchFieldDesc(cur, tok)
+		if fd == nil || fd.Kind() != protoreflect.MessageKind {
+			return nil
+		}
+		cur = fd.Message()
+	}
+	return cur
+}
+
+func isRepeatingPatchField(parentMD protoreflect.MessageDescriptor, fieldName string) bool {
+	if fd := lookupPatchFieldDesc(parentMD, fieldName); fd != nil {
+		return fd.IsList()
+	}
+	return knownRepeatingFHIRFields[fieldName]
+}
+
+func extractFHIRPatchValueWithDesc(pm map[string]any, targetMD protoreflect.MessageDescriptor) (any, bool) {
 	if subParts, ok := pm["part"].([]any); ok && len(subParts) > 0 {
-		return fhirPatchPartsToMap(subParts), true
+		return fhirPatchPartsToMapWithDesc(subParts, targetMD), true
 	}
 	if resObj, ok := pm["resource"].(map[string]any); ok {
 		return resObj, true
@@ -1581,7 +1656,7 @@ func extractFHIRPatchValue(pm map[string]any) (any, bool) {
 	return nil, false
 }
 
-func fhirPatchPartsToMap(parts []any) map[string]any {
+func fhirPatchPartsToMapWithDesc(parts []any, parentMD protoreflect.MessageDescriptor) map[string]any {
 	out := make(map[string]any)
 	for _, rp := range parts {
 		pm, ok := rp.(map[string]any)
@@ -1592,7 +1667,11 @@ func fhirPatchPartsToMap(parts []any) map[string]any {
 		if name == "" {
 			continue
 		}
-		v, ok := extractFHIRPatchValue(pm)
+		var childMD protoreflect.MessageDescriptor
+		if fd := lookupPatchFieldDesc(parentMD, name); fd != nil && fd.Kind() == protoreflect.MessageKind {
+			childMD = fd.Message()
+		}
+		v, ok := extractFHIRPatchValueWithDesc(pm, childMD)
 		if !ok {
 			continue
 		}
@@ -1602,7 +1681,7 @@ func fhirPatchPartsToMap(parts []any) map[string]any {
 			} else {
 				out[name] = []any{existing, v}
 			}
-		} else if knownRepeatingFHIRFields[name] {
+		} else if isRepeatingPatchField(parentMD, name) {
 			if _, isSlice := v.([]any); isSlice {
 				out[name] = v
 			} else {

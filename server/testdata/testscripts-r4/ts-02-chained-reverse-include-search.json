@@ -1,0 +1,320 @@
+{
+  "resourceType": "TestScript",
+  "id": "ts-02-chained-reverse-include-search",
+  "url": "http://flint.fhir.org/TestScript/ts-02-chained-reverse-include-search",
+  "version": "0.6.0",
+  "name": "HL7R4ChainedReverseIncludeAndSearchModifiers",
+  "title": "HL7 FHIR R4 Chained Search, Reverse-Chained (_has), _include, _revinclude & Search Modifiers",
+  "status": "active",
+  "contained": [
+    {
+      "resourceType": "Organization",
+      "id": "org-search",
+      "active": true,
+      "name": "FlintTouchstoneClinic"
+    },
+    {
+      "resourceType": "Patient",
+      "id": "pat-search",
+      "active": true,
+      "gender": "female",
+      "birthDate": "1979-04-12",
+      "identifier": [
+        {"system": "http://example.org/mrn", "value": "TS-SEARCH-001"}
+      ],
+      "name": [
+        {"use": "official", "family": "SearchChainTarget", "given": ["Grace"]}
+      ],
+      "managingOrganization": {"reference": "Organization/${searchOrgId}"}
+    },
+    {
+      "resourceType": "Observation",
+      "id": "obs-search",
+      "status": "final",
+      "category": [
+        {
+          "coding": [
+            {"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}
+          ]
+        }
+      ],
+      "code": {
+        "coding": [
+          {"system": "http://loinc.org", "code": "85354-9", "display": "Blood pressure panel"}
+        ]
+      },
+      "subject": {"reference": "Patient/${searchPatId}"},
+      "effectiveDateTime": "2026-02-10T10:00:00Z"
+    },
+    {
+      "resourceType": "Condition",
+      "id": "cond-search",
+      "clinicalStatus": {
+        "coding": [
+          {"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}
+        ]
+      },
+      "verificationStatus": {
+        "coding": [
+          {"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"}
+        ]
+      },
+      "code": {
+        "coding": [
+          {"system": "http://snomed.info/sct", "code": "44054006", "display": "Diabetes mellitus type 2"}
+        ]
+      },
+      "subject": {"reference": "Patient/${searchPatId}"}
+    }
+  ],
+  "fixture": [
+    {"id": "fx-org", "autocreate": false, "autodelete": false, "resource": {"reference": "#org-search"}},
+    {"id": "fx-pat", "autocreate": false, "autodelete": false, "resource": {"reference": "#pat-search"}},
+    {"id": "fx-obs", "autocreate": false, "autodelete": false, "resource": {"reference": "#obs-search"}},
+    {"id": "fx-cond", "autocreate": false, "autodelete": false, "resource": {"reference": "#cond-search"}}
+  ],
+  "variable": [
+    {"name": "searchOrgId", "expression": "Organization.id", "sourceId": "resp-create-org"},
+    {"name": "searchPatId", "expression": "Patient.id", "sourceId": "resp-create-pat"},
+    {"name": "searchObsId", "expression": "Observation.id", "sourceId": "resp-create-obs"},
+    {"name": "searchCondId", "expression": "Condition.id", "sourceId": "resp-create-cond"}
+  ],
+  "setup": {
+    "action": [
+      {
+        "operation": {
+          "type": {"code": "create"},
+          "resource": "Organization",
+          "sourceId": "fx-org",
+          "responseId": "resp-create-org"
+        }
+      },
+      {"assert": {"response": "created"}},
+      {
+        "operation": {
+          "type": {"code": "create"},
+          "resource": "Patient",
+          "sourceId": "fx-pat",
+          "responseId": "resp-create-pat"
+        }
+      },
+      {"assert": {"response": "created"}},
+      {
+        "operation": {
+          "type": {"code": "create"},
+          "resource": "Observation",
+          "sourceId": "fx-obs",
+          "responseId": "resp-create-obs"
+        }
+      },
+      {"assert": {"response": "created"}},
+      {
+        "operation": {
+          "type": {"code": "create"},
+          "resource": "Condition",
+          "sourceId": "fx-cond",
+          "responseId": "resp-create-cond"
+        }
+      },
+      {"assert": {"response": "created"}}
+    ]
+  },
+  "test": [
+    {
+      "name": "01-ChainedSearchAndReverseHas",
+      "description": "Verify forward-chained search (Patient?organization.name, Observation?subject:Patient.family) and reverse-chained _has.",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "search"},
+            "resource": "Patient",
+            "params": "organization.name=FlintTouchstoneClinic"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Bundle",
+            "expression": "Bundle.entry.where(resource.id = '${searchPatId}').exists()"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "search"},
+            "resource": "Observation",
+            "params": "subject:Patient.family=SearchChainTarget"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Bundle.entry.where(resource.id = '${searchObsId}').exists()"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "search"},
+            "resource": "Patient",
+            "params": "_has:Observation:patient:code=85354-9"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Bundle.entry.where(resource.id = '${searchPatId}').exists()"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "search"},
+            "resource": "Patient",
+            "params": "_has:Condition:patient:code=44054006"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Bundle.entry.where(resource.id = '${searchPatId}').exists()"
+          }
+        }
+      ]
+    },
+    {
+      "name": "02-IncludeAndRevIncludeSearchModes",
+      "description": "Verify _include and _revinclude populate Bundle.entry.search.mode ('match' vs 'include') accurately.",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "search"},
+            "resource": "Observation",
+            "params": "_id=${searchObsId}&_include=Observation:patient"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Bundle.entry.where(search.mode = 'match' and resource.resourceType = 'Observation').count()",
+            "operator": "equals",
+            "value": "1"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Bundle.entry.where(search.mode = 'include' and resource.resourceType = 'Patient').count()",
+            "operator": "equals",
+            "value": "1"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "search"},
+            "resource": "Patient",
+            "params": "_id=${searchPatId}&_revinclude=Observation:patient&_revinclude=Condition:patient"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Bundle.entry.where(search.mode = 'match' and resource.resourceType = 'Patient').count()",
+            "operator": "equals",
+            "value": "1"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Bundle.entry.where(search.mode = 'include').count()",
+            "operator": "equals",
+            "value": "2"
+          }
+        }
+      ]
+    },
+    {
+      "name": "03-SearchModifiersAndSummaryCount",
+      "description": "Verify :exact, :contains, :missing=true, and _summary=count search semantics.",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "search"},
+            "resource": "Patient",
+            "params": "family:exact=SearchChainTarget"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Bundle.entry.where(resource.id = '${searchPatId}').exists()"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "search"},
+            "resource": "Patient",
+            "params": "family=SearchChain"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Bundle.entry.where(resource.id = '${searchPatId}').exists()"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "search"},
+            "resource": "Patient",
+            "params": "family:exact=SearchChain"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Bundle.entry.where(resource.id = '${searchPatId}').empty()"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "search"},
+            "resource": "Patient",
+            "params": "family:contains=ChainTarg&deceased:missing=true"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Bundle.entry.where(resource.id = '${searchPatId}').exists()"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "search"},
+            "resource": "Patient",
+            "params": "_id=${searchPatId}&_summary=count"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Bundle.total",
+            "operator": "equals",
+            "value": "1"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Bundle.entry",
+            "operator": "empty"
+          }
+        }
+      ]
+    }
+  ],
+  "teardown": {
+    "action": [
+      {"operation": {"type": {"code": "delete"}, "resource": "Condition", "targetId": "${searchCondId}"}},
+      {"operation": {"type": {"code": "delete"}, "resource": "Observation", "targetId": "${searchObsId}"}},
+      {"operation": {"type": {"code": "delete"}, "resource": "Patient", "targetId": "${searchPatId}"}},
+      {"operation": {"type": {"code": "delete"}, "resource": "Organization", "targetId": "${searchOrgId}"}}
+    ]
+  }
+}

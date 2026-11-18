@@ -176,6 +176,7 @@ type ResourceSchema struct {
 	DateFields       map[string]bool            // primitive Date fields derived from proto descriptor
 	DateTimeFields   map[string]bool            // primitive DateTime fields derived from proto descriptor
 	InstantFields    map[string]bool            // primitive Instant fields derived from proto descriptor
+	ChoiceGroups     map[string][]string        // choice[x] base name -> concrete JSON field names
 	ChildDescriptors map[string]protoreflect.MessageDescriptor
 }
 
@@ -205,6 +206,7 @@ type protoSchemaDetails struct {
 	dateFields       map[string]bool
 	dateTimeFields   map[string]bool
 	instantFields    map[string]bool
+	choiceGroups     map[string][]string
 	childDescriptors map[string]protoreflect.MessageDescriptor
 }
 
@@ -229,6 +231,7 @@ func deriveProtoSchemaDetails(md protoreflect.MessageDescriptor) protoSchemaDeta
 		dateFields:       make(map[string]bool),
 		dateTimeFields:   make(map[string]bool),
 		instantFields:    make(map[string]bool),
+		choiceGroups:     make(map[string][]string),
 		childDescriptors: make(map[string]protoreflect.MessageDescriptor),
 	}
 	if md == nil {
@@ -268,6 +271,7 @@ func deriveProtoSchemaDetails(md protoreflect.MessageDescriptor) protoSchemaDeta
 				}
 				choiceFieldName := jsonName + strings.ToUpper(optJSON[:1]) + optJSON[1:]
 				det.allowedFields[choiceFieldName] = true
+				det.choiceGroups[jsonName] = append(det.choiceGroups[jsonName], choiceFieldName)
 				if cfd.Kind() == protoreflect.MessageKind && cfd.Message() != nil {
 					cfmd := cfd.Message()
 					switch string(cfmd.FullName()) {
@@ -701,13 +705,18 @@ func DefaultSchemas() map[string]ResourceSchema {
 
 		"Device": {
 			ResourceType:   "Device",
-			RequiredFields: []string{"type"},
+			RequiredFields: []string{}, // Device.type is 0..1 in base FHIR R4 (1..1 in us-core-implantable-device)
 			CodeBindings: map[string]map[string]bool{
 				"status": DeviceStatusValueSet,
 			},
 			ValueSetURIs: map[string]string{
 				"status": "http://hl7.org/fhir/valueset/device-status",
 			},
+		},
+
+		"Bundle": {
+			ResourceType:   "Bundle",
+			RequiredFields: []string{"type"},
 		},
 
 		"PractitionerRole": {
@@ -750,6 +759,7 @@ func DefaultSchemas() map[string]ResourceSchema {
 			override.DateFields = det.dateFields
 			override.DateTimeFields = det.dateTimeFields
 			override.InstantFields = det.instantFields
+			override.ChoiceGroups = det.choiceGroups
 			override.ChildDescriptors = det.childDescriptors
 			schemas[resType] = override
 		} else {
@@ -763,6 +773,7 @@ func DefaultSchemas() map[string]ResourceSchema {
 				DateFields:       det.dateFields,
 				DateTimeFields:   det.dateTimeFields,
 				InstantFields:    det.instantFields,
+				ChoiceGroups:     det.choiceGroups,
 				ChildDescriptors: det.childDescriptors,
 			}
 		}
