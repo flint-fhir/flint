@@ -674,7 +674,7 @@ def drive_waiting_smart_flow!(
       shc_doc = JSON.parse(Net::HTTP.get(shc_uri))
       jws_str = Array(shc_doc['verifiableCredential']).first.to_s
       qr_chunk = "shc:/#{jws_str.chars.map { |c| format('%02d', c.ord - 45) }.join}"
-      wait_id = waiting_result.identifier.to_s
+      wait_id = resolve_wait_identifier(runs_repo, test_run_id, waiting_result)
       puts "    [SMART Health Cards QR] Submitting numeric SHC QR chunk to /custom/smart_health_cards/post_qr_code?id=#{wait_id}"
       rack_resp = INFERNO_RACK_MOCK.post(
         "/custom/smart_health_cards/post_qr_code?id=#{URI.encode_www_form_component(wait_id)}",
@@ -685,7 +685,7 @@ def drive_waiting_smart_flow!(
         raise "Inferno SHC post_qr_code route failed (HTTP #{rack_resp.status}): #{rack_resp.body}"
       end
     elsif waiting_result.test_id.to_s.include?('uds_plus_post_manifest_test')
-      wait_id = waiting_result.identifier.to_s
+      wait_id = resolve_wait_identifier(runs_repo, test_run_id, waiting_result)
       manifest_json = Net::HTTP.get(URI.parse("#{flint_fhir_url}/$uds-plus-manifest"))
       puts "    [HRSA UDS+] Posting UDS+ Import Manifest Parameters to /custom/uds_plus/postHere?id=#{wait_id}"
       rack_resp = INFERNO_RACK_MOCK.post(
@@ -697,7 +697,7 @@ def drive_waiting_smart_flow!(
         raise "Inferno UDS+ postHere route failed (HTTP #{rack_resp.status}): #{rack_resp.body}"
       end
     elsif waiting_result.test_id.to_s.include?('request_receive_post')
-      wait_id = waiting_result.identifier.to_s
+      wait_id = resolve_wait_identifier(runs_repo, test_run_id, waiting_result)
       hl_uri = URI.parse("#{flint_fhir_url}/Patient/#{patient_id}/$home-lab-report")
       hl_req = Net::HTTP::Get.new(hl_uri)
       hl_req['Accept'] = 'application/fhir+json'
@@ -725,6 +725,24 @@ def drive_waiting_smart_flow!(
       raise "Unhandled Inferno waiting state on test #{waiting_result.test_id} (outputs: #{outputs.keys.join(', ')})"
     end
   end
+end
+
+def resolve_wait_identifier(runs_repo, test_run_id, waiting_result)
+  run_entity = begin
+    runs_repo.find(test_run_id)
+  rescue StandardError
+    nil
+  end
+  if run_entity && run_entity.respond_to?(:identifier) && !run_entity.identifier.to_s.strip.empty?
+    return run_entity.identifier.to_s.strip
+  end
+
+  msg = waiting_result.respond_to?(:result_message) ? waiting_result.result_message.to_s : ''
+  if (m = msg.match(/[?&]id=([^\s\)\].&]+)/))
+    return m[1].to_s.strip
+  end
+
+  raise "Could not resolve wait identifier for test_run=#{test_run_id} (#{waiting_result&.test_id})"
 end
 
 def find_group_in_suite(root_runnable, target_suffix)
@@ -980,6 +998,29 @@ def execute_inferno_target(
   )
 
   artifact_payload
+rescue StandardError => e
+  warn "  [SUITE EXCEPTION] #{label} (#{suite_id}): #{e.class}: #{e.message}"
+  Array(e.backtrace).first(8).each { |bt| warn "    #{bt}" }
+  err_payload = {
+    label: label,
+    suite_id: suite_id,
+    runnable_id: suite_id,
+    elapsed_seconds: 0.0,
+    exception: "#{e.class}: #{e.message}",
+    counts: {
+      total_leaf_tests: 1,
+      pass: 0,
+      skip: 0,
+      omit: 0,
+      fail: 0,
+      error: 1,
+      wait: 0,
+      cancel: 0
+    },
+    tests: []
+  }
+  File.write(File.join(artifacts_dir, "#{label}.json"), JSON.pretty_generate(err_payload))
+  err_payload
 end
 
 register_jwks_with_flint!(flint_base_url, client_id)
