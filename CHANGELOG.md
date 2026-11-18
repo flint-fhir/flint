@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-17
+
 ### Added
 
 - **Upstream HL7 `FHIR/fhir-test-cases` R4 Conformance Vectors & Expanded `TestScript` Corpus (`pkg/fhirxml/testdata/hl7-r4`, `pkg/validation/testdata/hl7-r4`, `server/testdata/patch-r4`, `server/testdata/testscripts-r4`, `server/testscript_ops.go`)**:
@@ -40,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added live SQL-on-FHIR v2 `ViewDefinition/$run` vs `ViewDefinition/$sql?dialect=sqlite` differential execution oracle, FHIRPath Kleene 3-valued logic laws, RFC 6455 WebSocket framing/fragmentation PBTs, Patch/Transaction atomicity PBTs, and `pkg/txclient` stateful LRU/TTL cache verification.
 - **Continuous Native Fuzzing, Concurrency Contention, `govulncheck` & XML `$certify` Hardening (`.github/workflows/ci.yml`, `.github/workflows/fuzz.yml`, `server/concurrency_hardening_test.go`, `pkg/certify`)**:
   - Wired `FuzzXMLRoundTrip` and `FuzzWebSocketFrames` into CI alongside a scheduled deep-fuzz workflow, `govulncheck ./...` static vulnerability gate, parallel `-race` optimistic locking (`If-Match` / `CreateOnly` / `If-None-Exist`) contention tests, and `application/fhir+xml` `$certify` checks.
+
+### Changed
+
+- Synchronized runtime, container, installer, analytics, OpenAPI 3.1.0, `CapabilityStatement.software.version`, and public website version reporting to `0.6.0`.
 
 ### Fixed
 
