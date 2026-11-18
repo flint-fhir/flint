@@ -61,7 +61,7 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Patient Compartment, IPS, SDC & Da Vinci Operations",
-			Capability:    "Patient/$everything & Encounter/$everything (GET/POST + _type/_since/_typeFilter/_count/_offset pagination), Patient/{id}/$summary (HL7 IPS), DocumentReference/$docref (US Core / Argonaut Clinical Notes + On-Demand IPS), Composition/{id}/$document (2-hop closure + persist=true), Questionnaire/$populate, Questionnaire/$dtr-questionnaire-package & QuestionnaireResponse/$extract (HL7 SDC / Da Vinci DTR + Auto-Provenance), Measure/$evaluate-measure, Measure/$care-gaps (Da Vinci DEQM), MeasureReport/$ra-evaluate-risk & Patient/$ra-coding-gap-report (Da Vinci RA), Group/$confirm-attribution-list & Group/$atr-summary (Da Vinci ATR), Group/$pdex-provider-member-match, Patient/$pdex-provider-everything, Patient/$pdex-payer-exchange & Patient/$pdex-payer-summary (CMS-0057-F / Da Vinci PDex v2.1.0), Claim/$submit, Claim/$pas-inquire & Patient/$burden-reduction-summary (Da Vinci PAS/CRD/DTR), X-Provenance Header & /{resourceType}/{id}/$provenance, Patient/$match (MPI), Patient/$member-match (Da Vinci HRex), System/Type/Instance $meta / $meta-add / $meta-delete & RESTful Compartment Search",
+			Capability:    "Patient/$everything & Encounter/$everything (GET/POST + _type/_since/_typeFilter/_count/_offset pagination), Patient/{id}/$summary (HL7 IPS), DocumentReference/$docref (US Core / Argonaut Clinical Notes + On-Demand IPS), Composition/{id}/$document (2-hop closure + persist=true), Questionnaire/$populate, Questionnaire/$questionnaire-package, Questionnaire/$next-question, Questionnaire/$log-questionnaire-errors, Questionnaire/$dtr-questionnaire-package & QuestionnaireResponse/$extract (HL7 SDC / Da Vinci DTR + Auto-Provenance), Measure/$evaluate-measure, Measure/$care-gaps (Da Vinci DEQM), MeasureReport/$ra-evaluate-risk & Patient/$ra-coding-gap-report (Da Vinci RA), Group/$confirm-attribution-list & Group/$atr-summary (Da Vinci ATR), Group/$pdex-provider-member-match, Patient/$pdex-provider-everything, Patient/$pdex-payer-exchange & Patient/$pdex-payer-summary (CMS-0057-F / Da Vinci PDex v2.1.0), Claim/$submit, Claim/$inquire, Claim/$pas-inquire & Patient/$burden-reduction-summary (Da Vinci PAS/CRD/DTR), X-Provenance Header & /{resourceType}/{id}/$provenance, Patient/$match (MPI), Patient/$member-match (Da Vinci HRex), System/Type/Instance $meta / $meta-add / $meta-delete & RESTful Compartment Search",
 			Specification: "HL7 FHIR R4, US Core, IPS, SDC, CMS-0057-F & Da Vinci HRex/PDex/PAS/CRD/DTR/ATR/RA/DEQM",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/DocumentReference/$docref",
@@ -5389,6 +5389,75 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				},
 				"responses": map[string]any{
 					"200": map[string]any{"description": "Searchset Bundle (ach-daily-initial-population-bundle)"},
+				},
+			},
+		},
+		"/Questionnaire/$questionnaire-package": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Questionnaire", "QuestionnaireResponse", "Library", "ValueSet", "Bundle"},
+				"summary":     "Assemble an HL7 Da Vinci Documentation Templates and Rules (DTR v2.0.1 / v2.2.0) Questionnaire Package Bundle",
+				"operationId": "questionnairePackagePost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing packagebundle (dtr-questionnairepackage-bundle)"},
+				},
+			},
+		},
+		"/Questionnaire/{id}/$questionnaire-package": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Questionnaire", "QuestionnaireResponse", "Library", "ValueSet", "Bundle"},
+				"summary":     "Assemble an HL7 Da Vinci DTR Questionnaire Package Bundle for Questionnaire/{id}",
+				"operationId": "questionnaireInstancePackagePost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Parameters containing packagebundle (dtr-questionnairepackage-bundle)"},
+				},
+			},
+		},
+		"/Questionnaire/$next-question": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Questionnaire", "QuestionnaireResponse"},
+				"summary":     "Advance an adaptive QuestionnaireResponse per HL7 SDC / Da Vinci DTR $next-question",
+				"operationId": "questionnaireNextQuestionPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Updated adaptive QuestionnaireResponse"},
+				},
+			},
+		},
+		"/Questionnaire/{id}/$next-question": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Questionnaire", "QuestionnaireResponse"},
+				"summary":     "Advance an adaptive QuestionnaireResponse for Questionnaire/{id} per HL7 SDC / Da Vinci DTR $next-question",
+				"operationId": "questionnaireInstanceNextQuestionPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Updated adaptive QuestionnaireResponse"},
+				},
+			},
+		},
+		"/Questionnaire/$log-questionnaire-errors": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Questionnaire", "OperationOutcome"},
+				"summary":     "Record Questionnaire / CQL execution diagnostics per HL7 Da Vinci DTR $log-questionnaire-errors",
+				"operationId": "questionnaireLogErrorsPost",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Informational OperationOutcome acknowledging logged error diagnostics"},
+				},
+			},
+		},
+		"/Questionnaire/{id}/$log-questionnaire-errors": map[string]any{
+			"post": map[string]any{
+				"tags":        []string{"Questionnaire", "OperationOutcome"},
+				"summary":     "Record Questionnaire / CQL execution diagnostics for Questionnaire/{id} per HL7 Da Vinci DTR $log-questionnaire-errors",
+				"operationId": "questionnaireInstanceLogErrorsPost",
+				"parameters": []map[string]any{
+					{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+				},
+				"responses": map[string]any{
+					"200": map[string]any{"description": "Informational OperationOutcome acknowledging logged error diagnostics"},
 				},
 			},
 		},

@@ -25836,45 +25836,10 @@ func (s *Server) handleGravitySDOHConsentAndCareWave52(w http.ResponseWriter, r 
 // handleUDAPDiscoveryWave54 serves the HL7 FAST Security / UDAP v1.0.0 discovery metadata
 // at GET /.well-known/udap and GET /fhir/r4/{tenant}/.well-known/udap.
 func (s *Server) handleUDAPDiscoveryWave54(w http.ResponseWriter, r *http.Request) {
-	baseURL := requestBaseURL(r)
-	if baseURL == "" {
-		baseURL = "http://localhost:8080"
-	}
-	tenant := strings.TrimSpace(r.PathValue("tenant"))
-	if tenant == "" {
-		tenant = "default"
-	}
-
-	udapMeta := map[string]any{
-		"udap_versions_supported":                 []string{"1"},
-		"udap_profiles_supported":                 []string{"udap_dcr", "udap_authn", "udap_authz", "udap_to"},
-		"udap_authorization_extensions_supported": []string{"hl7-b2b", "hl7-b2b-user"},
-		"udap_authorization_extensions_required":  []string{"hl7-b2b"},
-		"udap_certifications_supported": []string{
-			"http://hl7.org/fhir/us/udap-security/ImplementationGuide/hl7.fhir.us.udap-security",
-		},
-		"udap_certifications_required": []string{
-			"http://hl7.org/fhir/us/udap-security/ImplementationGuide/hl7.fhir.us.udap-security",
-		},
-		"grant_types_supported": []string{"authorization_code", "refresh_token", "client_credentials"},
-		"scopes_supported": []string{
-			"openid", "fhirUser", "udap", "launch", "launch/patient",
-			"patient/*.rs", "user/*.cruds", "system/*.rs", "system/*.cruds",
-		},
-		"authorization_endpoint": baseURL + "/oauth2/authorize",
-		"token_endpoint":         baseURL + "/oauth2/token",
-		"token_endpoint_auth_methods_supported": []string{
-			"private_key_jwt",
-		},
-		"token_endpoint_auth_signing_alg_values_supported": []string{
-			"RS256", "RS384", "ES256", "ES384",
-		},
-		"registration_endpoint": baseURL + "/fhir/r4/" + tenant + "/Organization/$udap-register",
-		"registration_endpoint_jwt_signing_alg_values_supported": []string{
-			"RS256", "RS384", "ES256", "ES384",
-		},
-		"signed_metadata": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.flint-udap-signed-metadata",
-		"x5c":             []string{"MIIFlintUDAPTrustCommunityRootCA=="},
+	udapMeta, err := s.buildUDAPDiscoveryMetadata(r)
+	if err != nil {
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

@@ -6,9 +6,11 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -720,13 +722,26 @@ func (s *Server) handleOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
 		tenant = strings.TrimSpace(r.PathValue("tenant"))
 	}
 
+	udapCli, isUDAP := s.lookupUDAPClient(clientID)
+	if isUDAP {
+		if !udapCli.supportsGrant("authorization_code") {
+			writeOAuthError(w, http.StatusBadRequest, "unauthorized_client", "UDAP client is not registered for authorization_code")
+			return
+		}
+		if !slices.Contains(udapCli.RedirectURIs, redirectURI) {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_request", "unregistered redirect_uri for UDAP client")
+			return
+		}
+	}
+
 	// SMART App Launch STU2 requires PKCE S256; reject plain or missing code_challenge_method whenever
-	// code_challenge is supplied, and require PKCE whenever aud is supplied or strict PKCE is enabled.
+	// code_challenge is supplied, and require PKCE whenever aud is supplied or strict PKCE is enabled
+	// (unless the client is an HL7 UDAP X.509 client whose Authorization Code flow omits PKCE).
 	if codeChallenge != "" && !strings.EqualFold(codeChallengeMethod, "S256") {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "SMART v2 requires code_challenge_method=S256")
 		return
 	}
-	if codeChallenge == "" && (s.isPKCERequired() || rawAud != "") {
+	if codeChallenge == "" && !isUDAP && (s.isPKCERequired() || rawAud != "") {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "SMART v2 requires PKCE code_challenge with code_challenge_method=S256")
 		return
 	}
@@ -857,6 +872,10 @@ func (s *Server) authenticateOAuthClient(w http.ResponseWriter, r *http.Request)
 		if len(parsed.RawSignature) < 64 {
 			writeOAuthError(w, http.StatusBadRequest, "invalid_client", "invalid client_assertion signature")
 			return "", false
+		}
+
+		if _, isUDAP := s.lookupUDAPClient(iss); isUDAP || len(parsed.Header.X5c) > 0 || strings.TrimSpace(r.FormValue("udap")) == "1" {
+			return s.authenticateUDAPClientAssertion(w, r, parsed, iss, jti)
 		}
 
 		s.oauthMu.Lock()
@@ -1138,6 +1157,15 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 		}
 
 		scope := r.FormValue("scope")
+		if udapCli, isUDAP := s.lookupUDAPClient(reqClientID); isUDAP {
+			if !udapCli.supportsGrant("client_credentials") {
+				writeOAuthError(w, http.StatusBadRequest, "unauthorized_client", "UDAP client is not registered for client_credentials")
+				return
+			}
+			if scope == "" {
+				scope = udapCli.Scope
+			}
+		}
 		if scope == "" {
 			scope = "system/*.rs"
 		}
@@ -1525,6 +1553,25 @@ func writeOAuthError(w http.ResponseWriter, status int, code, desc string) {
 // handleOAuthRegister implements RFC 7591 OAuth 2.0 Dynamic Client Registration
 // (POST /oauth2/register) for registering SMART public, symmetric, and asymmetric clients.
 func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
+	bodyBytes, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "failed to read client registration request")
+		return
+	}
+	var rawMap map[string]any
+	if err := json.Unmarshal(bodyBytes, &rawMap); err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "malformed JSON client registration request")
+		return
+	}
+	if _, hasSS := rawMap["software_statement"]; hasSS {
+		s.handleUDAPClientRegistration(w, r, rawMap)
+		return
+	}
+	if _, hasUDAP := rawMap["udap"]; hasUDAP {
+		s.handleUDAPClientRegistration(w, r, rawMap)
+		return
+	}
+
 	var req struct {
 		ClientID                string      `json:"client_id"`
 		ClientSecret            string      `json:"client_secret"`
@@ -1535,7 +1582,7 @@ func (s *Server) handleOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		Scope                   string      `json:"scope"`
 		JWKS                    auth.JWKSet `json:"jwks"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req); err != nil {
+	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "malformed JSON client registration request")
 		return
 	}

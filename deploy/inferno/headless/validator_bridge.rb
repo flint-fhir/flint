@@ -126,8 +126,14 @@ server.mount_proc '/igs' do |_req, res|
       'hl7.fhir.us.carin-bb#2.0.0',
       'hl7.fhir.us.davinci-pdex#2.0.0',
       'hl7.fhir.us.davinci-hrex#1.0.0',
+      'hl7.fhir.us.davinci-hrex#1.1.0',
+      'hl7.fhir.us.davinci-hrex#1.2.0',
       'hl7.fhir.us.davinci-pas#2.0.1',
-      'hl7.fhir.us.davinci-pas#2.2.1'
+      'hl7.fhir.us.davinci-pas#2.2.1',
+      'hl7.fhir.us.davinci-crd#2.0.1',
+      'hl7.fhir.us.davinci-crd#2.2.1',
+      'hl7.fhir.us.davinci-dtr#2.0.1',
+      'hl7.fhir.us.davinci-dtr#2.2.0'
     ],
     'profiles' => {}
   })

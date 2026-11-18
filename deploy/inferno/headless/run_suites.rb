@@ -43,6 +43,7 @@ ENV['FHIRPATH_URL'] ||= ENV['FHIR_RESOURCE_VALIDATOR_URL']
 FileUtils.mkdir_p(File.join(__dir__, 'data'))
 $LOAD_PATH.unshift(File.join(__dir__, 'lib')) unless $LOAD_PATH.include?(File.join(__dir__, 'lib'))
 require 'pas_payloads'
+require 'track8_payloads'
 
 require 'inferno'
 Inferno::Application.finalize!
@@ -65,6 +66,25 @@ if defined?(Inferno::DSL::FhirpathEvaluation::Evaluator)
     Module.new do
       def call_fhirpath_service(fhir_resource, fhirpath_expression)
         super(fhir_resource, URI.encode_www_form_component(fhirpath_expression.to_s))
+      end
+    end
+  )
+end
+
+$active_crd_job_threads = []
+$active_crd_job_threads_mutex = Mutex.new
+
+if defined?(DaVinciCRDTestKit::Jobs::InvokeHook)
+  Inferno::Jobs.singleton_class.prepend(
+    Module.new do
+      def perform(job_class, *args, **kwargs)
+        if job_class.is_a?(Class) && job_class <= DaVinciCRDTestKit::Jobs::InvokeHook
+          thr = Thread.new { super(job_class, *args, **kwargs) }
+          $active_crd_job_threads_mutex.synchronize { $active_crd_job_threads << thr }
+          thr
+        else
+          super
+        end
       end
     end
   )
@@ -215,6 +235,9 @@ def collect_inferno_public_jwks
   end
   if defined?(ONCCertificationG10TestKit::BulkDataJWKSHelper)
     sources << JSON.parse(ONCCertificationG10TestKit::BulkDataJWKSHelper.public_jwks_json)
+  end
+  if defined?(DaVinciCRDTestKit::JWKS) && DaVinciCRDTestKit::JWKS.respond_to?(:jwks_json)
+    sources << JSON.parse(DaVinciCRDTestKit::JWKS.jwks_json)
   end
 
   seen_kids = {}
@@ -492,8 +515,9 @@ def drive_waiting_smart_flow!(
     end
 
     launch_uri       = outputs['launch_uri']
-    auth_url         = outputs['authorization_url']
+    auth_url         = outputs['authorization_url'].to_s.empty? ? outputs['udap_authorization_redirect_url'] : outputs['authorization_url']
     confirmation_url = outputs['confirmation_url']
+    continuation_url = outputs['continuation_url']
 
     if !confirmation_url.nil? && !confirmation_url.empty?
       drive_waiting_subscription_flow!(
@@ -570,13 +594,28 @@ def drive_waiting_smart_flow!(
       unless [200, 302, 303].include?(rack_resp.status)
         raise "Inferno redirect resume route failed (HTTP #{rack_resp.status}): #{rack_resp.body}"
       end
+    elsif (!continuation_url.nil? && !continuation_url.empty?) || waiting_result.test_id.to_s.include?('invoke_hook')
+      puts "    [CRD InvokeHook] Waiting for async CRD hook worker to complete #{waiting_result.test_id} ..."
+      crd_deadline = Time.now + 45.0
+      while %w[waiting queued running].include?(runs_repo.status_for_test_run(test_run_id).to_s) && Time.now <= crd_deadline
+        sleep 0.15
+      end
+      pending_threads = $active_crd_job_threads_mutex.synchronize do
+        copy = $active_crd_job_threads.dup
+        $active_crd_job_threads.clear
+        copy
+      end
+      pending_threads.each { |thr| thr.join(15.0) }
+      if %w[waiting queued running].include?(runs_repo.status_for_test_run(test_run_id).to_s)
+        raise "Timed out waiting for async CRD InvokeHook completion on #{waiting_result.test_id}"
+      end
     elsif waiting_result.test_id.to_s.include?('subscription_notification_wait')
       puts "    [PAS Pended Notification] Waiting for async PASSubscriptionTopic rest-hook webhook to resume #{waiting_result.test_id} ..."
       pas_deadline = Time.now + 30.0
-      while runs_repo.status_for_test_run(test_run_id).to_s == 'waiting' && Time.now <= pas_deadline
+      while %w[waiting queued running].include?(runs_repo.status_for_test_run(test_run_id).to_s) && Time.now <= pas_deadline
         sleep 0.15
       end
-      if runs_repo.status_for_test_run(test_run_id).to_s == 'waiting'
+      if %w[waiting queued running].include?(runs_repo.status_for_test_run(test_run_id).to_s)
         raise "Timed out waiting for async PAS pended rest-hook notification on #{waiting_result.test_id}"
       end
     else
@@ -698,6 +737,7 @@ def execute_inferno_target(
       available_list.each do |ri|
         next unless ri.type.to_s == 'radio'
         next if ri.respond_to?(:locked) && ri.locked
+        next if inputs.key?(ri.name.to_sym) || inputs.key?(ri.name.to_s)
 
         data_repo.save(
           test_session_id: test_session.id,
@@ -1229,6 +1269,98 @@ if pas_suite && ENV['INFERNO_SKIP_PAS'] != 'true'
         notify_endpoint: pas_notify_endpoint,
         notify_token: pas_notify_token
       )
+    }
+  )
+end
+
+udap_suite = Inferno::Repositories::TestSuites.new.find('udap_security')
+if udap_suite && ENV['INFERNO_SKIP_UDAP'] != 'true'
+  udap_inputs = FlintTrack8Payloads.mint_udap_pki!(
+    flint_base_url: flint_base_url,
+    flint_fhir_url: flint_fhir_url
+  )
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'udap_security_v100',
+    suite_id: 'udap_security',
+    runnables: Array(udap_suite.groups),
+    auto_radio_true: true,
+    populate_defaults: true,
+    inputs: udap_inputs
+  )
+end
+
+crd_v201_suite = Inferno::Repositories::TestSuites.new.find('crd_server')
+if crd_v201_suite && ENV['INFERNO_SKIP_CRD'] != 'true'
+  crd_v201_runnables = Array(crd_v201_suite.groups).flat_map do |g|
+    g.id.to_s.end_with?('server_hooks') ? Array(g.groups) : [g]
+  end
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'davinci_crd_v201',
+    suite_id: 'crd_server',
+    runnables: crd_v201_runnables,
+    populate_defaults: true,
+    inputs: {
+      base_url: flint_base_url,
+      **FlintTrack8Payloads.crd_inputs(flint_fhir_url: flint_fhir_url, ig_version: 'v201')
+    }
+  )
+end
+
+crd_v221_suite = Inferno::Repositories::TestSuites.new.find('crd_server_v221')
+if crd_v221_suite && ENV['INFERNO_SKIP_CRD'] != 'true'
+  crd_v221_runnables = Array(crd_v221_suite.groups).flat_map do |g|
+    if g.id.to_s.end_with?('server_hooks') || g.id.to_s.end_with?('specific_coverage_responses')
+      Array(g.groups)
+    else
+      [g]
+    end
+  end
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'davinci_crd_v221',
+    suite_id: 'crd_server_v221',
+    runnables: crd_v221_runnables,
+    populate_defaults: true,
+    inputs: {
+      base_url: flint_base_url,
+      **FlintTrack8Payloads.crd_inputs(flint_fhir_url: flint_fhir_url, ig_version: 'v221')
+    }
+  )
+end
+
+dtr_v201_suite = Inferno::Repositories::TestSuites.new.find('dtr_payer_server')
+if dtr_v201_suite && ENV['INFERNO_SKIP_DTR'] != 'true'
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'davinci_dtr_v201',
+    suite_id: 'dtr_payer_server',
+    runnables: Array(dtr_v201_suite.groups),
+    populate_defaults: true,
+    inputs: {
+      url: flint_fhir_url,
+      smart_auth_info: us_core_auth_json,
+      **FlintTrack8Payloads.dtr_v201_inputs(flint_fhir_url: flint_fhir_url)
+    }
+  )
+end
+
+dtr_v220_suite = Inferno::Repositories::TestSuites.new.find('dtr_payer_server_v220')
+if dtr_v220_suite && ENV['INFERNO_SKIP_DTR'] != 'true'
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'davinci_dtr_v220',
+    suite_id: 'dtr_payer_server_v220',
+    runnables: Array(dtr_v220_suite.groups),
+    populate_defaults: true,
+    inputs: {
+      url: flint_fhir_url,
+      backend_services_smart_auth_info: backend_auth_json,
+      **FlintTrack8Payloads.dtr_v220_inputs(flint_fhir_url: flint_fhir_url)
     }
   )
 end

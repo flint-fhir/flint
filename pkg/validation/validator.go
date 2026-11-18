@@ -626,6 +626,11 @@ func (e *Engine) ValidateJSONWithProfiles(expectedResType string, rawJSON []byte
 // optional $validate operation mode ("create", "update", "delete"), and explicit or
 // meta.profile-declared US Core v6.1.0 / v7.0.0 StructureDefinition profiles.
 func (e *Engine) ValidateResourceWithProfiles(expectedResType string, resMap map[string]any, profiles []string, mode string) *Outcome {
+	if expectedResType == "" && (resMap == nil || resMap["resourceType"] == nil) {
+		if lmOutcome, handled := e.validateCRDLogicalModels(resMap, profiles); handled {
+			return lmOutcome
+		}
+	}
 	outcome := e.ValidateResource(expectedResType, resMap)
 	resTypeStr, _ := resMap["resourceType"].(string)
 	if resTypeStr == "" {
@@ -773,6 +778,12 @@ func hasUSCoreRequiredElement(resMap map[string]any, fieldSpec string) bool {
 			}
 		case "medication[x]":
 			for _, k := range []string{"medicationCodeableConcept", "medicationReference"} {
+				if v, ok := resMap[k]; ok && v != nil && !isEmptyValue(v) {
+					return true
+				}
+			}
+		case "code[x]":
+			for _, k := range []string{"codeCodeableConcept", "codeReference"} {
 				if v, ok := resMap[k]; ok && v != nil && !isEmptyValue(v) {
 					return true
 				}
@@ -1663,6 +1674,306 @@ var usCoreProfileSpecs = map[string]usCoreProfileSpec{
 		ResourceType:   "NutritionOrder",
 		RequiredFields: []string{"status", "intent", "patient", "dateTime"},
 	},
+	// HL7 Da Vinci HRex v1.1.0 / v1.2.0 additional profiles
+	"http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-practitioner": {
+		Slug:           "hrex-practitioner",
+		ResourceType:   "Practitioner",
+		RequiredFields: []string{"identifier", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-practitionerrole": {
+		Slug:           "hrex-practitionerrole",
+		ResourceType:   "PractitionerRole",
+		RequiredFields: []string{"practitioner|organization|code|specialty"},
+	},
+	"http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-organization": {
+		Slug:           "hrex-organization",
+		ResourceType:   "Organization",
+		RequiredFields: []string{"active", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-patient-demographics": {
+		Slug:           "hrex-patient-demographics",
+		ResourceType:   "Patient",
+		RequiredFields: []string{"name"},
+	},
+	"http://hl7.org/fhir/us/davinci-hrex/StructureDefinition/hrex-task-data-request": {
+		Slug:           "hrex-task-data-request",
+		ResourceType:   "Task",
+		RequiredFields: []string{"status", "intent", "code"},
+	},
+	// HL7 Da Vinci Coverage Requirements Discovery (CRD) v2.0.1 / v2.2.1 profiles
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-appointment": {
+		Slug:           "crd-profile-appointment",
+		ResourceType:   "Appointment",
+		RequiredFields: []string{"status", "participant"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-appointment-no-order": {
+		Slug:           "crd-profile-appointment-no-order",
+		ResourceType:   "Appointment",
+		RequiredFields: []string{"status", "participant"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-appointment-with-order": {
+		Slug:           "crd-profile-appointment-with-order",
+		ResourceType:   "Appointment",
+		RequiredFields: []string{"status", "basedOn", "participant"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-communicationrequest": {
+		Slug:           "crd-profile-communicationrequest",
+		ResourceType:   "CommunicationRequest",
+		RequiredFields: []string{"status", "payload"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-coverage": {
+		Slug:           "crd-profile-coverage",
+		ResourceType:   "Coverage",
+		RequiredFields: []string{"status", "beneficiary", "payor"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-device": {
+		Slug:           "crd-profile-device",
+		ResourceType:   "Device",
+		RequiredFields: []string{"type"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-devicerequest": {
+		Slug:           "crd-profile-devicerequest",
+		ResourceType:   "DeviceRequest",
+		RequiredFields: []string{"status", "intent", "code[x]", "subject"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-encounter": {
+		Slug:           "crd-profile-encounter",
+		ResourceType:   "Encounter",
+		RequiredFields: []string{"status", "class", "subject"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-location": {
+		Slug:           "crd-profile-location",
+		ResourceType:   "Location",
+		RequiredFields: []string{"status|name|address"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-medication": {
+		Slug:           "crd-profile-medication",
+		ResourceType:   "Medication",
+		RequiredFields: []string{"code"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-medicationrequest": {
+		Slug:           "crd-profile-medicationrequest",
+		ResourceType:   "MedicationRequest",
+		RequiredFields: []string{"status", "intent", "medication[x]", "subject"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-nutritionorder": {
+		Slug:           "crd-profile-nutritionorder",
+		ResourceType:   "NutritionOrder",
+		RequiredFields: []string{"status", "intent", "patient", "dateTime"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-organization": {
+		Slug:           "crd-profile-organization",
+		ResourceType:   "Organization",
+		RequiredFields: []string{"active", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-patient": {
+		Slug:           "crd-profile-patient",
+		ResourceType:   "Patient",
+		RequiredFields: []string{"identifier", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-practitioner": {
+		Slug:           "crd-profile-practitioner",
+		ResourceType:   "Practitioner",
+		RequiredFields: []string{"identifier", "name"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-practitionerrole": {
+		Slug:           "crd-profile-practitionerrole",
+		ResourceType:   "PractitionerRole",
+		RequiredFields: []string{"practitioner|organization|code|specialty"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-servicerequest": {
+		Slug:           "crd-profile-servicerequest",
+		ResourceType:   "ServiceRequest",
+		RequiredFields: []string{"status", "intent", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-task": {
+		Slug:           "crd-profile-task",
+		ResourceType:   "Task",
+		RequiredFields: []string{"status", "intent", "code"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-taskdispatch": {
+		Slug:           "crd-profile-taskdispatch",
+		ResourceType:   "Task",
+		RequiredFields: []string{"status", "intent", "code"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-taskquestionnaire": {
+		Slug:           "crd-profile-taskquestionnaire",
+		ResourceType:   "Task",
+		RequiredFields: []string{"status", "intent", "code"},
+	},
+	"http://hl7.org/fhir/us/davinci-crd/StructureDefinition/profile-visionprescription": {
+		Slug:           "crd-profile-visionprescription",
+		ResourceType:   "VisionPrescription",
+		RequiredFields: []string{"status", "created", "patient", "dateWritten", "prescriber", "lensSpecification"},
+	},
+	// HL7 Da Vinci Documentation Templates and Rules (DTR) v2.0.1 / v2.2.0 & HL7 SDC profiles
+	"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-qpackage-input-parameters": {
+		Slug:           "dtr-qpackage-input-parameters",
+		ResourceType:   "Parameters",
+		RequiredFields: []string{"parameter"},
+	},
+	"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-qpackage-output-parameters": {
+		Slug:           "dtr-qpackage-output-parameters",
+		ResourceType:   "Parameters",
+		RequiredFields: []string{"parameter"},
+	},
+	"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/DTR-QPackageBundle": {
+		Slug:           "DTR-QPackageBundle",
+		ResourceType:   "Bundle",
+		RequiredFields: []string{"type", "timestamp", "entry"},
+	},
+	"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-qpackage-bundle": {
+		Slug:           "dtr-qpackage-bundle",
+		ResourceType:   "Bundle",
+		RequiredFields: []string{"type", "timestamp", "entry"},
+	},
+	"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-base-questionnaire": {
+		Slug:           "dtr-base-questionnaire",
+		ResourceType:   "Questionnaire",
+		RequiredFields: []string{"url", "version", "title", "status", "subjectType"},
+	},
+	"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-std-questionnaire": {
+		Slug:           "dtr-std-questionnaire",
+		ResourceType:   "Questionnaire",
+		RequiredFields: []string{"url", "version", "title", "status", "subjectType", "item"},
+	},
+	"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-questionnaire-adapt": {
+		Slug:           "dtr-questionnaire-adapt",
+		ResourceType:   "Questionnaire",
+		RequiredFields: []string{"url", "status"},
+	},
+	"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-questionnaire-adapt-search": {
+		Slug:           "dtr-questionnaire-adapt-search",
+		ResourceType:   "Questionnaire",
+		RequiredFields: []string{"url", "version", "title", "status", "subjectType"},
+	},
+	"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-questionnaireresponse": {
+		Slug:           "dtr-questionnaireresponse",
+		ResourceType:   "QuestionnaireResponse",
+		RequiredFields: []string{"questionnaire", "status", "subject"},
+	},
+	"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-questionnaireresponse-adapt": {
+		Slug:           "dtr-questionnaireresponse-adapt",
+		ResourceType:   "QuestionnaireResponse",
+		RequiredFields: []string{"questionnaire", "status", "subject"},
+	},
+	"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-next-question-input-parameters": {
+		Slug:           "dtr-next-question-input-parameters",
+		ResourceType:   "Parameters",
+		RequiredFields: []string{"parameter"},
+	},
+	"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-next-question-output-parameters": {
+		Slug:           "dtr-next-question-output-parameters",
+		ResourceType:   "Parameters",
+		RequiredFields: []string{"parameter"},
+	},
+	"http://hl7.org/fhir/us/davinci-dtr/StructureDefinition/dtr-log-errors-input-parameters": {
+		Slug:           "dtr-log-errors-input-parameters",
+		ResourceType:   "Parameters",
+		RequiredFields: []string{"parameter"},
+	},
+	"http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaire": {
+		Slug:           "sdc-questionnaire",
+		ResourceType:   "Questionnaire",
+		RequiredFields: []string{"status"},
+	},
+	"http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaire-adapt": {
+		Slug:           "sdc-questionnaire-adapt",
+		ResourceType:   "Questionnaire",
+		RequiredFields: []string{"status"},
+	},
+	"http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaire-adapt-srch": {
+		Slug:           "sdc-questionnaire-adapt-srch",
+		ResourceType:   "Questionnaire",
+		RequiredFields: []string{"status"},
+	},
+	"http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaire-populate-exp": {
+		Slug:           "sdc-questionnaire-populate-exp",
+		ResourceType:   "Questionnaire",
+		RequiredFields: []string{"status"},
+	},
+	"http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaireresponse": {
+		Slug:           "sdc-questionnaireresponse",
+		ResourceType:   "QuestionnaireResponse",
+		RequiredFields: []string{"status"},
+	},
+	"http://hl7.org/fhir/uv/sdc/StructureDefinition/sdc-questionnaireresponse-adapt": {
+		Slug:           "sdc-questionnaireresponse-adapt",
+		ResourceType:   "QuestionnaireResponse",
+		RequiredFields: []string{"questionnaire", "status"},
+	},
+	"http://hl7.org/fhir/uv/sdc/StructureDefinition/parameters-questionnaire-next-question-in": {
+		Slug:           "parameters-questionnaire-next-question-in",
+		ResourceType:   "Parameters",
+		RequiredFields: []string{"parameter"},
+	},
+	"http://hl7.org/fhir/uv/sdc/StructureDefinition/parameters-questionnaire-next-question-out": {
+		Slug:           "parameters-questionnaire-next-question-out",
+		ResourceType:   "Parameters",
+		RequiredFields: []string{"parameter"},
+	},
+}
+
+func (e *Engine) validateCRDLogicalModels(resMap map[string]any, profiles []string) (*Outcome, bool) {
+	var matched []string
+	for _, rawP := range profiles {
+		for p := range strings.SplitSeq(rawP, ",") {
+			p = strings.TrimSpace(p)
+			if pipeIdx := strings.IndexByte(p, '|'); pipeIdx != -1 {
+				p = strings.TrimSpace(p[:pipeIdx])
+			}
+			if strings.HasPrefix(p, "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/CRDHooks") {
+				matched = append(matched, p)
+			}
+		}
+	}
+	if len(matched) == 0 {
+		return nil, false
+	}
+	outcome := NewOutcome()
+	if resMap == nil {
+		outcome.AddError(CodeRequired, "CRD Logical Model payload must be a JSON object")
+		return outcome, true
+	}
+	for _, prof := range matched {
+		slug := strings.TrimPrefix(prof, "http://hl7.org/fhir/us/davinci-crd/StructureDefinition/")
+		switch slug {
+		case "CRDHooksRequest":
+			for _, reqKey := range []string{"hook", "hookInstance", "context"} {
+				if v, ok := resMap[reqKey]; !ok || v == nil || isEmptyValue(v) {
+					outcome.AddError(CodeRequired, fmt.Sprintf("CRDHooksRequest requires %q", reqKey), "CRDHooksRequest."+reqKey)
+				}
+			}
+		case "CRDHooksResponseBase":
+			_, hasCards := resMap["cards"].([]any)
+			_, hasActions := resMap["systemActions"].([]any)
+			if !hasCards && !hasActions {
+				outcome.AddError(CodeRequired, "CRDHooksResponseBase requires \"cards\" or \"systemActions\" array", slug+".cards")
+			}
+		case "CRDHooksResponse-additionalOrders",
+			"CRDHooksResponse-adjustCoverage",
+			"CRDHooksResponse-alternateRequest",
+			"CRDHooksResponse-externalReference",
+			"CRDHooksResponse-formCompletion",
+			"CRDHooksResponse-instructions",
+			"CRDHooksResponse-launchSMART":
+			if _, ok := resMap["cards"].([]any); !ok {
+				outcome.AddError(CodeRequired, fmt.Sprintf("%s requires \"cards\" array", slug), slug+".cards")
+			}
+		case "CRDHooksResponse-coverageInformation":
+			if rawCards, hasCards := resMap["cards"]; hasCards {
+				if _, ok := rawCards.([]any); !ok {
+					outcome.AddError(CodeRequired, "CRDHooksResponse-coverageInformation \"cards\" must be an array", slug+".cards")
+				}
+			}
+			if v, ok := resMap["systemActions"]; !ok || v == nil || isEmptyValue(v) {
+				outcome.AddError(CodeRequired, "CRDHooksResponse-coverageInformation requires non-empty \"systemActions\"", slug+".systemActions")
+			}
+		default:
+			outcome.AddWarning(CodeNotSupported, fmt.Sprintf("Unrecognized CRD Logical Model %q", prof), slug)
+		}
+	}
+	return outcome, true
 }
 
 func vitalSignsSpec(slug string, extra func(resType string, resMap map[string]any, outcome *Outcome)) usCoreProfileSpec {

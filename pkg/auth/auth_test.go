@@ -623,3 +623,59 @@ func TestGranularScopeConstraintsAndMockAndAlgorithmsWave55(t *testing.T) {
 	assert.Equal(t, "org_987", zCtx.TenantId)
 	assert.Equal(t, "enc-555", zCtx.EncounterId)
 }
+
+func TestSignRS256WithX5CAndSignRS384(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	// nil private key checks
+	_, err = auth.SignRS256WithX5C(map[string]any{"iss": "https://client.example"}, nil, []string{"MIIB"})
+	require.Error(t, err)
+	_, err = auth.SignRS384(map[string]any{"iss": "https://client.example"}, nil, "kid-1")
+	require.Error(t, err)
+
+	// unmarshalable payload checks
+	_, err = auth.SignRS256WithX5C(map[string]any{"bad": make(chan int)}, rsaKey, []string{"MIIB"})
+	require.Error(t, err)
+	_, err = auth.SignRS384(map[string]any{"bad": make(chan int)}, rsaKey, "kid-1")
+	require.Error(t, err)
+
+	// SignRS256WithX5C round-trip + VerifySignature
+	x5cChain := []string{"MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A", "MIIBRootCA"}
+	x5cJWS, err := auth.SignRS256WithX5C(map[string]any{
+		"iss": "https://udap.example/app",
+		"sub": "https://udap.example/app",
+		"jti": "udap-jti-1",
+	}, rsaKey, x5cChain)
+	require.NoError(t, err)
+	parsedX5C, err := auth.ParseJWT(x5cJWS)
+	require.NoError(t, err)
+	assert.Equal(t, "RS256", parsedX5C.Header.Alg)
+	assert.Equal(t, x5cChain, parsedX5C.Header.X5c)
+	assert.Equal(t, "udap-jti-1", parsedX5C.Payload.JTI)
+	require.NoError(t, parsedX5C.VerifySignature(&rsaKey.PublicKey))
+	require.ErrorIs(t, parsedX5C.VerifySignature(&otherKey.PublicKey), auth.ErrInvalidSignature)
+
+	// SignRS384 with kid and without kid + VerifySignature
+	rs384JWS, err := auth.SignRS384(map[string]any{
+		"iss": "https://cds.example/ehr",
+		"jti": "cds-jti-384",
+	}, rsaKey, "  rs384-kid-1  ")
+	require.NoError(t, err)
+	parsedRS384, err := auth.ParseJWT(rs384JWS)
+	require.NoError(t, err)
+	assert.Equal(t, "RS384", parsedRS384.Header.Alg)
+	assert.Equal(t, "rs384-kid-1", parsedRS384.Header.Kid)
+	require.NoError(t, parsedRS384.VerifySignature(&rsaKey.PublicKey))
+	require.ErrorIs(t, parsedRS384.VerifySignature(&otherKey.PublicKey), auth.ErrInvalidSignature)
+	require.ErrorIs(t, parsedRS384.VerifySignature([]byte("not-rsa")), auth.ErrUnsupportedKeyType)
+
+	rs384NoKid, err := auth.SignRS384(map[string]any{"iss": "https://cds.example/ehr"}, rsaKey, "")
+	require.NoError(t, err)
+	parsedNoKid, err := auth.ParseJWT(rs384NoKid)
+	require.NoError(t, err)
+	assert.Empty(t, parsedNoKid.Header.Kid)
+	require.NoError(t, parsedNoKid.VerifySignature(&rsaKey.PublicKey))
+}
