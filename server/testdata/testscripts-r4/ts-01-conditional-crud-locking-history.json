@@ -1,0 +1,377 @@
+{
+  "resourceType": "TestScript",
+  "id": "ts-01-conditional-crud-locking-history",
+  "url": "http://flint.fhir.org/TestScript/ts-01-conditional-crud-locking-history",
+  "version": "0.6.0",
+  "name": "HL7R4ConditionalCRUDLockingPatchAndHistory",
+  "title": "HL7 FHIR R4 Conditional CRUD, If-Match Optimistic Locking, FHIRPath Patch, History & VRead",
+  "status": "active",
+  "contained": [
+    {
+      "resourceType": "Patient",
+      "id": "pat-cond-v1",
+      "active": true,
+      "gender": "female",
+      "birthDate": "1985-12-10",
+      "identifier": [
+        {"system": "http://example.org/mrn", "value": "TS-COND-001"}
+      ],
+      "name": [
+        {"use": "official", "family": "ConditionalAlpha", "given": ["Ada"]}
+      ]
+    },
+    {
+      "resourceType": "Patient",
+      "id": "pat-cond-v2",
+      "active": true,
+      "gender": "female",
+      "birthDate": "1985-12-10",
+      "identifier": [
+        {"system": "http://example.org/mrn", "value": "TS-COND-001"}
+      ],
+      "name": [
+        {"use": "official", "family": "ConditionalBeta", "given": ["Ada", "Byron"]}
+      ]
+    },
+    {
+      "resourceType": "Patient",
+      "id": "pat-cond-v3",
+      "active": true,
+      "gender": "female",
+      "birthDate": "1985-12-10",
+      "identifier": [
+        {"system": "http://example.org/mrn", "value": "TS-COND-001"}
+      ],
+      "name": [
+        {"use": "official", "family": "ConditionalGamma", "given": ["Ada", "Lovelace"]}
+      ]
+    },
+    {
+      "resourceType": "Parameters",
+      "id": "pat-fhir-patch",
+      "parameter": [
+        {
+          "name": "operation",
+          "part": [
+            {"name": "type", "valueCode": "replace"},
+            {"name": "path", "valueString": "Patient.birthDate"},
+            {"name": "value", "valueDate": "1985-12-11"}
+          ]
+        }
+      ]
+    },
+    {
+      "resourceType": "Observation",
+      "id": "obs-cond-del",
+      "status": "final",
+      "identifier": [
+        {"system": "http://example.org/obs", "value": "TS-OBS-DEL-1"}
+      ],
+      "code": {
+        "coding": [
+          {"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}
+        ]
+      },
+      "subject": {"reference": "Patient/${condPatId}"},
+      "valueQuantity": {
+        "value": 68,
+        "unit": "/min",
+        "system": "http://unitsofmeasure.org",
+        "code": "/min"
+      }
+    }
+  ],
+  "fixture": [
+    {"id": "fx-pat-v1", "autocreate": false, "autodelete": false, "resource": {"reference": "#pat-cond-v1"}},
+    {"id": "fx-pat-v2", "autocreate": false, "autodelete": false, "resource": {"reference": "#pat-cond-v2"}},
+    {"id": "fx-pat-v3", "autocreate": false, "autodelete": false, "resource": {"reference": "#pat-cond-v3"}},
+    {"id": "fx-pat-patch", "autocreate": false, "autodelete": false, "resource": {"reference": "#pat-fhir-patch"}},
+    {"id": "fx-obs-del", "autocreate": false, "autodelete": false, "resource": {"reference": "#obs-cond-del"}}
+  ],
+  "variable": [
+    {"name": "condPatId", "expression": "Patient.id", "sourceId": "resp-cond-create-1"},
+    {"name": "condObsId", "expression": "Observation.id", "sourceId": "resp-obs-create"}
+  ],
+  "setup": {
+    "action": [
+      {
+        "operation": {
+          "type": {"code": "capabilities"},
+          "responseId": "resp-cap"
+        }
+      },
+      {
+        "assert": {
+          "response": "okay",
+          "resource": "CapabilityStatement",
+          "expression": "CapabilityStatement.fhirVersion",
+          "operator": "equals",
+          "value": "4.0.1"
+        }
+      }
+    ]
+  },
+  "test": [
+    {
+      "name": "01-ConditionalCreateIdempotency",
+      "description": "Verify If-None-Exist creates once (201) and returns existing resource idempotently (200) on replay.",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "create"},
+            "resource": "Patient",
+            "sourceId": "fx-pat-v1",
+            "responseId": "resp-cond-create-1",
+            "requestHeader": [
+              {"field": "If-None-Exist", "value": "identifier=http://example.org/mrn|TS-COND-001"}
+            ]
+          }
+        },
+        {
+          "assert": {
+            "response": "created",
+            "responseCode": "201",
+            "resource": "Patient",
+            "headerField": "ETag",
+            "operator": "contains",
+            "value": "W/\"1\""
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "create"},
+            "resource": "Patient",
+            "sourceId": "fx-pat-v2",
+            "responseId": "resp-cond-create-2",
+            "requestHeader": [
+              {"field": "If-None-Exist", "value": "identifier=http://example.org/mrn|TS-COND-001"}
+            ]
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "responseCode": "200",
+            "resource": "Patient",
+            "expression": "Patient.id",
+            "operator": "equals",
+            "value": "${condPatId}"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Patient.meta.versionId",
+            "operator": "equals",
+            "value": "1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "02-ConditionalUpdateAndOptimisticLocking",
+      "description": "Verify conditional PUT updates matching Patient to v2, If-Match W/\"2\" updates to v3, and stale If-Match W/\"1\" fails with 412.",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "update"},
+            "resource": "Patient",
+            "params": "identifier=http://example.org/mrn|TS-COND-001",
+            "sourceId": "fx-pat-v2",
+            "responseId": "resp-cond-update"
+          }
+        },
+        {
+          "assert": {
+            "responseCode": "200",
+            "resource": "Patient",
+            "expression": "Patient.meta.versionId",
+            "operator": "equals",
+            "value": "2"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "update"},
+            "resource": "Patient",
+            "targetId": "${condPatId}",
+            "sourceId": "fx-pat-v3",
+            "responseId": "resp-cas-ok",
+            "requestHeader": [
+              {"field": "If-Match", "value": "W/\"2\""}
+            ]
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Patient.meta.versionId",
+            "operator": "equals",
+            "value": "3"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "update"},
+            "resource": "Patient",
+            "targetId": "${condPatId}",
+            "sourceId": "fx-pat-v2",
+            "responseId": "resp-cas-conflict",
+            "requestHeader": [
+              {"field": "If-Match", "value": "W/\"1\""}
+            ]
+          }
+        },
+        {
+          "assert": {
+            "response": "preconditionFailed",
+            "responseCode": "412",
+            "resource": "OperationOutcome"
+          }
+        }
+      ]
+    },
+    {
+      "name": "03-FHIRPathPatchHistoryAndVRead",
+      "description": "Apply FHIRPath Parameters PATCH (v4), verify _history count, and vread historical versions 1 and 3.",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "patch"},
+            "resource": "Patient",
+            "targetId": "${condPatId}",
+            "sourceId": "fx-pat-patch",
+            "responseId": "resp-patch"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Patient.meta.versionId",
+            "operator": "equals",
+            "value": "4"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Patient.birthDate",
+            "operator": "equals",
+            "value": "1985-12-11"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "history"},
+            "resource": "Patient",
+            "targetId": "${condPatId}"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Bundle",
+            "expression": "Bundle.type",
+            "operator": "equals",
+            "value": "history"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Bundle.entry.count()",
+            "operator": "equals",
+            "value": "4"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "vread"},
+            "resource": "Patient",
+            "targetId": "${condPatId}",
+            "params": "1"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Patient.name[0].family",
+            "operator": "equals",
+            "value": "ConditionalAlpha"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "vread"},
+            "resource": "Patient",
+            "targetId": "${condPatId}",
+            "params": "3"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Patient.name[0].family",
+            "operator": "equals",
+            "value": "ConditionalGamma"
+          }
+        }
+      ]
+    },
+    {
+      "name": "04-ConditionalDeleteAndTombstoneGone",
+      "description": "Create an Observation linked to ${condPatId}, conditionally DELETE by identifier, and verify 410 Gone tombstone.",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "create"},
+            "resource": "Observation",
+            "sourceId": "fx-obs-del",
+            "responseId": "resp-obs-create"
+          }
+        },
+        {
+          "assert": {
+            "response": "created",
+            "expression": "Observation.subject.reference",
+            "operator": "equals",
+            "value": "Patient/${condPatId}"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "delete"},
+            "resource": "Observation",
+            "params": "identifier=http://example.org/obs|TS-OBS-DEL-1"
+          }
+        },
+        {
+          "assert": {
+            "responseCode": "200,204"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "read"},
+            "resource": "Observation",
+            "targetId": "${condObsId}"
+          }
+        },
+        {
+          "assert": {
+            "response": "gone",
+            "responseCode": "410"
+          }
+        }
+      ]
+    }
+  ],
+  "teardown": {
+    "action": [
+      {
+        "operation": {
+          "type": {"code": "delete"},
+          "resource": "Patient",
+          "targetId": "${condPatId}"
+        }
+      }
+    ]
+  }
+}

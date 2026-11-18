@@ -210,6 +210,9 @@ func (e *Engine) ValidateResource(expectedResType string, resMap map[string]any)
 		}
 	}
 
+	// 3b. Enforce polymorphic choice[x] mutual exclusion on top-level elements
+	validateChoiceGroupMutualExclusion(resTypeStr, schema.ChoiceGroups, resMap, outcome)
+
 	// 4. Required elements check (1..1 min cardinality)
 	if e.opts.EnforceRequiredElements {
 		for _, reqField := range schema.RequiredFields {
@@ -452,6 +455,33 @@ var (
 	nestedDetailsCache = make(map[protoreflect.FullName]protoSchemaDetails)
 )
 
+func validateChoiceGroupMutualExclusion(
+	elementPath string,
+	choiceGroups map[string][]string,
+	elemMap map[string]any,
+	outcome *Outcome,
+) {
+	if len(choiceGroups) == 0 || len(elemMap) == 0 {
+		return
+	}
+	for baseGroup, candidates := range choiceGroups {
+		var present []string
+		for _, cand := range candidates {
+			v, hasV := elemMap[cand]
+			ext, hasExt := elemMap["_"+cand]
+			if (hasV && v != nil) || (hasExt && ext != nil) {
+				present = append(present, cand)
+			}
+		}
+		if len(present) > 1 {
+			outcome.AddError(CodeStructure,
+				fmt.Sprintf("Polymorphic choice element %s.%s[x] cannot specify multiple types simultaneously (%s)",
+					elementPath, baseGroup, strings.Join(present, ", ")),
+				fmt.Sprintf("%s.%s[x]", elementPath, baseGroup))
+		}
+	}
+}
+
 func cachedProtoSchemaDetails(md protoreflect.MessageDescriptor) protoSchemaDetails {
 	if md == nil {
 		return protoSchemaDetails{}
@@ -557,6 +587,8 @@ func (e *Engine) validateComplexElement(
 		return
 	}
 	det := cachedProtoSchemaDetails(md)
+
+	validateChoiceGroupMutualExclusion(elementPath, det.choiceGroups, elemMap, outcome)
 
 	if e.opts.DisallowUnknownFields {
 		for key := range elemMap {

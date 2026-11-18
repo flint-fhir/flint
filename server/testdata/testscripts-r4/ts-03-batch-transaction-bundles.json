@@ -1,0 +1,317 @@
+{
+  "resourceType": "TestScript",
+  "id": "ts-03-batch-transaction-bundles",
+  "url": "http://flint.fhir.org/TestScript/ts-03-batch-transaction-bundles",
+  "version": "0.6.0",
+  "name": "HL7R4BatchAndTransactionBundleConformance",
+  "title": "HL7 FHIR R4 Atomic Transaction urn:uuid Resolution, Rollback Isolation & Independent Batch Bundles",
+  "status": "active",
+  "contained": [
+    {
+      "resourceType": "Bundle",
+      "id": "bundle-tx-valid",
+      "type": "transaction",
+      "entry": [
+        {
+          "fullUrl": "urn:uuid:11111111-2222-4333-8444-555555555501",
+          "resource": {
+            "resourceType": "Patient",
+            "active": true,
+            "gender": "male",
+            "birthDate": "1972-09-18",
+            "identifier": [
+              {"system": "http://example.org/mrn", "value": "TX-UUID-001"}
+            ],
+            "name": [
+              {"use": "official", "family": "TransactionBundle", "given": ["Alan"]}
+            ]
+          },
+          "request": {
+            "method": "POST",
+            "url": "Patient",
+            "ifNoneExist": "identifier=http://example.org/mrn|TX-UUID-001"
+          }
+        },
+        {
+          "fullUrl": "urn:uuid:11111111-2222-4333-8444-555555555502",
+          "resource": {
+            "resourceType": "Encounter",
+            "status": "finished",
+            "class": {
+              "system": "http://terminology.hl7.org/CodeSystem/v3-ActCode",
+              "code": "AMB",
+              "display": "ambulatory"
+            },
+            "subject": {
+              "reference": "urn:uuid:11111111-2222-4333-8444-555555555501"
+            }
+          },
+          "request": {
+            "method": "POST",
+            "url": "Encounter"
+          }
+        },
+        {
+          "fullUrl": "urn:uuid:11111111-2222-4333-8444-555555555503",
+          "resource": {
+            "resourceType": "Observation",
+            "status": "final",
+            "code": {
+              "coding": [
+                {"system": "http://loinc.org", "code": "8867-4", "display": "Heart rate"}
+              ]
+            },
+            "subject": {
+              "reference": "urn:uuid:11111111-2222-4333-8444-555555555501"
+            },
+            "encounter": {
+              "reference": "urn:uuid:11111111-2222-4333-8444-555555555502"
+            },
+            "valueQuantity": {
+              "value": 74,
+              "unit": "/min",
+              "system": "http://unitsofmeasure.org",
+              "code": "/min"
+            }
+          },
+          "request": {
+            "method": "POST",
+            "url": "Observation"
+          }
+        }
+      ]
+    },
+    {
+      "resourceType": "Bundle",
+      "id": "bundle-tx-rollback",
+      "type": "transaction",
+      "entry": [
+        {
+          "fullUrl": "urn:uuid:99999999-2222-4333-8444-555555555501",
+          "resource": {
+            "resourceType": "Patient",
+            "active": true,
+            "gender": "female",
+            "identifier": [
+              {"system": "http://example.org/mrn", "value": "TX-ROLLBACK-001"}
+            ],
+            "name": [
+              {"family": "MustNotPersist"}
+            ]
+          },
+          "request": {
+            "method": "POST",
+            "url": "Patient"
+          }
+        },
+        {
+          "fullUrl": "urn:uuid:99999999-2222-4333-8444-555555555502",
+          "resource": {
+            "resourceType": "Observation",
+            "subject": {
+              "reference": "urn:uuid:99999999-2222-4333-8444-555555555501"
+            }
+          },
+          "request": {
+            "method": "POST",
+            "url": "Observation"
+          }
+        }
+      ]
+    },
+    {
+      "resourceType": "Bundle",
+      "id": "bundle-batch-mixed",
+      "type": "batch",
+      "entry": [
+        {
+          "resource": {
+            "resourceType": "Patient",
+            "active": true,
+            "gender": "other",
+            "identifier": [
+              {"system": "http://example.org/mrn", "value": "BATCH-SURVIVOR-001"}
+            ],
+            "name": [
+              {"family": "BatchIndependent"}
+            ]
+          },
+          "request": {
+            "method": "POST",
+            "url": "Patient"
+          }
+        },
+        {
+          "request": {
+            "method": "GET",
+            "url": "Patient/nonexistent-batch-patient-99999"
+          }
+        }
+      ]
+    }
+  ],
+  "fixture": [
+    {"id": "fx-tx-valid", "autocreate": false, "autodelete": false, "resource": {"reference": "#bundle-tx-valid"}},
+    {"id": "fx-tx-rollback", "autocreate": false, "autodelete": false, "resource": {"reference": "#bundle-tx-rollback"}},
+    {"id": "fx-batch-mixed", "autocreate": false, "autodelete": false, "resource": {"reference": "#bundle-batch-mixed"}}
+  ],
+  "variable": [
+    {"name": "txPatId", "expression": "Bundle.entry[0].resource.id", "sourceId": "resp-tx-valid"},
+    {"name": "txEncId", "expression": "Bundle.entry[1].resource.id", "sourceId": "resp-tx-valid"},
+    {"name": "txObsId", "expression": "Bundle.entry[2].resource.id", "sourceId": "resp-tx-valid"},
+    {"name": "batchPatId", "expression": "Bundle.entry[0].resource.id", "sourceId": "resp-batch-mixed"}
+  ],
+  "test": [
+    {
+      "name": "01-AtomicTransactionWithUrnUuidResolution",
+      "description": "Execute atomic transaction Bundle and verify urn:uuid intra-bundle references resolve to persisted IDs.",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "transaction"},
+            "sourceId": "fx-tx-valid",
+            "responseId": "resp-tx-valid",
+            "requestHeader": [
+              {"field": "Prefer", "value": "return=representation"}
+            ]
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Bundle",
+            "expression": "Bundle.type",
+            "operator": "equals",
+            "value": "transaction-response"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Bundle.entry.count()",
+            "operator": "equals",
+            "value": "3"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "read"},
+            "resource": "Observation",
+            "targetId": "${txObsId}",
+            "responseId": "resp-read-tx-obs"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Observation.subject.reference",
+            "operator": "equals",
+            "value": "Patient/${txPatId}"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Observation.encounter.reference",
+            "operator": "equals",
+            "value": "Encounter/${txEncId}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "02-AtomicTransactionRollbackOnFailure",
+      "description": "Verify failed transaction entry rolls back earlier valid entries atomically.",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "transaction"},
+            "sourceId": "fx-tx-rollback",
+            "responseId": "resp-tx-rollback"
+          }
+        },
+        {
+          "assert": {
+            "responseCode": "400,422",
+            "resource": "OperationOutcome"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "search"},
+            "resource": "Patient",
+            "params": "identifier=http://example.org/mrn|TX-ROLLBACK-001"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Bundle.total",
+            "operator": "equals",
+            "value": "0"
+          }
+        }
+      ]
+    },
+    {
+      "name": "03-IndependentBatchBundleExecution",
+      "description": "Verify batch Bundle executes entries independently, returning 201 for entry[0] and 404 for entry[1].",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "batch"},
+            "sourceId": "fx-batch-mixed",
+            "responseId": "resp-batch-mixed",
+            "requestHeader": [
+              {"field": "Prefer", "value": "return=representation"}
+            ]
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Bundle",
+            "expression": "Bundle.type",
+            "operator": "equals",
+            "value": "batch-response"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Bundle.entry[0].response.status",
+            "operator": "contains",
+            "value": "201"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Bundle.entry[1].response.status",
+            "operator": "contains",
+            "value": "404"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "read"},
+            "resource": "Patient",
+            "targetId": "${batchPatId}"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "expression": "Patient.name[0].family",
+            "operator": "equals",
+            "value": "BatchIndependent"
+          }
+        }
+      ]
+    }
+  ],
+  "teardown": {
+    "action": [
+      {"operation": {"type": {"code": "delete"}, "resource": "Observation", "targetId": "${txObsId}"}},
+      {"operation": {"type": {"code": "delete"}, "resource": "Encounter", "targetId": "${txEncId}"}},
+      {"operation": {"type": {"code": "delete"}, "resource": "Patient", "targetId": "${txPatId}"}},
+      {"operation": {"type": {"code": "delete"}, "resource": "Patient", "targetId": "${batchPatId}"}}
+    ]
+  }
+}

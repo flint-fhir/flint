@@ -606,7 +606,7 @@ func writeXHTMLDiv(buf *bytes.Buffer, val any, extVal any) error {
 		buf.WriteByte('"')
 	}
 	buf.WriteByte('>')
-	_ = xml.EscapeText(buf, []byte(rawDiv))
+	writeEscapedXHTMLText(buf, []byte(rawDiv))
 	buf.WriteString("</div>")
 	return nil
 }
@@ -1410,7 +1410,7 @@ func readRawXHTMLDiv(dec *xml.Decoder, rootStart xml.StartElement, depth int) (s
 		case xml.Comment, xml.ProcInst:
 			continue
 		case xml.CharData:
-			_ = xml.EscapeText(&buf, t)
+			writeEscapedXHTMLText(&buf, t)
 		case xml.StartElement:
 			curDepth++
 			if depth+curDepth > maxXMLDepth {
@@ -1505,7 +1505,7 @@ func isPrimitiveWrapperDescriptor(md protoreflect.MessageDescriptor) bool {
 		return false
 	}
 	switch fullName {
-	case "google.fhir.r4.core.Date", "google.fhir.r4.core.DateTime", "google.fhir.r4.core.Instant":
+	case "google.fhir.r4.core.Date", "google.fhir.r4.core.DateTime", "google.fhir.r4.core.Instant", "google.fhir.r4.core.Time":
 		return true
 	}
 	valFD := md.Fields().ByName("value")
@@ -1583,6 +1583,23 @@ func isValidXMLIdent(s string) bool {
 		}
 	}
 	return true
+}
+
+func writeEscapedXHTMLText(buf *bytes.Buffer, b []byte) {
+	for _, c := range b {
+		switch c {
+		case '&':
+			buf.WriteString("&amp;")
+		case '<':
+			buf.WriteString("&lt;")
+		case '>':
+			buf.WriteString("&gt;")
+		case '\r':
+			buf.WriteString("&#xD;")
+		default:
+			buf.WriteByte(c)
+		}
+	}
 }
 
 func writeEscapedAttr(buf *bytes.Buffer, s string) {

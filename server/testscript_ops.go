@@ -17,6 +17,8 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/auth"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
+	"github.com/flint-fhir/flint/pkg/fhirxml"
+	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/store"
 )
 
@@ -35,16 +37,17 @@ func canonicalR4ResourceType(raw string) string {
 }
 
 type testScriptInteractionCapture struct {
-	reqMethod  string
-	reqURL     string
-	reqHeaders http.Header
-	reqBody    map[string]any
-	statusCode int
-	headers    http.Header
-	rawBody    []byte
-	bodyMap    map[string]any
-	resType    string
-	resID      string
+	reqMethod     string
+	reqURL        string
+	reqHeaders    http.Header
+	reqBody       map[string]any
+	statusCode    int
+	headers       http.Header
+	rawBody       []byte
+	bodyMap       map[string]any
+	resType       string
+	resID         string
+	fromContained bool
 }
 
 // handleTestScriptEvaluate handles GET/POST /fhir/r4/{tenant}/TestScript/$evaluate
@@ -184,6 +187,23 @@ func (s *Server) executeTestScript(
 		scriptName = scriptID
 	}
 
+	// Build profile lookup table from TestScript.profile[]
+	profileByID := make(map[string]string)
+	if pList, ok := script["profile"].([]any); ok {
+		for _, p := range pList {
+			if pm, ok := p.(map[string]any); ok {
+				pid := extractStringField(pm, "id")
+				pref := extractStringField(pm, "reference")
+				if pref == "" {
+					pref = extractStringField(pm, "uri")
+				}
+				if pid != "" && pref != "" {
+					profileByID[pid] = pref
+				}
+			}
+		}
+	}
+
 	// Build fixture table from contained resources, static fixtures, and external fixtures
 	containedByID := make(map[string]map[string]any)
 	if contained, ok := script["contained"].([]any); ok {
@@ -237,11 +257,12 @@ func (s *Server) executeTestScript(
 						rid, _ := cm["id"].(string)
 						raw, _ := json.Marshal(cm)
 						fixtures[fID] = &testScriptInteractionCapture{
-							statusCode: http.StatusOK,
-							rawBody:    raw,
-							bodyMap:    cm,
-							resType:    rt,
-							resID:      rid,
+							statusCode:    http.StatusOK,
+							rawBody:       raw,
+							bodyMap:       cm,
+							resType:       rt,
+							resID:         rid,
+							fromContained: true,
 						}
 					}
 				}
@@ -342,7 +363,7 @@ func (s *Server) executeTestScript(
 				}
 			}
 			if assertMap, hasAssert := am["assert"].(map[string]any); hasAssert && !isTeardown {
-				assertReport := s.executeTestScriptAssert(assertMap, lastCapture, fixtures, expandVars)
+				assertReport := s.executeTestScriptAssert(assertMap, lastCapture, fixtures, profileByID, expandVars)
 				ar["assert"] = assertReport
 				totalChecks++
 				resStr, _ := assertReport["result"].(string)
@@ -472,13 +493,21 @@ func (s *Server) executeTestScriptOperation(
 
 	// Resolve request body from sourceId fixture or contained resource
 	var bodyMap map[string]any
+	var fromContained bool
 	if sourceID != "" {
 		if fix, ok := fixtures[sourceID]; ok && fix != nil && fix.bodyMap != nil {
 			clonedBytes, _ := json.Marshal(fix.bodyMap)
 			_ = json.Unmarshal(clonedBytes, &bodyMap)
+			fromContained = fix.fromContained
 		} else if cm, ok := containedByID[strings.TrimPrefix(sourceID, "#")]; ok {
 			clonedBytes, _ := json.Marshal(cm)
 			_ = json.Unmarshal(clonedBytes, &bodyMap)
+			fromContained = true
+		}
+	}
+	if bodyMap != nil {
+		if expanded, ok := expandVarsInAny(bodyMap, expandVars).(map[string]any); ok {
+			bodyMap = expanded
 		}
 	}
 	if resType == "" && bodyMap != nil {
@@ -524,6 +553,9 @@ func (s *Server) executeTestScriptOperation(
 				}
 				targetPath = basePath + "/" + resType + "/" + resolvedID
 			} else {
+				if fromContained && bodyMap != nil {
+					delete(bodyMap, "id")
+				}
 				if !strings.HasPrefix(params, "?") && params != "" {
 					params = "?" + params
 				}
@@ -537,6 +569,9 @@ func (s *Server) executeTestScriptOperation(
 			if resolvedID != "" {
 				targetPath = basePath + "/" + resType + "/" + resolvedID
 			} else {
+				if fromContained && bodyMap != nil {
+					delete(bodyMap, "id")
+				}
 				if !strings.HasPrefix(params, "?") && params != "" {
 					params = "?" + params
 				}
@@ -598,9 +633,35 @@ func (s *Server) executeTestScriptOperation(
 		method = explicitMethod
 	}
 
+	contentType := normalizeTestScriptMIME(expandVars(extractStringField(opMap, "contentType")))
+	accept := normalizeTestScriptMIME(expandVars(extractStringField(opMap, "accept")))
+	var extraHeaders [][2]string
+	if hdrs, ok := opMap["requestHeader"].([]any); ok {
+		for _, h := range hdrs {
+			if hm, ok := h.(map[string]any); ok {
+				f := extractStringField(hm, "field")
+				v := expandVars(extractStringField(hm, "value"))
+				if f != "" {
+					extraHeaders = append(extraHeaders, [2]string{f, v})
+					if strings.EqualFold(f, "Content-Type") && contentType == "" {
+						contentType = normalizeTestScriptMIME(v)
+					}
+				}
+			}
+		}
+	}
+	if contentType == "" && bodyMap != nil {
+		contentType = "application/fhir+json"
+	}
+
 	var reqReader io.Reader
 	if bodyMap != nil && (method == http.MethodPost || method == http.MethodPut || method == http.MethodPatch) {
-		rawReq, _ := json.Marshal(bodyMap)
+		var rawReq []byte
+		if strings.Contains(strings.ToLower(contentType), "xml") {
+			rawReq, _ = fhirxml.MarshalFHIRMap(bodyMap)
+		} else {
+			rawReq, _ = json.Marshal(bodyMap)
+		}
 		reqReader = bytes.NewReader(rawReq)
 	}
 
@@ -611,26 +672,14 @@ func (s *Server) executeTestScriptOperation(
 			req.Header.Set("Authorization", authHdr)
 		}
 	}
-	contentType := extractStringField(opMap, "contentType")
-	if contentType == "" && bodyMap != nil {
-		contentType = "application/fhir+json"
-	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	if accept := extractStringField(opMap, "accept"); accept != "" {
+	if accept != "" {
 		req.Header.Set("Accept", accept)
 	}
-	if hdrs, ok := opMap["requestHeader"].([]any); ok {
-		for _, h := range hdrs {
-			if hm, ok := h.(map[string]any); ok {
-				f := extractStringField(hm, "field")
-				v := expandVars(extractStringField(hm, "value"))
-				if f != "" {
-					req.Header.Set(f, v)
-				}
-			}
-		}
+	for _, kv := range extraHeaders {
+		req.Header.Set(kv[0], kv[1])
 	}
 
 	rec := httptest.NewRecorder()
@@ -638,7 +687,12 @@ func (s *Server) executeTestScriptOperation(
 
 	rawResp := rec.Body.Bytes()
 	var respMap map[string]any
-	_ = json.Unmarshal(rawResp, &respMap)
+	if err := json.Unmarshal(rawResp, &respMap); err != nil && len(bytes.TrimSpace(rawResp)) > 0 {
+		respCT := strings.ToLower(rec.Header().Get("Content-Type"))
+		if strings.Contains(respCT, "xml") || bytes.HasPrefix(bytes.TrimSpace(rawResp), []byte("<")) {
+			respMap, _ = fhirxml.UnmarshalFHIRMap(rawResp)
+		}
+	}
 
 	outRT, _ := respMap["resourceType"].(string)
 	outID, _ := respMap["id"].(string)
@@ -677,6 +731,7 @@ func (s *Server) executeTestScriptAssert(
 	assertMap map[string]any,
 	lastCapture *testScriptInteractionCapture,
 	fixtures map[string]*testScriptInteractionCapture,
+	profileByID map[string]string,
 	expandVars func(string) string,
 ) map[string]any {
 	warningOnly, _ := assertMap["warningOnly"].(bool)
@@ -796,6 +851,38 @@ func (s *Server) executeTestScriptAssert(
 				return map[string]any{
 					"result":  failResult,
 					"message": fmt.Sprintf("response missing required minimumId (%s) element %q", minID, k),
+				}
+			}
+		}
+	}
+
+	// 6b. validateProfileId StructureDefinition / base R4 validation assertion
+	if profKey := expandVars(extractStringField(assertMap, "validateProfileId")); profKey != "" {
+		if targetBody == nil {
+			return map[string]any{
+				"result":  failResult,
+				"message": fmt.Sprintf("cannot validate profile %q against empty body", profKey),
+			}
+		}
+		profURL := profileByID[profKey]
+		if profURL == "" {
+			profURL = profKey
+		}
+		if s.validator != nil {
+			resType, _ := targetBody["resourceType"].(string)
+			var outcome *validation.Outcome
+			baseSDPrefix := "http://hl7.org/fhir/StructureDefinition/"
+			isBaseCoreSD := strings.HasPrefix(profURL, baseSDPrefix) &&
+				strings.EqualFold(strings.TrimPrefix(profURL, baseSDPrefix), resType)
+			if pv, ok := s.validator.(validation.ProfileValidator); ok && strings.Contains(profURL, "://") && !isBaseCoreSD {
+				outcome = pv.ValidateResourceWithProfiles(resType, targetBody, []string{profURL}, "")
+			} else {
+				outcome = s.validator.ValidateResource(resType, targetBody)
+			}
+			if outcome != nil && !outcome.IsValid() {
+				return map[string]any{
+					"result":  failResult,
+					"message": fmt.Sprintf("validateProfileId %q (%s) failed: %+v", profKey, profURL, outcome.Issues),
 				}
 			}
 		}
@@ -958,6 +1045,43 @@ func symbolicResponseToStatusCode(sym string) int {
 		return http.StatusUnprocessableEntity
 	}
 	return 0
+}
+
+func normalizeTestScriptMIME(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return ""
+	case "xml":
+		return "application/fhir+xml"
+	case "json":
+		return "application/fhir+json"
+	default:
+		return strings.TrimSpace(raw)
+	}
+}
+
+func expandVarsInAny(v any, expandVars func(string) string) any {
+	switch val := v.(type) {
+	case string:
+		if strings.Contains(val, "${") {
+			return expandVars(val)
+		}
+		return val
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, item := range val {
+			out[k] = expandVarsInAny(item, expandVars)
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = expandVarsInAny(item, expandVars)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 func extractStringField(m map[string]any, key string) string {

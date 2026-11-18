@@ -1,0 +1,329 @@
+{
+  "resourceType": "TestScript",
+  "id": "ts-04-extended-ops-and-xml-parity",
+  "url": "http://flint.fhir.org/TestScript/ts-04-extended-ops-and-xml-parity",
+  "version": "0.6.0",
+  "name": "HL7R4ExtendedOperationsAndXMLWireParity",
+  "title": "HL7 FHIR R4 $validate, validateProfileId, $everything, Measure/$evaluate-measure & XML/JSON Wire Negotiation",
+  "status": "active",
+  "profile": [
+    {
+      "id": "us-core-patient-profile",
+      "reference": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+    },
+    {
+      "id": "r4-observation-profile",
+      "reference": "http://hl7.org/fhir/StructureDefinition/Observation"
+    }
+  ],
+  "contained": [
+    {
+      "resourceType": "Patient",
+      "id": "pat-xml-uscore",
+      "active": true,
+      "gender": "female",
+      "birthDate": "1991-07-04",
+      "identifier": [
+        {"system": "http://hospital.smarthealthit.org", "value": "XML-MRN-401"}
+      ],
+      "name": [
+        {"use": "official", "family": "XMLWireParity", "given": ["Katherine"]}
+      ]
+    },
+    {
+      "resourceType": "Observation",
+      "id": "obs-invalid-obs6",
+      "status": "final",
+      "code": {
+        "coding": [
+          {"system": "http://loinc.org", "code": "8310-5", "display": "Body temperature"}
+        ]
+      },
+      "valueQuantity": {
+        "value": 98.6,
+        "unit": "degF"
+      },
+      "dataAbsentReason": {
+        "coding": [
+          {"system": "http://terminology.hl7.org/CodeSystem/data-absent-reason", "code": "unknown"}
+        ]
+      }
+    },
+    {
+      "resourceType": "Observation",
+      "id": "obs-valid-temp",
+      "status": "final",
+      "category": [
+        {
+          "coding": [
+            {"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "vital-signs"}
+          ]
+        }
+      ],
+      "code": {
+        "coding": [
+          {"system": "http://loinc.org", "code": "8310-5", "display": "Body temperature"}
+        ]
+      },
+      "subject": {"reference": "Patient/${xmlPatId}"},
+      "effectiveDateTime": "2026-03-15T09:30:00Z",
+      "valueQuantity": {
+        "value": 98.6,
+        "unit": "degF",
+        "system": "http://unitsofmeasure.org",
+        "code": "[degF]"
+      }
+    },
+    {
+      "resourceType": "Measure",
+      "id": "measure-ts-prop",
+      "url": "http://flint.fhir.org/Measure/ts-proportion-measure",
+      "version": "1.0.0",
+      "name": "TSProportionMeasure",
+      "status": "active",
+      "scoring": {
+        "coding": [
+          {"system": "http://terminology.hl7.org/CodeSystem/measure-scoring", "code": "proportion"}
+        ]
+      },
+      "group": [
+        {
+          "population": [
+            {
+              "code": {
+                "coding": [
+                  {"system": "http://terminology.hl7.org/CodeSystem/measure-population", "code": "initial-population"}
+                ]
+              },
+              "criteria": {
+                "language": "text/fhirpath",
+                "expression": "Patient.active = true"
+              }
+            },
+            {
+              "code": {
+                "coding": [
+                  {"system": "http://terminology.hl7.org/CodeSystem/measure-population", "code": "denominator"}
+                ]
+              },
+              "criteria": {
+                "language": "text/fhirpath",
+                "expression": "Patient.active = true"
+              }
+            },
+            {
+              "code": {
+                "coding": [
+                  {"system": "http://terminology.hl7.org/CodeSystem/measure-population", "code": "numerator"}
+                ]
+              },
+              "criteria": {
+                "language": "text/fhirpath",
+                "expression": "Patient.gender = 'female'"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "fixture": [
+    {"id": "fx-pat-xml", "autocreate": false, "autodelete": false, "resource": {"reference": "#pat-xml-uscore"}},
+    {"id": "fx-obs-bad", "autocreate": false, "autodelete": false, "resource": {"reference": "#obs-invalid-obs6"}},
+    {"id": "fx-obs-good", "autocreate": false, "autodelete": false, "resource": {"reference": "#obs-valid-temp"}},
+    {"id": "fx-measure", "autocreate": false, "autodelete": false, "resource": {"reference": "#measure-ts-prop"}}
+  ],
+  "variable": [
+    {"name": "xmlPatId", "expression": "Patient.id", "sourceId": "resp-xml-pat-create"},
+    {"name": "xmlObsId", "expression": "Observation.id", "sourceId": "resp-json-obs-create"},
+    {"name": "tsMeasureId", "expression": "Measure.id", "sourceId": "resp-measure-create"}
+  ],
+  "test": [
+    {
+      "name": "01-ValidateExtendedOperationPositiveAndNegative",
+      "description": "Verify $validate returns clean OperationOutcome for valid US Core Patient and error issues for obs-6 violation.",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "$validate"},
+            "resource": "Patient",
+            "sourceId": "fx-pat-xml",
+            "params": "profile=http://hl7.org/fhir/us/core/StructureDefinition/us-core-patient"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "OperationOutcome",
+            "expression": "OperationOutcome.issue.where(severity = 'error' or severity = 'fatal')",
+            "operator": "empty"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "$validate"},
+            "resource": "Observation",
+            "sourceId": "fx-obs-bad"
+          }
+        },
+        {
+          "assert": {
+            "responseCode": "200,400,422",
+            "resource": "OperationOutcome",
+            "expression": "OperationOutcome.issue.where(severity = 'error').exists()"
+          }
+        }
+      ]
+    },
+    {
+      "name": "02-BidirectionalXMLAndJSONWireParity",
+      "description": "Create Patient as application/fhir+xml, read back as JSON, create Observation as JSON, and read back as XML.",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "create"},
+            "resource": "Patient",
+            "contentType": "xml",
+            "accept": "xml",
+            "sourceId": "fx-pat-xml",
+            "responseId": "resp-xml-pat-create"
+          }
+        },
+        {
+          "assert": {
+            "response": "created",
+            "contentType": "application/fhir+xml",
+            "resource": "Patient",
+            "validateProfileId": "us-core-patient-profile"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Patient.name[0].family",
+            "operator": "equals",
+            "value": "XMLWireParity"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "read"},
+            "resource": "Patient",
+            "targetId": "${xmlPatId}",
+            "accept": "json"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "contentType": "application/fhir+json",
+            "expression": "Patient.identifier[0].value",
+            "operator": "equals",
+            "value": "XML-MRN-401"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "create"},
+            "resource": "Observation",
+            "contentType": "json",
+            "accept": "json",
+            "sourceId": "fx-obs-good",
+            "responseId": "resp-json-obs-create"
+          }
+        },
+        {
+          "assert": {
+            "response": "created",
+            "contentType": "application/fhir+json",
+            "validateProfileId": "r4-observation-profile"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "read"},
+            "resource": "Observation",
+            "targetId": "${xmlObsId}",
+            "accept": "application/fhir+xml"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "contentType": "application/fhir+xml",
+            "resource": "Observation",
+            "expression": "Observation.valueQuantity.value",
+            "operator": "equals",
+            "value": "98.6"
+          }
+        }
+      ]
+    },
+    {
+      "name": "03-PatientEverythingAndMeasureEvaluate",
+      "description": "Verify Patient/{id}/$everything compartment Bundle and Measure/{id}/$evaluate-measure proportion report.",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "$everything"},
+            "resource": "Patient",
+            "targetId": "${xmlPatId}"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Bundle",
+            "expression": "Bundle.type",
+            "operator": "equals",
+            "value": "searchset"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Bundle.entry.count()",
+            "operator": "greaterThan",
+            "value": "1"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "create"},
+            "resource": "Measure",
+            "sourceId": "fx-measure",
+            "responseId": "resp-measure-create"
+          }
+        },
+        {
+          "assert": {
+            "response": "created",
+            "resource": "Measure"
+          }
+        },
+        {
+          "operation": {
+            "type": {"code": "$evaluate-measure"},
+            "resource": "Measure",
+            "targetId": "${tsMeasureId}",
+            "params": "periodStart=2020-01-01&periodEnd=2030-12-31"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "MeasureReport",
+            "expression": "MeasureReport.status",
+            "operator": "equals",
+            "value": "complete"
+          }
+        }
+      ]
+    }
+  ],
+  "teardown": {
+    "action": [
+      {"operation": {"type": {"code": "delete"}, "resource": "Measure", "targetId": "${tsMeasureId}"}},
+      {"operation": {"type": {"code": "delete"}, "resource": "Observation", "targetId": "${xmlObsId}"}},
+      {"operation": {"type": {"code": "delete"}, "resource": "Patient", "targetId": "${xmlPatId}"}}
+    ]
+  }
+}
