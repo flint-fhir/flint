@@ -3,6 +3,8 @@ package auth
 import (
 	"context"
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -26,22 +28,49 @@ type MockTokenValidator struct {
 	privateKey *rsa.PrivateKey
 	publicKey  *rsa.PublicKey
 	keyID      string
-	issuer     string
-	audience   string
+
+	// In-memory ECDSA P-256 key pair for ES256 JWS signing (e.g. SMART Health Cards)
+	ecPrivateKey *ecdsa.PrivateKey
+	ecPublicKey  *ecdsa.PublicKey
+	ecKeyID      string
+	ecX          string
+	ecY          string
+
+	issuer   string
+	audience string
 }
 
-// NewMockTokenValidator initializes a mock validator with an ephemeral RSA-2048 key pair.
+// NewMockTokenValidator initializes a mock validator with an ephemeral RSA-2048 and ECDSA P-256 key pair.
 func NewMockTokenValidator(issuer, audience string) (*MockTokenValidator, error) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		return nil, fmt.Errorf("generate mock rsa key: %w", err)
 	}
+	ecPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generate mock p256 key: %w", err)
+	}
+	uncompressed, err := ecPriv.PublicKey.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("encode mock p256 public key: %w", err)
+	}
+	ecX := base64.RawURLEncoding.EncodeToString(uncompressed[1:33])
+	ecY := base64.RawURLEncoding.EncodeToString(uncompressed[33:65])
+	// RFC 7638 JWK SHA-256 thumbprint over lexicographically ordered required EC members: crv, kty, x, y
+	thumbInput := fmt.Sprintf(`{"crv":"P-256","kty":"EC","x":%q,"y":%q}`, ecX, ecY)
+	thumbSum := sha256.Sum256([]byte(thumbInput))
+	ecKid := base64.RawURLEncoding.EncodeToString(thumbSum[:])
 
 	return &MockTokenValidator{
 		staticContexts: make(map[string]*authv1.SecurityContext),
 		privateKey:     priv,
 		publicKey:      &priv.PublicKey,
 		keyID:          "mock-key-1",
+		ecPrivateKey:   ecPriv,
+		ecPublicKey:    &ecPriv.PublicKey,
+		ecKeyID:        ecKid,
+		ecX:            ecX,
+		ecY:            ecY,
 		issuer:         issuer,
 		audience:       audience,
 	}, nil
@@ -151,21 +180,59 @@ func (m *MockTokenValidator) IssueToken(sub, scopes, patientID string, ttl time.
 	return signedData + "." + sB64, nil
 }
 
-// JWKS returns the mock's public key as a JWKSet.
+// ECKeyID returns the RFC 7638 JWK SHA-256 thumbprint kid of the P-256 ES256 signing key.
+func (m *MockTokenValidator) ECKeyID() string {
+	if m == nil {
+		return ""
+	}
+	return m.ecKeyID
+}
+
+// SignRawES256 signs an arbitrary JWS signing input ("<b64header>.<b64payload>") with ECDSA P-256 SHA-256
+// and returns the unpadded base64url-encoded 64-byte IEEE P1363 R||S signature segment.
+func (m *MockTokenValidator) SignRawES256(signingInput string) (string, error) {
+	if m == nil || m.ecPrivateKey == nil {
+		return "", fmt.Errorf("mock validator missing ECDSA P-256 key")
+	}
+	sum := sha256.Sum256([]byte(signingInput))
+	rInt, sInt, err := ecdsa.Sign(rand.Reader, m.ecPrivateKey, sum[:])
+	if err != nil {
+		return "", fmt.Errorf("sign ES256: %w", err)
+	}
+	sig := make([]byte, 64)
+	rBytes := rInt.Bytes()
+	sBytes := sInt.Bytes()
+	copy(sig[32-len(rBytes):32], rBytes)
+	copy(sig[64-len(sBytes):64], sBytes)
+	return base64.RawURLEncoding.EncodeToString(sig), nil
+}
+
+// JWKS returns the mock's RSA (RS256) and EC P-256 (ES256) public keys as a JWKSet.
 func (m *MockTokenValidator) JWKS() *JWKSet {
 	nBytes := m.publicKey.N.Bytes()
 	eBytes := []byte{1, 0, 1} // 65537
 
-	return &JWKSet{
-		Keys: []JWK{
-			{
-				Kty: "RSA",
-				Kid: m.keyID,
-				Use: "sig",
-				Alg: "RS256",
-				N:   base64.RawURLEncoding.EncodeToString(nBytes),
-				E:   base64.RawURLEncoding.EncodeToString(eBytes),
-			},
+	keys := []JWK{
+		{
+			Kty: "RSA",
+			Kid: m.keyID,
+			Use: "sig",
+			Alg: "RS256",
+			N:   base64.RawURLEncoding.EncodeToString(nBytes),
+			E:   base64.RawURLEncoding.EncodeToString(eBytes),
 		},
 	}
+	if m.ecPublicKey != nil && m.ecX != "" && m.ecY != "" {
+		keys = append(keys, JWK{
+			Kty: "EC",
+			Kid: m.ecKeyID,
+			Use: "sig",
+			Alg: "ES256",
+			Crv: "P-256",
+			X:   m.ecX,
+			Y:   m.ecY,
+		})
+	}
+
+	return &JWKSet{Keys: keys}
 }

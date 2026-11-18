@@ -611,6 +611,7 @@ func (s *Server) handleSMARTConfig(w http.ResponseWriter, r *http.Request) {
 			"permission-v2",
 			"authorize-post",
 			"sso-openid-connect",
+			"health-cards",
 		},
 	}
 
@@ -645,6 +646,8 @@ func (s *Server) handleOIDCConfig(w http.ResponseWriter, r *http.Request) {
 
 // handleJWKS serves /.well-known/jwks.json containing the server's public signing keys.
 func (s *Server) handleJWKS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	if s.devAuth != nil {
@@ -1139,6 +1142,17 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			"smart_style_url":     smartStyleURLFromConfig(cfg),
 			"id_token":            idToken,
 			"refresh_token":       refreshToken,
+		}
+		if _, isUDAP := s.lookupUDAPClient(audClientID); isUDAP {
+			resp["fhirContext"] = []map[string]any{
+				{"reference": "Organization/org-flint-health"},
+			}
+			resp["intent"] = "summary"
+			tenantCtx := strings.TrimSpace(entry.Tenant)
+			if tenantCtx == "" {
+				tenantCtx = "demo"
+			}
+			resp["tenant"] = tenantCtx
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")

@@ -1,0 +1,195 @@
+{
+  "resourceType": "TestScript",
+  "id": "ts-05-davinci-cdex",
+  "url": "http://flint.fhir.org/TestScript/ts-05-davinci-cdex",
+  "version": "0.7.0",
+  "name": "DaVinciCDexAttachmentsPollingAndSignatures",
+  "title": "HL7 Da Vinci CDex Solicited/Unsolicited Attachments, Task Request/Poll & JWS Digital Signatures",
+  "status": "active",
+  "contained": [
+    {
+      "resourceType": "Parameters",
+      "id": "params-cdex-task-att",
+      "parameter": [
+        {"name": "patient", "valueString": "Patient/pat-cdex-ts05"},
+        {"name": "taskId", "valueString": "cdex-att-task-ts05"}
+      ]
+    },
+    {
+      "resourceType": "Parameters",
+      "id": "params-cdex-comm-att",
+      "parameter": [
+        {"name": "MemberId", "valueString": "pat-cdex-ts05"},
+        {"name": "TrackingId", "valueString": "TRK-CDEX-TS05"}
+      ]
+    },
+    {
+      "resourceType": "Parameters",
+      "id": "params-cdex-data-req",
+      "parameter": [
+        {"name": "patient", "valueString": "pat-cdex-ts05"},
+        {"name": "query", "valueString": "Condition?patient=Patient/pat-cdex-ts05"}
+      ]
+    },
+    {
+      "resourceType": "Parameters",
+      "id": "params-cdex-sign",
+      "parameter": [
+        {"name": "signer", "valueString": "Practitioner/prac-cdex-ts05"},
+        {"name": "bundleId", "valueString": "cdex-sig-bundle-ts05"}
+      ]
+    }
+  ],
+  "fixture": [
+    {"id": "fx-cdex-task-att", "autocreate": false, "autodelete": false, "resource": {"reference": "#params-cdex-task-att"}},
+    {"id": "fx-cdex-comm-att", "autocreate": false, "autodelete": false, "resource": {"reference": "#params-cdex-comm-att"}},
+    {"id": "fx-cdex-data-req", "autocreate": false, "autodelete": false, "resource": {"reference": "#params-cdex-data-req"}},
+    {"id": "fx-cdex-sign", "autocreate": false, "autodelete": false, "resource": {"reference": "#params-cdex-sign"}}
+  ],
+  "variable": [
+    {"name": "cdexReqTaskId", "expression": "Task.id", "sourceId": "resp-cdex-req"}
+  ],
+  "test": [
+    {
+      "name": "01-CDexTaskAttachmentSubmit",
+      "description": "Verify Task/$cdex-submit-attachment completes attachment Task and links DocumentReference output.",
+      "action": [
+        {
+          "operation": {
+            "method": "post",
+            "url": "Task/$cdex-submit-attachment",
+            "sourceId": "fx-cdex-task-att"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Task",
+            "expression": "Task.status",
+            "operator": "equals",
+            "value": "completed"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Task.businessStatus.coding[0].code",
+            "operator": "equals",
+            "value": "attachments-received"
+          }
+        }
+      ]
+    },
+    {
+      "name": "02-CDexUnsolicitedCommunicationAttachment",
+      "description": "Verify Communication/$cdex-submit-attachment accepts unsolicited clinical attachment with trackingId.",
+      "action": [
+        {
+          "operation": {
+            "method": "post",
+            "url": "Communication/$cdex-submit-attachment",
+            "sourceId": "fx-cdex-comm-att"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Parameters",
+            "expression": "Parameters.parameter.where(name = 'status').valueString",
+            "operator": "equals",
+            "value": "accepted"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Parameters.parameter.where(name = 'trackingId').valueString",
+            "operator": "equals",
+            "value": "TRK-CDEX-TS05"
+          }
+        }
+      ]
+    },
+    {
+      "name": "03-CDexTaskDataRequestAndPoll",
+      "description": "Verify Task/$cdex-request creates CDex data-request-query Task and Task/{id}/$cdex-poll returns searchset Bundle with HRex Provenance.",
+      "action": [
+        {
+          "operation": {
+            "method": "post",
+            "url": "Task/$cdex-request",
+            "sourceId": "fx-cdex-data-req",
+            "responseId": "resp-cdex-req"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Task",
+            "expression": "Task.code.coding[0].code",
+            "operator": "equals",
+            "value": "data-request-query"
+          }
+        },
+        {
+          "operation": {
+            "method": "get",
+            "url": "Task/${cdexReqTaskId}/$cdex-poll"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Bundle",
+            "expression": "Bundle.type",
+            "operator": "equals",
+            "value": "searchset"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Bundle.entry.count()",
+            "operator": "equals",
+            "value": "2"
+          }
+        }
+      ]
+    },
+    {
+      "name": "04-CDexDigitalSignatureAndVerification",
+      "description": "Verify Bundle/$cdex-sign attaches application/jose JWS signature and Bundle/$cdex-verify-signature confirms integrity.",
+      "action": [
+        {
+          "operation": {
+            "method": "post",
+            "url": "Bundle/$cdex-sign",
+            "sourceId": "fx-cdex-sign"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Bundle",
+            "expression": "Bundle.signature.sigFormat",
+            "operator": "equals",
+            "value": "application/jose"
+          }
+        },
+        {
+          "operation": {
+            "method": "post",
+            "url": "Bundle/$cdex-verify-signature",
+            "sourceId": "fx-cdex-sign"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Parameters",
+            "expression": "Parameters.parameter.where(name = 'verified').valueBoolean",
+            "operator": "equals",
+            "value": "true"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -477,6 +477,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$process-notification", s.handleProcessNotification)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$davinci-data-export", s.handleDaVinciDataExport)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$davinci-data-export", s.handleDaVinciDataExport)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$bulk-publish", s.handleSMARTBulkPublishManifest)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$bulk-publish-file/{file}", s.handleSMARTBulkPublishFile)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$uds-plus-manifest", s.handleUDSPlusManifest)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$uds-plus-ndjson/{stream}", s.handleUDSPlusNDJSON)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$uds-plus-resource/{slug}", s.handleUDSPlusSingleResource)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$submit-attachment", s.handleCDexSubmitAttachment)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$convert", s.handleResourceConvert)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$convert", s.handleResourceConvert)
@@ -801,6 +806,16 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$health-cards-issue" {
 					r.SetPathValue("tenant", parts[2])
 					s.handlePatientHealthCardsIssue(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$pathology-exchange-bundle" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientPathologyExchangeBundle(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$home-lab-report" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientHomeLabReport(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$pcde" {
@@ -2644,6 +2659,24 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handlePatientHealthCardsIssue(w, r)
+					return
+				}
+				if isGetOrHead && strings.EqualFold(parts[3], "Patient") && parts[5] == "$health-cards.smart-health-card" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientSmartHealthCardDownload(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$pathology-exchange-bundle" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientPathologyExchangeBundle(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$home-lab-report" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientHomeLabReport(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$pcde" {
@@ -6304,6 +6337,8 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-condition",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-problem-list-item",
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/Condition-uv-ips",
+			"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-primary-cancer-condition",
+			"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-secondary-cancer-condition",
 		}
 	case "Observation":
 		return []string{
@@ -6337,6 +6372,13 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-pregnancystatus",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-sexual-orientation",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-adi-documentation",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-social-history",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-imaging",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-test",
+			"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-tnm-stage-group",
+			"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-tnm-distant-metastases-category",
+			"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-tnm-primary-tumor-category",
+			"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-tnm-regional-nodes-category",
 			"http://hl7.org/fhir/StructureDefinition/vitalsigns",
 			"http://hl7.org/fhir/StructureDefinition/bp",
 			"http://hl7.org/fhir/StructureDefinition/bodyheight",
@@ -6370,6 +6412,11 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-medicationrequest",
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/MedicationRequest-uv-ips",
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-medicationrequest",
+			"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-cancer-related-medication-request",
+		}
+	case "MedicationAdministration":
+		return []string{
+			"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-cancer-related-medication-administration",
 		}
 	case "MedicationStatement":
 		return []string{
@@ -6386,6 +6433,7 @@ func usCoreSupportedProfiles(rt string) []string {
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-procedure",
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/Procedure-uv-ips",
+			"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-radiotherapy-course-summary",
 		}
 	case "DiagnosticReport":
 		return []string{
@@ -6466,9 +6514,14 @@ func usCoreSupportedProfiles(rt string) []string {
 	case "Device":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-implantable-device",
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-device",
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/Device-uv-ips",
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/Device-observer-uv-ips",
 			"http://hl7.org/fhir/us/davinci-pdex/StructureDefinition/pdex-device",
+		}
+	case "FamilyMemberHistory":
+		return []string{
+			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-familymemberhistory",
 		}
 	case "PractitionerRole":
 		return []string{
@@ -7912,6 +7965,9 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 			"http://hl7.org/fhir/us/davinci-pdex/CapabilityStatement/pdex-server",
 			"http://hl7.org/fhir/us/davinci-pas/CapabilityStatement/pas-server",
 			"http://hl7.org/fhir/us/davinci-dtr/CapabilityStatement/dtr-payer-service",
+			"http://hl7.org/fhir/us/central-cancer-registry-reporting/CapabilityStatement/central-cancer-registry-reporting-ehr",
+			"http://hl7.org/fhir/us/cancer-reporting/CapabilityStatement/pathology-data-sharing-ehr",
+			"http://hl7.org/fhir/us/us-quality-core/CapabilityStatement/us-quality-core-server",
 		},
 		"format":      []string{"json", "application/fhir+json", "xml", "application/fhir+xml", "application/xml", "text/xml", "application/fhir+ndjson", "application/x-protobuf", "application/fhir+protobuf"},
 		"patchFormat": []string{"application/json-patch+json", "application/merge-patch+json", "application/fhir+json", "application/fhir+xml", "application/x-protobuf", "application/fhir+protobuf"},

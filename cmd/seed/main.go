@@ -47,7 +47,7 @@ func parseSeedConfig(args []string, getenv func(string) string) (Config, error) 
 	fs.SetOutput(io.Discard)
 	urlFlag := fs.String("url", defaultURL, "Flint server base URL")
 	tenantFlag := fs.String("tenant", defaultTenant, "Target FHIR tenant ID")
-	suiteFlag := fs.String("suite", defaultSuite, "Seed suite: uscore (default), plannet, formulary, c4bb, pdex, or pas")
+	suiteFlag := fs.String("suite", defaultSuite, "Seed suite: uscore (default), plannet, formulary, c4bb, pdex, pas, cpds, usqc, or ccrr")
 	tokenFlag := fs.String("token", defaultToken, "Optional SMART on FHIR Bearer token")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -112,8 +112,14 @@ func Run(ctx context.Context, cfg Config) error {
 		bundleBytes, err = PDexTransactionBundleJSON()
 	case "pas":
 		bundleBytes, err = PASTransactionBundleJSON()
+	case "cpds":
+		bundleBytes, err = CPDSTransactionBundleJSON()
+	case "usqc", "us-quality-core":
+		bundleBytes, err = USQCTransactionBundleJSON()
+	case "ccrr":
+		bundleBytes, err = CCRRTransactionBundleJSON()
 	default:
-		return fmt.Errorf("unknown seed suite %q (expected uscore, plannet, formulary, c4bb, pdex, or pas)", cfg.Suite)
+		return fmt.Errorf("unknown seed suite %q (expected uscore, plannet, formulary, c4bb, pdex, pas, cpds, usqc, or ccrr)", cfg.Suite)
 	}
 	if err != nil {
 		return fmt.Errorf("build cohort bundle: %w", err)

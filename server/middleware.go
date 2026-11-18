@@ -74,6 +74,13 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				return
 			}
 
+			// Allow unauthenticated public bulk-publish, UDS+ manifest/stream, and SMART Health Cards endpoints
+			// when no Authorization header is supplied (while still validating Bearer tokens when supplied).
+			if authHeader == "" && isUnauthenticatedAllowedEndpoint(r, parts) {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			// Extract Bearer token
 			if authHeader == "" || !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
 				writeOperationOutcome(w, http.StatusUnauthorized, "login", "missing or malformed Authorization header")
@@ -174,6 +181,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			resType := parts[3]
 			isBulkExportOp := resType == "$export" || resType == "$export-poll" || resType == "$export-file" ||
 				resType == "$import" || resType == "$import-poll" || resType == "$certify" ||
+				resType == "$bulk-publish" || resType == "$bulk-publish-file" ||
+				resType == "$uds-plus-manifest" || resType == "$uds-plus-ndjson" || resType == "$uds-plus-resource" ||
 				(strings.EqualFold(resType, "Patient") && len(parts) == 5 && parts[4] == "$export") ||
 				(strings.EqualFold(resType, "Patient") && len(parts) == 6 && parts[5] == "$export") ||
 				(strings.EqualFold(resType, "Group") && len(parts) == 6 && parts[5] == "$export")
@@ -1064,6 +1073,33 @@ func isSubscriptionsWSUpgrade(r *http.Request, parts []string) bool {
 	return false
 }
 
+func isUnauthenticatedAllowedEndpoint(r *http.Request, parts []string) bool {
+	if r == nil || len(parts) < 4 || parts[0] != "fhir" || parts[1] != "r4" {
+		return false
+	}
+	isGetOrHead := r.Method == http.MethodGet || r.Method == http.MethodHead
+	if isGetOrHead {
+		if len(parts) == 4 && (parts[3] == "$bulk-publish" || parts[3] == "$uds-plus-manifest") {
+			return true
+		}
+		if len(parts) == 5 && (parts[3] == "$bulk-publish-file" || parts[3] == "$uds-plus-ndjson" || parts[3] == "$uds-plus-resource") {
+			return true
+		}
+		if len(parts) == 6 && strings.EqualFold(parts[3], "Patient") && parts[5] == "$health-cards.smart-health-card" {
+			return true
+		}
+	}
+	if r.Method == http.MethodPost {
+		if len(parts) == 5 && strings.EqualFold(parts[3], "Patient") && parts[4] == "$health-cards-issue" {
+			return true
+		}
+		if len(parts) == 6 && strings.EqualFold(parts[3], "Patient") && parts[5] == "$health-cards-issue" {
+			return true
+		}
+	}
+	return false
+}
+
 func isSubscriptionOpName(op string) bool {
 	return op == "$status" || op == "$events" || op == "$bind-ws" || op == "$get-ws-binding-token"
 }
@@ -1393,7 +1429,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Communication") && (parts[4] == "$rr-process" || parts[4] == "$cdex-submit-attachment") {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Patient") && (parts[4] == "$merge" || parts[4] == "$health-cards-issue" || parts[4] == "$pcde" || parts[4] == "$immds-forecast" || parts[4] == "$gfe" || parts[4] == "$ihe-pix" || parts[4] == "$bulk-member-match" || parts[4] == "$sdoh-summary" || parts[4] == "$carin-bb" || parts[4] == "$decease" || parts[4] == "$mcode-summary" || parts[4] == "$find-subject-variants" || parts[4] == "$find-subject-tx-implications" || parts[4] == "$pacio-summary" || parts[4] == "$birth-report" || parts[4] == "$ihe-pdqm" || parts[4] == "$physical-activity-summary" || parts[4] == "$adi-record" || parts[4] == "$ra-coding-gaps" || parts[4] == "$pdex-WriteData" || parts[4] == "$record-occupation" || parts[4] == "$odh-summary" || parts[4] == "$cancer-registry-report" || parts[4] == "$pacio-cognitive-assess" || parts[4] == "$pacio-cognitive-summary" || parts[4] == "$idi-match" || parts[4] == "$pacio-pfe-record" || parts[4] == "$pacio-pfe-summary" || parts[4] == "$mcode-radiotherapy-summary" || parts[4] == "$iis-history" || parts[4] == "$mcode-genomics-summary" || parts[4] == "$nbs-summary" || parts[4] == "$ecr-summary" || parts[4] == "$elr-summary" || parts[4] == "$rtpbc-summary" || parts[4] == "$nhsn-hai-summary" || parts[4] == "$mcode-trial-match" || parts[4] == "$ra-coding-gap-report" || parts[4] == "$nhsn-ach-summary" || parts[4] == "$burden-reduction-summary" || parts[4] == "$mcode-trial-summary" || parts[4] == "$pacio-splasch-summary" || parts[4] == "$vulcan-rwd-summary" || parts[4] == "$codex-rttd-summary" || parts[4] == "$sdoh-care-bundle" || parts[4] == "$pdex-provider-everything" || parts[4] == "$pdex-payer-exchange" || parts[4] == "$pdex-payer-summary") {
+		if strings.EqualFold(parts[3], "Patient") && (parts[4] == "$merge" || parts[4] == "$health-cards-issue" || parts[4] == "$pathology-exchange-bundle" || parts[4] == "$home-lab-report" || parts[4] == "$pcde" || parts[4] == "$immds-forecast" || parts[4] == "$gfe" || parts[4] == "$ihe-pix" || parts[4] == "$bulk-member-match" || parts[4] == "$sdoh-summary" || parts[4] == "$carin-bb" || parts[4] == "$decease" || parts[4] == "$mcode-summary" || parts[4] == "$find-subject-variants" || parts[4] == "$find-subject-tx-implications" || parts[4] == "$pacio-summary" || parts[4] == "$birth-report" || parts[4] == "$ihe-pdqm" || parts[4] == "$physical-activity-summary" || parts[4] == "$adi-record" || parts[4] == "$ra-coding-gaps" || parts[4] == "$pdex-WriteData" || parts[4] == "$record-occupation" || parts[4] == "$odh-summary" || parts[4] == "$cancer-registry-report" || parts[4] == "$pacio-cognitive-assess" || parts[4] == "$pacio-cognitive-summary" || parts[4] == "$idi-match" || parts[4] == "$pacio-pfe-record" || parts[4] == "$pacio-pfe-summary" || parts[4] == "$mcode-radiotherapy-summary" || parts[4] == "$iis-history" || parts[4] == "$mcode-genomics-summary" || parts[4] == "$nbs-summary" || parts[4] == "$ecr-summary" || parts[4] == "$elr-summary" || parts[4] == "$rtpbc-summary" || parts[4] == "$nhsn-hai-summary" || parts[4] == "$mcode-trial-match" || parts[4] == "$ra-coding-gap-report" || parts[4] == "$nhsn-ach-summary" || parts[4] == "$burden-reduction-summary" || parts[4] == "$mcode-trial-summary" || parts[4] == "$pacio-splasch-summary" || parts[4] == "$vulcan-rwd-summary" || parts[4] == "$codex-rttd-summary" || parts[4] == "$sdoh-care-bundle" || parts[4] == "$pdex-provider-everything" || parts[4] == "$pdex-payer-exchange" || parts[4] == "$pdex-payer-summary") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Group") && (parts[4] == "$confirm-attribution-list" || parts[4] == "$atr-summary" || parts[4] == "$pdex-provider-member-match") {
@@ -1531,7 +1567,7 @@ func isPlanApplyOp(parts []string) bool {
 		if strings.EqualFold(parts[3], "Library") && parts[5] == "$evaluate" {
 			return true
 		}
-		if strings.EqualFold(parts[3], "Patient") && (parts[5] == "$health-cards-issue" || parts[5] == "$pcde" || parts[5] == "$immds-forecast" || parts[5] == "$gfe" || parts[5] == "$ihe-pix" || parts[5] == "$sdoh-summary" || parts[5] == "$carin-bb" || parts[5] == "$decease" || parts[5] == "$mcode-summary" || parts[5] == "$find-subject-variants" || parts[5] == "$find-subject-tx-implications" || parts[5] == "$pacio-summary" || parts[5] == "$birth-report" || parts[5] == "$physical-activity-summary" || parts[5] == "$adi-record" || parts[5] == "$ra-coding-gaps" || parts[5] == "$pdex-WriteData" || parts[5] == "$record-occupation" || parts[5] == "$odh-summary" || parts[5] == "$cancer-registry-report" || parts[5] == "$pacio-cognitive-assess" || parts[5] == "$pacio-cognitive-summary" || parts[5] == "$pacio-pfe-record" || parts[5] == "$pacio-pfe-summary" || parts[5] == "$mcode-radiotherapy-summary" || parts[5] == "$iis-history" || parts[5] == "$mcode-genomics-summary" || parts[5] == "$nbs-summary" || parts[5] == "$ecr-summary" || parts[5] == "$elr-summary" || parts[5] == "$rtpbc-summary" || parts[5] == "$nhsn-hai-summary" || parts[5] == "$mcode-trial-match" || parts[5] == "$ra-coding-gap-report" || parts[5] == "$nhsn-ach-summary" || parts[5] == "$burden-reduction-summary" || parts[5] == "$mcode-trial-summary" || parts[5] == "$pacio-splasch-summary" || parts[5] == "$vulcan-rwd-summary" || parts[5] == "$codex-rttd-summary" || parts[5] == "$sdoh-care-bundle" || parts[5] == "$pdex-provider-everything" || parts[5] == "$pdex-payer-exchange" || parts[5] == "$pdex-payer-summary") {
+		if strings.EqualFold(parts[3], "Patient") && (parts[5] == "$health-cards-issue" || parts[5] == "$health-cards.smart-health-card" || parts[5] == "$pathology-exchange-bundle" || parts[5] == "$home-lab-report" || parts[5] == "$pcde" || parts[5] == "$immds-forecast" || parts[5] == "$gfe" || parts[5] == "$ihe-pix" || parts[5] == "$sdoh-summary" || parts[5] == "$carin-bb" || parts[5] == "$decease" || parts[5] == "$mcode-summary" || parts[5] == "$find-subject-variants" || parts[5] == "$find-subject-tx-implications" || parts[5] == "$pacio-summary" || parts[5] == "$birth-report" || parts[5] == "$physical-activity-summary" || parts[5] == "$adi-record" || parts[5] == "$ra-coding-gaps" || parts[5] == "$pdex-WriteData" || parts[5] == "$record-occupation" || parts[5] == "$odh-summary" || parts[5] == "$cancer-registry-report" || parts[5] == "$pacio-cognitive-assess" || parts[5] == "$pacio-cognitive-summary" || parts[5] == "$pacio-pfe-record" || parts[5] == "$pacio-pfe-summary" || parts[5] == "$mcode-radiotherapy-summary" || parts[5] == "$iis-history" || parts[5] == "$mcode-genomics-summary" || parts[5] == "$nbs-summary" || parts[5] == "$ecr-summary" || parts[5] == "$elr-summary" || parts[5] == "$rtpbc-summary" || parts[5] == "$nhsn-hai-summary" || parts[5] == "$mcode-trial-match" || parts[5] == "$ra-coding-gap-report" || parts[5] == "$nhsn-ach-summary" || parts[5] == "$burden-reduction-summary" || parts[5] == "$mcode-trial-summary" || parts[5] == "$pacio-splasch-summary" || parts[5] == "$vulcan-rwd-summary" || parts[5] == "$codex-rttd-summary" || parts[5] == "$sdoh-care-bundle" || parts[5] == "$pdex-provider-everything" || parts[5] == "$pdex-payer-exchange" || parts[5] == "$pdex-payer-summary") {
 			return true
 		}
 		if strings.EqualFold(parts[3], "Observation") && (parts[5] == "$mcode-disease-status" || parts[5] == "$pacio-splasch-record") {

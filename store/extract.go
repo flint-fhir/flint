@@ -462,6 +462,15 @@ func ExtractMedicationRequest(tenantID string, resID string, protoBytes []byte) 
 	}
 	effID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(gensearchidx.ExtractMedicationRequestIndexes(tenantID, &r))
+	if r.GetDoNotPerform() != nil {
+		idx.Tokens = append(idx.Tokens, SpidxToken{
+			TenantID: tenantID,
+			ResType:  "MedicationRequest",
+			ResID:    effID,
+			SpName:   "do-not-perform",
+			SpValue:  strconv.FormatBool(r.GetDoNotPerform().GetValue()),
+		})
+	}
 	appendMetaIndexes(idx, tenantID, "MedicationRequest", effID, r.GetMeta())
 	appendTokenTextFromMessage(idx, tenantID, "MedicationRequest", effID, r.ProtoReflect(), "", 0)
 	return idx, nil

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Headless HL7 Inferno Conformance Runner (20 Official HL7 / ONC / CMS-0057-F / UDAP Suites)
+# Headless HL7 Inferno Conformance Runner (32 Official HL7 / ONC / CMS-0057-F / USCDI+ / UDAP Suites)
 # (ONC (g)(10) HTI-1 + US Core v6.1.0/v7.0.0/v8.0.0 + UDAP v1.0.0 + Da Vinci CRD v2.0.1/v2.2.1 +
 #  Da Vinci DTR v2.0.1/v2.2.0 + Da Vinci PAS v2.2.1 + Da Vinci PDex v2.0.0 + CARIN BB v2.0.0 +
 #  Plan-Net v1.1.0 + USDF v2.0.1 + IPS v1.1.0 + IPA v1.0.0 + Subscriptions R5 Backport + SMART STU2 + Bulk Data v2.0.0)
@@ -62,19 +62,28 @@ FORMULARY_TENANT="${FLINT_FORMULARY_TENANT:-formulary}"
 C4BB_TENANT="${FLINT_C4BB_TENANT:-c4bb}"
 PDEX_TENANT="${FLINT_PDEX_TENANT:-pdex}"
 PAS_TENANT="${FLINT_PAS_TENANT:-pas}"
-echo "==> Seeding Plan-Net ('${PLANNET_TENANT}'), Formulary ('${FORMULARY_TENANT}'), CARIN BB ('${C4BB_TENANT}'), PDex ('${PDEX_TENANT}'), & PAS ('${PAS_TENANT}') cohorts"
+CPDS_TENANT="${FLINT_CPDS_TENANT:-cpds}"
+USQC_TENANT="${FLINT_USQC_TENANT:-usqc}"
+CCRR_TENANT="${FLINT_CCRR_TENANT:-ccrr}"
+echo "==> Seeding Plan-Net, Formulary, CARIN BB, PDex, PAS, CPDS, US Quality Core, & CCRR cohorts"
 if [[ -x "${REPO_ROOT}/bin/seed" ]]; then
   "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${PLANNET_TENANT}" -suite plannet -token "${ACCESS_TOKEN}" >/dev/null
   "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${FORMULARY_TENANT}" -suite formulary -token "${ACCESS_TOKEN}" >/dev/null
   "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${C4BB_TENANT}" -suite c4bb -token "${ACCESS_TOKEN}" >/dev/null
   "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${PDEX_TENANT}" -suite pdex -token "${ACCESS_TOKEN}" >/dev/null
   "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${PAS_TENANT}" -suite pas -token "${ACCESS_TOKEN}" >/dev/null
+  "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${CPDS_TENANT}" -suite cpds -token "${ACCESS_TOKEN}" >/dev/null
+  "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${USQC_TENANT}" -suite usqc -token "${ACCESS_TOKEN}" >/dev/null
+  "${REPO_ROOT}/bin/seed" -url "${FLINT_BASE_URL}" -tenant "${CCRR_TENANT}" -suite ccrr -token "${ACCESS_TOKEN}" >/dev/null
 else
   (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${PLANNET_TENANT}" -suite plannet -token "${ACCESS_TOKEN}" >/dev/null)
   (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${FORMULARY_TENANT}" -suite formulary -token "${ACCESS_TOKEN}" >/dev/null)
   (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${C4BB_TENANT}" -suite c4bb -token "${ACCESS_TOKEN}" >/dev/null)
   (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${PDEX_TENANT}" -suite pdex -token "${ACCESS_TOKEN}" >/dev/null)
   (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${PAS_TENANT}" -suite pas -token "${ACCESS_TOKEN}" >/dev/null)
+  (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${CPDS_TENANT}" -suite cpds -token "${ACCESS_TOKEN}" >/dev/null)
+  (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${USQC_TENANT}" -suite usqc -token "${ACCESS_TOKEN}" >/dev/null)
+  (cd "${REPO_ROOT}" && go run ./cmd/seed -url "${FLINT_BASE_URL}" -tenant "${CCRR_TENANT}" -suite ccrr -token "${ACCESS_TOKEN}" >/dev/null)
 fi
 
 cd "${HEADLESS_DIR}"
