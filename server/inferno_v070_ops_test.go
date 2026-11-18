@@ -361,7 +361,25 @@ func TestInfernoV070_UDSPlusCPDSHomeLabAndCCRRBundles(t *testing.T) {
 
 	cpdsHide := getAuthBundle("/fhir/r4/demo/Patient/pat-alice-001/$pathology-exchange-bundle?missingData=hide")
 	assert.NotContains(t, string(cpdsHide), "http://hl7.org/fhir/StructureDefinition/data-absent-reason")
+	assert.NotContains(t, string(cpdsHide), "http://terminology.hl7.org/CodeSystem/data-absent-reason")
 	validateBundleAndEntries("CPDS hide DAR", cpdsHide)
+
+	// 2b. Verify extension-only _recordedDate on Condition is not indexed at 1970-01-01
+	condPresent := []byte(`{"resourceType":"Condition","id":"cond-rec-present","clinicalStatus":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/condition-clinical","code":"active"}]},"code":{"coding":[{"system":"http://snomed.info/sct","code":"38341003"}]},"subject":{"reference":"Patient/pat-alice-001"},"recordedDate":"2024-06-01T00:00:00Z"}`)
+	condMissing := []byte(`{"resourceType":"Condition","id":"cond-rec-missing","clinicalStatus":{"coding":[{"system":"http://terminology.hl7.org/CodeSystem/condition-clinical","code":"active"}]},"code":{"coding":[{"system":"http://snomed.info/sct","code":"38341003"}]},"subject":{"reference":"Patient/pat-alice-001"},"onsetDateTime":"2026-01-15T09:05:00Z","_recordedDate":{"extension":[{"url":"http://hl7.org/fhir/StructureDefinition/data-absent-reason","valueCode":"unknown"}]}}`)
+	for id, body := range map[string][]byte{"cond-rec-present": condPresent, "cond-rec-missing": condMissing} {
+		putReq, pErr := http.NewRequest(http.MethodPut, ts.URL+"/fhir/r4/demo/Condition/"+id, bytes.NewReader(body))
+		require.NoError(t, pErr)
+		putReq.Header.Set("Content-Type", "application/fhir+json")
+		putReq.Header.Set("Authorization", "Bearer "+tok)
+		putResp, pDoErr := ts.Client().Do(putReq)
+		require.NoError(t, pDoErr)
+		_ = putResp.Body.Close()
+		require.Contains(t, []int{http.StatusOK, http.StatusCreated}, putResp.StatusCode)
+	}
+	searchRecorded := getAuthBundle("/fhir/r4/demo/Condition?patient=pat-alice-001&recorded-date=lt2024-06-02T00:00:00Z")
+	assert.Contains(t, string(searchRecorded), "cond-rec-present")
+	assert.NotContains(t, string(searchRecorded), "cond-rec-missing")
 
 	// 3. At-Home In-Vitro $home-lab-report
 	homeLab := getAuthBundle("/fhir/r4/demo/Patient/pat-alice-001/$home-lab-report")

@@ -2020,7 +2020,7 @@ if ccrr_ehr_suite && ENV['INFERNO_SKIP_CCRR'] != 'true'
       tnm_regional_nodes_category_code: '21906-3',
       tnm_stage_group_code: '21908-9',
       smart_auth_info: us_core_auth_json,
-      smart_credentials: us_core_auth_json
+      smart_credentials: access_token
     }
   )
 end

@@ -1280,6 +1280,7 @@ func (s *Server) handlePatientPathologyExchangeBundle(w http.ResponseWriter, r *
 		},
 		"specialty": []map[string]any{
 			{"coding": []map[string]any{{"system": "http://nucc.org/provider-taxonomy", "code": "207ZP0102X", "display": "Anatomic Pathology & Clinical Pathology Physician"}}},
+			{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/data-absent-reason", "code": "unknown", "display": "Unknown"}}},
 		},
 		"location": []map[string]any{{"reference": "Location/loc-cpds-pathology"}},
 		"telecom": []map[string]any{
@@ -1455,6 +1456,9 @@ func (s *Server) handlePatientPathologyExchangeBundle(w http.ResponseWriter, r *
 	}
 
 	if strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("missingData")), "hide") {
+		prRes["specialty"] = []map[string]any{
+			{"coding": []map[string]any{{"system": "http://nucc.org/provider-taxonomy", "code": "207ZP0102X", "display": "Anatomic Pathology & Clinical Pathology Physician"}}},
+		}
 		delete(specPart, "_receivedTime")
 		specPart["receivedTime"] = "2024-11-01T09:35:00Z"
 		specPart["collection"] = map[string]any{

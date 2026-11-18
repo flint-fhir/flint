@@ -277,6 +277,23 @@ func ExtractCondition(tenantID string, resID string, protoBytes []byte) (*Search
 	}
 	effID := r.GetId().GetValue()
 	idx := normalizeSearchIndexes(gensearchidx.ExtractConditionIndexes(tenantID, &r))
+	// Extension-only _recordedDate / _onsetDateTime / _abatementDateTime (e.g. data-absent-reason)
+	// carry Precision == PRECISION_UNSPECIFIED with ValueUs == 0 and must not index as 1970-01-01.
+	missingRecorded := r.GetRecordedDate() == nil || (r.GetRecordedDate().GetValueUs() == 0 && r.GetRecordedDate().GetPrecision() == dtpb.DateTime_PRECISION_UNSPECIFIED)
+	missingOnset := r.GetOnset().GetDateTime() != nil && r.GetOnset().GetDateTime().GetValueUs() == 0 && r.GetOnset().GetDateTime().GetPrecision() == dtpb.DateTime_PRECISION_UNSPECIFIED
+	missingAbatement := r.GetAbatement().GetDateTime() != nil && r.GetAbatement().GetDateTime().GetValueUs() == 0 && r.GetAbatement().GetDateTime().GetPrecision() == dtpb.DateTime_PRECISION_UNSPECIFIED
+	if missingRecorded || missingOnset || missingAbatement {
+		filtered := idx.Dates[:0]
+		for _, d := range idx.Dates {
+			if (missingRecorded && d.SpName == "recorded-date") ||
+				(missingOnset && d.SpName == "onset-date") ||
+				(missingAbatement && d.SpName == "abatement-date") {
+				continue
+			}
+			filtered = append(filtered, d)
+		}
+		idx.Dates = filtered
+	}
 	appendMetaIndexes(idx, tenantID, "Condition", effID, r.GetMeta())
 	appendTokenTextFromMessage(idx, tenantID, "Condition", effID, r.ProtoReflect(), "", 0)
 	appendRefLogicalIdentifierTokens(idx, tenantID, "Condition", effID, r.GetSubject(), "patient", "subject")

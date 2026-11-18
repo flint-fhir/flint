@@ -867,8 +867,15 @@ func extractAddressStrings(idx *SearchIndexes, tenantID, resType, resID string, 
 
 func extractTemporalTime(msg protoreflect.Message) (time.Time, bool) {
 	valFD := msg.Descriptor().Fields().ByName("value_us")
-	if valFD == nil || !msg.Has(valFD) || valFD.Kind() != protoreflect.Int64Kind {
+	if valFD == nil || valFD.Kind() != protoreflect.Int64Kind {
 		return time.Time{}, false
+	}
+	if !msg.Has(valFD) {
+		precFD := msg.Descriptor().Fields().ByName("precision")
+		if precFD == nil || !msg.Has(precFD) {
+			return time.Time{}, false
+		}
+		return time.UnixMicro(0).UTC(), true
 	}
 	return time.UnixMicro(msg.Get(valFD).Int()).UTC(), true
 }
