@@ -575,7 +575,7 @@ func buildCQLExpressionWithELM(name, cqlExpr string) map[string]any {
 	elmJSON := fmt.Sprintf(`{"library":{"identifier":{"id":"DTRLogic","version":"2.2.0"},"statements":{"def":[{"name":%q,"expression":{"type":"ExpressionRef","name":%q}}]}}}`, name, name)
 	return map[string]any{
 		"name":       name,
-		"language":   "text/cql-identifier",
+		"language":   "text/cql",
 		"expression": cqlExpr,
 		"extension": []any{
 			map[string]any{
