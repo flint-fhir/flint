@@ -90,8 +90,15 @@ if defined?(DaVinciCRDTestKit::Jobs::InvokeHook)
   )
 end
 
-if defined?(CancerRegistryReportingTestKit::MedicationAdministrationMustSupportTest)
-  CancerRegistryReportingTestKit::MedicationAdministrationMustSupportTest.metadata.extensions&.reject! { |e| e[:url].nil? }
+if defined?(CancerRegistryReportingTestKit::HdeaGenerator::GroupMetadata)
+  CancerRegistryReportingTestKit::HdeaGenerator::GroupMetadata.prepend(
+    Module.new do
+      def initialize(metadata)
+        super
+        must_supports[:extensions]&.reject! { |e| e[:url].nil? } if must_supports.is_a?(Hash)
+      end
+    end
+  )
 end
 
 if defined?(CancerRegistryReportingTestKit::HDEAV100::PractitionerRoleMustSupportTest)
@@ -666,7 +673,7 @@ def drive_waiting_smart_flow!(
       shc_uri = URI.parse("#{flint_fhir_url}/Patient/#{patient_id}/$health-cards.smart-health-card")
       shc_doc = JSON.parse(Net::HTTP.get(shc_uri))
       jws_str = Array(shc_doc['verifiableCredential']).first.to_s
-      qr_chunk = SmartHealthCardsTestKit::Utils::ChunkingUtils.jws_to_qr_chunks(jws_str).first
+      qr_chunk = "shc:/#{jws_str.chars.map { |c| format('%02d', c.ord - 45) }.join}"
       wait_id = waiting_result.identifier.to_s
       puts "    [SMART Health Cards QR] Submitting numeric SHC QR chunk to /custom/smart_health_cards/post_qr_code?id=#{wait_id}"
       rack_resp = INFERNO_RACK_MOCK.post(
