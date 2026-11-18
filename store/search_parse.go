@@ -722,6 +722,8 @@ var (
 		"role": true, "relationship": true, "subscriber-id": true,
 		"value-concept": true, "component-value-concept": true, "combo-value-concept": true,
 		"race": true, "ethnicity": true, "birthsex": true, "marital-status": true,
+		"indigenous-status": true, "gender-identity": true,
+		"do-not-perform": true, "event": true, "topic": true,
 		"contenttype": true,
 		"_tag":        true, "_security": true,
 	}
@@ -756,6 +758,7 @@ var (
 		"occurrence": true, "whenhandedover": true, "whenprepared": true,
 		"value-date":   true,
 		"service-date": true, "service-start-date": true, "billable-period-start": true,
+		"recorded-date": true, "effective-time": true, "effective": true,
 	}
 	knownQuantitySearchParams = map[string]bool{
 		"value-quantity":           true,
@@ -921,6 +924,15 @@ var (
 			Type:        "string",
 			Expression:  "MedicationKnowledge.code.coding.display | MedicationKnowledge.synonym",
 			Description: "Select FormularyDrug MedicationKnowledge resources by display name or synonym.",
+		},
+		{
+			ID:          "us-quality-core-devicerequest-do-not-perform",
+			URL:         "http://hl7.org/fhir/us/qicore/SearchParameter/devicerequest-do-not-perform",
+			Code:        "do-not-perform",
+			Base:        []string{"DeviceRequest"},
+			Type:        "token",
+			Expression:  "DeviceRequest.modifierExtension.where(url='http://hl7.org/fhir/5.0/StructureDefinition/extension-DeviceRequest.doNotPerform')",
+			Description: "Select DeviceRequest resources by R5 backport doNotPerform modifierExtension.",
 		},
 	}
 )

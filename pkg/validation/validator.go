@@ -721,6 +721,9 @@ func (e *Engine) ValidateResourceWithProfiles(expectedResType string, resMap map
 		}
 		spec, known := usCoreProfileSpecs[baseProf]
 		if !known {
+			spec, known = resolveUSQualityCoreProfileSpec(baseProf)
+		}
+		if !known {
 			if after, ok := strings.CutPrefix(baseProf, "http://hl7.org/fhir/StructureDefinition/"); ok {
 				targetRT := strings.TrimSpace(after)
 				if targetRT == "" || targetRT == "Resource" || targetRT == "DomainResource" {
@@ -821,7 +824,7 @@ func hasUSCoreRequiredElement(resMap map[string]any, fieldSpec string) bool {
 				}
 			}
 		case "occurrence[x]":
-			for _, k := range []string{"occurrenceDateTime", "occurrenceString"} {
+			for _, k := range []string{"occurrenceDateTime", "occurrencePeriod", "occurrenceString"} {
 				if v, ok := resMap[k]; ok && v != nil && !isEmptyValue(v) {
 					return true
 				}
@@ -1944,6 +1947,425 @@ var usCoreProfileSpecs = map[string]usCoreProfileSpec{
 		ResourceType:   "Parameters",
 		RequiredFields: []string{"parameter"},
 	},
+	// US Core v5.0.1 & v9.0.0 additional profile URLs
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-social-history": {
+		Slug:           "us-core-observation-social-history",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-imaging": {
+		Slug:           "us-core-observation-imaging",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-observation-clinical-test": {
+		Slug:           "us-core-observation-clinical-test",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-device": {
+		Slug:           "us-core-device",
+		ResourceType:   "Device",
+		RequiredFields: []string{"type", "patient"},
+	},
+	"http://hl7.org/fhir/us/core/StructureDefinition/us-core-familymemberhistory": {
+		Slug:           "us-core-familymemberhistory",
+		ResourceType:   "FamilyMemberHistory",
+		RequiredFields: []string{"status", "patient", "relationship"},
+	},
+	// SMART Scheduling Links IG profiles
+	"http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-location": {
+		Slug:           "vaccine-location",
+		ResourceType:   "Location",
+		RequiredFields: []string{"name", "telecom", "address"},
+	},
+	"http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-schedule": {
+		Slug:           "vaccine-schedule",
+		ResourceType:   "Schedule",
+		RequiredFields: []string{"actor", "serviceType"},
+	},
+	"http://fhir-registry.smarthealthit.org/StructureDefinition/vaccine-slot": {
+		Slug:           "vaccine-slot",
+		ResourceType:   "Slot",
+		RequiredFields: []string{"schedule", "status", "start", "end"},
+	},
+	// SMART Health Cards: Vaccination & Testing IG profiles
+	"http://hl7.org/fhir/uv/smarthealthcards-vaccination/StructureDefinition/vaccination-credential-bundle": {
+		Slug:           "vaccination-credential-bundle",
+		ResourceType:   "Bundle",
+		RequiredFields: []string{"type", "entry"},
+	},
+	"http://hl7.org/fhir/uv/smarthealthcards-vaccination/StructureDefinition/vaccination-credential-bundle-dm": {
+		Slug:           "vaccination-credential-bundle-dm",
+		ResourceType:   "Bundle",
+		RequiredFields: []string{"type", "entry"},
+	},
+	"http://hl7.org/fhir/uv/smarthealthcards-vaccination/StructureDefinition/covid19-laboratory-bundle": {
+		Slug:           "covid19-laboratory-bundle",
+		ResourceType:   "Bundle",
+		RequiredFields: []string{"type", "entry"},
+	},
+	"http://hl7.org/fhir/uv/smarthealthcards-vaccination/StructureDefinition/covid19-laboratory-bundle-dm": {
+		Slug:           "covid19-laboratory-bundle-dm",
+		ResourceType:   "Bundle",
+		RequiredFields: []string{"type", "entry"},
+	},
+	// HRSA Uniform Data System (UDS+) IG v2.0.0 profiles
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-import-manifest": {
+		Slug:           "uds-plus-import-manifest",
+		ResourceType:   "Parameters",
+		RequiredFields: []string{"parameter"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/de-identified-uds-plus-patient": {
+		Slug:           "de-identified-uds-plus-patient",
+		ResourceType:   "Patient",
+		RequiredFields: []string{"gender"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/de-identified-uds-plus-relatedperson": {
+		Slug:           "de-identified-uds-plus-relatedperson",
+		ResourceType:   "RelatedPerson",
+		RequiredFields: []string{"patient", "relationship"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-coverage": {
+		Slug:           "uds-plus-coverage",
+		ResourceType:   "Coverage",
+		RequiredFields: []string{"status", "type", "beneficiary", "payor"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-diagnosis": {
+		Slug:           "uds-plus-diagnosis",
+		ResourceType:   "Condition",
+		RequiredFields: []string{"code", "subject"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-encounter": {
+		Slug:           "uds-plus-encounter",
+		ResourceType:   "Encounter",
+		RequiredFields: []string{"status", "class", "type", "subject"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-procedure": {
+		Slug:           "uds-plus-procedure",
+		ResourceType:   "Procedure",
+		RequiredFields: []string{"status", "code", "subject"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-immunization": {
+		Slug:           "uds-plus-immunization",
+		ResourceType:   "Immunization",
+		RequiredFields: []string{"status", "vaccineCode", "patient", "occurrence[x]"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-location": {
+		Slug:           "uds-plus-location",
+		ResourceType:   "Location",
+		RequiredFields: []string{"name"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-allergyintolerance": {
+		Slug:           "uds-plus-allergyintolerance",
+		ResourceType:   "AllergyIntolerance",
+		RequiredFields: []string{"code", "patient"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-adverseevent": {
+		Slug:           "uds-plus-adverseevent",
+		ResourceType:   "AdverseEvent",
+		RequiredFields: []string{"actuality", "subject"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/de-identified-uds-plus-income-observation": {
+		Slug:           "de-identified-uds-plus-income-observation",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-lab-observation": {
+		Slug:           "uds-plus-lab-observation",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-clinical-result-observation": {
+		Slug:           "uds-plus-clinical-result-observation",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-observation": {
+		Slug:           "uds-plus-observation",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-medicationrequest": {
+		Slug:           "uds-plus-medicationrequest",
+		ResourceType:   "MedicationRequest",
+		RequiredFields: []string{"status", "intent", "medication[x]", "subject"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-medicationstatement": {
+		Slug:           "uds-plus-medicationstatement",
+		ResourceType:   "MedicationStatement",
+		RequiredFields: []string{"status", "medication[x]", "subject"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-servicerequest": {
+		Slug:           "uds-plus-servicerequest",
+		ResourceType:   "ServiceRequest",
+		RequiredFields: []string{"status", "intent", "code", "subject"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-deidentify-operation-data-urls-parameter": {
+		Slug:           "uds-plus-deidentify-operation-data-urls-parameter",
+		ResourceType:   "Parameters",
+		RequiredFields: []string{"parameter"},
+	},
+	"http://fhir.org/guides/hrsa/uds-plus/StructureDefinition/uds-plus-patient-reporting-parameters": {
+		Slug:           "uds-plus-patient-reporting-parameters",
+		ResourceType:   "Parameters",
+		RequiredFields: []string{"parameter"},
+	},
+	// HL7 mCODE v3.0.0, Central Cancer Registry Reporting (CCRR) v1.0.0, ODH & US PH Library profiles
+	"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-cancer-patient": {
+		Slug:           "mcode-cancer-patient",
+		ResourceType:   "Patient",
+		RequiredFields: []string{"identifier", "name"},
+	},
+	"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-primary-cancer-condition": {
+		Slug:           "mcode-primary-cancer-condition",
+		ResourceType:   "Condition",
+		RequiredFields: []string{"code", "subject"},
+	},
+	"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-secondary-cancer-condition": {
+		Slug:           "mcode-secondary-cancer-condition",
+		ResourceType:   "Condition",
+		RequiredFields: []string{"code", "subject"},
+	},
+	"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-cancer-related-medication-request": {
+		Slug:           "mcode-cancer-related-medication-request",
+		ResourceType:   "MedicationRequest",
+		RequiredFields: []string{"status", "intent", "medication[x]", "subject"},
+	},
+	"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-cancer-related-medication-administration": {
+		Slug:           "mcode-cancer-related-medication-administration",
+		ResourceType:   "MedicationAdministration",
+		RequiredFields: []string{"status", "medication[x]", "subject", "effective[x]"},
+	},
+	"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-tnm-stage-group": {
+		Slug:           "mcode-tnm-stage-group",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-tnm-primary-tumor-category": {
+		Slug:           "mcode-tnm-primary-tumor-category",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-tnm-regional-nodes-category": {
+		Slug:           "mcode-tnm-regional-nodes-category",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-tnm-distant-metastases-category": {
+		Slug:           "mcode-tnm-distant-metastases-category",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-radiotherapy-course-summary": {
+		Slug:           "mcode-radiotherapy-course-summary",
+		ResourceType:   "Procedure",
+		RequiredFields: []string{"status", "code", "subject", "performed[x]"},
+	},
+	"http://hl7.org/fhir/us/central-cancer-registry-reporting/StructureDefinition/ccrr-content-bundle": {
+		Slug:           "ccrr-content-bundle",
+		ResourceType:   "Bundle",
+		RequiredFields: []string{"type", "entry"},
+	},
+	"http://hl7.org/fhir/us/central-cancer-registry-reporting/StructureDefinition/ccrr-composition": {
+		Slug:           "ccrr-composition",
+		ResourceType:   "Composition",
+		RequiredFields: []string{"identifier", "status", "type", "subject", "encounter", "date", "author", "title", "section"},
+	},
+	"http://hl7.org/fhir/us/central-cancer-registry-reporting/StructureDefinition/central-cancer-registry-primary-cancer-condition": {
+		Slug:           "central-cancer-registry-primary-cancer-condition",
+		ResourceType:   "Condition",
+		RequiredFields: []string{"code", "subject"},
+	},
+	"http://hl7.org/fhir/us/central-cancer-registry-reporting/StructureDefinition/ccrr-medication-statement": {
+		Slug:           "ccrr-medication-statement",
+		ResourceType:   "MedicationStatement",
+		RequiredFields: []string{"status", "medication[x]", "subject"},
+	},
+	"http://hl7.org/fhir/us/central-cancer-registry-reporting/StructureDefinition/ccrr-service-request": {
+		Slug:           "ccrr-service-request",
+		ResourceType:   "ServiceRequest",
+		RequiredFields: []string{"status", "intent", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/odh/StructureDefinition/odh-UsualWork": {
+		Slug:           "odh-UsualWork",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]", "value[x]", "component"},
+	},
+	"http://hl7.org/fhir/us/odh/StructureDefinition/odh-PastOrPresentJob": {
+		Slug:           "odh-PastOrPresentJob",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/ph-library/StructureDefinition/us-ph-encounter": {
+		Slug:           "us-ph-encounter",
+		ResourceType:   "Encounter",
+		RequiredFields: []string{"status", "class", "type", "subject"},
+	},
+	"http://hl7.org/fhir/us/ph-library/StructureDefinition/us-ph-organization": {
+		Slug:           "us-ph-organization",
+		ResourceType:   "Organization",
+		RequiredFields: []string{"active", "name"},
+	},
+	// HL7 Cancer Pathology Data Sharing (CPDS) v1.0.1 profiles
+	"http://hl7.org/fhir/us/cancer-reporting/StructureDefinition/us-pathology-exchange-bundle": {
+		Slug:           "us-pathology-exchange-bundle",
+		ResourceType:   "Bundle",
+		RequiredFields: []string{"type", "timestamp", "entry"},
+	},
+	"http://hl7.org/fhir/us/cancer-reporting/StructureDefinition/us-pathology-diagnostic-report": {
+		Slug:           "us-pathology-diagnostic-report",
+		ResourceType:   "DiagnosticReport",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/cancer-reporting/StructureDefinition/us-pathology-specimen": {
+		Slug:           "us-pathology-specimen",
+		ResourceType:   "Specimen",
+		RequiredFields: []string{"identifier", "accessionIdentifier", "type", "subject", "collection", "container"},
+	},
+	"http://hl7.org/fhir/us/cancer-reporting/StructureDefinition/us-pathology-service-request": {
+		Slug:           "us-pathology-service-request",
+		ResourceType:   "ServiceRequest",
+		RequiredFields: []string{"status", "intent", "category", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/cancer-reporting/StructureDefinition/us-pathology-related-practitioner-role": {
+		Slug:           "us-pathology-related-practitioner-role",
+		ResourceType:   "PractitionerRole",
+		RequiredFields: []string{"practitioner|organization|code|specialty"},
+	},
+	"http://hl7.org/fhir/us/cancer-reporting/StructureDefinition/us-pathology-related-practitioner": {
+		Slug:           "us-pathology-related-practitioner",
+		ResourceType:   "Practitioner",
+		RequiredFields: []string{"identifier", "name"},
+	},
+	// HL7 At-Home In-Vitro Test Report v1.0.0 profiles
+	"http://hl7.org/fhir/us/home-lab-report/StructureDefinition/Bundle-at-home-in-vitro-test": {
+		Slug:           "Bundle-at-home-in-vitro-test",
+		ResourceType:   "Bundle",
+		RequiredFields: []string{"type", "entry"},
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			if extractStringOrWrapped(resMap["type"]) != "message" {
+				outcome.AddError(CodeInvalid, "Bundle-at-home-in-vitro-test requires Bundle.type == 'message'", "Bundle.type")
+			}
+		},
+	},
+	"http://hl7.org/fhir/us/home-lab-report/StructureDefinition/MessageHeader-at-home-in-vitro-test-results": {
+		Slug:           "MessageHeader-at-home-in-vitro-test-results",
+		ResourceType:   "MessageHeader",
+		RequiredFields: []string{"source"},
+	},
+	"http://hl7.org/fhir/us/home-lab-report/StructureDefinition/DiagnosticReport-at-home-in-vitro-results": {
+		Slug:           "DiagnosticReport-at-home-in-vitro-results",
+		ResourceType:   "DiagnosticReport",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/home-lab-report/StructureDefinition/Patient-at-home-in-vitro-test": {
+		Slug:           "Patient-at-home-in-vitro-test",
+		ResourceType:   "Patient",
+		RequiredFields: []string{"identifier", "name"},
+	},
+	"http://hl7.org/fhir/us/home-lab-report/StructureDefinition/Observation-at-home-in-vitro-test-result": {
+		Slug:           "Observation-at-home-in-vitro-test-result",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://hl7.org/fhir/us/home-lab-report/StructureDefinition/Specimen-at-home-in-vitro-test": {
+		Slug:           "Specimen-at-home-in-vitro-test",
+		ResourceType:   "Specimen",
+		RequiredFields: []string{"type", "subject"},
+	},
+	"http://hl7.org/fhir/us/home-lab-report/StructureDefinition/Device-at-home-in-vitro-test": {
+		Slug:           "Device-at-home-in-vitro-test",
+		ResourceType:   "Device",
+		RequiredFields: []string{"deviceName"},
+	},
+}
+
+func resolveUSQualityCoreProfileSpec(baseProf string) (usCoreProfileSpec, bool) {
+	var slug string
+	if s, ok := strings.CutPrefix(baseProf, "http://fhir.org/guides/onc/us-quality-core/StructureDefinition/"); ok {
+		slug = strings.TrimSpace(s)
+	} else if s, ok := strings.CutPrefix(baseProf, "http://hl7.org/fhir/us/quality-core/StructureDefinition/"); ok {
+		slug = strings.TrimSpace(s)
+	} else {
+		return usCoreProfileSpec{}, false
+	}
+	switch slug {
+	case "us-quality-core-adverseevent":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "AdverseEvent", RequiredFields: []string{"actuality", "event", "subject"}}, true
+	case "us-quality-core-allergyintolerance":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "AllergyIntolerance", RequiredFields: []string{"code", "patient"}}, true
+	case "us-quality-core-careplan":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "CarePlan", RequiredFields: []string{"text", "status", "intent", "category", "subject"}}, true
+	case "us-quality-core-careteam":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "CareTeam", RequiredFields: []string{"status", "subject", "participant"}}, true
+	case "us-quality-core-communication", "us-quality-core-communicationdone":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Communication", RequiredFields: []string{"status", "subject"}}, true
+	case "us-quality-core-communicationnotdone":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Communication", RequiredFields: []string{"status", "statusReason", "subject"}}, true
+	case "us-quality-core-condition-encounter-diagnosis", "us-quality-core-condition-problems-health-concerns":
+		return conditionProfileSpec(slug), true
+	case "us-quality-core-coverage":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Coverage", RequiredFields: []string{"status", "beneficiary", "payor"}}, true
+	case "us-quality-core-devicerequest", "us-quality-core-devicerequested", "us-quality-core-devicenotrequested", "us-quality-core-deviceprohibited":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "DeviceRequest", RequiredFields: []string{"intent", "code[x]", "subject"}}, true
+	case "us-quality-core-diagnosticreport-lab", "us-quality-core-diagnosticreport-note":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "DiagnosticReport", RequiredFields: []string{"status", "category", "code", "subject"}}, true
+	case "us-quality-core-encounter":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Encounter", RequiredFields: []string{"status", "class", "type", "subject"}}, true
+	case "us-quality-core-familymemberhistory":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "FamilyMemberHistory", RequiredFields: []string{"status", "patient", "relationship"}}, true
+	case "us-quality-core-goal":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Goal", RequiredFields: []string{"lifecycleStatus", "description", "subject"}}, true
+	case "us-quality-core-imagingstudy":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "ImagingStudy", RequiredFields: []string{"status", "subject", "series"}}, true
+	case "us-quality-core-immunization", "us-quality-core-immunizationdone":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Immunization", RequiredFields: []string{"status", "vaccineCode", "patient", "occurrence[x]"}}, true
+	case "us-quality-core-immunizationnotdone":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Immunization", RequiredFields: []string{"status", "statusReason", "vaccineCode", "patient"}}, true
+	case "us-quality-core-location":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Location", RequiredFields: []string{"name"}}, true
+	case "us-quality-core-medicationadministration", "us-quality-core-medicationadministrationdone":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "MedicationAdministration", RequiredFields: []string{"status", "medication[x]", "subject", "effective[x]"}}, true
+	case "us-quality-core-medicationadministrationnotdone":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "MedicationAdministration", RequiredFields: []string{"status", "statusReason", "medication[x]", "subject", "effective[x]"}}, true
+	case "us-quality-core-medicationdispense", "us-quality-core-medicationdispensedone":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "MedicationDispense", RequiredFields: []string{"status", "medication[x]", "subject"}}, true
+	case "us-quality-core-medicationdispensedeclined":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "MedicationDispense", RequiredFields: []string{"status", "medication[x]", "subject"}}, true
+	case "us-quality-core-medicationrequest", "us-quality-core-medicationrequested", "us-quality-core-medicationnotrequested", "us-quality-core-medicationprohibited":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "MedicationRequest", RequiredFields: []string{"status", "intent", "medication[x]", "subject"}}, true
+	case "us-quality-core-nutritionorder":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "NutritionOrder", RequiredFields: []string{"status", "intent", "patient", "dateTime"}}, true
+	case "us-quality-core-observation-clinical-result", "us-quality-core-observation-lab", "us-quality-core-observation-screening-assessment", "us-quality-core-simple-observation":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Observation", RequiredFields: []string{"status", "category", "code", "subject"}}, true
+	case "us-quality-core-observationcancelled":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Observation", RequiredFields: []string{"status", "code", "subject"}}, true
+	case "us-quality-core-organization":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Organization", RequiredFields: []string{"active", "name"}}, true
+	case "us-quality-core-patient":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Patient", RequiredFields: []string{"identifier", "name"}}, true
+	case "us-quality-core-practitioner":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Practitioner", RequiredFields: []string{"identifier", "name"}}, true
+	case "us-quality-core-practitionerrole":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "PractitionerRole", RequiredFields: []string{"practitioner|organization|code|specialty"}}, true
+	case "us-quality-core-procedure", "us-quality-core-proceduredone":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Procedure", RequiredFields: []string{"status", "code", "subject", "performed[x]"}}, true
+	case "us-quality-core-procedurenotdone":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Procedure", RequiredFields: []string{"status", "statusReason", "code", "subject"}}, true
+	case "us-quality-core-questionnaireresponse":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "QuestionnaireResponse", RequiredFields: []string{"status", "questionnaire", "subject"}}, true
+	case "us-quality-core-relatedperson":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "RelatedPerson", RequiredFields: []string{"patient", "relationship", "name"}}, true
+	case "us-quality-core-servicerequest", "us-quality-core-servicerequested", "us-quality-core-servicenotrequested", "us-quality-core-serviceprohibited":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "ServiceRequest", RequiredFields: []string{"status", "intent", "code", "subject"}}, true
+	case "us-quality-core-task", "us-quality-core-taskdone":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Task", RequiredFields: []string{"status", "intent", "code"}}, true
+	case "us-quality-core-taskrejected":
+		return usCoreProfileSpec{Slug: slug, ResourceType: "Task", RequiredFields: []string{"status", "statusReason", "intent", "code"}}, true
+	default:
+		return usCoreProfileSpec{}, false
+	}
 }
 
 func (e *Engine) validateCRDLogicalModels(resMap map[string]any, profiles []string) (*Outcome, bool) {

@@ -64,7 +64,7 @@ func runVendoredTestScriptCorpusOnStore(t *testing.T, backendName string, st sto
 			scriptFiles = append(scriptFiles, ent.Name())
 		}
 	}
-	require.GreaterOrEqual(t, len(scriptFiles), 4, "expected >= 4 vendored R4 TestScript suites")
+	require.GreaterOrEqual(t, len(scriptFiles), 8, "expected >= 8 vendored R4 TestScript suites")
 
 	for idx, sf := range scriptFiles {
 		t.Run(sf, func(t *testing.T) {
@@ -141,12 +141,12 @@ func TestOfficialHL7R4TestScriptCorpus(t *testing.T) {
 			defer db.Close()
 			ctx := t.Context()
 			require.NoError(t, postgres.RunMigrations(ctx, db))
-			for i := 1; i <= 8; i++ {
+			for i := 1; i <= 12; i++ {
 				_ = postgres.PurgeTenant(ctx, db, fmt.Sprintf("ts-inline-postgres-%d", i))
 				_ = postgres.PurgeTenant(ctx, db, fmt.Sprintf("ts-stored-postgres-%d", i))
 			}
 			t.Cleanup(func() {
-				for i := 1; i <= 8; i++ {
+				for i := 1; i <= 12; i++ {
 					_ = postgres.PurgeTenant(t.Context(), db, fmt.Sprintf("ts-inline-postgres-%d", i))
 					_ = postgres.PurgeTenant(t.Context(), db, fmt.Sprintf("ts-stored-postgres-%d", i))
 				}

@@ -519,10 +519,20 @@ func (s *Server) executeTestScriptOperation(
 	var targetPath string
 
 	if explicitURL != "" {
+		if bodyMap != nil {
+			method = http.MethodPost
+		}
 		if strings.HasPrefix(explicitURL, "/fhir/r4/") {
 			targetPath = explicitURL
 		} else {
 			targetPath = basePath + "/" + strings.TrimPrefix(explicitURL, "/")
+		}
+		if params != "" {
+			if strings.Contains(targetPath, "?") {
+				targetPath += "&" + strings.TrimPrefix(params, "?")
+			} else {
+				targetPath += "?" + strings.TrimPrefix(params, "?")
+			}
 		}
 	} else {
 		switch strings.ToLower(opCode) {
@@ -603,28 +613,39 @@ func (s *Server) executeTestScriptOperation(
 			method = http.MethodGet
 			targetPath = basePath + "/metadata"
 		default:
-			// Extended operation such as $validate, $fhirpath, $everything
-			opSlug := opCode
-			if !strings.HasPrefix(opSlug, "$") {
-				opSlug = "$" + opSlug
-			}
+			// Extended operation such as $validate, $fhirpath, $everything, or generic type="operation"
 			if bodyMap != nil {
 				method = http.MethodPost
 			} else {
 				method = http.MethodGet
 			}
-			if resolvedID != "" && resType != "" {
-				targetPath = basePath + "/" + resType + "/" + resolvedID + "/" + opSlug
-			} else if resType != "" {
-				targetPath = basePath + "/" + resType + "/" + opSlug
-			} else {
-				targetPath = basePath + "/" + opSlug
-			}
-			if params != "" {
-				if !strings.HasPrefix(params, "?") {
-					params = "?" + params
+			if strings.EqualFold(opCode, "operation") && strings.HasPrefix(strings.TrimPrefix(params, "/"), "$") {
+				opAndQuery := strings.TrimPrefix(params, "/")
+				if resolvedID != "" && resType != "" {
+					targetPath = basePath + "/" + resType + "/" + resolvedID + "/" + opAndQuery
+				} else if resType != "" {
+					targetPath = basePath + "/" + resType + "/" + opAndQuery
+				} else {
+					targetPath = basePath + "/" + opAndQuery
 				}
-				targetPath += params
+			} else {
+				opSlug := opCode
+				if !strings.HasPrefix(opSlug, "$") {
+					opSlug = "$" + opSlug
+				}
+				if resolvedID != "" && resType != "" {
+					targetPath = basePath + "/" + resType + "/" + resolvedID + "/" + opSlug
+				} else if resType != "" {
+					targetPath = basePath + "/" + resType + "/" + opSlug
+				} else {
+					targetPath = basePath + "/" + opSlug
+				}
+				if params != "" {
+					if !strings.HasPrefix(params, "?") {
+						params = "?" + params
+					}
+					targetPath += params
+				}
 			}
 		}
 	}
@@ -1021,6 +1042,8 @@ func symbolicResponseToStatusCode(sym string) int {
 		return http.StatusOK
 	case "created":
 		return http.StatusCreated
+	case "accepted":
+		return http.StatusAccepted
 	case "nocontent", "no-content":
 		return http.StatusNoContent
 	case "notmodified", "not-modified":

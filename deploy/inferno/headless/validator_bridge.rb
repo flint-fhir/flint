@@ -115,9 +115,11 @@ server.mount_proc '/igs' do |_req, res|
     'version' => '8.0.0',
     'igs' => [
       'hl7.fhir.us.core#3.1.1',
+      'hl7.fhir.us.core#5.0.1',
       'hl7.fhir.us.core#6.1.0',
       'hl7.fhir.us.core#7.0.0',
       'hl7.fhir.us.core#8.0.0',
+      'hl7.fhir.us.core#9.0.0',
       'hl7.fhir.uv.ipa#1.0.0',
       'hl7.fhir.uv.ips#1.1.0',
       'hl7.fhir.uv.subscriptions-backport#1.1.0',
@@ -133,7 +135,14 @@ server.mount_proc '/igs' do |_req, res|
       'hl7.fhir.us.davinci-crd#2.0.1',
       'hl7.fhir.us.davinci-crd#2.2.1',
       'hl7.fhir.us.davinci-dtr#2.0.1',
-      'hl7.fhir.us.davinci-dtr#2.2.0'
+      'hl7.fhir.us.davinci-dtr#2.2.0',
+      'fhir.hrsa.uds-plus#2.0.0',
+      'hl7.fhir.us.home-lab-report#1.0.0',
+      'hl7.fhir.us.central-cancer-registry-reporting#1.0.0',
+      'hl7.fhir.us.mcode#3.0.0',
+      'hl7.fhir.us.cancer-reporting#1.0.1',
+      'fhir.onc.us-quality-core#0.5.0',
+      'hl7.fhir.us.quality-core#1.0.0-ballot'
     ],
     'profiles' => {}
   })

@@ -11,7 +11,7 @@ on:
 
 jobs:
   inferno:
-    name: HL7 Inferno 20-Suite Matrix (ONC g10 + US Core + UDAP + CRD + DTR + PAS + PDex + C4BB + Plan-Net + USDF + IPS + IPA + Subs + SMART + Bulk) [${{ matrix.store }}]
+    name: HL7 Inferno 32-Suite Matrix (ONC g10 + US Core + USQC + UDAP + SMART-UDAP + SHC + SSL + UDS+ + CPDS + CCRR + At-Home + Da Vinci + C4BB + IPS + IPA + Subs + SMART + Bulk) [${{ matrix.store }}]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

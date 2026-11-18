@@ -293,8 +293,8 @@ func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
 	assert.True(t, adiObsOutcome.IsValid(), "Observation ADI Documentation v8.0.0 validation failed: %+v", adiObsOutcome.Issues)
 
 	// 8. Seed Da Vinci Plan-Net (plannet), US Drug Formulary (formulary), CARIN Blue Button (c4bb),
-	// Da Vinci PDex (pdex), & Da Vinci PAS (pas) cohorts and validate every resource
-	for _, suiteName := range []string{"plannet", "formulary", "c4bb", "pdex", "pas"} {
+	// Da Vinci PDex (pdex), Da Vinci PAS (pas), CPDS (cpds), US Quality Core (usqc), & CCRR (ccrr) cohorts
+	for _, suiteName := range []string{"plannet", "formulary", "c4bb", "pdex", "pas", "cpds", "usqc", "ccrr"} {
 		require.NoError(t, Run(t.Context(), Config{
 			BaseURL:    ts.URL,
 			Tenant:     suiteName,
@@ -307,6 +307,9 @@ func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
 		C4BBTransactionBundleJSON,
 		PDexTransactionBundleJSON,
 		PASTransactionBundleJSON,
+		CPDSTransactionBundleJSON,
+		USQCTransactionBundleJSON,
+		CCRRTransactionBundleJSON,
 	} {
 		rawBundle, err := fn()
 		require.NoError(t, err)

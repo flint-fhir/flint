@@ -366,6 +366,8 @@ func extractSingleFieldValue(
 			boolSpName = "active"
 		case fieldName == "deceased" || parentField == "deceased":
 			boolSpName = "deceased"
+		case fieldName == "do_not_perform" && parentField == "":
+			boolSpName = "do-not-perform"
 		}
 		if boolSpName != "" {
 			if valFD := subMsg.Descriptor().Fields().ByName("value"); valFD != nil && subMsg.Has(valFD) && valFD.Kind() == protoreflect.BoolKind {
@@ -865,8 +867,15 @@ func extractAddressStrings(idx *SearchIndexes, tenantID, resType, resID string, 
 
 func extractTemporalTime(msg protoreflect.Message) (time.Time, bool) {
 	valFD := msg.Descriptor().Fields().ByName("value_us")
-	if valFD == nil || !msg.Has(valFD) || valFD.Kind() != protoreflect.Int64Kind {
+	if valFD == nil || valFD.Kind() != protoreflect.Int64Kind {
 		return time.Time{}, false
+	}
+	if !msg.Has(valFD) {
+		precFD := msg.Descriptor().Fields().ByName("precision")
+		if precFD == nil || !msg.Has(precFD) {
+			return time.Time{}, false
+		}
+		return time.UnixMicro(0).UTC(), true
 	}
 	return time.UnixMicro(msg.Get(valFD).Int()).UTC(), true
 }
@@ -1129,6 +1138,8 @@ func mapReferenceSpNames(resType, fieldName, parentField string) []string {
 		return []string{"subject"}
 	case "beneficiary":
 		return []string{"beneficiary", "patient"}
+	case "for_value", "for":
+		return []string{"patient", "subject", "for"}
 	case "encounter", "context":
 		return []string{"encounter"}
 	case "practitioner", "Actor", "participant_individual":
@@ -1208,7 +1219,9 @@ func mapDateSpNames(resType, fieldName, parentField string) []string {
 		return []string{"recorded", "date"}
 	case "issued", "created", "indexed":
 		return []string{"date", effective}
-	case "period", "effective", "performed", "occurrence", "onset", "context":
+	case "effective":
+		return []string{"date", "period", "effective", "effective-time"}
+	case "period", "performed", "occurrence", "onset", "context":
 		return []string{"date", "period"}
 	case "due":
 		if resType == "Goal" {
@@ -1430,6 +1443,8 @@ func processSingleExtension(idx *SearchIndexes, tenantID, resType, resID string,
 		matched = append(matched, struct{ code, typ string }{"ethnicity", "token"})
 	case "http://hl7.org/fhir/us/core/structuredefinition/us-core-birthsex":
 		matched = append(matched, struct{ code, typ string }{"birthsex", "token"})
+	case "http://hl7.org/fhir/5.0/structuredefinition/extension-devicerequest.donotperform":
+		matched = append(matched, struct{ code, typ string }{"do-not-perform", "token"})
 	}
 
 	lowerURL := strings.ToLower(extURL)

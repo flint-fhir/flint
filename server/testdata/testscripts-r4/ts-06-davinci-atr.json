@@ -1,0 +1,222 @@
+{
+  "resourceType": "TestScript",
+  "id": "ts-06-davinci-atr",
+  "url": "http://flint.fhir.org/TestScript/ts-06-davinci-atr",
+  "version": "0.7.0",
+  "name": "DaVinciMemberAttributionLifecycleAndExport",
+  "title": "HL7 Da Vinci Member Attribution (ATR) $member-add, $member-remove, $confirm-attribution-list, $atr-summary & $davinci-data-export",
+  "status": "active",
+  "contained": [
+    {
+      "resourceType": "Patient",
+      "id": "pat-atr-one",
+      "active": true,
+      "gender": "female",
+      "birthDate": "1984-02-19",
+      "name": [{"use": "official", "family": "AttributionOne", "given": ["Maya"]}]
+    },
+    {
+      "resourceType": "Patient",
+      "id": "pat-atr-two",
+      "active": true,
+      "gender": "male",
+      "birthDate": "1979-11-08",
+      "name": [{"use": "official", "family": "AttributionTwo", "given": ["Devon"]}]
+    },
+    {
+      "resourceType": "Group",
+      "id": "grp-atr-roster",
+      "active": true,
+      "type": "person",
+      "actual": true,
+      "name": "Da Vinci ATR Value-Based Care Roster"
+    },
+    {
+      "resourceType": "Parameters",
+      "id": "params-atr-empty",
+      "parameter": [
+        {"name": "status", "valueCode": "active"}
+      ]
+    }
+  ],
+  "fixture": [
+    {"id": "fx-atr-pat1", "autocreate": false, "autodelete": false, "resource": {"reference": "#pat-atr-one"}},
+    {"id": "fx-atr-pat2", "autocreate": false, "autodelete": false, "resource": {"reference": "#pat-atr-two"}},
+    {"id": "fx-atr-grp", "autocreate": false, "autodelete": false, "resource": {"reference": "#grp-atr-roster"}},
+    {"id": "fx-atr-params", "autocreate": false, "autodelete": false, "resource": {"reference": "#params-atr-empty"}}
+  ],
+  "variable": [
+    {"name": "atrPat1Id", "expression": "Patient.id", "sourceId": "resp-atr-pat1"},
+    {"name": "atrPat2Id", "expression": "Patient.id", "sourceId": "resp-atr-pat2"},
+    {"name": "atrGrpId", "expression": "Group.id", "sourceId": "resp-atr-grp"}
+  ],
+  "setup": {
+    "action": [
+      {
+        "operation": {
+          "type": {"code": "create"},
+          "resource": "Patient",
+          "sourceId": "fx-atr-pat1",
+          "responseId": "resp-atr-pat1"
+        }
+      },
+      {"assert": {"response": "created"}},
+      {
+        "operation": {
+          "type": {"code": "create"},
+          "resource": "Patient",
+          "sourceId": "fx-atr-pat2",
+          "responseId": "resp-atr-pat2"
+        }
+      },
+      {"assert": {"response": "created"}},
+      {
+        "operation": {
+          "type": {"code": "create"},
+          "resource": "Group",
+          "sourceId": "fx-atr-grp",
+          "responseId": "resp-atr-grp"
+        }
+      },
+      {"assert": {"response": "created"}}
+    ]
+  },
+  "test": [
+    {
+      "name": "01-ATRMemberAddRosterLifecycle",
+      "description": "Verify Group/{id}/$member-add enrolls two attributed patients and updates active Group.quantity.",
+      "action": [
+        {
+          "operation": {
+            "method": "post",
+            "url": "Group/${atrGrpId}/$member-add",
+            "params": "memberId=Patient/${atrPat1Id}",
+            "sourceId": "fx-atr-params"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Group",
+            "expression": "Group.quantity",
+            "operator": "equals",
+            "value": "1"
+          }
+        },
+        {
+          "operation": {
+            "method": "post",
+            "url": "Group/${atrGrpId}/$member-add",
+            "params": "memberId=Patient/${atrPat2Id}",
+            "sourceId": "fx-atr-params"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Group",
+            "expression": "Group.quantity",
+            "operator": "equals",
+            "value": "2"
+          }
+        }
+      ]
+    },
+    {
+      "name": "02-ATRMemberRemoveAndConfirmAttributionList",
+      "description": "Verify Group/{id}/$member-remove soft-inactivates member and GET $confirm-attribution-list reports active/inactive counts.",
+      "action": [
+        {
+          "operation": {
+            "method": "post",
+            "url": "Group/${atrGrpId}/$member-remove",
+            "params": "memberId=Patient/${atrPat2Id}",
+            "sourceId": "fx-atr-params"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Group",
+            "expression": "Group.quantity",
+            "operator": "equals",
+            "value": "1"
+          }
+        },
+        {
+          "operation": {
+            "method": "get",
+            "url": "Group/${atrGrpId}/$confirm-attribution-list"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Parameters",
+            "expression": "Parameters.parameter.where(name = 'status').valueCode",
+            "operator": "equals",
+            "value": "confirmed"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Parameters.parameter.where(name = 'activeMemberCount').valueInteger",
+            "operator": "equals",
+            "value": "1"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Parameters.parameter.where(name = 'inactiveMemberCount').valueInteger",
+            "operator": "equals",
+            "value": "1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "03-ATRDaVinciDataExportAndSummaryBundle",
+      "description": "Verify Group/{id}/$davinci-data-export exports only active attributed patient data and Group/$atr-summary returns 3-resource ATR Bundle.",
+      "action": [
+        {
+          "operation": {
+            "method": "get",
+            "url": "Group/${atrGrpId}/$davinci-data-export"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Bundle",
+            "expression": "Bundle.type",
+            "operator": "equals",
+            "value": "collection"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Bundle.entry.count()",
+            "operator": "equals",
+            "value": "1"
+          }
+        },
+        {
+          "operation": {
+            "method": "get",
+            "url": "Group/atr-summary-ts06/$atr-summary",
+            "params": "patient=${atrPat1Id}"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Bundle",
+            "expression": "Bundle.total",
+            "operator": "equals",
+            "value": "3"
+          }
+        }
+      ]
+    }
+  ]
+}

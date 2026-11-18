@@ -1,0 +1,279 @@
+{
+  "resourceType": "TestScript",
+  "id": "ts-08-ihe-mhd-pacio-mcode",
+  "url": "http://flint.fhir.org/TestScript/ts-08-ihe-mhd-pacio-mcode",
+  "version": "0.7.0",
+  "name": "IHEMHDDocumentExchangePACIOAndCodeXMCODE",
+  "title": "IHE MHD ($iti-65, $iti-67, $ihe-iti-68), PACIO ($pacio-pfe-record, $pacio-cognitive-assess, $adi-document) & CodeX mCODE ($stage-cancer, $mcode-genomics-report, $mcode-summary)",
+  "status": "active",
+  "contained": [
+    {
+      "resourceType": "Bundle",
+      "id": "bundle-mhd-iti65",
+      "type": "transaction",
+      "entry": [
+        {
+          "fullUrl": "urn:uuid:770e8400-e29b-41d4-a716-446655440001",
+          "resource": {
+            "resourceType": "Patient",
+            "id": "pat-mhd-ts08",
+            "active": true,
+            "gender": "female",
+            "birthDate": "1968-05-14",
+            "name": [{"use": "official", "family": "OncologyMHD", "given": ["Evelyn"]}]
+          },
+          "request": {"method": "PUT", "url": "Patient/pat-mhd-ts08"}
+        },
+        {
+          "fullUrl": "urn:uuid:770e8400-e29b-41d4-a716-446655440002",
+          "resource": {
+            "resourceType": "Binary",
+            "id": "bin-mhd-ts08",
+            "contentType": "application/pdf",
+            "data": "JVBERi0xLjQK"
+          },
+          "request": {"method": "PUT", "url": "Binary/bin-mhd-ts08"}
+        },
+        {
+          "fullUrl": "urn:uuid:770e8400-e29b-41d4-a716-446655440003",
+          "resource": {
+            "resourceType": "DocumentReference",
+            "id": "docref-mhd-ts08",
+            "status": "current",
+            "type": {
+              "coding": [{"system": "http://loinc.org", "code": "34133-9", "display": "Summary of episode note"}]
+            },
+            "subject": {"reference": "Patient/pat-mhd-ts08"},
+            "content": [
+              {
+                "attachment": {
+                  "contentType": "application/pdf",
+                  "url": "Binary/bin-mhd-ts08"
+                }
+              }
+            ]
+          },
+          "request": {"method": "PUT", "url": "DocumentReference/docref-mhd-ts08"}
+        }
+      ]
+    },
+    {
+      "resourceType": "Condition",
+      "id": "cond-mcode-ts08",
+      "clinicalStatus": {
+        "coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-clinical", "code": "active"}]
+      },
+      "verificationStatus": {
+        "coding": [{"system": "http://terminology.hl7.org/CodeSystem/condition-ver-status", "code": "confirmed"}]
+      },
+      "code": {
+        "coding": [{"system": "http://snomed.info/sct", "code": "254837009", "display": "Malignant neoplasm of breast"}]
+      },
+      "subject": {"reference": "Patient/pat-mhd-ts08"}
+    },
+    {
+      "resourceType": "Parameters",
+      "id": "params-pacio-bims",
+      "parameter": [
+        {"name": "bimsScore", "valueInteger": 15}
+      ]
+    },
+    {
+      "resourceType": "Parameters",
+      "id": "params-mcode-stage",
+      "parameter": [
+        {"name": "tCategory", "valueString": "cT2"},
+        {"name": "nCategory", "valueString": "cN0"},
+        {"name": "mCategory", "valueString": "cM0"}
+      ]
+    }
+  ],
+  "fixture": [
+    {"id": "fx-mhd-bundle", "autocreate": false, "autodelete": false, "resource": {"reference": "#bundle-mhd-iti65"}},
+    {"id": "fx-mcode-cond", "autocreate": false, "autodelete": false, "resource": {"reference": "#cond-mcode-ts08"}},
+    {"id": "fx-pacio-bims", "autocreate": false, "autodelete": false, "resource": {"reference": "#params-pacio-bims"}},
+    {"id": "fx-mcode-stage", "autocreate": false, "autodelete": false, "resource": {"reference": "#params-mcode-stage"}}
+  ],
+  "variable": [
+    {"name": "mcodeCondId", "expression": "Condition.id", "sourceId": "resp-mcode-cond"}
+  ],
+  "test": [
+    {
+      "name": "01-IHEMHDProvideFindAndRetrieveDocument",
+      "description": "Verify IHE MHD ITI-65 Provide Document Bundle, ITI-67 Find DocumentReferences, and ITI-68 Retrieve Document.",
+      "action": [
+        {
+          "operation": {
+            "method": "post",
+            "url": "Bundle/$iti-65",
+            "sourceId": "fx-mhd-bundle"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Bundle",
+            "expression": "Bundle.type",
+            "operator": "equals",
+            "value": "transaction-response"
+          }
+        },
+        {
+          "operation": {
+            "method": "get",
+            "url": "DocumentReference/$iti-67",
+            "params": "status=current"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Bundle",
+            "expression": "Bundle.total",
+            "operator": "greaterThan",
+            "value": "0"
+          }
+        },
+        {
+          "operation": {
+            "method": "get",
+            "url": "DocumentReference/docref-mhd-ts08/$ihe-iti-68"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Parameters",
+            "expression": "Parameters.parameter.where(name = 'contentType').valueCode",
+            "operator": "equals",
+            "value": "application/pdf"
+          }
+        }
+      ]
+    },
+    {
+      "name": "02-PACIOPFECognitiveStatusAndAdvanceDirectives",
+      "description": "Verify PACIO Personal Functioning & Engagement, Cognitive Status BIMS assessment, and Advance Directives document Bundle.",
+      "action": [
+        {
+          "operation": {
+            "method": "post",
+            "url": "Patient/pat-mhd-ts08/$pacio-pfe-record",
+            "sourceId": "fx-pacio-bims"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Parameters",
+            "expression": "Parameters.parameter[0].name",
+            "operator": "equals",
+            "value": "pfeObservation"
+          }
+        },
+        {
+          "operation": {
+            "method": "post",
+            "url": "Patient/pat-mhd-ts08/$pacio-cognitive-assess",
+            "sourceId": "fx-pacio-bims"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Parameters",
+            "expression": "Parameters.parameter.where(name = 'cognitiveStatus').valueCode",
+            "operator": "equals",
+            "value": "cognitively-intact"
+          }
+        },
+        {
+          "operation": {
+            "method": "get",
+            "url": "Composition/$adi-document",
+            "params": "patient=pat-mhd-ts08"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Bundle",
+            "expression": "Bundle.type",
+            "operator": "equals",
+            "value": "document"
+          }
+        }
+      ]
+    },
+    {
+      "name": "03-CodeXMCODETNMStagingGenomicsAndPatientSummary",
+      "description": "Verify CodeX mCODE Condition/$stage-cancer, DiagnosticReport/$mcode-genomics-report, and Patient/{id}/$mcode-summary.",
+      "action": [
+        {
+          "operation": {
+            "type": {"code": "create"},
+            "resource": "Condition",
+            "sourceId": "fx-mcode-cond",
+            "responseId": "resp-mcode-cond"
+          }
+        },
+        {"assert": {"response": "created"}},
+        {
+          "operation": {
+            "method": "post",
+            "url": "Condition/${mcodeCondId}/$stage-cancer",
+            "sourceId": "fx-mcode-stage"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Parameters",
+            "expression": "Parameters.parameter[1].name",
+            "operator": "equals",
+            "value": "tnmStageGroup"
+          }
+        },
+        {
+          "operation": {
+            "method": "post",
+            "url": "DiagnosticReport/$mcode-genomics-report",
+            "params": "patient=pat-mhd-ts08&gene=BRCA2",
+            "sourceId": "fx-mcode-stage"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "DiagnosticReport",
+            "expression": "DiagnosticReport.status",
+            "operator": "equals",
+            "value": "final"
+          }
+        },
+        {
+          "operation": {
+            "method": "get",
+            "url": "Patient/pat-mhd-ts08/$mcode-summary"
+          }
+        },
+        {
+          "assert": {
+            "response": "okay",
+            "resource": "Bundle",
+            "expression": "Bundle.type",
+            "operator": "equals",
+            "value": "collection"
+          }
+        },
+        {
+          "assert": {
+            "expression": "Bundle.entry.count()",
+            "operator": "greaterThan",
+            "value": "2"
+          }
+        }
+      ]
+    }
+  ]
+}

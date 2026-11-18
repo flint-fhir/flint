@@ -90,6 +90,57 @@ if defined?(DaVinciCRDTestKit::Jobs::InvokeHook)
   )
 end
 
+if defined?(CancerRegistryReportingTestKit::HdeaGenerator::GroupMetadata)
+  CancerRegistryReportingTestKit::HdeaGenerator::GroupMetadata.prepend(
+    Module.new do
+      def initialize(metadata)
+        super
+        must_supports[:extensions]&.reject! { |e| e[:url].nil? } if must_supports.is_a?(Hash)
+      end
+    end
+  )
+end
+
+if defined?(CancerRegistryReportingTestKit::HDEAV100::PractitionerRoleMustSupportTest)
+  CancerRegistryReportingTestKit::HDEAV100::PractitionerRoleMustSupportTest.singleton_class.prepend(
+    Module.new do
+      def metadata
+        @metadata ||= begin
+          src = instance_method(:resource_type).source_location&.first
+          yml_path = File.join(File.dirname(src.to_s), 'practitioner_role_metadata.yml')
+          CancerRegistryReportingTestKit::HdeaGenerator::GroupMetadata.new(YAML.load_file(yml_path, aliases: true))
+        end
+      end
+    end
+  )
+end
+
+if defined?(CancerRegistryReportingTestKit::CCRRV100::HDEASuite) &&
+   defined?(USCoreTestKit::ProvenanceValidator) &&
+   !CancerRegistryReportingTestKit::CCRRV100::HDEASuite.const_defined?(:ProvenanceValidator)
+  CancerRegistryReportingTestKit::CCRRV100::HDEASuite.const_set(:ProvenanceValidator, USCoreTestKit::ProvenanceValidator)
+end
+
+if defined?(SMART_UDAP_HarmonizationTestKit::SMART_UDAP_TokenRefreshTest)
+  SMART_UDAP_HarmonizationTestKit::SMART_UDAP_TokenRefreshTest.class_eval do
+    def udap_received_scopes
+      received_scopes
+    end
+  end
+end
+
+if defined?(SMART_UDAP_HarmonizationTestKit::SMART_UDAP_TokenResponseScopeTest)
+  SMART_UDAP_HarmonizationTestKit::SMART_UDAP_TokenResponseScopeTest.output :udap_refresh_token
+  SMART_UDAP_HarmonizationTestKit::SMART_UDAP_TokenResponseScopeTest.prepend(
+    Module.new do
+      def check_for_missing_scopes(req_scopes, parsed_body)
+        output(udap_refresh_token: parsed_body['refresh_token']) if parsed_body.is_a?(Hash) && parsed_body['refresh_token']
+        super
+      end
+    end
+  )
+end
+
 flint_base_url    = ENV.fetch('FLINT_BASE_URL', 'http://127.0.0.1:18080').chomp('/')
 flint_tenant      = ENV.fetch('FLINT_TENANT', 'demo')
 flint_fhir_url    = ENV.fetch('FLINT_FHIR_URL', "#{flint_base_url}/fhir/r4/#{flint_tenant}").chomp('/')
@@ -618,10 +669,80 @@ def drive_waiting_smart_flow!(
       if %w[waiting queued running].include?(runs_repo.status_for_test_run(test_run_id).to_s)
         raise "Timed out waiting for async PAS pended rest-hook notification on #{waiting_result.test_id}"
       end
+    elsif waiting_result.test_id.to_s.include?('qr_code_scan_test')
+      shc_uri = URI.parse("#{flint_fhir_url}/Patient/#{patient_id}/$health-cards.smart-health-card")
+      shc_doc = JSON.parse(Net::HTTP.get(shc_uri))
+      jws_str = Array(shc_doc['verifiableCredential']).first.to_s
+      qr_chunk = "shc:/#{jws_str.chars.map { |c| format('%02d', c.ord - 45) }.join}"
+      wait_id = resolve_wait_identifier(runs_repo, test_run_id, waiting_result)
+      puts "    [SMART Health Cards QR] Submitting numeric SHC QR chunk to /custom/smart_health_cards/post_qr_code?id=#{wait_id}"
+      rack_resp = INFERNO_RACK_MOCK.post(
+        "/custom/smart_health_cards/post_qr_code?id=#{URI.encode_www_form_component(wait_id)}",
+        'CONTENT_TYPE' => 'application/json',
+        input: JSON.generate({ qr_code_content: qr_chunk })
+      )
+      unless [200, 201, 202, 204, 302, 303].include?(rack_resp.status)
+        raise "Inferno SHC post_qr_code route failed (HTTP #{rack_resp.status}): #{rack_resp.body}"
+      end
+    elsif waiting_result.test_id.to_s.include?('uds_plus_post_manifest_test')
+      wait_id = resolve_wait_identifier(runs_repo, test_run_id, waiting_result)
+      manifest_json = Net::HTTP.get(URI.parse("#{flint_fhir_url}/$uds-plus-manifest"))
+      puts "    [HRSA UDS+] Posting UDS+ Import Manifest Parameters to /custom/uds_plus/postHere?id=#{wait_id}"
+      rack_resp = INFERNO_RACK_MOCK.post(
+        "/custom/uds_plus/postHere?id=#{URI.encode_www_form_component(wait_id)}",
+        'CONTENT_TYPE' => 'application/fhir+json',
+        input: manifest_json
+      )
+      unless [200, 201, 202, 204, 302, 303].include?(rack_resp.status)
+        raise "Inferno UDS+ postHere route failed (HTTP #{rack_resp.status}): #{rack_resp.body}"
+      end
+    elsif waiting_result.test_id.to_s.include?('request_receive_post')
+      wait_id = resolve_wait_identifier(runs_repo, test_run_id, waiting_result)
+      hl_uri = URI.parse("#{flint_fhir_url}/Patient/#{patient_id}/$home-lab-report")
+      hl_req = Net::HTTP::Get.new(hl_uri)
+      hl_req['Accept'] = 'application/fhir+json'
+      hl_req['Authorization'] = "Bearer #{bearer_token}" unless bearer_token.to_s.empty?
+      hl_resp = Net::HTTP.start(hl_uri.hostname, hl_uri.port, use_ssl: hl_uri.scheme == 'https', read_timeout: 20) do |http|
+        http.request(hl_req)
+      end
+      puts "    [At-Home In-Vitro] Posting home-lab message Bundle to /custom/at_home_test_kit/bundle?id=#{wait_id}"
+      rack_resp = INFERNO_RACK_MOCK.post(
+        "/custom/at_home_test_kit/bundle?id=#{URI.encode_www_form_component(wait_id)}",
+        'CONTENT_TYPE' => 'application/fhir+json',
+        input: hl_resp.body.to_s
+      )
+      unless [200, 201, 202, 204, 302, 303].include?(rack_resp.status)
+        raise "Inferno At-Home In-Vitro bundle route failed (HTTP #{rack_resp.status}): #{rack_resp.body}"
+      end
+    elsif (resume_match = waiting_result.result_message.to_s.match(%r{https?://[^\s\)\]]+/resume_pass\?token=[^\s\)\]]+}))
+      resume_uri = URI.parse(resume_match[0])
+      puts "    [Inferno Attestation] Confirming #{waiting_result.test_id} via #{resume_uri.path}"
+      rack_resp = INFERNO_RACK_MOCK.get(resume_uri.request_uri)
+      unless [200, 302, 303].include?(rack_resp.status)
+        raise "Inferno resume_pass route failed (HTTP #{rack_resp.status}): #{rack_resp.body}"
+      end
     else
       raise "Unhandled Inferno waiting state on test #{waiting_result.test_id} (outputs: #{outputs.keys.join(', ')})"
     end
   end
+end
+
+def resolve_wait_identifier(runs_repo, test_run_id, waiting_result)
+  run_entity = begin
+    runs_repo.find(test_run_id)
+  rescue StandardError
+    nil
+  end
+  if run_entity && run_entity.respond_to?(:identifier) && !run_entity.identifier.to_s.strip.empty?
+    return run_entity.identifier.to_s.strip
+  end
+
+  msg = waiting_result.respond_to?(:result_message) ? waiting_result.result_message.to_s : ''
+  if (m = msg.match(/[?&]id=([^\s\)\].&]+)/))
+    return m[1].to_s.strip
+  end
+
+  raise "Could not resolve wait identifier for test_run=#{test_run_id} (#{waiting_result&.test_id})"
 end
 
 def find_group_in_suite(root_runnable, target_suffix)
@@ -877,6 +998,29 @@ def execute_inferno_target(
   )
 
   artifact_payload
+rescue StandardError => e
+  warn "  [SUITE EXCEPTION] #{label} (#{suite_id}): #{e.class}: #{e.message}"
+  Array(e.backtrace).first(8).each { |bt| warn "    #{bt}" }
+  err_payload = {
+    label: label,
+    suite_id: suite_id,
+    runnable_id: suite_id,
+    elapsed_seconds: 0.0,
+    exception: "#{e.class}: #{e.message}",
+    counts: {
+      total_leaf_tests: 1,
+      pass: 0,
+      skip: 0,
+      omit: 0,
+      fail: 0,
+      error: 1,
+      wait: 0,
+      cancel: 0
+    },
+    tests: []
+  }
+  File.write(File.join(artifacts_dir, "#{label}.json"), JSON.pretty_generate(err_payload))
+  err_payload
 end
 
 register_jwks_with_flint!(flint_base_url, client_id)
@@ -1689,6 +1833,250 @@ if g10_suite && ENV['INFERNO_SKIP_G10'] != 'true'
           end
         end
       }
+    }
+  )
+end
+
+def fetch_flint_json_bundle!(url_str, bearer_token)
+  uri = URI.parse(url_str)
+  req = Net::HTTP::Get.new(uri)
+  req['Accept'] = 'application/fhir+json'
+  req['Authorization'] = "Bearer #{bearer_token}" unless bearer_token.to_s.empty?
+  resp = Net::HTTP.start(uri.hostname, uri.port, use_ssl: uri.scheme == 'https', read_timeout: 30) do |http|
+    http.request(req)
+  end
+  unless resp.code.to_i == 200
+    raise "Failed to fetch bundle from #{url_str} (HTTP #{resp.code}): #{resp.body}"
+  end
+
+  resp.body.to_s
+end
+
+ssl_suite = Inferno::Repositories::TestSuites.new.find('smart_scheduling_links')
+if ssl_suite && ENV['INFERNO_SKIP_SSL'] != 'true'
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'smart_scheduling_links',
+    suite_id: 'smart_scheduling_links',
+    populate_defaults: true,
+    inputs: {
+      url: "#{flint_fhir_url}/$bulk-publish",
+      max_lines_per_file: '100'
+    }
+  )
+end
+
+shc_suite = Inferno::Repositories::TestSuites.new.find('smart_health_cards')
+if shc_suite && ENV['INFERNO_SKIP_SHC'] != 'true'
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'smart_health_cards',
+    suite_id: 'smart_health_cards',
+    inputs: {
+      file_download_url: "#{flint_fhir_url}/Patient/#{launch_patient_id}/$health-cards.smart-health-card",
+      base_fhir_url: flint_fhir_url,
+      patient_id: launch_patient_id
+    }
+  )
+end
+
+shc_vacc_suite = Inferno::Repositories::TestSuites.new.find('shc_vaccination')
+if shc_vacc_suite && ENV['INFERNO_SKIP_SHC_VACCINATION'] != 'true'
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'shc_vaccination',
+    suite_id: 'shc_vaccination',
+    inputs: {
+      file_download_url: "#{flint_fhir_url}/Patient/#{launch_patient_id}/$health-cards.smart-health-card",
+      base_fhir_url: flint_fhir_url,
+      patient_id: launch_patient_id
+    }
+  )
+end
+
+smart_udap_suite = Inferno::Repositories::TestSuites.new.find('smart_udap_harmonization')
+if smart_udap_suite && ENV['INFERNO_SKIP_SMART_UDAP'] != 'true'
+  smart_udap_pki = FlintTrack8Payloads.mint_udap_pki!(
+    flint_base_url: flint_base_url,
+    flint_fhir_url: flint_fhir_url
+  )
+  smart_udap_inputs = smart_udap_pki.merge(
+    udap_auth_code_flow_registration_scope: 'system/*.rs user/*.rs patient/*.rs launch launch/patient launch/encounter openid fhirUser offline_access',
+    udap_authorization_code_request_scopes: 'launch/patient launch/encounter openid fhirUser offline_access patient/Patient.rs patient/Encounter.rs user/Practitioner.rs'
+  )
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'smart_udap_harmonization',
+    suite_id: 'smart_udap_harmonization',
+    runnables: Array(smart_udap_suite.groups),
+    auto_radio_true: true,
+    populate_defaults: true,
+    inputs: smart_udap_inputs
+  )
+end
+
+uds_suite = Inferno::Repositories::TestSuites.new.find('uds_plus')
+if uds_suite && ENV['INFERNO_SKIP_UDS_PLUS'] != 'true'
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'uds_plus_v200',
+    suite_id: 'uds_plus',
+    runnables: Array(uds_suite.groups),
+    inputs: {
+      import_manifest: "#{flint_fhir_url}/$uds-plus-manifest",
+      coverage_data: "#{flint_fhir_url}/$uds-plus-resource/coverage",
+      diagnosis_data: "#{flint_fhir_url}/$uds-plus-resource/diagnosis",
+      encounter_data: "#{flint_fhir_url}/$uds-plus-resource/encounter",
+      patient_data: "#{flint_fhir_url}/$uds-plus-resource/patient",
+      procedure_data: "#{flint_fhir_url}/$uds-plus-resource/procedure",
+      related_person_data: "#{flint_fhir_url}/$uds-plus-resource/related_person",
+      immunization_data: "#{flint_fhir_url}/$uds-plus-resource/immunization",
+      location_data: "#{flint_fhir_url}/$uds-plus-resource/location",
+      allergy_intolerance_data: "#{flint_fhir_url}/$uds-plus-resource/allergy_intolerance",
+      adverse_event_data: "#{flint_fhir_url}/$uds-plus-resource/adverse_event",
+      income_data: "#{flint_fhir_url}/$uds-plus-resource/income",
+      lab_data: "#{flint_fhir_url}/$uds-plus-resource/lab",
+      clinical_result_data: "#{flint_fhir_url}/$uds-plus-resource/clinical_result",
+      observation_data: "#{flint_fhir_url}/$uds-plus-resource/observation",
+      medication_request_data: "#{flint_fhir_url}/$uds-plus-resource/medication_request",
+      medication_statement_data: "#{flint_fhir_url}/$uds-plus-resource/medication_statement",
+      service_request_data: "#{flint_fhir_url}/$uds-plus-resource/service_request",
+      data_urls_data: "#{flint_fhir_url}/$uds-plus-resource/data_urls",
+      patient_reporting_parameters_data: "#{flint_fhir_url}/$uds-plus-resource/reporting_parameters"
+    }
+  )
+end
+
+athome_suite = Inferno::Repositories::TestSuites.new.find('at_home_test_kit')
+if athome_suite && ENV['INFERNO_SKIP_AT_HOME'] != 'true'
+  home_lab_bundle = fetch_flint_json_bundle!("#{flint_fhir_url}/Patient/#{launch_patient_id}/$home-lab-report", access_token)
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'at_home_in_vitro_v100',
+    suite_id: 'at_home_test_kit',
+    runnables: Array(athome_suite.groups),
+    inputs: {
+      session_id: 'flint-athome-session-1',
+      fhir_bundle: home_lab_bundle
+    }
+  )
+end
+
+cpds_access_suite = Inferno::Repositories::TestSuites.new.find('cpds_data_access')
+if cpds_access_suite && ENV['INFERNO_SKIP_CPDS'] != 'true'
+  cpds_tenant = ENV.fetch('FLINT_CPDS_TENANT', 'cpds')
+  cpds_fhir_url = "#{flint_base_url}/fhir/r4/#{cpds_tenant}"
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    flint_fhir_url: cpds_fhir_url,
+    flint_tenant: cpds_tenant,
+    label: 'cpds_data_access_v101',
+    suite_id: 'cpds_data_access',
+    inputs: {
+      url: cpds_fhir_url,
+      patient_ids: 'pat-alice-001',
+      implantable_device_codes: '14106009',
+      smart_auth_info: us_core_auth_json,
+      smart_credentials: us_core_auth_json
+    }
+  )
+end
+
+cpds_report_suite = Inferno::Repositories::TestSuites.new.find('cpds_report_generation')
+if cpds_report_suite && ENV['INFERNO_SKIP_CPDS'] != 'true'
+  cpds_bundle_json = fetch_flint_json_bundle!("#{flint_fhir_url}/Patient/pat-alice-001/$pathology-exchange-bundle", access_token)
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'cpds_report_generation_v101',
+    suite_id: 'cpds_report_generation',
+    runnables: Array(cpds_report_suite.groups),
+    inputs: {
+      reports: cpds_bundle_json
+    }
+  )
+end
+
+ccrr_ehr_suite = Inferno::Repositories::TestSuites.new.find('ccrr_ehr')
+if ccrr_ehr_suite && ENV['INFERNO_SKIP_CCRR'] != 'true'
+  ccrr_tenant = ENV.fetch('FLINT_CCRR_TENANT', 'ccrr')
+  ccrr_fhir_url = "#{flint_base_url}/fhir/r4/#{ccrr_tenant}"
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    flint_fhir_url: ccrr_fhir_url,
+    flint_tenant: ccrr_tenant,
+    label: 'ccrr_ehr_v100',
+    suite_id: 'ccrr_ehr',
+    inputs: {
+      url: ccrr_fhir_url,
+      patient_ids: 'pat-ccrr-001',
+      implantable_device_codes: '14106009',
+      primary_condition_category: 'primary-cancer-condition',
+      secondary_condition_category: 'secondary-cancer-condition',
+      tnm_distant_metastases_category_code: '21907-1',
+      tnm_primary_tumor_category_code: '21905-5',
+      tnm_regional_nodes_category_code: '21906-3',
+      tnm_stage_group_code: '21908-9',
+      smart_auth_info: us_core_auth_json,
+      smart_credentials: access_token
+    }
+  )
+end
+
+ccrr_report_suite = Inferno::Repositories::TestSuites.new.find('ccrr_v100_report_generation')
+if ccrr_report_suite && ENV['INFERNO_SKIP_CCRR'] != 'true'
+  ccrr_tenant = ENV.fetch('FLINT_CCRR_TENANT', 'ccrr')
+  ccrr_fhir_url = "#{flint_base_url}/fhir/r4/#{ccrr_tenant}"
+  ccrr_bundle_json = fetch_flint_json_bundle!("#{ccrr_fhir_url}/Patient/pat-ccrr-001/$cancer-registry-report", access_token)
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    flint_fhir_url: ccrr_fhir_url,
+    flint_tenant: ccrr_tenant,
+    label: 'ccrr_v100_report_generation',
+    suite_id: 'ccrr_v100_report_generation',
+    inputs: {
+      reports: ccrr_bundle_json
+    }
+  )
+end
+
+usqc_v050_suite = Inferno::Repositories::TestSuites.new.find('us_quality_core_v050')
+if usqc_v050_suite && ENV['INFERNO_SKIP_USQC'] != 'true'
+  usqc_tenant = ENV.fetch('FLINT_USQC_TENANT', 'usqc')
+  usqc_fhir_url = "#{flint_base_url}/fhir/r4/#{usqc_tenant}"
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    flint_fhir_url: usqc_fhir_url,
+    flint_tenant: usqc_tenant,
+    label: 'us_quality_core_v050',
+    suite_id: 'us_quality_core_v050',
+    inputs: {
+      url: usqc_fhir_url,
+      patient_ids: 'pat-alice-001',
+      smart_auth_info: us_core_auth_json
+    }
+  )
+end
+
+usqc_v100_suite = Inferno::Repositories::TestSuites.new.find('us_quality_core_v100_ballot')
+if usqc_v100_suite && ENV['INFERNO_SKIP_USQC'] != 'true'
+  usqc_tenant = ENV.fetch('FLINT_USQC_TENANT', 'usqc')
+  usqc_fhir_url = "#{flint_base_url}/fhir/r4/#{usqc_tenant}"
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    flint_fhir_url: usqc_fhir_url,
+    flint_tenant: usqc_tenant,
+    label: 'us_quality_core_v100_ballot',
+    suite_id: 'us_quality_core_v100_ballot',
+    inputs: {
+      url: usqc_fhir_url,
+      patient_ids: 'pat-alice-001',
+      smart_auth_info: us_core_auth_json
     }
   )
 end
