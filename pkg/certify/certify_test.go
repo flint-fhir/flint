@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/flint-fhir/flint/pkg/shlink"
 )
 
 func TestReport_ToFHIRTestReportAndFormatScorecard(t *testing.T) {
@@ -165,6 +167,7 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 		metaDeleted bool
 		revokedTok  bool
 		seenJTI     = make(map[string]bool)
+		shlMgr      = shlink.NewManager()
 		serverURL   string
 	)
 
@@ -262,6 +265,85 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 		case "/oauth2/revoke":
 			revokedTok = true
 			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		// MCP-01 & SHL-01 mock handlers
+		if strings.HasSuffix(path, "/$mcp") {
+			bodyBytes, _ := io.ReadAll(r.Body)
+			bodyStr := string(bodyBytes)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Mcp-Session-Id", "mock-mcp-sess-1")
+			switch {
+			case strings.Contains(bodyStr, `"initialize"`):
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","serverInfo":{"name":"flint-fhir-mcp","version":"0.7.0"}}}`))
+			case strings.Contains(bodyStr, `"tools/list"`):
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"fhir_search"},{"name":"patient_summary_ips"}]}}`))
+			case strings.Contains(bodyStr, `"other-patient-999"`):
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":4,"error":{"code":-32003,"message":"forbidden"}}`))
+			default:
+				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"resourceType\":\"Patient\",\"id\":\"cert-pat-1\"}"}]}}`))
+			}
+			return
+		}
+		if strings.HasSuffix(path, "/Patient/cert-pat-1/$shlink") {
+			issued, _ := shlMgr.CreateLink(shlink.CreateRequest{
+				Tenant:     "certify",
+				PatientID:  "cert-pat-1",
+				BaseOrigin: serverURL,
+				Label:      "Certify IPS Link",
+				Passcode:   "739182",
+				MaxViews:   2,
+				Artifacts: []shlink.ArtifactInput{{
+					ContentType: "application/fhir+json",
+					Plaintext:   []byte(`{"resourceType":"Bundle","type":"document","entry":[{"resource":{"resourceType":"Composition","type":{"coding":[{"code":"60591-5"}]},"subject":{"reference":"Patient/cert-pat-1"}}}]}`),
+					Deflate:     true,
+				}},
+			})
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"resourceType": "Parameters",
+				"parameter": []map[string]any{
+					{"name": "shlink", "valueUri": issued.SHLinkURI},
+					{"name": "linkId", "valueString": issued.ID},
+					{"name": "qrCodeSvg", "valueString": issued.QRCodeSVG},
+				},
+			})
+			return
+		}
+		if strings.HasSuffix(path, "/Patient/cert-pat-1/$shlink-revoke") {
+			var doc map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&doc)
+			_ = shlMgr.Revoke("certify", "cert-pat-1", doc["linkId"])
+			_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome"}`))
+			return
+		}
+		if strings.HasPrefix(path, "/shlink/") && strings.HasSuffix(path, "/manifest") {
+			parts := strings.Split(strings.Trim(path, "/"), "/")
+			var mReq shlink.ManifestRequest
+			_ = json.NewDecoder(r.Body).Decode(&mReq)
+			man, _, _, mErr := shlMgr.ResolveManifest(parts[1], serverURL, mReq)
+			if mErr != nil {
+				if strings.Contains(mErr.Error(), "passcode") {
+					w.WriteHeader(http.StatusUnauthorized)
+				} else {
+					w.WriteHeader(http.StatusGone)
+				}
+				_, _ = w.Write([]byte(`{"error":"shlink_err"}`))
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(man)
+			return
+		}
+		if strings.HasPrefix(path, "/shlink/") && strings.Contains(path, "/content/") {
+			parts := strings.Split(strings.Trim(path, "/"), "/")
+			jweStr, _, _, cErr := shlMgr.ReadContent(parts[1], parts[3])
+			if cErr != nil {
+				w.WriteHeader(http.StatusGone)
+				return
+			}
+			w.Header().Set("Content-Type", "application/jose")
+			_, _ = w.Write([]byte(jweStr))
 			return
 		}
 
@@ -1407,8 +1489,8 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 138 {
-		t.Fatalf("expected all 138 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 140 {
+		t.Fatalf("expected all 140 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()

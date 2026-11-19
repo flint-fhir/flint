@@ -131,7 +131,7 @@ tar -xzf "${TMP_DIR}/${ARCHIVE_NAME}" -C "${TMP_DIR}"
 INSTALL_DIR="$(resolve_install_dir)"
 mkdir -p "${INSTALL_DIR}"
 
-for bin_name in flintd seed certify; do
+for bin_name in flintd flint-mcp seed certify; do
   src_bin="${TMP_DIR}/${PKG_NAME}/${bin_name}"
   if [ -f "${src_bin}" ]; then
     cp "${src_bin}" "${INSTALL_DIR}/${bin_name}"
@@ -139,7 +139,7 @@ for bin_name in flintd seed certify; do
   fi
 done
 
-printf '==> Installed flintd, seed, and certify to %s\n' "${INSTALL_DIR}"
+printf '==> Installed flintd, flint-mcp, seed, and certify to %s\n' "${INSTALL_DIR}"
 case ":${PATH:-}:" in
   *":${INSTALL_DIR}:"*) ;;
   *)

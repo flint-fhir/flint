@@ -13,6 +13,7 @@ ARG TARGETOS=linux
 ARG TARGETARCH
 ARG VERSION=0.6.0
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/flintd ./cmd/flintd \
+ && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/flint-mcp ./cmd/flint-mcp \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/seed ./cmd/seed \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/certify ./cmd/certify \
  && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/worker ./cmd/worker
@@ -36,6 +37,7 @@ RUN apk add --no-cache ca-certificates tzdata wget \
  && adduser -D -u 10001 flint
 
 COPY --from=builder /out/flintd /usr/local/bin/flintd
+COPY --from=builder /out/flint-mcp /usr/local/bin/flint-mcp
 COPY --from=builder /out/seed /usr/local/bin/seed
 COPY --from=builder /out/certify /usr/local/bin/certify
 
