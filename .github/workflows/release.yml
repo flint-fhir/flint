@@ -84,6 +84,9 @@ jobs:
                 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
                 -o "dist/${pkg}/flintd" ./cmd/flintd
               CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
+                go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
+                -o "dist/${pkg}/flint-mcp" ./cmd/flint-mcp
+              CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
                 go build -trimpath -ldflags="-s -w" \
                 -o "dist/${pkg}/seed" ./cmd/seed
               CGO_ENABLED=0 GOOS="${goos}" GOARCH="${goarch}" \
@@ -133,12 +136,14 @@ jobs:
 
             def install
               bin.install "flintd"
+              bin.install "flint-mcp"
               bin.install "seed" => "flint-seed"
               bin.install "certify" => "flint-certify"
             end
 
             test do
               assert_match version.to_s, shell_output("#{bin}/flintd --version")
+              assert_match version.to_s, shell_output("#{bin}/flint-mcp --version")
             end
           end
           EOF

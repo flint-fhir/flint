@@ -1,7 +1,7 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, HL7 SQL-on-FHIR v2, and 35+ National HL7
 // Implementation Guide conformance & certification runner. It executes 10 structured test suites
-// (138 checks) over HTTP against any Flint storage topology (PostgreSQL, SQLite, Apache Doris,
+// (140 checks) over HTTP against any Flint storage topology (PostgreSQL, SQLite, Apache Doris,
 // or HybridStore) and produces both a standard FHIR R4 TestReport resource and a scorecard.
 package certify
 
@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/flint-fhir/flint/pkg/shlink"
 	"github.com/flint-fhir/flint/pkg/validation"
 )
 
@@ -926,6 +927,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	// Suite 5: SMART v2 OAuth2 PKCE Launch, $validate & ONC (d)(2) AuditEvent
 	// =========================================================================
 	suite5 := "Suite 5: SMART v2 OAuth2 PKCE Launch, $validate & ONC §170.315(d)(2) AuditEvent"
+	var smartPatToken string
 
 	t0 = time.Now()
 	{
@@ -986,6 +988,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 				if accessToken == "" || tokResp["patient"] != "cert-pat-1" || tokResp["id_token"] == "" {
 					err = fmt.Errorf("incomplete SMART v2 token response: %s", string(bTok))
 				} else {
+					smartPatToken = accessToken
 					// 1. Authorized read on own Patient compartment -> 200 OK
 					respOwn, _, errOwn := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1", "", nil, map[string]string{
 						"Authorization": "Bearer " + accessToken,
@@ -1095,6 +1098,131 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("SMART-04", suite5, "SMART Backend Services Asymmetric JWT (private_key_jwt ES384 & jti Replay Protection)", t0, err, "Verified ES384 private_key_jwt signature & rejected replayed jti")
+
+	t0 = time.Now()
+	{
+		err = nil
+		if smartPatToken == "" {
+			err = fmt.Errorf("missing patient-scoped SMART token from SMART-01")
+		} else {
+			mcpHeaders := map[string]string{"Authorization": "Bearer " + smartPatToken}
+			respInit, bInit, errInit := doReq(http.MethodPost, basePath+"/$mcp", "application/json",
+				[]byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}`), mcpHeaders)
+			if errInit != nil || respInit.StatusCode != http.StatusOK || !strings.Contains(string(bInit), `"2025-03-26"`) {
+				err = fmt.Errorf("expected 200 OK MCP initialize response, got %v: %s", errInit, string(bInit))
+			} else {
+				sessID := respInit.Header.Get("Mcp-Session-Id")
+				if sessID != "" {
+					mcpHeaders["Mcp-Session-Id"] = sessID
+				}
+				respList, bList, errList := doReq(http.MethodPost, basePath+"/$mcp", "application/json",
+					[]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`), mcpHeaders)
+				respOwn, bOwn, errOwn := doReq(http.MethodPost, basePath+"/$mcp", "application/json",
+					[]byte(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"fhir_read","arguments":{"resourceType":"Patient","id":"cert-pat-1"}}}`), mcpHeaders)
+				respCross, bCross, errCross := doReq(http.MethodPost, basePath+"/$mcp", "application/json",
+					[]byte(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"fhir_read","arguments":{"resourceType":"Patient","id":"other-patient-999"}}}`), mcpHeaders)
+				if errList != nil || respList.StatusCode != http.StatusOK || !strings.Contains(string(bList), `"fhir_search"`) || !strings.Contains(string(bList), `"patient_summary_ips"`) {
+					err = fmt.Errorf("expected MCP tools/list with clinical tools, got %s", string(bList))
+				} else if errOwn != nil || respOwn.StatusCode != http.StatusOK || !strings.Contains(string(bOwn), "cert-pat-1") {
+					err = fmt.Errorf("expected authorized MCP fhir_read on cert-pat-1, got %s", string(bOwn))
+				} else if errCross != nil || respCross.StatusCode != http.StatusOK || !strings.Contains(string(bCross), "-32003") {
+					err = fmt.Errorf("expected -32003 Forbidden on cross-patient MCP fhir_read, got %s", string(bCross))
+				}
+			}
+		}
+	}
+	record("MCP-01", suite5, "SMART-Authorized FHIR Model Context Protocol ($mcp Streamable HTTP, Tools & Compartment Isolation)", t0, err, "Verified SMART Bearer MCP initialize, tools/list, own-compartment fhir_read & -32003 cross-patient rejection")
+
+	t0 = time.Now()
+	{
+		err = nil
+		if smartPatToken == "" {
+			err = fmt.Errorf("missing patient-scoped SMART token from SMART-01")
+		} else {
+			shlHeaders := map[string]string{"Authorization": "Bearer " + smartPatToken}
+			respSHL, bSHL, errSHL := doReq(http.MethodPost, basePath+"/Patient/cert-pat-1/$shlink", "application/json",
+				[]byte(`{"label":"Certify IPS Link","passcode":"739182","maxViews":2,"includeSHC":false,"includeIPS":true}`), shlHeaders)
+			if errSHL != nil || respSHL.StatusCode != http.StatusOK {
+				err = fmt.Errorf("expected 200 OK Parameters from Patient/$shlink, got %v: %s", errSHL, string(bSHL))
+			} else {
+				var pDoc struct {
+					Parameter []struct {
+						Name        string `json:"name"`
+						ValueURI    string `json:"valueUri"`
+						ValueString string `json:"valueString"`
+					} `json:"parameter"`
+				}
+				_ = json.Unmarshal(bSHL, &pDoc)
+				var shlURI, linkID, qrSVG string
+				for _, p := range pDoc.Parameter {
+					switch p.Name {
+					case "shlink":
+						shlURI = p.ValueURI
+					case "linkId":
+						linkID = p.ValueString
+					case "qrCodeSvg":
+						qrSVG = p.ValueString
+					}
+				}
+				if !strings.Contains(qrSVG, "<svg") {
+					err = fmt.Errorf("expected SVG QR code in qrCodeSvg parameter, got %q", qrSVG)
+				} else {
+					shlPayload, decErr := shlink.DecodeSHLinkURI(shlURI)
+					if decErr != nil {
+						err = fmt.Errorf("decode shlink:/ URI: %w", decErr)
+					} else {
+						aesKey, keyErr := shlink.DecodeAES256Key(shlPayload.Key)
+						manU, uErr := url.Parse(shlPayload.URL)
+						if keyErr != nil || uErr != nil {
+							err = fmt.Errorf("invalid SHLink key or manifest URL: keyErr=%v urlErr=%v", keyErr, uErr)
+						} else {
+							respBadPin, _, errBadPin := doReq(http.MethodPost, manU.Path, "application/json",
+								[]byte(`{"recipient":"Certify Verifier","passcode":"000000"}`), nil)
+							respMan, bMan, errMan := doReq(http.MethodPost, manU.Path, "application/json",
+								[]byte(`{"recipient":"Certify Verifier","passcode":"739182"}`), nil)
+							if errBadPin != nil || respBadPin.StatusCode != http.StatusUnauthorized {
+								err = fmt.Errorf("expected 401 Unauthorized on wrong SHLink passcode, got %d", respBadPin.StatusCode)
+							} else if errMan != nil || respMan.StatusCode != http.StatusOK {
+								err = fmt.Errorf("expected 200 OK from /shlink/{id}/manifest, got %d: %s", respMan.StatusCode, string(bMan))
+							} else {
+								var man shlink.ManifestResponse
+								_ = json.Unmarshal(bMan, &man)
+								if len(man.Files) == 0 {
+									err = fmt.Errorf("expected >= 1 file in SHLink manifest")
+								} else {
+									locU, lErr := url.Parse(man.Files[0].Location)
+									if lErr != nil {
+										err = lErr
+									} else {
+										respJWE, bJWE, errJWE := doReq(http.MethodGet, locU.Path, "", nil, nil)
+										if errJWE != nil || respJWE.StatusCode != http.StatusOK {
+											err = fmt.Errorf("expected 200 OK fetching SHLink JWE content, got %d", respJWE.StatusCode)
+										} else {
+											plaintext, _, jweErr := shlink.DecryptCompactJWE(aesKey, string(bJWE))
+											if jweErr != nil || !strings.Contains(string(plaintext), "60591-5") || !strings.Contains(string(plaintext), "cert-pat-1") {
+												err = fmt.Errorf("failed A256GCM JWE decryption verification: err=%v body=%s", jweErr, string(plaintext))
+											} else {
+												respRevSHL, _, errRevSHL := doReq(http.MethodPost, basePath+"/Patient/cert-pat-1/$shlink-revoke", "application/json",
+													[]byte(`{"linkId":"`+linkID+`"}`), shlHeaders)
+												respGone, _, errGone := doReq(http.MethodPost, manU.Path, "application/json",
+													[]byte(`{"recipient":"Certify Verifier","passcode":"739182"}`), nil)
+												if errRevSHL != nil || respRevSHL.StatusCode != http.StatusOK {
+													err = fmt.Errorf("expected 200 OK from $shlink-revoke, got %d", respRevSHL.StatusCode)
+												} else if errGone != nil || respGone.StatusCode != http.StatusGone {
+													err = fmt.Errorf("expected 410 Gone after $shlink-revoke, got %d", respGone.StatusCode)
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	record("SHL-01", suite5, "HL7 SMART Health Links ($shlink, Passcode Manifest, dir+A256GCM JWE & Revocation)", t0, err, "Verified shlink:/ QR issuance, passcode 401/200 manifest, A256GCM JWE IPS decryption & 410 revocation")
 
 	t0 = time.Now()
 	resp, _, err = doReq(http.MethodPost, basePath+"/MedicationRequest/$validate", "application/fhir+json",

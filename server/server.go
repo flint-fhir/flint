@@ -57,6 +57,8 @@ import (
 	automq "github.com/flint-fhir/flint/pkg/cdc"
 	"github.com/flint-fhir/flint/pkg/fhirutil"
 	"github.com/flint-fhir/flint/pkg/fhirxml"
+	"github.com/flint-fhir/flint/pkg/mcp"
+	"github.com/flint-fhir/flint/pkg/shlink"
 	"github.com/flint-fhir/flint/pkg/txclient"
 	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/store"
@@ -128,6 +130,9 @@ type Server struct {
 	allowLocalIGPaths          bool
 	routerOnce                 sync.Once
 	internalRouter             http.Handler
+	mcpOnce                    sync.Once
+	mcpServer                  *mcp.Server
+	shlinks                    *shlink.Manager
 	metrics                    *serverMetrics
 	txClient                   *txclient.Client
 	bgMu                       sync.Mutex
@@ -184,6 +189,7 @@ func New(st store.Store, logger *slog.Logger) *Server {
 		exportJobs:       make(map[string]*exportJob),
 		subSem:           make(chan struct{}, 32),
 		subWSHub:         newSubscriptionWSHub(),
+		shlinks:          shlink.NewManager(),
 		metrics:          newServerMetrics(),
 		bgCtx:            bgCtx,
 		bgCancel:         bgCancel,
@@ -437,6 +443,12 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCConfig)
 	mux.HandleFunc("GET /.well-known/udap", s.handleUDAPDiscoveryWave54)
 
+	// HL7 SMART Health Links (SHLinks) public recipient manifest & A256GCM JWE content endpoints
+	mux.HandleFunc("POST /shlink/{id}/manifest", s.handleSHLinkManifest)
+	mux.HandleFunc("OPTIONS /shlink/{id}/manifest", s.handleSHLinkManifest)
+	mux.HandleFunc("GET /shlink/{id}/content/{item}", s.handleSHLinkContent)
+	mux.HandleFunc("OPTIONS /shlink/{id}/content/{item}", s.handleSHLinkContent)
+
 	// Discovery & OpenAPI 3.1 / Interactive Explorer / CDS Hooks v2.0 endpoints
 	mux.HandleFunc("GET /fhir/r4/openapi.json", s.handleOpenAPI)
 	mux.HandleFunc("GET /fhir/r4/$docs", s.handleDocsUI)
@@ -507,6 +519,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$run", s.handleViewDefinitionRun)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$sql", s.handleViewDefinitionSQL)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$sql", s.handleViewDefinitionSQL)
+
+	// SMART-on-FHIR v2 Authorized Model Context Protocol (MCP) Streamable HTTP endpoints
+	mux.HandleFunc("GET /fhir/r4/{tenant}/$mcp", s.handleMCP)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$mcp", s.handleMCP)
+	mux.HandleFunc("DELETE /fhir/r4/{tenant}/$mcp", s.handleMCP)
 
 	// HL7 SQL-on-FHIR v2 ViewDefinition CRUD, $run, $export, and Zero-JSON $sql endpoints
 	mux.HandleFunc("GET /fhir/r4/{tenant}/ViewDefinition/$run", s.handleViewDefinitionRun)
@@ -806,6 +823,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				if r.Method == http.MethodPost && strings.EqualFold(parts[3], "Patient") && parts[4] == "$health-cards-issue" {
 					r.SetPathValue("tenant", parts[2])
 					s.handlePatientHealthCardsIssue(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$shlink" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientSHLinkIssue(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$pathology-exchange-bundle" {
@@ -2659,6 +2681,18 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handlePatientHealthCardsIssue(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$shlink" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientSHLinkIssue(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$shlink-revoke" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientSHLinkRevoke(w, r)
 					return
 				}
 				if isGetOrHead && strings.EqualFold(parts[3], "Patient") && parts[5] == "$health-cards.smart-health-card" {

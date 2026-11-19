@@ -3,7 +3,7 @@
 [![Release](https://img.shields.io/badge/Release-v0.6.0-f97316)](CHANGELOG.md)
 [![CI](https://github.com/flint-fhir/flint/actions/workflows/ci.yml/badge.svg)](https://github.com/flint-fhir/flint/actions/workflows/ci.yml)
 [![HL7 Inferno](https://github.com/flint-fhir/flint/actions/workflows/inferno.yml/badge.svg)](https://github.com/flint-fhir/flint/actions/workflows/inferno.yml)
-[![Conformance](https://img.shields.io/badge/%24certify-138%2F138%20Checks-22c55e)](pkg/certify/certify.go)
+[![Conformance](https://img.shields.io/badge/%24certify-140%2F140%20Checks-22c55e)](pkg/certify/certify.go)
 [![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](go.mod)
 [![FHIR R4](https://img.shields.io/badge/FHIR-R4.0.1-firebrick)](https://hl7.org/fhir/R4/)
 [![Storage](https://img.shields.io/badge/Storage-PostgreSQL%20%7C%20SQLite%20%7C%20Doris-38bdf8)](docs/architecture.md)
@@ -12,7 +12,7 @@
 
 **Flint** (`v0.6.0`) is an open-source, high-throughput **HL7 FHIR R4 API and clinical interoperability engine** written in Go. Flint strictly separates its **storage-agnostic FHIR R4 API & Clinical Layer** ([`server/`](server/), [`pkg/`](pkg/)) from its **Pluggable Persistence & Analytical Plane** ([`store/`](store/)):
 
-1. **Storage-Agnostic FHIR R4 API Layer (`server/`)**: Speaks standard FHIR JSON, **bidirectional HL7 FHIR R4 XML (`application/fhir+xml`, `_format=xml`)**, NDJSON, CSV/TSV, and **zero-JSON binary `google/fhir` Proto3 over HTTP** (`application/x-protobuf`, `application/fhir+protobuf`). Owns SMART on FHIR v2 OAuth2/PKCE/EHR Launch/OIDC/Backend Services/UDAP, ASTM E2147 `AuditEvent` logging, `StructureDefinition`/`ValueSet`/FHIRPath R4 validation (including slicing discriminators, semantic type-checking & optional LRU/TTL cached **external terminology server federation** via `--tx-server-url` / `FLINT_TX_SERVER_URL`), startup/runtime **HL7 FHIR NPM (`.tgz`) IG package loading** (`--ig-package`, `POST /$install-ig`), ACID `Bundle` coordination, **real-time RFC 6455 WebSocket (`$subscriptions-ws`, `$bind-ws`) & CNCF CloudEvents v1.0 `Subscription` streaming**, UCUM unit normalization, **35+ National HL7 Implementation Guides (130+ `$` operations)**, **HL7 SQL-on-FHIR v2 (`ViewDefinition/$run`, `$export`, and multi-dialect `$sql` compiler)**, `TestScript/$evaluate`, and a built-in **138-check `$certify` conformance harness**—with zero SQL dialect or database driver coupling.
+1. **Storage-Agnostic FHIR R4 API Layer (`server/`)**: Speaks standard FHIR JSON, **bidirectional HL7 FHIR R4 XML (`application/fhir+xml`, `_format=xml`)**, NDJSON, CSV/TSV, **SMART-authorized Model Context Protocol (`POST|GET /fhir/r4/{tenant}/$mcp` & `flint-mcp` stdio)**, and **zero-JSON binary `google/fhir` Proto3 over HTTP** (`application/x-protobuf`, `application/fhir+protobuf`). Owns SMART on FHIR v2 OAuth2/PKCE/EHR Launch/OIDC/Backend Services/UDAP, **HL7 SMART Health Links (`Patient/{id}/$shlink`, `/shlink/{id}/manifest` with RFC 7516 `dir`+`A256GCM` JWE & SVG QR)**, ASTM E2147 `AuditEvent` logging, `StructureDefinition`/`ValueSet`/FHIRPath R4 validation (including slicing discriminators, semantic type-checking & optional LRU/TTL cached **external terminology server federation** via `--tx-server-url` / `FLINT_TX_SERVER_URL`), startup/runtime **HL7 FHIR NPM (`.tgz`) IG package loading** (`--ig-package`, `POST /$install-ig`), ACID `Bundle` coordination, **real-time RFC 6455 WebSocket (`$subscriptions-ws`, `$bind-ws`) & CNCF CloudEvents v1.0 `Subscription` streaming**, UCUM unit normalization, **35+ National HL7 Implementation Guides (130+ `$` operations)**, **HL7 SQL-on-FHIR v2 (`ViewDefinition/$run`, `$export`, and multi-dialect `$sql` compiler)**, `TestScript/$evaluate`, and a built-in **140-check `$certify` conformance harness**—with zero SQL dialect or database driver coupling.
 2. **Pluggable Storage & Analytical Plane (`store.Store` + `store.AnalyticalStore`)**: Run the exact same `flintd` binary over **PostgreSQL 15+** (ACID OLTP + physical schema-per-tenant isolation), **Embedded SQLite WAL** (pure-Go `CGO_ENABLED=0`, zero external dependencies, `:memory:` or single file), **Apache Doris MPP** (Unique Key Merge-on-Write columnar + inverted indexes), or **Real-Time Hybrid OLTP + OLAP (`store.HybridStore`)** (`--store=postgres --analytics-store=doris|sqlite`) with **100% API and certification parity**.
 
 All 146 FHIR R4 domain models and search index extractors are compiled directly from `google/fhir` Protocol Buffers using [proto2type](https://github.com/protocgen/proto2type) — **zero JSON/JSONB/VARIANT blobs are stored in any backend**.
@@ -83,7 +83,7 @@ flowchart TD
 
 ### Pluggable Runtime Topologies (`flintd`)
 
-Every topology runs the **exact same API binary** and passes **138/138 `$certify` checks**:
+Every topology runs the **exact same API binary** and passes **140/140 `$certify` checks**:
 
 | Topology | CLI Flags | Env Vars | When to Use |
 |:---------|:----------|:---------|:------------|
@@ -614,11 +614,12 @@ task test-recovery
 
 ```
 flint/
-├── bin/                  # Compiled binaries (flintd, seed, certify, loadtest; optional: worker)
+├── bin/                  # Compiled binaries (flintd, flint-mcp, seed, certify, loadtest; optional: worker)
 ├── cmd/
 │   ├── flintd/           # Core FHIR R4 API HTTP server (--store=postgres|sqlite|doris, --analytics-store=doris|sqlite|none)
+│   ├── flint-mcp/        # SMART-authorized FHIR Model Context Protocol (MCP) stdio server CLI
 │   ├── seed/             # Deterministic US Core v6.1.0/v7.0.0/v8.0.0 & HL7 IPA cohort seeder (task seed)
-│   ├── certify/          # Automated 138-check conformance & certification CLI across 10 suites (task certify)
+│   ├── certify/          # Automated 140-check conformance & certification CLI across 10 suites (task certify)
 │   ├── loadtest/         # High-throughput JSON & Binary Proto3 (-wire=proto) HTTP & Store load testing harness
 │   ├── worker/           # [Add-On] Temporal ingestion worker entrypoint (task build-worker)
 │   └── e2e/              # [Add-On] Lakehouse E2E & restart recovery verification
@@ -638,10 +639,12 @@ flint/
 │   ├── audit/            # HIPAA/ONC FHIR R4 AuditEvent classification, serialization & recorders
 │   ├── auth/             # TokenValidator, SMART v2, OIDC/Zitadel, and Hegel property tests
 │   ├── cdc/              # Generic, zero-dependency CDC Publisher interface & in-memory sink
-│   ├── certify/          # 138-check FHIR R4 / US Core / ONC (g)(10) / National IG / TestScript / SQL-on-FHIR v2 conformance engine
+│   ├── certify/          # 140-check FHIR R4 / US Core / ONC (g)(10) / National IG / TestScript / SQL-on-FHIR v2 conformance engine
 │   ├── fhirutil/         # Bidirectional flat FHIR R4 JSON <-> google/fhir protojson codec & OpenAPI schema compiler
 │   ├── fhirxml/          # Pure-Go bidirectional HL7 FHIR R4 XML <-> FHIR JSON / Proto3 wire transcoder
 │   ├── igloader/         # Pure-Go HL7 FHIR R4 NPM (.tgz) Implementation Guide package loader
+│   ├── mcp/              # Transport-agnostic JSON-RPC 2.0 Model Context Protocol (Streamable HTTP + stdio) server
+│   ├── shlink/           # HL7 SMART Health Links (RFC 7516 dir+A256GCM JWE, passcode/lockout, ISO/IEC 18004 SVG QR)
 │   ├── txclient/         # Thread-safe LRU/TTL cached external FHIR R4 terminology federation client
 │   └── validation/       # FHIR StructureDefinition, slicing, ValueSet, cardinality & FHIRPath R4 validator
 ├── proto/
