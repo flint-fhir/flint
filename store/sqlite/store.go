@@ -4,14 +4,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/flint-fhir/flint/store"
@@ -52,6 +56,8 @@ type sqliteEntry struct {
 	indexes        *store.SearchIndexes
 }
 
+var sqlitePathWriteLocks sync.Map
+
 // Store implements store.Store and store.AnalyticalStore for embedded SQLite WAL deployments.
 //
 // In SQLite WAL mode, readers execute concurrently while writes are serialized via a single
@@ -61,17 +67,22 @@ type Store struct {
 	dsn         string
 	journalMode JournalMode
 
-	writeMu sync.Mutex
-	mu      sync.RWMutex
+	writeMu          sync.Mutex
+	mu               sync.RWMutex
+	localEpoch       int64
+	localAuditEpoch  int64
+	metaSyncDisabled atomic.Bool
 
-	resources     map[string]sqliteEntry
-	history       map[string][]store.ResourceRecord
-	audits        map[string][]store.AuditRecord
-	authCodes     map[string]store.OAuthAuthCodeRecord
-	refreshTokens map[string]store.OAuthRefreshTokenRecord
-	revokedTokens map[string]time.Time
-	exportJobs    map[string]store.ExportJobRecord
-	sqlLog        []string
+	resources      map[string]sqliteEntry
+	history        map[string][]store.ResourceRecord
+	audits         map[string][]store.AuditRecord
+	authCodes      map[string]store.OAuthAuthCodeRecord
+	refreshTokens  map[string]store.OAuthRefreshTokenRecord
+	revokedTokens  map[string]time.Time
+	exportJobs     map[string]store.ExportJobRecord
+	clusterSecrets map[string][]byte
+	clusterStates  map[string]store.ClusterStateRecord
+	sqlLog         []string
 }
 
 var (
@@ -82,16 +93,18 @@ var (
 // New creates a new Zero-JSON SQLite WAL store.
 func New(db *sql.DB, opts ...Option) *Store {
 	s := &Store{
-		db:            db,
-		dsn:           "flint.db",
-		journalMode:   JournalWAL,
-		resources:     make(map[string]sqliteEntry),
-		history:       make(map[string][]store.ResourceRecord),
-		audits:        make(map[string][]store.AuditRecord),
-		authCodes:     make(map[string]store.OAuthAuthCodeRecord),
-		refreshTokens: make(map[string]store.OAuthRefreshTokenRecord),
-		revokedTokens: make(map[string]time.Time),
-		exportJobs:    make(map[string]store.ExportJobRecord),
+		db:             db,
+		dsn:            "flint.db",
+		journalMode:    JournalWAL,
+		resources:      make(map[string]sqliteEntry),
+		history:        make(map[string][]store.ResourceRecord),
+		audits:         make(map[string][]store.AuditRecord),
+		authCodes:      make(map[string]store.OAuthAuthCodeRecord),
+		refreshTokens:  make(map[string]store.OAuthRefreshTokenRecord),
+		revokedTokens:  make(map[string]time.Time),
+		exportJobs:     make(map[string]store.ExportJobRecord),
+		clusterSecrets: make(map[string][]byte),
+		clusterStates:  make(map[string]store.ClusterStateRecord),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -137,6 +150,179 @@ func resKey(tenantID, resType, resID string) string {
 
 type sqliteTxKey struct{}
 
+func inSQLiteTx(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	tx, ok := ctx.Value(sqliteTxKey{}).(*sql.Tx)
+	return ok && tx != nil
+}
+
+func (s *Store) writeLock() *sync.Mutex {
+	if s.db != nil && s.dsn != "" && s.dsn != ":memory:" {
+		clean := filepath.Clean(s.dsn)
+		v, _ := sqlitePathWriteLocks.LoadOrStore(clean, &sync.Mutex{})
+		return v.(*sync.Mutex)
+	}
+	return &s.writeMu
+}
+
+func (s *Store) readDBMetaSeq(ctx context.Context, metaKey string) (int64, bool) {
+	if s == nil || s.db == nil || inSQLiteTx(ctx) || s.metaSyncDisabled.Load() {
+		return 0, false
+	}
+	qCtx := ctx
+	if qCtx == nil {
+		qCtx = context.Background()
+	}
+	var seq int64
+	err := s.db.QueryRowContext(qCtx, `SELECT meta_seq FROM fhir_sqlite_meta WHERE meta_key = ?`, metaKey).Scan(&seq)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, true
+	}
+	if err != nil {
+		if ctx == nil || ctx.Err() == nil {
+			s.metaSyncDisabled.Store(true)
+		}
+		return 0, false
+	}
+	return seq, true
+}
+
+func (s *Store) readDBEpoch(ctx context.Context) (int64, bool) {
+	return s.readDBMetaSeq(ctx, "epoch")
+}
+
+func (s *Store) syncBeforeWriteLocked(ctx context.Context) {
+	if s == nil || s.db == nil || inSQLiteTx(ctx) || s.metaSyncDisabled.Load() {
+		return
+	}
+	dbSeq, ok := s.readDBEpoch(ctx)
+	if !ok {
+		return
+	}
+	s.mu.RLock()
+	cur := s.localEpoch
+	s.mu.RUnlock()
+	if dbSeq != cur {
+		qCtx := ctx
+		if qCtx == nil {
+			qCtx = context.Background()
+		}
+		_ = s.loadFromDBInternal(qCtx, false)
+	}
+}
+
+func (s *Store) syncIfStale(ctx context.Context) {
+	if s == nil || s.db == nil || inSQLiteTx(ctx) || s.metaSyncDisabled.Load() {
+		return
+	}
+	dbSeq, ok := s.readDBEpoch(ctx)
+	if !ok {
+		return
+	}
+	s.mu.RLock()
+	cur := s.localEpoch
+	s.mu.RUnlock()
+	if dbSeq == cur {
+		return
+	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+}
+
+func (s *Store) bumpEpochLocked(ctx context.Context) {
+	if s == nil || s.db == nil || inSQLiteTx(ctx) || s.metaSyncDisabled.Load() {
+		return
+	}
+	qCtx := ctx
+	if qCtx == nil {
+		qCtx = context.Background()
+	}
+	if _, err := s.db.ExecContext(qCtx, `INSERT INTO fhir_sqlite_meta (meta_key, meta_seq) VALUES ('epoch', 1) ON CONFLICT (meta_key) DO UPDATE SET meta_seq = fhir_sqlite_meta.meta_seq + 1`); err != nil {
+		if ctx == nil || ctx.Err() == nil {
+			s.metaSyncDisabled.Store(true)
+		}
+		return
+	}
+	if seq, ok := s.readDBEpoch(qCtx); ok {
+		s.mu.Lock()
+		s.localEpoch = seq
+		s.mu.Unlock()
+	}
+}
+
+func (s *Store) syncAuditsLocked(ctx context.Context) {
+	if s == nil || s.db == nil || inSQLiteTx(ctx) || s.metaSyncDisabled.Load() {
+		return
+	}
+	dbSeq, ok := s.readDBMetaSeq(ctx, "audit_epoch")
+	if !ok {
+		return
+	}
+	s.mu.RLock()
+	cur := s.localAuditEpoch
+	s.mu.RUnlock()
+	if dbSeq == cur {
+		return
+	}
+	qCtx := ctx
+	if qCtx == nil {
+		qCtx = context.Background()
+	}
+	audits, err := s.queryAuditsFromDB(qCtx)
+	if err != nil {
+		return
+	}
+	s.mu.Lock()
+	s.audits = audits
+	s.localAuditEpoch = dbSeq
+	s.mu.Unlock()
+}
+
+func (s *Store) syncAuditsIfStale(ctx context.Context) {
+	if s == nil || s.db == nil || inSQLiteTx(ctx) || s.metaSyncDisabled.Load() {
+		return
+	}
+	dbSeq, ok := s.readDBMetaSeq(ctx, "audit_epoch")
+	if !ok {
+		return
+	}
+	s.mu.RLock()
+	cur := s.localAuditEpoch
+	s.mu.RUnlock()
+	if dbSeq == cur {
+		return
+	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncAuditsLocked(ctx)
+}
+
+func (s *Store) bumpAuditEpochLocked(ctx context.Context) {
+	if s == nil || s.db == nil || inSQLiteTx(ctx) || s.metaSyncDisabled.Load() {
+		return
+	}
+	qCtx := ctx
+	if qCtx == nil {
+		qCtx = context.Background()
+	}
+	if _, err := s.db.ExecContext(qCtx, `INSERT INTO fhir_sqlite_meta (meta_key, meta_seq) VALUES ('audit_epoch', 1) ON CONFLICT (meta_key) DO UPDATE SET meta_seq = fhir_sqlite_meta.meta_seq + 1`); err != nil {
+		if ctx == nil || ctx.Err() == nil {
+			s.metaSyncDisabled.Store(true)
+		}
+		return
+	}
+	if seq, ok := s.readDBMetaSeq(qCtx, "audit_epoch"); ok {
+		s.mu.Lock()
+		s.localAuditEpoch = seq
+		s.mu.Unlock()
+	}
+}
+
 func (s *Store) execSQLite(ctx context.Context, stmt string, args ...any) error {
 	s.mu.Lock()
 	if len(s.sqlLog) < 1024 {
@@ -176,8 +362,10 @@ func (s *Store) WriteResourceWithMeta(ctx context.Context, input store.ResourceI
 	if strings.TrimSpace(input.TenantID) == "" {
 		return nil, store.ErrNoTenant
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
 
 	return s.writeUnlocked(ctx, input)
 }
@@ -319,6 +507,7 @@ func (s *Store) writeUnlocked(ctx context.Context, input store.ResourceInput) (*
 		}
 	}
 
+	s.bumpEpochLocked(ctx)
 	return &rec, nil
 }
 
@@ -333,8 +522,10 @@ func (s *Store) WriteBatch(ctx context.Context, inputs []store.ResourceInput) er
 			return store.ErrCrossTenantBatch
 		}
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
 	for _, in := range inputs {
 		if _, err := s.writeUnlocked(ctx, in); err != nil {
 			return err
@@ -345,14 +536,16 @@ func (s *Store) WriteBatch(ctx context.Context, inputs []store.ResourceInput) er
 
 // ConditionalCreateResource evaluates an If-None-Exist search query under the SQLite write lock.
 func (s *Store) ConditionalCreateResource(ctx context.Context, input store.ResourceInput, condParams store.SearchParams) (*store.ResourceRecord, bool, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
 
 	return s.conditionalCreateUnlocked(ctx, input, condParams)
 }
 
 func (s *Store) conditionalCreateUnlocked(ctx context.Context, input store.ResourceInput, condParams store.SearchParams) (*store.ResourceRecord, bool, error) {
-	sr, err := s.Search(ctx, condParams)
+	sr, err := s.searchSynced(ctx, condParams)
 	if err != nil {
 		return nil, false, err
 	}
@@ -360,7 +553,7 @@ func (s *Store) conditionalCreateUnlocked(ctx context.Context, input store.Resou
 		return nil, false, fmt.Errorf("%w: If-None-Exist matched %d existing %s resources", store.ErrPreconditionFailed, sr.Total, input.ResType)
 	}
 	if sr.Total == 1 && len(sr.Matches) == 1 {
-		rec, err := s.ReadResourceWithMeta(ctx, input.TenantID, input.ResType, sr.Matches[0].ResID)
+		rec, err := s.readResourceWithMetaSynced(input.TenantID, input.ResType, sr.Matches[0].ResID)
 		if err != nil {
 			return nil, false, err
 		}
@@ -380,8 +573,10 @@ func (s *Store) ConditionalUpdateResource(
 	condParams store.SearchParams,
 	buildInput func(matchedID string, isExisting bool) (store.ResourceInput, error),
 ) (*store.ResourceRecord, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
 
 	return s.conditionalUpdateUnlocked(ctx, resType, condParams, buildInput)
 }
@@ -394,7 +589,7 @@ func (s *Store) conditionalUpdateUnlocked(
 ) (*store.ResourceRecord, error) {
 	condParams.Count = 2
 	condParams.Offset = 0
-	sr, err := s.Search(ctx, condParams)
+	sr, err := s.searchSynced(ctx, condParams)
 	if err != nil {
 		return nil, err
 	}
@@ -439,8 +634,10 @@ func (s *Store) ConditionalDeleteResources(
 	maxCount int,
 	verifyMatch func(matchedID string) error,
 ) ([]store.ResourceRecord, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
 
 	if maxCount <= 1 {
 		condParams.Count = 2
@@ -448,7 +645,7 @@ func (s *Store) ConditionalDeleteResources(
 		condParams.Count = maxCount
 	}
 	condParams.Offset = 0
-	sr, err := s.Search(ctx, condParams)
+	sr, err := s.searchSynced(ctx, condParams)
 	if err != nil {
 		return nil, err
 	}
@@ -492,8 +689,11 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []store.Bundle
 		}
 	}
 
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+	baseCtx := ctx
 
 	s.mu.RLock()
 	snapResources := make(map[string]sqliteEntry, len(s.resources))
@@ -537,7 +737,7 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []store.Bundle
 				condParams := *op.ConditionalParams
 				condParams.Count = 2
 				condParams.Offset = 0
-				sr, err := s.Search(ctx, condParams)
+				sr, err := s.searchSynced(ctx, condParams)
 				if err != nil {
 					rollback()
 					return nil, fmt.Errorf("entry[%d] conditional delete search %s: %w", i, op.Input.ResType, err)
@@ -659,6 +859,7 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []store.Bundle
 			return nil, fmt.Errorf("sqlite commit transaction: %w", err)
 		}
 	}
+	s.bumpEpochLocked(baseCtx)
 	return results, nil
 }
 
@@ -672,7 +873,12 @@ func (s *Store) ReadResource(ctx context.Context, tenantID, resType, resID strin
 }
 
 // ReadResourceWithMeta reads a single resource and its version metadata using WITHOUT ROWID primary key lookup.
-func (s *Store) ReadResourceWithMeta(_ context.Context, tenantID, resType, resID string) (*store.ResourceRecord, error) {
+func (s *Store) ReadResourceWithMeta(ctx context.Context, tenantID, resType, resID string) (*store.ResourceRecord, error) {
+	s.syncIfStale(ctx)
+	return s.readResourceWithMetaSynced(tenantID, resType, resID)
+}
+
+func (s *Store) readResourceWithMetaSynced(tenantID, resType, resID string) (*store.ResourceRecord, error) {
 	key := resKey(tenantID, resType, resID)
 	s.mu.RLock()
 	entry, ok := s.resources[key]
@@ -696,7 +902,8 @@ func (s *Store) ReadResourceWithMeta(_ context.Context, tenantID, resType, resID
 }
 
 // ReadResourceVersion reads a specific historical version of a resource (FHIR vread).
-func (s *Store) ReadResourceVersion(_ context.Context, tenantID, resType, resID string, version int) (*store.ResourceRecord, error) {
+func (s *Store) ReadResourceVersion(ctx context.Context, tenantID, resType, resID string, version int) (*store.ResourceRecord, error) {
+	s.syncIfStale(ctx)
 	key := resKey(tenantID, resType, resID)
 	s.mu.RLock()
 	versions := s.history[key]
@@ -732,7 +939,8 @@ func (s *Store) ListHistory(ctx context.Context, tenantID, resType, resID string
 }
 
 // ListHistoryWithParams returns version history records filtered by HistoryParams.
-func (s *Store) ListHistoryWithParams(_ context.Context, params store.HistoryParams) ([]store.ResourceRecord, int, error) {
+func (s *Store) ListHistoryWithParams(ctx context.Context, params store.HistoryParams) ([]store.ResourceRecord, int, error) {
+	s.syncIfStale(ctx)
 	limit := params.Limit
 	if limit <= 0 {
 		limit = 100
@@ -796,8 +1004,10 @@ func (s *Store) DeleteResourceWithMeta(ctx context.Context, tenantID, resType, r
 
 // DeleteResourceWithExpectedVersion soft-deletes a resource while enforcing If-Match when expectedVersion > 0.
 func (s *Store) DeleteResourceWithExpectedVersion(ctx context.Context, tenantID, resType, resID string, expectedVersion int) (*store.ResourceRecord, error) {
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
 
 	return s.deleteUnlocked(ctx, tenantID, resType, resID, expectedVersion)
 }
@@ -858,6 +1068,7 @@ func (s *Store) deleteUnlocked(ctx context.Context, tenantID, resType, resID str
 		_ = s.execSQLite(ctx, fmt.Sprintf("DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ?", tbl),
 			tenantID, resType, resID)
 	}
+	s.bumpEpochLocked(ctx)
 
 	return &tombstoneRec, nil
 }
@@ -869,12 +1080,17 @@ func (s *Store) Reindex(ctx context.Context, params store.ReindexParams) (*store
 			return nil, err
 		}
 	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
 	out := &store.ReindexResult{
 		ByResourceType: make(map[string]int),
 	}
 
+	var updatedEntries []sqliteEntry
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for k, entry := range s.resources {
 		if entry.tenantID != params.TenantID || entry.isDeleted {
 			continue
@@ -891,19 +1107,64 @@ func (s *Store) Reindex(ctx context.Context, params store.ReindexParams) (*store
 		}
 		idx, err := extractor(params.TenantID, entry.resID, entry.resourceProto)
 		if err != nil {
+			s.mu.Unlock()
 			return nil, err
 		}
 		entry.indexes = cloneSearchIndexes(idx)
 		entry.patientID, entry.encounterID = extractCompartmentLinks(entry.resType, entry.resID, idx)
 		s.resources[k] = entry
+		updatedEntries = append(updatedEntries, entry)
 		out.ReindexedResources++
 		out.ByResourceType[entry.resType]++
+	}
+	s.mu.Unlock()
+
+	for _, entry := range updatedEntries {
+		for _, tbl := range []string{"spidx_string", "spidx_token", "spidx_date", "spidx_reference", "spidx_quantity", "spidx_uri"} {
+			_ = s.execSQLite(ctx, fmt.Sprintf("DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ?", tbl),
+				entry.tenantID, entry.resType, entry.resID)
+		}
+		if entry.indexes == nil {
+			continue
+		}
+		for _, st := range entry.indexes.Strings {
+			_ = s.execSQLite(ctx, `INSERT INTO spidx_string (tenant_id, res_type, res_id, sp_name, sp_value, sp_value_lower) VALUES (?, ?, ?, ?, ?, ?)`,
+				entry.tenantID, entry.resType, entry.resID, st.SpName, st.SpValue, strings.ToLower(st.SpValue))
+		}
+		for _, tk := range entry.indexes.Tokens {
+			_ = s.execSQLite(ctx, `INSERT INTO spidx_token (tenant_id, res_type, res_id, sp_name, sp_system, sp_value) VALUES (?, ?, ?, ?, ?, ?)`,
+				entry.tenantID, entry.resType, entry.resID, tk.SpName, tk.SpSystem, tk.SpValue)
+		}
+		for _, dt := range entry.indexes.Dates {
+			_ = s.execSQLite(ctx, `INSERT INTO spidx_date (tenant_id, res_type, res_id, sp_name, sp_low, sp_high) VALUES (?, ?, ?, ?, ?, ?)`,
+				entry.tenantID, entry.resType, entry.resID, dt.SpName, dt.SpLow.UTC().Format(time.RFC3339Nano), dt.SpHigh.UTC().Format(time.RFC3339Nano))
+		}
+		for _, rf := range entry.indexes.References {
+			_ = s.execSQLite(ctx, `INSERT INTO spidx_reference (tenant_id, res_type, res_id, sp_name, target_type, target_id) VALUES (?, ?, ?, ?, ?, ?)`,
+				entry.tenantID, entry.resType, entry.resID, rf.SpName, rf.TargetType, rf.TargetID)
+		}
+		for _, qt := range entry.indexes.Quantities {
+			_ = s.execSQLite(ctx, `INSERT INTO spidx_quantity (tenant_id, res_type, res_id, sp_name, sp_system, sp_code, sp_value) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				entry.tenantID, entry.resType, entry.resID, qt.SpName, qt.SpSystem, qt.SpCode, qt.SpValue)
+		}
+		for _, u := range entry.indexes.URIs {
+			_ = s.execSQLite(ctx, `INSERT INTO spidx_uri (tenant_id, res_type, res_id, sp_name, sp_value) VALUES (?, ?, ?, ?, ?)`,
+				entry.tenantID, entry.resType, entry.resID, u.SpName, u.SpValue)
+		}
+	}
+	if len(updatedEntries) > 0 {
+		s.bumpEpochLocked(ctx)
 	}
 	return out, nil
 }
 
 // Search executes a FHIR search query across the 6 spidx_* categories.
 func (s *Store) Search(ctx context.Context, params store.SearchParams) (*store.SearchResults, error) {
+	s.syncIfStale(ctx)
+	return s.searchSynced(ctx, params)
+}
+
+func (s *Store) searchSynced(ctx context.Context, params store.SearchParams) (*store.SearchResults, error) {
 	_ = s.execSQLite(ctx, `SELECT res_type, res_id, res_version, last_updated, resource_proto FROM fhir_resource WHERE tenant_id = ? AND is_deleted = 0`, params.TenantID)
 
 	s.mu.RLock()
@@ -1504,6 +1765,7 @@ func (s *Store) EncounterEverything(ctx context.Context, params store.EncounterE
 
 // GroupEverything returns the focal Group and cohort resources.
 func (s *Store) GroupEverything(ctx context.Context, params store.GroupEverythingParams) (*store.SearchResults, error) {
+	s.syncIfStale(ctx)
 	var matches []store.SearchResult
 	if grpRec, err := s.ReadResourceWithMeta(ctx, params.TenantID, "Group", params.GroupID); err == nil {
 		if matchesEverythingFilters("Group", grpRec.LastUpdated, params.ResourceTypes, params.Since, params.Until) {
@@ -1550,13 +1812,14 @@ func (s *Store) GroupEverything(ctx context.Context, params store.GroupEverythin
 }
 
 // BelongsToPatientCompartment checks whether a resource belongs to patientID's compartment.
-func (s *Store) BelongsToPatientCompartment(_ context.Context, tenantID, resType, resID, patientID string) (bool, error) {
+func (s *Store) BelongsToPatientCompartment(ctx context.Context, tenantID, resType, resID, patientID string) (bool, error) {
 	if strings.EqualFold(resType, "Patient") {
 		return resID == patientID, nil
 	}
 	if !store.IsPatientCompartmentResourceType(resType) {
 		return true, nil
 	}
+	s.syncIfStale(ctx)
 	key := resKey(tenantID, resType, resID)
 	s.mu.RLock()
 	entry, ok := s.resources[key]
@@ -1568,7 +1831,8 @@ func (s *Store) BelongsToPatientCompartment(_ context.Context, tenantID, resType
 }
 
 // SearchPatientMatchCandidates returns candidate Patient resources for $match and $member-match.
-func (s *Store) SearchPatientMatchCandidates(_ context.Context, params store.PatientMatchCandidateParams) ([]store.SearchResult, error) {
+func (s *Store) SearchPatientMatchCandidates(ctx context.Context, params store.PatientMatchCandidateParams) ([]store.SearchResult, error) {
+	s.syncIfStale(ctx)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var out []store.SearchResult
@@ -1644,7 +1908,8 @@ func (s *Store) ResourceGraph(ctx context.Context, params store.ResourceGraphPar
 }
 
 // AggregateMeta returns distinct _profile, _tag, and _security values across active resources.
-func (s *Store) AggregateMeta(_ context.Context, tenantID, resType string) (*store.AggregatedMeta, error) {
+func (s *Store) AggregateMeta(ctx context.Context, tenantID, resType string) (*store.AggregatedMeta, error) {
+	s.syncIfStale(ctx)
 	out := &store.AggregatedMeta{}
 	profSeen := make(map[string]bool)
 	tagSeen := make(map[string]bool)
@@ -1703,6 +1968,7 @@ func (s *Store) StreamAnalyticalExport(ctx context.Context, params store.ExportP
 	if params.EmptyCohort {
 		return nil
 	}
+	s.syncIfStale(ctx)
 	_ = s.execSQLite(ctx, `SELECT res_type, res_id, res_version, last_updated, resource_proto FROM fhir_resource WHERE tenant_id = ? AND is_deleted = 0 ORDER BY res_type ASC, res_id ASC`, params.TenantID)
 
 	typeFilter := make(map[string]bool, len(params.ResourceTypes))
@@ -1768,6 +2034,7 @@ func (s *Store) StreamAnalyticalExport(ctx context.Context, params store.ExportP
 
 // EvaluateObservationStats implements store.AnalyticalStore over SQLite spidx_quantity B-tree indexes.
 func (s *Store) EvaluateObservationStats(ctx context.Context, params store.ObservationStatsParams) (*store.ObservationStatsResult, error) {
+	s.syncIfStale(ctx)
 	_ = s.execSQLite(ctx, `SELECT sp_system, sp_code, COUNT(*), AVG(sp_value), MIN(sp_value), MAX(sp_value), SUM(sp_value) FROM spidx_quantity WHERE tenant_id = ? AND res_type = 'Observation' GROUP BY sp_system, sp_code`, params.TenantID)
 
 	type bucket struct {
@@ -1860,6 +2127,7 @@ func (s *Store) EvaluateObservationStats(ctx context.Context, params store.Obser
 
 // EvaluateCohortCounts implements store.AnalyticalStore for SQLite.
 func (s *Store) EvaluateCohortCounts(ctx context.Context, tenantID string, resourceTypes []string) (map[string]int, error) {
+	s.syncIfStale(ctx)
 	_ = s.execSQLite(ctx, `SELECT res_type, COUNT(*) FROM fhir_resource WHERE tenant_id = ? AND is_deleted = 0 GROUP BY res_type`, tenantID)
 	allowed := make(map[string]bool, len(resourceTypes))
 	for _, rt := range resourceTypes {
@@ -1887,8 +2155,10 @@ func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID
 			return nil, err
 		}
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
 
 	type sqlMutation struct {
 		resType string
@@ -1959,6 +2229,9 @@ func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID
 				tenantID, mut.resType, mut.resID)
 		}
 	}
+	if len(sqlMutated) > 0 {
+		s.bumpEpochLocked(ctx)
+	}
 	return purged, nil
 }
 
@@ -1967,8 +2240,10 @@ func (s *Store) ExpungeResources(ctx context.Context, params store.ExpungeParams
 	if !params.ExpungeDeletedResources && !params.ExpungePreviousVersions && !params.ExpungeEverything {
 		params.ExpungeDeletedResources = true
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
 
 	type expungeTarget struct {
 		resType     string
@@ -2030,7 +2305,24 @@ func (s *Store) ExpungeResources(ctx context.Context, params store.ExpungeParams
 				params.TenantID, tgt.resType, tgt.resID, tgt.keepVersion)
 		}
 	}
+	if len(sqlTargets) > 0 {
+		s.bumpEpochLocked(ctx)
+	}
 	return expunged, nil
+}
+
+func hydrateSQLitePurposeOfUse(rec *store.AuditRecord) {
+	if rec == nil || rec.PurposeOfUse != "" {
+		return
+	}
+	const tag = " [purposeOfUse="
+	if idx := strings.Index(rec.OutcomeDesc, tag); idx != -1 {
+		rest := rec.OutcomeDesc[idx+len(tag):]
+		if endIdx := strings.IndexByte(rest, ']'); endIdx != -1 {
+			rec.PurposeOfUse = rest[:endIdx]
+			rec.OutcomeDesc = strings.TrimSpace(rec.OutcomeDesc[:idx])
+		}
+	}
 }
 
 // WriteAuditEvent persists a HIPAA / ONC AuditRecord to SQLite.
@@ -2041,20 +2333,35 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec store.AuditRecord) erro
 	if rec.AgentSubject == "" {
 		rec.AgentSubject = "anonymous"
 	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncAuditsLocked(ctx)
+
 	s.mu.Lock()
 	s.audits[rec.TenantID] = append(s.audits[rec.TenantID], rec)
 	s.mu.Unlock()
 
-	stmt := `INSERT INTO fhir_audit_event (tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc, http_method, http_status, request_uri, agent_subject, agent_patient, client_ip, entity_type, entity_id, entity_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	return s.execSQLite(ctx, stmt,
-		rec.TenantID, rec.AuditID, rec.Recorded.Format(time.RFC3339Nano), rec.Action, rec.SubtypeCode, rec.Outcome, rec.OutcomeDesc,
+	outcomeDesc := rec.OutcomeDesc
+	if rec.PurposeOfUse != "" && !strings.Contains(outcomeDesc, "[purposeOfUse=") {
+		outcomeDesc = fmt.Sprintf("%s [purposeOfUse=%s]", outcomeDesc, rec.PurposeOfUse)
+	}
+
+	stmt := `INSERT INTO fhir_audit_event (tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc, http_method, http_status, request_uri, agent_subject, agent_patient, client_ip, entity_type, entity_id, entity_version, trace_id, span_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (tenant_id, audit_id) DO NOTHING`
+	if err := s.execSQLite(ctx, stmt,
+		rec.TenantID, rec.AuditID, rec.Recorded.Format(time.RFC3339Nano), rec.Action, rec.SubtypeCode, rec.Outcome, outcomeDesc,
 		rec.HTTPMethod, rec.HTTPStatus, rec.RequestURI, rec.AgentSubject, rec.AgentPatient,
-		rec.ClientIP, rec.EntityType, rec.EntityID, rec.EntityVersion,
-	)
+		rec.ClientIP, rec.EntityType, rec.EntityID, rec.EntityVersion, rec.TraceID, rec.SpanID,
+	); err != nil {
+		return err
+	}
+	s.bumpAuditEpochLocked(ctx)
+	return nil
 }
 
 // ReadAuditEvent reads a single AuditRecord by (tenant_id, audit_id).
-func (s *Store) ReadAuditEvent(_ context.Context, tenantID, auditID string) (*store.AuditRecord, error) {
+func (s *Store) ReadAuditEvent(ctx context.Context, tenantID, auditID string) (*store.AuditRecord, error) {
+	s.syncAuditsIfStale(ctx)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, rec := range s.audits[tenantID] {
@@ -2067,7 +2374,8 @@ func (s *Store) ReadAuditEvent(_ context.Context, tenantID, auditID string) (*st
 }
 
 // QueryAuditEvents searches persisted AuditRecords ordered by recorded descending.
-func (s *Store) QueryAuditEvents(_ context.Context, params store.AuditQueryParams) ([]store.AuditRecord, int, error) {
+func (s *Store) QueryAuditEvents(ctx context.Context, params store.AuditQueryParams) ([]store.AuditRecord, int, error) {
+	s.syncAuditsIfStale(ctx)
 	s.mu.RLock()
 	var matched []store.AuditRecord
 	for _, rec := range s.audits[params.TenantID] {
@@ -2120,29 +2428,49 @@ func hashToken(raw string) string {
 }
 
 // SaveAuthCode stores an OAuth2 authorization code.
-func (s *Store) SaveAuthCode(_ context.Context, rawCode string, rec store.OAuthAuthCodeRecord) error {
+func (s *Store) SaveAuthCode(ctx context.Context, rawCode string, rec store.OAuthAuthCodeRecord) error {
 	if rawCode == "" {
 		return nil
 	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
+	h := hashToken(rawCode)
 	s.mu.Lock()
-	s.authCodes[hashToken(rawCode)] = rec
+	s.authCodes[h] = rec
 	s.mu.Unlock()
+
+	_ = s.execSQLite(ctx, `INSERT INTO fhir_oauth_auth_code (code_hash, client_id, redirect_uri, scope, code_challenge, code_challenge_method, patient_id, encounter_id, tenant_id, nonce, fhir_user, extra_claims_text, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (code_hash) DO UPDATE SET client_id = excluded.client_id, redirect_uri = excluded.redirect_uri, scope = excluded.scope, code_challenge = excluded.code_challenge, code_challenge_method = excluded.code_challenge_method, patient_id = excluded.patient_id, encounter_id = excluded.encounter_id, tenant_id = excluded.tenant_id, nonce = excluded.nonce, fhir_user = excluded.fhir_user, extra_claims_text = excluded.extra_claims_text, expires_at = excluded.expires_at`,
+		h, rec.ClientID, rec.RedirectURI, rec.Scope, rec.CodeChallenge, rec.CodeChallengeMethod,
+		rec.PatientID, rec.EncounterID, rec.TenantID, rec.Nonce, rec.FhirUser, rec.ExtraClaimsJSON, rec.ExpiresAt.UTC().Format(time.RFC3339Nano))
+	s.bumpEpochLocked(ctx)
 	return nil
 }
 
 // ConsumeAuthCode atomically consumes an unexpired OAuth2 authorization code.
-func (s *Store) ConsumeAuthCode(_ context.Context, rawCode string) (store.OAuthAuthCodeRecord, bool, error) {
+func (s *Store) ConsumeAuthCode(ctx context.Context, rawCode string) (store.OAuthAuthCodeRecord, bool, error) {
 	if rawCode == "" {
 		return store.OAuthAuthCodeRecord{}, false, nil
 	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
 	h := hashToken(rawCode)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	rec, ok := s.authCodes[h]
+	if ok {
+		delete(s.authCodes, h)
+	}
+	s.mu.Unlock()
 	if !ok {
 		return store.OAuthAuthCodeRecord{}, false, nil
 	}
-	delete(s.authCodes, h)
+	_ = s.execSQLite(ctx, `DELETE FROM fhir_oauth_auth_code WHERE code_hash = ?`, h)
+	s.bumpEpochLocked(ctx)
 	if !rec.ExpiresAt.IsZero() && time.Now().UTC().After(rec.ExpiresAt) {
 		return store.OAuthAuthCodeRecord{}, false, nil
 	}
@@ -2150,29 +2478,68 @@ func (s *Store) ConsumeAuthCode(_ context.Context, rawCode string) (store.OAuthA
 }
 
 // SaveRefreshToken stores an OAuth2 refresh token.
-func (s *Store) SaveRefreshToken(_ context.Context, rawToken string, rec store.OAuthRefreshTokenRecord) error {
+func (s *Store) SaveRefreshToken(ctx context.Context, rawToken string, rec store.OAuthRefreshTokenRecord) error {
 	if rawToken == "" {
 		return nil
 	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
+	h := hashToken(rawToken)
 	s.mu.Lock()
-	s.refreshTokens[hashToken(rawToken)] = rec
+	s.refreshTokens[h] = rec
 	s.mu.Unlock()
+
+	_ = s.execSQLite(ctx, `INSERT INTO fhir_oauth_refresh_token (token_hash, subject, grant_id, client_id, tenant_id, patient_id, encounter_id, scope, nonce, fhir_user, extra_claims_text, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (token_hash) DO UPDATE SET subject = excluded.subject, grant_id = excluded.grant_id, client_id = excluded.client_id, tenant_id = excluded.tenant_id, patient_id = excluded.patient_id, encounter_id = excluded.encounter_id, scope = excluded.scope, nonce = excluded.nonce, fhir_user = excluded.fhir_user, extra_claims_text = excluded.extra_claims_text, expires_at = excluded.expires_at`,
+		h, rec.Subject, rec.GrantID, rec.ClientID, rec.TenantID, rec.PatientID, rec.EncounterID,
+		rec.Scope, rec.Nonce, rec.FhirUser, rec.ExtraClaimsJSON, rec.ExpiresAt.UTC().Format(time.RFC3339Nano))
+	s.bumpEpochLocked(ctx)
 	return nil
 }
 
-// ConsumeRefreshToken atomically consumes an unexpired OAuth2 refresh token.
-func (s *Store) ConsumeRefreshToken(_ context.Context, rawToken string) (store.OAuthRefreshTokenRecord, bool, error) {
+// PeekRefreshToken looks up an unexpired OAuth2 refresh token without consuming it.
+func (s *Store) PeekRefreshToken(ctx context.Context, rawToken string) (store.OAuthRefreshTokenRecord, bool, error) {
 	if rawToken == "" {
 		return store.OAuthRefreshTokenRecord{}, false, nil
 	}
+	s.syncIfStale(ctx)
 	h := hashToken(rawToken)
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
 	rec, ok := s.refreshTokens[h]
+	s.mu.RUnlock()
 	if !ok {
 		return store.OAuthRefreshTokenRecord{}, false, nil
 	}
-	delete(s.refreshTokens, h)
+	if !rec.ExpiresAt.IsZero() && time.Now().UTC().After(rec.ExpiresAt) {
+		return store.OAuthRefreshTokenRecord{}, false, nil
+	}
+	return rec, true, nil
+}
+
+// ConsumeRefreshToken atomically consumes an unexpired OAuth2 refresh token.
+func (s *Store) ConsumeRefreshToken(ctx context.Context, rawToken string) (store.OAuthRefreshTokenRecord, bool, error) {
+	if rawToken == "" {
+		return store.OAuthRefreshTokenRecord{}, false, nil
+	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
+	h := hashToken(rawToken)
+	s.mu.Lock()
+	rec, ok := s.refreshTokens[h]
+	if ok {
+		delete(s.refreshTokens, h)
+	}
+	s.mu.Unlock()
+	if !ok {
+		return store.OAuthRefreshTokenRecord{}, false, nil
+	}
+	_ = s.execSQLite(ctx, `DELETE FROM fhir_oauth_refresh_token WHERE token_hash = ?`, h)
+	s.bumpEpochLocked(ctx)
 	if !rec.ExpiresAt.IsZero() && time.Now().UTC().After(rec.ExpiresAt) {
 		return store.OAuthRefreshTokenRecord{}, false, nil
 	}
@@ -2180,26 +2547,38 @@ func (s *Store) ConsumeRefreshToken(_ context.Context, rawToken string) (store.O
 }
 
 // RevokeToken records an OAuth2 token revocation.
-func (s *Store) RevokeToken(_ context.Context, rawToken string, ttl time.Duration) error {
+func (s *Store) RevokeToken(ctx context.Context, rawToken string, ttl time.Duration) error {
 	if rawToken == "" {
 		return nil
 	}
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
 	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
 	h := hashToken(rawToken)
+	exp := time.Now().UTC().Add(ttl)
 	s.mu.Lock()
 	delete(s.refreshTokens, h)
-	s.revokedTokens[h] = time.Now().UTC().Add(ttl)
+	s.revokedTokens[h] = exp
 	s.mu.Unlock()
+
+	_ = s.execSQLite(ctx, `DELETE FROM fhir_oauth_refresh_token WHERE token_hash = ?`, h)
+	_ = s.execSQLite(ctx, `INSERT INTO fhir_oauth_revoked_token (token_hash, expires_at) VALUES (?, ?) ON CONFLICT (token_hash) DO UPDATE SET expires_at = excluded.expires_at`,
+		h, exp.Format(time.RFC3339Nano))
+	s.bumpEpochLocked(ctx)
 	return nil
 }
 
 // IsTokenRevoked checks whether rawToken has been revoked.
-func (s *Store) IsTokenRevoked(_ context.Context, rawToken string) (bool, error) {
+func (s *Store) IsTokenRevoked(ctx context.Context, rawToken string) (bool, error) {
 	if rawToken == "" {
 		return false, nil
 	}
+	s.syncIfStale(ctx)
 	h := hashToken(rawToken)
 	s.mu.RLock()
 	exp, ok := s.revokedTokens[h]
@@ -2210,6 +2589,331 @@ func (s *Store) IsTokenRevoked(_ context.Context, rawToken string) (bool, error)
 	return time.Now().UTC().Before(exp), nil
 }
 
+// ClaimNonce atomically claims a single-use cryptographic replay nonce.
+func (s *Store) ClaimNonce(ctx context.Context, nonceKey string, ttl time.Duration) (bool, error) {
+	if nonceKey == "" {
+		return false, nil
+	}
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
+	h := hashToken("nonce:" + nonceKey)
+	now := time.Now().UTC()
+	exp := now.Add(ttl)
+	s.mu.Lock()
+	if curExp, ok := s.revokedTokens[h]; ok && now.Before(curExp) {
+		s.mu.Unlock()
+		return false, nil
+	}
+	s.revokedTokens[h] = exp
+	s.mu.Unlock()
+
+	_ = s.execSQLite(ctx, `INSERT INTO fhir_oauth_revoked_token (token_hash, expires_at) VALUES (?, ?) ON CONFLICT (token_hash) DO UPDATE SET expires_at = excluded.expires_at`,
+		h, exp.Format(time.RFC3339Nano))
+	s.bumpEpochLocked(ctx)
+	return true, nil
+}
+
+func cloneClusterState(rec store.ClusterStateRecord) store.ClusterStateRecord {
+	cp := rec
+	if rec.Value != nil {
+		cp.Value = append([]byte(nil), rec.Value...)
+	}
+	if rec.ExpiresAt != nil {
+		t := rec.ExpiresAt.UTC()
+		cp.ExpiresAt = &t
+	}
+	return cp
+}
+
+func isClusterStateExpired(rec store.ClusterStateRecord, now time.Time) bool {
+	return rec.ExpiresAt != nil && !rec.ExpiresAt.IsZero() && !rec.ExpiresAt.After(now)
+}
+
+// GetOrCreateClusterSecret retrieves or initializes a cluster-wide secret in SQLite.
+func (s *Store) GetOrCreateClusterSecret(ctx context.Context, key string, generate func() ([]byte, error)) ([]byte, error) {
+	if key == "" {
+		if generate != nil {
+			return generate()
+		}
+		return nil, nil
+	}
+	s.syncIfStale(ctx)
+	s.mu.RLock()
+	if existing, ok := s.clusterSecrets[key]; ok && len(existing) > 0 {
+		cp := append([]byte(nil), existing...)
+		s.mu.RUnlock()
+		return cp, nil
+	}
+	s.mu.RUnlock()
+
+	if generate == nil {
+		return nil, sql.ErrNoRows
+	}
+	genBytes, err := generate()
+	if err != nil {
+		return nil, err
+	}
+
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
+	s.mu.Lock()
+	if existing, ok := s.clusterSecrets[key]; ok && len(existing) > 0 {
+		cp := append([]byte(nil), existing...)
+		s.mu.Unlock()
+		return cp, nil
+	}
+	stored := append([]byte(nil), genBytes...)
+	s.clusterSecrets[key] = stored
+	s.mu.Unlock()
+
+	_ = s.execSQLite(ctx, `INSERT INTO fhir_cluster_secret (secret_key, secret_bytes, created_at) VALUES (?, ?, ?) ON CONFLICT (secret_key) DO NOTHING`,
+		key, stored, time.Now().UTC().Format(time.RFC3339Nano))
+	s.bumpEpochLocked(ctx)
+	return append([]byte(nil), stored...), nil
+}
+
+func clusterStateMapKey(namespace, key string) string {
+	return namespace + "|" + key
+}
+
+// PutClusterState upserts a versioned cluster state entry in SQLite.
+func (s *Store) PutClusterState(ctx context.Context, rec store.ClusterStateRecord) (store.ClusterStateRecord, error) {
+	if rec.Namespace == "" || rec.Key == "" {
+		return rec, nil
+	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
+	now := time.Now().UTC()
+	mapKey := clusterStateMapKey(rec.Namespace, rec.Key)
+
+	s.mu.Lock()
+	ver := int64(1)
+	if prev, ok := s.clusterStates[mapKey]; ok {
+		ver = prev.Version + 1
+	}
+	stored := cloneClusterState(rec)
+	if stored.Value == nil {
+		stored.Value = []byte{}
+	}
+	stored.Version = ver
+	stored.UpdatedAt = now
+	s.clusterStates[mapKey] = stored
+	s.mu.Unlock()
+
+	var expStr any
+	if stored.ExpiresAt != nil && !stored.ExpiresAt.IsZero() {
+		expStr = stored.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	_ = s.execSQLite(ctx, `INSERT INTO fhir_cluster_state (namespace, state_key, tenant_id, secondary_key, value_blob, version, expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (namespace, state_key) DO UPDATE SET tenant_id = excluded.tenant_id, secondary_key = excluded.secondary_key, value_blob = excluded.value_blob, version = excluded.version, expires_at = excluded.expires_at, updated_at = excluded.updated_at`,
+		stored.Namespace, stored.Key, stored.TenantID, stored.SecondaryKey, stored.Value, stored.Version, expStr, stored.UpdatedAt.Format(time.RFC3339Nano))
+	s.bumpEpochLocked(ctx)
+	return cloneClusterState(stored), nil
+}
+
+// GetClusterState retrieves an unexpired cluster state entry by (namespace, key).
+func (s *Store) GetClusterState(ctx context.Context, namespace, key string) (*store.ClusterStateRecord, bool, error) {
+	if namespace == "" || key == "" {
+		return nil, false, nil
+	}
+	s.syncIfStale(ctx)
+	now := time.Now().UTC()
+	s.mu.RLock()
+	rec, ok := s.clusterStates[clusterStateMapKey(namespace, key)]
+	s.mu.RUnlock()
+	if !ok || isClusterStateExpired(rec, now) {
+		return nil, false, nil
+	}
+	cp := cloneClusterState(rec)
+	return &cp, true, nil
+}
+
+// GetClusterStateBySecondary retrieves the latest unexpired cluster state entry by (namespace, secondaryKey).
+func (s *Store) GetClusterStateBySecondary(ctx context.Context, namespace, secondaryKey string) (*store.ClusterStateRecord, bool, error) {
+	if namespace == "" || secondaryKey == "" {
+		return nil, false, nil
+	}
+	s.syncIfStale(ctx)
+	now := time.Now().UTC()
+	var best *store.ClusterStateRecord
+	s.mu.RLock()
+	for _, rec := range s.clusterStates {
+		if rec.Namespace != namespace || rec.SecondaryKey != secondaryKey || isClusterStateExpired(rec, now) {
+			continue
+		}
+		if best == nil || rec.UpdatedAt.After(best.UpdatedAt) || (rec.UpdatedAt.Equal(best.UpdatedAt) && rec.Key < best.Key) {
+			cp := cloneClusterState(rec)
+			best = &cp
+		}
+	}
+	s.mu.RUnlock()
+	if best == nil {
+		return nil, false, nil
+	}
+	return best, true, nil
+}
+
+// CompareAndSwapClusterState atomically inserts (when expectedVersion == 0) or updates
+// (when current version == expectedVersion) an unexpired cluster state entry.
+func (s *Store) CompareAndSwapClusterState(ctx context.Context, expectedVersion int64, rec store.ClusterStateRecord) (store.ClusterStateRecord, bool, error) {
+	if rec.Namespace == "" || rec.Key == "" {
+		return store.ClusterStateRecord{}, false, nil
+	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
+	now := time.Now().UTC()
+	mapKey := clusterStateMapKey(rec.Namespace, rec.Key)
+
+	s.mu.Lock()
+	existing, exists := s.clusterStates[mapKey]
+	if exists && isClusterStateExpired(existing, now) {
+		delete(s.clusterStates, mapKey)
+		exists = false
+	}
+	if expectedVersion == 0 {
+		if exists {
+			s.mu.Unlock()
+			return store.ClusterStateRecord{}, false, nil
+		}
+	} else {
+		if !exists || existing.Version != expectedVersion {
+			s.mu.Unlock()
+			return store.ClusterStateRecord{}, false, nil
+		}
+	}
+	stored := cloneClusterState(rec)
+	if stored.Value == nil {
+		stored.Value = []byte{}
+	}
+	stored.Version = expectedVersion + 1
+	stored.UpdatedAt = now
+	s.clusterStates[mapKey] = stored
+	s.mu.Unlock()
+
+	var expStr any
+	if stored.ExpiresAt != nil && !stored.ExpiresAt.IsZero() {
+		expStr = stored.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	_ = s.execSQLite(ctx, `INSERT INTO fhir_cluster_state (namespace, state_key, tenant_id, secondary_key, value_blob, version, expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (namespace, state_key) DO UPDATE SET tenant_id = excluded.tenant_id, secondary_key = excluded.secondary_key, value_blob = excluded.value_blob, version = excluded.version, expires_at = excluded.expires_at, updated_at = excluded.updated_at`,
+		stored.Namespace, stored.Key, stored.TenantID, stored.SecondaryKey, stored.Value, stored.Version, expStr, stored.UpdatedAt.Format(time.RFC3339Nano))
+	s.bumpEpochLocked(ctx)
+	return cloneClusterState(stored), true, nil
+}
+
+// ConsumeClusterState atomically deletes and returns an unexpired cluster state entry.
+func (s *Store) ConsumeClusterState(ctx context.Context, namespace, key string) (*store.ClusterStateRecord, bool, error) {
+	if namespace == "" || key == "" {
+		return nil, false, nil
+	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
+	now := time.Now().UTC()
+	mapKey := clusterStateMapKey(namespace, key)
+	s.mu.Lock()
+	rec, ok := s.clusterStates[mapKey]
+	if ok {
+		delete(s.clusterStates, mapKey)
+	}
+	s.mu.Unlock()
+	if !ok {
+		return nil, false, nil
+	}
+	_ = s.execSQLite(ctx, `DELETE FROM fhir_cluster_state WHERE namespace = ? AND state_key = ?`, namespace, key)
+	s.bumpEpochLocked(ctx)
+	if isClusterStateExpired(rec, now) {
+		return nil, false, nil
+	}
+	cp := cloneClusterState(rec)
+	return &cp, true, nil
+}
+
+// DeleteClusterState deletes a cluster state entry by (namespace, key).
+func (s *Store) DeleteClusterState(ctx context.Context, namespace, key string) (bool, error) {
+	if namespace == "" || key == "" {
+		return false, nil
+	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
+	mapKey := clusterStateMapKey(namespace, key)
+	s.mu.Lock()
+	_, ok := s.clusterStates[mapKey]
+	delete(s.clusterStates, mapKey)
+	s.mu.Unlock()
+	_ = s.execSQLite(ctx, `DELETE FROM fhir_cluster_state WHERE namespace = ? AND state_key = ?`, namespace, key)
+	if ok {
+		s.bumpEpochLocked(ctx)
+	}
+	return ok, nil
+}
+
+// ListClusterStates lists unexpired cluster state entries in namespace (optionally filtered by tenantID).
+func (s *Store) ListClusterStates(ctx context.Context, namespace, tenantID string) ([]store.ClusterStateRecord, error) {
+	if namespace == "" {
+		return nil, nil
+	}
+	s.syncIfStale(ctx)
+	now := time.Now().UTC()
+	var out []store.ClusterStateRecord
+	s.mu.RLock()
+	for _, rec := range s.clusterStates {
+		if rec.Namespace != namespace || isClusterStateExpired(rec, now) {
+			continue
+		}
+		if tenantID != "" && rec.TenantID != tenantID {
+			continue
+		}
+		out = append(out, cloneClusterState(rec))
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Key < out[j].Key
+	})
+	return out, nil
+}
+
+func cloneExportJobRecord(job store.ExportJobRecord) store.ExportJobRecord {
+	cp := job
+	if job.TypesOrder != nil {
+		cp.TypesOrder = append([]string(nil), job.TypesOrder...)
+	}
+	if job.Counts != nil {
+		cp.Counts = make(map[string]int, len(job.Counts))
+		for k, v := range job.Counts {
+			cp.Counts[k] = v
+		}
+	}
+	if job.Files != nil {
+		cp.Files = make(map[string][]byte, len(job.Files))
+		for k, v := range job.Files {
+			cp.Files[k] = append([]byte(nil), v...)
+		}
+	}
+	if job.Combined != nil {
+		cp.Combined = append([]byte(nil), job.Combined...)
+	}
+	return cp
+}
+
 // SaveExportJob persists a Bulk Data ($export) job record.
 func (s *Store) SaveExportJob(ctx context.Context, job store.ExportJobRecord) error {
 	if job.ID == "" {
@@ -2218,56 +2922,123 @@ func (s *Store) SaveExportJob(ctx context.Context, job store.ExportJobRecord) er
 	if job.CreatedAt.IsZero() {
 		job.CreatedAt = time.Now().UTC()
 	}
+	if job.Status == "" {
+		job.Status = "complete"
+	}
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
+	stored := cloneExportJobRecord(job)
 	s.mu.Lock()
-	s.exportJobs[job.TenantID+"|"+job.ID] = job
+	s.exportJobs[stored.TenantID+"|"+stored.ID] = stored
 	s.mu.Unlock()
 
-	stmt := `INSERT INTO fhir_export_job (tenant_id, job_id, patient_id, request_url, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (tenant_id, job_id) DO UPDATE SET patient_id = excluded.patient_id, request_url = excluded.request_url, created_at = excluded.created_at`
-	return s.execSQLite(ctx, stmt, job.TenantID, job.ID, job.PatientID, job.RequestURL, job.CreatedAt.UTC().Format(time.RFC3339Nano))
+	typesJSON, _ := json.Marshal(stored.TypesOrder)
+	countsJSON, _ := json.Marshal(stored.Counts)
+	encodedFiles := make(map[string]string, len(stored.Files))
+	for k, v := range stored.Files {
+		encodedFiles[k] = base64.StdEncoding.EncodeToString(v)
+	}
+	filesJSON, _ := json.Marshal(encodedFiles)
+	cancelInt := 0
+	if stored.CancelRequested {
+		cancelInt = 1
+	}
+
+	stmt := `INSERT INTO fhir_export_job (tenant_id, job_id, patient_id, status, err_msg, output_format, cancel_requested, request_url, created_at, types_order, counts, files_b64, combined) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (tenant_id, job_id) DO UPDATE SET patient_id = excluded.patient_id, status = excluded.status, err_msg = excluded.err_msg, output_format = excluded.output_format, cancel_requested = excluded.cancel_requested, request_url = excluded.request_url, created_at = excluded.created_at, types_order = excluded.types_order, counts = excluded.counts, files_b64 = excluded.files_b64, combined = excluded.combined`
+	if err := s.execSQLite(ctx, stmt,
+		stored.TenantID, stored.ID, stored.PatientID, stored.Status, stored.Err, stored.OutputFormat, cancelInt,
+		stored.RequestURL, stored.CreatedAt.UTC().Format(time.RFC3339Nano),
+		string(typesJSON), string(countsJSON), string(filesJSON), stored.Combined,
+	); err != nil {
+		return err
+	}
+	s.bumpEpochLocked(ctx)
+	return nil
 }
 
 // GetExportJob retrieves a persisted Bulk Data ($export) job record.
-func (s *Store) GetExportJob(_ context.Context, tenantID, jobID string) (*store.ExportJobRecord, error) {
+func (s *Store) GetExportJob(ctx context.Context, tenantID, jobID string) (*store.ExportJobRecord, error) {
+	s.syncIfStale(ctx)
 	s.mu.RLock()
 	job, ok := s.exportJobs[tenantID+"|"+jobID]
 	s.mu.RUnlock()
 	if !ok {
 		return nil, sql.ErrNoRows
 	}
-	cp := job
+	cp := cloneExportJobRecord(job)
 	return &cp, nil
 }
 
 // DeleteExportJob deletes a Bulk Data ($export) job record.
 func (s *Store) DeleteExportJob(ctx context.Context, tenantID, jobID string) (bool, error) {
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	s.syncBeforeWriteLocked(ctx)
+
 	key := tenantID + "|" + jobID
 	s.mu.Lock()
 	_, ok := s.exportJobs[key]
 	delete(s.exportJobs, key)
 	s.mu.Unlock()
 	_ = s.execSQLite(ctx, `DELETE FROM fhir_export_job WHERE tenant_id = ? AND job_id = ?`, tenantID, jobID)
+	if ok {
+		s.bumpEpochLocked(ctx)
+	}
 	return ok, nil
 }
 
-// LoadFromDB hydrates the in-memory resource, history, spidx_*, audit, and export job indexes
+// LoadFromDB hydrates the in-memory resource, history, spidx_*, audit, OAuth, cluster, and export job indexes
 // from the persisted SQLite WAL tables on server startup or restart.
 func (s *Store) LoadFromDB(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
+	wl := s.writeLock()
+	wl.Lock()
+	defer wl.Unlock()
+	return s.loadFromDBInternal(ctx, true)
+}
 
+func (s *Store) queryAuditsFromDB(ctx context.Context) (map[string][]store.AuditRecord, error) {
+	audits := make(map[string][]store.AuditRecord)
+	auditRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, audit_id, recorded, action, subtype_code, outcome, COALESCE(outcome_desc, ''), COALESCE(http_method, ''), COALESCE(http_status, 0), COALESCE(request_uri, ''), COALESCE(agent_subject, ''), COALESCE(agent_patient, ''), COALESCE(client_ip, ''), COALESCE(entity_type, ''), COALESCE(entity_id, ''), COALESCE(entity_version, ''), COALESCE(trace_id, ''), COALESCE(span_id, '') FROM fhir_audit_event`)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite load fhir_audit_event: %w", err)
+	}
+	for auditRows.Next() {
+		var rec store.AuditRecord
+		var recStr string
+		if err := auditRows.Scan(
+			&rec.TenantID, &rec.AuditID, &recStr, &rec.Action, &rec.SubtypeCode, &rec.Outcome,
+			&rec.OutcomeDesc, &rec.HTTPMethod, &rec.HTTPStatus, &rec.RequestURI,
+			&rec.AgentSubject, &rec.AgentPatient, &rec.ClientIP, &rec.EntityType,
+			&rec.EntityID, &rec.EntityVersion, &rec.TraceID, &rec.SpanID,
+		); err != nil {
+			_ = auditRows.Close()
+			return nil, fmt.Errorf("sqlite scan fhir_audit_event: %w", err)
+		}
+		rec.Recorded, _ = time.Parse(time.RFC3339Nano, recStr)
+		hydrateSQLitePurposeOfUse(&rec)
+		audits[rec.TenantID] = append(audits[rec.TenantID], rec)
+	}
+	_ = auditRows.Close()
+	return audits, nil
+}
+
+func (s *Store) loadFromDBInternal(ctx context.Context, includeAudits bool) error {
 	resources := make(map[string]sqliteEntry)
 	history := make(map[string][]store.ResourceRecord)
-	audits := make(map[string][]store.AuditRecord)
+	var audits map[string][]store.AuditRecord
 	exportJobs := make(map[string]store.ExportJobRecord)
 
 	resRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, res_version, is_deleted, last_updated, COALESCE(idempotency_key, ''), resource_proto FROM fhir_resource`)
 	if err != nil {
 		return fmt.Errorf("sqlite load fhir_resource: %w", err)
 	}
-	defer resRows.Close()
 	for resRows.Next() {
 		var (
 			tenantID, resType, resID, lastUpdStr, idemKey string
@@ -2275,6 +3046,7 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 			protoBytes                                    []byte
 		)
 		if err := resRows.Scan(&tenantID, &resType, &resID, &resVersion, &isDelInt, &lastUpdStr, &idemKey, &protoBytes); err != nil {
+			_ = resRows.Close()
 			return fmt.Errorf("sqlite scan fhir_resource: %w", err)
 		}
 		lu, _ := time.Parse(time.RFC3339Nano, lastUpdStr)
@@ -2296,15 +3068,16 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 			indexes:        idx,
 		}
 	}
-	if err := resRows.Err(); err != nil {
-		return fmt.Errorf("sqlite iterate fhir_resource: %w", err)
+	resErr := resRows.Err()
+	_ = resRows.Close()
+	if resErr != nil {
+		return fmt.Errorf("sqlite iterate fhir_resource: %w", resErr)
 	}
 
 	histRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto FROM fhir_resource_history ORDER BY res_version ASC`)
 	if err != nil {
 		return fmt.Errorf("sqlite load fhir_resource_history: %w", err)
 	}
-	defer histRows.Close()
 	for histRows.Next() {
 		var (
 			tenantID, resType, resID, lastUpdStr string
@@ -2312,6 +3085,7 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 			protoBytes                           []byte
 		)
 		if err := histRows.Scan(&tenantID, &resType, &resID, &resVersion, &isDelInt, &lastUpdStr, &protoBytes); err != nil {
+			_ = histRows.Close()
 			return fmt.Errorf("sqlite scan fhir_resource_history: %w", err)
 		}
 		lu, _ := time.Parse(time.RFC3339Nano, lastUpdStr)
@@ -2326,18 +3100,20 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 			IsDeleted:     isDelInt != 0,
 		})
 	}
-	if err := histRows.Err(); err != nil {
-		return fmt.Errorf("sqlite iterate fhir_resource_history: %w", err)
+	histErr := histRows.Err()
+	_ = histRows.Close()
+	if histErr != nil {
+		return fmt.Errorf("sqlite iterate fhir_resource_history: %w", histErr)
 	}
 
 	strRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, sp_name, sp_value FROM spidx_string`)
 	if err != nil {
 		return fmt.Errorf("sqlite load spidx_string: %w", err)
 	}
-	defer strRows.Close()
 	for strRows.Next() {
 		var tenantID, resType, resID, spName, spValue string
 		if err := strRows.Scan(&tenantID, &resType, &resID, &spName, &spValue); err != nil {
+			_ = strRows.Close()
 			return fmt.Errorf("sqlite scan spidx_string: %w", err)
 		}
 		key := resKey(tenantID, resType, resID)
@@ -2345,15 +3121,16 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 			e.indexes.Strings = append(e.indexes.Strings, store.SpidxString{SpName: spName, SpValue: spValue})
 		}
 	}
+	_ = strRows.Close()
 
 	tokRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, sp_name, sp_system, sp_value FROM spidx_token`)
 	if err != nil {
 		return fmt.Errorf("sqlite load spidx_token: %w", err)
 	}
-	defer tokRows.Close()
 	for tokRows.Next() {
 		var tenantID, resType, resID, spName, spSystem, spValue string
 		if err := tokRows.Scan(&tenantID, &resType, &resID, &spName, &spSystem, &spValue); err != nil {
+			_ = tokRows.Close()
 			return fmt.Errorf("sqlite scan spidx_token: %w", err)
 		}
 		key := resKey(tenantID, resType, resID)
@@ -2361,15 +3138,16 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 			e.indexes.Tokens = append(e.indexes.Tokens, store.SpidxToken{SpName: spName, SpSystem: spSystem, SpValue: spValue})
 		}
 	}
+	_ = tokRows.Close()
 
 	dateRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, sp_name, sp_low, sp_high FROM spidx_date`)
 	if err != nil {
 		return fmt.Errorf("sqlite load spidx_date: %w", err)
 	}
-	defer dateRows.Close()
 	for dateRows.Next() {
 		var tenantID, resType, resID, spName, spLowStr, spHighStr string
 		if err := dateRows.Scan(&tenantID, &resType, &resID, &spName, &spLowStr, &spHighStr); err != nil {
+			_ = dateRows.Close()
 			return fmt.Errorf("sqlite scan spidx_date: %w", err)
 		}
 		low, _ := time.Parse(time.RFC3339Nano, spLowStr)
@@ -2379,15 +3157,16 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 			e.indexes.Dates = append(e.indexes.Dates, store.SpidxDate{SpName: spName, SpLow: low, SpHigh: high})
 		}
 	}
+	_ = dateRows.Close()
 
 	refRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, sp_name, target_type, target_id FROM spidx_reference`)
 	if err != nil {
 		return fmt.Errorf("sqlite load spidx_reference: %w", err)
 	}
-	defer refRows.Close()
 	for refRows.Next() {
 		var tenantID, resType, resID, spName, targetType, targetID string
 		if err := refRows.Scan(&tenantID, &resType, &resID, &spName, &targetType, &targetID); err != nil {
+			_ = refRows.Close()
 			return fmt.Errorf("sqlite scan spidx_reference: %w", err)
 		}
 		key := resKey(tenantID, resType, resID)
@@ -2395,16 +3174,17 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 			e.indexes.References = append(e.indexes.References, store.SpidxReference{SpName: spName, TargetType: targetType, TargetID: targetID})
 		}
 	}
+	_ = refRows.Close()
 
 	qtyRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, sp_name, sp_system, sp_code, sp_value FROM spidx_quantity`)
 	if err != nil {
 		return fmt.Errorf("sqlite load spidx_quantity: %w", err)
 	}
-	defer qtyRows.Close()
 	for qtyRows.Next() {
 		var tenantID, resType, resID, spName, spSystem, spCode string
 		var spValue float64
 		if err := qtyRows.Scan(&tenantID, &resType, &resID, &spName, &spSystem, &spCode, &spValue); err != nil {
+			_ = qtyRows.Close()
 			return fmt.Errorf("sqlite scan spidx_quantity: %w", err)
 		}
 		key := resKey(tenantID, resType, resID)
@@ -2412,15 +3192,16 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 			e.indexes.Quantities = append(e.indexes.Quantities, store.SpidxQuantity{SpName: spName, SpSystem: spSystem, SpCode: spCode, SpValue: spValue})
 		}
 	}
+	_ = qtyRows.Close()
 
 	uriRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, res_type, res_id, sp_name, sp_value FROM spidx_uri`)
 	if err != nil {
 		return fmt.Errorf("sqlite load spidx_uri: %w", err)
 	}
-	defer uriRows.Close()
 	for uriRows.Next() {
 		var tenantID, resType, resID, spName, spValue string
 		if err := uriRows.Scan(&tenantID, &resType, &resID, &spName, &spValue); err != nil {
+			_ = uriRows.Close()
 			return fmt.Errorf("sqlite scan spidx_uri: %w", err)
 		}
 		key := resKey(tenantID, resType, resID)
@@ -2428,6 +3209,7 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 			e.indexes.URIs = append(e.indexes.URIs, store.SpidxURI{SpName: spName, SpValue: spValue})
 		}
 	}
+	_ = uriRows.Close()
 
 	for k, e := range resources {
 		if !e.isDeleted {
@@ -2436,46 +3218,152 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 		}
 	}
 
-	auditRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, audit_id, recorded, action, subtype_code, outcome, COALESCE(outcome_desc, ''), COALESCE(http_method, ''), COALESCE(http_status, 0), COALESCE(request_uri, ''), COALESCE(agent_subject, ''), COALESCE(agent_patient, ''), COALESCE(client_ip, ''), COALESCE(entity_type, ''), COALESCE(entity_id, ''), COALESCE(entity_version, '') FROM fhir_audit_event`)
-	if err != nil {
-		return fmt.Errorf("sqlite load fhir_audit_event: %w", err)
-	}
-	defer auditRows.Close()
-	for auditRows.Next() {
-		var rec store.AuditRecord
-		var recStr string
-		if err := auditRows.Scan(
-			&rec.TenantID, &rec.AuditID, &recStr, &rec.Action, &rec.SubtypeCode, &rec.Outcome,
-			&rec.OutcomeDesc, &rec.HTTPMethod, &rec.HTTPStatus, &rec.RequestURI,
-			&rec.AgentSubject, &rec.AgentPatient, &rec.ClientIP, &rec.EntityType,
-			&rec.EntityID, &rec.EntityVersion,
-		); err != nil {
-			return fmt.Errorf("sqlite scan fhir_audit_event: %w", err)
+	if includeAudits {
+		loadedAudits, err := s.queryAuditsFromDB(ctx)
+		if err != nil {
+			return err
 		}
-		rec.Recorded, _ = time.Parse(time.RFC3339Nano, recStr)
-		audits[rec.TenantID] = append(audits[rec.TenantID], rec)
+		audits = loadedAudits
 	}
 
-	jobRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, job_id, COALESCE(patient_id, ''), COALESCE(request_url, ''), created_at FROM fhir_export_job`)
+	jobRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, job_id, COALESCE(patient_id, ''), COALESCE(status, 'complete'), COALESCE(err_msg, ''), COALESCE(output_format, ''), COALESCE(cancel_requested, 0), COALESCE(request_url, ''), created_at, COALESCE(types_order, ''), COALESCE(counts, ''), COALESCE(files_b64, ''), combined FROM fhir_export_job`)
 	if err != nil {
 		return fmt.Errorf("sqlite load fhir_export_job: %w", err)
 	}
-	defer jobRows.Close()
 	for jobRows.Next() {
 		var job store.ExportJobRecord
-		var createdStr string
-		if err := jobRows.Scan(&job.TenantID, &job.ID, &job.PatientID, &job.RequestURL, &createdStr); err != nil {
+		var createdStr, typesRaw, countsRaw, filesRaw string
+		var cancelInt int
+		if err := jobRows.Scan(
+			&job.TenantID, &job.ID, &job.PatientID, &job.Status, &job.Err, &job.OutputFormat,
+			&cancelInt, &job.RequestURL, &createdStr, &typesRaw, &countsRaw, &filesRaw, &job.Combined,
+		); err != nil {
+			_ = jobRows.Close()
 			return fmt.Errorf("sqlite scan fhir_export_job: %w", err)
 		}
+		job.CancelRequested = cancelInt != 0
 		job.CreatedAt, _ = time.Parse(time.RFC3339Nano, createdStr)
+		if typesRaw != "" {
+			_ = json.Unmarshal([]byte(typesRaw), &job.TypesOrder)
+		}
+		if countsRaw != "" {
+			_ = json.Unmarshal([]byte(countsRaw), &job.Counts)
+		}
+		if filesRaw != "" {
+			var enc map[string]string
+			if json.Unmarshal([]byte(filesRaw), &enc) == nil {
+				job.Files = make(map[string][]byte, len(enc))
+				for k, b64 := range enc {
+					if dec, dErr := base64.StdEncoding.DecodeString(b64); dErr == nil {
+						job.Files[k] = dec
+					}
+				}
+			}
+		}
 		exportJobs[job.TenantID+"|"+job.ID] = job
+	}
+	_ = jobRows.Close()
+
+	clusterSecrets := make(map[string][]byte)
+	if secRows, sErr := s.db.QueryContext(ctx, `SELECT secret_key, secret_bytes FROM fhir_cluster_secret`); sErr == nil {
+		for secRows.Next() {
+			var k string
+			var b []byte
+			if secRows.Scan(&k, &b) == nil {
+				clusterSecrets[k] = append([]byte(nil), b...)
+			}
+		}
+		_ = secRows.Close()
+	}
+
+	clusterStates := make(map[string]store.ClusterStateRecord)
+	if stRows, stErr := s.db.QueryContext(ctx, `SELECT namespace, state_key, tenant_id, secondary_key, value_blob, version, COALESCE(expires_at, ''), updated_at FROM fhir_cluster_state`); stErr == nil {
+		for stRows.Next() {
+			var rec store.ClusterStateRecord
+			var expStr, updStr string
+			if stRows.Scan(&rec.Namespace, &rec.Key, &rec.TenantID, &rec.SecondaryKey, &rec.Value, &rec.Version, &expStr, &updStr) == nil {
+				rec.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updStr)
+				if expStr != "" {
+					if t, pErr := time.Parse(time.RFC3339Nano, expStr); pErr == nil {
+						rec.ExpiresAt = &t
+					}
+				}
+				clusterStates[clusterStateMapKey(rec.Namespace, rec.Key)] = rec
+			}
+		}
+		_ = stRows.Close()
+	}
+
+	authCodes := make(map[string]store.OAuthAuthCodeRecord)
+	if acRows, acErr := s.db.QueryContext(ctx, `SELECT code_hash, client_id, redirect_uri, scope, code_challenge, code_challenge_method, patient_id, encounter_id, tenant_id, nonce, fhir_user, extra_claims_text, expires_at FROM fhir_oauth_auth_code`); acErr == nil {
+		for acRows.Next() {
+			var h, expStr string
+			var rec store.OAuthAuthCodeRecord
+			if acRows.Scan(
+				&h, &rec.ClientID, &rec.RedirectURI, &rec.Scope, &rec.CodeChallenge, &rec.CodeChallengeMethod,
+				&rec.PatientID, &rec.EncounterID, &rec.TenantID, &rec.Nonce, &rec.FhirUser, &rec.ExtraClaimsJSON, &expStr,
+			) == nil {
+				rec.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expStr)
+				authCodes[h] = rec
+			}
+		}
+		_ = acRows.Close()
+	}
+
+	refreshTokens := make(map[string]store.OAuthRefreshTokenRecord)
+	if rtRows, rtErr := s.db.QueryContext(ctx, `SELECT token_hash, subject, grant_id, client_id, tenant_id, patient_id, encounter_id, scope, nonce, fhir_user, extra_claims_text, expires_at FROM fhir_oauth_refresh_token`); rtErr == nil {
+		for rtRows.Next() {
+			var h, expStr string
+			var rec store.OAuthRefreshTokenRecord
+			if rtRows.Scan(
+				&h, &rec.Subject, &rec.GrantID, &rec.ClientID, &rec.TenantID, &rec.PatientID, &rec.EncounterID,
+				&rec.Scope, &rec.Nonce, &rec.FhirUser, &rec.ExtraClaimsJSON, &expStr,
+			) == nil {
+				rec.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expStr)
+				refreshTokens[h] = rec
+			}
+		}
+		_ = rtRows.Close()
+	}
+
+	revokedTokens := make(map[string]time.Time)
+	if rvRows, rvErr := s.db.QueryContext(ctx, `SELECT token_hash, expires_at FROM fhir_oauth_revoked_token`); rvErr == nil {
+		for rvRows.Next() {
+			var h, expStr string
+			if rvRows.Scan(&h, &expStr) == nil {
+				if exp, pErr := time.Parse(time.RFC3339Nano, expStr); pErr == nil {
+					revokedTokens[h] = exp
+				}
+			}
+		}
+		_ = rvRows.Close()
+	}
+
+	var loadedEpoch int64
+	if seq, ok := s.readDBEpoch(ctx); ok {
+		loadedEpoch = seq
+	}
+	var loadedAuditEpoch int64
+	if includeAudits {
+		if aSeq, ok := s.readDBMetaSeq(ctx, "audit_epoch"); ok {
+			loadedAuditEpoch = aSeq
+		}
 	}
 
 	s.mu.Lock()
 	s.resources = resources
 	s.history = history
-	s.audits = audits
+	if includeAudits {
+		s.audits = audits
+		s.localAuditEpoch = loadedAuditEpoch
+	}
 	s.exportJobs = exportJobs
+	s.clusterSecrets = clusterSecrets
+	s.clusterStates = clusterStates
+	s.authCodes = authCodes
+	s.refreshTokens = refreshTokens
+	s.revokedTokens = revokedTokens
+	s.localEpoch = loadedEpoch
 	s.mu.Unlock()
 	return nil
 }

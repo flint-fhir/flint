@@ -16,6 +16,7 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/audit"
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/pkg/telemetry"
 	"github.com/flint-fhir/flint/store"
 	"github.com/google/uuid"
 )
@@ -64,12 +65,39 @@ func (s *Server) RegisterCDSClientJWKS(issuer string, jwks auth.JWKSet) {
 	if iss == "" {
 		return
 	}
+	if s.store != nil {
+		if b, err := json.Marshal(jwks); err == nil {
+			_, _ = s.store.PutClusterState(context.Background(), store.ClusterStateRecord{
+				Namespace: "cds_client_jwks",
+				Key:       iss,
+				Value:     b,
+			})
+		}
+	}
 	s.cdsHooksMu.Lock()
 	defer s.cdsHooksMu.Unlock()
 	if s.cdsClientJWKS == nil {
 		s.cdsClientJWKS = make(map[string]auth.JWKSet)
 	}
 	s.cdsClientJWKS[iss] = jwks
+}
+
+func (s *Server) lookupCDSClientJWKS(iss string) (auth.JWKSet, bool) {
+	s.cdsHooksMu.RLock()
+	set, ok := s.cdsClientJWKS[iss]
+	s.cdsHooksMu.RUnlock()
+	if ok {
+		return set, true
+	}
+	if s.store != nil {
+		if rec, found, err := s.store.GetClusterState(context.Background(), "cds_client_jwks", iss); err == nil && found && rec != nil {
+			var parsed auth.JWKSet
+			if json.Unmarshal(rec.Value, &parsed) == nil {
+				return parsed, true
+			}
+		}
+	}
+	return auth.JWKSet{}, false
 }
 
 // SetCDSHooksAllowedJKUPrefixes configures the allowlisted HTTPS (or loopback HTTP)
@@ -109,6 +137,11 @@ func (s *Server) hasCDSHooksJWTConfig() bool {
 	s.cdsHooksMu.RUnlock()
 	if has {
 		return true
+	}
+	if s.store != nil {
+		if recs, err := s.store.ListClusterStates(context.Background(), "cds_client_jwks", ""); err == nil && len(recs) > 0 {
+			return true
+		}
 	}
 	return strings.TrimSpace(os.Getenv("FLINT_CDS_HOOKS_REQUIRE_JWT")) != "" ||
 		strings.TrimSpace(os.Getenv("FLINT_CDS_HOOKS_JKU_ALLOWLIST")) != "" ||
@@ -412,9 +445,7 @@ func (s *Server) resolveCDSClientSigningKey(ctx context.Context, parsed *auth.Pa
 		}
 		jwks = fetched
 	} else {
-		s.cdsHooksMu.RLock()
-		staticSet, ok := s.cdsClientJWKS[iss]
-		s.cdsHooksMu.RUnlock()
+		staticSet, ok := s.lookupCDSClientJWKS(iss)
 		if !ok {
 			return nil, fmt.Errorf("%w: untrusted CDS client issuer %q", auth.ErrInvalidIssuer, iss)
 		}
@@ -529,6 +560,7 @@ func (s *Server) fetchCDSJKU(ctx context.Context, jkuURL, kid string, now time.T
 		return auth.JWKSet{}, fmt.Errorf("invalid JKU URL: %w", err)
 	}
 	req.Header.Set("Accept", "application/jwk-set+json, application/json")
+	telemetry.InjectHTTP(ctx, req.Header)
 
 	resp, err := cli.Do(req)
 	if err != nil {
@@ -586,6 +618,14 @@ func (s *Server) fetchCDSJKU(ctx context.Context, jkuURL, kid string, now time.T
 }
 
 func (s *Server) consumeCDSJTIOnce(issuer, jti string, expiresAt, now time.Time) bool {
+	if s.store != nil {
+		ttl := expiresAt.Sub(now)
+		if ttl <= 0 {
+			ttl = time.Minute
+		}
+		claimed, err := s.store.ClaimNonce(context.Background(), "cds-jti:"+issuer+":"+jti, ttl)
+		return err == nil && claimed
+	}
 	key := issuer + "\x00" + jti
 	s.cdsHooksMu.Lock()
 	defer s.cdsHooksMu.Unlock()

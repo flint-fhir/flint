@@ -77,33 +77,121 @@ type launchContextEntry struct {
 
 // RegisterOAuthClientJWK registers a trusted public JWK for a SMART client_id.
 func (s *Server) RegisterOAuthClientJWK(clientID string, jwk auth.JWK) {
+	cid := strings.TrimSpace(clientID)
+	if cid == "" {
+		return
+	}
+	if s.store != nil {
+		if b, err := json.Marshal(jwk); err == nil {
+			_, _ = s.store.PutClusterState(context.Background(), store.ClusterStateRecord{
+				Namespace: "oauth_client_jwk",
+				Key:       cid,
+				Value:     b,
+			})
+		}
+	}
 	s.oauthMu.Lock()
 	defer s.oauthMu.Unlock()
 	if s.clientJWKs == nil {
 		s.clientJWKs = make(map[string]auth.JWK)
 	}
-	s.clientJWKs[strings.TrimSpace(clientID)] = jwk
+	s.clientJWKs[cid] = jwk
 }
 
 // RegisterOAuthClientJWKSet registers a trusted RFC 7517 JWKSet (containing one or more
 // RSA/EC public signing keys) for a SMART client_id.
 func (s *Server) RegisterOAuthClientJWKSet(clientID string, jwks auth.JWKSet) {
+	cid := strings.TrimSpace(clientID)
+	if cid == "" {
+		return
+	}
+	if s.store != nil {
+		if b, err := json.Marshal(jwks); err == nil {
+			_, _ = s.store.PutClusterState(context.Background(), store.ClusterStateRecord{
+				Namespace: "oauth_client_jwks",
+				Key:       cid,
+				Value:     b,
+			})
+		}
+	}
 	s.oauthMu.Lock()
 	defer s.oauthMu.Unlock()
 	if s.clientJWKSets == nil {
 		s.clientJWKSets = make(map[string]auth.JWKSet)
 	}
-	s.clientJWKSets[strings.TrimSpace(clientID)] = jwks
+	s.clientJWKSets[cid] = jwks
 }
 
 // RegisterOAuthClientSecret registers a shared secret for a confidential symmetric OAuth2 client.
 func (s *Server) RegisterOAuthClientSecret(clientID, clientSecret string) {
+	cid := strings.TrimSpace(clientID)
+	if cid == "" {
+		return
+	}
+	if s.store != nil {
+		_, _ = s.store.PutClusterState(context.Background(), store.ClusterStateRecord{
+			Namespace: "oauth_client_secret",
+			Key:       cid,
+			Value:     []byte(clientSecret),
+		})
+	}
 	s.oauthMu.Lock()
 	defer s.oauthMu.Unlock()
 	if s.clientSecrets == nil {
 		s.clientSecrets = make(map[string]string)
 	}
-	s.clientSecrets[strings.TrimSpace(clientID)] = clientSecret
+	s.clientSecrets[cid] = clientSecret
+}
+
+func (s *Server) lookupOAuthClientJWKSet(clientID string) (auth.JWKSet, bool) {
+	s.oauthMu.Lock()
+	set, ok := s.clientJWKSets[clientID]
+	s.oauthMu.Unlock()
+	if ok {
+		return set, true
+	}
+	if s.store != nil {
+		if rec, found, err := s.store.GetClusterState(context.Background(), "oauth_client_jwks", clientID); err == nil && found && rec != nil {
+			var parsed auth.JWKSet
+			if json.Unmarshal(rec.Value, &parsed) == nil {
+				return parsed, true
+			}
+		}
+	}
+	return auth.JWKSet{}, false
+}
+
+func (s *Server) lookupOAuthClientJWK(clientID string) (auth.JWK, bool) {
+	s.oauthMu.Lock()
+	jwk, ok := s.clientJWKs[clientID]
+	s.oauthMu.Unlock()
+	if ok {
+		return jwk, true
+	}
+	if s.store != nil {
+		if rec, found, err := s.store.GetClusterState(context.Background(), "oauth_client_jwk", clientID); err == nil && found && rec != nil {
+			var parsed auth.JWK
+			if json.Unmarshal(rec.Value, &parsed) == nil {
+				return parsed, true
+			}
+		}
+	}
+	return auth.JWK{}, false
+}
+
+func (s *Server) lookupOAuthClientSecret(clientID string) (string, bool) {
+	s.oauthMu.Lock()
+	sec, ok := s.clientSecrets[clientID]
+	s.oauthMu.Unlock()
+	if ok {
+		return sec, true
+	}
+	if s.store != nil {
+		if rec, found, err := s.store.GetClusterState(context.Background(), "oauth_client_secret", clientID); err == nil && found && rec != nil {
+			return string(rec.Value), true
+		}
+	}
+	return "", false
 }
 
 // SetRequireRegisteredClientJWK configures whether private_key_jwt assertions
@@ -147,6 +235,19 @@ func (s *Server) RegisterLaunchContext(launchID, patientID, encounterID, tenant 
 }
 
 func (s *Server) storeLaunchContext(launchID string, entry launchContextEntry) {
+	if s.store != nil {
+		if b, err := json.Marshal(entry); err == nil {
+			exp := entry.ExpiresAt.UTC()
+			_, _ = s.store.PutClusterState(context.Background(), store.ClusterStateRecord{
+				Namespace: "oauth_launch",
+				Key:       launchID,
+				TenantID:  entry.Tenant,
+				Value:     b,
+				ExpiresAt: &exp,
+			})
+			return
+		}
+	}
 	now := time.Now()
 	s.oauthMu.Lock()
 	defer s.oauthMu.Unlock()
@@ -177,6 +278,20 @@ func (s *Server) storeLaunchContext(launchID string, entry launchContextEntry) {
 func (s *Server) resolveLaunchContext(launchID string) (launchContextEntry, bool) {
 	if launchID == "" {
 		return launchContextEntry{}, false
+	}
+	if s.store != nil {
+		rec, found, err := s.store.GetClusterState(context.Background(), "oauth_launch", launchID)
+		if err != nil || !found || rec == nil {
+			return launchContextEntry{}, false
+		}
+		var entry launchContextEntry
+		if json.Unmarshal(rec.Value, &entry) != nil {
+			return launchContextEntry{}, false
+		}
+		if !entry.ExpiresAt.IsZero() && time.Now().After(entry.ExpiresAt) {
+			return launchContextEntry{}, false
+		}
+		return entry, true
 	}
 	now := time.Now()
 	s.oauthMu.Lock()
@@ -262,6 +377,7 @@ func (s *Server) storeAuthCode(code string, entry authCodeEntry) {
 			Nonce:               entry.Nonce,
 			ExpiresAt:           entry.ExpiresAt,
 		})
+		return
 	}
 	now := time.Now()
 	s.oauthMu.Lock()
@@ -292,25 +408,22 @@ func (s *Server) storeAuthCode(code string, entry authCodeEntry) {
 
 func (s *Server) consumeAuthCode(code string) (authCodeEntry, bool) {
 	if s.store != nil {
-		if rec, ok, err := s.store.ConsumeAuthCode(context.Background(), code); err == nil && ok {
-			s.oauthMu.Lock()
-			if s.oauthCodes != nil {
-				delete(s.oauthCodes, code)
-			}
-			s.oauthMu.Unlock()
-			return authCodeEntry{
-				ClientID:            rec.ClientID,
-				RedirectURI:         rec.RedirectURI,
-				Scope:               rec.Scope,
-				CodeChallenge:       rec.CodeChallenge,
-				CodeChallengeMethod: rec.CodeChallengeMethod,
-				PatientID:           rec.PatientID,
-				EncounterID:         rec.EncounterID,
-				Tenant:              rec.TenantID,
-				Nonce:               rec.Nonce,
-				ExpiresAt:           rec.ExpiresAt,
-			}, true
+		rec, ok, err := s.store.ConsumeAuthCode(context.Background(), code)
+		if err != nil || !ok {
+			return authCodeEntry{}, false
 		}
+		return authCodeEntry{
+			ClientID:            rec.ClientID,
+			RedirectURI:         rec.RedirectURI,
+			Scope:               rec.Scope,
+			CodeChallenge:       rec.CodeChallenge,
+			CodeChallengeMethod: rec.CodeChallengeMethod,
+			PatientID:           rec.PatientID,
+			EncounterID:         rec.EncounterID,
+			Tenant:              rec.TenantID,
+			Nonce:               rec.Nonce,
+			ExpiresAt:           rec.ExpiresAt,
+		}, true
 	}
 	s.oauthMu.Lock()
 	defer s.oauthMu.Unlock()
@@ -328,11 +441,16 @@ func (s *Server) storeRefreshToken(token string, entry refreshTokenEntry) {
 	if s.store != nil {
 		_ = s.store.SaveRefreshToken(context.Background(), token, store.OAuthRefreshTokenRecord{
 			Subject:     entry.Subject,
+			GrantID:     entry.GrantID,
+			ClientID:    entry.ClientID,
+			TenantID:    entry.Tenant,
 			PatientID:   entry.PatientID,
 			EncounterID: entry.EncounterID,
 			Scope:       entry.Scope,
+			Nonce:       entry.Nonce,
 			ExpiresAt:   entry.ExpiresAt,
 		})
+		return
 	}
 	now := time.Now()
 	s.oauthMu.Lock()
@@ -363,25 +481,21 @@ func (s *Server) storeRefreshToken(token string, entry refreshTokenEntry) {
 
 func (s *Server) consumeRefreshToken(token string) (refreshTokenEntry, bool) {
 	if s.store != nil {
-		if rec, ok, err := s.store.ConsumeRefreshToken(context.Background(), token); err == nil && ok {
-			var memEntry refreshTokenEntry
-			s.oauthMu.Lock()
-			if s.refreshTokens != nil {
-				memEntry = s.refreshTokens[token]
-				delete(s.refreshTokens, token)
-			}
-			s.oauthMu.Unlock()
-			return refreshTokenEntry{
-				Subject:     rec.Subject,
-				ClientID:    memEntry.ClientID,
-				PatientID:   rec.PatientID,
-				EncounterID: rec.EncounterID,
-				Tenant:      memEntry.Tenant,
-				Nonce:       memEntry.Nonce,
-				Scope:       rec.Scope,
-				ExpiresAt:   rec.ExpiresAt,
-			}, true
+		rec, ok, err := s.store.ConsumeRefreshToken(context.Background(), token)
+		if err != nil || !ok {
+			return refreshTokenEntry{}, false
 		}
+		return refreshTokenEntry{
+			GrantID:     rec.GrantID,
+			Subject:     rec.Subject,
+			ClientID:    rec.ClientID,
+			PatientID:   rec.PatientID,
+			EncounterID: rec.EncounterID,
+			Tenant:      rec.TenantID,
+			Nonce:       rec.Nonce,
+			Scope:       rec.Scope,
+			ExpiresAt:   rec.ExpiresAt,
+		}, true
 	}
 	s.oauthMu.Lock()
 	defer s.oauthMu.Unlock()
@@ -881,9 +995,9 @@ func (s *Server) authenticateOAuthClient(w http.ResponseWriter, r *http.Request)
 			return s.authenticateUDAPClientAssertion(w, r, parsed, iss, jti)
 		}
 
+		regJWKSet, hasRegJWKSet := s.lookupOAuthClientJWKSet(iss)
+		regJWK, hasRegJWK := s.lookupOAuthClientJWK(iss)
 		s.oauthMu.Lock()
-		regJWKSet, hasRegJWKSet := s.clientJWKSets[iss]
-		regJWK, hasRegJWK := s.clientJWKs[iss]
 		requireReg := s.requireRegisteredClientJWK
 		s.oauthMu.Unlock()
 
@@ -939,12 +1053,10 @@ func (s *Server) authenticateOAuthClient(w http.ResponseWriter, r *http.Request)
 			}
 		}
 
-		jtiKey := "jti:" + jti
-		if s.isTokenRevoked(jtiKey) {
+		if !s.claimReplayNonce(r.Context(), "oauth-jti:"+iss+":"+jti, 10*time.Minute) {
 			writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "client_assertion jti has already been used (replay detected)")
 			return "", false
 		}
-		s.revokeTokenInternal(r.Context(), jtiKey, 10*time.Minute)
 		return iss, true
 	}
 
@@ -960,9 +1072,7 @@ func (s *Server) authenticateOAuthClient(w http.ResponseWriter, r *http.Request)
 			writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "Basic auth client_id does not match form client_id")
 			return "", false
 		}
-		s.oauthMu.Lock()
-		regSecret, hasSecret := s.clientSecrets[clientID]
-		s.oauthMu.Unlock()
+		regSecret, hasSecret := s.lookupOAuthClientSecret(clientID)
 		if hasSecret && subtle.ConstantTimeCompare([]byte(basicPass), []byte(regSecret)) != 1 {
 			if decPass, err := url.QueryUnescape(basicPass); err != nil || subtle.ConstantTimeCompare([]byte(decPass), []byte(regSecret)) != 1 {
 				w.Header().Set("WWW-Authenticate", `Basic realm="Flint OAuth2"`)
@@ -984,9 +1094,7 @@ func (s *Server) authenticateOAuthClient(w http.ResponseWriter, r *http.Request)
 			writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "client_secret_post requires non-empty client_id and client_secret")
 			return "", false
 		}
-		s.oauthMu.Lock()
-		regSecret, hasSecret := s.clientSecrets[formClientID]
-		s.oauthMu.Unlock()
+		regSecret, hasSecret := s.lookupOAuthClientSecret(formClientID)
 		if hasSecret && subtle.ConstantTimeCompare([]byte(secretVal), []byte(regSecret)) != 1 {
 			writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "invalid client_secret")
 			return "", false
@@ -995,9 +1103,7 @@ func (s *Server) authenticateOAuthClient(w http.ResponseWriter, r *http.Request)
 	}
 
 	if formClientID != "" {
-		s.oauthMu.Lock()
-		regSecret, hasSecret := s.clientSecrets[formClientID]
-		s.oauthMu.Unlock()
+		regSecret, hasSecret := s.lookupOAuthClientSecret(formClientID)
 		if hasSecret && regSecret != "" {
 			w.Header().Set("WWW-Authenticate", `Basic realm="Flint OAuth2"`)
 			writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "confidential client requires client_secret authentication")
@@ -1039,9 +1145,7 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if entry.ClientID != "" {
-			s.oauthMu.Lock()
-			regSecret, hasSecret := s.clientSecrets[entry.ClientID]
-			s.oauthMu.Unlock()
+			regSecret, hasSecret := s.lookupOAuthClientSecret(entry.ClientID)
 			if hasSecret && regSecret != "" && reqClientID == "" {
 				w.Header().Set("WWW-Authenticate", `Basic realm="Flint OAuth2"`)
 				writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "confidential client requires client_secret authentication")
@@ -1225,9 +1329,7 @@ func (s *Server) handleOAuthToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if rtEntry.ClientID != "" {
-			s.oauthMu.Lock()
-			regSecret, hasSecret := s.clientSecrets[rtEntry.ClientID]
-			s.oauthMu.Unlock()
+			regSecret, hasSecret := s.lookupOAuthClientSecret(rtEntry.ClientID)
 			if hasSecret && regSecret != "" && reqClientID == "" {
 				w.Header().Set("WWW-Authenticate", `Basic realm="Flint OAuth2"`)
 				writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "confidential client requires client_secret authentication")
@@ -1449,13 +1551,20 @@ func (s *Server) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 	rawToken := strings.TrimSpace(r.FormValue("token"))
 	if rawToken != "" {
 		var cascadeGrantID string
-		s.oauthMu.Lock()
-		if s.refreshTokens != nil {
-			if rt, ok := s.refreshTokens[rawToken]; ok && rt.GrantID != "" {
-				cascadeGrantID = rt.GrantID
+		if s.store != nil {
+			if peeked, ok, err := s.store.PeekRefreshToken(r.Context(), rawToken); err == nil && ok && peeked.GrantID != "" {
+				cascadeGrantID = peeked.GrantID
 			}
 		}
-		s.oauthMu.Unlock()
+		if cascadeGrantID == "" {
+			s.oauthMu.Lock()
+			if s.refreshTokens != nil {
+				if rt, ok := s.refreshTokens[rawToken]; ok && rt.GrantID != "" {
+					cascadeGrantID = rt.GrantID
+				}
+			}
+			s.oauthMu.Unlock()
+		}
 		if cascadeGrantID == "" && strings.Contains(rawToken, ".") {
 			if parsed, err := auth.ParseJWT(rawToken); err == nil && parsed != nil {
 				if gid, ok := parsed.Payload.Extra["grant_id"].(string); ok && gid != "" {
@@ -1482,6 +1591,21 @@ func (s *Server) handleOAuthRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) claimReplayNonce(ctx context.Context, nonceKey string, ttl time.Duration) bool {
+	if nonceKey == "" {
+		return false
+	}
+	if s.store != nil {
+		claimed, err := s.store.ClaimNonce(ctx, nonceKey, ttl)
+		return err == nil && claimed
+	}
+	if s.isTokenRevoked("nonce:" + nonceKey) {
+		return false
+	}
+	s.revokeTokenInternal(ctx, "nonce:"+nonceKey, ttl)
+	return true
 }
 
 func (s *Server) revokeTokenInternal(ctx context.Context, rawToken string, ttl time.Duration) {

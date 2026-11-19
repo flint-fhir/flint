@@ -1,0 +1,21 @@
+apiVersion: v2
+name: flint
+description: Decoupled HL7 FHIR R4 API & Pluggable Clinical Storage Engine (PostgreSQL, SQLite WAL, Apache Doris, HybridStore)
+type: application
+version: 0.6.0
+appVersion: "0.6.0"
+kubeVersion: ">=1.26.0-0"
+home: https://github.com/flint-fhir/flint
+icon: https://flint-fhir.github.io/flint/favicon.svg
+sources:
+  - https://github.com/flint-fhir/flint
+keywords:
+  - fhir
+  - hl7
+  - smart-on-fhir
+  - healthcare
+  - mcp
+  - opentelemetry
+maintainers:
+  - name: Flint Maintainers
+    url: https://github.com/flint-fhir/flint

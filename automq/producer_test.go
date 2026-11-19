@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/flint-fhir/flint/automq"
+	"github.com/flint-fhir/flint/pkg/telemetry"
 )
 
 func TestProducer_BuildRecord(t *testing.T) {
@@ -197,4 +198,79 @@ func TestNewProducer(t *testing.T) {
 	assert.Equal(t, "fhir.", prod.TopicPrefix)
 	require.NoError(t, prod.Publish(context.Background(), nil))
 	prod.Close()
+}
+
+func TestProducer_TraceContextHeadersAndErrorBranches(t *testing.T) {
+	sc, ok := telemetry.ParseTraceParent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+	require.True(t, ok)
+	sc.TraceState = "flint=node-a"
+	ctx := telemetry.ContextWithSpanContext(context.Background(), sc)
+
+	p := &automq.Producer{
+		TopicPrefix:     "fhir.",
+		DefaultSchemaID: 42,
+	}
+	defID, err := p.EnsureSchemaID(ctx, "fhir.Patient")
+	require.NoError(t, err)
+	assert.Equal(t, uint32(42), defID)
+
+	rec := p.BuildRecordWithContext(ctx, automq.Message{
+		TenantID:  "demo",
+		ResType:   "Patient",
+		ResID:     "pat-trace-1",
+		ProtoData: []byte{0x0a, 0x02, 0x69, 0x64},
+		Op:        "U",
+	})
+	hdrs := make(map[string]string, len(rec.Headers))
+	for _, h := range rec.Headers {
+		hdrs[h.Key] = string(h.Value)
+	}
+	assert.Equal(t, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", hdrs["traceparent"])
+	assert.Equal(t, "flint=node-a", hdrs["tracestate"])
+
+	// Confluent framing error cases
+	_, _, err = automq.UnwrapConfluentProtobuf([]byte{0x00, 0x01})
+	require.Error(t, err)
+	_, _, err = automq.UnwrapConfluentProtobuf([]byte{0x01, 0, 0, 0, 1, 0})
+	require.Error(t, err)
+	_, _, err = automq.UnwrapConfluentProtobuf([]byte{0x00, 0, 0, 0, 1, 0x01})
+	require.Error(t, err)
+
+	// Nil client Publish error + Schema Registry HTTP error & bad JSON + cancelled ProduceSync
+	require.Error(t, p.Publish(ctx, []automq.Message{{ResType: "Patient", ResID: "p1"}}))
+
+	errSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01", r.Header.Get("Traceparent"))
+		if r.URL.Path == "/subjects/fhir.BadJSON-value/versions" {
+			_, _ = w.Write([]byte(`{"id":0}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer errSrv.Close()
+
+	prod, err := automq.NewProducer(automq.Config{
+		Brokers:           []string{"127.0.0.1:1"},
+		TopicPrefix:       "fhir.",
+		SchemaRegistryURL: errSrv.URL,
+	})
+	require.NoError(t, err)
+	defer prod.Close()
+
+	_, err = prod.EnsureSchemaID(ctx, "fhir.Observation")
+	require.Error(t, err)
+	_, err = prod.EnsureSchemaID(ctx, "fhir.BadJSON")
+	require.Error(t, err)
+	require.Error(t, prod.Publish(ctx, []automq.Message{{ResType: "Observation", ResID: "o1"}}))
+
+	// Cancelled context immediately terminates ProduceSync without waiting on unreachable broker
+	prodNoReg, err := automq.NewProducer(automq.Config{
+		Brokers:     []string{"127.0.0.1:1"},
+		TopicPrefix: "fhir.",
+	})
+	require.NoError(t, err)
+	defer prodNoReg.Close()
+	cCtx, cancel := context.WithCancel(ctx)
+	cancel()
+	require.Error(t, prodNoReg.Publish(cCtx, []automq.Message{{TenantID: "demo", ResType: "Patient", ResID: "p1", Op: "U"}}))
 }

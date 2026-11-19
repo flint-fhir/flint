@@ -175,12 +175,12 @@ func (c *mockPGConn) QueryContext(_ context.Context, query string, _ []driver.Na
 			cols: []string{
 				"tenant_id", "audit_id", "recorded", "action", "subtype_code", "outcome", "outcome_desc",
 				"http_method", "http_status", "request_uri", "agent_subject", "agent_patient",
-				"client_ip", "entity_type", "entity_id", "entity_version",
+				"client_ip", "entity_type", "entity_id", "entity_version", "trace_id", "span_id",
 			},
 			rows: [][]driver.Value{{
 				"t1", "aud-1", now, "R", "read", "0", "200 OK",
 				"GET", int64(200), "/fhir/r4/t1/Patient/pat-1", "practitioner-1", "pat-1",
-				"127.0.0.1", "Patient", "pat-1", "1",
+				"127.0.0.1", "Patient", "pat-1", "1", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7",
 			}},
 		}, nil
 
@@ -188,18 +188,24 @@ func (c *mockPGConn) QueryContext(_ context.Context, query string, _ []driver.Na
 		return &mockPGRows{
 			cols: []string{
 				"client_id", "redirect_uri", "scope", "code_challenge", "code_challenge_method",
-				"patient_id", "encounter_id", "tenant_id", "nonce", "expires_at",
+				"patient_id", "encounter_id", "tenant_id", "nonce", "fhir_user", "extra_claims_text", "expires_at",
 			},
 			rows: [][]driver.Value{{
 				"inferno", "https://cb", "patient/*.rs", "chal", "S256",
-				"pat-1", "enc-1", "t1", "nonce-1", now.Add(time.Hour),
+				"pat-1", "enc-1", "t1", "nonce-1", "Patient/pat-1", "", now.Add(time.Hour),
 			}},
 		}, nil
 
-	case strings.Contains(q, "DELETE FROM fhir_oauth_refresh_token"):
+	case strings.Contains(q, "DELETE FROM fhir_oauth_refresh_token") || strings.Contains(q, "FROM fhir_oauth_refresh_token"):
 		return &mockPGRows{
-			cols: []string{"subject", "patient_id", "encounter_id", "scope", "expires_at"},
-			rows: [][]driver.Value{{"sub-1", "pat-1", "enc-1", "patient/*.rs", now.Add(time.Hour)}},
+			cols: []string{
+				"subject", "grant_id", "client_id", "tenant_id", "patient_id", "encounter_id",
+				"scope", "nonce", "fhir_user", "extra_claims_text", "expires_at",
+			},
+			rows: [][]driver.Value{{
+				"sub-1", "grant-1", "inferno", "t1", "pat-1", "enc-1",
+				"patient/*.rs", "nonce-1", "Patient/pat-1", "", now.Add(time.Hour),
+			}},
 		}, nil
 
 	case strings.Contains(q, "SELECT 1 FROM fhir_oauth_revoked_token"):
@@ -208,12 +214,40 @@ func (c *mockPGConn) QueryContext(_ context.Context, query string, _ []driver.Na
 			rows: [][]driver.Value{{int64(1)}},
 		}, nil
 
+	case strings.Contains(q, "SELECT secret_bytes FROM fhir_cluster_secret"):
+		return &mockPGRows{
+			cols: []string{"secret_bytes"},
+			rows: [][]driver.Value{{[]byte("mock-secret")}},
+		}, nil
+
+	case strings.Contains(q, "RETURNING version, updated_at"):
+		return &mockPGRows{
+			cols: []string{"version", "updated_at"},
+			rows: [][]driver.Value{{int64(1), now}},
+		}, nil
+
+	case strings.Contains(q, "FROM fhir_cluster_state"):
+		return &mockPGRows{
+			cols: []string{
+				"namespace", "state_key", "tenant_id", "secondary_key",
+				"value_blob", "version", "expires_at", "updated_at",
+			},
+			rows: [][]driver.Value{{
+				"oauth_client", "cli-1", "t1", "https://iss.example",
+				[]byte(`{"id":"cli-1"}`), int64(1), now.Add(time.Hour), now,
+			}},
+		}, nil
+
 	case strings.Contains(q, "FROM fhir_export_job"):
 		b64 := base64.StdEncoding.EncodeToString([]byte(`{"resourceType":"Patient","id":"pat-1"}` + "\n"))
 		return &mockPGRows{
-			cols: []string{"job_id", "tenant_id", "patient_id", "request_url", "created_at", "types_order", "counts", "files_json", "combined"},
+			cols: []string{
+				"job_id", "tenant_id", "patient_id", "status", "err_msg", "output_format", "cancel_requested",
+				"request_url", "created_at", "types_order", "counts", "files_json", "combined",
+			},
 			rows: [][]driver.Value{{
-				"job-1", "t1", "pat-1", "http://localhost/export", now,
+				"job-1", "t1", "pat-1", "complete", "", "application/fhir+ndjson", false,
+				"http://localhost/export", now,
 				`["Patient"]`, `{"Patient":1}`, `{"Patient":"` + b64 + `"}`, []byte("combined"),
 			}},
 		}, nil
@@ -431,8 +465,14 @@ func TestStoreCRUDHistoryAuditOAuthAndExportOfflineUnit(t *testing.T) {
 
 	require.NoError(t, st.SaveRefreshToken(ctx, "rt-123", OAuthRefreshTokenRecord{
 		Subject:   "sub-1",
+		GrantID:   "grant-1",
 		ExpiresAt: now.Add(time.Hour),
 	}))
+	peekRT, ok, err := st.PeekRefreshToken(ctx, "rt-123")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "grant-1", peekRT.GrantID)
+
 	rtRec, ok, err := st.ConsumeRefreshToken(ctx, "rt-123")
 	require.NoError(t, err)
 	assert.True(t, ok)
@@ -442,6 +482,71 @@ func TestStoreCRUDHistoryAuditOAuthAndExportOfflineUnit(t *testing.T) {
 	revoked, err := st.IsTokenRevoked(ctx, "rev-123")
 	require.NoError(t, err)
 	assert.True(t, revoked)
+
+	claimed, err := st.ClaimNonce(ctx, "jti-1", time.Minute)
+	require.NoError(t, err)
+	assert.True(t, claimed)
+
+	secBytes, err := st.GetOrCreateClusterSecret(ctx, "jwt-rsa", func() ([]byte, error) {
+		return []byte("gen"), nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []byte("mock-secret"), secBytes)
+
+	expTime := now.Add(time.Hour)
+	putCS, err := st.PutClusterState(ctx, ClusterStateRecord{
+		Namespace:    "oauth_client",
+		Key:          "cli-1",
+		TenantID:     "t1",
+		SecondaryKey: "https://iss.example",
+		Value:        []byte(`{"id":"cli-1"}`),
+		ExpiresAt:    &expTime,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), putCS.Version)
+
+	gotCS, ok, err := st.GetClusterState(ctx, "oauth_client", "cli-1")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "cli-1", gotCS.Key)
+
+	gotSec, ok, err := st.GetClusterStateBySecondary(ctx, "oauth_client", "https://iss.example")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "cli-1", gotSec.Key)
+
+	_, ok, err = st.CompareAndSwapClusterState(ctx, 0, ClusterStateRecord{
+		Namespace: "shlink",
+		Key:       "shl-1",
+		Value:     []byte(`{}`),
+	})
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	_, ok, err = st.CompareAndSwapClusterState(ctx, 1, ClusterStateRecord{
+		Namespace: "shlink",
+		Key:       "shl-1",
+		Value:     []byte(`{"views":1}`),
+	})
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	listCS, err := st.ListClusterStates(ctx, "oauth_client", "t1")
+	require.NoError(t, err)
+	assert.Len(t, listCS, 1)
+
+	listAllCS, err := st.ListClusterStates(ctx, "oauth_client", "")
+	require.NoError(t, err)
+	assert.Len(t, listAllCS, 1)
+
+	consCS, ok, err := st.ConsumeClusterState(ctx, "oauth_client", "cli-1")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "cli-1", consCS.Key)
+
+	delCS, err := st.DeleteClusterState(ctx, "oauth_client", "cli-1")
+	require.NoError(t, err)
+	assert.True(t, delCS)
 
 	require.NoError(t, st.SaveExportJob(ctx, ExportJobRecord{
 		ID:         "job-1",

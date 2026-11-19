@@ -155,6 +155,17 @@ func (s *Server) saveViewDefinition(tenant string, vd sqlOnFHIRViewDefinition) s
 	if strings.TrimSpace(vd.Status) == "" {
 		vd.Status = "active"
 	}
+	if s.store != nil {
+		if rawJSON, err := json.Marshal(vd); err == nil {
+			_, _ = s.store.PutClusterState(context.Background(), store.ClusterStateRecord{
+				Namespace: "view_definition",
+				Key:       tenant + "|" + vd.ID,
+				TenantID:  tenant,
+				Value:     rawJSON,
+			})
+			return vd
+		}
+	}
 	s.viewDefsMu.Lock()
 	if s.viewDefs == nil {
 		s.viewDefs = make(map[string]map[string]sqlOnFHIRViewDefinition)
@@ -167,6 +178,30 @@ func (s *Server) saveViewDefinition(tenant string, vd sqlOnFHIRViewDefinition) s
 	return vd
 }
 
+func (s *Server) listStoredViewDefinitions(ctx context.Context, tenant string) []sqlOnFHIRViewDefinition {
+	if s.store != nil {
+		recs, err := s.store.ListClusterStates(ctx, "view_definition", tenant)
+		if err != nil {
+			return nil
+		}
+		out := make([]sqlOnFHIRViewDefinition, 0, len(recs))
+		for _, rec := range recs {
+			var vd sqlOnFHIRViewDefinition
+			if json.Unmarshal(rec.Value, &vd) == nil && vd.ID != "" {
+				out = append(out, vd)
+			}
+		}
+		return out
+	}
+	s.viewDefsMu.RLock()
+	defer s.viewDefsMu.RUnlock()
+	out := make([]sqlOnFHIRViewDefinition, 0, len(s.viewDefs[tenant]))
+	for _, vd := range s.viewDefs[tenant] {
+		out = append(out, vd)
+	}
+	return out
+}
+
 func (s *Server) resolveViewDefinitionByID(ctx context.Context, tenant, id string) (sqlOnFHIRViewDefinition, bool) {
 	id = strings.TrimSpace(id)
 	if slash := strings.LastIndexByte(id, '/'); slash != -1 {
@@ -176,20 +211,34 @@ func (s *Server) resolveViewDefinitionByID(ctx context.Context, tenant, id strin
 		return sqlOnFHIRViewDefinition{}, false
 	}
 
-	s.viewDefsMu.RLock()
-	if byTenant, ok := s.viewDefs[tenant]; ok {
-		if vd, found := byTenant[id]; found {
-			s.viewDefsMu.RUnlock()
-			return vd, true
-		}
-		for _, vd := range byTenant {
-			if strings.EqualFold(vd.Name, id) || (vd.URL != "" && strings.EqualFold(vd.URL, id)) {
-				s.viewDefsMu.RUnlock()
+	if s.store != nil {
+		if rec, found, err := s.store.GetClusterState(ctx, "view_definition", tenant+"|"+id); err == nil && found && rec != nil {
+			var vd sqlOnFHIRViewDefinition
+			if json.Unmarshal(rec.Value, &vd) == nil && vd.ID != "" {
 				return vd, true
 			}
 		}
+		for _, vd := range s.listStoredViewDefinitions(ctx, tenant) {
+			if strings.EqualFold(vd.Name, id) || (vd.URL != "" && strings.EqualFold(vd.URL, id)) {
+				return vd, true
+			}
+		}
+	} else {
+		s.viewDefsMu.RLock()
+		if byTenant, ok := s.viewDefs[tenant]; ok {
+			if vd, found := byTenant[id]; found {
+				s.viewDefsMu.RUnlock()
+				return vd, true
+			}
+			for _, vd := range byTenant {
+				if strings.EqualFold(vd.Name, id) || (vd.URL != "" && strings.EqualFold(vd.URL, id)) {
+					s.viewDefsMu.RUnlock()
+					return vd, true
+				}
+			}
+		}
+		s.viewDefsMu.RUnlock()
 	}
-	s.viewDefsMu.RUnlock()
 
 	builtins := builtinViewDefinitions()
 	if vd, ok := builtins[id]; ok {
@@ -440,9 +489,8 @@ func (s *Server) handleViewDefinitionCRUD(w http.ResponseWriter, r *http.Request
 		var entries []map[string]any
 		var protoEntries []any
 		seen := make(map[string]bool)
-		s.viewDefsMu.RLock()
-		for k, vd := range s.viewDefs[tenant] {
-			seen[k] = true
+		for _, vd := range s.listStoredViewDefinitions(r.Context(), tenant) {
+			seen[vd.ID] = true
 			entries = append(entries, map[string]any{
 				"fullUrl":  fmt.Sprintf("ViewDefinition/%s", vd.ID),
 				"resource": vd,
@@ -452,7 +500,6 @@ func (s *Server) handleViewDefinitionCRUD(w http.ResponseWriter, r *http.Request
 				"resource": viewDefinitionToParametersMap(vd),
 			})
 		}
-		s.viewDefsMu.RUnlock()
 		for k, vd := range builtinViewDefinitions() {
 			if !seen[k] {
 				entries = append(entries, map[string]any{
@@ -540,11 +587,15 @@ func (s *Server) handleViewDefinitionCRUD(w http.ResponseWriter, r *http.Request
 			writeValidateErrorOutcome(w, r, http.StatusBadRequest, "required", "ViewDefinition id is required for DELETE")
 			return
 		}
-		s.viewDefsMu.Lock()
-		if s.viewDefs != nil && s.viewDefs[tenant] != nil {
-			delete(s.viewDefs[tenant], id)
+		if s.store != nil {
+			_, _ = s.store.DeleteClusterState(r.Context(), "view_definition", tenant+"|"+id)
+		} else {
+			s.viewDefsMu.Lock()
+			if s.viewDefs != nil && s.viewDefs[tenant] != nil {
+				delete(s.viewDefs[tenant], id)
+			}
+			s.viewDefsMu.Unlock()
 		}
-		s.viewDefsMu.Unlock()
 		w.WriteHeader(http.StatusNoContent)
 
 	default:

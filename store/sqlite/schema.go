@@ -149,15 +149,78 @@ func SchemaDDL() []string {
     entity_type    TEXT    NULL,
     entity_id      TEXT    NULL,
     entity_version TEXT    NULL,
+    trace_id       TEXT    NULL,
+    span_id        TEXT    NULL,
     PRIMARY KEY (tenant_id, audit_id)
 ) WITHOUT ROWID;`,
 		`CREATE TABLE IF NOT EXISTS fhir_export_job (
-    tenant_id   TEXT NOT NULL,
-    job_id      TEXT NOT NULL,
-    patient_id  TEXT NULL,
-    request_url TEXT NULL,
-    created_at  TEXT NOT NULL,
+    tenant_id        TEXT    NOT NULL,
+    job_id           TEXT    NOT NULL,
+    patient_id       TEXT    NULL,
+    status           TEXT    NULL,
+    err_msg          TEXT    NULL,
+    output_format    TEXT    NULL,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    request_url      TEXT    NULL,
+    created_at       TEXT    NOT NULL,
+    types_order      TEXT    NULL,
+    counts           TEXT    NULL,
+    files_b64        TEXT    NULL,
+    combined         BLOB    NULL,
     PRIMARY KEY (tenant_id, job_id)
+) WITHOUT ROWID;`,
+		`CREATE TABLE IF NOT EXISTS fhir_cluster_secret (
+    secret_key   TEXT NOT NULL PRIMARY KEY,
+    secret_bytes BLOB NOT NULL,
+    created_at   TEXT NOT NULL
+) WITHOUT ROWID;`,
+		`CREATE TABLE IF NOT EXISTS fhir_cluster_state (
+    namespace     TEXT    NOT NULL,
+    state_key     TEXT    NOT NULL,
+    tenant_id     TEXT    NOT NULL DEFAULT '',
+    secondary_key TEXT    NOT NULL DEFAULT '',
+    value_blob    BLOB    NOT NULL,
+    version       INTEGER NOT NULL DEFAULT 1,
+    expires_at    TEXT    NULL,
+    updated_at    TEXT    NOT NULL,
+    PRIMARY KEY (namespace, state_key)
+) WITHOUT ROWID;`,
+		`CREATE TABLE IF NOT EXISTS fhir_oauth_auth_code (
+    code_hash             TEXT NOT NULL PRIMARY KEY,
+    client_id             TEXT NOT NULL DEFAULT '',
+    redirect_uri          TEXT NOT NULL DEFAULT '',
+    scope                 TEXT NOT NULL DEFAULT '',
+    code_challenge        TEXT NOT NULL DEFAULT '',
+    code_challenge_method TEXT NOT NULL DEFAULT '',
+    patient_id            TEXT NOT NULL DEFAULT '',
+    encounter_id          TEXT NOT NULL DEFAULT '',
+    tenant_id             TEXT NOT NULL DEFAULT '',
+    nonce                 TEXT NOT NULL DEFAULT '',
+    fhir_user             TEXT NOT NULL DEFAULT '',
+    extra_claims_text     TEXT NOT NULL DEFAULT '',
+    expires_at            TEXT NOT NULL
+) WITHOUT ROWID;`,
+		`CREATE TABLE IF NOT EXISTS fhir_oauth_refresh_token (
+    token_hash        TEXT NOT NULL PRIMARY KEY,
+    subject           TEXT NOT NULL DEFAULT '',
+    grant_id          TEXT NOT NULL DEFAULT '',
+    client_id         TEXT NOT NULL DEFAULT '',
+    tenant_id         TEXT NOT NULL DEFAULT '',
+    patient_id        TEXT NOT NULL DEFAULT '',
+    encounter_id      TEXT NOT NULL DEFAULT '',
+    scope             TEXT NOT NULL DEFAULT '',
+    nonce             TEXT NOT NULL DEFAULT '',
+    fhir_user         TEXT NOT NULL DEFAULT '',
+    extra_claims_text TEXT NOT NULL DEFAULT '',
+    expires_at        TEXT NOT NULL
+) WITHOUT ROWID;`,
+		`CREATE TABLE IF NOT EXISTS fhir_oauth_revoked_token (
+    token_hash TEXT NOT NULL PRIMARY KEY,
+    expires_at TEXT NOT NULL
+) WITHOUT ROWID;`,
+		`CREATE TABLE IF NOT EXISTS fhir_sqlite_meta (
+    meta_key TEXT    NOT NULL PRIMARY KEY,
+    meta_seq INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;`,
 	}
 }

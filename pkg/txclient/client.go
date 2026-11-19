@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/flint-fhir/flint/pkg/telemetry"
 )
 
 const (
@@ -593,6 +595,7 @@ func (c *Client) doFHIRRequest(ctx context.Context, method, endpoint string, bod
 	if c.headerName != "" && c.headerVal != "" {
 		req.Header.Set(c.headerName, c.headerVal)
 	}
+	telemetry.InjectHTTP(reqCtx, req.Header)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

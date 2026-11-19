@@ -60,6 +60,10 @@ func TestArchitecture_ZeroCrossBackendImports(t *testing.T) {
 			forbidden: append(append([]string{"database/sql"}, allBackendPkgs...), allSQLDrivers...),
 		},
 		{
+			pkg:       "github.com/flint-fhir/flint/pkg/telemetry",
+			forbidden: append(append([]string{"database/sql"}, allBackendPkgs...), allSQLDrivers...),
+		},
+		{
 			pkg:       "github.com/flint-fhir/flint/ingest/activity",
 			forbidden: append(append([]string{}, allBackendPkgs...), allSQLDrivers...),
 		},

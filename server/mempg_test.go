@@ -61,15 +61,19 @@ type memResRecord struct {
 }
 
 type memExportJobRec struct {
-	jobID      string
-	tenantID   string
-	patientID  string
-	requestURL string
-	createdAt  time.Time
-	typesOrder string
-	counts     string
-	filesJSON  string
-	combined   []byte
+	jobID           string
+	tenantID        string
+	patientID       string
+	status          string
+	errMsg          string
+	outputFormat    string
+	cancelRequested bool
+	requestURL      string
+	createdAt       time.Time
+	typesOrder      string
+	counts          string
+	filesJSON       string
+	combined        []byte
 }
 
 type memAuditRec struct {
@@ -89,33 +93,50 @@ type memAuditRec struct {
 	entityType    string
 	entityID      string
 	entityVersion string
+	traceID       string
+	spanID        string
+}
+
+type memClusterStateRec struct {
+	namespace    string
+	key          string
+	tenantID     string
+	secondaryKey string
+	valueBlob    []byte
+	version      int64
+	expiresAt    *time.Time
+	updatedAt    time.Time
 }
 
 type memPGStore struct {
-	txMu          sync.Mutex
-	mu            sync.RWMutex
-	resources     map[string]*memResRecord
-	history       []memResRecord
-	strings       []store.SpidxString
-	tokens        []store.SpidxToken
-	dates         []store.SpidxDate
-	refs          []store.SpidxReference
-	quants        []store.SpidxQuantity
-	uris          []store.SpidxURI
-	exportJobs    map[string]*memExportJobRec
-	authCodes     map[string][]driver.Value
-	refreshTokens map[string][]driver.Value
-	revokedTokens map[string]bool
-	audits        []memAuditRec
+	txMu           sync.Mutex
+	mu             sync.RWMutex
+	resources      map[string]*memResRecord
+	history        []memResRecord
+	strings        []store.SpidxString
+	tokens         []store.SpidxToken
+	dates          []store.SpidxDate
+	refs           []store.SpidxReference
+	quants         []store.SpidxQuantity
+	uris           []store.SpidxURI
+	exportJobs     map[string]*memExportJobRec
+	authCodes      map[string][]driver.Value
+	refreshTokens  map[string][]driver.Value
+	revokedTokens  map[string]time.Time
+	clusterSecrets map[string][]byte
+	clusterStates  map[string]*memClusterStateRec
+	audits         []memAuditRec
 }
 
 func newMemPGStore() *memPGStore {
 	return &memPGStore{
-		resources:     make(map[string]*memResRecord),
-		exportJobs:    make(map[string]*memExportJobRec),
-		authCodes:     make(map[string][]driver.Value),
-		refreshTokens: make(map[string][]driver.Value),
-		revokedTokens: make(map[string]bool),
+		resources:      make(map[string]*memResRecord),
+		exportJobs:     make(map[string]*memExportJobRec),
+		authCodes:      make(map[string][]driver.Value),
+		refreshTokens:  make(map[string][]driver.Value),
+		revokedTokens:  make(map[string]time.Time),
+		clusterSecrets: make(map[string][]byte),
+		clusterStates:  make(map[string]*memClusterStateRec),
 	}
 }
 
@@ -295,6 +316,92 @@ func nvTime(args []driver.NamedValue, i int) time.Time {
 		return t.UTC()
 	}
 	return time.Now().UTC()
+}
+
+func nvOptTime(args []driver.NamedValue, i int) *time.Time {
+	if i >= len(args) || args[i].Value == nil {
+		return nil
+	}
+	if t, ok := args[i].Value.(time.Time); ok {
+		u := t.UTC()
+		return &u
+	}
+	return nil
+}
+
+func nvBool(args []driver.NamedValue, i int) bool {
+	if i >= len(args) || args[i].Value == nil {
+		return false
+	}
+	switch v := args[i].Value.(type) {
+	case bool:
+		return v
+	case int64:
+		return v != 0
+	case string:
+		return strings.EqualFold(v, "true") || v == "1"
+	default:
+		return false
+	}
+}
+
+func clusterStateRowValues(r *memClusterStateRec) []driver.Value {
+	var expVal driver.Value
+	if r.expiresAt != nil {
+		expVal = *r.expiresAt
+	}
+	return []driver.Value{
+		r.namespace, r.key, r.tenantID, r.secondaryKey,
+		append([]byte(nil), r.valueBlob...), r.version, expVal, r.updatedAt,
+	}
+}
+
+var reAuditEq = regexp.MustCompile(`\b(tenant_id|audit_id|action|subtype_code|outcome|agent_subject|agent_patient|entity_type|entity_id)\s*=\s*\$(\d+)`)
+
+func matchMemAudit(a memAuditRec, q string, args []driver.NamedValue) bool {
+	for _, m := range reAuditEq.FindAllStringSubmatch(q, -1) {
+		idx, _ := strconv.Atoi(m[2])
+		want := nvStr(args, idx-1)
+		switch m[1] {
+		case "tenant_id":
+			if a.tenantID != want {
+				return false
+			}
+		case "audit_id":
+			if a.auditID != want {
+				return false
+			}
+		case "action":
+			if a.action != want {
+				return false
+			}
+		case "subtype_code":
+			if a.subtypeCode != want {
+				return false
+			}
+		case "outcome":
+			if a.outcome != want {
+				return false
+			}
+		case "agent_subject":
+			if a.agentSubject != want {
+				return false
+			}
+		case "agent_patient":
+			if a.agentPatient != want {
+				return false
+			}
+		case "entity_type":
+			if a.entityType != want {
+				return false
+			}
+		case "entity_id":
+			if a.entityID != want {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (c *memPGConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
@@ -550,15 +657,19 @@ func (c *memPGConn) ExecContext(_ context.Context, query string, args []driver.N
 
 	case strings.Contains(q, "INSERT INTO fhir_export_job"):
 		job := &memExportJobRec{
-			jobID:      nvStr(args, 0),
-			tenantID:   nvStr(args, 1),
-			patientID:  nvStr(args, 2),
-			requestURL: nvStr(args, 3),
-			createdAt:  nvTime(args, 4),
-			typesOrder: nvStr(args, 5),
-			counts:     nvStr(args, 6),
-			filesJSON:  nvStr(args, 7),
-			combined:   nvBytes(args, 8),
+			jobID:           nvStr(args, 0),
+			tenantID:        nvStr(args, 1),
+			patientID:       nvStr(args, 2),
+			status:          nvStr(args, 3),
+			errMsg:          nvStr(args, 4),
+			outputFormat:    nvStr(args, 5),
+			cancelRequested: nvBool(args, 6),
+			requestURL:      nvStr(args, 7),
+			createdAt:       nvTime(args, 8),
+			typesOrder:      nvStr(args, 9),
+			counts:          nvStr(args, 10),
+			filesJSON:       nvStr(args, 11),
+			combined:        nvBytes(args, 12),
 		}
 		s.exportJobs[job.tenantID+"|"+job.jobID] = job
 		return driver.RowsAffected(1), nil
@@ -571,18 +682,43 @@ func (c *memPGConn) ExecContext(_ context.Context, query string, args []driver.N
 		}
 		return driver.RowsAffected(0), nil
 
+	case strings.Contains(q, "DELETE FROM fhir_oauth_auth_code WHERE expires_at <= NOW()"):
+		now := time.Now().UTC()
+		for k, vals := range s.authCodes {
+			if len(vals) >= 12 {
+				if exp, ok := vals[11].(time.Time); ok && !exp.After(now) {
+					delete(s.authCodes, k)
+				}
+			}
+		}
+		return driver.RowsAffected(0), nil
+
 	case strings.Contains(q, "INSERT INTO fhir_oauth_auth_code"):
 		h := nvStr(args, 0)
 		s.authCodes[h] = []driver.Value{
 			nvStr(args, 1), nvStr(args, 2), nvStr(args, 3), nvStr(args, 4), nvStr(args, 5),
-			nvStr(args, 6), nvStr(args, 7), nvStr(args, 8), nvStr(args, 9), nvTime(args, 10),
+			nvStr(args, 6), nvStr(args, 7), nvStr(args, 8), nvStr(args, 9), nvStr(args, 10),
+			nvStr(args, 11), nvTime(args, 12),
 		}
 		return driver.RowsAffected(1), nil
+
+	case strings.Contains(q, "DELETE FROM fhir_oauth_refresh_token WHERE expires_at <= NOW()"):
+		now := time.Now().UTC()
+		for k, vals := range s.refreshTokens {
+			if len(vals) >= 11 {
+				if exp, ok := vals[10].(time.Time); ok && !exp.After(now) {
+					delete(s.refreshTokens, k)
+				}
+			}
+		}
+		return driver.RowsAffected(0), nil
 
 	case strings.Contains(q, "INSERT INTO fhir_oauth_refresh_token"):
 		h := nvStr(args, 0)
 		s.refreshTokens[h] = []driver.Value{
-			nvStr(args, 1), nvStr(args, 2), nvStr(args, 3), nvStr(args, 4), nvTime(args, 5),
+			nvStr(args, 1), nvStr(args, 2), nvStr(args, 3), nvStr(args, 4), nvStr(args, 5),
+			nvStr(args, 6), nvStr(args, 7), nvStr(args, 8), nvStr(args, 9), nvStr(args, 10),
+			nvTime(args, 11),
 		}
 		return driver.RowsAffected(1), nil
 
@@ -590,15 +726,70 @@ func (c *memPGConn) ExecContext(_ context.Context, query string, args []driver.N
 		delete(s.refreshTokens, nvStr(args, 0))
 		return driver.RowsAffected(1), nil
 
+	case strings.Contains(q, "DELETE FROM fhir_oauth_revoked_token WHERE token_hash = $1 AND expires_at <= NOW()"):
+		h := nvStr(args, 0)
+		if exp, ok := s.revokedTokens[h]; ok && !exp.After(time.Now().UTC()) {
+			delete(s.revokedTokens, h)
+			return driver.RowsAffected(1), nil
+		}
+		return driver.RowsAffected(0), nil
+
+	case strings.Contains(q, "DELETE FROM fhir_oauth_revoked_token WHERE expires_at <= NOW()"):
+		now := time.Now().UTC()
+		for k, exp := range s.revokedTokens {
+			if !exp.After(now) {
+				delete(s.revokedTokens, k)
+			}
+		}
+		return driver.RowsAffected(0), nil
+
 	case strings.Contains(q, "INSERT INTO fhir_oauth_revoked_token"):
-		s.revokedTokens[nvStr(args, 0)] = true
+		h := nvStr(args, 0)
+		exp := nvTime(args, 1)
+		if strings.Contains(q, "DO NOTHING") {
+			if curExp, ok := s.revokedTokens[h]; ok && curExp.After(time.Now().UTC()) {
+				return driver.RowsAffected(0), nil
+			}
+		}
+		s.revokedTokens[h] = exp
+		return driver.RowsAffected(1), nil
+
+	case strings.Contains(q, "INSERT INTO fhir_cluster_secret"):
+		k := nvStr(args, 0)
+		if _, exists := s.clusterSecrets[k]; exists && strings.Contains(q, "DO NOTHING") {
+			return driver.RowsAffected(0), nil
+		}
+		s.clusterSecrets[k] = nvBytes(args, 1)
+		return driver.RowsAffected(1), nil
+
+	case strings.Contains(q, "DELETE FROM fhir_cluster_state"):
+		mapKey := nvStr(args, 0) + "|" + nvStr(args, 1)
+		cur := s.clusterStates[mapKey]
+		if cur == nil {
+			return driver.RowsAffected(0), nil
+		}
+		if strings.Contains(q, "expires_at <= NOW()") {
+			if cur.expiresAt != nil && !cur.expiresAt.After(time.Now().UTC()) {
+				delete(s.clusterStates, mapKey)
+				return driver.RowsAffected(1), nil
+			}
+			return driver.RowsAffected(0), nil
+		}
+		delete(s.clusterStates, mapKey)
 		return driver.RowsAffected(1), nil
 
 	case strings.Contains(q, "INSERT INTO fhir_audit_event"):
 		if len(args) >= 16 {
+			tenantID := nvStr(args, 0)
+			auditID := nvStr(args, 1)
+			for _, existing := range s.audits {
+				if existing.tenantID == tenantID && existing.auditID == auditID {
+					return driver.RowsAffected(0), nil
+				}
+			}
 			s.audits = append(s.audits, memAuditRec{
-				tenantID:      nvStr(args, 0),
-				auditID:       nvStr(args, 1),
+				tenantID:      tenantID,
+				auditID:       auditID,
 				recorded:      nvTime(args, 2),
 				action:        nvStr(args, 3),
 				subtypeCode:   nvStr(args, 4),
@@ -613,6 +804,8 @@ func (c *memPGConn) ExecContext(_ context.Context, query string, args []driver.N
 				entityType:    nvStr(args, 13),
 				entityID:      nvStr(args, 14),
 				entityVersion: nvStr(args, 15),
+				traceID:       nvStr(args, 16),
+				spanID:        nvStr(args, 17),
 			})
 		}
 		return driver.RowsAffected(1), nil
@@ -953,20 +1146,48 @@ func (c *memPGConn) QueryContext(_ context.Context, query string, args []driver.
 	case strings.Contains(q, "FROM fhir_export_job"):
 		key := nvStr(args, 0) + "|" + nvStr(args, 1)
 		job := s.exportJobs[key]
+		cols := []string{
+			"job_id", "tenant_id", "patient_id", "status", "err_msg", "output_format", "cancel_requested",
+			"request_url", "created_at", "types_order", "counts", "files_json", "combined",
+		}
 		if job == nil {
-			return &memPGRows{cols: []string{"job_id", "tenant_id", "patient_id", "request_url", "created_at", "types_order", "counts", "files_json", "combined"}}, nil
+			return &memPGRows{cols: cols}, nil
 		}
 		return &memPGRows{
-			cols: []string{"job_id", "tenant_id", "patient_id", "request_url", "created_at", "types_order", "counts", "files_json", "combined"},
-			rows: [][]driver.Value{{job.jobID, job.tenantID, job.patientID, job.requestURL, job.createdAt, job.typesOrder, job.counts, job.filesJSON, job.combined}},
+			cols: cols,
+			rows: [][]driver.Value{{
+				job.jobID, job.tenantID, job.patientID, job.status, job.errMsg, job.outputFormat, job.cancelRequested,
+				job.requestURL, job.createdAt, job.typesOrder, job.counts, job.filesJSON, job.combined,
+			}},
 		}, nil
 
 	case strings.Contains(q, "DELETE FROM fhir_oauth_auth_code"):
 		h := nvStr(args, 0)
 		vals, ok := s.authCodes[h]
 		delete(s.authCodes, h)
-		cols := []string{"client_id", "redirect_uri", "scope", "code_challenge", "code_challenge_method", "patient_id", "encounter_id", "tenant_id", "nonce", "expires_at"}
-		if !ok {
+		cols := []string{
+			"client_id", "redirect_uri", "scope", "code_challenge", "code_challenge_method",
+			"patient_id", "encounter_id", "tenant_id", "nonce", "fhir_user", "extra_claims_text", "expires_at",
+		}
+		if !ok || len(vals) < 12 {
+			return &memPGRows{cols: cols}, nil
+		}
+		if exp, isT := vals[11].(time.Time); isT && !exp.After(now) {
+			return &memPGRows{cols: cols}, nil
+		}
+		return &memPGRows{cols: cols, rows: [][]driver.Value{vals}}, nil
+
+	case strings.Contains(q, "FROM fhir_oauth_refresh_token") && strings.HasPrefix(q, "SELECT"):
+		h := nvStr(args, 0)
+		vals, ok := s.refreshTokens[h]
+		cols := []string{
+			"subject", "grant_id", "client_id", "tenant_id", "patient_id", "encounter_id",
+			"scope", "nonce", "fhir_user", "extra_claims_text", "expires_at",
+		}
+		if !ok || len(vals) < 11 {
+			return &memPGRows{cols: cols}, nil
+		}
+		if exp, isT := vals[10].(time.Time); isT && !exp.After(now) {
 			return &memPGRows{cols: cols}, nil
 		}
 		return &memPGRows{cols: cols, rows: [][]driver.Value{vals}}, nil
@@ -975,24 +1196,150 @@ func (c *memPGConn) QueryContext(_ context.Context, query string, args []driver.
 		h := nvStr(args, 0)
 		vals, ok := s.refreshTokens[h]
 		delete(s.refreshTokens, h)
-		cols := []string{"subject", "patient_id", "encounter_id", "scope", "expires_at"}
-		if !ok {
+		cols := []string{
+			"subject", "grant_id", "client_id", "tenant_id", "patient_id", "encounter_id",
+			"scope", "nonce", "fhir_user", "extra_claims_text", "expires_at",
+		}
+		if !ok || len(vals) < 11 {
+			return &memPGRows{cols: cols}, nil
+		}
+		if exp, isT := vals[10].(time.Time); isT && !exp.After(now) {
 			return &memPGRows{cols: cols}, nil
 		}
 		return &memPGRows{cols: cols, rows: [][]driver.Value{vals}}, nil
 
 	case strings.Contains(q, "SELECT 1 FROM fhir_oauth_revoked_token"):
 		h := nvStr(args, 0)
-		if s.revokedTokens[h] {
+		if exp, ok := s.revokedTokens[h]; ok && exp.After(now) {
 			return &memPGRows{cols: []string{"?column?"}, rows: [][]driver.Value{{int64(1)}}}, nil
 		}
 		return &memPGRows{cols: []string{"?column?"}}, nil
 
+	case strings.Contains(q, "SELECT secret_bytes FROM fhir_cluster_secret"):
+		k := nvStr(args, 0)
+		if b, ok := s.clusterSecrets[k]; ok {
+			return &memPGRows{
+				cols: []string{"secret_bytes"},
+				rows: [][]driver.Value{{append([]byte(nil), b...)}},
+			}, nil
+		}
+		return &memPGRows{cols: []string{"secret_bytes"}}, nil
+
+	case strings.Contains(q, "INSERT INTO fhir_cluster_state"):
+		ns, key := nvStr(args, 0), nvStr(args, 1)
+		mapKey := ns + "|" + key
+		cur := s.clusterStates[mapKey]
+		if strings.Contains(q, "DO NOTHING") {
+			if cur != nil && (cur.expiresAt == nil || cur.expiresAt.After(now)) {
+				return &memPGRows{cols: []string{"version", "updated_at"}}, nil
+			}
+			rec := &memClusterStateRec{
+				namespace:    ns,
+				key:          key,
+				tenantID:     nvStr(args, 2),
+				secondaryKey: nvStr(args, 3),
+				valueBlob:    nvBytes(args, 4),
+				version:      1,
+				expiresAt:    nvOptTime(args, 5),
+				updatedAt:    now,
+			}
+			s.clusterStates[mapKey] = rec
+			return &memPGRows{cols: []string{"version", "updated_at"}, rows: [][]driver.Value{{int64(1), now}}}, nil
+		}
+		ver := int64(1)
+		if cur != nil {
+			ver = cur.version + 1
+		}
+		rec := &memClusterStateRec{
+			namespace:    ns,
+			key:          key,
+			tenantID:     nvStr(args, 2),
+			secondaryKey: nvStr(args, 3),
+			valueBlob:    nvBytes(args, 4),
+			version:      ver,
+			expiresAt:    nvOptTime(args, 5),
+			updatedAt:    now,
+		}
+		s.clusterStates[mapKey] = rec
+		return &memPGRows{cols: []string{"version", "updated_at"}, rows: [][]driver.Value{{ver, now}}}, nil
+
+	case strings.Contains(q, "UPDATE fhir_cluster_state"):
+		ns, key := nvStr(args, 0), nvStr(args, 1)
+		mapKey := ns + "|" + key
+		wantVer := int64(nvInt(args, 6))
+		cur := s.clusterStates[mapKey]
+		if cur == nil || cur.version != wantVer || (cur.expiresAt != nil && !cur.expiresAt.After(now)) {
+			return &memPGRows{cols: []string{"version", "updated_at"}}, nil
+		}
+		cur.tenantID = nvStr(args, 2)
+		cur.secondaryKey = nvStr(args, 3)
+		cur.valueBlob = nvBytes(args, 4)
+		cur.version = wantVer + 1
+		cur.expiresAt = nvOptTime(args, 5)
+		cur.updatedAt = now
+		return &memPGRows{cols: []string{"version", "updated_at"}, rows: [][]driver.Value{{cur.version, now}}}, nil
+
+	case strings.Contains(q, "DELETE FROM fhir_cluster_state") && strings.Contains(q, "RETURNING"):
+		cols := []string{"namespace", "state_key", "tenant_id", "secondary_key", "value_blob", "version", "expires_at", "updated_at"}
+		mapKey := nvStr(args, 0) + "|" + nvStr(args, 1)
+		cur := s.clusterStates[mapKey]
+		delete(s.clusterStates, mapKey)
+		if cur == nil || (cur.expiresAt != nil && !cur.expiresAt.After(now)) {
+			return &memPGRows{cols: cols}, nil
+		}
+		return &memPGRows{cols: cols, rows: [][]driver.Value{clusterStateRowValues(cur)}}, nil
+
+	case strings.Contains(q, "FROM fhir_cluster_state"):
+		cols := []string{"namespace", "state_key", "tenant_id", "secondary_key", "value_blob", "version", "expires_at", "updated_at"}
+		ns := nvStr(args, 0)
+		if strings.Contains(q, "state_key = $2") {
+			cur := s.clusterStates[ns+"|"+nvStr(args, 1)]
+			if cur == nil || (cur.expiresAt != nil && !cur.expiresAt.After(now)) {
+				return &memPGRows{cols: cols}, nil
+			}
+			return &memPGRows{cols: cols, rows: [][]driver.Value{clusterStateRowValues(cur)}}, nil
+		}
+		if strings.Contains(q, "secondary_key = $2") {
+			sec := nvStr(args, 1)
+			var best *memClusterStateRec
+			for _, r := range s.clusterStates {
+				if r.namespace != ns || r.secondaryKey != sec || (r.expiresAt != nil && !r.expiresAt.After(now)) {
+					continue
+				}
+				if best == nil || r.updatedAt.After(best.updatedAt) || (r.updatedAt.Equal(best.updatedAt) && r.key < best.key) {
+					best = r
+				}
+			}
+			if best == nil {
+				return &memPGRows{cols: cols}, nil
+			}
+			return &memPGRows{cols: cols, rows: [][]driver.Value{clusterStateRowValues(best)}}, nil
+		}
+		wantTenant := ""
+		if strings.Contains(q, "tenant_id = $2") {
+			wantTenant = nvStr(args, 1)
+		}
+		var list []*memClusterStateRec
+		for _, r := range s.clusterStates {
+			if r.namespace != ns || (r.expiresAt != nil && !r.expiresAt.After(now)) {
+				continue
+			}
+			if wantTenant != "" && r.tenantID != wantTenant {
+				continue
+			}
+			list = append(list, r)
+		}
+		sort.Slice(list, func(i, j int) bool { return list[i].key < list[j].key })
+		rows := make([][]driver.Value, 0, len(list))
+		for _, r := range list {
+			rows = append(rows, clusterStateRowValues(r))
+		}
+		return &memPGRows{cols: cols, rows: rows}, nil
+
 	case strings.Contains(q, "SELECT COUNT(*) FROM fhir_audit_event"):
-		tenant := nvStr(args, 0)
 		var cnt int64
 		for _, a := range s.audits {
-			if a.tenantID == tenant {
+			if matchMemAudit(a, q, args) {
 				cnt++
 			}
 		}
@@ -1002,24 +1349,23 @@ func (c *memPGConn) QueryContext(_ context.Context, query string, args []driver.
 		}, nil
 
 	case strings.Contains(q, "FROM fhir_audit_event"):
-		tenant := nvStr(args, 0)
 		var rows [][]driver.Value
 		for i := len(s.audits) - 1; i >= 0; i-- {
 			a := s.audits[i]
-			if a.tenantID != tenant {
+			if !matchMemAudit(a, q, args) {
 				continue
 			}
 			rows = append(rows, []driver.Value{
 				a.tenantID, a.auditID, a.recorded, a.action, a.subtypeCode, a.outcome, a.outcomeDesc,
 				a.httpMethod, a.httpStatus, a.requestURI, a.agentSubject, a.agentPatient,
-				a.clientIP, a.entityType, a.entityID, a.entityVersion,
+				a.clientIP, a.entityType, a.entityID, a.entityVersion, a.traceID, a.spanID,
 			})
 		}
 		return &memPGRows{
 			cols: []string{
 				"tenant_id", "audit_id", "recorded", "action", "subtype_code", "outcome", "outcome_desc",
 				"http_method", "http_status", "request_uri", "agent_subject", "agent_patient",
-				"client_ip", "entity_type", "entity_id", "entity_version",
+				"client_ip", "entity_type", "entity_id", "entity_version", "trace_id", "span_id",
 			},
 			rows: rows,
 		}, nil

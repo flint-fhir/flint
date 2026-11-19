@@ -132,13 +132,25 @@ type Store interface {
 	ReadAuditEvent(ctx context.Context, tenantID, auditID string) (*AuditRecord, error)
 	QueryAuditEvents(ctx context.Context, params AuditQueryParams) ([]AuditRecord, int, error)
 
-	// SMART on FHIR OAuth2 Grant & Revocation Persistence
+	// SMART on FHIR OAuth2 Grant, Nonce & Revocation Persistence
 	SaveAuthCode(ctx context.Context, rawCode string, rec OAuthAuthCodeRecord) error
 	ConsumeAuthCode(ctx context.Context, rawCode string) (OAuthAuthCodeRecord, bool, error)
 	SaveRefreshToken(ctx context.Context, rawToken string, rec OAuthRefreshTokenRecord) error
+	PeekRefreshToken(ctx context.Context, rawToken string) (OAuthRefreshTokenRecord, bool, error)
 	ConsumeRefreshToken(ctx context.Context, rawToken string) (OAuthRefreshTokenRecord, bool, error)
 	RevokeToken(ctx context.Context, rawToken string, ttl time.Duration) error
 	IsTokenRevoked(ctx context.Context, rawToken string) (bool, error)
+	ClaimNonce(ctx context.Context, nonceKey string, ttl time.Duration) (bool, error)
+
+	// Stateless Multi-Replica Cluster Secrets & State
+	GetOrCreateClusterSecret(ctx context.Context, key string, generate func() ([]byte, error)) ([]byte, error)
+	PutClusterState(ctx context.Context, rec ClusterStateRecord) (ClusterStateRecord, error)
+	GetClusterState(ctx context.Context, namespace, key string) (*ClusterStateRecord, bool, error)
+	GetClusterStateBySecondary(ctx context.Context, namespace, secondaryKey string) (*ClusterStateRecord, bool, error)
+	CompareAndSwapClusterState(ctx context.Context, expectedVersion int64, rec ClusterStateRecord) (ClusterStateRecord, bool, error)
+	ConsumeClusterState(ctx context.Context, namespace, key string) (*ClusterStateRecord, bool, error)
+	DeleteClusterState(ctx context.Context, namespace, key string) (bool, error)
+	ListClusterStates(ctx context.Context, namespace, tenantID string) ([]ClusterStateRecord, error)
 }
 
 // ObservationStatsParams specifies query criteria for columnar-accelerated Observation/$stats.

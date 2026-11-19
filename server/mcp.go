@@ -59,10 +59,47 @@ func (s *Server) IssueDevToken(sub, scopes, tenantID, patientID string, ttl time
 	return s.devAuth.IssueToken(sub, scopes, cleanID(patientID), ttl, extra)
 }
 
+type serverMCPSessionStore struct {
+	srv *Server
+}
+
+func (m *serverMCPSessionStore) SaveSession(ctx context.Context, sessionID string) error {
+	if m == nil || m.srv == nil || m.srv.store == nil || sessionID == "" {
+		return nil
+	}
+	exp := time.Now().UTC().Add(24 * time.Hour)
+	_, err := m.srv.store.PutClusterState(ctx, store.ClusterStateRecord{
+		Namespace: "mcp_session",
+		Key:       sessionID,
+		Value:     []byte("1"),
+		ExpiresAt: &exp,
+	})
+	return err
+}
+
+func (m *serverMCPSessionStore) HasSession(ctx context.Context, sessionID string) (bool, error) {
+	if m == nil || m.srv == nil || m.srv.store == nil || sessionID == "" {
+		return false, nil
+	}
+	_, ok, err := m.srv.store.GetClusterState(ctx, "mcp_session", sessionID)
+	return ok, err
+}
+
+func (m *serverMCPSessionStore) DeleteSession(ctx context.Context, sessionID string) (bool, error) {
+	if m == nil || m.srv == nil || m.srv.store == nil || sessionID == "" {
+		return false, nil
+	}
+	return m.srv.store.DeleteClusterState(ctx, "mcp_session", sessionID)
+}
+
 // MCPServer returns the SMART-authorized Model Context Protocol server bound to s.
 func (s *Server) MCPServer() *mcp.Server {
 	s.mcpOnce.Do(func() {
-		s.mcpServer = mcp.NewServer("flint-fhir-mcp", Version, &serverMCPBackend{srv: s})
+		ms := mcp.NewServer("flint-fhir-mcp", Version, &serverMCPBackend{srv: s})
+		if s.store != nil {
+			ms.SetSessionStore(&serverMCPSessionStore{srv: s})
+		}
+		s.mcpServer = ms
 	})
 	return s.mcpServer
 }

@@ -38,9 +38,11 @@ type stubSQLiteTx struct{}
 func (stubSQLiteTx) Commit() error   { return nil }
 func (stubSQLiteTx) Rollback() error { return nil }
 
-func (c *stubSQLiteConn) Prepare(_ string) (driver.Stmt, error) { return nil, nil }
-func (c *stubSQLiteConn) Close() error                          { return nil }
-func (c *stubSQLiteConn) Begin() (driver.Tx, error)             { return stubSQLiteTx{}, nil }
+func (c *stubSQLiteConn) Prepare(_ string) (driver.Stmt, error) {
+	return nil, errors.New("unsupported")
+}
+func (c *stubSQLiteConn) Close() error              { return nil }
+func (c *stubSQLiteConn) Begin() (driver.Tx, error) { return stubSQLiteTx{}, nil }
 func (c *stubSQLiteConn) ExecContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Result, error) {
 	if c.execErr != nil {
 		return nil, c.execErr
@@ -671,16 +673,20 @@ func (c *stubHydrationConn) QueryContext(_ context.Context, q string, _ []driver
 				"tenant_id", "audit_id", "recorded", "action", "subtype_code", "outcome",
 				"outcome_desc", "http_method", "http_status", "request_uri",
 				"agent_subject", "agent_patient", "client_ip", "entity_type", "entity_id", "entity_version",
+				"trace_id", "span_id",
 			},
 			data: [][]driver.Value{
-				{"t1", "aud-hydrated", nowStr, "R", "read", "0", "", "GET", int64(200), "/fhir/r4/t1/Patient/pat-1", "doc-1", "pat-1", "127.0.0.1", "Patient", "pat-1", "2"},
+				{"t1", "aud-hydrated", nowStr, "R", "read", "0", "", "GET", int64(200), "/fhir/r4/t1/Patient/pat-1", "doc-1", "pat-1", "127.0.0.1", "Patient", "pat-1", "2", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"},
 			},
 		}, nil
 	case strings.Contains(q, "FROM fhir_export_job"):
 		return &stubHydrationRows{
-			cols: []string{"tenant_id", "job_id", "patient_id", "request_url", "created_at"},
+			cols: []string{
+				"tenant_id", "job_id", "patient_id", "status", "err_msg", "output_format",
+				"cancel_requested", "request_url", "created_at", "types_order", "counts", "files_b64", "combined",
+			},
 			data: [][]driver.Value{
-				{"t1", "job-hydrated", "pat-1", "http://localhost/fhir/r4/t1/$export", nowStr},
+				{"t1", "job-hydrated", "pat-1", "complete", "", "application/fhir+ndjson", int64(0), "http://localhost/fhir/r4/t1/$export", nowStr, `["Patient"]`, `{"Patient":1}`, `{}`, []byte{}},
 			},
 		}, nil
 	default:
@@ -876,4 +882,114 @@ func TestSQLiteStore_RealModerncFileWAL_PersistenceAndReload(t *testing.T) {
 	job, err := ss2.GetExportJob(ctx, "tenant-wal", "job-wal-1")
 	require.NoError(t, err)
 	assert.Equal(t, "pat-real-1", job.PatientID)
+}
+
+func TestSQLiteStore_ClusterStateSecretsAndNonces(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "flint-cluster.db")
+	db1, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer db1.Close()
+	require.NoError(t, sqlite.RunMigrations(ctx, db1, sqlite.JournalWAL))
+
+	ss := sqlite.New(db1, sqlite.WithDSN(dbPath))
+	sec, err := ss.GetOrCreateClusterSecret(ctx, "jwt-rsa", func() ([]byte, error) {
+		return []byte("pem-bytes"), nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []byte("pem-bytes"), sec)
+	sec2, err := ss.GetOrCreateClusterSecret(ctx, "jwt-rsa", func() ([]byte, error) {
+		return []byte("other"), nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sec, sec2)
+
+	claimed, err := ss.ClaimNonce(ctx, "jti-1", time.Minute)
+	require.NoError(t, err)
+	assert.True(t, claimed)
+	claimedDup, err := ss.ClaimNonce(ctx, "jti-1", time.Minute)
+	require.NoError(t, err)
+	assert.False(t, claimedDup)
+
+	exp := time.Now().UTC().Add(time.Hour)
+	require.NoError(t, ss.SaveRefreshToken(ctx, "rt-peek", store.OAuthRefreshTokenRecord{
+		Subject:   "u1",
+		GrantID:   "g1",
+		ExpiresAt: exp,
+	}))
+	peek, ok, err := ss.PeekRefreshToken(ctx, "rt-peek")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "g1", peek.GrantID)
+
+	cs1, ok, err := ss.CompareAndSwapClusterState(ctx, 0, store.ClusterStateRecord{
+		Namespace:    "oauth_client",
+		Key:          "c1",
+		TenantID:     "t1",
+		SecondaryKey: "https://iss.example",
+		Value:        []byte(`{"id":"c1"}`),
+		ExpiresAt:    &exp,
+	})
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, int64(1), cs1.Version)
+
+	_, dupOK, err := ss.CompareAndSwapClusterState(ctx, 0, store.ClusterStateRecord{Namespace: "oauth_client", Key: "c1"})
+	require.NoError(t, err)
+	assert.False(t, dupOK)
+
+	_, casOK, err := ss.CompareAndSwapClusterState(ctx, 1, store.ClusterStateRecord{
+		Namespace:    "oauth_client",
+		Key:          "c1",
+		TenantID:     "t1",
+		SecondaryKey: "https://iss.example",
+		Value:        []byte(`{"id":"c1","v":2}`),
+		ExpiresAt:    &exp,
+	})
+	require.NoError(t, err)
+	assert.True(t, casOK)
+
+	_, err = ss.PutClusterState(ctx, store.ClusterStateRecord{
+		Namespace:    "oauth_client",
+		Key:          "c2",
+		TenantID:     "t1",
+		SecondaryKey: "https://iss2.example",
+		Value:        []byte(`{"id":"c2"}`),
+		ExpiresAt:    &exp,
+	})
+	require.NoError(t, err)
+
+	got, ok, err := ss.GetClusterState(ctx, "oauth_client", "c1")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, int64(2), got.Version)
+
+	gotSec, ok, err := ss.GetClusterStateBySecondary(ctx, "oauth_client", "https://iss2.example")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "c2", gotSec.Key)
+
+	list, err := ss.ListClusterStates(ctx, "oauth_client", "t1")
+	require.NoError(t, err)
+	assert.Len(t, list, 2)
+
+	// Reload into a fresh Store instance from SQLite WAL
+	ssReload := sqlite.New(db1, sqlite.WithDSN(dbPath))
+	require.NoError(t, ssReload.LoadFromDB(ctx))
+	reSec, err := ssReload.GetOrCreateClusterSecret(ctx, "jwt-rsa", nil)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("pem-bytes"), reSec)
+	reGot, ok, err := ssReload.GetClusterState(ctx, "oauth_client", "c1")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, int64(2), reGot.Version)
+
+	cons, ok, err := ss.ConsumeClusterState(ctx, "oauth_client", "c2")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "c2", cons.Key)
+
+	delOK, err := ss.DeleteClusterState(ctx, "oauth_client", "c1")
+	require.NoError(t, err)
+	assert.True(t, delOK)
 }

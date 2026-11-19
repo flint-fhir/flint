@@ -59,6 +59,7 @@ import (
 	"github.com/flint-fhir/flint/pkg/fhirxml"
 	"github.com/flint-fhir/flint/pkg/mcp"
 	"github.com/flint-fhir/flint/pkg/shlink"
+	"github.com/flint-fhir/flint/pkg/telemetry"
 	"github.com/flint-fhir/flint/pkg/txclient"
 	"github.com/flint-fhir/flint/pkg/validation"
 	"github.com/flint-fhir/flint/store"
@@ -72,8 +73,10 @@ var idSeq atomic.Uint64
 // Server is the Flint FHIR REST API server.
 type Server struct {
 	primaryStore    store.Store
+	baseStore       store.Store
 	store           store.Store
 	analyticalStore store.AnalyticalStore
+	tracer          *telemetry.Tracer
 	logger          *slog.Logger
 	// protoRegistry maps FHIR resource type names to proto message descriptors.
 	// Used to unmarshal proto bytes back to proto messages for JSON conversion.
@@ -165,6 +168,7 @@ func New(st store.Store, logger *slog.Logger) *Server {
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	srv := &Server{
 		primaryStore:     st,
+		baseStore:        st,
 		store:            st,
 		analyticalStore:  analytical,
 		logger:           logger,
@@ -194,7 +198,12 @@ func New(st store.Store, logger *slog.Logger) *Server {
 		bgCtx:            bgCtx,
 		bgCancel:         bgCancel,
 	}
+	srv.bootstrapClusterSigningKeys()
+	if st != nil {
+		srv.shlinks.SetBackendStore(&serverSHLinkStore{srv: srv})
+	}
 	valEngine.SetValueSetValidator(srv.validateCodeAgainstKnownValueSet)
+	valEngine.SetCustomProfileResolver(srv.resolveClusterStructureDefinition)
 	return srv
 }
 
@@ -250,16 +259,24 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.bgWG.Wait()
 		close(done)
 	}()
+	var waitErr error
 	if ctx == nil {
 		<-done
-		return nil
+	} else {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			waitErr = ctx.Err()
+		}
 	}
-	select {
-	case <-done:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	if firstClose && s.tracer != nil {
+		tCtx := ctx
+		if tCtx == nil {
+			tCtx = context.Background()
+		}
+		_ = s.tracer.Shutdown(tCtx)
 	}
+	return waitErr
 }
 
 // Close cancels and drains all background server workers and hijacked WebSocket streams.
@@ -282,24 +299,20 @@ func (s *Server) Store() store.Store {
 func (s *Server) SetAnalyticalStore(as store.AnalyticalStore) {
 	if store.IsNil(as) {
 		s.analyticalStore = nil
-		s.store = s.primaryStore
-		if s.primaryStore != nil {
-			s.auditRecorder = audit.NewStoreRecorder(s.primaryStore)
-		}
+		s.baseStore = s.primaryStore
+		s.refreshStoreWiring()
 		return
 	}
 	if asStore, ok := as.(store.Store); ok && !store.IsNil(asStore) && s.primaryStore != nil && any(asStore) != any(s.primaryStore) {
 		hyb := store.NewHybridStore(s.primaryStore, asStore)
-		s.store = hyb
+		s.baseStore = hyb
 		s.analyticalStore = hyb
-		s.auditRecorder = audit.NewStoreRecorder(hyb)
+		s.refreshStoreWiring()
 		return
 	}
-	s.store = s.primaryStore
+	s.baseStore = s.primaryStore
 	s.analyticalStore = as
-	if s.primaryStore != nil {
-		s.auditRecorder = audit.NewStoreRecorder(s.primaryStore)
-	}
+	s.refreshStoreWiring()
 }
 
 // AnalyticalStore returns the configured AnalyticalStore, or nil if none is active.
@@ -403,7 +416,7 @@ func (s *Server) RegisterIndexExtractor(resType string, fn store.IndexExtractorF
 
 // Handler returns the HTTP handler for the FHIR API.
 func (s *Server) Handler() http.Handler {
-	return s.metricsMiddleware(s.xmlNegotiationMiddleware(s.auditMiddleware(s.authMiddleware(s.fhirRouter()))))
+	return s.telemetryMiddleware(s.metricsMiddleware(s.xmlNegotiationMiddleware(s.auditMiddleware(s.authMiddleware(s.fhirRouter())))))
 }
 
 func (s *Server) fhirRouter() http.Handler {

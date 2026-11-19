@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/flint-fhir/flint/pkg/telemetry"
 	"github.com/flint-fhir/flint/store"
 )
 
@@ -57,7 +58,18 @@ func NewStoreRecorder(store AuditStore) *StoreRecorder {
 	return &StoreRecorder{store: store}
 }
 
+func enrichAuditTraceContext(ctx context.Context, rec *store.AuditRecord) {
+	if ctx == nil || rec == nil || rec.TraceID != "" {
+		return
+	}
+	if sc, ok := telemetry.FromContext(ctx); ok && sc.IsValid() {
+		rec.TraceID = sc.TraceIDHex()
+		rec.SpanID = sc.SpanIDHex()
+	}
+}
+
 func (r *StoreRecorder) Record(ctx context.Context, rec store.AuditRecord) error {
+	enrichAuditTraceContext(ctx, &rec)
 	return r.store.WriteAuditEvent(ctx, rec)
 }
 
@@ -81,7 +93,8 @@ func NewMemoryRecorder() *MemoryRecorder {
 	return &MemoryRecorder{}
 }
 
-func (m *MemoryRecorder) Record(_ context.Context, rec store.AuditRecord) error {
+func (m *MemoryRecorder) Record(ctx context.Context, rec store.AuditRecord) error {
+	enrichAuditTraceContext(ctx, &rec)
 	if rec.Recorded.IsZero() {
 		rec.Recorded = time.Now().UTC()
 	}
@@ -422,6 +435,26 @@ func ToFHIRResource(rec store.AuditRecord) map[string]any {
 						"display": disp,
 					},
 				},
+			},
+		}
+	}
+	if rec.TraceID != "" {
+		subExts := []map[string]any{
+			{
+				"url":         "traceId",
+				"valueString": rec.TraceID,
+			},
+		}
+		if rec.SpanID != "" {
+			subExts = append(subExts, map[string]any{
+				"url":         "spanId",
+				"valueString": rec.SpanID,
+			})
+		}
+		res["extension"] = []map[string]any{
+			{
+				"url":       "http://flint-fhir.org/fhir/StructureDefinition/trace-context",
+				"extension": subExts,
 			},
 		}
 	}

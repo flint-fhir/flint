@@ -605,3 +605,64 @@ func TestConfigureTerminologyClientFlagsAndEnv(t *testing.T) {
 		require.Error(t, err)
 	}
 }
+
+func TestConfigureTelemetryFlagsAndEnv(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Disabled when unset
+	srv := server.New(nil, logger)
+	require.NoError(t, configureTelemetry(srv, cliOptions{}, logger, func(string) string { return "" }))
+	assert.Nil(t, srv.Tracer())
+
+	// Configured via CLI flags
+	opts, err := parseCLIOptions([]string{
+		"--otlp-endpoint=http://127.0.0.1:4318",
+		"--otlp-protocol=http/json",
+		"--otlp-service-name=flint-cluster-node",
+		"--otlp-sample-ratio=0.5",
+		"--otlp-headers=Authorization=Bearer secret",
+	}, io.Discard)
+	require.NoError(t, err)
+	require.NoError(t, configureTelemetry(srv, opts, logger, func(string) string { return "" }))
+	require.NotNil(t, srv.Tracer())
+	assert.Equal(t, "http://127.0.0.1:4318/v1/traces", srv.Tracer().Endpoint())
+	assert.Equal(t, "http/json", srv.Tracer().Protocol())
+	require.NoError(t, srv.Close())
+
+	// Configured via OTEL_EXPORTER_OTLP_* environment variables inside run(...)
+	env := map[string]string{
+		"FLINT_STORE_BACKEND":         "sqlite",
+		"FLINT_SQLITE_DSN":            ":memory:",
+		"OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:4318",
+		"OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+		"OTEL_SERVICE_NAME":           "flint-env",
+		"OTEL_TRACES_SAMPLER_ARG":     "1.0",
+	}
+	err = run(
+		nil,
+		func(k string) string { return env[k] },
+		io.Discard,
+		logger,
+		sql.Open,
+		func(string, http.Handler) error { return nil },
+	)
+	require.NoError(t, err)
+
+	// Invalid sample ratio and endpoint error branches
+	require.Error(t, configureTelemetry(server.New(nil, logger), cliOptions{}, logger, func(k string) string {
+		switch k {
+		case "FLINT_OTLP_ENDPOINT":
+			return "http://127.0.0.1:4318"
+		case "FLINT_OTLP_SAMPLE_RATIO":
+			return "2.5"
+		default:
+			return ""
+		}
+	}))
+	require.Error(t, configureTelemetry(server.New(nil, logger), cliOptions{}, logger, func(k string) string {
+		if k == "FLINT_OTLP_ENDPOINT" {
+			return "ftp://bad"
+		}
+		return ""
+	}))
+}

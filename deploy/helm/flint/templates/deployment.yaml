@@ -1,0 +1,141 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "flint.fullname" . }}
+  labels:
+    {{- include "flint.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  {{- with .Values.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "flint.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "flint.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "flint.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
+      {{- else if .Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+          topologyKey: {{ .Values.topologySpread.topologyKey }}
+          whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "flint.selectorLabels" . | nindent 14 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "flint.fullname" . }}
+          env:
+            - name: FLINT_POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "flint.secretName" . }}
+                  key: {{ .Values.existingSecretKeys.postgresDSN }}
+                  optional: {{ ne .Values.store.backend "postgres" }}
+            - name: FLINT_DORIS_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "flint.secretName" . }}
+                  key: {{ .Values.existingSecretKeys.dorisDSN }}
+                  optional: true
+            - name: FLINT_SIGNING_KEY_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "flint.secretName" . }}
+                  key: {{ .Values.existingSecretKeys.signingKeyPEM }}
+                  optional: true
+            - name: FLINT_SHC_SIGNING_KEY_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "flint.secretName" . }}
+                  key: {{ .Values.existingSecretKeys.shcSigningKeyPEM }}
+                  optional: true
+            {{- if .Values.telemetry.enabled }}
+            - name: FLINT_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "flint.secretName" . }}
+                  key: {{ .Values.existingSecretKeys.otlpHeaders }}
+                  optional: true
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if or (eq .Values.store.backend "sqlite") (eq .Values.store.analyticsBackend "sqlite") }}
+            - name: sqlite-data
+              mountPath: /var/lib/flint
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if or (eq .Values.store.backend "sqlite") (eq .Values.store.analyticsBackend "sqlite") }}
+        - name: sqlite-data
+          emptyDir: {}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

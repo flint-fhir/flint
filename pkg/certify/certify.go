@@ -1,7 +1,7 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, HL7 SQL-on-FHIR v2, and 35+ National HL7
 // Implementation Guide conformance & certification runner. It executes 10 structured test suites
-// (140 checks) over HTTP against any Flint storage topology (PostgreSQL, SQLite, Apache Doris,
+// (142 checks) over HTTP against any Flint storage topology (PostgreSQL, SQLite, Apache Doris,
 // or HybridStore) and produces both a standard FHIR R4 TestReport resource and a scorecard.
 package certify
 
@@ -852,11 +852,20 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 	}
 	var exportedCount int
 	if err == nil {
-		// Poll job status
+		// Poll job status (supporting 202 Accepted while async export finishes across cluster replicas)
 		pollPath := strings.TrimPrefix(pollURL, baseURL)
-		respPoll, bPoll, errPoll := doReq(http.MethodGet, pollPath, "", nil, nil)
+		var respPoll *http.Response
+		var bPoll []byte
+		var errPoll error
+		for range 40 {
+			respPoll, bPoll, errPoll = doReq(http.MethodGet, pollPath, "", nil, nil)
+			if errPoll != nil || respPoll.StatusCode != http.StatusAccepted {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
 		if errPoll != nil || respPoll.StatusCode != http.StatusOK {
-			err = fmt.Errorf("expected 200 OK from export poll %s, got %d", pollPath, respPoll.StatusCode)
+			err = fmt.Errorf("expected 200 OK from export poll %s, got %d", pollPath, statusCodeOrZero(respPoll))
 		} else {
 			var manifest struct {
 				Output []struct {
@@ -931,6 +940,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 
 	t0 = time.Now()
 	{
+		err = nil
 		verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk-flint-smart-v2-pkce"
 		sum := sha256.Sum256([]byte(verifier))
 		challenge := base64.RawURLEncoding.EncodeToString(sum[:])
@@ -1016,6 +1026,7 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 
 	t0 = time.Now()
 	{
+		err = nil
 		ccForm := url.Values{
 			"grant_type": {"client_credentials"},
 			"scope":      {"system/*.rs"},
@@ -1223,6 +1234,157 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("SHL-01", suite5, "HL7 SMART Health Links ($shlink, Passcode Manifest, dir+A256GCM JWE & Revocation)", t0, err, "Verified shlink:/ QR issuance, passcode 401/200 manifest, A256GCM JWE IPS decryption & 410 revocation")
+
+	// CLUSTER-01: Stateless Multi-Replica Session, Dynamic Client Registration, EHR Launch & Refresh Rotation Continuity
+	t0 = time.Now()
+	{
+		err = nil
+		regBody := []byte(`{"client_name":"Certify Stateless Cluster App","token_endpoint_auth_method":"client_secret_basic","grant_types":["authorization_code","refresh_token"],"redirect_uris":["https://cluster.certify.example/cb"],"scope":"launch patient/Patient.rs offline_access"}`)
+		respReg, bReg, errReg := doReq(http.MethodPost, "/oauth2/register", "application/json", regBody, nil)
+		if errReg != nil || respReg.StatusCode != http.StatusCreated {
+			err = fmt.Errorf("expected 201 Created from POST /oauth2/register, got %v / %d: %s", errReg, statusCodeOrZero(respReg), string(bReg))
+		} else {
+			var regMap map[string]any
+			_ = json.Unmarshal(bReg, &regMap)
+			cliID, _ := regMap["client_id"].(string)
+			cliSec, _ := regMap["client_secret"].(string)
+			basicHdr := "Basic " + base64.StdEncoding.EncodeToString([]byte(cliID+":"+cliSec))
+
+			respLaunch, bLaunch, errLaunch := doReq(http.MethodPost, "/oauth2/launch", "application/json",
+				fmt.Appendf(nil, `{"patient":"cert-pat-1","encounter":"cert-enc-1","tenant":%q}`, tenant), nil)
+			if errLaunch != nil || respLaunch.StatusCode != http.StatusCreated {
+				err = fmt.Errorf("expected 201 Created from POST /oauth2/launch, got %v / %d: %s", errLaunch, statusCodeOrZero(respLaunch), string(bLaunch))
+			} else {
+				var lMap map[string]any
+				_ = json.Unmarshal(bLaunch, &lMap)
+				launchTok, _ := lMap["launch"].(string)
+
+				verifier := "certify-cluster-pkce-verifier-0123456789abcdef"
+				vSum := sha256.Sum256([]byte(verifier))
+				challenge := base64.RawURLEncoding.EncodeToString(vSum[:])
+
+				authPath := fmt.Sprintf("/oauth2/authorize?response_type=code&client_id=%s&redirect_uri=%s&launch=%s&scope=%s&state=cl1&code_challenge=%s&code_challenge_method=S256&aud=%s",
+					url.QueryEscape(cliID),
+					url.QueryEscape("https://cluster.certify.example/cb"),
+					url.QueryEscape(launchTok),
+					url.QueryEscape("launch patient/Patient.rs offline_access"),
+					url.QueryEscape(challenge),
+					url.QueryEscape(baseURL+basePath),
+				)
+				noRedirClient := &http.Client{
+					Transport: client.Transport,
+					Timeout:   client.Timeout,
+					CheckRedirect: func(*http.Request, []*http.Request) error {
+						return http.ErrUseLastResponse
+					},
+				}
+				reqAuth, _ := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+authPath, nil)
+				respAuth, errAuth := noRedirClient.Do(reqAuth)
+				if errAuth != nil || respAuth.StatusCode != http.StatusFound {
+					if respAuth != nil && respAuth.Body != nil {
+						respAuth.Body.Close()
+					}
+					err = fmt.Errorf("expected 302 Found from /oauth2/authorize with EHR launch, got %v / %d", errAuth, statusCodeOrZero(respAuth))
+				} else {
+					loc := respAuth.Header.Get("Location")
+					respAuth.Body.Close()
+					locURL, _ := url.Parse(loc)
+					authCode := ""
+					if locURL != nil {
+						authCode = locURL.Query().Get("code")
+					}
+					tokForm := url.Values{
+						"grant_type":    {"authorization_code"},
+						"code":          {authCode},
+						"redirect_uri":  {"https://cluster.certify.example/cb"},
+						"code_verifier": {verifier},
+					}
+					respTok, bTok, errTok := doReq(http.MethodPost, "/oauth2/token", "application/x-www-form-urlencoded", []byte(tokForm.Encode()), map[string]string{
+						"Authorization": basicHdr,
+					})
+					if errTok != nil || respTok.StatusCode != http.StatusOK {
+						err = fmt.Errorf("expected 200 OK from /oauth2/token exchange, got %v / %d: %s", errTok, statusCodeOrZero(respTok), string(bTok))
+					} else {
+						var tokDoc map[string]any
+						_ = json.Unmarshal(bTok, &tokDoc)
+						rt1, _ := tokDoc["refresh_token"].(string)
+						if rt1 == "" {
+							err = fmt.Errorf("expected refresh_token from /oauth2/token, got: %s", string(bTok))
+						} else {
+							refForm := url.Values{
+								"grant_type":    {"refresh_token"},
+								"refresh_token": {rt1},
+							}
+							respRef, bRef, errRef := doReq(http.MethodPost, "/oauth2/token", "application/x-www-form-urlencoded", []byte(refForm.Encode()), map[string]string{
+								"Authorization": basicHdr,
+							})
+							if errRef != nil || respRef.StatusCode != http.StatusOK {
+								err = fmt.Errorf("expected 200 OK from refresh_token rotation, got %v / %d: %s", errRef, statusCodeOrZero(respRef), string(bRef))
+							} else {
+								var refDoc map[string]any
+								_ = json.Unmarshal(bRef, &refDoc)
+								at2, _ := refDoc["access_token"].(string)
+								rt2, _ := refDoc["refresh_token"].(string)
+								// Replay old refresh token must fail
+								respReplay, _, errReplay := doReq(http.MethodPost, "/oauth2/token", "application/x-www-form-urlencoded", []byte(refForm.Encode()), map[string]string{
+									"Authorization": basicHdr,
+								})
+								if errReplay != nil || respReplay.StatusCode != http.StatusBadRequest {
+									err = fmt.Errorf("expected 400 invalid_grant when replaying consumed refresh_token across cluster, got %v / %d", errReplay, statusCodeOrZero(respReplay))
+								} else {
+									// Rotated access token must read Patient/cert-pat-1
+									respRead, _, errRead := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1", "", nil, map[string]string{
+										"Authorization": "Bearer " + at2,
+									})
+									if errRead != nil || respRead.StatusCode != http.StatusOK {
+										err = fmt.Errorf("expected 200 OK reading Patient/cert-pat-1 with rotated token, got %v / %d", errRead, statusCodeOrZero(respRead))
+									} else {
+										// Revoking rt2 must cascade-revoke at2 via grant_id
+										revForm := url.Values{"token": {rt2}}
+										_, _, _ = doReq(http.MethodPost, "/oauth2/revoke", "application/x-www-form-urlencoded", []byte(revForm.Encode()), map[string]string{
+											"Authorization": basicHdr,
+										})
+										respRevRead, _, errRevRead := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1", "", nil, map[string]string{
+											"Authorization": "Bearer " + at2,
+										})
+										if errRevRead != nil || respRevRead.StatusCode != http.StatusUnauthorized {
+											err = fmt.Errorf("expected 401 Unauthorized after cascade refresh_token revocation, got %v / %d", errRevRead, statusCodeOrZero(respRevRead))
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	record("CLUSTER-01", suite5, "Stateless Cluster DCR, EHR Launch, PKCE Auth Code, Refresh Rotation, Replay Protection & Cascade Revoke", t0, err, "Verified dynamic client registration, EHR launch context, single-use refresh rotation & grant_id cascade revocation")
+
+	// OTEL-01: W3C Trace Context (traceparent) Propagation, AuditEvent Trace Correlation & Prometheus OTLP Metrics
+	t0 = time.Now()
+	{
+		err = nil
+		wantTraceID := "4bf92f3577b34da6a3ce929d0e0e4736"
+		traceParent := "00-" + wantTraceID + "-00f067aa0ba902b7-01"
+		respTraced, _, errTr := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1", "", nil, map[string]string{
+			"traceparent": traceParent,
+		})
+		if errTr != nil || respTraced.StatusCode != http.StatusOK {
+			err = fmt.Errorf("expected 200 OK on W3C traceparent GET /Patient/cert-pat-1, got %v / %d", errTr, statusCodeOrZero(respTraced))
+		} else if gotHdr := respTraced.Header.Get("X-Trace-Id"); gotHdr != wantTraceID {
+			err = fmt.Errorf("expected X-Trace-Id header %q, got %q", wantTraceID, gotHdr)
+		} else {
+			respAud, bAud, errAud := doReq(http.MethodGet, basePath+"/AuditEvent?entity=Patient/cert-pat-1&_count=5", "", nil, nil)
+			respMet, bMet, errMet := doReq(http.MethodGet, "/metrics", "", nil, nil)
+			if errAud != nil || respAud.StatusCode != http.StatusOK || !strings.Contains(string(bAud), wantTraceID) {
+				err = fmt.Errorf("expected AuditEvent search to include W3C traceId %s, got %v / %d: %s", wantTraceID, errAud, statusCodeOrZero(respAud), string(bAud))
+			} else if errMet != nil || respMet.StatusCode != http.StatusOK || !strings.Contains(string(bMet), "flint_otlp_spans_exported_total") {
+				err = fmt.Errorf("expected /metrics to expose flint_otlp_spans_exported_total, got %v / %d", errMet, statusCodeOrZero(respMet))
+			}
+		}
+	}
+	record("OTEL-01", suite5, "OpenTelemetry W3C Trace Context Propagation, Trace-Correlated AuditEvent & OTLP Metrics", t0, err, "Verified W3C traceparent extraction, X-Trace-Id response correlation, AuditEvent trace-context extension & Prometheus OTLP counters")
 
 	t0 = time.Now()
 	resp, _, err = doReq(http.MethodPost, basePath+"/MedicationRequest/$validate", "application/fhir+json",
@@ -7274,4 +7436,11 @@ func signES384ClientAssertion(clientID, tokenEndpoint, jti string) (string, erro
 	r.FillBytes(rawSig[:48])
 	s.FillBytes(rawSig[48:])
 	return signedData + "." + base64.RawURLEncoding.EncodeToString(rawSig), nil
+}
+
+func statusCodeOrZero(r *http.Response) int {
+	if r == nil {
+		return 0
+	}
+	return r.StatusCode
 }

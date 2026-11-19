@@ -31,6 +31,7 @@ import (
 
 	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/pkg/telemetry"
 	"github.com/flint-fhir/flint/pkg/txclient"
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store"
@@ -74,10 +75,15 @@ type cliOptions struct {
 	txCacheMaxEntries    int
 	txAuthHeader         string
 	txFailOpen           string
+	otlpEndpoint         string
+	otlpProtocol         string
+	otlpServiceName      string
+	otlpSampleRatio      string
+	otlpHeaders          string
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(telemetry.WrapSlogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	err := run(
 		os.Args[1:],
 		os.Getenv,
@@ -114,6 +120,11 @@ func parseCLIOptions(args []string, errOut io.Writer) (cliOptions, error) {
 	fs.IntVar(&opts.txCacheMaxEntries, "tx-cache-max-entries", 0, "Maximum cached federated terminology entries (default 4096)")
 	fs.StringVar(&opts.txAuthHeader, "tx-auth-header", "", "Optional auth header for federated terminology calls (e.g. 'Bearer <token>' or 'X-Api-Key: <key>')")
 	fs.StringVar(&opts.txFailOpen, "tx-fail-open", "", "Fail-open ('true', default) or fail-closed ('false') when upstream terminology server is unreachable")
+	fs.StringVar(&opts.otlpEndpoint, "otlp-endpoint", "", "Optional OpenTelemetry OTLP/HTTP collector endpoint (e.g. 'http://otel-collector:4318')")
+	fs.StringVar(&opts.otlpProtocol, "otlp-protocol", "", "OpenTelemetry OTLP/HTTP wire protocol: 'http/protobuf' (default) or 'http/json'")
+	fs.StringVar(&opts.otlpServiceName, "otlp-service-name", "", "OpenTelemetry service.name attribute (default 'flintd')")
+	fs.StringVar(&opts.otlpSampleRatio, "otlp-sample-ratio", "", "OpenTelemetry parent-based root trace sample ratio in [0.0, 1.0] (default '1.0')")
+	fs.StringVar(&opts.otlpHeaders, "otlp-headers", "", "Comma-separated OpenTelemetry OTLP HTTP headers (e.g. 'Authorization=Bearer xyz')")
 	if err := fs.Parse(args); err != nil {
 		return cliOptions{}, err
 	}
@@ -149,6 +160,66 @@ func resolveIGConfig(cliOpts cliOptions, getenv func(string) string) ([]string, 
 	}
 	loadExamples := cliOpts.igLoadExamples || strings.EqualFold(strings.TrimSpace(getenv("FLINT_IG_LOAD_EXAMPLES")), "true")
 	return paths, loadExamples
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func configureTelemetry(srv *server.Server, cliOpts cliOptions, logger *slog.Logger, getenv func(string) string) error {
+	endpoint := firstNonEmpty(
+		cliOpts.otlpEndpoint,
+		getenv("FLINT_OTLP_ENDPOINT"),
+		getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"),
+		getenv("OTEL_EXPORTER_OTLP_ENDPOINT"),
+	)
+	if endpoint == "" {
+		return nil
+	}
+	proto := firstNonEmpty(
+		cliOpts.otlpProtocol,
+		getenv("FLINT_OTLP_PROTOCOL"),
+		getenv("OTEL_EXPORTER_OTLP_PROTOCOL"),
+	)
+	svcName := firstNonEmpty(
+		cliOpts.otlpServiceName,
+		getenv("FLINT_OTLP_SERVICE_NAME"),
+		getenv("OTEL_SERVICE_NAME"),
+		"flintd",
+	)
+	rawRatio := firstNonEmpty(
+		cliOpts.otlpSampleRatio,
+		getenv("FLINT_OTLP_SAMPLE_RATIO"),
+		getenv("OTEL_TRACES_SAMPLER_ARG"),
+	)
+	ratio, err := telemetry.ParseSampleRatio(rawRatio)
+	if err != nil {
+		return err
+	}
+	rawHeaders := firstNonEmpty(
+		cliOpts.otlpHeaders,
+		getenv("FLINT_OTLP_HEADERS"),
+		getenv("OTEL_EXPORTER_OTLP_HEADERS"),
+	)
+	tr, err := telemetry.NewTracer(telemetry.Config{
+		Endpoint:       endpoint,
+		Protocol:       proto,
+		ServiceName:    svcName,
+		ServiceVersion: version,
+		Headers:        telemetry.ParseHeaders(rawHeaders),
+		SampleRatio:    ratio,
+	})
+	if err != nil {
+		return fmt.Errorf("init opentelemetry tracer: %w", err)
+	}
+	srv.SetTracer(tr)
+	logger.Info("OpenTelemetry OTLP/HTTP distributed tracing enabled", "endpoint", tr.Endpoint(), "protocol", tr.Protocol(), "service_name", svcName)
+	return nil
 }
 
 func configureTerminologyClient(srv *server.Server, cliOpts cliOptions, logger *slog.Logger, getenv func(string) string) error {
@@ -559,6 +630,9 @@ func run(
 	srv.SetReferentialIntegrity(refIntegrityMode)
 	if analyticalStore != nil {
 		srv.SetAnalyticalStore(analyticalStore)
+	}
+	if err := configureTelemetry(srv, cliOpts, logger, getenv); err != nil {
+		return err
 	}
 
 	// Register all supported US Core / USCDI v3 FHIR R4 resource types

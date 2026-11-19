@@ -154,11 +154,20 @@ type RPCResponse struct {
 	Error   *RPCError       `json:"error,omitempty"`
 }
 
+// SessionStore is an optional persistence hook allowing stateless multi-replica clusters
+// to share MCP Streamable HTTP session IDs without importing database drivers.
+type SessionStore interface {
+	SaveSession(ctx context.Context, sessionID string) error
+	HasSession(ctx context.Context, sessionID string) (bool, error)
+	DeleteSession(ctx context.Context, sessionID string) (bool, error)
+}
+
 // Server implements a transport-agnostic MCP JSON-RPC 2.0 server.
 type Server struct {
-	name    string
-	version string
-	backend ClinicalBackend
+	name         string
+	version      string
+	backend      ClinicalBackend
+	sessionStore SessionStore
 
 	mu       sync.RWMutex
 	sessions map[string]bool
@@ -180,14 +189,55 @@ func NewServer(name, version string, backend ClinicalBackend) *Server {
 	}
 }
 
-func (s *Server) newSessionID() string {
+// SetSessionStore configures an optional cluster-shared SessionStore for Mcp-Session-Id state.
+func (s *Server) SetSessionStore(st SessionStore) {
+	s.mu.Lock()
+	s.sessionStore = st
+	s.mu.Unlock()
+}
+
+func (s *Server) getSessionStore() SessionStore {
+	s.mu.RLock()
+	st := s.sessionStore
+	s.mu.RUnlock()
+	return st
+}
+
+func (s *Server) newSessionID(ctx context.Context) string {
 	var buf [16]byte
 	_, _ = rand.Read(buf[:])
 	id := hex.EncodeToString(buf[:])
+	if st := s.getSessionStore(); st != nil {
+		_ = st.SaveSession(ctx, id)
+		return id
+	}
 	s.mu.Lock()
 	s.sessions[id] = true
 	s.mu.Unlock()
 	return id
+}
+
+func (s *Server) hasSession(ctx context.Context, id string) bool {
+	if st := s.getSessionStore(); st != nil {
+		ok, err := st.HasSession(ctx, id)
+		return err == nil && ok
+	}
+	s.mu.RLock()
+	ok := s.sessions[id]
+	s.mu.RUnlock()
+	return ok
+}
+
+func (s *Server) deleteSession(ctx context.Context, id string) bool {
+	if st := s.getSessionStore(); st != nil {
+		ok, err := st.DeleteSession(ctx, id)
+		return err == nil && ok
+	}
+	s.mu.Lock()
+	existed := s.sessions[id]
+	delete(s.sessions, id)
+	s.mu.Unlock()
+	return existed
 }
 
 // BuiltinTools returns all 9 SMART-authorized FHIR R4 clinical MCP tool definitions.
@@ -508,7 +558,7 @@ func (s *Server) executeMethod(ctx context.Context, tenant string, method string
 		if p.ProtocolVersion == LegacyProtocolVersion {
 			negVer = LegacyProtocolVersion
 		}
-		sid := s.newSessionID()
+		sid := s.newSessionID(ctx)
 		return map[string]any{
 			"protocolVersion": negVer,
 			"capabilities": map[string]any{
@@ -633,11 +683,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request, tenant string
 			http.Error(w, `{"error":"missing Mcp-Session-Id header"}`, http.StatusBadRequest)
 			return
 		}
-		s.mu.Lock()
-		existed := s.sessions[sid]
-		delete(s.sessions, sid)
-		s.mu.Unlock()
-		if !existed {
+		if !s.deleteSession(r.Context(), sid) {
 			http.Error(w, `{"error":"session not found"}`, http.StatusNotFound)
 			return
 		}
@@ -648,7 +694,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request, tenant string
 		if strings.Contains(accept, "text/event-stream") {
 			sid := strings.TrimSpace(r.Header.Get("Mcp-Session-Id"))
 			if sid == "" {
-				sid = s.newSessionID()
+				sid = s.newSessionID(r.Context())
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Connection", "keep-alive")
@@ -680,10 +726,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request, tenant string
 	case http.MethodPost:
 		existingSID := strings.TrimSpace(r.Header.Get("Mcp-Session-Id"))
 		if existingSID != "" {
-			s.mu.RLock()
-			known := s.sessions[existingSID]
-			s.mu.RUnlock()
-			if !known {
+			if !s.hasSession(r.Context(), existingSID) {
 				http.Error(w, `{"error":"invalid or expired Mcp-Session-Id"}`, http.StatusNotFound)
 				return
 			}

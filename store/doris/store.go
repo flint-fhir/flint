@@ -63,15 +63,17 @@ type Store struct {
 	// Sharded concurrency coordinator for TOCTOU-free conditional writes & If-Match checks
 	stripes [64]sync.Mutex
 
-	mu            sync.RWMutex
-	resources     map[string]storedEntry            // key: tenantID + "|" + resType + "|" + resID
-	history       map[string][]store.ResourceRecord // key: tenantID + "|" + resType + "|" + resID
-	audits        map[string][]store.AuditRecord    // key: tenantID
-	authCodes     map[string]store.OAuthAuthCodeRecord
-	refreshTokens map[string]store.OAuthRefreshTokenRecord
-	revokedTokens map[string]time.Time
-	exportJobs    map[string]store.ExportJobRecord // key: tenantID + "|" + jobID
-	sqlLog        []string
+	mu             sync.RWMutex
+	resources      map[string]storedEntry            // key: tenantID + "|" + resType + "|" + resID
+	history        map[string][]store.ResourceRecord // key: tenantID + "|" + resType + "|" + resID
+	audits         map[string][]store.AuditRecord    // key: tenantID
+	authCodes      map[string]store.OAuthAuthCodeRecord
+	refreshTokens  map[string]store.OAuthRefreshTokenRecord
+	revokedTokens  map[string]time.Time
+	exportJobs     map[string]store.ExportJobRecord // key: tenantID + "|" + jobID
+	clusterSecrets map[string][]byte
+	clusterStates  map[string]store.ClusterStateRecord
+	sqlLog         []string
 }
 
 var (
@@ -82,16 +84,18 @@ var (
 // New creates a new Zero-JSON Apache Doris store.
 func New(db *sql.DB, opts ...Option) *Store {
 	s := &Store{
-		db:            db,
-		database:      "flint",
-		groupCommit:   GroupCommitSync,
-		resources:     make(map[string]storedEntry),
-		history:       make(map[string][]store.ResourceRecord),
-		audits:        make(map[string][]store.AuditRecord),
-		authCodes:     make(map[string]store.OAuthAuthCodeRecord),
-		refreshTokens: make(map[string]store.OAuthRefreshTokenRecord),
-		revokedTokens: make(map[string]time.Time),
-		exportJobs:    make(map[string]store.ExportJobRecord),
+		db:             db,
+		database:       "flint",
+		groupCommit:    GroupCommitSync,
+		resources:      make(map[string]storedEntry),
+		history:        make(map[string][]store.ResourceRecord),
+		audits:         make(map[string][]store.AuditRecord),
+		authCodes:      make(map[string]store.OAuthAuthCodeRecord),
+		refreshTokens:  make(map[string]store.OAuthRefreshTokenRecord),
+		revokedTokens:  make(map[string]time.Time),
+		exportJobs:     make(map[string]store.ExportJobRecord),
+		clusterSecrets: make(map[string][]byte),
+		clusterStates:  make(map[string]store.ClusterStateRecord),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -2139,11 +2143,11 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec store.AuditRecord) erro
 	s.audits[rec.TenantID] = append(s.audits[rec.TenantID], rec)
 	s.mu.Unlock()
 
-	stmt := `INSERT INTO fhir_audit_event (tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc, http_method, http_status, request_uri, agent_subject, agent_patient, client_ip, entity_type, entity_id, entity_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	stmt := `INSERT INTO fhir_audit_event (tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc, http_method, http_status, request_uri, agent_subject, agent_patient, client_ip, entity_type, entity_id, entity_version, trace_id, span_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	return s.execDorisSQL(ctx, stmt,
 		rec.TenantID, rec.AuditID, rec.Recorded, rec.Action, rec.SubtypeCode, rec.Outcome, rec.OutcomeDesc,
 		rec.HTTPMethod, rec.HTTPStatus, rec.RequestURI, rec.AgentSubject, rec.AgentPatient,
-		rec.ClientIP, rec.EntityType, rec.EntityID, rec.EntityVersion,
+		rec.ClientIP, rec.EntityType, rec.EntityID, rec.EntityVersion, rec.TraceID, rec.SpanID,
 	)
 }
 
@@ -2254,6 +2258,24 @@ func (s *Store) SaveRefreshToken(_ context.Context, rawToken string, rec store.O
 	return nil
 }
 
+// PeekRefreshToken looks up an unexpired OAuth2 refresh token without consuming it.
+func (s *Store) PeekRefreshToken(_ context.Context, rawToken string) (store.OAuthRefreshTokenRecord, bool, error) {
+	if rawToken == "" {
+		return store.OAuthRefreshTokenRecord{}, false, nil
+	}
+	h := hashToken(rawToken)
+	s.mu.RLock()
+	rec, ok := s.refreshTokens[h]
+	s.mu.RUnlock()
+	if !ok {
+		return store.OAuthRefreshTokenRecord{}, false, nil
+	}
+	if !rec.ExpiresAt.IsZero() && time.Now().UTC().After(rec.ExpiresAt) {
+		return store.OAuthRefreshTokenRecord{}, false, nil
+	}
+	return rec, true, nil
+}
+
 // ConsumeRefreshToken atomically consumes an unexpired OAuth2 refresh token.
 func (s *Store) ConsumeRefreshToken(_ context.Context, rawToken string) (store.OAuthRefreshTokenRecord, bool, error) {
 	if rawToken == "" {
@@ -2304,6 +2326,250 @@ func (s *Store) IsTokenRevoked(_ context.Context, rawToken string) (bool, error)
 	return time.Now().UTC().Before(exp), nil
 }
 
+// ClaimNonce atomically claims a single-use cryptographic replay nonce.
+func (s *Store) ClaimNonce(_ context.Context, nonceKey string, ttl time.Duration) (bool, error) {
+	if nonceKey == "" {
+		return false, nil
+	}
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	h := hashToken("nonce:" + nonceKey)
+	now := time.Now().UTC()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if exp, ok := s.revokedTokens[h]; ok && now.Before(exp) {
+		return false, nil
+	}
+	s.revokedTokens[h] = now.Add(ttl)
+	return true, nil
+}
+
+func cloneDorisClusterState(rec store.ClusterStateRecord) store.ClusterStateRecord {
+	cp := rec
+	if rec.Value != nil {
+		cp.Value = append([]byte(nil), rec.Value...)
+	}
+	if rec.ExpiresAt != nil {
+		t := rec.ExpiresAt.UTC()
+		cp.ExpiresAt = &t
+	}
+	return cp
+}
+
+func isDorisClusterStateExpired(rec store.ClusterStateRecord, now time.Time) bool {
+	return rec.ExpiresAt != nil && !rec.ExpiresAt.IsZero() && !rec.ExpiresAt.After(now)
+}
+
+func dorisClusterStateKey(namespace, key string) string {
+	return namespace + "|" + key
+}
+
+// GetOrCreateClusterSecret retrieves or initializes a cluster-wide secret in Doris.
+func (s *Store) GetOrCreateClusterSecret(ctx context.Context, key string, generate func() ([]byte, error)) ([]byte, error) {
+	if key == "" {
+		if generate != nil {
+			return generate()
+		}
+		return nil, nil
+	}
+	s.mu.RLock()
+	if existing, ok := s.clusterSecrets[key]; ok && len(existing) > 0 {
+		cp := append([]byte(nil), existing...)
+		s.mu.RUnlock()
+		return cp, nil
+	}
+	s.mu.RUnlock()
+
+	if generate == nil {
+		return nil, sql.ErrNoRows
+	}
+	genBytes, err := generate()
+	if err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	if existing, ok := s.clusterSecrets[key]; ok && len(existing) > 0 {
+		cp := append([]byte(nil), existing...)
+		s.mu.Unlock()
+		return cp, nil
+	}
+	stored := append([]byte(nil), genBytes...)
+	s.clusterSecrets[key] = stored
+	s.mu.Unlock()
+
+	_ = s.execDorisSQL(ctx, `INSERT INTO fhir_cluster_secret (secret_key, secret_bytes_hex, created_at) VALUES (?, ?, ?)`,
+		key, hex.EncodeToString(stored), time.Now().UTC())
+	return append([]byte(nil), stored...), nil
+}
+
+// PutClusterState upserts a versioned cluster state entry in Doris.
+func (s *Store) PutClusterState(ctx context.Context, rec store.ClusterStateRecord) (store.ClusterStateRecord, error) {
+	if rec.Namespace == "" || rec.Key == "" {
+		return rec, nil
+	}
+	now := time.Now().UTC()
+	mapKey := dorisClusterStateKey(rec.Namespace, rec.Key)
+
+	s.mu.Lock()
+	ver := int64(1)
+	if prev, ok := s.clusterStates[mapKey]; ok {
+		ver = prev.Version + 1
+	}
+	stored := cloneDorisClusterState(rec)
+	if stored.Value == nil {
+		stored.Value = []byte{}
+	}
+	stored.Version = ver
+	stored.UpdatedAt = now
+	s.clusterStates[mapKey] = stored
+	s.mu.Unlock()
+
+	_ = s.execDorisSQL(ctx, `INSERT INTO fhir_cluster_state (namespace, state_key, tenant_id, secondary_key, value_hex, version, expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		stored.Namespace, stored.Key, stored.TenantID, stored.SecondaryKey, hex.EncodeToString(stored.Value), stored.Version, stored.ExpiresAt, stored.UpdatedAt)
+	return cloneDorisClusterState(stored), nil
+}
+
+// GetClusterState retrieves an unexpired cluster state entry by (namespace, key).
+func (s *Store) GetClusterState(_ context.Context, namespace, key string) (*store.ClusterStateRecord, bool, error) {
+	if namespace == "" || key == "" {
+		return nil, false, nil
+	}
+	now := time.Now().UTC()
+	s.mu.RLock()
+	rec, ok := s.clusterStates[dorisClusterStateKey(namespace, key)]
+	s.mu.RUnlock()
+	if !ok || isDorisClusterStateExpired(rec, now) {
+		return nil, false, nil
+	}
+	cp := cloneDorisClusterState(rec)
+	return &cp, true, nil
+}
+
+// GetClusterStateBySecondary retrieves the latest unexpired cluster state entry by (namespace, secondaryKey).
+func (s *Store) GetClusterStateBySecondary(_ context.Context, namespace, secondaryKey string) (*store.ClusterStateRecord, bool, error) {
+	if namespace == "" || secondaryKey == "" {
+		return nil, false, nil
+	}
+	now := time.Now().UTC()
+	var best *store.ClusterStateRecord
+	s.mu.RLock()
+	for _, rec := range s.clusterStates {
+		if rec.Namespace != namespace || rec.SecondaryKey != secondaryKey || isDorisClusterStateExpired(rec, now) {
+			continue
+		}
+		if best == nil || rec.UpdatedAt.After(best.UpdatedAt) || (rec.UpdatedAt.Equal(best.UpdatedAt) && rec.Key < best.Key) {
+			cp := cloneDorisClusterState(rec)
+			best = &cp
+		}
+	}
+	s.mu.RUnlock()
+	if best == nil {
+		return nil, false, nil
+	}
+	return best, true, nil
+}
+
+// CompareAndSwapClusterState atomically inserts (when expectedVersion == 0) or updates
+// (when current version == expectedVersion) an unexpired cluster state entry.
+func (s *Store) CompareAndSwapClusterState(ctx context.Context, expectedVersion int64, rec store.ClusterStateRecord) (store.ClusterStateRecord, bool, error) {
+	if rec.Namespace == "" || rec.Key == "" {
+		return store.ClusterStateRecord{}, false, nil
+	}
+	now := time.Now().UTC()
+	mapKey := dorisClusterStateKey(rec.Namespace, rec.Key)
+
+	s.mu.Lock()
+	existing, exists := s.clusterStates[mapKey]
+	if exists && isDorisClusterStateExpired(existing, now) {
+		delete(s.clusterStates, mapKey)
+		exists = false
+	}
+	if expectedVersion == 0 {
+		if exists {
+			s.mu.Unlock()
+			return store.ClusterStateRecord{}, false, nil
+		}
+	} else {
+		if !exists || existing.Version != expectedVersion {
+			s.mu.Unlock()
+			return store.ClusterStateRecord{}, false, nil
+		}
+	}
+	stored := cloneDorisClusterState(rec)
+	if stored.Value == nil {
+		stored.Value = []byte{}
+	}
+	stored.Version = expectedVersion + 1
+	stored.UpdatedAt = now
+	s.clusterStates[mapKey] = stored
+	s.mu.Unlock()
+
+	_ = s.execDorisSQL(ctx, `INSERT INTO fhir_cluster_state (namespace, state_key, tenant_id, secondary_key, value_hex, version, expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		stored.Namespace, stored.Key, stored.TenantID, stored.SecondaryKey, hex.EncodeToString(stored.Value), stored.Version, stored.ExpiresAt, stored.UpdatedAt)
+	return cloneDorisClusterState(stored), true, nil
+}
+
+// ConsumeClusterState atomically deletes and returns an unexpired cluster state entry.
+func (s *Store) ConsumeClusterState(ctx context.Context, namespace, key string) (*store.ClusterStateRecord, bool, error) {
+	if namespace == "" || key == "" {
+		return nil, false, nil
+	}
+	now := time.Now().UTC()
+	mapKey := dorisClusterStateKey(namespace, key)
+	s.mu.Lock()
+	rec, ok := s.clusterStates[mapKey]
+	if ok {
+		delete(s.clusterStates, mapKey)
+	}
+	s.mu.Unlock()
+	if !ok || isDorisClusterStateExpired(rec, now) {
+		return nil, false, nil
+	}
+	_ = s.execDorisSQL(ctx, `DELETE FROM fhir_cluster_state WHERE namespace = ? AND state_key = ?`, namespace, key)
+	cp := cloneDorisClusterState(rec)
+	return &cp, true, nil
+}
+
+// DeleteClusterState deletes a cluster state entry by (namespace, key).
+func (s *Store) DeleteClusterState(ctx context.Context, namespace, key string) (bool, error) {
+	if namespace == "" || key == "" {
+		return false, nil
+	}
+	mapKey := dorisClusterStateKey(namespace, key)
+	s.mu.Lock()
+	_, ok := s.clusterStates[mapKey]
+	delete(s.clusterStates, mapKey)
+	s.mu.Unlock()
+	_ = s.execDorisSQL(ctx, `DELETE FROM fhir_cluster_state WHERE namespace = ? AND state_key = ?`, namespace, key)
+	return ok, nil
+}
+
+// ListClusterStates lists unexpired cluster state entries in namespace (optionally filtered by tenantID).
+func (s *Store) ListClusterStates(_ context.Context, namespace, tenantID string) ([]store.ClusterStateRecord, error) {
+	if namespace == "" {
+		return nil, nil
+	}
+	now := time.Now().UTC()
+	var out []store.ClusterStateRecord
+	s.mu.RLock()
+	for _, rec := range s.clusterStates {
+		if rec.Namespace != namespace || isDorisClusterStateExpired(rec, now) {
+			continue
+		}
+		if tenantID != "" && rec.TenantID != tenantID {
+			continue
+		}
+		out = append(out, cloneDorisClusterState(rec))
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Key < out[j].Key
+	})
+	return out, nil
+}
+
 // SaveExportJob persists a Bulk Data ($export) job record.
 func (s *Store) SaveExportJob(ctx context.Context, job store.ExportJobRecord) error {
 	if job.ID == "" {
@@ -2312,12 +2578,15 @@ func (s *Store) SaveExportJob(ctx context.Context, job store.ExportJobRecord) er
 	if job.CreatedAt.IsZero() {
 		job.CreatedAt = time.Now().UTC()
 	}
+	if job.Status == "" {
+		job.Status = "complete"
+	}
 	s.mu.Lock()
 	s.exportJobs[job.TenantID+"|"+job.ID] = job
 	s.mu.Unlock()
 
-	stmt := `INSERT INTO fhir_export_job (tenant_id, job_id, patient_id, request_url, created_at) VALUES (?, ?, ?, ?, ?)`
-	return s.execDorisSQL(ctx, stmt, job.TenantID, job.ID, job.PatientID, job.RequestURL, job.CreatedAt.UTC())
+	stmt := `INSERT INTO fhir_export_job (tenant_id, job_id, patient_id, status, err_msg, output_format, cancel_requested, request_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	return s.execDorisSQL(ctx, stmt, job.TenantID, job.ID, job.PatientID, job.Status, job.Err, job.OutputFormat, job.CancelRequested, job.RequestURL, job.CreatedAt.UTC())
 }
 
 // GetExportJob retrieves a persisted Bulk Data ($export) job record.
@@ -2471,7 +2740,7 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 		return fmt.Errorf("doris iterate fhir_resource_history: %w", err)
 	}
 
-	auditRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, audit_id, recorded, action, subtype_code, outcome, COALESCE(outcome_desc, ''), COALESCE(http_method, ''), COALESCE(http_status, 0), COALESCE(request_uri, ''), COALESCE(agent_subject, ''), COALESCE(agent_patient, ''), COALESCE(client_ip, ''), COALESCE(entity_type, ''), COALESCE(entity_id, ''), COALESCE(entity_version, '') FROM fhir_audit_event`)
+	auditRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, audit_id, recorded, action, subtype_code, outcome, COALESCE(outcome_desc, ''), COALESCE(http_method, ''), COALESCE(http_status, 0), COALESCE(request_uri, ''), COALESCE(agent_subject, ''), COALESCE(agent_patient, ''), COALESCE(client_ip, ''), COALESCE(entity_type, ''), COALESCE(entity_id, ''), COALESCE(entity_version, ''), COALESCE(trace_id, ''), COALESCE(span_id, '') FROM fhir_audit_event`)
 	if err != nil {
 		return fmt.Errorf("doris load fhir_audit_event: %w", err)
 	}
@@ -2483,7 +2752,7 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 			&rec.TenantID, &rec.AuditID, &rawRecorded, &rec.Action, &rec.SubtypeCode, &rec.Outcome,
 			&rec.OutcomeDesc, &rec.HTTPMethod, &rec.HTTPStatus, &rec.RequestURI,
 			&rec.AgentSubject, &rec.AgentPatient, &rec.ClientIP, &rec.EntityType,
-			&rec.EntityID, &rec.EntityVersion,
+			&rec.EntityID, &rec.EntityVersion, &rec.TraceID, &rec.SpanID,
 		); err != nil {
 			return fmt.Errorf("doris scan fhir_audit_event: %w", err)
 		}
@@ -2491,17 +2760,21 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 		audits[rec.TenantID] = append(audits[rec.TenantID], rec)
 	}
 
-	jobRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, job_id, COALESCE(patient_id, ''), COALESCE(request_url, ''), created_at FROM fhir_export_job`)
+	jobRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, job_id, COALESCE(patient_id, ''), COALESCE(status, 'complete'), COALESCE(err_msg, ''), COALESCE(output_format, ''), COALESCE(cancel_requested, FALSE), COALESCE(request_url, ''), created_at FROM fhir_export_job`)
 	if err != nil {
 		return fmt.Errorf("doris load fhir_export_job: %w", err)
 	}
 	defer jobRows.Close()
 	for jobRows.Next() {
 		var job store.ExportJobRecord
-		var rawCreated any
-		if err := jobRows.Scan(&job.TenantID, &job.ID, &job.PatientID, &job.RequestURL, &rawCreated); err != nil {
+		var rawCancel, rawCreated any
+		if err := jobRows.Scan(
+			&job.TenantID, &job.ID, &job.PatientID, &job.Status, &job.Err, &job.OutputFormat,
+			&rawCancel, &job.RequestURL, &rawCreated,
+		); err != nil {
 			return fmt.Errorf("doris scan fhir_export_job: %w", err)
 		}
+		job.CancelRequested = parseDorisBool(rawCancel)
 		job.CreatedAt = parseDorisTime(rawCreated)
 		exportJobs[job.TenantID+"|"+job.ID] = job
 	}

@@ -26,17 +26,17 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec AuditRecord) error {
 			INSERT INTO fhir_audit_event (
 				tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc,
 				http_method, http_status, request_uri, agent_subject, agent_patient,
-				client_ip, entity_type, entity_id, entity_version
+				client_ip, entity_type, entity_id, entity_version, trace_id, span_id
 			) VALUES (
 				$1, $2, $3, $4, $5, $6, $7,
 				$8, $9, $10, $11, $12,
-				$13, $14, $15, $16
+				$13, $14, $15, $16, $17, $18
 			)
 			ON CONFLICT (tenant_id, audit_id) DO NOTHING
 		`,
 			rec.TenantID, rec.AuditID, rec.Recorded, rec.Action, rec.SubtypeCode, rec.Outcome, outcomeDesc,
 			rec.HTTPMethod, rec.HTTPStatus, rec.RequestURI, rec.AgentSubject, rec.AgentPatient,
-			rec.ClientIP, rec.EntityType, rec.EntityID, rec.EntityVersion,
+			rec.ClientIP, rec.EntityType, rec.EntityID, rec.EntityVersion, rec.TraceID, rec.SpanID,
 		)
 		if err != nil {
 			return fmt.Errorf("insert audit event: %w", err)
@@ -53,13 +53,13 @@ func (s *Store) ReadAuditEvent(ctx context.Context, tenantID, auditID string) (*
 			SELECT
 				tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc,
 				http_method, http_status, request_uri, agent_subject, agent_patient,
-				client_ip, entity_type, entity_id, entity_version
+				client_ip, entity_type, entity_id, entity_version, trace_id, span_id
 			FROM fhir_audit_event
 			WHERE tenant_id = $1 AND audit_id = $2
 		`, tenantID, auditID).Scan(
 			&rec.TenantID, &rec.AuditID, &rec.Recorded, &rec.Action, &rec.SubtypeCode, &rec.Outcome, &rec.OutcomeDesc,
 			&rec.HTTPMethod, &rec.HTTPStatus, &rec.RequestURI, &rec.AgentSubject, &rec.AgentPatient,
-			&rec.ClientIP, &rec.EntityType, &rec.EntityID, &rec.EntityVersion,
+			&rec.ClientIP, &rec.EntityType, &rec.EntityID, &rec.EntityVersion, &rec.TraceID, &rec.SpanID,
 		)
 	})
 	if err != nil {
@@ -133,7 +133,7 @@ func (s *Store) QueryAuditEvents(ctx context.Context, params AuditQueryParams) (
 			SELECT
 				tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc,
 				http_method, http_status, request_uri, agent_subject, agent_patient,
-				client_ip, entity_type, entity_id, entity_version
+				client_ip, entity_type, entity_id, entity_version, trace_id, span_id
 			FROM fhir_audit_event
 			%s
 			ORDER BY recorded DESC, audit_id DESC
@@ -151,7 +151,7 @@ func (s *Store) QueryAuditEvents(ctx context.Context, params AuditQueryParams) (
 			if err := rows.Scan(
 				&rec.TenantID, &rec.AuditID, &rec.Recorded, &rec.Action, &rec.SubtypeCode, &rec.Outcome, &rec.OutcomeDesc,
 				&rec.HTTPMethod, &rec.HTTPStatus, &rec.RequestURI, &rec.AgentSubject, &rec.AgentPatient,
-				&rec.ClientIP, &rec.EntityType, &rec.EntityID, &rec.EntityVersion,
+				&rec.ClientIP, &rec.EntityType, &rec.EntityID, &rec.EntityVersion, &rec.TraceID, &rec.SpanID,
 			); err != nil {
 				return fmt.Errorf("scan audit event: %w", err)
 			}

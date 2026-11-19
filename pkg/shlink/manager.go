@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -66,29 +67,38 @@ type IssuedLink struct {
 
 // EncryptedItem holds a pre-encrypted JWE artifact stored by the zero-knowledge SHLink server.
 type EncryptedItem struct {
-	ID          string
-	ContentType string
-	CompactJWE  string
+	ID          string `json:"id"`
+	ContentType string `json:"contentType"`
+	CompactJWE  string `json:"compactJwe"`
 }
 
 type storedLink struct {
-	ID                  string
-	Tenant              string
-	PatientID           string
-	Label               string
-	Flag                string
-	LongTerm            bool
-	ExpiresAt           time.Time
-	PasscodeSalt        []byte
-	PasscodeHash        [32]byte
-	HasPasscode         bool
-	FailedAttempts      int
-	MaxPasscodeFailures int
-	Views               int
-	MaxViews            int
-	Revoked             bool
-	CreatedAt           time.Time
-	Items               []EncryptedItem
+	ID                  string          `json:"id"`
+	Tenant              string          `json:"tenant"`
+	PatientID           string          `json:"patientId"`
+	Label               string          `json:"label"`
+	Flag                string          `json:"flag"`
+	LongTerm            bool            `json:"longTerm"`
+	ExpiresAt           time.Time       `json:"expiresAt"`
+	PasscodeSalt        []byte          `json:"passcodeSalt,omitempty"`
+	PasscodeHash        [32]byte        `json:"passcodeHash"`
+	HasPasscode         bool            `json:"hasPasscode"`
+	FailedAttempts      int             `json:"failedAttempts"`
+	MaxPasscodeFailures int             `json:"maxPasscodeFailures"`
+	Views               int             `json:"views"`
+	MaxViews            int             `json:"maxViews"`
+	Revoked             bool            `json:"revoked"`
+	CreatedAt           time.Time       `json:"createdAt"`
+	Items               []EncryptedItem `json:"items,omitempty"`
+}
+
+// BackendStore is an optional driver-free persistence hook allowing stateless multi-replica
+// clusters to share zero-knowledge SHLink ciphertexts, maxViews counters, and passcode lockouts
+// with optimistic Compare-And-Swap concurrency control.
+type BackendStore interface {
+	CreateLink(id, tenant string, rawJSON []byte) error
+	GetLink(id string) (rawJSON []byte, version int64, ok bool, err error)
+	CompareAndSwapLink(id, tenant string, expectedVersion int64, rawJSON []byte) (bool, error)
 }
 
 // ManifestRequest represents the JSON body posted to POST /shlink/{id}/manifest.
@@ -130,6 +140,7 @@ func (e *PasscodeError) Unwrap() error {
 type Manager struct {
 	mu    sync.RWMutex
 	links map[string]*storedLink
+	store BackendStore
 	nowFn func() time.Time
 }
 
@@ -139,6 +150,20 @@ func NewManager() *Manager {
 		links: make(map[string]*storedLink),
 		nowFn: func() time.Time { return time.Now().UTC() },
 	}
+}
+
+// SetBackendStore configures an optional cluster-shared BackendStore for SHLink records.
+func (m *Manager) SetBackendStore(st BackendStore) {
+	m.mu.Lock()
+	m.store = st
+	m.mu.Unlock()
+}
+
+func (m *Manager) getBackendStore() BackendStore {
+	m.mu.RLock()
+	st := m.store
+	m.mu.RUnlock()
+	return st
 }
 
 // SetClock overrides the clock used for expiration checks (for deterministic tests).
@@ -157,6 +182,13 @@ func (m *Manager) Now() time.Time {
 	m.mu.RUnlock()
 	if fn != nil {
 		return fn().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (m *Manager) nowLocked() time.Time {
+	if m.nowFn != nil {
+		return m.nowFn().UTC()
 	}
 	return time.Now().UTC()
 }
@@ -263,9 +295,8 @@ func (m *Manager) CreateLink(req CreateRequest) (*IssuedLink, error) {
 		return nil, err
 	}
 
-	m.mu.Lock()
-	now := m.nowFn()
-	m.links[linkID] = &storedLink{
+	now := m.Now()
+	rec := &storedLink{
 		ID:                  linkID,
 		Tenant:              strings.TrimSpace(req.Tenant),
 		PatientID:           strings.TrimSpace(req.PatientID),
@@ -281,12 +312,25 @@ func (m *Manager) CreateLink(req CreateRequest) (*IssuedLink, error) {
 		CreatedAt:           now,
 		Items:               items,
 	}
-	m.mu.Unlock()
+
+	if st := m.getBackendStore(); st != nil {
+		rawJSON, err := json.Marshal(rec)
+		if err != nil {
+			return nil, err
+		}
+		if err := st.CreateLink(linkID, rec.Tenant, rawJSON); err != nil {
+			return nil, err
+		}
+	} else {
+		m.mu.Lock()
+		m.links[linkID] = rec
+		m.mu.Unlock()
+	}
 
 	return &IssuedLink{
 		ID:          linkID,
-		Tenant:      strings.TrimSpace(req.Tenant),
-		PatientID:   strings.TrimSpace(req.PatientID),
+		Tenant:      rec.Tenant,
+		PatientID:   rec.PatientID,
 		ManifestURL: manifestURL,
 		SHLinkURI:   uri,
 		Flag:        flagStr,
@@ -296,47 +340,7 @@ func (m *Manager) CreateLink(req CreateRequest) (*IssuedLink, error) {
 	}, nil
 }
 
-// ResolveManifest validates recipient, revocation, expiration, passcode, and maxViews,
-// returning the SHLink manifest and associated (tenant, patientID) for AuditEvent logging.
-func (m *Manager) ResolveManifest(linkID string, baseOrigin string, req ManifestRequest) (*ManifestResponse, string, string, error) {
-	if strings.TrimSpace(req.Recipient) == "" {
-		metaTenant, metaPatient := m.LinkOwner(linkID)
-		return nil, metaTenant, metaPatient, ErrRecipientRequired
-	}
-
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	rec, ok := m.links[strings.TrimSpace(linkID)]
-	if !ok {
-		return nil, "", "", ErrNotFound
-	}
-	if rec.Revoked {
-		return nil, rec.Tenant, rec.PatientID, ErrRevoked
-	}
-	now := m.nowFn()
-	if !rec.ExpiresAt.IsZero() && !now.Before(rec.ExpiresAt) {
-		return nil, rec.Tenant, rec.PatientID, ErrExpired
-	}
-	if rec.HasPasscode {
-		if rec.FailedAttempts >= rec.MaxPasscodeFailures {
-			return nil, rec.Tenant, rec.PatientID, ErrPasscodeLockedOut
-		}
-		candidate := hashPasscode(rec.PasscodeSalt, req.Passcode)
-		if req.Passcode == "" || subtle.ConstantTimeCompare(candidate[:], rec.PasscodeHash[:]) != 1 {
-			rec.FailedAttempts++
-			rem := max(rec.MaxPasscodeFailures-rec.FailedAttempts, 0)
-			if rem == 0 {
-				return nil, rec.Tenant, rec.PatientID, ErrPasscodeLockedOut
-			}
-			return nil, rec.Tenant, rec.PatientID, &PasscodeError{RemainingAttempts: rem}
-		}
-	}
-	if rec.MaxViews > 0 && rec.Views >= rec.MaxViews {
-		return nil, rec.Tenant, rec.PatientID, ErrMaxViewsReached
-	}
-	rec.Views++
-
+func buildManifestResponse(rec *storedLink, baseOrigin string, req ManifestRequest) *ManifestResponse {
 	origin := strings.TrimRight(strings.TrimSpace(baseOrigin), "/")
 	if origin == "" {
 		origin = "http://localhost:8080"
@@ -362,28 +366,158 @@ func (m *Manager) ResolveManifest(linkID string, baseOrigin string, req Manifest
 	return &ManifestResponse{
 		Status: status,
 		Files:  files,
-	}, rec.Tenant, rec.PatientID, nil
+	}
+}
+
+// ResolveManifest validates recipient, revocation, expiration, passcode, and maxViews,
+// returning the SHLink manifest and associated (tenant, patientID) for AuditEvent logging.
+func (m *Manager) ResolveManifest(linkID string, baseOrigin string, req ManifestRequest) (*ManifestResponse, string, string, error) {
+	if strings.TrimSpace(req.Recipient) == "" {
+		metaTenant, metaPatient := m.LinkOwner(linkID)
+		return nil, metaTenant, metaPatient, ErrRecipientRequired
+	}
+	cleanedID := strings.TrimSpace(linkID)
+
+	if st := m.getBackendStore(); st != nil {
+		for range 16 {
+			rawJSON, ver, ok, err := st.GetLink(cleanedID)
+			if err != nil {
+				return nil, "", "", err
+			}
+			if !ok {
+				return nil, "", "", ErrNotFound
+			}
+			var rec storedLink
+			if err := json.Unmarshal(rawJSON, &rec); err != nil {
+				return nil, "", "", err
+			}
+			if rec.Revoked {
+				return nil, rec.Tenant, rec.PatientID, ErrRevoked
+			}
+			now := m.Now()
+			if !rec.ExpiresAt.IsZero() && !now.Before(rec.ExpiresAt) {
+				return nil, rec.Tenant, rec.PatientID, ErrExpired
+			}
+			if rec.HasPasscode {
+				if rec.FailedAttempts >= rec.MaxPasscodeFailures {
+					return nil, rec.Tenant, rec.PatientID, ErrPasscodeLockedOut
+				}
+				candidate := hashPasscode(rec.PasscodeSalt, req.Passcode)
+				if req.Passcode == "" || subtle.ConstantTimeCompare(candidate[:], rec.PasscodeHash[:]) != 1 {
+					rec.FailedAttempts++
+					updatedJSON, mErr := json.Marshal(&rec)
+					if mErr != nil {
+						return nil, rec.Tenant, rec.PatientID, mErr
+					}
+					swapped, casErr := st.CompareAndSwapLink(cleanedID, rec.Tenant, ver, updatedJSON)
+					if casErr != nil {
+						return nil, rec.Tenant, rec.PatientID, casErr
+					}
+					if !swapped {
+						continue
+					}
+					rem := max(rec.MaxPasscodeFailures-rec.FailedAttempts, 0)
+					if rem == 0 {
+						return nil, rec.Tenant, rec.PatientID, ErrPasscodeLockedOut
+					}
+					return nil, rec.Tenant, rec.PatientID, &PasscodeError{RemainingAttempts: rem}
+				}
+			}
+			if rec.MaxViews > 0 && rec.Views >= rec.MaxViews {
+				return nil, rec.Tenant, rec.PatientID, ErrMaxViewsReached
+			}
+			rec.Views++
+			updatedJSON, mErr := json.Marshal(&rec)
+			if mErr != nil {
+				return nil, rec.Tenant, rec.PatientID, mErr
+			}
+			swapped, casErr := st.CompareAndSwapLink(cleanedID, rec.Tenant, ver, updatedJSON)
+			if casErr != nil {
+				return nil, rec.Tenant, rec.PatientID, casErr
+			}
+			if !swapped {
+				continue
+			}
+			return buildManifestResponse(&rec, baseOrigin, req), rec.Tenant, rec.PatientID, nil
+		}
+		return nil, "", "", errors.New("shlink: concurrent manifest update conflict")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	rec, ok := m.links[cleanedID]
+	if !ok {
+		return nil, "", "", ErrNotFound
+	}
+	if rec.Revoked {
+		return nil, rec.Tenant, rec.PatientID, ErrRevoked
+	}
+	now := m.nowLocked()
+	if !rec.ExpiresAt.IsZero() && !now.Before(rec.ExpiresAt) {
+		return nil, rec.Tenant, rec.PatientID, ErrExpired
+	}
+	if rec.HasPasscode {
+		if rec.FailedAttempts >= rec.MaxPasscodeFailures {
+			return nil, rec.Tenant, rec.PatientID, ErrPasscodeLockedOut
+		}
+		candidate := hashPasscode(rec.PasscodeSalt, req.Passcode)
+		if req.Passcode == "" || subtle.ConstantTimeCompare(candidate[:], rec.PasscodeHash[:]) != 1 {
+			rec.FailedAttempts++
+			rem := max(rec.MaxPasscodeFailures-rec.FailedAttempts, 0)
+			if rem == 0 {
+				return nil, rec.Tenant, rec.PatientID, ErrPasscodeLockedOut
+			}
+			return nil, rec.Tenant, rec.PatientID, &PasscodeError{RemainingAttempts: rem}
+		}
+	}
+	if rec.MaxViews > 0 && rec.Views >= rec.MaxViews {
+		return nil, rec.Tenant, rec.PatientID, ErrMaxViewsReached
+	}
+	rec.Views++
+	return buildManifestResponse(rec, baseOrigin, req), rec.Tenant, rec.PatientID, nil
 }
 
 // ReadContent returns the pre-encrypted compact JWE for a specific SHLink item,
 // enforcing revocation and expiration checks.
 func (m *Manager) ReadContent(linkID, itemID string) (compactJWE string, tenant string, patientID string, err error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	cleanedID := strings.TrimSpace(linkID)
+	cleanedItem := strings.TrimSpace(itemID)
 
-	rec, ok := m.links[strings.TrimSpace(linkID)]
-	if !ok {
+	var rec *storedLink
+	if st := m.getBackendStore(); st != nil {
+		rawJSON, _, ok, gErr := st.GetLink(cleanedID)
+		if gErr != nil || !ok {
+			return "", "", "", ErrNotFound
+		}
+		var parsed storedLink
+		if json.Unmarshal(rawJSON, &parsed) != nil {
+			return "", "", "", ErrNotFound
+		}
+		rec = &parsed
+	} else {
+		m.mu.RLock()
+		r, ok := m.links[cleanedID]
+		if ok && r != nil {
+			cp := *r
+			cp.Items = append([]EncryptedItem(nil), r.Items...)
+			rec = &cp
+		}
+		m.mu.RUnlock()
+	}
+
+	if rec == nil {
 		return "", "", "", ErrNotFound
 	}
 	if rec.Revoked {
 		return "", rec.Tenant, rec.PatientID, ErrRevoked
 	}
-	now := m.nowFn()
+	now := m.Now()
 	if !rec.ExpiresAt.IsZero() && !now.Before(rec.ExpiresAt) {
 		return "", rec.Tenant, rec.PatientID, ErrExpired
 	}
 	for _, it := range rec.Items {
-		if it.ID == strings.TrimSpace(itemID) {
+		if it.ID == cleanedItem {
 			return it.CompactJWE, rec.Tenant, rec.PatientID, nil
 		}
 	}
@@ -392,10 +526,44 @@ func (m *Manager) ReadContent(linkID, itemID string) (compactJWE string, tenant 
 
 // Revoke permanently deactivates an issued SMART Health Link for the given tenant and patient.
 func (m *Manager) Revoke(tenant, patientID, linkID string) error {
+	cleanedID := strings.TrimSpace(linkID)
+	if st := m.getBackendStore(); st != nil {
+		for range 16 {
+			rawJSON, ver, ok, err := st.GetLink(cleanedID)
+			if err != nil || !ok {
+				return ErrNotFound
+			}
+			var rec storedLink
+			if json.Unmarshal(rawJSON, &rec) != nil {
+				return ErrNotFound
+			}
+			if rec.Tenant != "" && tenant != "" && rec.Tenant != tenant {
+				return ErrNotFound
+			}
+			if patientID != "" && rec.PatientID != "" && rec.PatientID != patientID {
+				return ErrForbiddenPatient
+			}
+			rec.Revoked = true
+			rec.Items = nil
+			updatedJSON, mErr := json.Marshal(&rec)
+			if mErr != nil {
+				return mErr
+			}
+			swapped, casErr := st.CompareAndSwapLink(cleanedID, rec.Tenant, ver, updatedJSON)
+			if casErr != nil {
+				return casErr
+			}
+			if swapped {
+				return nil
+			}
+		}
+		return errors.New("shlink: concurrent revoke conflict")
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	rec, ok := m.links[strings.TrimSpace(linkID)]
+	rec, ok := m.links[cleanedID]
 	if !ok || (rec.Tenant != "" && tenant != "" && rec.Tenant != tenant) {
 		return ErrNotFound
 	}
@@ -409,9 +577,21 @@ func (m *Manager) Revoke(tenant, patientID, linkID string) error {
 
 // LinkOwner returns (tenant, patientID) for a link ID if known (used for audit enrichment).
 func (m *Manager) LinkOwner(linkID string) (string, string) {
+	cleanedID := strings.TrimSpace(linkID)
+	if st := m.getBackendStore(); st != nil {
+		rawJSON, _, ok, err := st.GetLink(cleanedID)
+		if err != nil || !ok {
+			return "", ""
+		}
+		var rec storedLink
+		if json.Unmarshal(rawJSON, &rec) != nil {
+			return "", ""
+		}
+		return rec.Tenant, rec.PatientID
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	rec, ok := m.links[strings.TrimSpace(linkID)]
+	rec, ok := m.links[cleanedID]
 	if !ok {
 		return "", ""
 	}

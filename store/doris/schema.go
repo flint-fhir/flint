@@ -419,6 +419,8 @@ PROPERTIES (
     entity_type    VARCHAR(64)   NULL,
     entity_id      VARCHAR(128)  NULL,
     entity_version VARCHAR(32)   NULL,
+    trace_id       VARCHAR(64)   NULL,
+    span_id        VARCHAR(32)   NULL,
     INDEX idx_audit_action (action) USING INVERTED,
     INDEX idx_audit_entity (entity_type) USING INVERTED,
     INDEX idx_audit_patient (agent_patient) USING INVERTED
@@ -430,17 +432,48 @@ PROPERTIES (
     "replication_num" = "1"
 );`,
 		`CREATE TABLE IF NOT EXISTS fhir_export_job (
-    tenant_id   VARCHAR(64)   NOT NULL,
-    job_id      VARCHAR(128)  NOT NULL,
-    patient_id  VARCHAR(64)   NULL,
-    request_url VARCHAR(1024) NULL,
-    created_at  DATETIME(6)   NOT NULL,
-    types_order STRING        NULL,
-    counts      STRING        NULL,
-    files_b64   STRING        NULL
+    tenant_id        VARCHAR(64)   NOT NULL,
+    job_id           VARCHAR(128)  NOT NULL,
+    patient_id       VARCHAR(64)   NULL,
+    status           VARCHAR(32)   NULL,
+    err_msg          VARCHAR(1024) NULL,
+    output_format    VARCHAR(128)  NULL,
+    cancel_requested BOOLEAN       NOT NULL DEFAULT FALSE,
+    request_url      VARCHAR(1024) NULL,
+    created_at       DATETIME(6)   NOT NULL,
+    types_order      STRING        NULL,
+    counts           STRING        NULL,
+    files_b64        STRING        NULL
 )
 UNIQUE KEY(tenant_id, job_id)
 DISTRIBUTED BY HASH(tenant_id, job_id) BUCKETS 4
+PROPERTIES (
+    "enable_unique_key_merge_on_write" = "true",
+    "replication_num" = "1"
+);`,
+		`CREATE TABLE IF NOT EXISTS fhir_cluster_secret (
+    secret_key       VARCHAR(128) NOT NULL,
+    secret_bytes_hex STRING       NOT NULL,
+    created_at       DATETIME(6)  NOT NULL
+)
+UNIQUE KEY(secret_key)
+DISTRIBUTED BY HASH(secret_key) BUCKETS 4
+PROPERTIES (
+    "enable_unique_key_merge_on_write" = "true",
+    "replication_num" = "1"
+);`,
+		`CREATE TABLE IF NOT EXISTS fhir_cluster_state (
+    namespace     VARCHAR(64)  NOT NULL,
+    state_key     VARCHAR(256) NOT NULL,
+    tenant_id     VARCHAR(64)  NOT NULL DEFAULT "",
+    secondary_key VARCHAR(256) NOT NULL DEFAULT "",
+    value_hex     STRING       NOT NULL,
+    version       BIGINT       NOT NULL DEFAULT 1,
+    expires_at    DATETIME(6)  NULL,
+    updated_at    DATETIME(6)  NOT NULL
+)
+UNIQUE KEY(namespace, state_key)
+DISTRIBUTED BY HASH(namespace, state_key) BUCKETS 8
 PROPERTIES (
     "enable_unique_key_merge_on_write" = "true",
     "replication_num" = "1"
