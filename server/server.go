@@ -510,6 +510,8 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$submit-attachment", s.handleCDexSubmitAttachment)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$convert", s.handleResourceConvert)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}/$convert", s.handleResourceConvert)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$ingest-hl7v2", s.handleIngestHL7v2)
+	mux.HandleFunc("POST /fhir/r4/{tenant}/$import-ccda", s.handleImportCCDA)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$certify", s.handleCertify)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$certify", s.handleCertify)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/$sync-analytics", s.handleSyncAnalytics)
@@ -751,6 +753,11 @@ func (s *Server) buildFHIRRouter() http.Handler {
 				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$summary" {
 					r.SetPathValue("tenant", parts[2])
 					s.handlePatientSummary(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[4] == "$ccda" {
+					r.SetPathValue("tenant", parts[2])
+					s.handlePatientCCDA(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "Questionnaire") && parts[4] == "$populate" {
@@ -2811,6 +2818,12 @@ func (s *Server) buildFHIRRouter() http.Handler {
 					r.SetPathValue("tenant", parts[2])
 					r.SetPathValue("id", parts[4])
 					s.handlePatientSummary(w, r)
+					return
+				}
+				if strings.EqualFold(parts[3], "Patient") && parts[5] == "$ccda" {
+					r.SetPathValue("tenant", parts[2])
+					r.SetPathValue("id", parts[4])
+					s.handlePatientCCDA(w, r)
 					return
 				}
 				if strings.EqualFold(parts[3], "Composition") && parts[5] == "$document" {
@@ -6949,6 +6962,10 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					"name":       "pdex-payer-summary",
 					"definition": "http://hl7.org/fhir/us/davinci-pdex/OperationDefinition/Patient-pdex-payer-summary",
 				},
+				{
+					"name":       "ccda",
+					"definition": "http://flint.fhir.org/OperationDefinition/Patient-ccda",
+				},
 			}
 		case "Location":
 			entry["operation"] = []map[string]string{
@@ -8550,6 +8567,18 @@ func (s *Server) buildCapabilityStatement(r *http.Request) map[string]any {
 					{
 						"name":       "igs",
 						"definition": "http://flint.fhir.org/OperationDefinition/System-igs",
+					},
+					{
+						"name":       "ingest-hl7v2",
+						"definition": "http://flint.fhir.org/OperationDefinition/System-ingest-hl7v2",
+					},
+					{
+						"name":       "import-ccda",
+						"definition": "http://flint.fhir.org/OperationDefinition/System-import-ccda",
+					},
+					{
+						"name":       "ccda",
+						"definition": "http://flint.fhir.org/OperationDefinition/Patient-ccda",
 					},
 				},
 			},

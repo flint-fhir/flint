@@ -1,0 +1,12 @@
+MSH|^~\&|NIST_LRI_LAB|NIST_LAB_FAC^2.16.840.1.113883.3.72.5.20^ISO|FLINT_EHR|FLINT_CLINIC|20260115104512-0500||ORU^R01^ORU_R01|NIST-LRI-ORU-0001|P|2.5.1|||AL|NE|||||LRI_Common_Component^^2.16.840.1.113883.9.16^ISO
+PID|1||MRN-778899^^^2.16.840.1.113883.3.72.5.30.1^MR||Jones^Isabella^Marie^^Ms^^L||19790624|F||2106-3^White^CDCREC|742 Evergreen Terrace^^Springfield^MA^01103^USA^H
+PV1|1|I|4WEST^412^A^METRO_GENERAL||||||||||||||||VN-2026-00042^^^METRO_GENERAL^VN|||||||||||||||||||||||||20260115081500-0500
+ORC|RE|ORD-5001^METRO_EHR|LAB-9001^NIST_LAB||CM||||20260115091500-0500|||1234567890^House^Gregory^M^^Dr^^^&2.16.840.1.113883.4.6&ISO
+OBR|1|ORD-5001^METRO_EHR|LAB-9001^NIST_LAB|24323-8^Comprehensive metabolic 2000 panel - Serum or Plasma^LN|||20260115093000-0500|||||||||1234567890^House^Gregory^M^^Dr^^^&2.16.840.1.113883.4.6&ISO||||||20260115104500-0500|||F
+NTE|1|L|Fasting specimen verified\.br\Hemolysis index normal
+OBX|1|NM|2345-7^Glucose [Mass/volume] in Serum or Plasma^LN|1|148|mg/dL^milligrams per deciliter^UCUM|70-99|H|||F|||20260115093000-0500
+NTE|1|L|Elevated fasting glucose\F\recommend HbA1c follow-up
+OBX|2|NM|2160-0^Creatinine [Mass/volume] in Serum or Plasma^LN|1|0.92|mg/dL^milligrams per deciliter^UCUM|0.55-1.02|N|||F|||20260115093000-0500
+OBX|3|SN|33914-3^Glomerular filtration rate/1.73 sq M.predicted^LN|1|>^60|mL/min/{1.73_m2}^mL/min/1.73m2^UCUM|>60|N|||F|||20260115093000-0500
+OBX|4|CWE|5778-6^Color of Urine^LN|1|263913002^Amber color^SCT||||||F|||20260115093000-0500
+SPM|1|SPEC-9001^NIST_LAB||119364003^Serum specimen^SCT|||||||||||||20260115093000-0500|20260115094200-0500

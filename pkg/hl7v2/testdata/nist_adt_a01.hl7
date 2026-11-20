@@ -1,0 +1,9 @@
+MSH|^~\&|EPIC_ADT|METRO_GENERAL^2.16.840.1.113883.3.72.5.30.1^ISO|FLINT_EHR|FLINT_CLINIC|20260115083000-0500||ADT^A01^ADT_A01|NIST-ADT-A01-0001|P|2.5.1
+EVN|A01|20260115083000-0500
+PID|1||MRN-778899^^^2.16.840.1.113883.3.72.5.30.1^MR~999-12-3456^^^USSSA^SS||Jones^ Isabella^Marie^Jr^Ms^^L||19790624|F||2106-3^White^CDCREC|742 Evergreen Terrace\S\Apt 2B^^Springfield^MA^01103^USA^H||^PRN^PH^^^413^5550199~^NET^Internet^isabella.jones@example.org||ENG^English^ISO639|M|CHR|||||2186-5^Not Hispanic or Latino^CDCREC
+NK1|1|Jones^Marcus^A^^Mr^^L|SPO^Spouse^HL70063|742 Evergreen Terrace^^Springfield^MA^01103^USA^H|^PRN^PH^^^413^5550100
+PV1|1|I|4WEST^412^A^METRO_GENERAL||||1234567890^House^Gregory^M^^Dr^^^&2.16.840.1.113883.4.6&ISO|9988776655^Wilson^James^E^^Dr^^^&2.16.840.1.113883.4.6&ISO|||||||||||VN-2026-00042^^^METRO_GENERAL^VN|||||||||||||||||||||||||20260115081500-0500
+AL1|1|DA|7980^Penicillin G^RXNORM|SV|Hives~Anaphylaxis|20200510
+AL1|2|FA|91935009^Allergy to peanut^SCT|MO|Urticaria
+DG1|1|I10|I10^Essential (primary) hypertension^I10||20260115082000-0500|A
+DG1|2|I10|E11.9^Type 2 diabetes mellitus without complications^I10||20240301|W

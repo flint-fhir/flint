@@ -38,6 +38,10 @@ jobs:
             target: FuzzValidationAndDynamicExtraction
           - pkg: ./server
             target: FuzzWebSocketFrames
+          - pkg: ./pkg/hl7v2
+            target: FuzzHL7v2Parser
+          - pkg: ./pkg/ccda
+            target: FuzzCCDAParser
     steps:
       - uses: actions/checkout@v4
 

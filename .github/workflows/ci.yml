@@ -65,7 +65,7 @@ jobs:
           CGO_ENABLED=0 go build -o bin/embedded-sqlite ./examples/embedded-sqlite
           sh -n install.sh
 
-      - name: Go Native Fuzzing Gate (XML, IG Loader, Search, _filter, FHIRPath, Patch, Validator & WebSocket)
+      - name: Go Native Fuzzing Gate (XML, IG Loader, Search, _filter, FHIRPath, Patch, Validator, WebSocket, HL7v2 & C-CDA)
         run: |
           go test ./pkg/fhirxml -run '^$' -fuzz=FuzzXMLRoundTrip -fuzztime=2s
           go test ./pkg/igloader -run '^$' -fuzz=FuzzLoadTGZBytes -fuzztime=2s
@@ -75,8 +75,10 @@ jobs:
           go test ./server -run '^$' -fuzz=FuzzPatchEngines -fuzztime=2s
           go test ./server -run '^$' -fuzz=FuzzValidationAndDynamicExtraction -fuzztime=2s
           go test ./server -run '^$' -fuzz=FuzzWebSocketFrames -fuzztime=2s
+          go test ./pkg/hl7v2 -run '^$' -fuzz=FuzzHL7v2Parser -fuzztime=2s
+          go test ./pkg/ccda -run '^$' -fuzz=FuzzCCDAParser -fuzztime=2s
 
-      - name: Live Server Binary, US Core Seeder & 142-Check $certify E2E Gate (Postgres, SQLite WAL & Hybrid)
+      - name: Live Server Binary, US Core Seeder & 144-Check $certify E2E Gate (Postgres, SQLite WAL & Hybrid)
         env:
           FLINT_POSTGRES_DSN: "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
         run: |

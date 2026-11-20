@@ -1,0 +1,8 @@
+MSH|^~\&|NIST_IZ_EHR|METRO_PEDIATRICS^2.16.840.1.113883.3.72.5.40.1^ISO|FLINT_IIS|FLINT_STATE_IIS|20260115111500-0500||VXU^V04^VXU_V04|NIST-IZ-VXU-0001|P|2.5.1|||ER|AL|||||Z22^CDCPHINVS
+PID|1||MRN-778899^^^2.16.840.1.113883.3.72.5.30.1^MR||Jones^Isabella^Marie^^Ms^^L||19790624|F||2106-3^White^CDCREC|742 Evergreen Terrace^^Springfield^MA^01103^USA^H
+PD1|||||||||||02^Reminder/Recall - any method^HL70215|N|20260115
+ORC|RE||IZ-FILL-7001^METRO_PEDIATRICS|||||||777111222^Nurse^Clara^A^^^^^&2.16.840.1.113883.4.6&ISO||1234567890^House^Gregory^M^^Dr^^^&2.16.840.1.113883.4.6&ISO
+RXA|0|1|20260115110000-0500|20260115110000-0500|208^SARS-COV-2 (COVID-19) vaccine, mRNA, spike protein, LNP, preservative free, 30 mcg/0.3mL dose^CVX^59267-1000-01^Pfizer COVID-19^NDC|0.3|mL^milliliters^UCUM||00^New immunization record^NIP001||||||LOT-PFZ-2026A|20261231|PFR^Pfizer, Inc^MVX|||CP|A
+RXR|C28161^Intramuscular^NCIT|LA^Left Arm^HL70163
+OBX|1|CE|64994-7^Vaccine funding program eligibility category^LN|1|V01^Not VFC eligible^HL70064||||||F|||20260115110000-0500
+OBX|2|DT|29768-9^Date vaccine information statement published^LN|1|20250801||||||F|||20260115110000-0500

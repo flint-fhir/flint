@@ -96,10 +96,17 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 		},
 		{
 			Category:      "Conformance, Validation & Certification",
-			Capability:    "StructureDefinition & ValueSet Validation ($validate, 26 US Core v6.1.0 & v7.0.0 Profiles), TestScript/$evaluate & 138-Check Automated Certification ($certify across 10 Suites)",
+			Capability:    "StructureDefinition & ValueSet Validation ($validate, 26 US Core v6.1.0 & v7.0.0 Profiles), TestScript/$evaluate & 144-Check Automated Certification ($certify across 10 Suites)",
 			Specification: "HL7 FHIR R4 OperationDefinition/Resource-validate, TestScript & TestReport",
 			Status:        "Verified",
 			Endpoint:      "/fhir/r4/{tenant}/$certify",
+		},
+		{
+			Category:      "Legacy Clinical Bridge (HL7 v2.x MLLP/HTTP & C-CDA R2.1)",
+			Capability:    "Pure-Go HL7 v2.x ER7 & MLLP TCP Ingestion ($ingest-hl7v2, ADT/ORU/VXU/ORM + AA/AE/AR ACK) & Bidirectional XXE-Hardened C-CDA R2.1 CCD ($import-ccda, Patient/{id}/$ccda)",
+			Specification: "HL7 v2.5.1 / MLLP v1 & HL7 C-CDA R2.1 (CCD)",
+			Status:        "Verified",
+			Endpoint:      "/fhir/r4/{tenant}/$ingest-hl7v2",
 		},
 		{
 			Category:      "Security & Authorization",
@@ -6430,12 +6437,95 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 		},
 	}
 
+	paths["/$ingest-hl7v2"] = map[string]any{
+		"post": map[string]any{
+			"tags":        []string{"HL7v2", "System"},
+			"summary":     "Ingest an HL7 v2.x ER7 message (ADT, ORU, VXU, ORM) into atomic FHIR R4 resources and return an AA/AE/AR ACK ($ingest-hl7v2)",
+			"operationId": "systemIngestHL7v2",
+			"responses": map[string]any{
+				"200": map[string]any{"description": "FHIR Parameters containing AA ACK and persisted transaction Bundle (or raw x-application/hl7-v2+er7 ACK)"},
+				"400": map[string]any{"description": "Malformed ER7 or unsupported message type with MSA|AR| NACK"},
+				"413": map[string]any{"description": "HL7 v2 payload exceeds maximum size limit"},
+			},
+		},
+	}
+
+	paths["/$import-ccda"] = map[string]any{
+		"post": map[string]any{
+			"tags":        []string{"CCDA", "System"},
+			"summary":     "Import and convert an XXE-hardened HL7 C-CDA R2.1 CCD XML document into FHIR R4 resources ($import-ccda)",
+			"operationId": "systemImportCCDA",
+			"parameters": []map[string]any{
+				{"name": "persist", "in": "query", "required": false, "schema": map[string]any{"type": "boolean"}},
+				{"name": "mode", "in": "query", "required": false, "schema": map[string]any{"type": "string", "enum": []string{"transaction", "document"}}},
+			},
+			"responses": map[string]any{
+				"200": map[string]any{"description": "Committed transaction-response Bundle (or non-persisted document Bundle when persist=false)"},
+				"400": map[string]any{"description": "Invalid C-CDA XML or rejected DOCTYPE/ENTITY XXE payload"},
+				"413": map[string]any{"description": "C-CDA payload exceeds maximum size limit"},
+			},
+		},
+	}
+
+	paths["/Patient/$ccda"] = map[string]any{
+		"get": map[string]any{
+			"tags":        []string{"Patient", "CCDA"},
+			"summary":     "Export a patient's FHIR R4 compartment as an HL7 C-CDA R2.1 Continuity of Care Document ($ccda)",
+			"operationId": "patientTypeCCDAGet",
+			"parameters": []map[string]any{
+				{"name": "patient", "in": "query", "required": true, "schema": map[string]any{"type": "string"}},
+			},
+			"responses": map[string]any{
+				"200": map[string]any{"description": "HL7 C-CDA R2.1 CCD XML (application/cda+xml) or FHIR Parameters wrapping DocumentReference"},
+				"400": map[string]any{"description": "Missing patient identifier"},
+				"404": map[string]any{"description": "Patient not found"},
+			},
+		},
+		"post": map[string]any{
+			"tags":        []string{"Patient", "CCDA"},
+			"summary":     "Export a patient's FHIR R4 compartment as an HL7 C-CDA R2.1 Continuity of Care Document via POST Parameters ($ccda)",
+			"operationId": "patientTypeCCDAPost",
+			"responses": map[string]any{
+				"200": map[string]any{"description": "HL7 C-CDA R2.1 CCD XML (application/cda+xml) or FHIR Parameters wrapping DocumentReference"},
+				"400": map[string]any{"description": "Missing patient identifier"},
+				"404": map[string]any{"description": "Patient not found"},
+			},
+		},
+	}
+
+	paths["/Patient/{id}/$ccda"] = map[string]any{
+		"get": map[string]any{
+			"tags":        []string{"Patient", "CCDA"},
+			"summary":     "Export Patient/{id} FHIR R4 compartment as an HL7 C-CDA R2.1 Continuity of Care Document ($ccda)",
+			"operationId": "patientInstanceCCDAGet",
+			"parameters": []map[string]any{
+				{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+			},
+			"responses": map[string]any{
+				"200": map[string]any{"description": "HL7 C-CDA R2.1 CCD XML (application/cda+xml) or FHIR Parameters wrapping DocumentReference"},
+				"404": map[string]any{"description": "Patient not found"},
+			},
+		},
+		"post": map[string]any{
+			"tags":        []string{"Patient", "CCDA"},
+			"summary":     "Export Patient/{id} FHIR R4 compartment as an HL7 C-CDA R2.1 Continuity of Care Document via POST Parameters ($ccda)",
+			"operationId": "patientInstanceCCDAPost",
+			"parameters": []map[string]any{
+				{"name": "id", "in": "path", "required": true, "schema": map[string]any{"type": "string"}},
+			},
+			"responses": map[string]any{
+				"200": map[string]any{"description": "HL7 C-CDA R2.1 CCD XML (application/cda+xml) or FHIR Parameters wrapping DocumentReference"},
+				"404": map[string]any{"description": "Patient not found"},
+			},
+		},
+	}
+
 	return map[string]any{
 		"openapi": "3.1.0",
 		"info": map[string]any{
 			"title":       "Flint FHIR R4 API & Interoperability Server",
 			"version":     Version,
-			"description": "Storage-agnostic HL7 FHIR R4 API & Interoperability Engine speaking FHIR JSON, HL7 FHIR R4 XML, NDJSON, CSV/TSV, and zero-JSON binary google/fhir Proto3 wire formats over pluggable store.Store & store.AnalyticalStore backends (PostgreSQL, Embedded SQLite WAL, Apache Doris MPP, and HybridStore), with SMART on FHIR v2 OAuth2/PKCE, 35+ National HL7 IGs, SQL-on-FHIR v2 ($run, $export, $sql), and 138-check automated conformance ($certify).",
+			"description": "Storage-agnostic HL7 FHIR R4 API & Interoperability Engine speaking FHIR JSON, HL7 FHIR R4 XML, NDJSON, CSV/TSV, and zero-JSON binary google/fhir Proto3 wire formats over pluggable store.Store & store.AnalyticalStore backends (PostgreSQL, Embedded SQLite WAL, Apache Doris MPP, and HybridStore), with SMART on FHIR v2 OAuth2/PKCE, 35+ National HL7 IGs, SQL-on-FHIR v2 ($run, $export, $sql), and 144-check automated conformance ($certify).",
 			"contact": map[string]any{
 				"name": "Flint FHIR Engineering",
 				"url":  "https://github.com/flint-fhir/flint",

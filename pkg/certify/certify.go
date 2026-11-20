@@ -1,7 +1,7 @@
 // Package certify implements an automated HL7 FHIR R4, US Core v6.1.0 & v7.0.0
 // (USCDI v3 & v4), ONC §170.315(g)(10) / HTI-1, HL7 SQL-on-FHIR v2, and 35+ National HL7
 // Implementation Guide conformance & certification runner. It executes 10 structured test suites
-// (142 checks) over HTTP against any Flint storage topology (PostgreSQL, SQLite, Apache Doris,
+// (144 checks) over HTTP against any Flint storage topology (PostgreSQL, SQLite, Apache Doris,
 // or HybridStore) and produces both a standard FHIR R4 TestReport resource and a scorecard.
 package certify
 
@@ -143,7 +143,7 @@ type Config struct {
 	SeedBundle  []byte
 }
 
-// Run executes all 10 certification suites (138 checks) against the configured Flint server.
+// Run executes all 10 certification suites (144 checks) against the configured Flint server.
 func Run(ctx context.Context, cfg Config) (*Report, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
 	if baseURL == "" {
@@ -1385,6 +1385,150 @@ func Run(ctx context.Context, cfg Config) (*Report, error) {
 		}
 	}
 	record("OTEL-01", suite5, "OpenTelemetry W3C Trace Context Propagation, Trace-Correlated AuditEvent & OTLP Metrics", t0, err, "Verified W3C traceparent extraction, X-Trace-Id response correlation, AuditEvent trace-context extension & Prometheus OTLP counters")
+
+	// HL7V2-01: HL7 v2.x ER7 Ingestion ($ingest-hl7v2, ADT^A01 + ORU^R01 -> FHIR R4, AA ACK & AR NACK)
+	t0 = time.Now()
+	{
+		err = nil
+		adtHL7 := []byte("MSH|^~\\&|EHR|CLINIC|FLINT|HOSP|20261119120000+0000||ADT^A01^ADT_A01|CERT-HL7-ADT-1|P|2.5.1\rPID|1||CERT-HL7-01^^^CLINIC^MR||Certify^Hl7||19850412|F\rPV1|1|I|WARD^101^A\r")
+		oruHL7 := []byte("MSH|^~\\&|LAB|CLINIC|FLINT|HOSP|20261119120500+0000||ORU^R01^ORU_R01|CERT-HL7-ORU-1|P|2.5.1\rPID|1||CERT-HL7-01^^^CLINIC^MR||Certify^Hl7||19850412|F\rOBR|1|CERT-ORD-1|CERT-FILL-1|8867-4^Heart rate^LN|||20261119120000+0000|||||||||||||||20261119120500+0000|||F\rOBX|1|NM|8867-4^Heart rate^LN||72|/min|60-100|N|||F|||20261119120000+0000\r")
+
+		respADT, bADT, errADT := doReq(http.MethodPost, basePath+"/$ingest-hl7v2", "x-application/hl7-v2+er7", adtHL7, nil)
+		if errADT != nil || respADT.StatusCode != http.StatusOK {
+			err = fmt.Errorf("expected 200 OK from POST $ingest-hl7v2 ADT^A01, got %v / %d: %s", errADT, statusCodeOrZero(respADT), string(bADT))
+		} else {
+			var pMap map[string]any
+			if jErr := json.Unmarshal(bADT, &pMap); jErr != nil {
+				err = fmt.Errorf("decode $ingest-hl7v2 ADT^A01 Parameters: %w", jErr)
+			} else {
+				var ackCode, ackStr, patRef string
+				if rawParams, ok := pMap["parameter"].([]any); ok {
+					for _, item := range rawParams {
+						pm, ok := item.(map[string]any)
+						if !ok {
+							continue
+						}
+						switch pm["name"] {
+						case "ackCode":
+							ackCode, _ = pm["valueCode"].(string)
+						case "ack":
+							ackStr, _ = pm["valueString"].(string)
+						case "patient":
+							if vr, ok := pm["valueReference"].(map[string]any); ok {
+								patRef, _ = vr["reference"].(string)
+							}
+						}
+					}
+				}
+				if ackCode != "AA" || !strings.Contains(ackStr, "MSA|AA|") || !strings.HasPrefix(patRef, "Patient/") {
+					err = fmt.Errorf("unexpected $ingest-hl7v2 Parameters: ackCode=%q patRef=%q body=%s", ackCode, patRef, string(bADT))
+				} else {
+					respORU, bORU, errORU := doReq(http.MethodPost, basePath+"/$ingest-hl7v2", "x-application/hl7-v2+er7", oruHL7, nil)
+					if errORU != nil || respORU.StatusCode != http.StatusOK || !strings.Contains(string(bORU), `"AA"`) {
+						err = fmt.Errorf("expected 200 OK AA ACK from POST $ingest-hl7v2 ORU^R01, got %v / %d: %s", errORU, statusCodeOrZero(respORU), string(bORU))
+					} else {
+						respPat, _, errPat := doReq(http.MethodGet, basePath+"/"+patRef, "", nil, nil)
+						respDR, bDR, errDR := doReq(http.MethodGet, basePath+"/DiagnosticReport?patient="+url.QueryEscape(patRef), "", nil, nil)
+						if errPat != nil || respPat.StatusCode != http.StatusOK {
+							err = fmt.Errorf("expected 200 OK reading mapped HL7 v2 %s, got %v / %d", patRef, errPat, statusCodeOrZero(respPat))
+						} else if errDR != nil || respDR.StatusCode != http.StatusOK {
+							err = fmt.Errorf("expected 200 OK querying DiagnosticReport for %s, got %v / %d", patRef, errDR, statusCodeOrZero(respDR))
+						} else {
+							var drBundle map[string]any
+							_ = json.Unmarshal(bDR, &drBundle)
+							drTotal, _ := drBundle["total"].(float64)
+							drEntries, _ := drBundle["entry"].([]any)
+							if drTotal < 1 && len(drEntries) < 1 {
+								err = fmt.Errorf("expected >= 1 DiagnosticReport mapped for %s, got total=%.0f entries=%d", patRef, drTotal, len(drEntries))
+							} else {
+								respBad, bBad, errBad := doReq(http.MethodPost, basePath+"/$ingest-hl7v2", "x-application/hl7-v2+er7",
+									[]byte("INVALID-NO-MSH\r"), map[string]string{"Accept": "x-application/hl7-v2+er7"})
+								if errBad != nil || respBad.StatusCode != http.StatusBadRequest || !strings.Contains(string(bBad), "MSA|AR|") {
+									err = fmt.Errorf("expected 400 MSA|AR| NACK on malformed HL7 v2 ER7, got %v / %d: %s", errBad, statusCodeOrZero(respBad), string(bBad))
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	record("HL7V2-01", suite5, "HL7 v2.x Ingestion ($ingest-hl7v2 ADT^A01 & ORU^R01 -> FHIR R4, AA ACK & AR NACK)", t0, err, "Verified ER7 ADT^A01/ORU^R01 FHIR R4 persistence, AA ACK & malformed MSA|AR| rejection")
+
+	// CCDA-01: Bidirectional C-CDA R2.1 CCD Export ($ccda), Idempotent $import-ccda & XXE Security Rejection
+	t0 = time.Now()
+	{
+		err = nil
+		respExp, bExp, errExp := doReq(http.MethodGet, basePath+"/Patient/cert-pat-1/$ccda", "", nil, map[string]string{
+			"Accept": "application/cda+xml",
+		})
+		if errExp != nil || respExp.StatusCode != http.StatusOK {
+			err = fmt.Errorf("expected 200 OK from GET /Patient/cert-pat-1/$ccda, got %v / %d: %s", errExp, statusCodeOrZero(respExp), string(bExp))
+		} else if ct := strings.ToLower(respExp.Header.Get("Content-Type")); !strings.Contains(ct, "application/cda+xml") {
+			err = fmt.Errorf("expected Content-Type application/cda+xml, got %q", respExp.Header.Get("Content-Type"))
+		} else if !strings.Contains(string(bExp), "<ClinicalDocument") || !strings.Contains(string(bExp), "2.16.840.1.113883.10.20.22.1.2") {
+			err = fmt.Errorf("expected C-CDA R2.1 CCD XML with template 2.16.840.1.113883.10.20.22.1.2, got: %s", string(bExp))
+		} else {
+			// Round-trip Patient/cert-pat-1 exported CCD with persist=false (document mode) so we do not duplicate CERT-MRN-1
+			respDoc, bDoc, errDoc := doReq(http.MethodPost, basePath+"/$import-ccda?persist=false", "application/cda+xml", bExp, nil)
+			if errDoc != nil || respDoc.StatusCode != http.StatusOK {
+				err = fmt.Errorf("expected 200 OK from POST $import-ccda?persist=false, got %v / %d: %s", errDoc, statusCodeOrZero(respDoc), string(bDoc))
+			} else {
+				var docBundle map[string]any
+				_ = json.Unmarshal(bDoc, &docBundle)
+				if docType, _ := docBundle["type"].(string); docType != "document" {
+					err = fmt.Errorf("expected document Bundle from $import-ccda?persist=false, got %q", docType)
+				}
+			}
+			if err == nil {
+				// Persisting idempotency check using an isolated MRN (CERT-CCDA-MRN-1) so AN-18 CERT-MRN-1 stays unambiguous
+				isolatedCCD := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<ClinicalDocument xmlns="urn:hl7-org:v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <realmCode code="US"/>
+  <typeId root="2.16.840.1.113883.1.3" extension="POCD_HD000040"/>
+  <templateId root="2.16.840.1.113883.10.20.22.1.1" extension="2015-08-01"/>
+  <templateId root="2.16.840.1.113883.10.20.22.1.2" extension="2015-08-01"/>
+  <id root="2.16.840.1.113883.19.5" extension="cert-ccda-doc-1"/>
+  <code code="34133-9" codeSystem="2.16.840.1.113883.6.1" displayName="Summarization of Episode Note"/>
+  <title>Certify Isolated CCD</title>
+  <effectiveTime value="20261119120000+0000"/>
+  <confidentialityCode code="N" codeSystem="2.16.840.1.113883.5.25"/>
+  <languageCode code="en-US"/>
+  <recordTarget><patientRole>
+    <id root="2.16.840.1.113883.19.5" extension="CERT-CCDA-MRN-1"/>
+    <patient><name><given>Certify</given><family>CCDA</family></name><administrativeGenderCode code="F" codeSystem="2.16.840.1.113883.5.1"/><birthTime value="19850412"/></patient>
+  </patientRole></recordTarget>
+  <custodian><assignedCustodian><representedCustodianOrganization><id root="2.16.840.1.113883.19.5"/><name>Flint Certify Clinic</name></representedCustodianOrganization></assignedCustodian></custodian>
+  <component><structuredBody><component><section>
+    <templateId root="2.16.840.1.113883.10.20.22.2.5.1" extension="2015-08-01"/>
+    <code code="11450-4" codeSystem="2.16.840.1.113883.6.1" displayName="Problem list"/>
+    <title>Problems</title><text>None</text>
+  </section></component></structuredBody></component>
+</ClinicalDocument>`)
+				for attempt := 1; attempt <= 2; attempt++ {
+					respImp, bImp, errImp := doReq(http.MethodPost, basePath+"/$import-ccda", "application/cda+xml", isolatedCCD, nil)
+					if errImp != nil || respImp.StatusCode != http.StatusOK {
+						err = fmt.Errorf("expected 200 OK from idempotent POST $import-ccda attempt %d, got %v / %d: %s", attempt, errImp, statusCodeOrZero(respImp), string(bImp))
+						break
+					}
+					var impBundle map[string]any
+					_ = json.Unmarshal(bImp, &impBundle)
+					if impType, _ := impBundle["type"].(string); impType != "transaction-response" {
+						err = fmt.Errorf("expected transaction-response Bundle on $import-ccda attempt %d, got %q", attempt, impType)
+						break
+					}
+				}
+			}
+			if err == nil {
+				xxePayload := []byte(`<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE ClinicalDocument [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><ClinicalDocument xmlns="urn:hl7-org:v3"><title>&xxe;</title></ClinicalDocument>`)
+				respXXE, bXXE, errXXE := doReq(http.MethodPost, basePath+"/$import-ccda", "application/cda+xml", xxePayload, nil)
+				if errXXE != nil || respXXE.StatusCode != http.StatusBadRequest || !strings.Contains(string(bXXE), `"security"`) {
+					err = fmt.Errorf("expected 400 security OperationOutcome on XXE DOCTYPE/ENTITY $import-ccda payload, got %v / %d: %s", errXXE, statusCodeOrZero(respXXE), string(bXXE))
+				}
+			}
+		}
+	}
+	record("CCDA-01", suite5, "Bidirectional HL7 C-CDA R2.1 ($ccda Export, Idempotent $import-ccda & XXE Security Gate)", t0, err, "Verified application/cda+xml CCD R2.1 export, idempotent $import-ccda persistence & DOCTYPE/ENTITY XXE rejection")
 
 	t0 = time.Now()
 	resp, _, err = doReq(http.MethodPost, basePath+"/MedicationRequest/$validate", "application/fhir+json",
