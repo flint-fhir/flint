@@ -25,26 +25,62 @@ var auditActorKey = auditActorKeyType{}
 // auditActorHolder captures authenticated actor metadata inside authMiddleware
 // even if authMiddleware subsequently aborts the request with 403 Forbidden.
 type auditActorHolder struct {
-	actorSubject string
-	patientID    string
-	purposeOfUse string
-	outcomeDesc  string
-	subtypeCode  string
+	actorSubject          string
+	agentIssuer           string
+	delegatedActorSubject string
+	delegatedActorIssuer  string
+	operatorCrossTenant   bool
+	patientID             string
+	purposeOfUse          string
+	outcomeDesc           string
+	subtypeCode           string
 }
 
 // corsMiddleware emits CORS headers for SMART App Launch STU2.2 browser-based
 // clients and answers generic OPTIONS preflight requests cleanly.
-func corsMiddleware(next http.Handler) http.Handler {
+func (s *Server) corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
 		path := strings.Trim(r.URL.Path, "/")
 		isDiscovery := strings.Contains(path, ".well-known/") || strings.HasSuffix(path, "/metadata") || path == "metadata"
+		allowed, restricted, echoOrigin := s.checkCORSOrigin(origin)
+
+		allowHeaders := "Authorization, Content-Type, Accept, Origin, If-Match, If-None-Exist, If-None-Match, Prefer, Idempotency-Key, X-Idempotency-Key, X-Request-Id, X-Purpose-Of-Use, X-TEFCA-Exchange-Purpose, " + DefaultTenantHeaderName
+		if customHdr := s.effectiveTenantHeaderName(); customHdr != "" && customHdr != DefaultTenantHeaderName {
+			allowHeaders += ", " + customHdr
+		}
+
+		if restricted {
+			w.Header().Add("Vary", "Origin")
+			if origin != "" {
+				if !allowed {
+					if r.Method == http.MethodOptions && !strings.HasPrefix(path, "shlink/") {
+						w.WriteHeader(http.StatusForbidden)
+						return
+					}
+					next.ServeHTTP(w, r)
+					return
+				}
+				if w.Header().Get("Access-Control-Allow-Origin") == "" {
+					w.Header().Set("Access-Control-Allow-Origin", echoOrigin)
+				}
+				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+				w.Header().Set("Access-Control-Allow-Headers", allowHeaders)
+				if r.Method == http.MethodOptions && !strings.HasPrefix(path, "shlink/") {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		if origin != "" || isDiscovery {
 			if w.Header().Get("Access-Control-Allow-Origin") == "" {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 			}
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Origin, If-Match, If-None-Exist, If-None-Match, Prefer, X-Purpose-Of-Use, X-TEFCA-Exchange-Purpose")
+			w.Header().Set("Access-Control-Allow-Headers", allowHeaders)
 			if r.Method == http.MethodOptions && !strings.HasPrefix(path, "shlink/") {
 				w.WriteHeader(http.StatusNoContent)
 				return
@@ -75,14 +111,24 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		authHeader := r.Header.Get("Authorization")
+		policy := s.SecurityPolicy()
 		secCtx, hasExistingSecCtx := auth.FromContext(r.Context())
 		if !hasExistingSecCtx || authHeader != "" {
-			validator := s.tokenValidator
+			validator := s.getTokenValidator()
 			if validator == nil {
+				if policy.RequireAuth {
+					writeOperationOutcome(w, http.StatusUnauthorized, "login", "authentication required")
+					return
+				}
 				// If no external token validator is configured and no Authorization header is supplied,
 				// server operates in unauthenticated dev mode. When an Authorization header IS supplied
 				// (e.g. SMART App Launch / HL7 Inferno conformance tests), validate and enforce scopes via devAuth.
 				if authHeader == "" {
+					if deniedType := deniedResourceTypeFromParts(parts); deniedType != "" && s.isResourceTypeDenied(deniedType) {
+						writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+							fmt.Sprintf("resource type %s is disabled by server security policy", deniedType))
+						return
+					}
 					next.ServeHTTP(w, r)
 					return
 				}
@@ -97,8 +143,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 
 			// Allow unauthenticated public bulk-publish, UDS+ manifest/stream, and SMART Health Cards endpoints
-			// when no Authorization header is supplied (while still validating Bearer tokens when supplied).
-			if authHeader == "" && isUnauthenticatedAllowedEndpoint(r, parts) {
+			// when no Authorization header is supplied (unless explicitly disabled by security policy).
+			if authHeader == "" && !policy.DisableUnauthenticatedEndpoints && isUnauthenticatedAllowedEndpoint(r, parts) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -115,7 +161,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				return
 			}
 
-			// Validate token using configured TokenValidator (OIDC/Zitadel/Mock)
+			// Validate token using configured TokenValidator (OIDC/Zitadel/TrustDoc/Mock)
 			var err error
 			secCtx, err = validator.ValidateToken(r.Context(), rawToken)
 			if err != nil {
@@ -125,8 +171,18 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
+		if deniedType := deniedResourceTypeFromParts(parts); deniedType != "" && s.isResourceTypeDenied(deniedType) {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
+				fmt.Sprintf("resource type %s is disabled by server security policy", deniedType))
+			return
+		}
+
 		if holder, ok := r.Context().Value(auditActorKey).(*auditActorHolder); ok && holder != nil {
 			holder.actorSubject = secCtx.GetSubject()
+			holder.agentIssuer = secCtx.GetIssuer()
+			holder.delegatedActorSubject = secCtx.GetActorSubject()
+			holder.delegatedActorIssuer = secCtx.GetActorIssuer()
+			holder.operatorCrossTenant = secCtx.GetOperatorCrossTenant()
 			holder.patientID = cleanID(secCtx.GetPatientId())
 		}
 
@@ -177,11 +233,20 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 
 		reqTenant := parts[2]
 
-		// Enforce tenant boundary if token is bound to a specific tenant
-		if secCtx.GetTenantId() != "" && secCtx.GetTenantId() != reqTenant {
-			writeOperationOutcome(w, http.StatusForbidden, "forbidden",
-				fmt.Sprintf("token tenant %s cannot access tenant %s", secCtx.GetTenantId(), reqTenant))
+		if policy.RequireTenantClaim && secCtx.GetTenantId() == "" && len(secCtx.GetTenantGrants()) == 0 && !secCtx.GetOperatorCrossTenant() {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", "token is missing required tenant claim")
 			return
+		}
+
+		// Enforce tenant boundary and isolate per-tenant grants when present
+		resolvedSecCtx, tenantErr := resolveRequestTenantSecurityContext(r.Context(), secCtx, reqTenant)
+		if tenantErr != nil {
+			writeOperationOutcome(w, http.StatusForbidden, "forbidden", tenantErr.Error())
+			return
+		}
+		secCtx = resolvedSecCtx
+		if holder, ok := r.Context().Value(auditActorKey).(*auditActorHolder); ok && holder != nil {
+			holder.operatorCrossTenant = secCtx.GetOperatorCrossTenant()
 		}
 
 		isValidateReq := (len(parts) >= 4 && parts[3] == "$validate") ||
@@ -980,6 +1045,32 @@ func cleanID(id string) string {
 	return id
 }
 
+func deniedResourceTypeFromParts(parts []string) string {
+	if len(parts) < 4 || parts[0] != "fhir" || parts[1] != "r4" {
+		return ""
+	}
+	seg := parts[3]
+	if seg == "" || strings.HasPrefix(seg, "$") || strings.HasPrefix(seg, "_") ||
+		seg == "metadata" || seg == "cds-services" || strings.HasPrefix(seg, ".well-known") {
+		return ""
+	}
+	return seg
+}
+
+func resolveRequestTenantSecurityContext(ctx context.Context, secCtx *auth.SecurityContext, reqTenant string) (*auth.SecurityContext, error) {
+	resolved, err := auth.ResolveTenantContext(secCtx, reqTenant)
+	if err == nil {
+		return resolved, nil
+	}
+	if rc, ok := tenantRouteFromContext(ctx); ok && rc.rawTenant != "" && rc.rawTenant != reqTenant {
+		if byRaw, errRaw := auth.ResolveTenantContext(secCtx, rc.rawTenant); errRaw == nil {
+			byRaw.TenantId = reqTenant
+			return byRaw, nil
+		}
+	}
+	return nil, err
+}
+
 // checkExistingResourceCompartment verifies whether an existing resource (active or in history)
 // belongs to the restricted patient compartment.
 // Returns (exists, allowed, err).
@@ -1185,12 +1276,14 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 		}
 
 		// On successful POST Create (201/200) or Conditional PUT/DELETE, extract resource ID from Location header:
-		// Location: /fhir/r4/{tenant}/{resourceType}/{id}
+		// Location: /fhir/r4/{tenant}/{resourceType}/{id} or flat /fhir/r4/{resourceType}/{id}
 		if entityID == "" && (r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete) && arw.statusCode < 400 {
 			if loc := arw.Header().Get("Location"); loc != "" {
 				locParts := strings.Split(strings.Trim(loc, "/"), "/")
 				if len(locParts) >= 5 && locParts[0] == "fhir" && locParts[1] == "r4" {
 					entityID = locParts[4]
+				} else if len(locParts) == 4 && locParts[0] == "fhir" && locParts[1] == "r4" {
+					entityID = locParts[3]
 				}
 			}
 		}
@@ -1206,6 +1299,11 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 		actorSubject := holder.actorSubject
 		if actorSubject == "" {
 			actorSubject = "anonymous"
+		}
+
+		requestID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
+		if requestID == "" {
+			requestID = strings.TrimSpace(r.Header.Get("X-Correlation-Id"))
 		}
 
 		patientID := holder.patientID
@@ -1237,23 +1335,28 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 		}
 
 		rec := store.AuditRecord{
-			TenantID:      tenantID,
-			AuditID:       uuid.NewString(),
-			Recorded:      time.Now().UTC(),
-			Action:        actionCode,
-			SubtypeCode:   subtypeCode,
-			Outcome:       outcomeCode,
-			OutcomeDesc:   outcomeDesc,
-			HTTPMethod:    r.Method,
-			HTTPStatus:    arw.statusCode,
-			RequestURI:    r.URL.RequestURI(),
-			AgentSubject:  actorSubject,
-			AgentPatient:  patientID,
-			ClientIP:      extractClientIP(r),
-			EntityType:    entityType,
-			EntityID:      entityID,
-			EntityVersion: entityVersion,
-			PurposeOfUse:  holder.purposeOfUse,
+			TenantID:            tenantID,
+			AuditID:             uuid.NewString(),
+			Recorded:            time.Now().UTC(),
+			Action:              actionCode,
+			SubtypeCode:         subtypeCode,
+			Outcome:             outcomeCode,
+			OutcomeDesc:         outcomeDesc,
+			HTTPMethod:          r.Method,
+			HTTPStatus:          arw.statusCode,
+			RequestURI:          r.URL.RequestURI(),
+			AgentSubject:        actorSubject,
+			AgentIssuer:         holder.agentIssuer,
+			ActorSubject:        holder.delegatedActorSubject,
+			ActorIssuer:         holder.delegatedActorIssuer,
+			OperatorCrossTenant: holder.operatorCrossTenant,
+			AgentPatient:        patientID,
+			ClientIP:            extractClientIP(r),
+			EntityType:          entityType,
+			EntityID:            entityID,
+			EntityVersion:       entityVersion,
+			PurposeOfUse:        holder.purposeOfUse,
+			RequestID:           requestID,
 		}
 
 		if err := s.auditRecorder.Record(auditCtx, rec); err != nil {

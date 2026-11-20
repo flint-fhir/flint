@@ -30,17 +30,32 @@ message SmartScope {
   repeated Action actions = 4;
 }
 
+// TenantGrant captures the roles and SMART scopes authorized for a specific tenant.
+message TenantGrant {
+  repeated string roles = 1;
+  repeated SmartScope scopes = 2;
+}
+
 // SecurityContext contains the verified identity, tenant boundary,
 // and clinical authorization context extracted from an authenticated token.
 // Can be serialized across Temporal workflows and AutoMQ audit events.
 message SecurityContext {
-  string subject = 1;               // sub claim (user, client, or service account ID)
-  string tenant_id = 2;             // multi-tenant schema isolation boundary
-  string patient_id = 3;            // patient launch context claim (if restricted)
-  string encounter_id = 4;          // encounter launch context claim (if restricted)
-  repeated SmartScope scopes = 5;   // parsed SMART scopes
-  map<string, string> claims = 6;   // token claims
-  string raw_token = 7;             // original bearer token (optional/redactable)
+  string subject = 1;                         // sub claim (user, client, or service account ID)
+  string tenant_id = 2;                       // multi-tenant schema isolation boundary
+  string patient_id = 3;                      // patient launch context claim (if restricted)
+  string encounter_id = 4;                    // encounter launch context claim (if restricted)
+  repeated SmartScope scopes = 5;             // parsed SMART scopes
+  map<string, string> claims = 6;             // token claims
+  string raw_token = 7;                       // original bearer token (optional/redactable)
+  map<string, TenantGrant> tenant_grants = 8; // per-tenant roles and scopes for multi-tenant isolation
+  string issuer = 9;                          // verified JWT iss claim
+  string actor_subject = 10;                  // RFC 8693 act.sub delegated caller subject
+  string actor_issuer = 11;                   // RFC 8693 act.iss delegated caller issuer
+  bool operator_cross_tenant = 12;            // true when a cross-tenant operator token was accepted
+  string principal_id = 13;                   // matched workload/service principal ID from trust doc
+  string auth_scheme = 14;                    // authentication scheme (e.g. "bearer", "trustdoc", "zitadel")
+  repeated string roles = 15;                 // active roles resolved for the bound tenant
+  string platform_tenant = 16;                // platform operator home tenant holding operator_role
 }
 
 // SmartConfiguration represents the SMART App Launch discovery document

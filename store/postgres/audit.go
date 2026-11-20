@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/flint-fhir/flint/store"
 )
 
 // WriteAuditEvent inserts an immutable security audit record into fhir_audit_event.
@@ -16,10 +18,7 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec AuditRecord) error {
 	if rec.AgentSubject == "" {
 		rec.AgentSubject = "anonymous"
 	}
-	outcomeDesc := rec.OutcomeDesc
-	if rec.PurposeOfUse != "" && !strings.Contains(outcomeDesc, "[purposeOfUse=") {
-		outcomeDesc = fmt.Sprintf("%s [purposeOfUse=%s]", outcomeDesc, rec.PurposeOfUse)
-	}
+	outcomeDesc := store.EncodeAuditOutcomeDesc(rec)
 
 	return s.withTenantTx(ctx, rec.TenantID, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
@@ -65,22 +64,8 @@ func (s *Store) ReadAuditEvent(ctx context.Context, tenantID, auditID string) (*
 	if err != nil {
 		return nil, err
 	}
-	hydratePurposeOfUse(&rec)
+	store.HydrateAuditOutcomeMetadata(&rec)
 	return &rec, nil
-}
-
-func hydratePurposeOfUse(rec *AuditRecord) {
-	if rec == nil || rec.PurposeOfUse != "" {
-		return
-	}
-	const tag = " [purposeOfUse="
-	if idx := strings.Index(rec.OutcomeDesc, tag); idx != -1 {
-		rest := rec.OutcomeDesc[idx+len(tag):]
-		if endIdx := strings.IndexByte(rest, ']'); endIdx != -1 {
-			rec.PurposeOfUse = rest[:endIdx]
-			rec.OutcomeDesc = strings.TrimSpace(rec.OutcomeDesc[:idx])
-		}
-	}
 }
 
 // QueryAuditEvents searches fhir_audit_event ordered by recorded descending.
@@ -155,7 +140,7 @@ func (s *Store) QueryAuditEvents(ctx context.Context, params AuditQueryParams) (
 			); err != nil {
 				return fmt.Errorf("scan audit event: %w", err)
 			}
-			hydratePurposeOfUse(&rec)
+			store.HydrateAuditOutcomeMetadata(&rec)
 			records = append(records, rec)
 		}
 		return rows.Err()

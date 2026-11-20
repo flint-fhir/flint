@@ -263,10 +263,28 @@ CLI flags: `--version`, `--store=postgres|sqlite|doris`, `--analytics-store=dori
 | `FLINT_DORIS_GROUP_COMMIT` | *(server default)* | `doris` | Optional Doris group-commit mode (`async_mode` or `sync_mode`) for high-throughput ingestion |
 | `FLINT_OIDC_ISSUER` | *(empty — dev mode)* | Auth | Enable external OIDC / SMART v2 JWT validation |
 | `FLINT_OIDC_AUDIENCE` | *(empty)* | Auth | Expected JWT `aud` claim |
+| `FLINT_OIDC_JWKS_URL` | *(`<issuer>/.well-known/jwks.json`)* | Auth | Override IdP JWKS endpoint URL |
+| `FLINT_OIDC_SIGNING_ALGS` | `RS256,ES256` | Auth | Comma-separated accepted asymmetric JWS algorithms (`RS*/PS*/ES*`) |
+| `FLINT_OIDC_ROLE_TO_SCOPES` | *(empty)* | Auth | Role-to-SMART-scope mapping (JSON object or `role=scopes;...`) |
+| `FLINT_IDENTITY_TRUST_FILE` | *(empty — also `PLATFORM_IDENTITY_TRUST_FILE`)* | Auth | JSON multi-issuer trust document (`grantMap`/`list`/`none`, `jwks`/`jwksUrl`, `act`) |
+| `FLINT_TRUST_PRINCIPALS_JSON` | *(empty)* | Auth | Optional JSON array of workload `TrustPrincipal` allowlist rules |
 | `FLINT_AUTH_PROVIDER` | `oidc` (`oidc` \| `zitadel`) | Auth | Identity provider claim mapper |
 | `FLINT_ZITADEL_TENANT_FROM_DOMAIN` | `false` | Auth | Derive Flint tenant slug from Zitadel organization primary domain |
 | `FLINT_SMART_AUTH_URL` | `/oauth2/authorize` | Auth | Advertised OAuth2 authorization endpoint in `/.well-known/smart-configuration` |
 | `FLINT_SMART_TOKEN_URL` | `/oauth2/token` | Auth | Advertised OAuth2 token endpoint in `/.well-known/smart-configuration` |
+| `FLINT_REQUIRE_AUTH` | `false` | Security | Fail closed at boot if no `TokenValidator` is configured; reject unauthenticated calls |
+| `FLINT_REQUIRE_TENANT_CLAIM` | `false` | Security | Reject tokens lacking an active tenant or tenant grant (`403 Forbidden`) |
+| `FLINT_DISABLE_UNAUTH_ENDPOINTS` | `false` | Security | Require auth on public `$bulk-publish`, `$uds-plus-*`, and `$health-cards-*` routes |
+| `FLINT_ALLOWED_ORIGINS` | `*` *(when empty)* | Security | Comma-separated CORS origin allowlist |
+| `FLINT_TENANT_HEADER` | `X-Azra-Tenant-Id` | Routing | HTTP header for flat `/fhir/r4/...` tenant routing (`-`/`none` disables) |
+| `FLINT_REQUIRE_TENANT_HEADER` | `false` | Routing | Require configured tenant header on clinical FHIR endpoints (`400`) |
+| `FLINT_LOCK_REFERENTIAL_INTEGRITY` | `false` | Safeguards | Ignore per-request `X-Flint-Referential-Integrity` header overrides |
+| `FLINT_LOCAL_REFERENCES_ONLY` | `false` | Safeguards | Reject external `http(s)://` and unresolved `urn:` references (`422`) |
+| `FLINT_MAX_BUNDLE_BYTES` | `52428800` *(50 MiB)* | Safeguards | Maximum `Bundle` payload size (`413`) |
+| `FLINT_MAX_BUNDLE_ENTRIES` | `0` *(unlimited)* | Safeguards | Maximum entries permitted per `Bundle` (`413`) |
+| `FLINT_DENIED_RESOURCE_TYPES` | *(empty)* | Safeguards | Comma-separated FHIR resource types blocked with `403 Forbidden` |
+| `FLINT_RATE_LIMIT_RPS` / `FLINT_RATE_LIMIT_BURST` | `0` *(disabled)* | Safeguards | Per-tenant token-bucket rate limit & burst (`429 Retry-After`) |
+| `FLINT_IDEMPOTENCY_TTL` | `24h` | Reliability | TTL for cluster-persisted `Idempotency-Key` / `X-Idempotency-Key` entries |
 | `FLINT_TX_SERVER_URL` | *(empty — local only)* | Terminology | Optional upstream FHIR R4 terminology server base URL (e.g. `https://tx.fhir.org/r4`; also `--tx-server-url`) |
 | `FLINT_TX_TIMEOUT` | `5s` | Terminology | Per-request timeout for federated terminology calls (also `--tx-timeout`) |
 | `FLINT_TX_CACHE_TTL` | `15m` | Terminology | In-memory LRU cache TTL for federated terminology responses (`-1s` disables; also `--tx-cache-ttl`) |
@@ -537,13 +555,25 @@ Flint protects endpoints through a pluggable interface:
 
 ### Environment Configuration
 ```bash
-# Enable SMART on FHIR with Zitadel
+# Option A: Enable SMART on FHIR with Zitadel
 FLINT_OIDC_ISSUER="https://auth.azra.dev"
 FLINT_OIDC_AUDIENCE="flint-api"
 FLINT_AUTH_PROVIDER="zitadel"
 FLINT_ZITADEL_TENANT_FROM_DOMAIN="true"
 FLINT_SMART_AUTH_URL="https://auth.azra.dev/oauth/v2/authorize"
 FLINT_SMART_TOKEN_URL="https://auth.azra.dev/oauth/v2/token"
+
+# Option B: Multi-issuer platform trust document + production fail-closed hardening
+PLATFORM_IDENTITY_TRUST_FILE="/etc/flint/identity-trust.json"
+FLINT_OIDC_ROLE_TO_SCOPES='clinician=user/Patient.rs user/Observation.rs;tenant-admin=system/*.*'
+FLINT_REQUIRE_AUTH="true"
+FLINT_REQUIRE_TENANT_CLAIM="true"
+FLINT_DISABLE_UNAUTH_ENDPOINTS="true"
+FLINT_ALLOWED_ORIGINS="https://app.azra.health"
+FLINT_LOCK_REFERENTIAL_INTEGRITY="true"
+FLINT_LOCAL_REFERENCES_ONLY="true"
+FLINT_RATE_LIMIT_RPS="100"
+FLINT_RATE_LIMIT_BURST="200"
 
 # Optional: Enforce strict HL7 CDS Hooks 2.0 Client JWS verification
 # Optional: OpenTelemetry OTLP/HTTP Distributed Tracing & Stateless Cluster Signing Keys

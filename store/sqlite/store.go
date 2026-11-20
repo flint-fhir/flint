@@ -2311,20 +2311,6 @@ func (s *Store) ExpungeResources(ctx context.Context, params store.ExpungeParams
 	return expunged, nil
 }
 
-func hydrateSQLitePurposeOfUse(rec *store.AuditRecord) {
-	if rec == nil || rec.PurposeOfUse != "" {
-		return
-	}
-	const tag = " [purposeOfUse="
-	if idx := strings.Index(rec.OutcomeDesc, tag); idx != -1 {
-		rest := rec.OutcomeDesc[idx+len(tag):]
-		if endIdx := strings.IndexByte(rest, ']'); endIdx != -1 {
-			rec.PurposeOfUse = rest[:endIdx]
-			rec.OutcomeDesc = strings.TrimSpace(rec.OutcomeDesc[:idx])
-		}
-	}
-}
-
 // WriteAuditEvent persists a HIPAA / ONC AuditRecord to SQLite.
 func (s *Store) WriteAuditEvent(ctx context.Context, rec store.AuditRecord) error {
 	if rec.Recorded.IsZero() {
@@ -2333,6 +2319,9 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec store.AuditRecord) erro
 	if rec.AgentSubject == "" {
 		rec.AgentSubject = "anonymous"
 	}
+	outcomeDesc := store.EncodeAuditOutcomeDesc(rec)
+	store.HydrateAuditOutcomeMetadata(&rec)
+
 	wl := s.writeLock()
 	wl.Lock()
 	defer wl.Unlock()
@@ -2341,11 +2330,6 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec store.AuditRecord) erro
 	s.mu.Lock()
 	s.audits[rec.TenantID] = append(s.audits[rec.TenantID], rec)
 	s.mu.Unlock()
-
-	outcomeDesc := rec.OutcomeDesc
-	if rec.PurposeOfUse != "" && !strings.Contains(outcomeDesc, "[purposeOfUse=") {
-		outcomeDesc = fmt.Sprintf("%s [purposeOfUse=%s]", outcomeDesc, rec.PurposeOfUse)
-	}
 
 	stmt := `INSERT INTO fhir_audit_event (tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc, http_method, http_status, request_uri, agent_subject, agent_patient, client_ip, entity_type, entity_id, entity_version, trace_id, span_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (tenant_id, audit_id) DO NOTHING`
 	if err := s.execSQLite(ctx, stmt,
@@ -3022,7 +3006,7 @@ func (s *Store) queryAuditsFromDB(ctx context.Context) (map[string][]store.Audit
 			return nil, fmt.Errorf("sqlite scan fhir_audit_event: %w", err)
 		}
 		rec.Recorded, _ = time.Parse(time.RFC3339Nano, recStr)
-		hydrateSQLitePurposeOfUse(&rec)
+		store.HydrateAuditOutcomeMetadata(&rec)
 		audits[rec.TenantID] = append(audits[rec.TenantID], rec)
 	}
 	_ = auditRows.Close()

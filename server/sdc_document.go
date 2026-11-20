@@ -1494,7 +1494,7 @@ func (s *Server) handleDocumentReferenceDocref(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	selfURL := requestBaseURL(r) + r.URL.Path
+	selfURL := requestBaseURL(r) + s.externalRequestPath(r)
 	if r.URL.RawQuery != "" {
 		selfURL += "?" + r.URL.RawQuery
 	}

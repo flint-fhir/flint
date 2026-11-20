@@ -141,6 +141,16 @@ func ParseJWT(raw string) (*ParsedToken, error) {
 
 // VerifyClaims checks exp, nbf, iss, and aud against the given expectations.
 func (t *ParsedToken) VerifyClaims(expectedIssuer, expectedAudience string, now time.Time) error {
+	var audiences []string
+	if expectedAudience != "" {
+		audiences = []string{expectedAudience}
+	}
+	return t.VerifyClaimsAudiences(expectedIssuer, audiences, now)
+}
+
+// VerifyClaimsAudiences checks exp, nbf, iss, and whether at least one accepted audience matches.
+// When expectedAudiences is empty, audience validation is skipped.
+func (t *ParsedToken) VerifyClaimsAudiences(expectedIssuer string, expectedAudiences []string, now time.Time) error {
 	p := t.Payload
 
 	if p.ExpiresAt <= 0 || now.Unix() > p.ExpiresAt {
@@ -155,74 +165,98 @@ func (t *ParsedToken) VerifyClaims(expectedIssuer, expectedAudience string, now 
 		return fmt.Errorf("%w: got %q, expected %q", ErrInvalidIssuer, p.Issuer, expectedIssuer)
 	}
 
-	if expectedAudience != "" && !p.Audience.Contains(expectedAudience) {
-		return fmt.Errorf("%w: expected audience %q", ErrInvalidAudience, expectedAudience)
+	if len(expectedAudiences) > 0 {
+		matched := false
+		for _, aud := range expectedAudiences {
+			if aud != "" && p.Audience.Contains(aud) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("%w: expected one of %v", ErrInvalidAudience, expectedAudiences)
+		}
 	}
 
 	return nil
 }
 
+func digestForHash(hashAlg crypto.Hash, data []byte) ([]byte, error) {
+	switch hashAlg {
+	case crypto.SHA256:
+		sum := sha256.Sum256(data)
+		return sum[:], nil
+	case crypto.SHA384:
+		sum := sha512.Sum384(data)
+		return sum[:], nil
+	case crypto.SHA512:
+		sum := sha512.Sum512(data)
+		return sum[:], nil
+	default:
+		return nil, fmt.Errorf("%w: hash %v", ErrUnsupportedAlg, hashAlg)
+	}
+}
+
 // VerifySignature verifies the token's signature against a public key or secret.
 func (t *ParsedToken) VerifySignature(key any) error {
-	hasher := sha256.New()
-	hasher.Write(t.SignedData)
-	hashed := hasher.Sum(nil)
-
 	switch t.Header.Alg {
-	case "RS256":
+	case "RS256", "RS384", "RS512", "PS256", "PS384", "PS512":
 		rsaPub, ok := key.(*rsa.PublicKey)
-		if !ok {
-			return fmt.Errorf("%w: expected *rsa.PublicKey for RS256", ErrUnsupportedKeyType)
+		if !ok || rsaPub == nil {
+			return fmt.Errorf("%w: expected *rsa.PublicKey for %s", ErrUnsupportedKeyType, t.Header.Alg)
 		}
-		if err := rsa.VerifyPKCS1v15(rsaPub, crypto.SHA256, hashed, t.RawSignature); err != nil {
+		hashAlg := crypto.SHA256
+		if strings.HasSuffix(t.Header.Alg, "384") {
+			hashAlg = crypto.SHA384
+		} else if strings.HasSuffix(t.Header.Alg, "512") {
+			hashAlg = crypto.SHA512
+		}
+		digest, err := digestForHash(hashAlg, t.SignedData)
+		if err != nil {
+			return err
+		}
+		if strings.HasPrefix(t.Header.Alg, "PS") {
+			if err := rsa.VerifyPSS(rsaPub, hashAlg, digest, t.RawSignature, &rsa.PSSOptions{SaltLength: rsa.PSSSaltLengthAuto}); err != nil {
+				return ErrInvalidSignature
+			}
+			return nil
+		}
+		if err := rsa.VerifyPKCS1v15(rsaPub, hashAlg, digest, t.RawSignature); err != nil {
 			return ErrInvalidSignature
 		}
 		return nil
 
-	case "RS384":
-		rsaPub, ok := key.(*rsa.PublicKey)
-		if !ok {
-			return fmt.Errorf("%w: expected *rsa.PublicKey for RS384", ErrUnsupportedKeyType)
-		}
-		h384 := sha512.Sum384(t.SignedData)
-		if err := rsa.VerifyPKCS1v15(rsaPub, crypto.SHA384, h384[:], t.RawSignature); err != nil {
-			return ErrInvalidSignature
-		}
-		return nil
-
-	case "ES256":
+	case "ES256", "ES384", "ES512":
 		ecdsaPub, ok := key.(*ecdsa.PublicKey)
-		if !ok {
-			return fmt.Errorf("%w: expected *ecdsa.PublicKey for ES256", ErrUnsupportedKeyType)
+		if !ok || ecdsaPub == nil {
+			return fmt.Errorf("%w: expected *ecdsa.PublicKey for %s", ErrUnsupportedKeyType, t.Header.Alg)
 		}
-		if ecdsaPub.Curve != elliptic.P256() {
-			return fmt.Errorf("%w: expected P-256 curve for ES256", ErrUnsupportedKeyType)
+		var (
+			wantCurve elliptic.Curve
+			coordLen  int
+			hashAlg   crypto.Hash
+		)
+		switch t.Header.Alg {
+		case "ES256":
+			wantCurve, coordLen, hashAlg = elliptic.P256(), 32, crypto.SHA256
+		case "ES384":
+			wantCurve, coordLen, hashAlg = elliptic.P384(), 48, crypto.SHA384
+		case "ES512":
+			wantCurve, coordLen, hashAlg = elliptic.P521(), 66, crypto.SHA512
 		}
-		if len(t.RawSignature) != 64 {
+		if ecdsaPub.Curve != wantCurve {
+			return fmt.Errorf("%w: expected %s curve for %s", ErrUnsupportedKeyType, wantCurve.Params().Name, t.Header.Alg)
+		}
+		if len(t.RawSignature) != 2*coordLen {
 			return ErrInvalidSignature
 		}
-		r := new(big.Int).SetBytes(t.RawSignature[:32])
-		s := new(big.Int).SetBytes(t.RawSignature[32:])
-		if !ecdsa.Verify(ecdsaPub, hashed, r, s) {
-			return ErrInvalidSignature
+		digest, err := digestForHash(hashAlg, t.SignedData)
+		if err != nil {
+			return err
 		}
-		return nil
-
-	case "ES384":
-		ecdsaPub, ok := key.(*ecdsa.PublicKey)
-		if !ok {
-			return fmt.Errorf("%w: expected *ecdsa.PublicKey for ES384", ErrUnsupportedKeyType)
-		}
-		if ecdsaPub.Curve != elliptic.P384() {
-			return fmt.Errorf("%w: expected P-384 curve for ES384", ErrUnsupportedKeyType)
-		}
-		if len(t.RawSignature) != 96 {
-			return ErrInvalidSignature
-		}
-		h384 := sha512.Sum384(t.SignedData)
-		r := new(big.Int).SetBytes(t.RawSignature[:48])
-		s := new(big.Int).SetBytes(t.RawSignature[48:])
-		if !ecdsa.Verify(ecdsaPub, h384[:], r, s) {
+		r := new(big.Int).SetBytes(t.RawSignature[:coordLen])
+		s := new(big.Int).SetBytes(t.RawSignature[coordLen:])
+		if !ecdsa.Verify(ecdsaPub, digest, r, s) {
 			return ErrInvalidSignature
 		}
 		return nil
@@ -303,6 +337,9 @@ func (k *JWK) PublicKey() (crypto.PublicKey, error) {
 		case "P-384":
 			curve = elliptic.P384()
 			coordLen = 48
+		case "P-521":
+			curve = elliptic.P521()
+			coordLen = 66
 		default:
 			return nil, fmt.Errorf("unsupported EC curve: %s", k.Crv)
 		}

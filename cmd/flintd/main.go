@@ -378,7 +378,56 @@ func configureAuth(srv *server.Server, logger *slog.Logger, getenv func(string) 
 	if strings.EqualFold(strings.TrimSpace(getenv("FLINT_SMART_REQUIRE_CLIENT_JWK")), "true") {
 		srv.SetRequireRegisteredClientJWK(true)
 	}
-	oidcIssuer := getenv("FLINT_OIDC_ISSUER")
+
+	roleToScopes, err := auth.ParseRoleToScopesMap(getenv("FLINT_OIDC_ROLE_TO_SCOPES"))
+	if err != nil {
+		return fmt.Errorf("invalid FLINT_OIDC_ROLE_TO_SCOPES: %w", err)
+	}
+	signingAlgs := splitCommaTrimmed(getenv("FLINT_OIDC_SIGNING_ALGS"))
+	jwksURL := strings.TrimSpace(getenv("FLINT_OIDC_JWKS_URL"))
+
+	if trustFile := firstNonEmpty(strings.TrimSpace(getenv("FLINT_IDENTITY_TRUST_FILE")), strings.TrimSpace(getenv("PLATFORM_IDENTITY_TRUST_FILE"))); trustFile != "" {
+		doc, err := auth.LoadTrustDocFile(trustFile)
+		if err != nil {
+			return fmt.Errorf("load identity trust file: %w", err)
+		}
+		var principals []auth.TrustPrincipal
+		if rawPrincipals := strings.TrimSpace(getenv("FLINT_TRUST_PRINCIPALS_JSON")); rawPrincipals != "" {
+			if err := json.Unmarshal([]byte(rawPrincipals), &principals); err != nil {
+				return fmt.Errorf("invalid FLINT_TRUST_PRINCIPALS_JSON: %w", err)
+			}
+		}
+		allowHTTPJWKS, err := parseOptionalBool(getenv("FLINT_TRUST_ALLOW_HTTP_JWKS"), "FLINT_TRUST_ALLOW_HTTP_JWKS")
+		if err != nil {
+			return err
+		}
+		val, err := auth.NewTrustDocValidator(auth.TrustDocConfig{
+			Document:               doc,
+			Principals:             principals,
+			RoleToScopes:           roleToScopes,
+			AllowPlaintextHTTPJWKS: allowHTTPJWKS,
+		})
+		if err != nil {
+			return fmt.Errorf("init trust doc validator: %w", err)
+		}
+		srv.SetTokenValidator(val)
+		if logger != nil {
+			logger.Info("Multi-issuer trust document auth enabled", "issuers", len(doc.Issuers), "principals", len(principals))
+		}
+		authURL := getenv("FLINT_SMART_AUTH_URL")
+		tokenURL := getenv("FLINT_SMART_TOKEN_URL")
+		smartIssuer := firstNonEmpty(strings.TrimSpace(getenv("FLINT_OIDC_ISSUER")), doc.Issuers[0].Issuer)
+		if authURL != "" && tokenURL != "" {
+			srv.SetSMARTConfig(server.SMARTConfig{
+				Issuer:                smartIssuer,
+				AuthorizationEndpoint: authURL,
+				TokenEndpoint:         tokenURL,
+			})
+		}
+		return nil
+	}
+
+	oidcIssuer := strings.TrimSpace(getenv("FLINT_OIDC_ISSUER"))
 	if oidcIssuer == "" {
 		if strings.EqualFold(strings.TrimSpace(getenv("FLINT_SMART_ENFORCE_DEV_AUTH")), "true") {
 			srv.EnableDevTokenEnforcement()
@@ -393,9 +442,12 @@ func configureAuth(srv *server.Server, logger *slog.Logger, getenv func(string) 
 	if idpProvider == "zitadel" {
 		zitadelVal, err := auth.NewZitadelValidator(auth.ZitadelConfig{
 			OIDCConfig: auth.OIDCConfig{
-				Issuer:   oidcIssuer,
-				Audience: oidcAudience,
+				Issuer:            oidcIssuer,
+				Audience:          oidcAudience,
+				JWKSURL:           jwksURL,
+				SigningAlgorithms: signingAlgs,
 			},
+			RoleToScopes:        roleToScopes,
 			TenantFromOrgDomain: getenv("FLINT_ZITADEL_TENANT_FROM_DOMAIN") == "true",
 		})
 		if err != nil {
@@ -405,8 +457,10 @@ func configureAuth(srv *server.Server, logger *slog.Logger, getenv func(string) 
 		logger.Info("SMART on FHIR auth enabled (provider: zitadel)", "issuer", oidcIssuer)
 	} else {
 		oidcVal, err := auth.NewOIDCValidator(auth.OIDCConfig{
-			Issuer:   oidcIssuer,
-			Audience: oidcAudience,
+			Issuer:            oidcIssuer,
+			Audience:          oidcAudience,
+			JWKSURL:           jwksURL,
+			SigningAlgorithms: signingAlgs,
 		})
 		if err != nil {
 			return fmt.Errorf("init oidc validator: %w", err)
@@ -427,6 +481,157 @@ func configureAuth(srv *server.Server, logger *slog.Logger, getenv func(string) 
 		})
 	}
 	return nil
+}
+
+func configureSecurityPolicy(srv *server.Server, logger *slog.Logger, getenv func(string) string) error {
+	requireAuth, err := parseOptionalBool(getenv("FLINT_REQUIRE_AUTH"), "FLINT_REQUIRE_AUTH")
+	if err != nil {
+		return err
+	}
+	requireTenantClaim, err := parseOptionalBool(getenv("FLINT_REQUIRE_TENANT_CLAIM"), "FLINT_REQUIRE_TENANT_CLAIM")
+	if err != nil {
+		return err
+	}
+	disableUnauth, err := parseOptionalBool(getenv("FLINT_DISABLE_UNAUTH_ENDPOINTS"), "FLINT_DISABLE_UNAUTH_ENDPOINTS")
+	if err != nil {
+		return err
+	}
+	requireTenantHeader, err := parseOptionalBool(getenv("FLINT_REQUIRE_TENANT_HEADER"), "FLINT_REQUIRE_TENANT_HEADER")
+	if err != nil {
+		return err
+	}
+	lockRefIntegrity, err := parseOptionalBool(getenv("FLINT_LOCK_REFERENTIAL_INTEGRITY"), "FLINT_LOCK_REFERENTIAL_INTEGRITY")
+	if err != nil {
+		return err
+	}
+	localRefsOnly, err := parseOptionalBool(getenv("FLINT_LOCAL_REFERENCES_ONLY"), "FLINT_LOCAL_REFERENCES_ONLY")
+	if err != nil {
+		return err
+	}
+	maxBundleBytes, err := parseOptionalInt64(getenv("FLINT_MAX_BUNDLE_BYTES"), "FLINT_MAX_BUNDLE_BYTES")
+	if err != nil {
+		return err
+	}
+	maxBundleEntries, err := parseOptionalInt(getenv("FLINT_MAX_BUNDLE_ENTRIES"), "FLINT_MAX_BUNDLE_ENTRIES")
+	if err != nil {
+		return err
+	}
+	rateRPS, err := parseOptionalFloat(getenv("FLINT_RATE_LIMIT_RPS"), "FLINT_RATE_LIMIT_RPS")
+	if err != nil {
+		return err
+	}
+	rateBurst, err := parseOptionalInt(getenv("FLINT_RATE_LIMIT_BURST"), "FLINT_RATE_LIMIT_BURST")
+	if err != nil {
+		return err
+	}
+	idemTTL, err := parseOptionalDuration(getenv("FLINT_IDEMPOTENCY_TTL"), "FLINT_IDEMPOTENCY_TTL")
+	if err != nil {
+		return err
+	}
+
+	policy := server.SecurityPolicy{
+		RequireAuth:                     requireAuth,
+		RequireTenantClaim:              requireTenantClaim,
+		DisableUnauthenticatedEndpoints: disableUnauth,
+		AllowedOrigins:                  splitCommaTrimmed(getenv("FLINT_ALLOWED_ORIGINS")),
+		TenantHeaderName:                strings.TrimSpace(getenv("FLINT_TENANT_HEADER")),
+		RequireTenantHeader:             requireTenantHeader,
+		LockReferentialIntegrity:        lockRefIntegrity,
+		EnforceLocalReferencesOnly:      localRefsOnly,
+		MaxBundleBytes:                  maxBundleBytes,
+		MaxBundleEntries:                maxBundleEntries,
+		DeniedResourceTypes:             splitCommaTrimmed(getenv("FLINT_DENIED_RESOURCE_TYPES")),
+		RateLimitPerSecond:              rateRPS,
+		RateLimitBurst:                  rateBurst,
+		IdempotencyTTL:                  idemTTL,
+	}
+	srv.SetSecurityPolicy(policy)
+	if err := srv.ValidateSecurityPolicy(); err != nil {
+		return err
+	}
+	if logger != nil && (policy.RequireAuth || policy.EnforceLocalReferencesOnly || policy.LockReferentialIntegrity || policy.RateLimitPerSecond > 0) {
+		logger.Info("Security policy hardened",
+			"require_auth", policy.RequireAuth,
+			"require_tenant_claim", policy.RequireTenantClaim,
+			"local_references_only", policy.EnforceLocalReferencesOnly,
+			"lock_referential_integrity", policy.LockReferentialIntegrity,
+			"rate_limit_rps", policy.RateLimitPerSecond,
+		)
+	}
+	return nil
+}
+
+func splitCommaTrimmed(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var out []string
+	for part := range strings.SplitSeq(raw, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func parseOptionalBool(raw, name string) (bool, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return false, nil
+	}
+	v, err := strconv.ParseBool(trimmed)
+	if err != nil {
+		return false, fmt.Errorf("invalid %s %q: %w", name, raw, err)
+	}
+	return v, nil
+}
+
+func parseOptionalInt(raw, name string) (int, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, nil
+	}
+	v, err := strconv.Atoi(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", name, raw, err)
+	}
+	return v, nil
+}
+
+func parseOptionalInt64(raw, name string) (int64, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, nil
+	}
+	v, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", name, raw, err)
+	}
+	return v, nil
+}
+
+func parseOptionalFloat(raw, name string) (float64, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, nil
+	}
+	v, err := strconv.ParseFloat(trimmed, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", name, raw, err)
+	}
+	return v, nil
+}
+
+func parseOptionalDuration(raw, name string) (time.Duration, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return 0, nil
+	}
+	v, err := time.ParseDuration(trimmed)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", name, raw, err)
+	}
+	return v, nil
 }
 
 func openDorisStore(getenv func(string) string, openDB func(driverName, dsn string) (*sql.DB, error)) (*doris.Store, *sql.DB, error) {
@@ -684,8 +889,11 @@ func run(
 		logger.Info("AutoMQ CDC streaming enabled", "brokers", brokers, "schemaRegistryURL", schemaRegistryURL)
 	}
 
-	// Optional SMART on FHIR Auth & OIDC/Zitadel configuration
+	// Optional SMART on FHIR Auth & OIDC/Zitadel/TrustDoc configuration
 	if err := configureAuth(srv, logger, getenv); err != nil {
+		return err
+	}
+	if err := configureSecurityPolicy(srv, logger, getenv); err != nil {
 		return err
 	}
 

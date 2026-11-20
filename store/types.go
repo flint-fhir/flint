@@ -308,25 +308,30 @@ type ExpungeParams struct {
 
 // AuditRecord represents a persisted HIPAA / ONC security audit event (FHIR R4 AuditEvent).
 type AuditRecord struct {
-	TenantID      string
-	AuditID       string
-	Recorded      time.Time
-	Action        string // C, R, U, D, E
-	SubtypeCode   string // read, vread, update, delete, history-instance, create, search-type, validate, batch
-	Outcome       string // 0 (success), 4 (minor failure / 4xx), 8 (serious failure / 5xx)
-	OutcomeDesc   string
-	HTTPMethod    string
-	HTTPStatus    int
-	RequestURI    string
-	AgentSubject  string
-	AgentPatient  string
-	ClientIP      string
-	EntityType    string
-	EntityID      string
-	EntityVersion string
-	PurposeOfUse  string
-	TraceID       string
-	SpanID        string
+	TenantID            string
+	AuditID             string
+	Recorded            time.Time
+	Action              string // C, R, U, D, E
+	SubtypeCode         string // read, vread, update, delete, history-instance, create, search-type, validate, batch
+	Outcome             string // 0 (success), 4 (minor failure / 4xx), 8 (serious failure / 5xx)
+	OutcomeDesc         string
+	HTTPMethod          string
+	HTTPStatus          int
+	RequestURI          string
+	AgentSubject        string
+	AgentPatient        string
+	ClientIP            string
+	EntityType          string
+	EntityID            string
+	EntityVersion       string
+	PurposeOfUse        string
+	TraceID             string
+	SpanID              string
+	AgentIssuer         string
+	ActorSubject        string
+	ActorIssuer         string
+	OperatorCrossTenant bool
+	RequestID           string
 }
 
 // AuditQueryParams specifies search filters for querying FHIR AuditEvent records.

@@ -202,25 +202,87 @@ func (x *SmartScope) GetActions() []Action {
 	return nil
 }
 
-// SecurityContext contains the verified identity, tenant boundary,
-// and clinical authorization context extracted from an authenticated token.
-// Can be serialized across Temporal workflows and AutoMQ audit events.
-type SecurityContext struct {
+// TenantGrant captures the roles and SMART scopes authorized for a specific tenant.
+type TenantGrant struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Subject       string                 `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`                                                                         // sub claim (user, client, or service account ID)
-	TenantId      string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`                                                       // multi-tenant schema isolation boundary
-	PatientId     string                 `protobuf:"bytes,3,opt,name=patient_id,json=patientId,proto3" json:"patient_id,omitempty"`                                                    // patient launch context claim (if restricted)
-	EncounterId   string                 `protobuf:"bytes,4,opt,name=encounter_id,json=encounterId,proto3" json:"encounter_id,omitempty"`                                              // encounter launch context claim (if restricted)
-	Scopes        []*SmartScope          `protobuf:"bytes,5,rep,name=scopes,proto3" json:"scopes,omitempty"`                                                                           // parsed SMART scopes
-	Claims        map[string]string      `protobuf:"bytes,6,rep,name=claims,proto3" json:"claims,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // token claims
-	RawToken      string                 `protobuf:"bytes,7,opt,name=raw_token,json=rawToken,proto3" json:"raw_token,omitempty"`                                                       // original bearer token (optional/redactable)
+	Roles         []string               `protobuf:"bytes,1,rep,name=roles,proto3" json:"roles,omitempty"`
+	Scopes        []*SmartScope          `protobuf:"bytes,2,rep,name=scopes,proto3" json:"scopes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
+func (x *TenantGrant) Reset() {
+	*x = TenantGrant{}
+	mi := &file_proto_flint_auth_v1_auth_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TenantGrant) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TenantGrant) ProtoMessage() {}
+
+func (x *TenantGrant) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_flint_auth_v1_auth_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TenantGrant.ProtoReflect.Descriptor instead.
+func (*TenantGrant) Descriptor() ([]byte, []int) {
+	return file_proto_flint_auth_v1_auth_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *TenantGrant) GetRoles() []string {
+	if x != nil {
+		return x.Roles
+	}
+	return nil
+}
+
+func (x *TenantGrant) GetScopes() []*SmartScope {
+	if x != nil {
+		return x.Scopes
+	}
+	return nil
+}
+
+// SecurityContext contains the verified identity, tenant boundary,
+// and clinical authorization context extracted from an authenticated token.
+// Can be serialized across Temporal workflows and AutoMQ audit events.
+type SecurityContext struct {
+	state               protoimpl.MessageState  `protogen:"open.v1"`
+	Subject             string                  `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`                                                                                                         // sub claim (user, client, or service account ID)
+	TenantId            string                  `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`                                                                                       // multi-tenant schema isolation boundary
+	PatientId           string                  `protobuf:"bytes,3,opt,name=patient_id,json=patientId,proto3" json:"patient_id,omitempty"`                                                                                    // patient launch context claim (if restricted)
+	EncounterId         string                  `protobuf:"bytes,4,opt,name=encounter_id,json=encounterId,proto3" json:"encounter_id,omitempty"`                                                                              // encounter launch context claim (if restricted)
+	Scopes              []*SmartScope           `protobuf:"bytes,5,rep,name=scopes,proto3" json:"scopes,omitempty"`                                                                                                           // parsed SMART scopes
+	Claims              map[string]string       `protobuf:"bytes,6,rep,name=claims,proto3" json:"claims,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`                                 // token claims
+	RawToken            string                  `protobuf:"bytes,7,opt,name=raw_token,json=rawToken,proto3" json:"raw_token,omitempty"`                                                                                       // original bearer token (optional/redactable)
+	TenantGrants        map[string]*TenantGrant `protobuf:"bytes,8,rep,name=tenant_grants,json=tenantGrants,proto3" json:"tenant_grants,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // per-tenant roles and scopes for multi-tenant isolation
+	Issuer              string                  `protobuf:"bytes,9,opt,name=issuer,proto3" json:"issuer,omitempty"`                                                                                                           // verified JWT iss claim
+	ActorSubject        string                  `protobuf:"bytes,10,opt,name=actor_subject,json=actorSubject,proto3" json:"actor_subject,omitempty"`                                                                          // RFC 8693 act.sub delegated caller subject
+	ActorIssuer         string                  `protobuf:"bytes,11,opt,name=actor_issuer,json=actorIssuer,proto3" json:"actor_issuer,omitempty"`                                                                             // RFC 8693 act.iss delegated caller issuer
+	OperatorCrossTenant bool                    `protobuf:"varint,12,opt,name=operator_cross_tenant,json=operatorCrossTenant,proto3" json:"operator_cross_tenant,omitempty"`                                                  // true when a cross-tenant operator token was accepted
+	PrincipalId         string                  `protobuf:"bytes,13,opt,name=principal_id,json=principalId,proto3" json:"principal_id,omitempty"`                                                                             // matched workload/service principal ID from trust doc
+	AuthScheme          string                  `protobuf:"bytes,14,opt,name=auth_scheme,json=authScheme,proto3" json:"auth_scheme,omitempty"`                                                                                // authentication scheme (e.g. "bearer", "trustdoc", "zitadel")
+	Roles               []string                `protobuf:"bytes,15,rep,name=roles,proto3" json:"roles,omitempty"`                                                                                                            // active roles resolved for the bound tenant
+	PlatformTenant      string                  `protobuf:"bytes,16,opt,name=platform_tenant,json=platformTenant,proto3" json:"platform_tenant,omitempty"`                                                                    // platform operator home tenant holding operator_role
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
+}
+
 func (x *SecurityContext) Reset() {
 	*x = SecurityContext{}
-	mi := &file_proto_flint_auth_v1_auth_proto_msgTypes[1]
+	mi := &file_proto_flint_auth_v1_auth_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -232,7 +294,7 @@ func (x *SecurityContext) String() string {
 func (*SecurityContext) ProtoMessage() {}
 
 func (x *SecurityContext) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_flint_auth_v1_auth_proto_msgTypes[1]
+	mi := &file_proto_flint_auth_v1_auth_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -245,7 +307,7 @@ func (x *SecurityContext) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SecurityContext.ProtoReflect.Descriptor instead.
 func (*SecurityContext) Descriptor() ([]byte, []int) {
-	return file_proto_flint_auth_v1_auth_proto_rawDescGZIP(), []int{1}
+	return file_proto_flint_auth_v1_auth_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *SecurityContext) GetSubject() string {
@@ -297,6 +359,69 @@ func (x *SecurityContext) GetRawToken() string {
 	return ""
 }
 
+func (x *SecurityContext) GetTenantGrants() map[string]*TenantGrant {
+	if x != nil {
+		return x.TenantGrants
+	}
+	return nil
+}
+
+func (x *SecurityContext) GetIssuer() string {
+	if x != nil {
+		return x.Issuer
+	}
+	return ""
+}
+
+func (x *SecurityContext) GetActorSubject() string {
+	if x != nil {
+		return x.ActorSubject
+	}
+	return ""
+}
+
+func (x *SecurityContext) GetActorIssuer() string {
+	if x != nil {
+		return x.ActorIssuer
+	}
+	return ""
+}
+
+func (x *SecurityContext) GetOperatorCrossTenant() bool {
+	if x != nil {
+		return x.OperatorCrossTenant
+	}
+	return false
+}
+
+func (x *SecurityContext) GetPrincipalId() string {
+	if x != nil {
+		return x.PrincipalId
+	}
+	return ""
+}
+
+func (x *SecurityContext) GetAuthScheme() string {
+	if x != nil {
+		return x.AuthScheme
+	}
+	return ""
+}
+
+func (x *SecurityContext) GetRoles() []string {
+	if x != nil {
+		return x.Roles
+	}
+	return nil
+}
+
+func (x *SecurityContext) GetPlatformTenant() string {
+	if x != nil {
+		return x.PlatformTenant
+	}
+	return ""
+}
+
 // SmartConfiguration represents the SMART App Launch discovery document
 // served at /.well-known/smart-configuration.
 type SmartConfiguration struct {
@@ -316,7 +441,7 @@ type SmartConfiguration struct {
 
 func (x *SmartConfiguration) Reset() {
 	*x = SmartConfiguration{}
-	mi := &file_proto_flint_auth_v1_auth_proto_msgTypes[2]
+	mi := &file_proto_flint_auth_v1_auth_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -328,7 +453,7 @@ func (x *SmartConfiguration) String() string {
 func (*SmartConfiguration) ProtoMessage() {}
 
 func (x *SmartConfiguration) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_flint_auth_v1_auth_proto_msgTypes[2]
+	mi := &file_proto_flint_auth_v1_auth_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -341,7 +466,7 @@ func (x *SmartConfiguration) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SmartConfiguration.ProtoReflect.Descriptor instead.
 func (*SmartConfiguration) Descriptor() ([]byte, []int) {
-	return file_proto_flint_auth_v1_auth_proto_rawDescGZIP(), []int{2}
+	return file_proto_flint_auth_v1_auth_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *SmartConfiguration) GetIssuer() string {
@@ -417,7 +542,10 @@ const file_proto_flint_auth_v1_auth_proto_rawDesc = "" +
 	"\x03raw\x18\x01 \x01(\tR\x03raw\x125\n" +
 	"\acontext\x18\x02 \x01(\x0e2\x1b.flint.auth.v1.ScopeContextR\acontext\x12#\n" +
 	"\rresource_type\x18\x03 \x01(\tR\fresourceType\x12/\n" +
-	"\aactions\x18\x04 \x03(\x0e2\x15.flint.auth.v1.ActionR\aactions\"\xd9\x02\n" +
+	"\aactions\x18\x04 \x03(\x0e2\x15.flint.auth.v1.ActionR\aactions\"V\n" +
+	"\vTenantGrant\x12\x14\n" +
+	"\x05roles\x18\x01 \x03(\tR\x05roles\x121\n" +
+	"\x06scopes\x18\x02 \x03(\v2\x19.flint.auth.v1.SmartScopeR\x06scopes\"\xa4\x06\n" +
 	"\x0fSecurityContext\x12\x18\n" +
 	"\asubject\x18\x01 \x01(\tR\asubject\x12\x1b\n" +
 	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12\x1d\n" +
@@ -426,10 +554,24 @@ const file_proto_flint_auth_v1_auth_proto_rawDesc = "" +
 	"\fencounter_id\x18\x04 \x01(\tR\vencounterId\x121\n" +
 	"\x06scopes\x18\x05 \x03(\v2\x19.flint.auth.v1.SmartScopeR\x06scopes\x12B\n" +
 	"\x06claims\x18\x06 \x03(\v2*.flint.auth.v1.SecurityContext.ClaimsEntryR\x06claims\x12\x1b\n" +
-	"\traw_token\x18\a \x01(\tR\brawToken\x1a9\n" +
+	"\traw_token\x18\a \x01(\tR\brawToken\x12U\n" +
+	"\rtenant_grants\x18\b \x03(\v20.flint.auth.v1.SecurityContext.TenantGrantsEntryR\ftenantGrants\x12\x16\n" +
+	"\x06issuer\x18\t \x01(\tR\x06issuer\x12#\n" +
+	"\ractor_subject\x18\n" +
+	" \x01(\tR\factorSubject\x12!\n" +
+	"\factor_issuer\x18\v \x01(\tR\vactorIssuer\x122\n" +
+	"\x15operator_cross_tenant\x18\f \x01(\bR\x13operatorCrossTenant\x12!\n" +
+	"\fprincipal_id\x18\r \x01(\tR\vprincipalId\x12\x1f\n" +
+	"\vauth_scheme\x18\x0e \x01(\tR\n" +
+	"authScheme\x12\x14\n" +
+	"\x05roles\x18\x0f \x03(\tR\x05roles\x12'\n" +
+	"\x0fplatform_tenant\x18\x10 \x01(\tR\x0eplatformTenant\x1a9\n" +
 	"\vClaimsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe2\x03\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a[\n" +
+	"\x11TenantGrantsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x120\n" +
+	"\x05value\x18\x02 \x01(\v2\x1a.flint.auth.v1.TenantGrantR\x05value:\x028\x01\"\xe2\x03\n" +
 	"\x12SmartConfiguration\x12\x16\n" +
 	"\x06issuer\x18\x01 \x01(\tR\x06issuer\x125\n" +
 	"\x16authorization_endpoint\x18\x02 \x01(\tR\x15authorizationEndpoint\x12%\n" +
@@ -466,25 +608,30 @@ func file_proto_flint_auth_v1_auth_proto_rawDescGZIP() []byte {
 }
 
 var file_proto_flint_auth_v1_auth_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_proto_flint_auth_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_proto_flint_auth_v1_auth_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_proto_flint_auth_v1_auth_proto_goTypes = []any{
 	(Action)(0),                // 0: flint.auth.v1.Action
 	(ScopeContext)(0),          // 1: flint.auth.v1.ScopeContext
 	(*SmartScope)(nil),         // 2: flint.auth.v1.SmartScope
-	(*SecurityContext)(nil),    // 3: flint.auth.v1.SecurityContext
-	(*SmartConfiguration)(nil), // 4: flint.auth.v1.SmartConfiguration
-	nil,                        // 5: flint.auth.v1.SecurityContext.ClaimsEntry
+	(*TenantGrant)(nil),        // 3: flint.auth.v1.TenantGrant
+	(*SecurityContext)(nil),    // 4: flint.auth.v1.SecurityContext
+	(*SmartConfiguration)(nil), // 5: flint.auth.v1.SmartConfiguration
+	nil,                        // 6: flint.auth.v1.SecurityContext.ClaimsEntry
+	nil,                        // 7: flint.auth.v1.SecurityContext.TenantGrantsEntry
 }
 var file_proto_flint_auth_v1_auth_proto_depIdxs = []int32{
 	1, // 0: flint.auth.v1.SmartScope.context:type_name -> flint.auth.v1.ScopeContext
 	0, // 1: flint.auth.v1.SmartScope.actions:type_name -> flint.auth.v1.Action
-	2, // 2: flint.auth.v1.SecurityContext.scopes:type_name -> flint.auth.v1.SmartScope
-	5, // 3: flint.auth.v1.SecurityContext.claims:type_name -> flint.auth.v1.SecurityContext.ClaimsEntry
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	2, // 2: flint.auth.v1.TenantGrant.scopes:type_name -> flint.auth.v1.SmartScope
+	2, // 3: flint.auth.v1.SecurityContext.scopes:type_name -> flint.auth.v1.SmartScope
+	6, // 4: flint.auth.v1.SecurityContext.claims:type_name -> flint.auth.v1.SecurityContext.ClaimsEntry
+	7, // 5: flint.auth.v1.SecurityContext.tenant_grants:type_name -> flint.auth.v1.SecurityContext.TenantGrantsEntry
+	3, // 6: flint.auth.v1.SecurityContext.TenantGrantsEntry.value:type_name -> flint.auth.v1.TenantGrant
+	7, // [7:7] is the sub-list for method output_type
+	7, // [7:7] is the sub-list for method input_type
+	7, // [7:7] is the sub-list for extension type_name
+	7, // [7:7] is the sub-list for extension extendee
+	0, // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_proto_flint_auth_v1_auth_proto_init() }
@@ -498,7 +645,7 @@ func file_proto_flint_auth_v1_auth_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_flint_auth_v1_auth_proto_rawDesc), len(file_proto_flint_auth_v1_auth_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
