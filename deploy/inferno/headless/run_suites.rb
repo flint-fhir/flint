@@ -1378,7 +1378,8 @@ if c4bb_v110_suite && ENV['INFERNO_SKIP_C4BB'] != 'true'
     auth_type: 'public',
     use_discovery: 'true',
     auth_request_method: 'GET',
-    pkce_support: 'disabled',
+    pkce_support: 'enabled',
+    pkce_code_challenge_method: 'S256',
     client_id: 'inferno-c4bb-v110-public',
     requested_scopes: [
       'openid fhirUser offline_access launch/patient',

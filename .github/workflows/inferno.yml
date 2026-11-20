@@ -140,15 +140,15 @@ jobs:
 
       - uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.3'
+          ruby-version: '3.3.6'
 
       - name: Cache HL7 AU Core Inferno Ruby gems
         uses: actions/cache@v4
         with:
           path: deploy/inferno/au_core/vendor/bundle
-          key: ${{ runner.os }}-au-core-gems-${{ hashFiles('deploy/inferno/au_core/Gemfile') }}
+          key: ${{ runner.os }}-au-core-ruby336-gems-${{ hashFiles('deploy/inferno/au_core/Gemfile') }}
           restore-keys: |
-            ${{ runner.os }}-au-core-gems-
+            ${{ runner.os }}-au-core-ruby336-gems-
 
       - name: Install HL7 AU Core Inferno Ruby gems
         working-directory: deploy/inferno/au_core
