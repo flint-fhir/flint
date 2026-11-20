@@ -107,7 +107,7 @@ jobs:
 
   inferno-au-core:
     name: HL7 AU Core v1.0.0 & v2.0.0 Inferno Matrix [${{ matrix.store }}]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

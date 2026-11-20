@@ -1401,7 +1401,11 @@ if c4bb_v110_suite && ENV['INFERNO_SKIP_C4BB'] != 'true'
       url: c4bb_fhir_url,
       smart_auth_info: c4bb_v110_auth_json,
       standalone_smart_auth_info: c4bb_v110_auth_json,
-      patient_ids: 'pat-alice-001'
+      patient_ids: 'pat-alice-001',
+      additional_patient_ids: 'pat-alice-001',
+      additional_coverage_ids: 'cov-c4bb-001',
+      additional_organization_ids: 'org-c4bb-insurer,org-c4bb-hospital',
+      additional_practitioner_ids: 'prac-c4bb-001,prac-c4bb-002'
     }
   )
 end
