@@ -288,16 +288,24 @@ func TestFlintMCP_StoreBackendsAndOIDCTokenAuth(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "postgres migrations")
 
-	// 2. Doris backend (in-memory, stub DSN ok, open error, migration error, invalid group commit)
+	// 2. Doris backend (in-memory, stub DSN ok, database isolation, open error, migration error, invalid flags)
 	var dorisOut bytes.Buffer
 	err = run(
 		context.Background(),
 		[]string{"--store=doris", "--tenant=demo"},
 		func(k string) string {
-			if k == "FLINT_DORIS_DSN" {
-				return "doris://stub"
+			switch k {
+			case "FLINT_DORIS_DSN":
+				return "flint_user:@tcp(127.0.0.1:9030)/flint"
+			case "FLINT_DORIS_TENANT_ISOLATION":
+				return "database"
+			case "FLINT_DORIS_REPLICATION_NUM":
+				return "3"
+			case "FLINT_DORIS_REQUIRE_NON_ROOT":
+				return "true"
+			default:
+				return ""
 			}
-			return ""
 		},
 		strings.NewReader(pingInput),
 		&dorisOut,
@@ -329,8 +337,63 @@ func TestFlintMCP_StoreBackendsAndOIDCTokenAuth(t *testing.T) {
 		context.Background(),
 		[]string{"--store=doris"},
 		func(k string) string {
+			switch k {
+			case "FLINT_DORIS_DSN":
+				return "root:@tcp(127.0.0.1:9030)/flint"
+			case "FLINT_DORIS_REQUIRE_NON_ROOT":
+				return "true"
+			default:
+				return ""
+			}
+		},
+		strings.NewReader(""),
+		&dorisOut,
+		&errOut,
+		logger,
+		sql.Open,
+	)
+	require.ErrorContains(t, err, "non-root")
+
+	err = run(
+		context.Background(),
+		[]string{"--store=doris"},
+		func(k string) string {
+			if k == "FLINT_DORIS_REPLICATION_NUM" {
+				return "0"
+			}
+			return ""
+		},
+		strings.NewReader(""),
+		&dorisOut,
+		&errOut,
+		logger,
+		sql.Open,
+	)
+	require.ErrorContains(t, err, "FLINT_DORIS_REPLICATION_NUM")
+
+	err = run(
+		context.Background(),
+		[]string{"--store=doris"},
+		func(k string) string {
 			if k == "FLINT_DORIS_DSN" {
-				return "doris://stub"
+				return "not-a-valid-dsn"
+			}
+			return ""
+		},
+		strings.NewReader(""),
+		&dorisOut,
+		&errOut,
+		logger,
+		sql.Open,
+	)
+	require.Error(t, err)
+
+	err = run(
+		context.Background(),
+		[]string{"--store=doris"},
+		func(k string) string {
+			if k == "FLINT_DORIS_DSN" {
+				return "flint_user:@tcp(127.0.0.1:9030)/flint"
 			}
 			return ""
 		},
@@ -347,7 +410,7 @@ func TestFlintMCP_StoreBackendsAndOIDCTokenAuth(t *testing.T) {
 		[]string{"--store=doris"},
 		func(k string) string {
 			if k == "FLINT_DORIS_DSN" {
-				return "doris://stub"
+				return "flint_user:@tcp(127.0.0.1:9030)/flint"
 			}
 			return ""
 		},

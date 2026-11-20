@@ -39,6 +39,70 @@ func WithDatabase(dbName string) Option {
 	}
 }
 
+// WithTenantIsolation configures multi-tenant isolation ("shared" tables vs "database" `tenant_<slug>`).
+func WithTenantIsolation(mode TenantIsolationMode) Option {
+	return func(s *Store) {
+		if mode == TenantIsolationShared || mode == TenantIsolationDatabase {
+			s.tenantIsolation = mode
+		}
+	}
+}
+
+// WithAutoProvision enables or disables on-demand `tenant_<slug>` database/table provisioning.
+func WithAutoProvision(enabled bool) Option {
+	return func(s *Store) {
+		s.autoProvision = enabled
+	}
+}
+
+// WithReplicationNum configures the Apache Doris table `replication_num` property (default: 1).
+func WithReplicationNum(n int) Option {
+	return func(s *Store) {
+		if n > 0 {
+			s.replicationNum = n
+		}
+	}
+}
+
+// WithResourceLimits configures statement-level Doris `SELECT /*+ SET_VAR(...) */` query hints.
+func WithResourceLimits(limits ResourceLimits) Option {
+	return func(s *Store) {
+		s.resourceLimits = limits
+	}
+}
+
+// WithRowLocker attaches a distributed RowLocker for multi-replica lease coordination.
+func WithRowLocker(locker RowLocker) Option {
+	return func(s *Store) {
+		s.rowLocker = locker
+	}
+}
+
+// WithLockTTL configures the lease TTL acquired from RowLocker (default: 15s).
+func WithLockTTL(ttl time.Duration) Option {
+	return func(s *Store) {
+		if ttl > 0 {
+			s.lockTTL = ttl
+		}
+	}
+}
+
+// WithDirectSQL controls whether Store executes reads/searches directly against the
+// backing Apache Doris *sql.DB (defaults to true whenever db != nil).
+func WithDirectSQL(enabled bool) Option {
+	return func(s *Store) {
+		s.directSQL = enabled
+	}
+}
+
+// WithSessionGroupCommitConfigured marks that the underlying DSN already configures
+// session `group_commit` on connect, avoiding per-INSERT session SET round-trips.
+func WithSessionGroupCommitConfigured(configured bool) Option {
+	return func(s *Store) {
+		s.sessionGroupCommitConfigured = configured
+	}
+}
+
 type storedEntry struct {
 	row     DorisResourceRow
 	indexes *store.SearchIndexes
@@ -49,12 +113,24 @@ type storedEntry struct {
 // Because Apache Doris is a columnar MPP engine using Unique Key Merge-on-Write (MoW)
 // without row-level SELECT FOR UPDATE or pg_advisory_xact_lock, Store coordinates
 // optimistic concurrency (If-Match), TOCTOU-free conditional operations (If-None-Exist),
-// and compensating transaction bundle rollback in Go before flushing mutations with
-// Doris Group Commit.
+// and compensating transaction bundle rollback via an optional distributed RowLocker
+// (or in-process sharded coordinator when single-replica) before flushing mutations
+// with Doris Group Commit.
 type Store struct {
-	db          *sql.DB
-	database    string
-	groupCommit GroupCommitMode
+	db                           *sql.DB
+	database                     string
+	groupCommit                  GroupCommitMode
+	tenantIsolation              TenantIsolationMode
+	autoProvision                bool
+	replicationNum               int
+	resourceLimits               ResourceLimits
+	rowLocker                    RowLocker
+	lockTTL                      time.Duration
+	directSQL                    bool
+	sessionGroupCommitConfigured bool
+
+	provisionMu        sync.Mutex
+	provisionedTenants sync.Map
 
 	// Bundle-level RWMutex: standalone mutators hold RLock; ExecuteTransactionBundle holds Lock
 	// so snapshot capture and compensating rollback are strictly isolated from concurrent writes.
@@ -84,18 +160,22 @@ var (
 // New creates a new Zero-JSON Apache Doris store.
 func New(db *sql.DB, opts ...Option) *Store {
 	s := &Store{
-		db:             db,
-		database:       "flint",
-		groupCommit:    GroupCommitSync,
-		resources:      make(map[string]storedEntry),
-		history:        make(map[string][]store.ResourceRecord),
-		audits:         make(map[string][]store.AuditRecord),
-		authCodes:      make(map[string]store.OAuthAuthCodeRecord),
-		refreshTokens:  make(map[string]store.OAuthRefreshTokenRecord),
-		revokedTokens:  make(map[string]time.Time),
-		exportJobs:     make(map[string]store.ExportJobRecord),
-		clusterSecrets: make(map[string][]byte),
-		clusterStates:  make(map[string]store.ClusterStateRecord),
+		db:              db,
+		database:        "flint",
+		groupCommit:     GroupCommitSync,
+		tenantIsolation: TenantIsolationShared,
+		replicationNum:  1,
+		lockTTL:         defaultRowLockTTL,
+		directSQL:       db != nil,
+		resources:       make(map[string]storedEntry),
+		history:         make(map[string][]store.ResourceRecord),
+		audits:          make(map[string][]store.AuditRecord),
+		authCodes:       make(map[string]store.OAuthAuthCodeRecord),
+		refreshTokens:   make(map[string]store.OAuthRefreshTokenRecord),
+		revokedTokens:   make(map[string]time.Time),
+		exportJobs:      make(map[string]store.ExportJobRecord),
+		clusterSecrets:  make(map[string][]byte),
+		clusterStates:   make(map[string]store.ClusterStateRecord),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -124,6 +204,27 @@ func (s *Store) Database() string {
 		return "flint"
 	}
 	return s.database
+}
+
+// TenantIsolation returns the configured Doris multi-tenant isolation mode.
+func (s *Store) TenantIsolation() TenantIsolationMode {
+	if s == nil || s.tenantIsolation == "" {
+		return TenantIsolationShared
+	}
+	return s.tenantIsolation
+}
+
+// ResourceLimits returns the configured statement-level Doris resource limits.
+func (s *Store) ResourceLimits() ResourceLimits {
+	if s == nil {
+		return ResourceLimits{}
+	}
+	return s.resourceLimits
+}
+
+// DirectSQL reports whether reads and searches execute directly against Doris SQL.
+func (s *Store) DirectSQL() bool {
+	return s != nil && s.directSQL && s.db != nil
 }
 
 // ExecutedStatements returns a snapshot of the Doris SQL statements executed by this Store.
@@ -174,21 +275,178 @@ func resKey(tenantID, resType, resID string) string {
 	return tenantID + "|" + resType + "|" + resID
 }
 
-func (s *Store) execDorisSQL(ctx context.Context, stmt string, args ...any) error {
+func (s *Store) recordSQL(stmt string) {
 	s.mu.Lock()
 	if len(s.sqlLog) < 1024 {
 		s.sqlLog = append(s.sqlLog, stmt)
 	}
 	s.mu.Unlock()
+}
 
+// EnsureTenantDatabase creates and migrates the isolated `tenant_<slug>` database when
+// configured with TenantIsolationDatabase and WithAutoProvision(true).
+func (s *Store) EnsureTenantDatabase(ctx context.Context, tenantID string) (string, error) {
+	if s == nil || s.tenantIsolation != TenantIsolationDatabase {
+		return "", nil
+	}
+	dbName, err := DatabaseFromSlug(tenantID)
+	if err != nil {
+		return "", err
+	}
+	if _, ok := s.provisionedTenants.Load(dbName); ok {
+		return dbName, nil
+	}
+	if s.db == nil || !s.autoProvision {
+		return dbName, nil
+	}
+	s.provisionMu.Lock()
+	defer s.provisionMu.Unlock()
+	if _, ok := s.provisionedTenants.Load(dbName); ok {
+		return dbName, nil
+	}
+	createDBStmt := fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", dbName)
+	if err := s.execDorisSQL(ctx, createDBStmt); err != nil {
+		return "", fmt.Errorf("doris auto-provision database %s: %w", dbName, err)
+	}
+	for i, ddl := range TenantSchemaDDL(SchemaOptions{ReplicationNum: s.replicationNum}) {
+		qStmt, err := QualifyCreateTableDDL(ddl, dbName)
+		if err != nil {
+			return "", fmt.Errorf("doris auto-provision table[%d] in %s: %w", i, dbName, err)
+		}
+		if err := s.execDorisSQL(ctx, qStmt); err != nil {
+			return "", fmt.Errorf("doris auto-provision table[%d] in %s: %w", i, dbName, err)
+		}
+	}
+	s.provisionedTenants.Store(dbName, true)
+	return dbName, nil
+}
+
+func (s *Store) tenantTableRef(ctx context.Context, tenantID, baseTable string) (string, error) {
+	if s.tenantIsolation == TenantIsolationDatabase {
+		dbName, err := s.EnsureTenantDatabase(ctx, tenantID)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("`%s`.`%s`", dbName, baseTable), nil
+	}
+	return baseTable, nil
+}
+
+func (s *Store) clusterTableRef(baseTable string) (string, error) {
+	if s.tenantIsolation == TenantIsolationDatabase && strings.TrimSpace(s.database) != "" {
+		dbName := strings.TrimSpace(s.database)
+		if err := ValidateIdentifier(dbName); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("`%s`.`%s`", dbName, baseTable), nil
+	}
+	return baseTable, nil
+}
+
+func (s *Store) acquireRowLock(ctx context.Context, lockKey string) (func(), error) {
+	if s.rowLocker == nil || strings.TrimSpace(lockKey) == "" {
+		return func() {}, nil
+	}
+	ttl := s.lockTTL
+	if ttl <= 0 {
+		ttl = defaultRowLockTTL
+	}
+	release, err := s.rowLocker.Acquire(ctx, lockKey, ttl)
+	if err != nil {
+		return nil, err
+	}
+	return func() {
+		_ = release(ctx)
+	}, nil
+}
+
+func (s *Store) execDorisSQL(ctx context.Context, stmt string, args ...any) error {
+	s.recordSQL(stmt)
 	if s.db == nil {
 		return nil
 	}
-	if s.groupCommit != "" && s.groupCommit != GroupCommitOff {
-		_, _ = s.db.ExecContext(ctx, fmt.Sprintf("SET group_commit = '%s'", s.groupCommit))
+	trimmedUpper := strings.ToUpper(strings.TrimLeft(stmt, " \t\r\n"))
+	if strings.HasPrefix(trimmedUpper, "INSERT") && s.groupCommit != "" && s.groupCommit != GroupCommitOff && !s.sessionGroupCommitConfigured {
+		conn, err := s.db.Conn(ctx)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET group_commit = '%s'", s.groupCommit)); err != nil {
+			return err
+		}
+		_, err = conn.ExecContext(ctx, stmt, args...)
+		return err
 	}
 	_, err := s.db.ExecContext(ctx, stmt, args...)
 	return err
+}
+
+func (s *Store) queryDorisSQL(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	finalQuery := InjectSelectSetVarHint(query, s.resourceLimits.FormatSetVarHint())
+	s.recordSQL(finalQuery)
+	if s.db == nil {
+		return nil, errors.New("doris database handle is nil")
+	}
+	return s.db.QueryContext(ctx, finalQuery, args...)
+}
+
+func nullableTimeArg(t *time.Time) any {
+	if t == nil || t.IsZero() {
+		return nil
+	}
+	return t.UTC()
+}
+
+func nullableFloat64Arg(f *float64) any {
+	if f == nil {
+		return nil
+	}
+	return *f
+}
+
+func buildDorisArrayLiteral(tokens []string) (string, []any) {
+	if len(tokens) == 0 {
+		return "[]", nil
+	}
+	ph := make([]string, len(tokens))
+	args := make([]any, len(tokens))
+	for i, tok := range tokens {
+		ph[i] = "?"
+		args[i] = tok
+	}
+	return "[" + strings.Join(ph, ", ") + "]", args
+}
+
+func buildInsertResourceSQL(tableRef string, rows []DorisResourceRow) (string, []any) {
+	tuples := make([]string, 0, len(rows))
+	args := make([]any, 0, len(rows)*17)
+	for _, row := range rows {
+		strExpr, strArgs := buildDorisArrayLiteral(row.StringTokens)
+		codeExpr, codeArgs := buildDorisArrayLiteral(row.CodeTokens)
+		refExpr, refArgs := buildDorisArrayLiteral(row.ReferenceTokens)
+		uriExpr, uriArgs := buildDorisArrayLiteral(row.URITokens)
+		tuples = append(tuples, fmt.Sprintf(
+			"(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, %s, %s, %s, %s)",
+			strExpr, codeExpr, refExpr, uriExpr,
+		))
+		args = append(args,
+			row.TenantID, row.ResType, row.ResID, row.ResVersion, row.IsDeleted, row.LastUpdated,
+			row.IdempotencyKey, row.PatientID, row.EncounterID, row.PrimaryCodeSys, row.PrimaryCode,
+			nullableTimeArg(row.PrimaryDateLow), nullableTimeArg(row.PrimaryDateHigh),
+			nullableFloat64Arg(row.PrimaryQuantity), row.PrimaryUnitSys, row.PrimaryUnitCode,
+			row.ResourceProtoHex,
+		)
+		args = append(args, strArgs...)
+		args = append(args, codeArgs...)
+		args = append(args, refArgs...)
+		args = append(args, uriArgs...)
+	}
+	stmt := fmt.Sprintf(
+		"INSERT INTO %s (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, idempotency_key, patient_id, encounter_id, primary_code_sys, primary_code, primary_date_low, primary_date_high, primary_quantity, primary_unit_sys, primary_unit_code, resource_proto_hex, string_tokens, code_tokens, reference_tokens, uri_tokens) VALUES %s",
+		tableRef, strings.Join(tuples, ", "),
+	)
+	return stmt, args
 }
 
 // Ping verifies connectivity to the underlying Apache Doris cluster.
@@ -206,7 +464,8 @@ func (s *Store) WriteResource(ctx context.Context, input store.ResourceInput) er
 }
 
 // WriteResourceWithMeta writes a single FHIR resource, enforcing ExpectedVersion (If-Match)
-// and CreateOnly semantics via the sharded concurrency coordinator before flushing to Doris.
+// and CreateOnly semantics via RowLocker (when attached) and the sharded concurrency coordinator
+// before flushing to Doris.
 func (s *Store) WriteResourceWithMeta(ctx context.Context, input store.ResourceInput) (*store.ResourceRecord, error) {
 	if strings.TrimSpace(input.TenantID) == "" {
 		return nil, store.ErrNoTenant
@@ -215,11 +474,19 @@ func (s *Store) WriteResourceWithMeta(ctx context.Context, input store.ResourceI
 	defer s.txMu.RUnlock()
 	unlock := s.lockTenantResourceType(input.TenantID, input.ResType)
 	defer unlock()
+	rel, err := s.acquireRowLock(ctx, "res:"+resKey(input.TenantID, input.ResType, input.ResID))
+	if err != nil {
+		return nil, err
+	}
+	defer rel()
 
 	return s.writeUnlocked(ctx, input)
 }
 
 func (s *Store) writeUnlocked(ctx context.Context, input store.ResourceInput) (*store.ResourceRecord, error) {
+	if s.DirectSQL() {
+		return s.writeUnlockedSQL(ctx, input, nil)
+	}
 	key := resKey(input.TenantID, input.ResType, input.ResID)
 
 	s.mu.Lock()
@@ -272,26 +539,35 @@ func (s *Store) writeUnlocked(ctx context.Context, input store.ResourceInput) (*
 	s.history[key] = append(s.history[key], rec)
 	s.mu.Unlock()
 
-	upsertStmt := `INSERT INTO fhir_resource (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, idempotency_key, patient_id, encounter_id, primary_code_sys, primary_code, primary_date_low, primary_date_high, primary_quantity, primary_unit_sys, primary_unit_code, resource_proto_hex) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	if err := s.execDorisSQL(ctx, upsertStmt,
-		row.TenantID, row.ResType, row.ResID, row.ResVersion, row.IsDeleted, row.LastUpdated,
-		row.IdempotencyKey, row.PatientID, row.EncounterID, row.PrimaryCodeSys, row.PrimaryCode,
-		row.PrimaryDateLow, row.PrimaryDateHigh, row.PrimaryQuantity, row.PrimaryUnitSys, row.PrimaryUnitCode,
-		row.ResourceProtoHex,
-	); err != nil {
+	resTbl, err := s.tenantTableRef(ctx, row.TenantID, "fhir_resource")
+	if err != nil {
+		return nil, err
+	}
+	histTbl, err := s.tenantTableRef(ctx, row.TenantID, "fhir_resource_history")
+	if err != nil {
+		return nil, err
+	}
+	upsertStmt, upsertArgs := buildInsertResourceSQL(resTbl, []DorisResourceRow{row})
+	if err := s.execDorisSQL(ctx, upsertStmt, upsertArgs...); err != nil {
 		return nil, fmt.Errorf("doris upsert resource: %w", err)
 	}
 
-	histStmt := `INSERT INTO fhir_resource_history (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES (?, ?, ?, ?, ?, ?, ?)`
+	histStmt := fmt.Sprintf(`INSERT INTO %s (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES (?, ?, ?, ?, ?, ?, ?)`, histTbl)
 	if err := s.execDorisSQL(ctx, histStmt,
 		row.TenantID, row.ResType, row.ResID, row.ResVersion, row.IsDeleted, row.LastUpdated, row.ResourceProtoHex,
 	); err != nil {
 		return nil, fmt.Errorf("doris insert history: %w", err)
 	}
 
-	if coreStmt, coreArgs, ok := ProjectCoreResourceUpsertSQL(row); ok {
-		if err := s.execDorisSQL(ctx, coreStmt, coreArgs...); err != nil {
-			return nil, fmt.Errorf("doris project core resource %s: %w", row.ResType, err)
+	if coreTblName, ok := CoreResourceTableName(row.ResType); ok {
+		coreTbl, err := s.tenantTableRef(ctx, row.TenantID, coreTblName)
+		if err != nil {
+			return nil, err
+		}
+		if coreStmt, coreArgs, ok := ProjectCoreResourceUpsertSQLQualified(coreTbl, row); ok {
+			if err := s.execDorisSQL(ctx, coreStmt, coreArgs...); err != nil {
+				return nil, fmt.Errorf("doris project core resource %s: %w", row.ResType, err)
+			}
 		}
 	}
 
@@ -329,6 +605,9 @@ func (s *Store) WriteBatch(ctx context.Context, inputs []store.ResourceInput) er
 	defer s.txMu.RUnlock()
 	unlockStripes := s.lockBatchStripes(inputs)
 	defer unlockStripes()
+	if s.DirectSQL() {
+		return s.writeBatchSQL(ctx, inputs)
+	}
 
 	now := time.Now().UTC()
 	rows := make([]DorisResourceRow, 0, len(inputs))
@@ -363,22 +642,25 @@ func (s *Store) WriteBatch(ctx context.Context, inputs []store.ResourceInput) er
 	}
 	s.mu.Unlock()
 
+	resTbl, err := s.tenantTableRef(ctx, inputs[0].TenantID, "fhir_resource")
+	if err != nil {
+		return err
+	}
+	histTbl, err := s.tenantTableRef(ctx, inputs[0].TenantID, "fhir_resource_history")
+	if err != nil {
+		return err
+	}
+	return s.flushBatchSQL(ctx, inputs[0].TenantID, resTbl, histTbl, rows)
+}
+
+func (s *Store) flushBatchSQL(ctx context.Context, tenantID, resTbl, histTbl string, rows []DorisResourceRow) error {
 	var (
-		resTuples  = make([]string, 0, len(rows))
-		resArgs    = make([]any, 0, len(rows)*17)
 		histTuples = make([]string, 0, len(rows))
 		histArgs   = make([]any, 0, len(rows)*7)
 		coreByTbl  = make(map[string][]DorisResourceRow)
 		coreOrder  []string
 	)
 	for _, row := range rows {
-		resTuples = append(resTuples, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-		resArgs = append(resArgs,
-			row.TenantID, row.ResType, row.ResID, row.ResVersion, row.IsDeleted, row.LastUpdated,
-			row.IdempotencyKey, row.PatientID, row.EncounterID, row.PrimaryCodeSys, row.PrimaryCode,
-			row.PrimaryDateLow, row.PrimaryDateHigh, row.PrimaryQuantity, row.PrimaryUnitSys, row.PrimaryUnitCode,
-			row.ResourceProtoHex,
-		)
 		histTuples = append(histTuples, "(?, ?, ?, ?, ?, ?, ?)")
 		histArgs = append(histArgs,
 			row.TenantID, row.ResType, row.ResID, row.ResVersion, row.IsDeleted, row.LastUpdated, row.ResourceProtoHex,
@@ -391,18 +673,22 @@ func (s *Store) WriteBatch(ctx context.Context, inputs []store.ResourceInput) er
 		}
 	}
 
-	batchUpsertStmt := "INSERT INTO fhir_resource (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, idempotency_key, patient_id, encounter_id, primary_code_sys, primary_code, primary_date_low, primary_date_high, primary_quantity, primary_unit_sys, primary_unit_code, resource_proto_hex) VALUES " + strings.Join(resTuples, ", ")
+	batchUpsertStmt, resArgs := buildInsertResourceSQL(resTbl, rows)
 	if err := s.execDorisSQL(ctx, batchUpsertStmt, resArgs...); err != nil {
 		return fmt.Errorf("doris batch upsert resource: %w", err)
 	}
 
-	batchHistStmt := "INSERT INTO fhir_resource_history (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES " + strings.Join(histTuples, ", ")
+	batchHistStmt := fmt.Sprintf("INSERT INTO %s (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES %s", histTbl, strings.Join(histTuples, ", "))
 	if err := s.execDorisSQL(ctx, batchHistStmt, histArgs...); err != nil {
 		return fmt.Errorf("doris batch insert history: %w", err)
 	}
 
 	for _, tbl := range coreOrder {
 		tblRows := coreByTbl[tbl]
+		coreTbl, err := s.tenantTableRef(ctx, tenantID, tbl)
+		if err != nil {
+			return err
+		}
 		coreTuples := make([]string, 0, len(tblRows))
 		coreArgs := make([]any, 0, len(tblRows)*14)
 		for _, row := range tblRows {
@@ -410,10 +696,11 @@ func (s *Store) WriteBatch(ctx context.Context, inputs []store.ResourceInput) er
 			coreArgs = append(coreArgs,
 				row.TenantID, row.ResID, row.ResVersion, row.IsDeleted, row.LastUpdated,
 				row.PatientID, row.EncounterID, row.PrimaryCodeSys, row.PrimaryCode,
-				row.PrimaryDateLow, row.PrimaryDateHigh, row.PrimaryQuantity, row.PrimaryUnitSys, row.PrimaryUnitCode,
+				nullableTimeArg(row.PrimaryDateLow), nullableTimeArg(row.PrimaryDateHigh),
+				nullableFloat64Arg(row.PrimaryQuantity), row.PrimaryUnitSys, row.PrimaryUnitCode,
 			)
 		}
-		coreStmt := fmt.Sprintf("INSERT INTO %s (tenant_id, res_id, res_version, is_deleted, last_updated, patient_id, encounter_id, code_system, code, effective_start, effective_end, value_quantity, value_unit_sys, value_unit_code) VALUES %s", tbl, strings.Join(coreTuples, ", "))
+		coreStmt := fmt.Sprintf("INSERT INTO %s (tenant_id, res_id, res_version, is_deleted, last_updated, patient_id, encounter_id, code_system, code, effective_start, effective_end, value_quantity, value_unit_sys, value_unit_code) VALUES %s", coreTbl, strings.Join(coreTuples, ", "))
 		if err := s.execDorisSQL(ctx, coreStmt, coreArgs...); err != nil {
 			return fmt.Errorf("doris batch project core resource %s: %w", tbl, err)
 		}
@@ -422,13 +709,18 @@ func (s *Store) WriteBatch(ctx context.Context, inputs []store.ResourceInput) er
 	return nil
 }
 
-// ConditionalCreateResource evaluates an If-None-Exist search query under the sharded
-// concurrency coordinator, preventing TOCTOU duplicate creation races on Apache Doris.
+// ConditionalCreateResource evaluates an If-None-Exist search query under the distributed RowLocker
+// and sharded concurrency coordinator, preventing TOCTOU duplicate creation races on Apache Doris.
 func (s *Store) ConditionalCreateResource(ctx context.Context, input store.ResourceInput, condParams store.SearchParams) (*store.ResourceRecord, bool, error) {
 	s.txMu.RLock()
 	defer s.txMu.RUnlock()
 	unlock := s.lockTenantResourceType(input.TenantID, input.ResType)
 	defer unlock()
+	rel, err := s.acquireRowLock(ctx, "cond:"+input.TenantID+":"+input.ResType)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rel()
 
 	return s.conditionalCreateUnlocked(ctx, input, condParams)
 }
@@ -466,6 +758,11 @@ func (s *Store) ConditionalUpdateResource(
 	defer s.txMu.RUnlock()
 	unlock := s.lockTenantResourceType(tenantID, resType)
 	defer unlock()
+	rel, err := s.acquireRowLock(ctx, "cond:"+tenantID+":"+resType)
+	if err != nil {
+		return nil, err
+	}
+	defer rel()
 
 	return s.conditionalUpdateUnlocked(ctx, resType, condParams, buildInput)
 }
@@ -527,6 +824,11 @@ func (s *Store) ConditionalDeleteResources(
 	defer s.txMu.RUnlock()
 	unlock := s.lockTenantResourceType(tenantID, resType)
 	defer unlock()
+	rel, err := s.acquireRowLock(ctx, "cond:"+tenantID+":"+resType)
+	if err != nil {
+		return nil, err
+	}
+	defer rel()
 
 	if maxCount <= 1 {
 		condParams.Count = 2
@@ -581,6 +883,14 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []store.Bundle
 
 	s.txMu.Lock()
 	defer s.txMu.Unlock()
+	rel, err := s.acquireRowLock(ctx, "tx:"+tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rel()
+	if s.DirectSQL() {
+		return s.executeTransactionBundleSQL(ctx, ops)
+	}
 
 	// Capture state snapshot for compensating rollback on failure
 	s.mu.RLock()
@@ -604,30 +914,33 @@ func (s *Store) ExecuteTransactionBundle(ctx context.Context, ops []store.Bundle
 		s.mu.Unlock()
 
 		for k, cur := range currentResources {
+			resTbl, _ := s.tenantTableRef(ctx, cur.row.TenantID, "fhir_resource")
+			histTbl, _ := s.tenantTableRef(ctx, cur.row.TenantID, "fhir_resource_history")
 			prev, hadPrev := snapResources[k]
 			if !hadPrev {
-				_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, cur.row.TenantID, cur.row.ResType, cur.row.ResID)
-				_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource_history WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, cur.row.TenantID, cur.row.ResType, cur.row.ResID)
+				_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, resTbl), cur.row.TenantID, cur.row.ResType, cur.row.ResID)
+				_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, histTbl), cur.row.TenantID, cur.row.ResType, cur.row.ResID)
 				if tbl, ok := CoreResourceTableName(cur.row.ResType); ok {
-					_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_id = ?`, tbl), cur.row.TenantID, cur.row.ResID)
+					coreTbl, _ := s.tenantTableRef(ctx, cur.row.TenantID, tbl)
+					_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_id = ?`, coreTbl), cur.row.TenantID, cur.row.ResID)
 				}
 				continue
 			}
 			if cur.row.ResVersion != prev.row.ResVersion || cur.row.IsDeleted != prev.row.IsDeleted {
-				_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource_history WHERE tenant_id = ? AND res_type = ? AND res_id = ? AND res_version > ?`, prev.row.TenantID, prev.row.ResType, prev.row.ResID, prev.row.ResVersion)
-				upsertStmt := `INSERT INTO fhir_resource (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, idempotency_key, patient_id, encounter_id, primary_code_sys, primary_code, primary_date_low, primary_date_high, primary_quantity, primary_unit_sys, primary_unit_code, resource_proto_hex) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-				_ = s.execDorisSQL(ctx, upsertStmt,
-					prev.row.TenantID, prev.row.ResType, prev.row.ResID, prev.row.ResVersion, prev.row.IsDeleted, prev.row.LastUpdated,
-					prev.row.IdempotencyKey, prev.row.PatientID, prev.row.EncounterID, prev.row.PrimaryCodeSys, prev.row.PrimaryCode,
-					prev.row.PrimaryDateLow, prev.row.PrimaryDateHigh, prev.row.PrimaryQuantity, prev.row.PrimaryUnitSys, prev.row.PrimaryUnitCode,
-					prev.row.ResourceProtoHex,
-				)
-				if prev.row.IsDeleted {
-					if coreDelStmt, coreDelArgs, ok := ProjectCoreResourceDeleteSQL(prev.row.TenantID, prev.row.ResType, prev.row.ResID, prev.row.ResVersion, prev.row.LastUpdated); ok {
-						_ = s.execDorisSQL(ctx, coreDelStmt, coreDelArgs...)
+				_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ? AND res_version > ?`, histTbl), prev.row.TenantID, prev.row.ResType, prev.row.ResID, prev.row.ResVersion)
+				_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, resTbl), prev.row.TenantID, prev.row.ResType, prev.row.ResID)
+				upsertStmt, upsertArgs := buildInsertResourceSQL(resTbl, []DorisResourceRow{prev.row})
+				_ = s.execDorisSQL(ctx, upsertStmt, upsertArgs...)
+				if tbl, ok := CoreResourceTableName(prev.row.ResType); ok {
+					coreTbl, _ := s.tenantTableRef(ctx, prev.row.TenantID, tbl)
+					_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_id = ?`, coreTbl), prev.row.TenantID, prev.row.ResID)
+					if prev.row.IsDeleted {
+						if coreDelStmt, coreDelArgs, ok := ProjectCoreResourceDeleteSQLQualified(coreTbl, prev.row.TenantID, prev.row.ResType, prev.row.ResID, prev.row.ResVersion, prev.row.LastUpdated); ok {
+							_ = s.execDorisSQL(ctx, coreDelStmt, coreDelArgs...)
+						}
+					} else if coreStmt, coreArgs, ok := ProjectCoreResourceUpsertSQLQualified(coreTbl, prev.row); ok {
+						_ = s.execDorisSQL(ctx, coreStmt, coreArgs...)
 					}
-				} else if coreStmt, coreArgs, ok := ProjectCoreResourceUpsertSQL(prev.row); ok {
-					_ = s.execDorisSQL(ctx, coreStmt, coreArgs...)
 				}
 			}
 		}
@@ -775,7 +1088,10 @@ func (s *Store) ReadResource(ctx context.Context, tenantID, resType, resID strin
 }
 
 // ReadResourceWithMeta reads a single resource and its version metadata using Doris row-store point lookup.
-func (s *Store) ReadResourceWithMeta(_ context.Context, tenantID, resType, resID string) (*store.ResourceRecord, error) {
+func (s *Store) ReadResourceWithMeta(ctx context.Context, tenantID, resType, resID string) (*store.ResourceRecord, error) {
+	if s.DirectSQL() {
+		return s.readResourceWithMetaSQL(ctx, tenantID, resType, resID)
+	}
 	key := resKey(tenantID, resType, resID)
 	s.mu.RLock()
 	entry, ok := s.resources[key]
@@ -799,7 +1115,10 @@ func (s *Store) ReadResourceWithMeta(_ context.Context, tenantID, resType, resID
 }
 
 // ReadResourceVersion reads a specific historical version of a resource (FHIR vread).
-func (s *Store) ReadResourceVersion(_ context.Context, tenantID, resType, resID string, version int) (*store.ResourceRecord, error) {
+func (s *Store) ReadResourceVersion(ctx context.Context, tenantID, resType, resID string, version int) (*store.ResourceRecord, error) {
+	if s.DirectSQL() {
+		return s.readResourceVersionSQL(ctx, tenantID, resType, resID, version)
+	}
 	key := resKey(tenantID, resType, resID)
 	s.mu.RLock()
 	versions := s.history[key]
@@ -835,7 +1154,10 @@ func (s *Store) ListHistory(ctx context.Context, tenantID, resType, resID string
 }
 
 // ListHistoryWithParams returns version history records filtered by HistoryParams.
-func (s *Store) ListHistoryWithParams(_ context.Context, params store.HistoryParams) ([]store.ResourceRecord, int, error) {
+func (s *Store) ListHistoryWithParams(ctx context.Context, params store.HistoryParams) ([]store.ResourceRecord, int, error) {
+	if s.DirectSQL() {
+		return s.listHistoryWithParamsSQL(ctx, params)
+	}
 	limit := params.Limit
 	if limit <= 0 {
 		limit = 100
@@ -904,11 +1226,19 @@ func (s *Store) DeleteResourceWithExpectedVersion(ctx context.Context, tenantID,
 	defer s.txMu.RUnlock()
 	unlock := s.lockTenantResourceType(tenantID, resType)
 	defer unlock()
+	rel, err := s.acquireRowLock(ctx, "res:"+resKey(tenantID, resType, resID))
+	if err != nil {
+		return nil, err
+	}
+	defer rel()
 
 	return s.deleteUnlocked(ctx, tenantID, resType, resID, expectedVersion)
 }
 
 func (s *Store) deleteUnlocked(ctx context.Context, tenantID, resType, resID string, expectedVersion int) (*store.ResourceRecord, error) {
+	if s.DirectSQL() {
+		return s.deleteUnlockedSQL(ctx, tenantID, resType, resID, expectedVersion, nil)
+	}
 	key := resKey(tenantID, resType, resID)
 	s.mu.Lock()
 	existing, exists := s.resources[key]
@@ -958,12 +1288,32 @@ func (s *Store) deleteUnlocked(ctx context.Context, tenantID, resType, resID str
 	s.history[key] = append(s.history[key], tombstoneRec)
 	s.mu.Unlock()
 
-	delStmt := `INSERT INTO fhir_resource (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES (?, ?, ?, ?, TRUE, ?, '')`
-	_ = s.execDorisSQL(ctx, delStmt, tenantID, resType, resID, newVersion, now)
-	histDelStmt := `INSERT INTO fhir_resource_history (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES (?, ?, ?, ?, TRUE, ?, '')`
-	_ = s.execDorisSQL(ctx, histDelStmt, tenantID, resType, resID, newVersion, now)
-	if coreDelStmt, coreDelArgs, ok := ProjectCoreResourceDeleteSQL(tenantID, resType, resID, newVersion, now); ok {
-		_ = s.execDorisSQL(ctx, coreDelStmt, coreDelArgs...)
+	resTbl, err := s.tenantTableRef(ctx, tenantID, "fhir_resource")
+	if err != nil {
+		return nil, err
+	}
+	histTbl, err := s.tenantTableRef(ctx, tenantID, "fhir_resource_history")
+	if err != nil {
+		return nil, err
+	}
+	delStmt, delArgs := buildInsertResourceSQL(resTbl, []DorisResourceRow{tombstoneRow})
+	if err := s.execDorisSQL(ctx, delStmt, delArgs...); err != nil {
+		return nil, fmt.Errorf("doris tombstone upsert: %w", err)
+	}
+	histDelStmt := fmt.Sprintf(`INSERT INTO %s (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES (?, ?, ?, ?, TRUE, ?, '')`, histTbl)
+	if err := s.execDorisSQL(ctx, histDelStmt, tenantID, resType, resID, newVersion, now); err != nil {
+		return nil, fmt.Errorf("doris tombstone history: %w", err)
+	}
+	if coreTblName, ok := CoreResourceTableName(resType); ok {
+		coreTbl, err := s.tenantTableRef(ctx, tenantID, coreTblName)
+		if err != nil {
+			return nil, err
+		}
+		if coreDelStmt, coreDelArgs, ok := ProjectCoreResourceDeleteSQLQualified(coreTbl, tenantID, resType, resID, newVersion, now); ok {
+			if err := s.execDorisSQL(ctx, coreDelStmt, coreDelArgs...); err != nil {
+				return nil, fmt.Errorf("doris tombstone core %s: %w", resType, err)
+			}
+		}
 	}
 
 	return &tombstoneRec, nil
@@ -971,6 +1321,9 @@ func (s *Store) deleteUnlocked(ctx context.Context, tenantID, resType, resID str
 
 // Reindex rebuilds inverted-index token arrays for matching active resources in Doris.
 func (s *Store) Reindex(ctx context.Context, params store.ReindexParams) (*store.ReindexResult, error) {
+	if s.DirectSQL() {
+		return s.reindexSQL(ctx, params)
+	}
 	s.txMu.RLock()
 	defer s.txMu.RUnlock()
 	if params.ResType != "" && params.ResID != "" {
@@ -1019,6 +1372,9 @@ func (s *Store) Reindex(ctx context.Context, params store.ReindexParams) (*store
 
 // Search executes a FHIR search query using Doris Inverted Index array predicates.
 func (s *Store) Search(ctx context.Context, params store.SearchParams) (*store.SearchResults, error) {
+	if s.DirectSQL() {
+		return s.searchSQL(ctx, params)
+	}
 	querySQL, queryArgs := BuildInvertedSearchSQL(params)
 	_ = s.execDorisSQL(ctx, querySQL, queryArgs...)
 
@@ -1467,6 +1823,9 @@ func paginateEverythingIncludes(includes []store.SearchResult, offset, count int
 
 // PatientEverything returns the target Patient and all compartment-linked resources.
 func (s *Store) PatientEverything(ctx context.Context, params store.PatientEverythingParams) (*store.SearchResults, error) {
+	if s.DirectSQL() {
+		return s.patientEverythingSQL(ctx, params)
+	}
 	patRec, err := s.ReadResourceWithMeta(ctx, params.TenantID, "Patient", params.PatientID)
 	if err != nil {
 		return nil, err
@@ -1553,6 +1912,9 @@ func (s *Store) PatientEverything(ctx context.Context, params store.PatientEvery
 
 // EncounterEverything returns the target Encounter and all compartment-linked resources.
 func (s *Store) EncounterEverything(ctx context.Context, params store.EncounterEverythingParams) (*store.SearchResults, error) {
+	if s.DirectSQL() {
+		return s.encounterEverythingSQL(ctx, params)
+	}
 	encRec, err := s.ReadResourceWithMeta(ctx, params.TenantID, "Encounter", params.EncounterID)
 	if err != nil {
 		return nil, err
@@ -1629,6 +1991,9 @@ func (s *Store) EncounterEverything(ctx context.Context, params store.EncounterE
 
 // GroupEverything returns the focal Group and cohort resources.
 func (s *Store) GroupEverything(ctx context.Context, params store.GroupEverythingParams) (*store.SearchResults, error) {
+	if s.DirectSQL() {
+		return s.groupEverythingSQL(ctx, params)
+	}
 	var matches []store.SearchResult
 	if grpRec, err := s.ReadResourceWithMeta(ctx, params.TenantID, "Group", params.GroupID); err == nil {
 		if matchesEverythingFilters("Group", grpRec.LastUpdated, params.ResourceTypes, params.Since, params.Until) {
@@ -1675,12 +2040,15 @@ func (s *Store) GroupEverything(ctx context.Context, params store.GroupEverythin
 }
 
 // BelongsToPatientCompartment checks whether a resource belongs to patientID's compartment.
-func (s *Store) BelongsToPatientCompartment(_ context.Context, tenantID, resType, resID, patientID string) (bool, error) {
+func (s *Store) BelongsToPatientCompartment(ctx context.Context, tenantID, resType, resID, patientID string) (bool, error) {
 	if strings.EqualFold(resType, "Patient") {
 		return resID == patientID, nil
 	}
 	if !store.IsPatientCompartmentResourceType(resType) {
 		return true, nil
+	}
+	if s.DirectSQL() {
+		return s.belongsToPatientCompartmentSQL(ctx, tenantID, resType, resID, patientID)
 	}
 	key := resKey(tenantID, resType, resID)
 	s.mu.RLock()
@@ -1693,7 +2061,10 @@ func (s *Store) BelongsToPatientCompartment(_ context.Context, tenantID, resType
 }
 
 // SearchPatientMatchCandidates returns candidate Patient resources for $match and $member-match.
-func (s *Store) SearchPatientMatchCandidates(_ context.Context, params store.PatientMatchCandidateParams) ([]store.SearchResult, error) {
+func (s *Store) SearchPatientMatchCandidates(ctx context.Context, params store.PatientMatchCandidateParams) ([]store.SearchResult, error) {
+	if s.DirectSQL() {
+		return s.searchPatientMatchCandidatesSQL(ctx, params)
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var out []store.SearchResult
@@ -1717,6 +2088,9 @@ func (s *Store) SearchPatientMatchCandidates(_ context.Context, params store.Pat
 
 // ResourceGraph traverses GraphDefinition links starting from (ResourceType, ResourceID).
 func (s *Store) ResourceGraph(ctx context.Context, params store.ResourceGraphParams) (*store.SearchResults, error) {
+	if s.DirectSQL() {
+		return s.resourceGraphSQL(ctx, params)
+	}
 	focal, err := s.ReadResourceWithMeta(ctx, params.TenantID, params.ResourceType, params.ResourceID)
 	if err != nil {
 		return nil, err
@@ -1769,7 +2143,10 @@ func (s *Store) ResourceGraph(ctx context.Context, params store.ResourceGraphPar
 }
 
 // AggregateMeta returns distinct _profile, _tag, and _security values across active resources.
-func (s *Store) AggregateMeta(_ context.Context, tenantID, resType string) (*store.AggregatedMeta, error) {
+func (s *Store) AggregateMeta(ctx context.Context, tenantID, resType string) (*store.AggregatedMeta, error) {
+	if s.DirectSQL() {
+		return s.aggregateMetaSQL(ctx, tenantID, resType)
+	}
 	out := &store.AggregatedMeta{}
 	profSeen := make(map[string]bool)
 	tagSeen := make(map[string]bool)
@@ -1828,6 +2205,9 @@ func (s *Store) StreamExportResources(ctx context.Context, params store.ExportPa
 func (s *Store) StreamAnalyticalExport(ctx context.Context, params store.ExportParams, emit func(store.SearchResult) error) error {
 	if params.EmptyCohort {
 		return nil
+	}
+	if s.DirectSQL() {
+		return s.streamAnalyticalExportSQL(ctx, params, emit)
 	}
 	_ = s.execDorisSQL(ctx,
 		`SELECT res_type, res_id, res_version, last_updated, resource_proto_hex FROM fhir_resource WHERE tenant_id = ? AND is_deleted = FALSE ORDER BY res_type ASC, res_id ASC`,
@@ -1899,6 +2279,9 @@ func (s *Store) StreamAnalyticalExport(ctx context.Context, params store.ExportP
 // EvaluateObservationStats implements store.AnalyticalStore using Doris vectorized columnar
 // aggregations (AVG, MIN, MAX, SUM, STDDEV_SAMP, VAR_SAMP) on the strongly-typed fhir_observation table.
 func (s *Store) EvaluateObservationStats(ctx context.Context, params store.ObservationStatsParams) (*store.ObservationStatsResult, error) {
+	if s.DirectSQL() {
+		return s.evaluateObservationStatsSQL(ctx, params)
+	}
 	statsSQL := `SELECT code_system, code, value_unit_code, COUNT(*), AVG(value_quantity), MIN(value_quantity), MAX(value_quantity), SUM(value_quantity), STDDEV_SAMP(value_quantity), VAR_SAMP(value_quantity) FROM fhir_observation WHERE tenant_id = ? AND is_deleted = FALSE AND value_quantity IS NOT NULL GROUP BY code_system, code, value_unit_code`
 	_ = s.execDorisSQL(ctx, statsSQL, params.TenantID)
 
@@ -1987,6 +2370,9 @@ func (s *Store) EvaluateObservationStats(ctx context.Context, params store.Obser
 // EvaluateCohortCounts implements store.AnalyticalStore by computing active resource counts
 // per FHIR resource type using Doris columnar aggregation.
 func (s *Store) EvaluateCohortCounts(ctx context.Context, tenantID string, resourceTypes []string) (map[string]int, error) {
+	if s.DirectSQL() {
+		return s.evaluateCohortCountsSQL(ctx, tenantID, resourceTypes)
+	}
 	_ = s.execDorisSQL(ctx,
 		`SELECT res_type, COUNT(*) FROM fhir_resource WHERE tenant_id = ? AND is_deleted = FALSE GROUP BY res_type`,
 		tenantID,
@@ -2012,6 +2398,9 @@ func (s *Store) EvaluateCohortCounts(ctx context.Context, tenantID string, resou
 
 // PurgePatientCompartment deletes a Patient and all compartment-linked clinical resources.
 func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID string, hardExpunge bool) ([]store.ResourceRecord, error) {
+	if s.DirectSQL() {
+		return s.purgePatientCompartmentSQL(ctx, tenantID, patientID, hardExpunge)
+	}
 	s.txMu.RLock()
 	defer s.txMu.RUnlock()
 	if _, err := s.ReadResourceWithMeta(ctx, tenantID, "Patient", patientID); err != nil {
@@ -2058,15 +2447,37 @@ func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID
 	}
 	s.mu.Unlock()
 
+	resTbl, err := s.tenantTableRef(ctx, tenantID, "fhir_resource")
+	if err != nil {
+		return nil, err
+	}
+	histTbl, err := s.tenantTableRef(ctx, tenantID, "fhir_resource_history")
+	if err != nil {
+		return nil, err
+	}
 	for _, rec := range purged {
 		if hardExpunge {
-			_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, tenantID, rec.ResType, rec.ResID)
-			_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource_history WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, tenantID, rec.ResType, rec.ResID)
+			_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, resTbl), tenantID, rec.ResType, rec.ResID)
+			_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, histTbl), tenantID, rec.ResType, rec.ResID)
+			if tbl, ok := CoreResourceTableName(rec.ResType); ok {
+				coreTbl, _ := s.tenantTableRef(ctx, tenantID, tbl)
+				_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_id = ?`, coreTbl), tenantID, rec.ResID)
+			}
 		} else {
-			_ = s.execDorisSQL(ctx, `INSERT INTO fhir_resource (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES (?, ?, ?, ?, TRUE, ?, '')`,
+			tombRow := DorisResourceRow{
+				TenantID: tenantID, ResType: rec.ResType, ResID: rec.ResID,
+				ResVersion: rec.ResVersion, IsDeleted: true, LastUpdated: rec.LastUpdated,
+			}
+			tStmt, tArgs := buildInsertResourceSQL(resTbl, []DorisResourceRow{tombRow})
+			_ = s.execDorisSQL(ctx, tStmt, tArgs...)
+			_ = s.execDorisSQL(ctx, fmt.Sprintf(`INSERT INTO %s (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES (?, ?, ?, ?, TRUE, ?, '')`, histTbl),
 				tenantID, rec.ResType, rec.ResID, rec.ResVersion, rec.LastUpdated)
-			_ = s.execDorisSQL(ctx, `INSERT INTO fhir_resource_history (tenant_id, res_type, res_id, res_version, is_deleted, last_updated, resource_proto_hex) VALUES (?, ?, ?, ?, TRUE, ?, '')`,
-				tenantID, rec.ResType, rec.ResID, rec.ResVersion, rec.LastUpdated)
+			if tbl, ok := CoreResourceTableName(rec.ResType); ok {
+				coreTbl, _ := s.tenantTableRef(ctx, tenantID, tbl)
+				if cStmt, cArgs, ok := ProjectCoreResourceDeleteSQLQualified(coreTbl, tenantID, rec.ResType, rec.ResID, rec.ResVersion, rec.LastUpdated); ok {
+					_ = s.execDorisSQL(ctx, cStmt, cArgs...)
+				}
+			}
 		}
 	}
 	return purged, nil
@@ -2074,6 +2485,9 @@ func (s *Store) PurgePatientCompartment(ctx context.Context, tenantID, patientID
 
 // ExpungeResources physically removes soft-deleted resources or historical versions.
 func (s *Store) ExpungeResources(ctx context.Context, params store.ExpungeParams) (int, error) {
+	if s.DirectSQL() {
+		return s.expungeResourcesSQL(ctx, params)
+	}
 	s.txMu.RLock()
 	defer s.txMu.RUnlock()
 	if !params.ExpungeDeletedResources && !params.ExpungePreviousVersions && !params.ExpungeEverything {
@@ -2117,15 +2531,22 @@ func (s *Store) ExpungeResources(ctx context.Context, params store.ExpungeParams
 	}
 	s.mu.Unlock()
 
+	resTbl, _ := s.tenantTableRef(ctx, params.TenantID, "fhir_resource")
+	histTbl, _ := s.tenantTableRef(ctx, params.TenantID, "fhir_resource_history")
 	for _, op := range sqlOps {
 		if op.keepVer > 0 {
-			_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource_history WHERE tenant_id = ? AND res_type = ? AND res_id = ? AND res_version < ?`,
+			_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ? AND res_version < ?`, histTbl),
 				params.TenantID, op.resType, op.resID, op.keepVer)
 		} else {
-			_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource WHERE tenant_id = ? AND res_type = ? AND res_id = ?`,
+			_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, resTbl),
 				params.TenantID, op.resType, op.resID)
-			_ = s.execDorisSQL(ctx, `DELETE FROM fhir_resource_history WHERE tenant_id = ? AND res_type = ? AND res_id = ?`,
+			_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_type = ? AND res_id = ?`, histTbl),
 				params.TenantID, op.resType, op.resID)
+			if tbl, ok := CoreResourceTableName(op.resType); ok {
+				coreTbl, _ := s.tenantTableRef(ctx, params.TenantID, tbl)
+				_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND res_id = ?`, coreTbl),
+					params.TenantID, op.resID)
+			}
 		}
 	}
 	return expunged, nil
@@ -2141,11 +2562,17 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec store.AuditRecord) erro
 	}
 	outcomeDesc := store.EncodeAuditOutcomeDesc(rec)
 	store.HydrateAuditOutcomeMetadata(&rec)
-	s.mu.Lock()
-	s.audits[rec.TenantID] = append(s.audits[rec.TenantID], rec)
-	s.mu.Unlock()
+	if !s.DirectSQL() {
+		s.mu.Lock()
+		s.audits[rec.TenantID] = append(s.audits[rec.TenantID], rec)
+		s.mu.Unlock()
+	}
 
-	stmt := `INSERT INTO fhir_audit_event (tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc, http_method, http_status, request_uri, agent_subject, agent_patient, client_ip, entity_type, entity_id, entity_version, trace_id, span_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	auditTbl, err := s.tenantTableRef(ctx, rec.TenantID, "fhir_audit_event")
+	if err != nil {
+		return err
+	}
+	stmt := fmt.Sprintf(`INSERT INTO %s (tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc, http_method, http_status, request_uri, agent_subject, agent_patient, client_ip, entity_type, entity_id, entity_version, trace_id, span_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, auditTbl)
 	return s.execDorisSQL(ctx, stmt,
 		rec.TenantID, rec.AuditID, rec.Recorded, rec.Action, rec.SubtypeCode, rec.Outcome, outcomeDesc,
 		rec.HTTPMethod, rec.HTTPStatus, rec.RequestURI, rec.AgentSubject, rec.AgentPatient,
@@ -2154,7 +2581,10 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec store.AuditRecord) erro
 }
 
 // ReadAuditEvent reads a single AuditRecord by (tenant_id, audit_id).
-func (s *Store) ReadAuditEvent(_ context.Context, tenantID, auditID string) (*store.AuditRecord, error) {
+func (s *Store) ReadAuditEvent(ctx context.Context, tenantID, auditID string) (*store.AuditRecord, error) {
+	if s.DirectSQL() {
+		return s.readAuditEventSQL(ctx, tenantID, auditID)
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, rec := range s.audits[tenantID] {
@@ -2167,7 +2597,10 @@ func (s *Store) ReadAuditEvent(_ context.Context, tenantID, auditID string) (*st
 }
 
 // QueryAuditEvents searches persisted AuditRecords ordered by recorded descending.
-func (s *Store) QueryAuditEvents(_ context.Context, params store.AuditQueryParams) ([]store.AuditRecord, int, error) {
+func (s *Store) QueryAuditEvents(ctx context.Context, params store.AuditQueryParams) ([]store.AuditRecord, int, error) {
+	if s.DirectSQL() {
+		return s.queryAuditEventsSQL(ctx, params)
+	}
 	s.mu.RLock()
 	var matched []store.AuditRecord
 	for _, rec := range s.audits[params.TenantID] {
@@ -2220,9 +2653,12 @@ func hashToken(raw string) string {
 }
 
 // SaveAuthCode stores an OAuth2 authorization code.
-func (s *Store) SaveAuthCode(_ context.Context, rawCode string, rec store.OAuthAuthCodeRecord) error {
+func (s *Store) SaveAuthCode(ctx context.Context, rawCode string, rec store.OAuthAuthCodeRecord) error {
 	if rawCode == "" {
 		return nil
+	}
+	if s.DirectSQL() {
+		return s.saveAuthCodeSQL(ctx, rawCode, rec)
 	}
 	s.mu.Lock()
 	s.authCodes[hashToken(rawCode)] = rec
@@ -2231,9 +2667,12 @@ func (s *Store) SaveAuthCode(_ context.Context, rawCode string, rec store.OAuthA
 }
 
 // ConsumeAuthCode atomically consumes an unexpired OAuth2 authorization code.
-func (s *Store) ConsumeAuthCode(_ context.Context, rawCode string) (store.OAuthAuthCodeRecord, bool, error) {
+func (s *Store) ConsumeAuthCode(ctx context.Context, rawCode string) (store.OAuthAuthCodeRecord, bool, error) {
 	if rawCode == "" {
 		return store.OAuthAuthCodeRecord{}, false, nil
+	}
+	if s.DirectSQL() {
+		return s.consumeAuthCodeSQL(ctx, rawCode)
 	}
 	h := hashToken(rawCode)
 	s.mu.Lock()
@@ -2250,9 +2689,12 @@ func (s *Store) ConsumeAuthCode(_ context.Context, rawCode string) (store.OAuthA
 }
 
 // SaveRefreshToken stores an OAuth2 refresh token.
-func (s *Store) SaveRefreshToken(_ context.Context, rawToken string, rec store.OAuthRefreshTokenRecord) error {
+func (s *Store) SaveRefreshToken(ctx context.Context, rawToken string, rec store.OAuthRefreshTokenRecord) error {
 	if rawToken == "" {
 		return nil
+	}
+	if s.DirectSQL() {
+		return s.saveRefreshTokenSQL(ctx, rawToken, rec)
 	}
 	s.mu.Lock()
 	s.refreshTokens[hashToken(rawToken)] = rec
@@ -2261,9 +2703,12 @@ func (s *Store) SaveRefreshToken(_ context.Context, rawToken string, rec store.O
 }
 
 // PeekRefreshToken looks up an unexpired OAuth2 refresh token without consuming it.
-func (s *Store) PeekRefreshToken(_ context.Context, rawToken string) (store.OAuthRefreshTokenRecord, bool, error) {
+func (s *Store) PeekRefreshToken(ctx context.Context, rawToken string) (store.OAuthRefreshTokenRecord, bool, error) {
 	if rawToken == "" {
 		return store.OAuthRefreshTokenRecord{}, false, nil
+	}
+	if s.DirectSQL() {
+		return s.peekRefreshTokenSQL(ctx, rawToken)
 	}
 	h := hashToken(rawToken)
 	s.mu.RLock()
@@ -2279,9 +2724,12 @@ func (s *Store) PeekRefreshToken(_ context.Context, rawToken string) (store.OAut
 }
 
 // ConsumeRefreshToken atomically consumes an unexpired OAuth2 refresh token.
-func (s *Store) ConsumeRefreshToken(_ context.Context, rawToken string) (store.OAuthRefreshTokenRecord, bool, error) {
+func (s *Store) ConsumeRefreshToken(ctx context.Context, rawToken string) (store.OAuthRefreshTokenRecord, bool, error) {
 	if rawToken == "" {
 		return store.OAuthRefreshTokenRecord{}, false, nil
+	}
+	if s.DirectSQL() {
+		return s.consumeRefreshTokenSQL(ctx, rawToken)
 	}
 	h := hashToken(rawToken)
 	s.mu.Lock()
@@ -2298,12 +2746,15 @@ func (s *Store) ConsumeRefreshToken(_ context.Context, rawToken string) (store.O
 }
 
 // RevokeToken records an OAuth2 token revocation.
-func (s *Store) RevokeToken(_ context.Context, rawToken string, ttl time.Duration) error {
+func (s *Store) RevokeToken(ctx context.Context, rawToken string, ttl time.Duration) error {
 	if rawToken == "" {
 		return nil
 	}
 	if ttl <= 0 {
 		ttl = 24 * time.Hour
+	}
+	if s.DirectSQL() {
+		return s.revokeTokenSQL(ctx, rawToken, ttl)
 	}
 	h := hashToken(rawToken)
 	s.mu.Lock()
@@ -2314,9 +2765,12 @@ func (s *Store) RevokeToken(_ context.Context, rawToken string, ttl time.Duratio
 }
 
 // IsTokenRevoked checks whether rawToken has been revoked.
-func (s *Store) IsTokenRevoked(_ context.Context, rawToken string) (bool, error) {
+func (s *Store) IsTokenRevoked(ctx context.Context, rawToken string) (bool, error) {
 	if rawToken == "" {
 		return false, nil
+	}
+	if s.DirectSQL() {
+		return s.isTokenRevokedSQL(ctx, rawToken)
 	}
 	h := hashToken(rawToken)
 	s.mu.RLock()
@@ -2329,13 +2783,21 @@ func (s *Store) IsTokenRevoked(_ context.Context, rawToken string) (bool, error)
 }
 
 // ClaimNonce atomically claims a single-use cryptographic replay nonce.
-func (s *Store) ClaimNonce(_ context.Context, nonceKey string, ttl time.Duration) (bool, error) {
+func (s *Store) ClaimNonce(ctx context.Context, nonceKey string, ttl time.Duration) (bool, error) {
 	if nonceKey == "" {
 		return false, nil
 	}
 	if ttl <= 0 {
 		ttl = 10 * time.Minute
 	}
+	if s.DirectSQL() {
+		return s.claimNonceSQL(ctx, nonceKey, ttl)
+	}
+	rel, err := s.acquireRowLock(ctx, "nonce:"+nonceKey)
+	if err != nil {
+		return false, err
+	}
+	defer rel()
 	h := hashToken("nonce:" + nonceKey)
 	now := time.Now().UTC()
 	s.mu.Lock()
@@ -2375,6 +2837,14 @@ func (s *Store) GetOrCreateClusterSecret(ctx context.Context, key string, genera
 		}
 		return nil, nil
 	}
+	if s.DirectSQL() {
+		return s.getOrCreateClusterSecretSQL(ctx, key, generate)
+	}
+	rel, err := s.acquireRowLock(ctx, "secret:"+key)
+	if err != nil {
+		return nil, err
+	}
+	defer rel()
 	s.mu.RLock()
 	if existing, ok := s.clusterSecrets[key]; ok && len(existing) > 0 {
 		cp := append([]byte(nil), existing...)
@@ -2401,7 +2871,11 @@ func (s *Store) GetOrCreateClusterSecret(ctx context.Context, key string, genera
 	s.clusterSecrets[key] = stored
 	s.mu.Unlock()
 
-	_ = s.execDorisSQL(ctx, `INSERT INTO fhir_cluster_secret (secret_key, secret_bytes_hex, created_at) VALUES (?, ?, ?)`,
+	secretTbl, err := s.clusterTableRef("fhir_cluster_secret")
+	if err != nil {
+		return nil, err
+	}
+	_ = s.execDorisSQL(ctx, fmt.Sprintf(`INSERT INTO %s (secret_key, secret_bytes_hex, created_at) VALUES (?, ?, ?)`, secretTbl),
 		key, hex.EncodeToString(stored), time.Now().UTC())
 	return append([]byte(nil), stored...), nil
 }
@@ -2411,6 +2885,14 @@ func (s *Store) PutClusterState(ctx context.Context, rec store.ClusterStateRecor
 	if rec.Namespace == "" || rec.Key == "" {
 		return rec, nil
 	}
+	if s.DirectSQL() {
+		return s.putClusterStateSQL(ctx, rec)
+	}
+	rel, err := s.acquireRowLock(ctx, "cs:"+rec.Namespace+":"+rec.Key)
+	if err != nil {
+		return store.ClusterStateRecord{}, err
+	}
+	defer rel()
 	now := time.Now().UTC()
 	mapKey := dorisClusterStateKey(rec.Namespace, rec.Key)
 
@@ -2428,15 +2910,22 @@ func (s *Store) PutClusterState(ctx context.Context, rec store.ClusterStateRecor
 	s.clusterStates[mapKey] = stored
 	s.mu.Unlock()
 
-	_ = s.execDorisSQL(ctx, `INSERT INTO fhir_cluster_state (namespace, state_key, tenant_id, secondary_key, value_hex, version, expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		stored.Namespace, stored.Key, stored.TenantID, stored.SecondaryKey, hex.EncodeToString(stored.Value), stored.Version, stored.ExpiresAt, stored.UpdatedAt)
+	csTbl, err := s.clusterTableRef("fhir_cluster_state")
+	if err != nil {
+		return store.ClusterStateRecord{}, err
+	}
+	_ = s.execDorisSQL(ctx, fmt.Sprintf(`INSERT INTO %s (namespace, state_key, tenant_id, secondary_key, value_hex, version, expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, csTbl),
+		stored.Namespace, stored.Key, stored.TenantID, stored.SecondaryKey, hex.EncodeToString(stored.Value), stored.Version, nullableTimeArg(stored.ExpiresAt), stored.UpdatedAt)
 	return cloneDorisClusterState(stored), nil
 }
 
 // GetClusterState retrieves an unexpired cluster state entry by (namespace, key).
-func (s *Store) GetClusterState(_ context.Context, namespace, key string) (*store.ClusterStateRecord, bool, error) {
+func (s *Store) GetClusterState(ctx context.Context, namespace, key string) (*store.ClusterStateRecord, bool, error) {
 	if namespace == "" || key == "" {
 		return nil, false, nil
+	}
+	if s.DirectSQL() {
+		return s.getClusterStateSQL(ctx, namespace, key)
 	}
 	now := time.Now().UTC()
 	s.mu.RLock()
@@ -2450,9 +2939,12 @@ func (s *Store) GetClusterState(_ context.Context, namespace, key string) (*stor
 }
 
 // GetClusterStateBySecondary retrieves the latest unexpired cluster state entry by (namespace, secondaryKey).
-func (s *Store) GetClusterStateBySecondary(_ context.Context, namespace, secondaryKey string) (*store.ClusterStateRecord, bool, error) {
+func (s *Store) GetClusterStateBySecondary(ctx context.Context, namespace, secondaryKey string) (*store.ClusterStateRecord, bool, error) {
 	if namespace == "" || secondaryKey == "" {
 		return nil, false, nil
+	}
+	if s.DirectSQL() {
+		return s.getClusterStateBySecondarySQL(ctx, namespace, secondaryKey)
 	}
 	now := time.Now().UTC()
 	var best *store.ClusterStateRecord
@@ -2479,6 +2971,14 @@ func (s *Store) CompareAndSwapClusterState(ctx context.Context, expectedVersion 
 	if rec.Namespace == "" || rec.Key == "" {
 		return store.ClusterStateRecord{}, false, nil
 	}
+	if s.DirectSQL() {
+		return s.compareAndSwapClusterStateSQL(ctx, expectedVersion, rec)
+	}
+	rel, err := s.acquireRowLock(ctx, "cs:"+rec.Namespace+":"+rec.Key)
+	if err != nil {
+		return store.ClusterStateRecord{}, false, err
+	}
+	defer rel()
 	now := time.Now().UTC()
 	mapKey := dorisClusterStateKey(rec.Namespace, rec.Key)
 
@@ -2508,8 +3008,12 @@ func (s *Store) CompareAndSwapClusterState(ctx context.Context, expectedVersion 
 	s.clusterStates[mapKey] = stored
 	s.mu.Unlock()
 
-	_ = s.execDorisSQL(ctx, `INSERT INTO fhir_cluster_state (namespace, state_key, tenant_id, secondary_key, value_hex, version, expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		stored.Namespace, stored.Key, stored.TenantID, stored.SecondaryKey, hex.EncodeToString(stored.Value), stored.Version, stored.ExpiresAt, stored.UpdatedAt)
+	csTbl, err := s.clusterTableRef("fhir_cluster_state")
+	if err != nil {
+		return store.ClusterStateRecord{}, false, err
+	}
+	_ = s.execDorisSQL(ctx, fmt.Sprintf(`INSERT INTO %s (namespace, state_key, tenant_id, secondary_key, value_hex, version, expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, csTbl),
+		stored.Namespace, stored.Key, stored.TenantID, stored.SecondaryKey, hex.EncodeToString(stored.Value), stored.Version, nullableTimeArg(stored.ExpiresAt), stored.UpdatedAt)
 	return cloneDorisClusterState(stored), true, nil
 }
 
@@ -2518,6 +3022,14 @@ func (s *Store) ConsumeClusterState(ctx context.Context, namespace, key string) 
 	if namespace == "" || key == "" {
 		return nil, false, nil
 	}
+	if s.DirectSQL() {
+		return s.consumeClusterStateSQL(ctx, namespace, key)
+	}
+	rel, err := s.acquireRowLock(ctx, "cs:"+namespace+":"+key)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rel()
 	now := time.Now().UTC()
 	mapKey := dorisClusterStateKey(namespace, key)
 	s.mu.Lock()
@@ -2529,7 +3041,11 @@ func (s *Store) ConsumeClusterState(ctx context.Context, namespace, key string) 
 	if !ok || isDorisClusterStateExpired(rec, now) {
 		return nil, false, nil
 	}
-	_ = s.execDorisSQL(ctx, `DELETE FROM fhir_cluster_state WHERE namespace = ? AND state_key = ?`, namespace, key)
+	csTbl, err := s.clusterTableRef("fhir_cluster_state")
+	if err != nil {
+		return nil, false, err
+	}
+	_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE namespace = ? AND state_key = ?`, csTbl), namespace, key)
 	cp := cloneDorisClusterState(rec)
 	return &cp, true, nil
 }
@@ -2539,19 +3055,29 @@ func (s *Store) DeleteClusterState(ctx context.Context, namespace, key string) (
 	if namespace == "" || key == "" {
 		return false, nil
 	}
+	if s.DirectSQL() {
+		return s.deleteClusterStateSQL(ctx, namespace, key)
+	}
 	mapKey := dorisClusterStateKey(namespace, key)
 	s.mu.Lock()
 	_, ok := s.clusterStates[mapKey]
 	delete(s.clusterStates, mapKey)
 	s.mu.Unlock()
-	_ = s.execDorisSQL(ctx, `DELETE FROM fhir_cluster_state WHERE namespace = ? AND state_key = ?`, namespace, key)
+	csTbl, err := s.clusterTableRef("fhir_cluster_state")
+	if err != nil {
+		return ok, err
+	}
+	_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE namespace = ? AND state_key = ?`, csTbl), namespace, key)
 	return ok, nil
 }
 
 // ListClusterStates lists unexpired cluster state entries in namespace (optionally filtered by tenantID).
-func (s *Store) ListClusterStates(_ context.Context, namespace, tenantID string) ([]store.ClusterStateRecord, error) {
+func (s *Store) ListClusterStates(ctx context.Context, namespace, tenantID string) ([]store.ClusterStateRecord, error) {
 	if namespace == "" {
 		return nil, nil
+	}
+	if s.DirectSQL() {
+		return s.listClusterStatesSQL(ctx, namespace, tenantID)
 	}
 	now := time.Now().UTC()
 	var out []store.ClusterStateRecord
@@ -2583,16 +3109,27 @@ func (s *Store) SaveExportJob(ctx context.Context, job store.ExportJobRecord) er
 	if job.Status == "" {
 		job.Status = "complete"
 	}
+	if s.DirectSQL() {
+		return s.saveExportJobSQL(ctx, job)
+	}
 	s.mu.Lock()
 	s.exportJobs[job.TenantID+"|"+job.ID] = job
 	s.mu.Unlock()
 
-	stmt := `INSERT INTO fhir_export_job (tenant_id, job_id, patient_id, status, err_msg, output_format, cancel_requested, request_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-	return s.execDorisSQL(ctx, stmt, job.TenantID, job.ID, job.PatientID, job.Status, job.Err, job.OutputFormat, job.CancelRequested, job.RequestURL, job.CreatedAt.UTC())
+	jobTbl, err := s.tenantTableRef(ctx, job.TenantID, "fhir_export_job")
+	if err != nil {
+		return err
+	}
+	typesJSON, countsJSON, filesJSON := encodeExportJobFields(job)
+	stmt := fmt.Sprintf(`INSERT INTO %s (tenant_id, job_id, patient_id, status, err_msg, output_format, cancel_requested, request_url, created_at, types_order, counts, files_b64) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, jobTbl)
+	return s.execDorisSQL(ctx, stmt, job.TenantID, job.ID, job.PatientID, job.Status, job.Err, job.OutputFormat, job.CancelRequested, job.RequestURL, job.CreatedAt.UTC(), typesJSON, countsJSON, filesJSON)
 }
 
 // GetExportJob retrieves a persisted Bulk Data ($export) job record.
-func (s *Store) GetExportJob(_ context.Context, tenantID, jobID string) (*store.ExportJobRecord, error) {
+func (s *Store) GetExportJob(ctx context.Context, tenantID, jobID string) (*store.ExportJobRecord, error) {
+	if s.DirectSQL() {
+		return s.getExportJobSQL(ctx, tenantID, jobID)
+	}
 	s.mu.RLock()
 	job, ok := s.exportJobs[tenantID+"|"+jobID]
 	s.mu.RUnlock()
@@ -2605,12 +3142,19 @@ func (s *Store) GetExportJob(_ context.Context, tenantID, jobID string) (*store.
 
 // DeleteExportJob deletes a Bulk Data ($export) job record.
 func (s *Store) DeleteExportJob(ctx context.Context, tenantID, jobID string) (bool, error) {
+	if s.DirectSQL() {
+		return s.deleteExportJobSQL(ctx, tenantID, jobID)
+	}
 	key := tenantID + "|" + jobID
 	s.mu.Lock()
 	_, ok := s.exportJobs[key]
 	delete(s.exportJobs, key)
 	s.mu.Unlock()
-	_ = s.execDorisSQL(ctx, `DELETE FROM fhir_export_job WHERE tenant_id = ? AND job_id = ?`, tenantID, jobID)
+	jobTbl, err := s.tenantTableRef(ctx, tenantID, "fhir_export_job")
+	if err != nil {
+		return ok, err
+	}
+	_ = s.execDorisSQL(ctx, fmt.Sprintf(`DELETE FROM %s WHERE tenant_id = ? AND job_id = ?`, jobTbl), tenantID, jobID)
 	return ok, nil
 }
 
@@ -2648,7 +3192,18 @@ func parseDorisTime(v any) time.Time {
 
 func parseDorisTimeString(raw string) time.Time {
 	raw = strings.TrimSpace(raw)
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05.999999", "2006-01-02 15:04:05"} {
+	if raw == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05.999999",
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05 -0700 MST",
+	} {
 		if t, err := time.Parse(layout, raw); err == nil {
 			return t.UTC()
 		}
@@ -2657,9 +3212,10 @@ func parseDorisTimeString(raw string) time.Time {
 }
 
 // LoadFromDB hydrates the in-memory resource, history, inverted-index, audit, and export job
-// state from the persisted Apache Doris Unique Key Merge-on-Write tables on server startup or restart.
+// state from the persisted Apache Doris Unique Key Merge-on-Write tables on server startup or restart
+// when DirectSQL is disabled (legacy in-memory cache mode). In stateless DirectSQL mode it is a no-op.
 func (s *Store) LoadFromDB(ctx context.Context) error {
-	if s == nil || s.db == nil {
+	if s == nil || s.db == nil || s.directSQL {
 		return nil
 	}
 
@@ -2763,22 +3319,26 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 		audits[rec.TenantID] = append(audits[rec.TenantID], rec)
 	}
 
-	jobRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, job_id, COALESCE(patient_id, ''), COALESCE(status, 'complete'), COALESCE(err_msg, ''), COALESCE(output_format, ''), COALESCE(cancel_requested, FALSE), COALESCE(request_url, ''), created_at FROM fhir_export_job`)
+	jobRows, err := s.db.QueryContext(ctx, `SELECT tenant_id, job_id, COALESCE(patient_id, ''), COALESCE(status, 'complete'), COALESCE(err_msg, ''), COALESCE(output_format, ''), COALESCE(cancel_requested, FALSE), COALESCE(request_url, ''), created_at, COALESCE(types_order, ''), COALESCE(counts, ''), COALESCE(files_b64, '') FROM fhir_export_job`)
 	if err != nil {
 		return fmt.Errorf("doris load fhir_export_job: %w", err)
 	}
 	defer jobRows.Close()
 	for jobRows.Next() {
-		var job store.ExportJobRecord
-		var rawCancel, rawCreated any
+		var (
+			job                              store.ExportJobRecord
+			rawCancel, rawCreated            any
+			typesJSON, countsJSON, filesJSON string
+		)
 		if err := jobRows.Scan(
 			&job.TenantID, &job.ID, &job.PatientID, &job.Status, &job.Err, &job.OutputFormat,
-			&rawCancel, &job.RequestURL, &rawCreated,
+			&rawCancel, &job.RequestURL, &rawCreated, &typesJSON, &countsJSON, &filesJSON,
 		); err != nil {
 			return fmt.Errorf("doris scan fhir_export_job: %w", err)
 		}
 		job.CancelRequested = parseDorisBool(rawCancel)
 		job.CreatedAt = parseDorisTime(rawCreated)
+		decodeExportJobFields(&job, typesJSON, countsJSON, filesJSON)
 		exportJobs[job.TenantID+"|"+job.ID] = job
 	}
 

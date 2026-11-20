@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
 
@@ -634,38 +635,141 @@ func parseOptionalDuration(raw, name string) (time.Duration, error) {
 	return v, nil
 }
 
-func openDorisStore(getenv func(string) string, openDB func(driverName, dsn string) (*sql.DB, error)) (*doris.Store, *sql.DB, error) {
+func openDorisStore(getenv func(string) string, openDB func(driverName, dsn string) (*sql.DB, error)) (*doris.Store, func(), error) {
 	groupCommit, err := doris.ParseGroupCommitMode(getenv("FLINT_DORIS_GROUP_COMMIT"))
 	if err != nil {
 		return nil, nil, err
 	}
-	var dorisDB *sql.DB
+	rawIsolation := strings.TrimSpace(getenv("FLINT_DORIS_TENANT_ISOLATION"))
+	if rawIsolation == "" {
+		rawIsolation = strings.TrimSpace(getenv("FLINT_TENANT_ISOLATION"))
+	}
+	isolation, err := doris.ParseTenantIsolationMode(rawIsolation)
+	if err != nil {
+		return nil, nil, err
+	}
+	autoProvision := isolation == doris.TenantIsolationDatabase
+	if rawAuto := strings.TrimSpace(getenv("FLINT_DORIS_AUTO_PROVISION")); rawAuto != "" {
+		autoProvision, err = parseOptionalBool(rawAuto, "FLINT_DORIS_AUTO_PROVISION")
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	repNum := 1
+	if rawRep := strings.TrimSpace(getenv("FLINT_DORIS_REPLICATION_NUM")); rawRep != "" {
+		repNum, err = parseOptionalInt(rawRep, "FLINT_DORIS_REPLICATION_NUM")
+		if err != nil {
+			return nil, nil, err
+		}
+		if repNum < 1 {
+			return nil, nil, fmt.Errorf("invalid FLINT_DORIS_REPLICATION_NUM %q: must be >= 1", rawRep)
+		}
+	}
+	requireNonRoot, err := parseOptionalBool(getenv("FLINT_DORIS_REQUIRE_NON_ROOT"), "FLINT_DORIS_REQUIRE_NON_ROOT")
+	if err != nil {
+		return nil, nil, err
+	}
+	execMemLimit, err := parseOptionalInt64(getenv("FLINT_DORIS_EXEC_MEM_LIMIT"), "FLINT_DORIS_EXEC_MEM_LIMIT")
+	if err != nil {
+		return nil, nil, err
+	}
+	cpuThreads, err := parseOptionalInt(getenv("FLINT_DORIS_CPU_THREADS"), "FLINT_DORIS_CPU_THREADS")
+	if err != nil {
+		return nil, nil, err
+	}
+	queryTimeout, err := parseOptionalInt(getenv("FLINT_DORIS_QUERY_TIMEOUT"), "FLINT_DORIS_QUERY_TIMEOUT")
+	if err != nil {
+		return nil, nil, err
+	}
+	limits := doris.ResourceLimits{
+		WorkloadGroup:   strings.TrimSpace(getenv("FLINT_DORIS_WORKLOAD_GROUP")),
+		ComputeGroup:    strings.TrimSpace(getenv("FLINT_DORIS_COMPUTE_GROUP")),
+		ExecMemLimit:    execMemLimit,
+		CPUThreads:      cpuThreads,
+		QueryTimeoutSec: queryTimeout,
+	}
+	if err := limits.Validate(); err != nil {
+		return nil, nil, err
+	}
+
+	dbName := strings.TrimSpace(getenv("FLINT_DORIS_DATABASE"))
+	var (
+		dorisDB                *sql.DB
+		lockDB                 *sql.DB
+		sessionGroupConfigured bool
+	)
+	closeDBs := func() {
+		if lockDB != nil {
+			_ = lockDB.Close()
+		}
+		if dorisDB != nil {
+			_ = dorisDB.Close()
+		}
+	}
+
 	if dorisDSN := strings.TrimSpace(getenv("FLINT_DORIS_DSN")); dorisDSN != "" {
-		dorisDB, err = openDB("mysql", dorisDSN)
+		normalizedDSN, err := doris.NormalizeDSN(dorisDSN, doris.DSNOptions{
+			DefaultDatabase: dbName,
+			GroupCommit:     groupCommit,
+			RequireNonRoot:  requireNonRoot,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		dorisDB, err = openDB("mysql", normalizedDSN)
 		if err != nil {
 			return nil, nil, fmt.Errorf("open doris db: %w", err)
 		}
+		doris.ConfigurePool(dorisDB, 0, 0, 0, 0)
 		if err := dorisDB.Ping(); err != nil {
-			_ = dorisDB.Close()
+			closeDBs()
 			return nil, nil, fmt.Errorf("ping doris db: %w", err)
 		}
-		if err := doris.RunMigrations(context.Background(), dorisDB); err != nil {
-			_ = dorisDB.Close()
+		if err := doris.RunMigrationsWithOptions(context.Background(), dorisDB, doris.MigrationOptions{
+			Database:        dbName,
+			TenantIsolation: isolation,
+			ReplicationNum:  repNum,
+		}); err != nil {
+			closeDBs()
 			return nil, nil, fmt.Errorf("run doris migrations: %w", err)
 		}
+		sessionGroupConfigured = true
 	}
-	ds := doris.New(
-		dorisDB,
+
+	opts := []doris.Option{
 		doris.WithGroupCommit(groupCommit),
-		doris.WithDatabase(getenv("FLINT_DORIS_DATABASE")),
-	)
-	if dorisDB != nil {
-		if err := ds.LoadFromDB(context.Background()); err != nil {
-			_ = dorisDB.Close()
-			return nil, nil, fmt.Errorf("load doris state from db: %w", err)
-		}
+		doris.WithDatabase(dbName),
+		doris.WithTenantIsolation(isolation),
+		doris.WithAutoProvision(autoProvision),
+		doris.WithReplicationNum(repNum),
+		doris.WithResourceLimits(limits),
+		doris.WithSessionGroupCommitConfigured(sessionGroupConfigured),
 	}
-	return ds, dorisDB, nil
+
+	if lockPGDSN := strings.TrimSpace(getenv("FLINT_DORIS_LOCK_POSTGRES_DSN")); lockPGDSN != "" {
+		lockDB, err = openDB("postgres", lockPGDSN)
+		if err != nil {
+			closeDBs()
+			return nil, nil, fmt.Errorf("open doris lock postgres db: %w", err)
+		}
+		if err := lockDB.Ping(); err != nil {
+			closeDBs()
+			return nil, nil, fmt.Errorf("ping doris lock postgres db: %w", err)
+		}
+		locker, err := doris.NewPostgresRowLocker(lockDB)
+		if err != nil {
+			closeDBs()
+			return nil, nil, fmt.Errorf("create doris row locker: %w", err)
+		}
+		if err := locker.EnsureTable(context.Background()); err != nil {
+			closeDBs()
+			return nil, nil, fmt.Errorf("ensure doris row lock table: %w", err)
+		}
+		opts = append(opts, doris.WithRowLocker(locker))
+	}
+
+	ds := doris.New(dorisDB, opts...)
+	return ds, closeDBs, nil
 }
 
 func openSQLiteStore(cliDSN string, getenv func(string) string, openDB func(driverName, dsn string) (*sql.DB, error)) (*sqlite.Store, *sql.DB, error) {
@@ -756,16 +860,20 @@ func run(
 
 	switch storeBackend {
 	case store.BackendDoris:
-		ds, dorisDB, err := openDorisStore(getenv, openDB)
+		ds, cleanupDoris, err := openDorisStore(getenv, openDB)
 		if err != nil {
 			return err
 		}
-		if dorisDB != nil {
-			defer dorisDB.Close()
+		if cleanupDoris != nil {
+			defer cleanupDoris()
 		}
 		primaryStore = ds
 		analyticalStore = ds
-		logger.Info("Zero-JSON Apache Doris store initialized", "group_commit", string(ds.GroupCommit()), "database", ds.Database())
+		logger.Info("Zero-JSON Apache Doris store initialized",
+			"group_commit", string(ds.GroupCommit()),
+			"database", ds.Database(),
+			"tenant_isolation", string(ds.TenantIsolation()),
+		)
 	case store.BackendSQLite:
 		ss, sqliteDB, err := openSQLiteStore(cliOpts.sqliteDSN, getenv, openDB)
 		if err != nil {
@@ -813,15 +921,18 @@ func run(
 
 		switch analyticsBackend {
 		case store.BackendDoris:
-			ds, dorisDB, err := openDorisStore(getenv, openDB)
+			ds, cleanupDoris, err := openDorisStore(getenv, openDB)
 			if err != nil {
 				return err
 			}
-			if dorisDB != nil {
-				defer dorisDB.Close()
+			if cleanupDoris != nil {
+				defer cleanupDoris()
 			}
 			analyticalStore = ds
-			logger.Info("Hybrid OLTP+OLAP mode enabled: Apache Doris analytical store attached", "group_commit", string(ds.GroupCommit()))
+			logger.Info("Hybrid OLTP+OLAP mode enabled: Apache Doris analytical store attached",
+				"group_commit", string(ds.GroupCommit()),
+				"tenant_isolation", string(ds.TenantIsolation()),
+			)
 		case store.BackendSQLite:
 			ss, sqliteDB, err := openSQLiteStore(cliOpts.sqliteDSN, getenv, openDB)
 			if err != nil {

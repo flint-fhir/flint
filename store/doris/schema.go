@@ -12,12 +12,77 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/flint-fhir/flint/store"
 )
+
+// TenantIsolationMode controls how tenant data is isolated in Apache Doris.
+type TenantIsolationMode string
+
+const (
+	// TenantIsolationShared stores all tenants in shared tables partitioned/keyed by tenant_id.
+	TenantIsolationShared TenantIsolationMode = "shared"
+	// TenantIsolationDatabase provisions a dedicated Apache Doris database (`tenant_<slug>`)
+	// per tenant while keeping cluster-wide state in the base cluster database.
+	TenantIsolationDatabase TenantIsolationMode = "database"
+)
+
+// ParseTenantIsolationMode parses a Doris tenant isolation mode string.
+func ParseTenantIsolationMode(raw string) (TenantIsolationMode, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "shared", "row":
+		return TenantIsolationShared, nil
+	case "database", "db", "schema":
+		return TenantIsolationDatabase, nil
+	default:
+		return "", fmt.Errorf("invalid doris tenant isolation mode %q (valid: shared, database)", raw)
+	}
+}
+
+var (
+	dorisIdentRegex      = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]{0,62}$`)
+	dorisTenantSlugRegex = regexp.MustCompile(`^[a-z0-9]([a-z0-9_]*[a-z0-9])?$`)
+)
+
+// ValidateIdentifier validates an unquoted SQL identifier (database/table name) against Doris rules.
+func ValidateIdentifier(name string) error {
+	if !dorisIdentRegex.MatchString(name) {
+		return fmt.Errorf("invalid doris SQL identifier %q: must match ^[a-zA-Z_][a-zA-Z0-9_]{0,62}$", name)
+	}
+	return nil
+}
+
+// DatabaseFromSlug derives the deterministic Doris database name (`tenant_<slug>`) for a tenant slug.
+func DatabaseFromSlug(slug string) (string, error) {
+	normalized := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(slug)), "-", "_")
+	if len(normalized) == 0 || len(normalized) > 56 || !dorisTenantSlugRegex.MatchString(normalized) {
+		return "", fmt.Errorf("invalid doris tenant slug %q: must be 1..56 alphanumeric/hyphen/underscore characters", slug)
+	}
+	return "tenant_" + normalized, nil
+}
+
+// SchemaOptions configures Apache Doris DDL generation.
+type SchemaOptions struct {
+	ReplicationNum int
+}
+
+func (o SchemaOptions) effectiveReplicationNum() int {
+	if o.ReplicationNum <= 0 {
+		return 1
+	}
+	return o.ReplicationNum
+}
+
+// MigrationOptions configures Apache Doris schema initialization.
+type MigrationOptions struct {
+	Database        string
+	TenantIsolation TenantIsolationMode
+	ReplicationNum  int
+}
 
 // GroupCommitMode configures Apache Doris Group Commit behavior for high-frequency point writes.
 type GroupCommitMode string
@@ -221,12 +286,18 @@ func CoreResourceTableName(resType string) (string, bool) {
 }
 
 // GenerateResourceTableDDL generates the Zero-JSON Apache Doris Unique Key Merge-on-Write (MoW)
-// table DDL for a specific FHIR R4 resource type (or the PARTITION BY LIST (res_type) unified
+// table DDL for a specific FHIR R4 resource type (or the AUTO PARTITION BY LIST (res_type) unified
 // fhir_resource table when resType == "").
 func GenerateResourceTableDDL(resType string) string {
+	return GenerateResourceTableDDLWithOptions(resType, SchemaOptions{ReplicationNum: 1})
+}
+
+// GenerateResourceTableDDLWithOptions generates the Zero-JSON Apache Doris table DDL with
+// explicit SchemaOptions such as replication_num.
+func GenerateResourceTableDDLWithOptions(resType string, opts SchemaOptions) string {
 	tableName := "fhir_resource"
 	partitionClause := `
-PARTITION BY LIST (res_type) (
+AUTO PARTITION BY LIST (res_type) (
     PARTITION p_patient             VALUES IN ("Patient"),
     PARTITION p_encounter           VALUES IN ("Encounter"),
     PARTITION p_observation         VALUES IN ("Observation"),
@@ -285,8 +356,8 @@ PROPERTIES (
     "enable_unique_key_merge_on_write" = "true",
     "function_column.sequence_col" = "res_version",
     "store_row_column" = "true",
-    "replication_num" = "1"
-);`, tableName, partitionClause)
+    "replication_num" = "%d"
+);`, tableName, partitionClause, opts.effectiveReplicationNum())
 }
 
 // CoreResourceTableDDL generates the strongly-typed, zero-blob Apache Doris Unique Key MoW table DDL
@@ -294,6 +365,11 @@ PROPERTIES (
 // resource_proto_hex, these 13 tables omit the proto payload and store only typed clinical scalars
 // and inverted-index arrays (~15 bytes/row compressed) for vectorized SQLMesh, CQL, and $stats queries.
 func CoreResourceTableDDL(resType string) (string, bool) {
+	return CoreResourceTableDDLWithOptions(resType, SchemaOptions{ReplicationNum: 1})
+}
+
+// CoreResourceTableDDLWithOptions generates the strongly-typed US Core table DDL with explicit SchemaOptions.
+func CoreResourceTableDDLWithOptions(resType string, opts SchemaOptions) (string, bool) {
 	tableName, ok := CoreResourceTableName(resType)
 	if !ok {
 		return "", false
@@ -333,15 +409,20 @@ DISTRIBUTED BY HASH(tenant_id, res_id) BUCKETS %d
 PROPERTIES (
     "enable_unique_key_merge_on_write" = "true",
     "function_column.sequence_col" = "res_version",
-    "replication_num" = "1"
-);`, tableName, buckets), true
+    "replication_num" = "%d"
+);`, tableName, buckets, opts.effectiveReplicationNum()), true
 }
 
 // CoreResourceTableDDLs returns the 13 strongly-typed US Core Apache Doris table DDL statements.
 func CoreResourceTableDDLs() []string {
+	return CoreResourceTableDDLsWithOptions(SchemaOptions{ReplicationNum: 1})
+}
+
+// CoreResourceTableDDLsWithOptions returns the 13 strongly-typed US Core DDL statements with explicit options.
+func CoreResourceTableDDLsWithOptions(opts SchemaOptions) []string {
 	ddls := make([]string, 0, len(USCoreResourceTypes))
 	for _, rt := range USCoreResourceTypes {
-		if ddl, ok := CoreResourceTableDDL(rt); ok {
+		if ddl, ok := CoreResourceTableDDLWithOptions(rt, opts); ok {
 			ddls = append(ddls, ddl)
 		}
 	}
@@ -355,9 +436,17 @@ func ProjectCoreResourceUpsertSQL(row DorisResourceRow) (string, []any, bool) {
 	if !ok {
 		return "", nil, false
 	}
+	return ProjectCoreResourceUpsertSQLQualified(tableName, row)
+}
+
+// ProjectCoreResourceUpsertSQLQualified builds the INSERT statement for a qualified or unqualified US Core table reference.
+func ProjectCoreResourceUpsertSQLQualified(tableRef string, row DorisResourceRow) (string, []any, bool) {
+	if _, ok := CoreResourceTableName(row.ResType); !ok || strings.TrimSpace(tableRef) == "" {
+		return "", nil, false
+	}
 	stmt := fmt.Sprintf(
 		`INSERT INTO %s (tenant_id, res_id, res_version, is_deleted, last_updated, patient_id, encounter_id, code_system, code, effective_start, effective_end, value_quantity, value_unit_sys, value_unit_code) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		tableName,
+		tableRef,
 	)
 	args := []any{
 		row.TenantID, row.ResID, row.ResVersion, row.IsDeleted, row.LastUpdated,
@@ -373,20 +462,28 @@ func ProjectCoreResourceDeleteSQL(tenantID, resType, resID string, version int, 
 	if !ok {
 		return "", nil, false
 	}
+	return ProjectCoreResourceDeleteSQLQualified(tableName, tenantID, resType, resID, version, now)
+}
+
+// ProjectCoreResourceDeleteSQLQualified builds the tombstone INSERT statement for a qualified or unqualified US Core table reference.
+func ProjectCoreResourceDeleteSQLQualified(tableRef, tenantID, resType, resID string, version int, now time.Time) (string, []any, bool) {
+	if _, ok := CoreResourceTableName(resType); !ok || strings.TrimSpace(tableRef) == "" {
+		return "", nil, false
+	}
 	stmt := fmt.Sprintf(
 		`INSERT INTO %s (tenant_id, res_id, res_version, is_deleted, last_updated) VALUES (?, ?, ?, TRUE, ?)`,
-		tableName,
+		tableRef,
 	)
 	return stmt, []any{tenantID, resID, version, now}, true
 }
 
-// SchemaDDL returns all Apache Doris Unique Key Merge-on-Write DDL statements required
-// to initialize the Flint operational and analytical store (Option C: LIST-partitioned
-// fhir_resource + 13 strongly-typed US Core tables + history, audit, and export tables).
-func SchemaDDL() []string {
+// TenantSchemaDDL returns the 17 tenant-scoped Apache Doris DDL statements (unified fhir_resource,
+// history, audit_event, export_job, and 13 strongly-typed US Core tables).
+func TenantSchemaDDL(opts SchemaOptions) []string {
+	rep := opts.effectiveReplicationNum()
 	stmts := []string{
-		GenerateResourceTableDDL(""),
-		`CREATE TABLE IF NOT EXISTS fhir_resource_history (
+		GenerateResourceTableDDLWithOptions("", opts),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS fhir_resource_history (
     tenant_id          VARCHAR(64)  NOT NULL,
     res_type           VARCHAR(64)  NOT NULL,
     res_id             VARCHAR(64)  NOT NULL,
@@ -400,9 +497,9 @@ DISTRIBUTED BY HASH(tenant_id, res_id) BUCKETS 16
 PROPERTIES (
     "enable_unique_key_merge_on_write" = "true",
     "store_row_column" = "true",
-    "replication_num" = "1"
-);`,
-		`CREATE TABLE IF NOT EXISTS fhir_audit_event (
+    "replication_num" = "%d"
+);`, rep),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS fhir_audit_event (
     tenant_id      VARCHAR(64)   NOT NULL,
     audit_id       VARCHAR(64)   NOT NULL,
     recorded       DATETIME(6)   NOT NULL,
@@ -429,9 +526,9 @@ UNIQUE KEY(tenant_id, audit_id)
 DISTRIBUTED BY HASH(tenant_id, audit_id) BUCKETS 8
 PROPERTIES (
     "enable_unique_key_merge_on_write" = "true",
-    "replication_num" = "1"
-);`,
-		`CREATE TABLE IF NOT EXISTS fhir_export_job (
+    "replication_num" = "%d"
+);`, rep),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS fhir_export_job (
     tenant_id        VARCHAR(64)   NOT NULL,
     job_id           VARCHAR(128)  NOT NULL,
     patient_id       VARCHAR(64)   NULL,
@@ -449,9 +546,18 @@ UNIQUE KEY(tenant_id, job_id)
 DISTRIBUTED BY HASH(tenant_id, job_id) BUCKETS 4
 PROPERTIES (
     "enable_unique_key_merge_on_write" = "true",
-    "replication_num" = "1"
-);`,
-		`CREATE TABLE IF NOT EXISTS fhir_cluster_secret (
+    "replication_num" = "%d"
+);`, rep),
+	}
+	return append(stmts, CoreResourceTableDDLsWithOptions(opts)...)
+}
+
+// ClusterSchemaDDL returns the 2 cluster-global Apache Doris DDL statements
+// (`fhir_cluster_secret` and `fhir_cluster_state`) that remain shared across all tenants.
+func ClusterSchemaDDL(opts SchemaOptions) []string {
+	rep := opts.effectiveReplicationNum()
+	return []string{
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS fhir_cluster_secret (
     secret_key       VARCHAR(128) NOT NULL,
     secret_bytes_hex STRING       NOT NULL,
     created_at       DATETIME(6)  NOT NULL
@@ -460,9 +566,9 @@ UNIQUE KEY(secret_key)
 DISTRIBUTED BY HASH(secret_key) BUCKETS 4
 PROPERTIES (
     "enable_unique_key_merge_on_write" = "true",
-    "replication_num" = "1"
-);`,
-		`CREATE TABLE IF NOT EXISTS fhir_cluster_state (
+    "replication_num" = "%d"
+);`, rep),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS fhir_cluster_state (
     namespace     VARCHAR(64)  NOT NULL,
     state_key     VARCHAR(256) NOT NULL,
     tenant_id     VARCHAR(64)  NOT NULL DEFAULT "",
@@ -476,19 +582,79 @@ UNIQUE KEY(namespace, state_key)
 DISTRIBUTED BY HASH(namespace, state_key) BUCKETS 8
 PROPERTIES (
     "enable_unique_key_merge_on_write" = "true",
-    "replication_num" = "1"
-);`,
+    "replication_num" = "%d"
+);`, rep),
 	}
-	return append(stmts, CoreResourceTableDDLs()...)
+}
+
+// SchemaDDL returns all Apache Doris Unique Key Merge-on-Write DDL statements required
+// to initialize the Flint operational and analytical store (Option C: AUTO LIST-partitioned
+// fhir_resource + 13 strongly-typed US Core tables + history, audit, export, and cluster state tables).
+func SchemaDDL() []string {
+	opts := SchemaOptions{ReplicationNum: 1}
+	stmts := TenantSchemaDDL(opts)
+	return append(stmts, ClusterSchemaDDL(opts)...)
+}
+
+// QualifyCreateTableDDL rewrites a `CREATE TABLE IF NOT EXISTS <tbl>` statement to target “ `<dbName>`.`<tbl>` “.
+func QualifyCreateTableDDL(ddl, dbName string) (string, error) {
+	if err := ValidateIdentifier(dbName); err != nil {
+		return "", err
+	}
+	const prefix = "CREATE TABLE IF NOT EXISTS "
+	idx := strings.Index(ddl, prefix)
+	if idx == -1 {
+		return "", fmt.Errorf("ddl missing %q prefix", prefix)
+	}
+	rest := ddl[idx+len(prefix):]
+	end := strings.IndexAny(rest, " (\t\r\n")
+	if end <= 0 {
+		return "", fmt.Errorf("could not extract table name from ddl")
+	}
+	tbl := rest[:end]
+	if err := ValidateIdentifier(tbl); err != nil {
+		return "", err
+	}
+	return ddl[:idx+len(prefix)] + fmt.Sprintf("`%s`.`%s`", dbName, tbl) + rest[end:], nil
 }
 
 // RunMigrations applies the Apache Doris Unique Key Merge-on-Write schema DDL statements.
 func RunMigrations(ctx context.Context, db *sql.DB) error {
+	return RunMigrationsWithOptions(ctx, db, MigrationOptions{})
+}
+
+// RunMigrationsWithOptions applies Apache Doris database creation and DDL migrations according to opts.
+func RunMigrationsWithOptions(ctx context.Context, db *sql.DB, opts MigrationOptions) error {
 	if db == nil {
 		return nil
 	}
-	for i, stmt := range SchemaDDL() {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
+	dbName := strings.TrimSpace(opts.Database)
+	if dbName != "" {
+		if err := ValidateIdentifier(dbName); err != nil {
+			return err
+		}
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", dbName)); err != nil {
+			return fmt.Errorf("doris create database %s: %w", dbName, err)
+		}
+	}
+	schemaOpts := SchemaOptions{ReplicationNum: opts.ReplicationNum}
+	var stmts []string
+	if opts.TenantIsolation == TenantIsolationDatabase {
+		stmts = ClusterSchemaDDL(schemaOpts)
+	} else {
+		stmts = TenantSchemaDDL(schemaOpts)
+		stmts = append(stmts, ClusterSchemaDDL(schemaOpts)...)
+	}
+	for i, stmt := range stmts {
+		execStmt := stmt
+		if dbName != "" {
+			qStmt, err := QualifyCreateTableDDL(stmt, dbName)
+			if err != nil {
+				return fmt.Errorf("doris migration[%d]: %w", i, err)
+			}
+			execStmt = qStmt
+		}
+		if _, err := db.ExecContext(ctx, execStmt); err != nil {
 			return fmt.Errorf("doris migration[%d]: %w", i, err)
 		}
 	}
