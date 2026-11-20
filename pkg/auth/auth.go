@@ -2,20 +2,30 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	authv1 "github.com/flint-fhir/flint/gen/go/flint/auth/v1"
+	"google.golang.org/protobuf/proto"
 )
 
 // Re-export protobuf types and enums for convenience.
 type (
 	SecurityContext    = authv1.SecurityContext
 	SmartScope         = authv1.SmartScope
+	TenantGrant        = authv1.TenantGrant
 	Action             = authv1.Action
 	ScopeContext       = authv1.ScopeContext
 	SmartConfiguration = authv1.SmartConfiguration
 )
+
+// ErrTenantForbidden indicates that the verified SecurityContext does not hold a grant
+// for the requested tenant.
+var ErrTenantForbidden = errors.New("token not authorized for requested tenant")
 
 const (
 	ActionUnspecified = authv1.Action_ACTION_UNSPECIFIED
@@ -272,4 +282,145 @@ func ParseSingleScope(raw string) (*authv1.SmartScope, bool) {
 		ResourceType: resType,
 		Actions:      actions,
 	}, true
+}
+
+// ResolveTenantContext binds sc to requestedTenant using isolated per-tenant grants when present.
+// It clones sc on change and never unions roles or scopes across tenants.
+func ResolveTenantContext(sc *authv1.SecurityContext, requestedTenant string) (*authv1.SecurityContext, error) {
+	if sc == nil {
+		return nil, nil
+	}
+	target := strings.TrimSpace(requestedTenant)
+	grants := sc.GetTenantGrants()
+
+	if len(grants) > 0 {
+		if target == "" {
+			target = strings.TrimSpace(sc.GetTenantId())
+		}
+		if target == "" && len(grants) == 1 {
+			for k := range grants {
+				target = k
+			}
+		}
+		if target == "" {
+			if sc.GetOperatorCrossTenant() {
+				return sc, nil
+			}
+			return nil, fmt.Errorf("%w: no active tenant specified", ErrTenantForbidden)
+		}
+
+		if grant, ok := grants[target]; ok {
+			cloned, _ := proto.Clone(sc).(*authv1.SecurityContext)
+			cloned.TenantId = target
+			cloned.OperatorCrossTenant = false
+			cloned.Roles = slices.Clone(grant.GetRoles())
+			cloned.Scopes = cloneScopes(grant.GetScopes())
+			return cloned, nil
+		}
+
+		if sc.GetOperatorCrossTenant() {
+			cloned, _ := proto.Clone(sc).(*authv1.SecurityContext)
+			cloned.TenantId = target
+			if pt := sc.GetPlatformTenant(); pt != "" {
+				if pGrant, ok := grants[pt]; ok {
+					cloned.Roles = slices.Clone(pGrant.GetRoles())
+					cloned.Scopes = cloneScopes(pGrant.GetScopes())
+				}
+			}
+			return cloned, nil
+		}
+
+		return nil, fmt.Errorf("%w: token grants do not include tenant %s", ErrTenantForbidden, target)
+	}
+
+	if target != "" && sc.GetTenantId() != "" && sc.GetTenantId() != target && !sc.GetOperatorCrossTenant() {
+		return nil, fmt.Errorf("%w: token tenant %s cannot access tenant %s", ErrTenantForbidden, sc.GetTenantId(), target)
+	}
+
+	if target != "" && sc.GetTenantId() == "" && sc.GetOperatorCrossTenant() {
+		cloned, _ := proto.Clone(sc).(*authv1.SecurityContext)
+		cloned.TenantId = target
+		return cloned, nil
+	}
+
+	return sc, nil
+}
+
+// ParseRoleToScopesMap parses a JSON object (e.g. `{"clinician":"user/*.rs"}`)
+// or semicolon/comma-delimited `role=scope1 scope2` list into a role -> scopes mapping.
+func ParseRoleToScopesMap(raw string) (map[string]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	if strings.HasPrefix(trimmed, "{") {
+		var m map[string]string
+		if err := json.Unmarshal([]byte(trimmed), &m); err != nil {
+			return nil, fmt.Errorf("parse role-to-scopes JSON: %w", err)
+		}
+		return m, nil
+	}
+
+	sep := ";"
+	if !strings.Contains(trimmed, ";") && strings.Contains(trimmed, ",") {
+		sep = ","
+	}
+	out := make(map[string]string)
+	for _, entry := range strings.Split(trimmed, sep) {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		role, scopeStr, ok := strings.Cut(entry, "=")
+		if !ok {
+			return nil, fmt.Errorf("invalid role-to-scopes entry %q (expected role=scopes)", entry)
+		}
+		role = strings.TrimSpace(role)
+		scopeStr = strings.TrimSpace(scopeStr)
+		if role == "" {
+			return nil, fmt.Errorf("empty role name in entry %q", entry)
+		}
+		out[role] = scopeStr
+	}
+	return out, nil
+}
+
+func mapRolesToScopes(roles []string, roleToScopes map[string]string) []*authv1.SmartScope {
+	if len(roles) == 0 || len(roleToScopes) == 0 {
+		return nil
+	}
+	var out []*authv1.SmartScope
+	for _, role := range roles {
+		if scopeStr, ok := roleToScopes[role]; ok && scopeStr != "" {
+			out = append(out, ParseScopes(scopeStr)...)
+		}
+	}
+	return out
+}
+
+func mergeSmartScopes(groups ...[]*authv1.SmartScope) []*authv1.SmartScope {
+	seen := make(map[string]struct{})
+	var out []*authv1.SmartScope
+	for _, grp := range groups {
+		for _, s := range grp {
+			if s == nil {
+				continue
+			}
+			key := s.GetRaw()
+			if key != "" {
+				if _, dup := seen[key]; dup {
+					continue
+				}
+				seen[key] = struct{}{}
+			}
+			if cloned, ok := proto.Clone(s).(*authv1.SmartScope); ok {
+				out = append(out, cloned)
+			}
+		}
+	}
+	return out
+}
+
+func cloneScopes(scopes []*authv1.SmartScope) []*authv1.SmartScope {
+	return mergeSmartScopes(scopes)
 }

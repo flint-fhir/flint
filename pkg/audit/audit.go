@@ -324,11 +324,16 @@ func ToFHIRResource(rec store.AuditRecord) map[string]any {
 		subject = "anonymous"
 	}
 
+	identifier := map[string]any{
+		"value": subject,
+	}
+	if rec.AgentIssuer != "" {
+		identifier["system"] = rec.AgentIssuer
+	}
+
 	agent := map[string]any{
 		"who": map[string]any{
-			"identifier": map[string]any{
-				"value": subject,
-			},
+			"identifier": identifier,
 		},
 		"requestor": true,
 	}
@@ -337,6 +342,31 @@ func ToFHIRResource(rec store.AuditRecord) map[string]any {
 			"address": rec.ClientIP,
 			"type":    "2", // IP Address
 		}
+	}
+
+	agents := []map[string]any{agent}
+	if rec.ActorSubject != "" {
+		actorIdent := map[string]any{
+			"value": rec.ActorSubject,
+		}
+		if rec.ActorIssuer != "" {
+			actorIdent["system"] = rec.ActorIssuer
+		}
+		agents = append(agents, map[string]any{
+			"type": map[string]any{
+				"coding": []map[string]any{
+					{
+						"system":  "http://terminology.hl7.org/CodeSystem/extra-security-role-type",
+						"code":    "delegated-actor",
+						"display": "Delegated Actor (RFC 8693)",
+					},
+				},
+			},
+			"who": map[string]any{
+				"identifier": actorIdent,
+			},
+			"requestor": false,
+		})
 	}
 
 	details := []map[string]any{
@@ -361,6 +391,18 @@ func ToFHIRResource(rec store.AuditRecord) map[string]any {
 		details = append(details, map[string]any{
 			"type":        "tefca-purpose-of-use",
 			"valueString": rec.PurposeOfUse,
+		})
+	}
+	if rec.RequestID != "" {
+		details = append(details, map[string]any{
+			"type":        "request-id",
+			"valueString": rec.RequestID,
+		})
+	}
+	if rec.OperatorCrossTenant {
+		details = append(details, map[string]any{
+			"type":        "operator-cross-tenant",
+			"valueString": "true",
 		})
 	}
 
@@ -413,7 +455,7 @@ func ToFHIRResource(rec store.AuditRecord) map[string]any {
 		"recorded":    recordedStr,
 		"outcome":     rec.Outcome,
 		"outcomeDesc": rec.OutcomeDesc,
-		"agent":       []map[string]any{agent},
+		"agent":       agents,
 		"source": map[string]any{
 			"observer": map[string]any{
 				"display": "Flint FHIR Server",
@@ -496,7 +538,7 @@ func ValidatePurposeOfUse(raw string) (code, display string, ok bool) {
 // ComputeRecordDigest computes the deterministic SHA-256 hex digest of an AuditRecord
 // per HIPAA 45 CFR §164.312(b) and ONC §170.315(d)(2)/(d)(3) tamper-evident audit requirements.
 func ComputeRecordDigest(rec store.AuditRecord) string {
-	canonical := strings.Join([]string{
+	fields := []string{
 		rec.TenantID,
 		rec.AuditID,
 		rec.Recorded.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano),
@@ -512,7 +554,17 @@ func ComputeRecordDigest(rec store.AuditRecord) string {
 		rec.EntityID,
 		rec.EntityVersion,
 		rec.PurposeOfUse,
-	}, "|")
+	}
+	if rec.AgentIssuer != "" || rec.ActorSubject != "" || rec.ActorIssuer != "" || rec.OperatorCrossTenant || rec.RequestID != "" {
+		fields = append(fields,
+			rec.AgentIssuer,
+			rec.ActorSubject,
+			rec.ActorIssuer,
+			strconv.FormatBool(rec.OperatorCrossTenant),
+			rec.RequestID,
+		)
+	}
+	canonical := strings.Join(fields, "|")
 	sum := sha256.Sum256([]byte(canonical))
 	return hex.EncodeToString(sum[:])
 }

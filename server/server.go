@@ -138,6 +138,11 @@ type Server struct {
 	shlinks                    *shlink.Manager
 	metrics                    *serverMetrics
 	txClient                   *txclient.Client
+	securityMu                 sync.RWMutex
+	compiledPolicy             compiledSecurityPolicy
+	rateLimiter                *tenantRateLimiter
+	idemLocks                  [256]sync.Mutex
+	idemMem                    idemMemCache
 	bgMu                       sync.Mutex
 	bgCtx                      context.Context
 	bgCancel                   context.CancelFunc
@@ -392,14 +397,23 @@ func (s *Server) SetValidator(v validation.Validator) {
 // SetTokenValidator configures the SMART on FHIR bearer token validator.
 // When set, all non-public FHIR endpoints require valid tokens and matching scopes.
 func (s *Server) SetTokenValidator(v auth.TokenValidator) {
+	s.securityMu.Lock()
 	s.tokenValidator = v
+	s.securityMu.Unlock()
+}
+
+func (s *Server) getTokenValidator() auth.TokenValidator {
+	s.securityMu.RLock()
+	tv := s.tokenValidator
+	s.securityMu.RUnlock()
+	return tv
 }
 
 // EnableDevTokenEnforcement requires valid SMART on FHIR bearer tokens issued by Flint's
 // built-in OAuth2 server on all non-public FHIR endpoints (without requiring an external IdP).
 func (s *Server) EnableDevTokenEnforcement() {
 	if s.devAuth != nil {
-		s.tokenValidator = s.devAuth
+		s.SetTokenValidator(s.devAuth)
 	}
 }
 
@@ -416,7 +430,23 @@ func (s *Server) RegisterIndexExtractor(resType string, fn store.IndexExtractorF
 
 // Handler returns the HTTP handler for the FHIR API.
 func (s *Server) Handler() http.Handler {
-	return s.telemetryMiddleware(s.metricsMiddleware(corsMiddleware(s.xmlNegotiationMiddleware(s.auditMiddleware(s.authMiddleware(s.fhirRouter()))))))
+	return s.telemetryMiddleware(
+		s.metricsMiddleware(
+			s.corsMiddleware(
+				s.tenantRoutingMiddleware(
+					s.xmlNegotiationMiddleware(
+						s.auditMiddleware(
+							s.authMiddleware(
+								s.rateLimitMiddleware(
+									s.idempotencyMiddleware(s.fhirRouter()),
+								),
+							),
+						),
+					),
+				),
+			),
+		),
+	)
 }
 
 func (s *Server) fhirRouter() http.Handler {
@@ -3525,7 +3555,7 @@ func (s *Server) handleInstanceHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	baseURL := requestBaseURL(r) + r.URL.Path
+	baseURL := requestBaseURL(r) + s.externalRequestPath(r)
 	makeURL := func(vals url.Values) string {
 		enc := vals.Encode()
 		if enc == "" {
@@ -3766,15 +3796,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.effectiveReferentialIntegrity(r) == ReferentialIntegrityStrict {
-		if refErr := s.verifyOutboundReferences(r.Context(), tenant, resType, resID, msg, protoBytes, idx, nil, nil); refErr != nil {
-			if errors.Is(refErr, errReferentialIntegrityTargetMissing) {
-				writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-found", refErr.Error())
-			} else {
-				writeOperationOutcome(w, http.StatusInternalServerError, "exception", refErr.Error())
-			}
-			return
-		}
+	if refErr := s.verifyWriteReferences(r, tenant, resType, resID, msg, protoBytes, idx, nil, nil); refErr != nil {
+		statusCode, issueCode := referenceCheckOutcome(refErr)
+		writeOperationOutcome(w, statusCode, issueCode, refErr.Error())
+		return
 	}
 
 	input := store.ResourceInput{
@@ -4055,15 +4080,10 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if s.effectiveReferentialIntegrity(r) == ReferentialIntegrityStrict {
-		if refErr := s.verifyOutboundReferences(r.Context(), tenant, resType, resID, msg, protoBytes, idx, nil, nil); refErr != nil {
-			if errors.Is(refErr, errReferentialIntegrityTargetMissing) {
-				writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-found", refErr.Error())
-			} else {
-				writeOperationOutcome(w, http.StatusInternalServerError, "exception", refErr.Error())
-			}
-			return
-		}
+	if refErr := s.verifyWriteReferences(r, tenant, resType, resID, msg, protoBytes, idx, nil, nil); refErr != nil {
+		statusCode, issueCode := referenceCheckOutcome(refErr)
+		writeOperationOutcome(w, statusCode, issueCode, refErr.Error())
+		return
 	}
 
 	rec, err := s.store.WriteResourceWithMeta(r.Context(), store.ResourceInput{
@@ -6140,7 +6160,7 @@ func (s *Server) writeSearchSetBundleWithOpts(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) buildSearchBundleLinks(r *http.Request, sr *store.SearchResults, params store.SearchParams) []map[string]string {
-	basePath := strings.TrimSuffix(r.URL.Path, "/_search")
+	basePath := strings.TrimSuffix(s.externalRequestPath(r), "/_search")
 	baseURL := requestBaseURL(r) + basePath
 	q := mergedSearchQuery(r)
 

@@ -755,3 +755,98 @@ func TestMLLPListenerFlagsAndLiveRoundTrip(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "start hl7v2 mllp listener")
 }
+
+func TestConfigureAuthAndSecurityPolicyHardening(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// 1. FLINT_REQUIRE_AUTH=true must fail closed if no TokenValidator is configured
+	err := run(
+		[]string{"--store=sqlite", "--sqlite-dsn=:memory:"},
+		func(k string) string {
+			if k == "FLINT_REQUIRE_AUTH" {
+				return "true"
+			}
+			return ""
+		},
+		io.Discard,
+		logger,
+		sql.Open,
+		func(string, http.Handler) error { return nil },
+	)
+	require.ErrorContains(t, err, "RequireAuth")
+
+	// 2. Valid PLATFORM_IDENTITY_TRUST_FILE + full security policy env configuration succeeds
+	trustPath := filepath.Join(t.TempDir(), "trust.json")
+	trustJSON := `{
+		"issuers": [{
+			"issuer": "https://idp.azra.example",
+			"audiences": ["azra-fhir"],
+			"jwksUrl": "https://idp.azra.example/.well-known/jwks.json",
+			"signingAlgorithms": ["RS256", "PS256"],
+			"claims": {
+				"shape": "grantMap",
+				"grantsClaim": "urn:zitadel:iam:org:project:roles",
+				"activeTenantClaim": "active_tenant",
+				"operatorRole": "azra-operator",
+				"platformTenant": "azra-platform",
+				"actorClaim": "act"
+			}
+		}]
+	}`
+	require.NoError(t, os.WriteFile(trustPath, []byte(trustJSON), 0o600))
+
+	srv := server.New(nil, logger)
+	env := map[string]string{
+		"PLATFORM_IDENTITY_TRUST_FILE":     trustPath,
+		"FLINT_OIDC_ROLE_TO_SCOPES":        `clinician=user/Patient.rs;azra-operator=system/*.*`,
+		"FLINT_REQUIRE_AUTH":               "true",
+		"FLINT_REQUIRE_TENANT_CLAIM":       "true",
+		"FLINT_DISABLE_UNAUTH_ENDPOINTS":   "true",
+		"FLINT_ALLOWED_ORIGINS":            "https://app.azra.health, https://admin.azra.health",
+		"FLINT_TENANT_HEADER":              "X-Azra-Tenant-Id",
+		"FLINT_REQUIRE_TENANT_HEADER":      "true",
+		"FLINT_LOCK_REFERENTIAL_INTEGRITY": "true",
+		"FLINT_LOCAL_REFERENCES_ONLY":      "true",
+		"FLINT_MAX_BUNDLE_BYTES":           "1048576",
+		"FLINT_MAX_BUNDLE_ENTRIES":         "50",
+		"FLINT_DENIED_RESOURCE_TYPES":      "MedicationKnowledge,TerminologyCapabilities",
+		"FLINT_RATE_LIMIT_RPS":             "25",
+		"FLINT_RATE_LIMIT_BURST":           "50",
+		"FLINT_IDEMPOTENCY_TTL":            "12h",
+	}
+	getenv := func(k string) string { return env[k] }
+	require.NoError(t, configureAuth(srv, logger, getenv))
+	require.NoError(t, configureSecurityPolicy(srv, logger, getenv))
+	assert.True(t, srv.HasTokenValidator())
+
+	pol := srv.SecurityPolicy()
+	assert.True(t, pol.RequireAuth)
+	assert.True(t, pol.RequireTenantClaim)
+	assert.True(t, pol.DisableUnauthenticatedEndpoints)
+	assert.Equal(t, []string{"https://app.azra.health", "https://admin.azra.health"}, pol.AllowedOrigins)
+	assert.Equal(t, "X-Azra-Tenant-Id", pol.TenantHeaderName)
+	assert.True(t, pol.RequireTenantHeader)
+	assert.True(t, pol.LockReferentialIntegrity)
+	assert.True(t, pol.EnforceLocalReferencesOnly)
+	assert.Equal(t, int64(1048576), pol.MaxBundleBytes)
+	assert.Equal(t, 50, pol.MaxBundleEntries)
+	assert.Equal(t, []string{"MedicationKnowledge", "TerminologyCapabilities"}, pol.DeniedResourceTypes)
+	assert.Equal(t, 25.0, pol.RateLimitPerSecond)
+	assert.Equal(t, 50, pol.RateLimitBurst)
+	assert.Equal(t, "12h0m0s", pol.IdempotencyTTL.String())
+
+	// 3. Invalid env values fail fast cleanly
+	badSrv := server.New(nil, logger)
+	require.ErrorContains(t, configureSecurityPolicy(badSrv, logger, func(k string) string {
+		if k == "FLINT_MAX_BUNDLE_BYTES" {
+			return "not-a-number"
+		}
+		return ""
+	}), "FLINT_MAX_BUNDLE_BYTES")
+	require.ErrorContains(t, configureSecurityPolicy(badSrv, logger, func(k string) string {
+		if k == "FLINT_IDEMPOTENCY_TTL" {
+			return "bad-duration"
+		}
+		return ""
+	}), "FLINT_IDEMPOTENCY_TTL")
+}

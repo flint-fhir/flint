@@ -2139,13 +2139,15 @@ func (s *Store) WriteAuditEvent(ctx context.Context, rec store.AuditRecord) erro
 	if rec.AgentSubject == "" {
 		rec.AgentSubject = "anonymous"
 	}
+	outcomeDesc := store.EncodeAuditOutcomeDesc(rec)
+	store.HydrateAuditOutcomeMetadata(&rec)
 	s.mu.Lock()
 	s.audits[rec.TenantID] = append(s.audits[rec.TenantID], rec)
 	s.mu.Unlock()
 
 	stmt := `INSERT INTO fhir_audit_event (tenant_id, audit_id, recorded, action, subtype_code, outcome, outcome_desc, http_method, http_status, request_uri, agent_subject, agent_patient, client_ip, entity_type, entity_id, entity_version, trace_id, span_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	return s.execDorisSQL(ctx, stmt,
-		rec.TenantID, rec.AuditID, rec.Recorded, rec.Action, rec.SubtypeCode, rec.Outcome, rec.OutcomeDesc,
+		rec.TenantID, rec.AuditID, rec.Recorded, rec.Action, rec.SubtypeCode, rec.Outcome, outcomeDesc,
 		rec.HTTPMethod, rec.HTTPStatus, rec.RequestURI, rec.AgentSubject, rec.AgentPatient,
 		rec.ClientIP, rec.EntityType, rec.EntityID, rec.EntityVersion, rec.TraceID, rec.SpanID,
 	)
@@ -2757,6 +2759,7 @@ func (s *Store) LoadFromDB(ctx context.Context) error {
 			return fmt.Errorf("doris scan fhir_audit_event: %w", err)
 		}
 		rec.Recorded = parseDorisTime(rawRecorded)
+		store.HydrateAuditOutcomeMetadata(&rec)
 		audits[rec.TenantID] = append(audits[rec.TenantID], rec)
 	}
 

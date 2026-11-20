@@ -283,15 +283,10 @@ func (s *Server) handlePatch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if s.effectiveReferentialIntegrity(r) == ReferentialIntegrityStrict {
-			if refErr := s.verifyOutboundReferences(r.Context(), tenant, resType, resID, msg, protoBytes, idx, nil, nil); refErr != nil {
-				if errors.Is(refErr, errReferentialIntegrityTargetMissing) {
-					writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-found", refErr.Error())
-				} else {
-					writeOperationOutcome(w, http.StatusInternalServerError, "exception", refErr.Error())
-				}
-				return
-			}
+		if refErr := s.verifyWriteReferences(r, tenant, resType, resID, msg, protoBytes, idx, nil, nil); refErr != nil {
+			statusCode, issueCode := referenceCheckOutcome(refErr)
+			writeOperationOutcome(w, statusCode, issueCode, refErr.Error())
+			return
 		}
 
 		rec, err = s.store.WriteResourceWithMeta(r.Context(), store.ResourceInput{
@@ -445,15 +440,10 @@ func (s *Server) handleConditionalUpdate(w http.ResponseWriter, r *http.Request)
 	}
 	bodyID := extractProtoResourceID(msg)
 
-	if s.effectiveReferentialIntegrity(r) == ReferentialIntegrityStrict {
-		if refErr := s.verifyOutboundReferences(r.Context(), tenant, resType, bodyID, msg, nil, nil, nil, nil); refErr != nil {
-			if errors.Is(refErr, errReferentialIntegrityTargetMissing) {
-				writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-found", refErr.Error())
-				return
-			}
-			writeOperationOutcome(w, http.StatusInternalServerError, "exception", refErr.Error())
-			return
-		}
+	if refErr := s.verifyWriteReferences(r, tenant, resType, bodyID, msg, nil, nil, nil, nil); refErr != nil {
+		statusCode, issueCode := referenceCheckOutcome(refErr)
+		writeOperationOutcome(w, statusCode, issueCode, refErr.Error())
+		return
 	}
 
 	var finalProtoBytes []byte

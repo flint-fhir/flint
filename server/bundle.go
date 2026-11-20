@@ -53,9 +53,15 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 50*1024*1024)) // 50MB max
+	maxBundleBytes := s.effectiveMaxBundleBytes()
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBundleBytes+1))
 	if err != nil {
 		writeOperationOutcome(w, http.StatusBadRequest, "invalid", "failed to read body")
+		return
+	}
+	if int64(len(body)) > maxBundleBytes {
+		writeOperationOutcome(w, http.StatusRequestEntityTooLarge, "too-costly",
+			fmt.Sprintf("bundle size exceeds configured limit of %d bytes", maxBundleBytes))
 		return
 	}
 	if isProtoContentType(r) {
@@ -92,6 +98,12 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 	if bundle.Type != "transaction" && bundle.Type != "batch" {
 		writeOperationOutcome(w, http.StatusBadRequest, "not-supported",
 			fmt.Sprintf("unsupported bundle type: %s (expected transaction or batch)", bundle.Type))
+		return
+	}
+
+	if maxEntries := s.SecurityPolicy().MaxBundleEntries; maxEntries > 0 && len(bundle.Entry) > maxEntries {
+		writeOperationOutcome(w, http.StatusRequestEntityTooLarge, "too-costly",
+			fmt.Sprintf("bundle contains %d entries, exceeding limit of %d", len(bundle.Entry), maxEntries))
 		return
 	}
 
@@ -257,6 +269,15 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				responseEntries[i] = bundleErrorResponse(http.StatusBadRequest, msg)
 				continue
 			}
+			if resTypeFromURL != "" && s.isResourceTypeDenied(resTypeFromURL) {
+				msg := fmt.Sprintf("entry[%d]: resource type %s is disabled by server security policy", i, resTypeFromURL)
+				if isTransaction {
+					writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
+					return
+				}
+				responseEntries[i] = bundleErrorResponseWithCode(http.StatusForbidden, "forbidden", msg)
+				continue
+			}
 			if hasSecCtx {
 				if auth.IsPatientRestricted(secCtx) && cleanID(secCtx.GetPatientId()) == "" {
 					writeOperationOutcome(w, http.StatusForbidden, "forbidden", "patient-scoped token is missing required patient_id claim")
@@ -333,6 +354,16 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 			responseEntries[i] = bundleErrorResponse(
 				http.StatusBadRequest, fmt.Sprintf("entry[%d]: missing resourceType", i))
+			continue
+		}
+
+		if s.isResourceTypeDenied(resType) {
+			msg := fmt.Sprintf("entry[%d]: resource type %s is disabled by server security policy", i, resType)
+			if isTransaction {
+				writeOperationOutcome(w, http.StatusForbidden, "forbidden", msg)
+				return
+			}
+			responseEntries[i] = bundleErrorResponseWithCode(http.StatusForbidden, "forbidden", msg)
 			continue
 		}
 
@@ -1010,15 +1041,10 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Batch mode: execute entry independently
-		if refMode == ReferentialIntegrityStrict && s.store != nil {
-			if refErr := s.verifyOutboundReferences(r.Context(), tenant, resType, resID, msg, protoBytes, idx, nil, nil); refErr != nil {
-				if errors.Is(refErr, errReferentialIntegrityTargetMissing) {
-					responseEntries[i] = bundleErrorResponseWithCode(http.StatusUnprocessableEntity, "not-found", fmt.Sprintf("entry[%d]: %v", i, refErr))
-				} else {
-					responseEntries[i] = bundleErrorResponse(http.StatusInternalServerError, fmt.Sprintf("entry[%d]: %v", i, refErr))
-				}
-				continue
-			}
+		if refErr := s.verifyWriteReferences(r, tenant, resType, resID, msg, protoBytes, idx, nil, nil); refErr != nil {
+			statusCode, issueCode := referenceCheckOutcome(refErr)
+			responseEntries[i] = bundleErrorResponseWithCode(statusCode, issueCode, fmt.Sprintf("entry[%d]: %v", i, refErr))
+			continue
 		}
 		if condParams != nil && s.store != nil {
 			rec, created, err := s.store.ConditionalCreateResource(r.Context(), input, *condParams)
@@ -1169,8 +1195,8 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Evaluate outbound reference existence checks on write ops in strict mode
-		if refMode == ReferentialIntegrityStrict {
+		// Evaluate outbound reference confinement and existence checks on write ops
+		if s.SecurityPolicy().EnforceLocalReferencesOnly || refMode == ReferentialIntegrityStrict {
 			for idxOp, op := range ops {
 				if op.Method == "DELETE" {
 					continue
@@ -1179,14 +1205,11 @@ func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 				if cid, ok := resolvedCondPutID[idxOp]; ok && cid != "" {
 					writeID = cid
 				}
-				if refErr := s.verifyOutboundReferences(r.Context(), tenant, op.Input.ResType, writeID, nil, op.Input.ResourceProto, op.Input.SearchIndexes, txWrites, txDeletes); refErr != nil {
+				if refErr := s.verifyWriteReferences(r, tenant, op.Input.ResType, writeID, nil, op.Input.ResourceProto, op.Input.SearchIndexes, txWrites, txDeletes); refErr != nil {
 					origIdx := opEntryIdx[idxOp]
 					msg := fmt.Sprintf("entry[%d]: %v", origIdx, refErr)
-					if errors.Is(refErr, errReferentialIntegrityTargetMissing) {
-						writeOperationOutcome(w, http.StatusUnprocessableEntity, "not-found", msg)
-					} else {
-						writeOperationOutcome(w, http.StatusInternalServerError, "exception", msg)
-					}
+					statusCode, issueCode := referenceCheckOutcome(refErr)
+					writeOperationOutcome(w, statusCode, issueCode, msg)
 					return
 				}
 			}

@@ -37,6 +37,7 @@ const (
 var (
 	errReferentialIntegrityTargetMissing = errors.New("referential integrity violation: target resource not found")
 	errReferentialIntegrityDeleteBlocked = errors.New("referential integrity violation: resource is referenced by active resources")
+	errExternalReferenceDisallowed       = errors.New("external or non-local FHIR reference is disallowed by server security policy")
 )
 
 // ParseReferentialIntegrityMode parses a CLI flag or environment variable value
@@ -70,9 +71,9 @@ func (s *Server) ReferentialIntegrity() ReferentialIntegrityMode {
 }
 
 // effectiveReferentialIntegrity resolves the active ReferentialIntegrityMode for r,
-// honoring an optional X-Flint-Referential-Integrity request header override.
+// honoring an optional X-Flint-Referential-Integrity request header override unless locked by SecurityPolicy.
 func (s *Server) effectiveReferentialIntegrity(r *http.Request) ReferentialIntegrityMode {
-	if r != nil {
+	if r != nil && !s.SecurityPolicy().LockReferentialIntegrity {
 		if hdr := strings.TrimSpace(r.Header.Get("X-Flint-Referential-Integrity")); hdr != "" {
 			if m, err := ParseReferentialIntegrityMode(hdr); err == nil {
 				return m
@@ -322,6 +323,101 @@ func (s *Server) verifyOutboundReferences(
 			errReferentialIntegrityTargetMissing, resType, resID, strings.Join(missing, ", "))
 	}
 	return nil
+}
+
+// collectExternalReferencesFromProto walks google.fhir.r4.core.Reference messages and
+// records any non-local URI values (http://, https://, urn:, or other scheme:// references).
+func collectExternalReferencesFromProto(msg protoreflect.Message, out *[]string, depth int) {
+	if !msg.IsValid() || depth > 8 {
+		return
+	}
+	if string(msg.Descriptor().FullName()) == "google.fhir.r4.core.Reference" {
+		if uriFD := msg.Descriptor().Fields().ByName("uri"); uriFD != nil && msg.Has(uriFD) && uriFD.Kind() == protoreflect.MessageKind {
+			raw := strings.TrimSpace(unwrapProtoStringField(msg.Get(uriFD).Message()))
+			if raw != "" && !strings.HasPrefix(raw, "#") {
+				lower := strings.ToLower(raw)
+				if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") ||
+					strings.HasPrefix(lower, "urn:") || strings.Contains(raw, "://") {
+					*out = append(*out, raw)
+				}
+			}
+		}
+		return
+	}
+	msg.Range(func(fd protoreflect.FieldDescriptor, val protoreflect.Value) bool {
+		if fd.Kind() != protoreflect.MessageKind {
+			return true
+		}
+		if fd.IsList() {
+			list := val.List()
+			for i := 0; i < list.Len(); i++ {
+				collectExternalReferencesFromProto(list.Get(i).Message(), out, depth+1)
+			}
+			return true
+		}
+		collectExternalReferencesFromProto(val.Message(), out, depth+1)
+		return true
+	})
+}
+
+func (s *Server) verifyLocalReferencesOnly(resType string, msg protoreflect.Message, protoBytes []byte) error {
+	if msg == nil && len(protoBytes) > 0 {
+		if md, ok := s.protoRegistry[resType]; ok {
+			dynMsg := dynamicpb.NewMessage(md)
+			if err := proto.Unmarshal(protoBytes, dynMsg); err == nil {
+				msg = dynMsg
+			}
+		}
+	}
+	if msg == nil {
+		return nil
+	}
+	var external []string
+	collectExternalReferencesFromProto(msg, &external, 0)
+	if len(external) > 0 {
+		return fmt.Errorf("%w: %s contains disallowed external reference(s): %s",
+			errExternalReferenceDisallowed, resType, strings.Join(external, ", "))
+	}
+	return nil
+}
+
+// verifyWriteReferences enforces local-only reference confinement (if enabled) and strict
+// referential integrity target existence (if enabled) on resource writes.
+func (s *Server) verifyWriteReferences(
+	r *http.Request,
+	tenant, resType, resID string,
+	msg protoreflect.Message,
+	protoBytes []byte,
+	idx *store.SearchIndexes,
+	inBundleWrites map[string]bool,
+	inBundleDeletes map[string]bool,
+) error {
+	if s.SecurityPolicy().EnforceLocalReferencesOnly {
+		if err := s.verifyLocalReferencesOnly(resType, msg, protoBytes); err != nil {
+			return err
+		}
+	}
+	if s.effectiveReferentialIntegrity(r) == ReferentialIntegrityStrict {
+		var ctx context.Context
+		if r != nil {
+			ctx = r.Context()
+		} else {
+			ctx = context.Background()
+		}
+		return s.verifyOutboundReferences(ctx, tenant, resType, resID, msg, protoBytes, idx, inBundleWrites, inBundleDeletes)
+	}
+	return nil
+}
+
+func referenceCheckOutcome(err error) (statusCode int, issueCode string) {
+	switch {
+	case errors.Is(err, errExternalReferenceDisallowed):
+		return http.StatusUnprocessableEntity, "business-rule"
+	case errors.Is(err, errReferentialIntegrityTargetMissing):
+		return http.StatusUnprocessableEntity, "not-found"
+	default:
+		return http.StatusInternalServerError, "exception"
+	}
 }
 
 // parseCascadeDelete extracts and validates the FHIR _cascade query parameter

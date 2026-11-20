@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -66,16 +68,16 @@ func (z *ZitadelValidator) ValidateToken(ctx context.Context, bearerToken string
 		return nil, err
 	}
 
+	secCtx.AuthScheme = "zitadel"
+	activeOrgID := strings.TrimSpace(secCtx.Claims[ZitadelClaimOrgID])
+
 	// 1. Map Zitadel Organization to Flint Tenant Schema
 	if z.cfg.TenantFromOrgDomain {
 		if orgDomain, ok := secCtx.Claims[ZitadelClaimOrgDomain]; ok && orgDomain != "" {
-			// e.g. "hospital-a.azra.dev" -> "hospital_a"
-			tenant := strings.Split(orgDomain, ".")[0]
-			tenant = strings.ReplaceAll(tenant, "-", "_")
-			secCtx.TenantId = tenant
+			secCtx.TenantId = normalizeZitadelOrgDomain(orgDomain)
 		}
-	} else if orgID, ok := secCtx.Claims[ZitadelClaimOrgID]; ok && orgID != "" && secCtx.TenantId == "" {
-		secCtx.TenantId = orgID
+	} else if activeOrgID != "" && secCtx.TenantId == "" {
+		secCtx.TenantId = activeOrgID
 	}
 
 	// 2. Map Zitadel User Metadata (e.g. patient_id, encounter_id — plain or base64-encoded)
@@ -91,21 +93,98 @@ func (z *ZitadelValidator) ValidateToken(ctx context.Context, bearerToken string
 		}
 	}
 
-	// 3. Map Zitadel Project Roles to SMART scopes
-	if len(z.cfg.RoleToScopes) > 0 {
-		if rolesRaw, ok := secCtx.Claims[ZitadelClaimRoles]; ok && rolesRaw != "" {
-			// Zitadel roles claim format: {"roleName": {"orgID": "..."}}
-			var rolesMap map[string]any
-			if err := json.Unmarshal([]byte(rolesRaw), &rolesMap); err == nil {
-				for roleName := range rolesMap {
-					if scopeStr, ok := z.cfg.RoleToScopes[roleName]; ok {
-						extraScopes := ParseScopes(scopeStr)
-						secCtx.Scopes = append(secCtx.Scopes, extraScopes...)
+	// 3. Map Zitadel Project Roles per organization to isolated TenantGrants & active-tenant SMART scopes.
+	// Roles held in one Zitadel org are NEVER unioned into another org's active scopes.
+	baseScopes := cloneScopes(secCtx.Scopes)
+	rolesRaw := strings.TrimSpace(secCtx.Claims[ZitadelClaimRoles])
+	if rolesRaw == "" {
+		// Support project-qualified claim urn:zitadel:iam:org:project:<id>:roles when generic claim is absent.
+		for k, v := range secCtx.Claims {
+			if strings.HasPrefix(k, "urn:zitadel:iam:org:project:") && strings.HasSuffix(k, ":roles") && v != "" {
+				rolesRaw = v
+				break
+			}
+		}
+	}
+	if rolesRaw != "" {
+		// Zitadel roles claim format: {"roleName": {"orgID": "orgDomainOrMeta"}}
+		var rolesMap map[string]any
+		if err := json.Unmarshal([]byte(rolesRaw), &rolesMap); err == nil {
+			rolesByOrg := make(map[string][]string)
+			domainAliasToOrg := make(map[string]string)
+			hasDomainHint := make(map[string]bool)
+
+			for roleName, orgsVal := range rolesMap {
+				orgEntries, ok := orgsVal.(map[string]any)
+				if !ok {
+					continue
+				}
+				for orgID, orgMeta := range orgEntries {
+					rolesByOrg[orgID] = append(rolesByOrg[orgID], roleName)
+					if metaStr, ok := orgMeta.(string); ok && strings.Contains(metaStr, ".") {
+						hasDomainHint[orgID] = true
+						domainAliasToOrg[metaStr] = orgID
+						domainAliasToOrg[normalizeZitadelOrgDomain(metaStr)] = orgID
 					}
+				}
+			}
+
+			if len(rolesByOrg) > 0 {
+				secCtx.TenantGrants = make(map[string]*authv1.TenantGrant, len(rolesByOrg))
+				for orgID, roles := range rolesByOrg {
+					sort.Strings(roles)
+					secCtx.TenantGrants[orgID] = &authv1.TenantGrant{
+						Roles:  roles,
+						Scopes: mergeSmartScopes(baseScopes, mapRolesToScopes(roles, z.cfg.RoleToScopes)),
+					}
+				}
+				for alias, orgID := range domainAliasToOrg {
+					if g, ok := secCtx.TenantGrants[orgID]; ok {
+						if _, exists := secCtx.TenantGrants[alias]; !exists {
+							secCtx.TenantGrants[alias] = &authv1.TenantGrant{
+								Roles:  slices.Clone(g.Roles),
+								Scopes: cloneScopes(g.Scopes),
+							}
+						}
+					}
+				}
+
+				var activeGrant *authv1.TenantGrant
+				switch {
+				case activeOrgID != "":
+					activeGrant = secCtx.TenantGrants[activeOrgID]
+				case secCtx.TenantId != "":
+					if g, ok := secCtx.TenantGrants[secCtx.TenantId]; ok {
+						activeGrant = g
+					} else if len(rolesByOrg) == 1 {
+						// Single-org token missing org:id where the org entry carries an opaque label rather than a conflicting domain.
+						for orgID := range rolesByOrg {
+							if !hasDomainHint[orgID] {
+								activeGrant = secCtx.TenantGrants[orgID]
+							}
+						}
+					}
+				}
+
+				if activeGrant != nil {
+					if secCtx.TenantId != "" {
+						secCtx.TenantGrants[secCtx.TenantId] = &authv1.TenantGrant{
+							Roles:  slices.Clone(activeGrant.Roles),
+							Scopes: cloneScopes(activeGrant.Scopes),
+						}
+					}
+					secCtx.Roles = slices.Clone(activeGrant.Roles)
+					secCtx.Scopes = cloneScopes(activeGrant.Scopes)
 				}
 			}
 		}
 	}
 
 	return secCtx, nil
+}
+
+func normalizeZitadelOrgDomain(orgDomain string) string {
+	// e.g. "hospital-a.azra.dev" -> "hospital_a"
+	tenant := strings.Split(orgDomain, ".")[0]
+	return strings.ReplaceAll(tenant, "-", "_")
 }

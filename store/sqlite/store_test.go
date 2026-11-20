@@ -993,3 +993,53 @@ func TestSQLiteStore_ClusterStateSecretsAndNonces(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, delOK)
 }
+
+func TestSQLiteStore_ExtendedAuditMetadataPersistence(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "audit-meta-wal.db")
+
+	db1, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	db1.SetMaxOpenConns(1)
+	require.NoError(t, sqlite.RunMigrations(ctx, db1, sqlite.JournalWAL))
+
+	ss1 := sqlite.New(db1, sqlite.WithJournalMode(sqlite.JournalWAL), sqlite.WithDSN(dbPath))
+	rec := store.AuditRecord{
+		TenantID:            "t-meta",
+		AuditID:             "aud-ext-1",
+		Recorded:            time.Now().UTC().Truncate(time.Microsecond),
+		Action:              "U",
+		SubtypeCode:         "update",
+		Outcome:             "0",
+		OutcomeDesc:         "200 OK",
+		HTTPMethod:          "PUT",
+		HTTPStatus:          200,
+		RequestURI:          "/fhir/r4/t-meta/Patient/p1",
+		AgentSubject:        "svc-worker",
+		AgentIssuer:         "https://workload.azra.internal",
+		ActorSubject:        "nurse-amy",
+		ActorIssuer:         "https://zitadel.azra.example",
+		OperatorCrossTenant: true,
+		PurposeOfUse:        "TREAT",
+		RequestID:           "req-9988",
+	}
+	require.NoError(t, ss1.WriteAuditEvent(ctx, rec))
+	_ = db1.Close()
+
+	db2, err := sql.Open("sqlite", dbPath)
+	require.NoError(t, err)
+	defer db2.Close()
+	db2.SetMaxOpenConns(1)
+	ss2 := sqlite.New(db2, sqlite.WithJournalMode(sqlite.JournalWAL), sqlite.WithDSN(dbPath))
+	require.NoError(t, ss2.LoadFromDB(ctx))
+
+	got, err := ss2.ReadAuditEvent(ctx, "t-meta", "aud-ext-1")
+	require.NoError(t, err)
+	assert.Equal(t, "200 OK", got.OutcomeDesc)
+	assert.Equal(t, rec.AgentIssuer, got.AgentIssuer)
+	assert.Equal(t, rec.ActorSubject, got.ActorSubject)
+	assert.Equal(t, rec.ActorIssuer, got.ActorIssuer)
+	assert.True(t, got.OperatorCrossTenant)
+	assert.Equal(t, rec.PurposeOfUse, got.PurposeOfUse)
+	assert.Equal(t, rec.RequestID, got.RequestID)
+}
