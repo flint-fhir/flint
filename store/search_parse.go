@@ -934,6 +934,24 @@ var (
 			Expression:  "DeviceRequest.modifierExtension.where(url='http://hl7.org/fhir/5.0/StructureDefinition/extension-DeviceRequest.doNotPerform')",
 			Description: "Select DeviceRequest resources by R5 backport doNotPerform modifierExtension.",
 		},
+		{
+			ID:          "au-core-patient-indigenous-status",
+			URL:         "http://hl7.org.au/fhir/core/SearchParameter/au-core-patient-indigenous-status",
+			Code:        "indigenous-status",
+			Base:        []string{"Patient"},
+			Type:        "token",
+			Expression:  "Patient.extension.where(url='http://hl7.org.au/fhir/StructureDefinition/indigenous-status')",
+			Description: "Select patients with an Australian indigenous-status extension matching the specified coding.",
+		},
+		{
+			ID:          "au-core-patient-gender-identity",
+			URL:         "http://hl7.org.au/fhir/core/SearchParameter/au-core-patient-gender-identity",
+			Code:        "gender-identity",
+			Base:        []string{"Patient"},
+			Type:        "token",
+			Expression:  "Patient.extension.where(url='http://hl7.org/fhir/StructureDefinition/individual-genderIdentity')",
+			Description: "Select patients with a gender-identity extension matching the specified coding.",
+		},
 	}
 )
 

@@ -129,6 +129,20 @@ func ConformanceMatrix() []ConformanceMatrixEntry {
 			Status:        "Verified",
 			Endpoint:      "analytics/models/mart_patient_360.sql",
 		},
+		{
+			Category:      "ONC HTI-1 & SMART Discovery",
+			Capability:    "Service Base URL Publication & SMART STU2.2 User-Access Brands + CORS",
+			Specification: "ONC HTI-1 § 170.404(b)(2) & HL7 SMART STU2.2",
+			Status:        "Verified",
+			Endpoint:      "/.well-known/service-base-urls",
+		},
+		{
+			Category:      "International Conformance",
+			Capability:    "HL7 AU Core v1.0.0 & v2.0.0 + US Core v5.0.1 + C4BB STU1.1 & STU2.0 (39 Headless Inferno Suites)",
+			Specification: "HL7 AU Core R4 / US Core v5-v8 / C4BB v1.1-v2.0",
+			Status:        "Verified",
+			Endpoint:      "/fhir/r4/{tenant}/metadata",
+		},
 	}
 }
 
@@ -160,6 +174,9 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "subject", "type": "reference"},
 			{"name": "encounter", "type": "reference"},
 			{"name": "onset-date", "type": "date"},
+			{"name": "recorded-date", "type": "date"},
+			{"name": "abatement-date", "type": "date"},
+			{"name": "asserted-date", "type": "date"},
 		},
 		"Encounter": {
 			{"name": "_id", "type": "token"},
@@ -529,6 +546,16 @@ func resourceSearchParamDefs() map[string][]map[string]string {
 			{"name": "code", "type": "token"},
 			{"name": "doseform", "type": "token"},
 		},
+		"MedicationStatement": {
+			{"name": "_id", "type": "token"},
+			{"name": "_lastUpdated", "type": "date"},
+			{"name": "patient", "type": "reference"},
+			{"name": "subject", "type": "reference"},
+			{"name": "status", "type": "token"},
+			{"name": "effective", "type": "date"},
+			{"name": "code", "type": "token"},
+			{"name": "identifier", "type": "token"},
+		},
 		"RelatedPerson": {
 			{"name": "_id", "type": "token"},
 			{"name": "_lastUpdated", "type": "date"},
@@ -818,6 +845,26 @@ func (s *Server) BuildOpenAPISpec(tenant string) map[string]any {
 				"operationId": "getJWKS",
 				"responses": map[string]any{
 					"200": map[string]any{"description": "RFC 7517 JWKS Document"},
+				},
+			},
+		},
+		"/.well-known/service-base-urls": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Discovery & Docs"},
+				"summary":     "Get ONC HTI-1 Service Base URL Publication Bundle",
+				"operationId": "getServiceBaseURLs",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 Bundle (collection) of active Endpoint and Organization resources"},
+				},
+			},
+		},
+		"/.well-known/smart-brands.json": map[string]any{
+			"get": map[string]any{
+				"tags":        []string{"Discovery & Docs"},
+				"summary":     "Get HL7 SMART App Launch STU2.2 User-Access Brands Bundle",
+				"operationId": "getSMARTBrands",
+				"responses": map[string]any{
+					"200": map[string]any{"description": "FHIR R4 User Access Brand Bundle of Organization and Endpoint resources"},
 				},
 			},
 		},

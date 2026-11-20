@@ -190,6 +190,81 @@ func TestOfficialFHIRPathR4ComplianceSuite(t *testing.T) {
 		totalExecuted, skippedSemantic, skippedCustom, verifiedHTTPEndpoint)
 	require.Equal(t, 0, skippedSemantic, "all official HL7 FHIRPath R4 semantic tests must execute with zero skips")
 	require.GreaterOrEqual(t, totalExecuted, 825)
+
+	t.Run("HTTP_PositiveWireAndInfernoModes", func(t *testing.T) {
+		patientRes := loadFixture(t, "patient-example.json")
+
+		paramsPayload, err := json.Marshal(map[string]any{
+			"resourceType": "Parameters",
+			"parameter": []map[string]any{
+				{"name": "resource", "resource": patientRes},
+				{"name": "expression", "valueString": "Patient.name.given"},
+			},
+		})
+		require.NoError(t, err)
+
+		// 1. JSON Parameters response
+		jsonReq, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/default/$fhirpath", bytes.NewReader(paramsPayload))
+		require.NoError(t, err)
+		jsonReq.Header.Set("Content-Type", "application/fhir+json")
+		jsonReq.Header.Set("Accept", "application/fhir+json")
+		jsonResp, err := http.DefaultClient.Do(jsonReq)
+		require.NoError(t, err)
+		jsonBody, err := io.ReadAll(jsonResp.Body)
+		jsonResp.Body.Close()
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, jsonResp.StatusCode, string(jsonBody))
+
+		var paramsOut map[string]any
+		require.NoError(t, json.Unmarshal(jsonBody, &paramsOut))
+		assert.Equal(t, "Parameters", paramsOut["resourceType"])
+		rawParamList, ok := paramsOut["parameter"].([]any)
+		require.True(t, ok)
+		var givenVals []string
+		for _, item := range rawParamList {
+			if m, ok := item.(map[string]any); ok && m["name"] == "result" {
+				if vs, ok := m["valueString"].(string); ok {
+					givenVals = append(givenVals, vs)
+				}
+			}
+		}
+		assert.Contains(t, givenVals, "Peter")
+		assert.Contains(t, givenVals, "James")
+
+		// 2. FHIR R4 XML Parameters response
+		xmlReq, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/default/$fhirpath", bytes.NewReader(paramsPayload))
+		require.NoError(t, err)
+		xmlReq.Header.Set("Content-Type", "application/fhir+json")
+		xmlReq.Header.Set("Accept", "application/fhir+xml")
+		xmlResp, err := http.DefaultClient.Do(xmlReq)
+		require.NoError(t, err)
+		xmlBody, err := io.ReadAll(xmlResp.Body)
+		xmlResp.Body.Close()
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, xmlResp.StatusCode, string(xmlBody))
+		assert.Contains(t, strings.ToLower(xmlResp.Header.Get("Content-Type")), "xml")
+		assert.Contains(t, string(xmlBody), "<Parameters")
+		assert.Contains(t, string(xmlBody), "Peter")
+
+		// 3. Inferno evaluator mode (?mode=inferno&expression=...)
+		rawPatientBytes, err := json.Marshal(patientRes)
+		require.NoError(t, err)
+		infReq, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/default/$fhirpath?mode=inferno&expression=Patient.name.family", bytes.NewReader(rawPatientBytes))
+		require.NoError(t, err)
+		infReq.Header.Set("Content-Type", "application/fhir+json")
+		infResp, err := http.DefaultClient.Do(infReq)
+		require.NoError(t, err)
+		infBody, err := io.ReadAll(infResp.Body)
+		infResp.Body.Close()
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, infResp.StatusCode, string(infBody))
+
+		var infernoItems []map[string]any
+		require.NoError(t, json.Unmarshal(infBody, &infernoItems), string(infBody))
+		require.NotEmpty(t, infernoItems)
+		assert.Equal(t, "string", infernoItems[0]["type"])
+		assert.Equal(t, "Chalmers", infernoItems[0]["element"])
+	})
 }
 
 func postLiveFHIRPathStrictEndpoint(t *testing.T, baseURL string, resource map[string]any, contextExpr, contextType, expr string) int {

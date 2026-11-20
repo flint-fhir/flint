@@ -47,7 +47,7 @@ func parseSeedConfig(args []string, getenv func(string) string) (Config, error) 
 	fs.SetOutput(io.Discard)
 	urlFlag := fs.String("url", defaultURL, "Flint server base URL")
 	tenantFlag := fs.String("tenant", defaultTenant, "Target FHIR tenant ID")
-	suiteFlag := fs.String("suite", defaultSuite, "Seed suite: uscore (default), plannet, formulary, c4bb, pdex, pas, cpds, usqc, or ccrr")
+	suiteFlag := fs.String("suite", defaultSuite, "Seed suite: uscore (default), plannet, formulary, c4bb, pdex, pas, cpds, usqc, ccrr, or aucore")
 	tokenFlag := fs.String("token", defaultToken, "Optional SMART on FHIR Bearer token")
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
@@ -118,8 +118,10 @@ func Run(ctx context.Context, cfg Config) error {
 		bundleBytes, err = USQCTransactionBundleJSON()
 	case "ccrr":
 		bundleBytes, err = CCRRTransactionBundleJSON()
+	case "aucore", "au-core":
+		bundleBytes, err = AUCoreTransactionBundleJSON()
 	default:
-		return fmt.Errorf("unknown seed suite %q (expected uscore, plannet, formulary, c4bb, pdex, pas, cpds, usqc, or ccrr)", cfg.Suite)
+		return fmt.Errorf("unknown seed suite %q (expected uscore, plannet, formulary, c4bb, pdex, pas, cpds, usqc, ccrr, or aucore)", cfg.Suite)
 	}
 	if err != nil {
 		return fmt.Errorf("build cohort bundle: %w", err)
@@ -352,6 +354,18 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 				{
 					"url":       "http://hl7.org/fhir/us/core/StructureDefinition/us-core-sex",
 					"valueCode": "248152002",
+				},
+				{
+					"url": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-genderIdentity",
+					"valueCodeableConcept": map[string]any{
+						"coding": []map[string]any{
+							{
+								"system":  "http://snomed.info/sct",
+								"code":    "446141000124107",
+								"display": "Identifies as female gender",
+							},
+						},
+					},
 				},
 				{
 					"url": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-tribal-affiliation",
@@ -1509,13 +1523,28 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			},
 		}),
 		putEntry("QuestionnaireResponse/qr-alice-phq9", map[string]any{
-			"resourceType":  "QuestionnaireResponse",
-			"id":            "qr-alice-phq9",
+			"resourceType": "QuestionnaireResponse",
+			"id":           "qr-alice-phq9",
+			"meta": map[string]any{
+				"tag": []map[string]any{
+					{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-tags", "code": "sdoh", "display": "SDOH"},
+				},
+			},
+			"identifier": map[string]any{
+				"system": "http://hospital.example.org/qr",
+				"value":  "QR-PHQ9-001",
+			},
 			"questionnaire": "http://hl7.org/fhir/us/core/Questionnaire/phq-9-quick-depression-assessment-panel",
-			"status":        "completed",
-			"subject":       map[string]any{"reference": "Patient/pat-alice-001"},
-			"authored":      "2026-01-15T09:19:00Z",
-			"author":        map[string]any{"reference": "Practitioner/prac-cardiology-1"},
+			"_questionnaire": map[string]any{
+				"extension": []map[string]any{
+					{"url": "http://hl7.org/fhir/StructureDefinition/display", "valueString": "PHQ-9 Depression Assessment"},
+					{"url": "http://hl7.org/fhir/us/core/StructureDefinition/us-core-extension-questionnaire-uri", "valueUri": "http://hl7.org/fhir/us/core/Questionnaire/phq-9-quick-depression-assessment-panel"},
+				},
+			},
+			"status":   "completed",
+			"subject":  map[string]any{"reference": "Patient/pat-alice-001"},
+			"authored": "2026-01-15T09:19:00Z",
+			"author":   map[string]any{"reference": "Practitioner/prac-cardiology-1"},
 			"item": []map[string]any{
 				{
 					"linkId": "44250-9",
@@ -1526,6 +1555,26 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 								"system":  "http://loinc.org",
 								"code":    "LA6568-5",
 								"display": "Not at all",
+							},
+						},
+					},
+					"item": []map[string]any{
+						{
+							"linkId": "44250-9-note",
+							"text":   "Patient narrative context",
+							"answer": []map[string]any{
+								{
+									"valueString": "Patient reports no recent loss of interest",
+									"item": []map[string]any{
+										{
+											"linkId": "44250-9-score",
+											"text":   "Numeric sub-score",
+											"answer": []map[string]any{
+												{"valueDecimal": 0.0},
+											},
+										},
+									},
+								},
 							},
 						},
 					},
@@ -1747,6 +1796,11 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 				},
 				{
 					"coding": []map[string]any{
+						{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-tags", "code": "sdoh", "display": "SDOH"},
+					},
+				},
+				{
+					"coding": []map[string]any{
 						{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-category", "code": "sdoh", "display": "SDOH"},
 					},
 				},
@@ -1786,6 +1840,9 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			},
 			"resultsInterpreter": []map[string]any{
 				{"reference": "Practitioner/prac-cardiology-1"},
+			},
+			"media": []map[string]any{
+				{"link": map[string]any{"reference": "Media/media-alice-xray"}},
 			},
 			"presentedForm": []map[string]any{
 				{
@@ -1942,12 +1999,15 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			"status":       "final",
 			"category": []map[string]any{
 				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "survey", "display": "Survey"}}},
+				{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-tags", "code": "sdoh", "display": "SDOH"}}},
 				{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-category", "code": "sdoh", "display": "SDOH"}}},
 			},
 			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "93030-5", "display": "Has lack of transportation kept you from medical appointments, meetings, work, or from getting things needed for daily living"}}},
 			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
 			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
 			"effectiveDateTime": "2026-01-15T09:17:00Z",
+			"derivedFrom":       []map[string]any{{"reference": "QuestionnaireResponse/qr-alice-phq9"}},
+			"hasMember":         []map[string]any{{"reference": "Observation/obs-alice-sdoh-score"}},
 			"valueCodeableConcept": map[string]any{
 				"coding": []map[string]any{
 					{"system": "http://loinc.org", "code": "LA32-8", "display": "No"},
@@ -2100,6 +2160,64 @@ func CohortTransactionBundleJSON() ([]byte, error) {
 			"dosage": []map[string]any{
 				{"text": "Take 1 tablet by mouth nightly"},
 			},
+		}),
+		putEntry("Media/media-alice-xray", map[string]any{
+			"resourceType": "Media",
+			"id":           "media-alice-xray",
+			"status":       "completed",
+			"subject":      map[string]any{"reference": "Patient/pat-alice-001"},
+			"content": map[string]any{
+				"contentType": "image/png",
+				"title":       "Chest X-Ray Image",
+			},
+		}),
+		putEntry("Observation/obs-alice-sexual-orientation", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-sexual-orientation",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "social-history", "display": "Social History"}}},
+				{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-tags", "code": "sdoh", "display": "SDOH"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "76690-7", "display": "Sexual orientation"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:16:00Z",
+			"valueCodeableConcept": map[string]any{
+				"coding": []map[string]any{
+					{"system": "http://snomed.info/sct", "code": "20430005", "display": "Heterosexual"},
+				},
+			},
+		}),
+		putEntry("Observation/obs-alice-clinical-test", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-clinical-test",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-observation-category", "code": "clinical-test", "display": "Clinical Test"}}},
+				{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-category", "code": "clinical-test", "display": "Clinical Test"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "34534-8", "display": "EKG 12 channel panel"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:35:00Z",
+			"valueString":       "Normal sinus rhythm",
+		}),
+		putEntry("Observation/obs-alice-sdoh-score", map[string]any{
+			"resourceType": "Observation",
+			"id":           "obs-alice-sdoh-score",
+			"status":       "final",
+			"category": []map[string]any{
+				{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "survey", "display": "Survey"}}},
+				{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-tags", "code": "sdoh", "display": "SDOH"}}},
+				{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/core/CodeSystem/us-core-category", "code": "sdoh", "display": "SDOH"}}},
+			},
+			"code":              map[string]any{"coding": []map[string]any{{"system": "http://loinc.org", "code": "44250-9", "display": "Little interest or pleasure in doing things"}}},
+			"subject":           map[string]any{"reference": "Patient/pat-alice-001"},
+			"performer":         []map[string]any{{"reference": "Practitioner/prac-cardiology-1"}},
+			"effectiveDateTime": "2026-01-15T09:19:00Z",
+			"derivedFrom":       []map[string]any{{"reference": "QuestionnaireResponse/qr-alice-phq9"}},
+			"valueQuantity":     map[string]any{"value": 0.0, "unit": "{score}", "system": "http://unitsofmeasure.org", "code": "{score}"},
 		}),
 	}
 

@@ -2307,6 +2307,158 @@ var usCoreProfileSpecs = map[string]usCoreProfileSpec{
 		ResourceType:   "Device",
 		RequiredFields: []string{"deviceName"},
 	},
+	// HL7 SMART App Launch STU2.2 User-Access Brands profiles
+	"http://hl7.org/fhir/smart-app-launch/StructureDefinition/user-access-brands-bundle": {
+		Slug:           "user-access-brands-bundle",
+		ResourceType:   "Bundle",
+		RequiredFields: []string{"type", "timestamp", "entry"},
+		CustomCheck: func(resType string, resMap map[string]any, outcome *Outcome) {
+			if extractStringOrWrapped(resMap["type"]) != "collection" {
+				outcome.AddError(CodeInvalid, "user-access-brands-bundle requires Bundle.type == 'collection'", "Bundle.type")
+			}
+		},
+	},
+	"http://hl7.org/fhir/smart-app-launch/StructureDefinition/user-access-brand": {
+		Slug:           "user-access-brand",
+		ResourceType:   "Organization",
+		RequiredFields: []string{"active", "name"},
+	},
+	"http://hl7.org/fhir/smart-app-launch/StructureDefinition/user-access-endpoint": {
+		Slug:           "user-access-endpoint",
+		ResourceType:   "Endpoint",
+		RequiredFields: []string{"status", "connectionType", "payloadType", "address"},
+	},
+	// HL7 AU Core v1.0.0 & v2.0.0 profiles
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-patient": {
+		Slug:           "au-core-patient",
+		ResourceType:   "Patient",
+		RequiredFields: []string{"name"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-allergyintolerance": {
+		Slug:           "au-core-allergyintolerance",
+		ResourceType:   "AllergyIntolerance",
+		RequiredFields: []string{"code", "patient"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-condition": {
+		Slug:           "au-core-condition",
+		ResourceType:   "Condition",
+		RequiredFields: []string{"code", "subject"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-encounter": {
+		Slug:           "au-core-encounter",
+		ResourceType:   "Encounter",
+		RequiredFields: []string{"status", "class", "subject"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-immunization": {
+		Slug:           "au-core-immunization",
+		ResourceType:   "Immunization",
+		RequiredFields: []string{"status", "vaccineCode", "patient", "occurrence[x]"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-location": {
+		Slug:           "au-core-location",
+		ResourceType:   "Location",
+		RequiredFields: []string{"name"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-medication": {
+		Slug:           "au-core-medication",
+		ResourceType:   "Medication",
+		RequiredFields: []string{"code"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-medicationrequest": {
+		Slug:           "au-core-medicationrequest",
+		ResourceType:   "MedicationRequest",
+		RequiredFields: []string{"status", "intent", "medication[x]", "subject"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-medicationstatement": {
+		Slug:           "au-core-medicationstatement",
+		ResourceType:   "MedicationStatement",
+		RequiredFields: []string{"status", "medication[x]", "subject"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-organization": {
+		Slug:           "au-core-organization",
+		ResourceType:   "Organization",
+		RequiredFields: []string{"name"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-practitioner": {
+		Slug:           "au-core-practitioner",
+		ResourceType:   "Practitioner",
+		RequiredFields: []string{"name"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-practitionerrole": {
+		Slug:           "au-core-practitionerrole",
+		ResourceType:   "PractitionerRole",
+		RequiredFields: []string{"practitioner|organization|code|specialty"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-procedure": {
+		Slug:           "au-core-procedure",
+		ResourceType:   "Procedure",
+		RequiredFields: []string{"status", "code", "subject"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-relatedperson": {
+		Slug:           "au-core-relatedperson",
+		ResourceType:   "RelatedPerson",
+		RequiredFields: []string{"patient"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-healthcareservice": {
+		Slug:           "au-core-healthcareservice",
+		ResourceType:   "HealthcareService",
+		RequiredFields: []string{"name"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-bodyweight": {
+		Slug:           "au-core-bodyweight",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-bloodpressure": {
+		Slug:           "au-core-bloodpressure",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-bodyheight": {
+		Slug:           "au-core-bodyheight",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-bodytemp": {
+		Slug:           "au-core-bodytemp",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-heartrate": {
+		Slug:           "au-core-heartrate",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-waistcircum": {
+		Slug:           "au-core-waistcircum",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-resprate": {
+		Slug:           "au-core-resprate",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject", "effective[x]"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-diagnosticresult": {
+		Slug:           "au-core-diagnosticresult",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-diagnosticresult-path": {
+		Slug:           "au-core-diagnosticresult-path",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "category", "code", "subject"},
+	},
+	"http://hl7.org.au/fhir/core/StructureDefinition/au-core-smokingstatus": {
+		Slug:           "au-core-smokingstatus",
+		ResourceType:   "Observation",
+		RequiredFields: []string{"status", "code", "subject"},
+	},
+	"http://hl7.org.au/fhir/StructureDefinition/au-diagnosticreport": {
+		Slug:           "au-diagnosticreport",
+		ResourceType:   "DiagnosticReport",
+		RequiredFields: []string{"status", "code", "subject"},
+	},
 }
 
 func resolveUSQualityCoreProfileSpec(baseProf string) (usCoreProfileSpec, bool) {

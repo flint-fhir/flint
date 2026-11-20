@@ -1,0 +1,11 @@
+development:
+  adapter: sqlite
+  database: <%= ENV.fetch('INFERNO_DB', 'data/inferno_development.db') %>
+
+test:
+  adapter: sqlite
+  database: <%= ENV.fetch('INFERNO_DB', 'data/inferno_test.db') %>
+
+production:
+  adapter: sqlite
+  database: <%= ENV.fetch('INFERNO_DB', 'data/inferno_production.db') %>

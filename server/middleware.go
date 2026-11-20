@@ -32,6 +32,28 @@ type auditActorHolder struct {
 	subtypeCode  string
 }
 
+// corsMiddleware emits CORS headers for SMART App Launch STU2.2 browser-based
+// clients and answers generic OPTIONS preflight requests cleanly.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		path := strings.Trim(r.URL.Path, "/")
+		isDiscovery := strings.Contains(path, ".well-known/") || strings.HasSuffix(path, "/metadata") || path == "metadata"
+		if origin != "" || isDiscovery {
+			if w.Header().Get("Access-Control-Allow-Origin") == "" {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			}
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Accept, Origin, If-Match, If-None-Exist, If-None-Match, Prefer, X-Purpose-Of-Use, X-TEFCA-Exchange-Purpose")
+			if r.Method == http.MethodOptions && !strings.HasPrefix(path, "shlink/") {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // authMiddleware enforces SMART on FHIR bearer token authentication,
 // scope checking, and patient compartment isolation.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {

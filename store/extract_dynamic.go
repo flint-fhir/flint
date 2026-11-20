@@ -1445,6 +1445,11 @@ func processSingleExtension(idx *SearchIndexes, tenantID, resType, resID string,
 		matched = append(matched, struct{ code, typ string }{"birthsex", "token"})
 	case "http://hl7.org/fhir/5.0/structuredefinition/extension-devicerequest.donotperform":
 		matched = append(matched, struct{ code, typ string }{"do-not-perform", "token"})
+	case "http://hl7.org.au/fhir/structuredefinition/indigenous-status":
+		matched = append(matched, struct{ code, typ string }{"indigenous-status", "token"})
+	case "http://hl7.org/fhir/structuredefinition/individual-genderidentity",
+		"http://hl7.org/fhir/us/core/structuredefinition/us-core-genderidentity":
+		matched = append(matched, struct{ code, typ string }{"gender-identity", "token"})
 	}
 
 	lowerURL := strings.ToLower(extURL)

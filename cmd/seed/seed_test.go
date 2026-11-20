@@ -37,7 +37,7 @@ func TestCohortTransactionBundle_ValidatesAllResources(t *testing.T) {
 	require.NoError(t, json.Unmarshal(bundleBytes, &bundle))
 	assert.Equal(t, "Bundle", bundle.ResourceType)
 	assert.Equal(t, "transaction", bundle.Type)
-	assert.Len(t, bundle.Entry, 68)
+	assert.Len(t, bundle.Entry, 72)
 
 	engine := validation.NewEngine(validation.DefaultOptions())
 	seenTypes := make(map[string]bool)
@@ -51,7 +51,7 @@ func TestCohortTransactionBundle_ValidatesAllResources(t *testing.T) {
 		outcome := engine.ValidateJSON("", entry.Resource)
 		assert.True(t, outcome.IsValid(), "expected seeded resource %s to pass FHIR R4 validation: %v", entry.FullURL, outcome.Issues)
 	}
-	assert.Len(t, seenTypes, 27, "expected all 26 US Core v6.1.0 & v7.0.0 resource types + MedicationStatement (HL7 IPA) in seed bundle")
+	assert.Len(t, seenTypes, 28, "expected all US Core v5.0.1/v6.1.0/v7.0.0/v8.0.0 resource types + MedicationStatement + Media in seed bundle")
 	for _, rt := range fhirutil.USCoreResourceTypes() {
 		assert.True(t, seenTypes[rt], "missing US Core resource type %s in seed cohort", rt)
 	}
@@ -72,7 +72,7 @@ func TestSeedRun_UnitHTTP(t *testing.T) {
 		var b map[string]any
 		require.NoError(t, json.Unmarshal(body, &b))
 		entries := b["entry"].([]any)
-		assert.Len(t, entries, 68)
+		assert.Len(t, entries, 72)
 
 		respEntries := make([]map[string]any, len(entries))
 		for i, rawEntry := range entries {
@@ -106,7 +106,7 @@ func TestSeedRun_UnitHTTP(t *testing.T) {
 		Out:         &buf,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, buf.String(), `Seeded 68 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "demo"`)
+	assert.Contains(t, buf.String(), `Seeded 72 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "demo"`)
 	assert.Contains(t, buf.String(), "Practitioner/prac-cardiology-1")
 	assert.Contains(t, buf.String(), "Patient/pat-alice-001/$everything")
 }
@@ -189,7 +189,7 @@ func TestSeedRun_EndToEndIntegration(t *testing.T) {
 		Out:        &buf,
 	})
 	require.NoError(t, err)
-	assert.Contains(t, buf.String(), `Seeded 68 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "test-seed"`)
+	assert.Contains(t, buf.String(), `Seeded 72 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "test-seed"`)
 
 	// Verify Patient/$everything for Alice returns full longitudinal chart across all linked US Core & IPA profiles
 	resp, err := http.Get(ts.URL + "/fhir/r4/test-seed/Patient/pat-alice-001/$everything")
@@ -199,7 +199,7 @@ func TestSeedRun_EndToEndIntegration(t *testing.T) {
 
 	var evBundle map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&evBundle))
-	assert.Equal(t, 53, int(evBundle["total"].(float64)))
+	assert.Equal(t, 57, int(evBundle["total"].(float64)))
 }
 
 func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
@@ -219,7 +219,7 @@ func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
 		HTTPClient: ts.Client(),
 		Out:        &buf,
 	}))
-	assert.Contains(t, buf.String(), `Seeded 68 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "demo"`)
+	assert.Contains(t, buf.String(), `Seeded 72 FHIR R4 resources (all 26 US Core v6.1.0 & v7.0.0 + HL7 IPA profiles) into tenant "demo"`)
 
 	engine := validation.NewEngine(validation.DefaultOptions())
 
@@ -277,11 +277,11 @@ func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
 		assert.Equal(t, 1, int(b["total"].(float64)), "expected exact timestamp search %s to return 1 resource", query)
 	}
 
-	// 6. Patient/$everything for Alice returns all 53 longitudinal resources
+	// 6. Patient/$everything for Alice returns all 57 longitudinal resources
 	evBytes := getRaw("/fhir/r4/demo/Patient/pat-alice-001/$everything")
 	var evBundle map[string]any
 	require.NoError(t, json.Unmarshal(evBytes, &evBundle))
-	assert.Equal(t, 53, int(evBundle["total"].(float64)))
+	assert.Equal(t, 57, int(evBundle["total"].(float64)))
 
 	// 7. US Core v8.0.0 ADI DocumentReference & Observation ADI Documentation round-trip & profile validation
 	adiDocBytes := getRaw("/fhir/r4/demo/DocumentReference/docref-alice-adi")
@@ -293,8 +293,8 @@ func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
 	assert.True(t, adiObsOutcome.IsValid(), "Observation ADI Documentation v8.0.0 validation failed: %+v", adiObsOutcome.Issues)
 
 	// 8. Seed Da Vinci Plan-Net (plannet), US Drug Formulary (formulary), CARIN Blue Button (c4bb),
-	// Da Vinci PDex (pdex), Da Vinci PAS (pas), CPDS (cpds), US Quality Core (usqc), & CCRR (ccrr) cohorts
-	for _, suiteName := range []string{"plannet", "formulary", "c4bb", "pdex", "pas", "cpds", "usqc", "ccrr"} {
+	// Da Vinci PDex (pdex), Da Vinci PAS (pas), CPDS (cpds), US Quality Core (usqc), CCRR (ccrr), & AU Core (aucore) cohorts
+	for _, suiteName := range []string{"plannet", "formulary", "c4bb", "pdex", "pas", "cpds", "usqc", "ccrr", "aucore"} {
 		require.NoError(t, Run(t.Context(), Config{
 			BaseURL:    ts.URL,
 			Tenant:     suiteName,
@@ -310,6 +310,7 @@ func TestSeedRun_SQLiteRoundTripAndUSCoreConformance(t *testing.T) {
 		CPDSTransactionBundleJSON,
 		USQCTransactionBundleJSON,
 		CCRRTransactionBundleJSON,
+		AUCoreTransactionBundleJSON,
 	} {
 		rawBundle, err := fn()
 		require.NoError(t, err)

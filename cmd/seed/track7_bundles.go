@@ -207,6 +207,7 @@ func C4BBTransactionBundleJSON() ([]byte, error) {
 				{
 					"line":       []string{"742 Evergreen Terrace"},
 					"city":       "Boston",
+					"district":   "Suffolk",
 					"state":      "MA",
 					"postalCode": "02115",
 					"country":    "US",
@@ -440,6 +441,7 @@ func C4BBTransactionBundleJSON() ([]byte, error) {
 				c4bbSupportingInfo(7, "drg", map[string]any{"code": map[string]any{"coding": []map[string]any{{"system": "https://www.cms.gov/Medicare/Medicare-Fee-for-Service-Payment/AcuteInpatientPPS/MS-DRG-Classifications-and-Software", "code": "291"}}}}),
 				c4bbSupportingInfo(8, "medicalrecordnumber", map[string]any{"valueString": "MRN-ALICE-001"}),
 				c4bbSupportingInfo(9, "patientaccountnumber", map[string]any{"valueString": "ACCT-ALICE-001"}),
+				c4bbSupportingInfo(10, "billingnetworkcontractingstatus", map[string]any{"code": map[string]any{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/carin-bb/CodeSystem/C4BBPayerAdjudicationStatus", "code": "contracted"}}}}),
 			},
 			"diagnosis": []map[string]any{
 				{
@@ -489,6 +491,7 @@ func C4BBTransactionBundleJSON() ([]byte, error) {
 						c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "submitted", 4200.00),
 						c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "benefit", 3800.00),
 						c4bbDiscrimAdj("adjustmentreason", map[string]any{"reason": adjReasonCC}),
+						c4bbDiscrimAdj("denialreason", map[string]any{"reason": adjReasonCC}),
 						c4bbDiscrimAdj("allowedunits", map[string]any{"value": 4}),
 					},
 				},
@@ -496,12 +499,14 @@ func C4BBTransactionBundleJSON() ([]byte, error) {
 			"adjudication": []map[string]any{
 				c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "submitted", 4200.00),
 				c4bbDiscrimAdj("adjustmentreason", map[string]any{"reason": adjReasonCC}),
+				c4bbDiscrimAdj("denialreason", map[string]any{"reason": adjReasonCC}),
 				c4bbDiscrimAdj("billingnetworkstatus", map[string]any{"reason": pnoReason}),
 				c4bbDiscrimAdj("benefitpaymentstatus", map[string]any{"reason": paidReason}),
 			},
 			"total": []map[string]any{
 				c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "submitted", 4200.00),
 				c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "benefit", 3800.00),
+				c4bbAmountAdj("http://hl7.org/fhir/us/carin-bb/CodeSystem/C4BBPayerAdjudicationStatus", "innetwork", 3800.00),
 			},
 			"payment": map[string]any{
 				"type": map[string]any{
@@ -577,6 +582,7 @@ func C4BBTransactionBundleJSON() ([]byte, error) {
 				c4bbSupportingInfo(5, "discharge-status", map[string]any{"code": map[string]any{"coding": []map[string]any{{"system": "https://www.nubc.org/CodeSystem/PatDischargeStatus", "code": "01"}}}}),
 				c4bbSupportingInfo(6, "medicalrecordnumber", map[string]any{"valueString": "MRN-ALICE-001"}),
 				c4bbSupportingInfo(7, "patientaccountnumber", map[string]any{"valueString": "ACCT-ALICE-002"}),
+				c4bbSupportingInfo(8, "billingnetworkcontractingstatus", map[string]any{"code": map[string]any{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/carin-bb/CodeSystem/C4BBPayerAdjudicationStatus", "code": "contracted"}}}}),
 			},
 			"diagnosis": []map[string]any{
 				{
@@ -611,6 +617,7 @@ func C4BBTransactionBundleJSON() ([]byte, error) {
 						c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "submitted", 250.00),
 						c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "benefit", 210.00),
 						c4bbDiscrimAdj("adjustmentreason", map[string]any{"reason": adjReasonCC}),
+						c4bbDiscrimAdj("denialreason", map[string]any{"reason": adjReasonCC}),
 						c4bbDiscrimAdj("allowedunits", map[string]any{"value": 1}),
 					},
 				},
@@ -618,12 +625,14 @@ func C4BBTransactionBundleJSON() ([]byte, error) {
 			"adjudication": []map[string]any{
 				c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "submitted", 250.00),
 				c4bbDiscrimAdj("adjustmentreason", map[string]any{"reason": adjReasonCC}),
+				c4bbDiscrimAdj("denialreason", map[string]any{"reason": adjReasonCC}),
 				c4bbDiscrimAdj("billingnetworkstatus", map[string]any{"reason": pnoReason}),
 				c4bbDiscrimAdj("benefitpaymentstatus", map[string]any{"reason": paidReason}),
 			},
 			"total": []map[string]any{
 				c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "submitted", 250.00),
 				c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "benefit", 210.00),
+				c4bbAmountAdj("http://hl7.org/fhir/us/carin-bb/CodeSystem/C4BBPayerAdjudicationStatus", "innetwork", 210.00),
 			},
 			"payment": map[string]any{
 				"type": map[string]any{
@@ -821,6 +830,7 @@ func C4BBTransactionBundleJSON() ([]byte, error) {
 				c4bbSupportingInfo(6, "rxorigincode", map[string]any{"code": map[string]any{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/NCPDPRxOriginCode", "code": "3"}}}}),
 				c4bbSupportingInfo(7, "clmrecvddate", map[string]any{"timingDate": "2026-03-15"}),
 				c4bbSupportingInfo(8, "compoundcode", map[string]any{"code": map[string]any{"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/NCPDPCompoundCode", "code": "1"}}}}),
+				c4bbSupportingInfo(9, "billingnetworkcontractingstatus", map[string]any{"code": map[string]any{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/carin-bb/CodeSystem/C4BBPayerAdjudicationStatus", "code": "contracted"}}}}),
 			},
 			"insurance": []map[string]any{
 				{"focal": true, "coverage": map[string]any{"reference": "Coverage/cov-c4bb-001"}},
@@ -837,6 +847,7 @@ func C4BBTransactionBundleJSON() ([]byte, error) {
 					"adjudication": []map[string]any{
 						c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "submitted", 45.00),
 						c4bbAmountAdj("http://hl7.org/fhir/us/carin-bb/CodeSystem/C4BBAdjudication", "drugcost", 40.00),
+						c4bbDiscrimAdj("denialreason", map[string]any{"reason": adjReasonCC}),
 						c4bbDiscrimAdj("rejectreason", map[string]any{
 							"reason": map[string]any{
 								"coding": []map[string]any{{"system": "http://terminology.hl7.org/CodeSystem/NCPDPRejectCode", "code": "70"}},
@@ -861,6 +872,7 @@ func C4BBTransactionBundleJSON() ([]byte, error) {
 			"total": []map[string]any{
 				c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "submitted", 45.00),
 				c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "benefit", 35.00),
+				c4bbAmountAdj("http://hl7.org/fhir/us/carin-bb/CodeSystem/C4BBPayerAdjudicationStatus", "innetwork", 35.00),
 			},
 			"payment": map[string]any{
 				"type": map[string]any{
@@ -938,6 +950,8 @@ func C4BBTransactionBundleJSON() ([]byte, error) {
 				c4bbSupportingInfo(9, "stretcherpurpose", map[string]any{"valueString": "Cardiac monitoring required"}),
 				c4bbSupportingInfo(10, "pickuplocation", map[string]any{"valueString": "742 Evergreen Terrace, Boston, MA"}),
 				c4bbSupportingInfo(11, "dropofflocation", map[string]any{"valueString": "55 Fruit Street, Boston, MA"}),
+				c4bbSupportingInfo(12, "billingnetworkcontractingstatus", map[string]any{"code": map[string]any{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/carin-bb/CodeSystem/C4BBPayerAdjudicationStatus", "code": "contracted"}}}}),
+				c4bbSupportingInfo(13, "performingnetworkcontractingstatus", map[string]any{"code": map[string]any{"coding": []map[string]any{{"system": "http://hl7.org/fhir/us/carin-bb/CodeSystem/C4BBPayerAdjudicationStatus", "code": "contracted"}}}}),
 			},
 			"diagnosis": []map[string]any{
 				{
@@ -971,6 +985,7 @@ func C4BBTransactionBundleJSON() ([]byte, error) {
 					"adjudication": []map[string]any{
 						c4bbAmountAdj("http://terminology.hl7.org/CodeSystem/adjudication", "submitted", 180.00),
 						c4bbDiscrimAdj("adjustmentreason", map[string]any{"reason": adjReasonCC}),
+						c4bbDiscrimAdj("denialreason", map[string]any{"reason": adjReasonCC}),
 						c4bbDiscrimAdj("benefitpaymentstatus", map[string]any{"reason": paidReason}),
 						c4bbDiscrimAdj("allowedunits", map[string]any{"value": 1}),
 					},

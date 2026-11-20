@@ -532,23 +532,30 @@ func (s *Server) resolveSMARTConfig(r *http.Request) SMARTConfig {
 	return s.resolveSMARTConfigForTenant(r, r.PathValue("tenant"))
 }
 
-func (s *Server) resolveSMARTConfigForTenant(r *http.Request, explicitTenant string) SMARTConfig {
+func requestOrigin(r *http.Request) string {
 	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+	if r != nil && (r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https") {
 		scheme = "https"
 	}
-	host := r.Host
+	host := ""
+	if r != nil {
+		host = r.Host
+	}
 	if host == "" {
 		host = "localhost:8080"
 	}
+	return scheme + "://" + host
+}
+
+func (s *Server) resolveSMARTConfigForTenant(r *http.Request, explicitTenant string) SMARTConfig {
 	tenant := strings.TrimSpace(explicitTenant)
-	if tenant == "" {
+	if tenant == "" && r != nil {
 		tenant = strings.TrimSpace(r.PathValue("tenant"))
 	}
 	if tenant == "" {
 		tenant = "default"
 	}
-	baseOrigin := scheme + "://" + host
+	baseOrigin := requestOrigin(r)
 	defaultCfg := SMARTConfig{
 		Issuer:                baseOrigin + "/fhir/r4/" + tenant,
 		AuthorizationEndpoint: baseOrigin + "/oauth2/authorize",

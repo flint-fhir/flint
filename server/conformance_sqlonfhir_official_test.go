@@ -48,19 +48,47 @@ type officialSQLOnFHIRSuite struct {
 }
 
 // TestOfficialSQLOnFHIRv2ComplianceSuite executes all 22 official HL7/FHIR sql-on-fhir-v2
-// JSON conformance test suites against POST /fhir/r4/{tenant}/ViewDefinition/$run.
+// JSON conformance test suites against POST /fhir/r4/{tenant}/ViewDefinition/$run
+// across both PostgreSQL and live SQLite backends.
 func TestOfficialSQLOnFHIRv2ComplianceSuite(t *testing.T) {
-	db := openMemPostgres(t)
-	defer db.Close()
-
-	pgStore := postgres.New(db, postgres.WithTenantIsolation(postgres.TenantIsolationShared))
+	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := server.New(pgStore, logger)
-	server.RegisterDefaultResourceTypes(srv)
 
-	ts := httptest.NewServer(srv.Handler())
-	defer ts.Close()
-	client := ts.Client()
+	t.Run("postgres", func(t *testing.T) {
+		pgDB := openMemPostgres(t)
+		defer pgDB.Close()
+
+		pgStore := postgres.New(pgDB, postgres.WithTenantIsolation(postgres.TenantIsolationShared))
+		srv := server.New(pgStore, logger)
+		server.RegisterDefaultResourceTypes(srv)
+
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+
+		runOfficialSQLOnFHIRv2Suite(t, ts.URL, ts.Client())
+	})
+
+	t.Run("sqlite", func(t *testing.T) {
+		sqPath := filepath.Join(t.TempDir(), "sof-official.db")
+		sqDB, err := sql.Open("sqlite", sqPath)
+		require.NoError(t, err)
+		defer sqDB.Close()
+		sqDB.SetMaxOpenConns(1)
+		require.NoError(t, sqlite.RunMigrations(ctx, sqDB, sqlite.JournalWAL))
+
+		sqStore := sqlite.New(sqDB, sqlite.WithJournalMode(sqlite.JournalWAL), sqlite.WithDSN(sqPath))
+		srv := server.New(sqStore, logger)
+		server.RegisterDefaultResourceTypes(srv)
+
+		ts := httptest.NewServer(srv.Handler())
+		defer ts.Close()
+
+		runOfficialSQLOnFHIRv2Suite(t, ts.URL, ts.Client())
+	})
+}
+
+func runOfficialSQLOnFHIRv2Suite(t *testing.T, baseURL string, client *http.Client) {
+	t.Helper()
 
 	suiteFiles, err := filepath.Glob(filepath.Join("testdata", "sql-on-fhir-v2", "*.json"))
 	require.NoError(t, err)
@@ -101,7 +129,7 @@ func TestOfficialSQLOnFHIRv2ComplianceSuite(t *testing.T) {
 					})
 					require.NoError(t, err)
 
-					req, err := http.NewRequest(http.MethodPost, ts.URL+"/fhir/r4/sof-official/ViewDefinition/$run", bytes.NewReader(reqBody))
+					req, err := http.NewRequest(http.MethodPost, baseURL+"/fhir/r4/sof-official/ViewDefinition/$run", bytes.NewReader(reqBody))
 					require.NoError(t, err)
 					req.Header.Set("Content-Type", "application/fhir+json")
 					req.Header.Set("Accept", "application/json")
@@ -304,7 +332,7 @@ func TestSQLOnFHIR_LiveCompiledSQLExecutionEquivalence(t *testing.T) {
 	}{
 		{
 			path: "Patient/p-alice",
-			body: `{"resourceType":"Patient","id":"p-alice","active":true,"gender":"female","birthDate":"1985-04-12","name":[{"use":"official","family":"Nguyen","given":["Alice"]}]}`,
+			body: `{"resourceType":"Patient","id":"p-alice","active":true,"gender":"female","birthDate":"1985-04-12","identifier":[{"system":"http://hospital.example.org/mrn","value":"MRN-ALICE"}],"name":[{"use":"official","family":"Nguyen","given":["Alice"]}]}`,
 		},
 		{
 			path: "Patient/p-bob",
@@ -377,6 +405,79 @@ func TestSQLOnFHIR_LiveCompiledSQLExecutionEquivalence(t *testing.T) {
 				}]
 			}`,
 		},
+		{
+			name: "custom_patient_foreach_given",
+			inlineVD: `{
+				"resourceType": "ViewDefinition",
+				"resource": "Patient",
+				"select": [{
+					"forEach": "name.given",
+					"column": [
+						{"name": "id", "path": "getResourceKey()"},
+						{"name": "given", "path": "$this"}
+					]
+				}]
+			}`,
+		},
+		{
+			name: "custom_patient_foreach_identifier",
+			inlineVD: `{
+				"resourceType": "ViewDefinition",
+				"resource": "Patient",
+				"select": [{
+					"forEach": "identifier",
+					"column": [
+						{"name": "id", "path": "getResourceKey()"},
+						{"name": "id_system", "path": "system"},
+						{"name": "id_value", "path": "value"}
+					]
+				}]
+			}`,
+		},
+		{
+			name: "custom_patient_foreach_or_null_identifier",
+			inlineVD: `{
+				"resourceType": "ViewDefinition",
+				"resource": "Patient",
+				"select": [{
+					"forEachOrNull": "identifier",
+					"column": [
+						{"name": "id", "path": "getResourceKey()"},
+						{"name": "gender", "path": "%resource.gender"},
+						{"name": "id_system", "path": "system"},
+						{"name": "id_value", "path": "value"}
+					]
+				}]
+			}`,
+		},
+		{
+			name: "custom_condition_reference_key",
+			inlineVD: `{
+				"resourceType": "ViewDefinition",
+				"resource": "Condition",
+				"select": [{
+					"column": [
+						{"name": "id", "path": "getResourceKey()"},
+						{"name": "patient_id", "path": "subject.getReferenceKey('Patient')"},
+						{"name": "code", "path": "code.coding.code.first()"}
+					]
+				}]
+			}`,
+		},
+		{
+			name: "custom_patient_union_all",
+			inlineVD: `{
+				"resourceType": "ViewDefinition",
+				"resource": "Patient",
+				"select": [{
+					"column": [{"name": "id", "path": "getResourceKey()"}],
+					"unionAll": [
+						{"column": [{"name": "name_part", "path": "name.family.first()"}, {"name": "part_kind", "path": "'family'"}]},
+						{"column": [{"name": "name_part", "path": "name.given.first()"}, {"name": "part_kind", "path": "'given'"}]}
+					]
+				}]
+			}`,
+		},
 	}
 
 	backends := []struct {
@@ -435,12 +536,7 @@ func TestSQLOnFHIR_LiveCompiledSQLExecutionEquivalence(t *testing.T) {
 					sqlRows := queryLiveSQLRows(t, ctx, bk.sqlDB, compiledSQL)
 					require.Equal(t, len(runRows), len(sqlRows), "row count mismatch for SQL:\n%s\nrunRows=%v\nsqlRows=%v", compiledSQL, runRows, sqlRows)
 
-					for i := range runRows {
-						for colName, expVal := range runRows[i] {
-							gotVal := sqlRows[i][colName]
-							assertLiveSQLCellMatchesRun(t, colName, expVal, gotVal, compiledSQL)
-						}
-					}
+					assertLiveSQLRowsMatchRun(t, runRows, sqlRows, compiledSQL)
 				})
 			}
 		})
@@ -479,25 +575,61 @@ func queryLiveSQLRows(t *testing.T, ctx context.Context, db *sql.DB, query strin
 	return out
 }
 
-func assertLiveSQLCellMatchesRun(t *testing.T, col string, expVal, gotVal any, compiledSQL string) {
+func assertLiveSQLRowsMatchRun(t *testing.T, runRows, sqlRows []map[string]any, compiledSQL string) {
 	t.Helper()
-	if expVal == nil {
-		assert.Nil(t, gotVal, "column %s expected nil in SQL:\n%s", col, compiledSQL)
-		return
+	used := make([]bool, len(sqlRows))
+	var backtrack func(idx int) bool
+	backtrack = func(idx int) bool {
+		if idx == len(runRows) {
+			return true
+		}
+		for j, gotRow := range sqlRows {
+			if used[j] {
+				continue
+			}
+			if liveSQLRowMatchesRun(runRows[idx], gotRow, compiledSQL) {
+				used[j] = true
+				if backtrack(idx + 1) {
+					return true
+				}
+				used[j] = false
+			}
+		}
+		return false
 	}
-	require.NotNil(t, gotVal, "column %s unexpectedly nil in SQL:\n%s (expected %v)", col, compiledSQL, expVal)
+	if !backtrack(0) {
+		t.Fatalf("live SQL rows do not match $run rows as multiset for SQL:\n%s\nrunRows=%v\nsqlRows=%v", compiledSQL, runRows, sqlRows)
+	}
+}
+
+func liveSQLRowMatchesRun(expRow, gotRow map[string]any, compiledSQL string) bool {
+	for colName, expVal := range expRow {
+		if !liveSQLCellMatchesRun(colName, expVal, gotRow[colName], compiledSQL) {
+			return false
+		}
+	}
+	return true
+}
+
+func liveSQLCellMatchesRun(col string, expVal, gotVal any, compiledSQL string) bool {
+	if expVal == nil {
+		return gotVal == nil
+	}
+	if gotVal == nil {
+		return false
+	}
 
 	switch ev := expVal.(type) {
 	case bool:
 		switch gv := gotVal.(type) {
 		case bool:
-			assert.Equal(t, ev, gv, "column %s", col)
+			return ev == gv
 		case int64:
-			assert.Equal(t, ev, gv != 0, "column %s", col)
+			return ev == (gv != 0)
 		case string:
-			assert.Equal(t, strconv.FormatBool(ev), strings.ToLower(gv), "column %s", col)
+			return strconv.FormatBool(ev) == strings.ToLower(gv)
 		default:
-			t.Fatalf("column %s unexpected SQL bool type %T (%v)", col, gotVal, gotVal)
+			return false
 		}
 	case float64:
 		var gf float64
@@ -508,12 +640,14 @@ func assertLiveSQLCellMatchesRun(t *testing.T, col string, expVal, gotVal any, c
 			gf = float64(gv)
 		case string:
 			parsed, err := strconv.ParseFloat(gv, 64)
-			require.NoError(t, err, "column %s parse float %q", col, gv)
+			if err != nil {
+				return false
+			}
 			gf = parsed
 		default:
-			t.Fatalf("column %s unexpected SQL numeric type %T (%v)", col, gotVal, gotVal)
+			return false
 		}
-		assert.InDelta(t, ev, gf, 1e-6, "column %s", col)
+		return math.Abs(ev-gf) <= 1e-6
 	case string:
 		var gs string
 		if tv, ok := gotVal.(time.Time); ok {
@@ -525,13 +659,12 @@ func assertLiveSQLCellMatchesRun(t *testing.T, col string, expVal, gotVal any, c
 		if len(ev) == 10 && len(gs) > 10 && strings.HasPrefix(gs, ev) {
 			gs = gs[:10]
 		}
-		// spidx_string stores case-folded normalized FHIR string search values (e.g. family/given)
-		if (col == "family" || col == "given") && strings.Contains(compiledSQL, "FROM spidx_string") {
-			assert.Equal(t, strings.ToLower(ev), gs, "column %s (spidx_string case-folded)", col)
-			return
+		// spidx_string stores case-folded normalized FHIR string search values (e.g. family/given/name_part)
+		if (col == "family" || col == "given" || col == "name_part") && strings.Contains(compiledSQL, "spidx_string") {
+			return strings.ToLower(ev) == gs
 		}
-		assert.Equal(t, ev, gs, "column %s", col)
+		return ev == gs
 	default:
-		assert.Equal(t, fmt.Sprintf("%v", ev), fmt.Sprintf("%v", gotVal), "column %s", col)
+		return fmt.Sprintf("%v", ev) == fmt.Sprintf("%v", gotVal)
 	}
 }
