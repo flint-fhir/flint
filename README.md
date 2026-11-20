@@ -258,9 +258,19 @@ CLI flags: `--version`, `--store=postgres|sqlite|doris`, `--analytics-store=dori
 | `FLINT_TENANT_ROLE_SWITCH` | `false` | `postgres` | Enable per-transaction PostgreSQL `SET LOCAL ROLE` tenant role switching |
 | `FLINT_SQLITE_DSN` | `flint.db` | `sqlite` | SQLite database file path or `:memory:` (pure-Go `modernc.org/sqlite`, also `--sqlite-dsn`) |
 | `FLINT_SQLITE_JOURNAL_MODE` | `WAL` | `sqlite` | SQLite journal mode (`WAL`, `DELETE`, `MEMORY`) |
-| `FLINT_DORIS_DSN` | `root:@tcp(127.0.0.1:9030)/flint` | `doris` | Apache Doris MySQL-protocol DSN |
-| `FLINT_DORIS_DATABASE` | `flint` | `doris` | Target Apache Doris database name |
-| `FLINT_DORIS_GROUP_COMMIT` | *(server default)* | `doris` | Optional Doris group-commit mode (`async_mode` or `sync_mode`) for high-throughput ingestion |
+| `FLINT_DORIS_DSN` | `root:@tcp(127.0.0.1:9030)/flint` | `doris` | Apache Doris MySQL-protocol DSN (`NormalizeDSN` enforces `interpolateParams=true`, `parseTime=true`, `loc=UTC`) |
+| `FLINT_DORIS_DATABASE` | `flint` | `doris` | Target Apache Doris base/cluster database name |
+| `FLINT_DORIS_GROUP_COMMIT` | *(server default)* | `doris` | Doris group-commit mode (`async_mode`, `sync_mode`, or `off_mode`) |
+| `FLINT_DORIS_TENANT_ISOLATION` | `shared` | `doris` | Doris isolation mode: `shared` tables by `tenant_id` or `database` (`tenant_<slug>`) |
+| `FLINT_DORIS_AUTO_PROVISION` | `false` *(`true` in `database` mode)* | `doris` | Auto-provision `tenant_<slug>` databases and tables on first tenant access |
+| `FLINT_DORIS_REPLICATION_NUM` | `1` | `doris` | Doris table `"replication_num"` property for newly created tables |
+| `FLINT_DORIS_REQUIRE_NON_ROOT` | `false` | `doris` | Reject empty, `root`, and `admin` principals in `FLINT_DORIS_DSN` |
+| `FLINT_DORIS_WORKLOAD_GROUP` | *(empty)* | `doris` | Doris `workload_group` injected via `SELECT /*+ SET_VAR(...) */` hints |
+| `FLINT_DORIS_COMPUTE_GROUP` | *(empty)* | `doris` | Doris `compute_group` injected via `SELECT /*+ SET_VAR(...) */` hints |
+| `FLINT_DORIS_EXEC_MEM_LIMIT` | `0` *(default)* | `doris` | Per-query `exec_mem_limit` bytes via `SELECT /*+ SET_VAR(...) */` |
+| `FLINT_DORIS_CPU_THREADS` | `0` *(default)* | `doris` | `parallel_pipeline_task_num` via `SELECT /*+ SET_VAR(...) */` |
+| `FLINT_DORIS_QUERY_TIMEOUT` | `0` *(default)* | `doris` | Per-query `query_timeout` seconds via `SELECT /*+ SET_VAR(...) */` |
+| `FLINT_DORIS_LOCK_POSTGRES_DSN` | *(empty)* | `doris` | Optional PostgreSQL DSN for multi-replica `PostgresRowLocker` UNLOGGED lease coordination |
 | `FLINT_OIDC_ISSUER` | *(empty — dev mode)* | Auth | Enable external OIDC / SMART v2 JWT validation |
 | `FLINT_OIDC_AUDIENCE` | *(empty)* | Auth | Expected JWT `aud` claim |
 | `FLINT_OIDC_JWKS_URL` | *(`<issuer>/.well-known/jwks.json`)* | Auth | Override IdP JWKS endpoint URL |

@@ -3,6 +3,7 @@ module github.com/flint-fhir/flint
 go 1.26.1
 
 require (
+	github.com/go-sql-driver/mysql v1.10.2
 	github.com/google/fhir/go v0.7.4
 	github.com/google/uuid v1.6.0
 	github.com/lib/pq v1.12.3
@@ -15,6 +16,7 @@ require (
 )
 
 require (
+	filippo.io/edwards25519 v1.2.0 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/ebitengine/purego v0.11.0-alpha.6.0.20260707033313-5f49e7c49322 // indirect
 	github.com/facebookgo/clock v0.0.0-20150410010913-600d898af40a // indirect

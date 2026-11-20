@@ -24,9 +24,11 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
+	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
 
@@ -169,18 +171,68 @@ func initStoreBackend(
 		if err != nil {
 			return nil, nil, err
 		}
-		var db *sql.DB
+		rawIso := strings.TrimSpace(getenv("FLINT_DORIS_TENANT_ISOLATION"))
+		if rawIso == "" {
+			rawIso = strings.TrimSpace(getenv("FLINT_TENANT_ISOLATION"))
+		}
+		isolation, err := doris.ParseTenantIsolationMode(rawIso)
+		if err != nil {
+			return nil, nil, err
+		}
+		repNum := 1
+		if rawRep := strings.TrimSpace(getenv("FLINT_DORIS_REPLICATION_NUM")); rawRep != "" {
+			parsedRep, err := strconv.Atoi(rawRep)
+			if err != nil || parsedRep < 1 {
+				return nil, nil, fmt.Errorf("invalid FLINT_DORIS_REPLICATION_NUM %q: must be >= 1", rawRep)
+			}
+			repNum = parsedRep
+		}
+		requireNonRoot := false
+		if rawNonRoot := strings.TrimSpace(getenv("FLINT_DORIS_REQUIRE_NON_ROOT")); rawNonRoot != "" {
+			parsedNR, err := strconv.ParseBool(rawNonRoot)
+			if err != nil {
+				return nil, nil, fmt.Errorf("invalid FLINT_DORIS_REQUIRE_NON_ROOT %q: %w", rawNonRoot, err)
+			}
+			requireNonRoot = parsedNR
+		}
+		dbName := strings.TrimSpace(getenv("FLINT_DORIS_DATABASE"))
+		var (
+			db                     *sql.DB
+			sessionGroupConfigured bool
+		)
 		if dsn := strings.TrimSpace(getenv("FLINT_DORIS_DSN")); dsn != "" {
-			db, err = openDB("mysql", dsn)
+			normalizedDSN, err := doris.NormalizeDSN(dsn, doris.DSNOptions{
+				DefaultDatabase: dbName,
+				GroupCommit:     groupCommit,
+				RequireNonRoot:  requireNonRoot,
+			})
+			if err != nil {
+				return nil, nil, err
+			}
+			db, err = openDB("mysql", normalizedDSN)
 			if err != nil {
 				return nil, nil, fmt.Errorf("open doris: %w", err)
 			}
-			if err := doris.RunMigrations(ctx, db); err != nil {
+			doris.ConfigurePool(db, 0, 0, 0, 0)
+			if err := doris.RunMigrationsWithOptions(ctx, db, doris.MigrationOptions{
+				Database:        dbName,
+				TenantIsolation: isolation,
+				ReplicationNum:  repNum,
+			}); err != nil {
 				_ = db.Close()
 				return nil, nil, fmt.Errorf("doris migrations: %w", err)
 			}
+			sessionGroupConfigured = true
 		}
-		st := doris.New(db, doris.WithGroupCommit(groupCommit), doris.WithDatabase(getenv("FLINT_DORIS_DATABASE")))
+		st := doris.New(
+			db,
+			doris.WithGroupCommit(groupCommit),
+			doris.WithDatabase(dbName),
+			doris.WithTenantIsolation(isolation),
+			doris.WithAutoProvision(isolation == doris.TenantIsolationDatabase),
+			doris.WithReplicationNum(repNum),
+			doris.WithSessionGroupCommitConfigured(sessionGroupConfigured),
+		)
 		cleanup := func() {
 			if db != nil {
 				_ = db.Close()

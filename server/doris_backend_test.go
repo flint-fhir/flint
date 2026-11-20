@@ -2,13 +2,23 @@ package server_test
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	_ "modernc.org/sqlite"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -261,4 +271,239 @@ func TestSQLiteStandaloneBackend_EndToEndFHIR(t *testing.T) {
 	expBytes, err := io.ReadAll(respExp.Body)
 	require.NoError(t, err)
 	assert.Contains(t, string(expBytes), `"id":"pat-sqlite-1"`)
+}
+
+type srvDorisSQLiteState struct {
+	mu      sync.Mutex
+	baseDrv driver.Driver
+	dsns    map[string]string
+}
+
+var (
+	regSrvDorisOnce  sync.Once
+	srvDorisState    = &srvDorisSQLiteState{dsns: make(map[string]string)}
+	srvReArrayPlace  = regexp.MustCompile(`\[(\?(?:,\s*\?)*)\]`)
+	srvReArrContains = regexp.MustCompile(`array_contains\(([a-zA-Z_][a-zA-Z0-9_]*),\s*\?\)`)
+	srvReVarchar     = regexp.MustCompile(`VARCHAR\(\d+\)`)
+)
+
+type srvDorisDriver struct{ st *srvDorisSQLiteState }
+type srvDorisConn struct{ inner driver.Conn }
+
+func (d *srvDorisDriver) Open(name string) (driver.Conn, error) {
+	d.st.mu.Lock()
+	dsn, ok := d.st.dsns[name]
+	base := d.st.baseDrv
+	d.st.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("unknown instance %q", name)
+	}
+	c, err := base.Open(dsn)
+	if err != nil {
+		return nil, err
+	}
+	if ex, ok := c.(driver.ExecerContext); ok {
+		_, _ = ex.ExecContext(context.Background(), "PRAGMA busy_timeout = 5000", nil)
+	}
+	return &srvDorisConn{inner: c}, nil
+}
+
+func (c *srvDorisConn) Prepare(q string) (driver.Stmt, error) { return c.inner.Prepare(q) }
+func (c *srvDorisConn) Close() error                          { return c.inner.Close() }
+func (c *srvDorisConn) Begin() (driver.Tx, error) {
+	return c.BeginTx(context.Background(), driver.TxOptions{})
+}
+
+func (c *srvDorisConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	if bt, ok := c.inner.(driver.ConnBeginTx); ok {
+		return bt.BeginTx(ctx, opts)
+	}
+	return nil, driver.ErrSkip
+}
+
+func srvTranslateSQL(q string) string {
+	up := strings.ToUpper(strings.TrimLeft(q, " \t\r\n"))
+	if strings.HasPrefix(up, "CREATE TABLE") {
+		idx := strings.Index(q, "CREATE TABLE IF NOT EXISTS ")
+		rest := q[idx+len("CREATE TABLE IF NOT EXISTS "):]
+		tbl := rest[:strings.IndexAny(rest, " (\t\r\n")]
+		pk := "PRIMARY KEY (tenant_id, res_id)"
+		switch tbl {
+		case "fhir_resource":
+			pk = "PRIMARY KEY (tenant_id, res_type, res_id)"
+		case "fhir_resource_history":
+			pk = "PRIMARY KEY (tenant_id, res_type, res_id, res_version)"
+		case "fhir_audit_event":
+			pk = "PRIMARY KEY (tenant_id, audit_id)"
+		case "fhir_export_job":
+			pk = "PRIMARY KEY (tenant_id, job_id)"
+		case "fhir_cluster_secret":
+			pk = "PRIMARY KEY (secret_key)"
+		case "fhir_cluster_state":
+			pk = "PRIMARY KEY (namespace, state_key)"
+		}
+		if bodyEnd := strings.Index(q, "\nUNIQUE KEY("); bodyEnd != -1 {
+			var kept []string
+			for _, line := range strings.Split(q[:bodyEnd], "\n") {
+				tr := strings.TrimSpace(line)
+				if strings.HasPrefix(tr, "INDEX ") || tr == ")" {
+					continue
+				}
+				kept = append(kept, line)
+			}
+			if n := len(kept); n > 0 && strings.HasSuffix(strings.TrimRight(kept[n-1], " \t\r"), ",") {
+				kept[n-1] = strings.TrimSuffix(strings.TrimRight(kept[n-1], " \t\r"), ",")
+			}
+			out := strings.Join(kept, "\n") + ",\n    " + pk + "\n);"
+			out = strings.ReplaceAll(out, "ARRAY<VARCHAR(512)>", "TEXT")
+			out = strings.ReplaceAll(out, "DATETIME(6)", "TEXT")
+			out = srvReVarchar.ReplaceAllString(out, "TEXT")
+			out = strings.ReplaceAll(out, "BOOLEAN", "INTEGER")
+			out = strings.ReplaceAll(out, "DOUBLE", "REAL")
+			out = strings.ReplaceAll(out, "BIGINT", "INTEGER")
+			return strings.ReplaceAll(out, " STRING ", " TEXT ")
+		}
+	}
+	if strings.HasPrefix(up, "INSERT INTO ") {
+		q = "INSERT OR REPLACE INTO " + q[len("INSERT INTO "):]
+		q = strings.ReplaceAll(q, ", []", ", '[]'")
+		return srvReArrayPlace.ReplaceAllString(q, "json_array($1)")
+	}
+	if strings.HasPrefix(up, "SELECT") {
+		return srvReArrContains.ReplaceAllString(q, "EXISTS (SELECT 1 FROM json_each($1) WHERE value = ?)")
+	}
+	return q
+}
+
+func srvTranslateArgs(args []driver.NamedValue) []driver.NamedValue {
+	if len(args) == 0 {
+		return nil
+	}
+	out := make([]driver.NamedValue, len(args))
+	for i, a := range args {
+		out[i] = a
+		if t, ok := a.Value.(time.Time); ok {
+			out[i].Value = t.UTC().Format("2006-01-02T15:04:05.000000Z")
+		}
+	}
+	return out
+}
+
+func (c *srvDorisConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(query)), "SET ") {
+		return driver.RowsAffected(0), nil
+	}
+	return c.inner.(driver.ExecerContext).ExecContext(ctx, srvTranslateSQL(query), srvTranslateArgs(args))
+}
+
+func (c *srvDorisConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	return c.inner.(driver.QueryerContext).QueryContext(ctx, srvTranslateSQL(query), srvTranslateArgs(args))
+}
+
+func TestDorisDirectSQL_MultiReplicaHTTPParity(t *testing.T) {
+	regSrvDorisOnce.Do(func() {
+		boot, err := sql.Open("sqlite", ":memory:")
+		require.NoError(t, err)
+		srvDorisState.baseDrv = boot.Driver()
+		require.NoError(t, boot.Close())
+		sql.Register("srv_doris_sqlite", &srvDorisDriver{st: srvDorisState})
+	})
+
+	dbFile := filepath.Join(t.TempDir(), "srv_doris.db")
+	sqliteDSN := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)", dbFile)
+	srvDorisState.mu.Lock()
+	srvDorisState.dsns["repA"] = sqliteDSN
+	srvDorisState.dsns["repB"] = sqliteDSN
+	srvDorisState.mu.Unlock()
+
+	dbA, err := sql.Open("srv_doris_sqlite", "repA")
+	require.NoError(t, err)
+	defer dbA.Close()
+	dbB, err := sql.Open("srv_doris_sqlite", "repB")
+	require.NoError(t, err)
+	defer dbB.Close()
+
+	require.NoError(t, doris.RunMigrations(context.Background(), dbA))
+
+	locker := doris.NewMemoryRowLocker()
+	nodeA := doris.New(dbA, doris.WithRowLocker(locker), doris.WithSessionGroupCommitConfigured(true))
+	nodeB := doris.New(dbB, doris.WithRowLocker(locker), doris.WithSessionGroupCommitConfigured(true))
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	srvA := server.New(nodeA, logger)
+	srvB := server.New(nodeB, logger)
+	server.RegisterDefaultResourceTypes(srvA)
+	server.RegisterDefaultResourceTypes(srvB)
+	srvA.SetSecurityPolicy(server.SecurityPolicy{IdempotencyTTL: time.Hour})
+	srvB.SetSecurityPolicy(server.SecurityPolicy{IdempotencyTTL: time.Hour})
+
+	tsA := httptest.NewServer(srvA.Handler())
+	defer tsA.Close()
+	tsB := httptest.NewServer(srvB.Handler())
+	defer tsB.Close()
+
+	patBody := `{"resourceType":"Patient","id":"http-doris-1","name":[{"family":"Stateless","given":["Doris"]}],"gender":"female"}`
+	reqPost, err := http.NewRequest(http.MethodPost, tsA.URL+"/fhir/r4/demo/Patient", strings.NewReader(patBody))
+	require.NoError(t, err)
+	reqPost.Header.Set("Content-Type", "application/fhir+json")
+	reqPost.Header.Set("Idempotency-Key", "doris-idem-1")
+	respPost, err := tsA.Client().Do(reqPost)
+	require.NoError(t, err)
+	respPost.Body.Close()
+	assert.Equal(t, http.StatusCreated, respPost.StatusCode)
+
+	// Replay same Idempotency-Key against Node B -> X-Idempotency-Replayed: true
+	reqReplay, err := http.NewRequest(http.MethodPost, tsB.URL+"/fhir/r4/demo/Patient", strings.NewReader(patBody))
+	require.NoError(t, err)
+	reqReplay.Header.Set("Content-Type", "application/fhir+json")
+	reqReplay.Header.Set("Idempotency-Key", "doris-idem-1")
+	respReplay, err := tsB.Client().Do(reqReplay)
+	require.NoError(t, err)
+	respReplay.Body.Close()
+	assert.Equal(t, http.StatusCreated, respReplay.StatusCode)
+	assert.Equal(t, "true", respReplay.Header.Get("X-Idempotency-Replayed"))
+
+	// Read and search via Node B
+	respGet, err := tsB.Client().Get(tsB.URL + "/fhir/r4/demo/Patient/http-doris-1")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, respGet.StatusCode)
+	respGet.Body.Close()
+
+	respSearch, err := tsB.Client().Get(tsB.URL + "/fhir/r4/demo/Patient?family=Stateless")
+	require.NoError(t, err)
+	var searchBundle map[string]any
+	require.NoError(t, json.NewDecoder(respSearch.Body).Decode(&searchBundle))
+	respSearch.Body.Close()
+	assert.Equal(t, float64(1), searchBundle["total"])
+
+	// Update & Delete via Node B -> 410 Gone on Node A
+	reqPut, err := http.NewRequest(http.MethodPut, tsB.URL+"/fhir/r4/demo/Patient/http-doris-1", strings.NewReader(`{"resourceType":"Patient","id":"http-doris-1","active":true}`))
+	require.NoError(t, err)
+	reqPut.Header.Set("Content-Type", "application/fhir+json")
+	respPut, err := tsB.Client().Do(reqPut)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, respPut.StatusCode)
+	assert.Equal(t, `W/"2"`, respPut.Header.Get("ETag"))
+	respPut.Body.Close()
+
+	reqDel, err := http.NewRequest(http.MethodDelete, tsB.URL+"/fhir/r4/demo/Patient/http-doris-1", nil)
+	require.NoError(t, err)
+	respDel, err := tsB.Client().Do(reqDel)
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusNoContent, respDel.StatusCode)
+	respDel.Body.Close()
+
+	respGone, err := tsA.Client().Get(tsA.URL + "/fhir/r4/demo/Patient/http-doris-1")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusGone, respGone.StatusCode)
+	respGone.Body.Close()
+
+	// AuditEvent written on Node A is queryable on Node B
+	respAudit, err := tsB.Client().Get(tsB.URL + "/fhir/r4/demo/AuditEvent")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, respAudit.StatusCode)
+	var auditBundle map[string]any
+	require.NoError(t, json.NewDecoder(respAudit.Body).Decode(&auditBundle))
+	respAudit.Body.Close()
+	assert.GreaterOrEqual(t, auditBundle["total"], float64(3))
 }

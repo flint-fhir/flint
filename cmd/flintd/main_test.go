@@ -25,6 +25,7 @@ import (
 
 	"github.com/flint-fhir/flint/pkg/hl7v2"
 	"github.com/flint-fhir/flint/server"
+	"github.com/flint-fhir/flint/store/doris"
 	"github.com/flint-fhir/flint/store/postgres"
 )
 
@@ -849,4 +850,164 @@ func TestConfigureAuthAndSecurityPolicyHardening(t *testing.T) {
 		}
 		return ""
 	}), "FLINT_IDEMPOTENCY_TTL")
+}
+
+func TestOpenDorisStoreProductionConfigurationAndErrors(t *testing.T) {
+	registerStubDrivers()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	var seenDrivers []string
+	var seenDSNs []string
+	env := map[string]string{
+		"FLINT_DORIS_DSN":               "flint_svc:secret@tcp(doris-fe:9030)/",
+		"FLINT_DORIS_DATABASE":          "flint_meta",
+		"FLINT_DORIS_GROUP_COMMIT":      "async_mode",
+		"FLINT_DORIS_TENANT_ISOLATION":  "database",
+		"FLINT_DORIS_AUTO_PROVISION":    "true",
+		"FLINT_DORIS_REPLICATION_NUM":   "3",
+		"FLINT_DORIS_REQUIRE_NON_ROOT":  "true",
+		"FLINT_DORIS_WORKLOAD_GROUP":    "flint_wg",
+		"FLINT_DORIS_COMPUTE_GROUP":     "cg1",
+		"FLINT_DORIS_EXEC_MEM_LIMIT":    "1073741824",
+		"FLINT_DORIS_CPU_THREADS":       "4",
+		"FLINT_DORIS_QUERY_TIMEOUT":     "20",
+		"FLINT_DORIS_LOCK_POSTGRES_DSN": "postgres://locker@pg:5432/locks",
+	}
+	ds, cleanup, err := openDorisStore(
+		func(k string) string { return env[k] },
+		func(drv, dsn string) (*sql.DB, error) {
+			seenDrivers = append(seenDrivers, drv)
+			seenDSNs = append(seenDSNs, dsn)
+			return sql.Open("flintd_stub_ok", "")
+		},
+	)
+	require.NoError(t, err)
+	require.NotNil(t, cleanup)
+	defer cleanup()
+
+	assert.Equal(t, doris.TenantIsolationDatabase, ds.TenantIsolation())
+	assert.Equal(t, doris.GroupCommitAsync, ds.GroupCommit())
+	assert.Equal(t, "flint_meta", ds.Database())
+	assert.Equal(t, doris.ResourceLimits{
+		WorkloadGroup:   "flint_wg",
+		ComputeGroup:    "cg1",
+		ExecMemLimit:    1073741824,
+		CPUThreads:      4,
+		QueryTimeoutSec: 20,
+	}, ds.ResourceLimits())
+	assert.Equal(t, []string{"mysql", "postgres"}, seenDrivers)
+	assert.Contains(t, seenDSNs[0], "interpolateParams=true")
+	assert.Contains(t, seenDSNs[0], "/flint_meta?")
+
+	// End-to-end run with -store=doris exercises run() database isolation cleanup branch
+	// (omit FLINT_DORIS_LOCK_POSTGRES_DSN since flintd_stub_ok returns zero rows on RETURNING)
+	require.NoError(t, run(
+		[]string{"-store", "doris"},
+		func(k string) string {
+			if k == "FLINT_DORIS_LOCK_POSTGRES_DSN" {
+				return ""
+			}
+			return env[k]
+		},
+		io.Discard,
+		logger,
+		func(_, _ string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") },
+		func(string, http.Handler) error { return nil },
+	))
+
+	// Error cases
+	failCases := []struct {
+		name      string
+		overrides map[string]string
+		openFn    func(string, string) (*sql.DB, error)
+		errSub    string
+	}{
+		{
+			name:      "non-root rejects root",
+			overrides: map[string]string{"FLINT_DORIS_DSN": "root:@tcp(127.0.0.1:9030)/flint", "FLINT_DORIS_REQUIRE_NON_ROOT": "true"},
+			errSub:    "non-root",
+		},
+		{
+			name:      "invalid tenant isolation",
+			overrides: map[string]string{"FLINT_DORIS_TENANT_ISOLATION": "bad-iso"},
+			errSub:    "invalid doris tenant isolation",
+		},
+		{
+			name:      "invalid auto provision bool",
+			overrides: map[string]string{"FLINT_DORIS_AUTO_PROVISION": "not-bool"},
+			errSub:    "FLINT_DORIS_AUTO_PROVISION",
+		},
+		{
+			name:      "invalid replication num non-positive",
+			overrides: map[string]string{"FLINT_DORIS_REPLICATION_NUM": "0"},
+			errSub:    "FLINT_DORIS_REPLICATION_NUM",
+		},
+		{
+			name:      "invalid exec mem limit",
+			overrides: map[string]string{"FLINT_DORIS_EXEC_MEM_LIMIT": "abc"},
+			errSub:    "FLINT_DORIS_EXEC_MEM_LIMIT",
+		},
+		{
+			name:      "invalid cpu threads",
+			overrides: map[string]string{"FLINT_DORIS_CPU_THREADS": "abc"},
+			errSub:    "FLINT_DORIS_CPU_THREADS",
+		},
+		{
+			name:      "invalid query timeout",
+			overrides: map[string]string{"FLINT_DORIS_QUERY_TIMEOUT": "abc"},
+			errSub:    "FLINT_DORIS_QUERY_TIMEOUT",
+		},
+		{
+			name:      "invalid workload group",
+			overrides: map[string]string{"FLINT_DORIS_WORKLOAD_GROUP": "bad'; DROP"},
+			errSub:    "workload_group",
+		},
+		{
+			name:      "doris open error",
+			overrides: map[string]string{"FLINT_DORIS_DSN": "flint@tcp(127.0.0.1:9030)/flint"},
+			openFn:    func(_, _ string) (*sql.DB, error) { return nil, errors.New("dial err") },
+			errSub:    "open doris db",
+		},
+		{
+			name:      "doris ping error",
+			overrides: map[string]string{"FLINT_DORIS_DSN": "flint@tcp(127.0.0.1:9030)/flint"},
+			openFn:    func(_, _ string) (*sql.DB, error) { return sql.Open("flintd_stub_ping_err", "") },
+			errSub:    "ping doris db",
+		},
+		{
+			name:      "doris migration error",
+			overrides: map[string]string{"FLINT_DORIS_DSN": "flint@tcp(127.0.0.1:9030)/flint"},
+			openFn:    func(_, _ string) (*sql.DB, error) { return sql.Open("flintd_stub_mig_err", "") },
+			errSub:    "run doris migrations",
+		},
+		{
+			name:      "lock postgres open error",
+			overrides: map[string]string{"FLINT_DORIS_LOCK_POSTGRES_DSN": "postgres://bad"},
+			openFn:    func(_, _ string) (*sql.DB, error) { return nil, errors.New("pg dial err") },
+			errSub:    "open doris lock postgres db",
+		},
+		{
+			name:      "lock postgres ping error",
+			overrides: map[string]string{"FLINT_DORIS_LOCK_POSTGRES_DSN": "postgres://bad"},
+			openFn:    func(_, _ string) (*sql.DB, error) { return sql.Open("flintd_stub_ping_err", "") },
+			errSub:    "ping doris lock postgres db",
+		},
+		{
+			name:      "lock postgres ddl error",
+			overrides: map[string]string{"FLINT_DORIS_LOCK_POSTGRES_DSN": "postgres://bad"},
+			openFn:    func(_, _ string) (*sql.DB, error) { return sql.Open("flintd_stub_mig_err", "") },
+			errSub:    "ensure doris row lock table",
+		},
+	}
+
+	for _, tc := range failCases {
+		t.Run(tc.name, func(t *testing.T) {
+			openFn := tc.openFn
+			if openFn == nil {
+				openFn = func(_, _ string) (*sql.DB, error) { return sql.Open("flintd_stub_ok", "") }
+			}
+			_, _, cErr := openDorisStore(func(k string) string { return tc.overrides[k] }, openFn)
+			require.ErrorContains(t, cErr, tc.errSub)
+		})
+	}
 }

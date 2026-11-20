@@ -73,6 +73,7 @@ func TestDorisDDLAndGroupCommit(t *testing.T) {
 	require.ErrorContains(t, err, "invalid doris group commit mode")
 
 	unifiedDDL := doris.GenerateResourceTableDDL("")
+	assert.Contains(t, unifiedDDL, "AUTO PARTITION BY LIST (res_type)")
 	assert.Contains(t, unifiedDDL, "PARTITION BY LIST (res_type)")
 	assert.Contains(t, unifiedDDL, `PARTITION p_observation`)
 	assert.Contains(t, unifiedDDL, `PARTITION p_patient`)
@@ -123,7 +124,7 @@ func TestDorisStore_CRUD_OptimisticLocking_And_Transactions(t *testing.T) {
 	require.NoError(t, err)
 	defer dbOK.Close()
 
-	ds := doris.New(dbOK, doris.WithGroupCommit(doris.GroupCommitAsync), doris.WithDatabase("flint_analytics"))
+	ds := doris.New(dbOK, doris.WithGroupCommit(doris.GroupCommitAsync), doris.WithDatabase("flint_analytics"), doris.WithDirectSQL(false))
 	assert.Equal(t, "doris", ds.BackendName())
 	assert.Equal(t, doris.GroupCommitAsync, ds.GroupCommit())
 	assert.Equal(t, "flint_analytics", ds.Database())
@@ -842,7 +843,7 @@ func TestDorisStore_LoadFromDB_And_CompensatingRollback(t *testing.T) {
 	require.NoError(t, err)
 	defer db.Close()
 
-	writer := doris.New(db)
+	writer := doris.New(db, doris.WithDirectSQL(false))
 	patProto, err := proto.Marshal(&patpb.Patient{
 		Id: &dtpb.Id{Value: "p-hydrate"},
 		Name: []*dtpb.HumanName{
@@ -877,7 +878,7 @@ func TestDorisStore_LoadFromDB_And_CompensatingRollback(t *testing.T) {
 	}))
 
 	// Hydrate a brand new doris.Store from the persisted Doris tables
-	restarted := doris.New(db)
+	restarted := doris.New(db, doris.WithDirectSQL(false))
 	require.NoError(t, restarted.LoadFromDB(ctx))
 
 	rec, err := restarted.ReadResourceWithMeta(ctx, "t-hyd", "Patient", "p-hydrate")
@@ -960,7 +961,8 @@ func TestDorisStore_LoadFromDB_And_CompensatingRollback(t *testing.T) {
 	}))
 	stmts := batchDS.ExecutedStatements()
 	require.Len(t, stmts, 3, "expected 3 multi-row INSERT statements (fhir_resource, fhir_resource_history, fhir_patient)")
-	assert.Contains(t, stmts[0], "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+	assert.Contains(t, stmts[0], "string_tokens, code_tokens, reference_tokens, uri_tokens")
+	assert.Contains(t, stmts[0], "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, [], [], [], []), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, [], [], [], [])")
 	assert.Contains(t, stmts[2], "INSERT INTO fhir_patient")
 }
 

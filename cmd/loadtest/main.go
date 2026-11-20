@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/lib/pq"
 	"go.temporal.io/sdk/client"
 	"google.golang.org/protobuf/proto"
