@@ -31,6 +31,7 @@ import (
 
 	"github.com/flint-fhir/flint/automq"
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/pkg/hl7v2"
 	"github.com/flint-fhir/flint/pkg/telemetry"
 	"github.com/flint-fhir/flint/pkg/txclient"
 	"github.com/flint-fhir/flint/server"
@@ -80,6 +81,8 @@ type cliOptions struct {
 	otlpServiceName      string
 	otlpSampleRatio      string
 	otlpHeaders          string
+	mllpAddr             string
+	mllpTenant           string
 }
 
 func main() {
@@ -125,6 +128,8 @@ func parseCLIOptions(args []string, errOut io.Writer) (cliOptions, error) {
 	fs.StringVar(&opts.otlpServiceName, "otlp-service-name", "", "OpenTelemetry service.name attribute (default 'flintd')")
 	fs.StringVar(&opts.otlpSampleRatio, "otlp-sample-ratio", "", "OpenTelemetry parent-based root trace sample ratio in [0.0, 1.0] (default '1.0')")
 	fs.StringVar(&opts.otlpHeaders, "otlp-headers", "", "Comma-separated OpenTelemetry OTLP HTTP headers (e.g. 'Authorization=Bearer xyz')")
+	fs.StringVar(&opts.mllpAddr, "mllp-addr", "", "Optional HL7 v2 MLLP v1 TCP listener address (e.g. ':2575'; disabled when empty)")
+	fs.StringVar(&opts.mllpTenant, "mllp-tenant", "", "Target FHIR tenant ID for incoming MLLP connections (default 'default')")
 	if err := fs.Parse(args); err != nil {
 		return cliOptions{}, err
 	}
@@ -684,6 +689,14 @@ func run(
 		return err
 	}
 
+	mllpSrv, err := startMLLPServerIfConfigured(srv, cliOpts, logger, getenv)
+	if err != nil {
+		return err
+	}
+	if mllpSrv != nil {
+		defer func() { _ = mllpSrv.Close() }()
+	}
+
 	addr := getenv("FLINT_ADDR")
 	if addr == "" {
 		addr = ":8080"
@@ -694,4 +707,20 @@ func run(
 		return fmt.Errorf("server: %w", err)
 	}
 	return nil
+}
+
+func startMLLPServerIfConfigured(srv *server.Server, cliOpts cliOptions, logger *slog.Logger, getenv func(string) string) (*hl7v2.MLLPServer, error) {
+	mllpAddr := firstNonEmpty(cliOpts.mllpAddr, getenv("FLINT_MLLP_ADDR"))
+	if mllpAddr == "" {
+		return nil, nil
+	}
+	mllpTenant := firstNonEmpty(cliOpts.mllpTenant, getenv("FLINT_MLLP_TENANT"), "default")
+	mllpSrv := srv.NewMLLPServer(mllpAddr, mllpTenant)
+	if err := mllpSrv.Start(); err != nil {
+		return nil, fmt.Errorf("start hl7v2 mllp listener on %q: %w", mllpAddr, err)
+	}
+	if logger != nil {
+		logger.Info("HL7 v2 MLLP TCP ingestion listener started", "addr", mllpSrv.Addr(), "tenant", mllpTenant)
+	}
+	return mllpSrv, nil
 }

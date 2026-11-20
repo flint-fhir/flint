@@ -56,6 +56,12 @@ type serverMetrics struct {
 	subscriptionsDeliveredTotal     atomic.Uint64
 	subscriptionDeliveryErrorsTotal atomic.Uint64
 	sqlOnFHIRRunsTotal              atomic.Uint64
+	hl7v2IngestedTotal              atomic.Uint64
+	hl7v2ErrorsTotal                atomic.Uint64
+	hl7v2MLLPIngestedTotal          atomic.Uint64
+	ccdaImportedTotal               atomic.Uint64
+	ccdaExportedTotal               atomic.Uint64
+	ccdaErrorsTotal                 atomic.Uint64
 }
 
 func newServerMetrics() *serverMetrics {
@@ -263,6 +269,39 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString("# HELP flint_otlp_spans_dropped_total Total number of OpenTelemetry spans dropped due to full queue.\n")
 	b.WriteString("# TYPE flint_otlp_spans_dropped_total counter\n")
 	fmt.Fprintf(&b, "flint_otlp_spans_dropped_total %d\n", otlpDropped)
+
+	var v2Ingested, v2Err, v2MLLP, ccdaIn, ccdaOut, ccdaErr uint64
+	if s.metrics != nil {
+		v2Ingested = s.metrics.hl7v2IngestedTotal.Load()
+		v2Err = s.metrics.hl7v2ErrorsTotal.Load()
+		v2MLLP = s.metrics.hl7v2MLLPIngestedTotal.Load()
+		ccdaIn = s.metrics.ccdaImportedTotal.Load()
+		ccdaOut = s.metrics.ccdaExportedTotal.Load()
+		ccdaErr = s.metrics.ccdaErrorsTotal.Load()
+	}
+	b.WriteString("# HELP flint_hl7v2_messages_ingested_total Total number of HL7 v2.x messages ingested via HTTP or MLLP.\n")
+	b.WriteString("# TYPE flint_hl7v2_messages_ingested_total counter\n")
+	fmt.Fprintf(&b, "flint_hl7v2_messages_ingested_total %d\n", v2Ingested)
+
+	b.WriteString("# HELP flint_hl7v2_messages_errors_total Total number of HL7 v2.x ingestion errors.\n")
+	b.WriteString("# TYPE flint_hl7v2_messages_errors_total counter\n")
+	fmt.Fprintf(&b, "flint_hl7v2_messages_errors_total %d\n", v2Err)
+
+	b.WriteString("# HELP flint_hl7v2_mllp_messages_total Total number of HL7 v2.x messages ingested over MLLP TCP.\n")
+	b.WriteString("# TYPE flint_hl7v2_mllp_messages_total counter\n")
+	fmt.Fprintf(&b, "flint_hl7v2_mllp_messages_total %d\n", v2MLLP)
+
+	b.WriteString("# HELP flint_ccda_documents_imported_total Total number of C-CDA R2.1 documents imported via $import-ccda.\n")
+	b.WriteString("# TYPE flint_ccda_documents_imported_total counter\n")
+	fmt.Fprintf(&b, "flint_ccda_documents_imported_total %d\n", ccdaIn)
+
+	b.WriteString("# HELP flint_ccda_documents_exported_total Total number of C-CDA R2.1 documents generated via $ccda.\n")
+	b.WriteString("# TYPE flint_ccda_documents_exported_total counter\n")
+	fmt.Fprintf(&b, "flint_ccda_documents_exported_total %d\n", ccdaOut)
+
+	b.WriteString("# HELP flint_ccda_operations_errors_total Total number of C-CDA R2.1 import/export errors.\n")
+	b.WriteString("# TYPE flint_ccda_operations_errors_total counter\n")
+	fmt.Fprintf(&b, "flint_ccda_operations_errors_total %d\n", ccdaErr)
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

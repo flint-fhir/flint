@@ -729,8 +729,8 @@ func TestCluster_StatelessCrossReplicaContinuity_SQLiteAndPostgres(t *testing.T)
 	})
 }
 
-func TestCluster_RoundRobinLoadBalancerFull142CheckCertify(t *testing.T) {
-	t.Run("SQLiteWAL_RoundRobin142Checks", func(t *testing.T) {
+func TestCluster_RoundRobinLoadBalancerFull144CheckCertify(t *testing.T) {
+	t.Run("SQLiteWAL_RoundRobin144Checks", func(t *testing.T) {
 		stA, stB := newSQLiteClusterStores(t)
 		rig := newClusterRig(t, stA, stB)
 
@@ -741,14 +741,14 @@ func TestCluster_RoundRobinLoadBalancerFull142CheckCertify(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, "pass", rep.Result, "scorecard:\n%s", rep.FormatScorecard())
-		assert.Equal(t, 142, rep.TotalChecks)
+		assert.Equal(t, 144, rep.TotalChecks)
 		assert.Equal(t, 0, rep.Failed)
 		assert.Equal(t, 100.0, rep.Score)
 		assert.Greater(t, rig.hitsA.Load(), uint64(100), "Node A must serve alternating load-balanced requests")
 		assert.Greater(t, rig.hitsB.Load(), uint64(100), "Node B must serve alternating load-balanced requests")
 	})
 
-	t.Run("PostgreSQL_RoundRobin142Checks", func(t *testing.T) {
+	t.Run("PostgreSQL_RoundRobin144Checks", func(t *testing.T) {
 		db := openTestPostgres(t)
 		defer db.Close()
 		require.NoError(t, postgres.RunMigrations(t.Context(), db))
@@ -764,7 +764,7 @@ func TestCluster_RoundRobinLoadBalancerFull142CheckCertify(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, "pass", rep.Result, "scorecard:\n%s", rep.FormatScorecard())
-		assert.Equal(t, 142, rep.TotalChecks)
+		assert.Equal(t, 144, rep.TotalChecks)
 		assert.Equal(t, 0, rep.Failed)
 		assert.Equal(t, 100.0, rep.Score)
 		assert.Greater(t, rig.hitsA.Load(), uint64(100))

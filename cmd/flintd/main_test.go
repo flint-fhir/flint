@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -10,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/flint-fhir/flint/pkg/hl7v2"
 	"github.com/flint-fhir/flint/server"
 	"github.com/flint-fhir/flint/store/postgres"
 )
@@ -665,4 +668,90 @@ func TestConfigureTelemetryFlagsAndEnv(t *testing.T) {
 		}
 		return ""
 	}))
+}
+
+func TestMLLPListenerFlagsAndLiveRoundTrip(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Disabled when unset
+	srvUnset := server.New(nil, logger)
+	mllpUnset, err := startMLLPServerIfConfigured(srvUnset, cliOptions{}, logger, func(string) string { return "" })
+	require.NoError(t, err)
+	assert.Nil(t, mllpUnset)
+
+	// Configured via CLI flags with live MLLP TCP frame round-trip against SQLite WAL store
+	dbPath := filepath.Join(t.TempDir(), "mllp-main-test.db")
+	st, sqliteDB, err := openSQLiteStore(dbPath, func(string) string { return "" }, sql.Open)
+	require.NoError(t, err)
+	defer sqliteDB.Close()
+
+	srv := server.New(st, logger)
+	server.RegisterDefaultResourceTypes(srv)
+	defer func() { _ = srv.Close() }()
+
+	opts, err := parseCLIOptions([]string{
+		"--mllp-addr=127.0.0.1:0",
+		"--mllp-tenant=mllp-test",
+	}, io.Discard)
+	require.NoError(t, err)
+	assert.Equal(t, "127.0.0.1:0", opts.mllpAddr)
+	assert.Equal(t, "mllp-test", opts.mllpTenant)
+
+	mllpSrv, err := startMLLPServerIfConfigured(srv, opts, logger, func(string) string { return "" })
+	require.NoError(t, err)
+	require.NotNil(t, mllpSrv)
+	defer func() { _ = mllpSrv.Close() }()
+
+	conn, err := net.Dial("tcp", mllpSrv.Addr())
+	require.NoError(t, err)
+	defer conn.Close()
+
+	msg := strings.Join([]string{
+		"MSH|^~\\&|EHR|CLINIC|FLINT|HOSP|20261119120000+0000||ADT^A01^ADT_A01|FLINTD-MLLP-1|P|2.5.1",
+		"PID|1||MRN-FLINTD-1^^^CLINIC^MR||Doe^Jane||19900102|F",
+		"PV1|1|I|WARD^101^A||||1234^Physician^Primary",
+	}, "\r") + "\r"
+	require.NoError(t, hl7v2.WriteMLLPFrame(conn, []byte(msg)))
+
+	ackBytes, err := hl7v2.ReadMLLPFrame(bufio.NewReader(conn), hl7v2.MaxMessageBytes)
+	require.NoError(t, err)
+	assert.Contains(t, string(ackBytes), "MSA|AA|FLINTD-MLLP-1")
+
+	require.NoError(t, mllpSrv.Close())
+
+	// Configured via FLINT_MLLP_* environment variables inside run(...)
+	env := map[string]string{
+		"FLINT_STORE_BACKEND": "sqlite",
+		"FLINT_SQLITE_DSN":    ":memory:",
+		"FLINT_MLLP_ADDR":     "127.0.0.1:0",
+		"FLINT_MLLP_TENANT":   "mllp-env",
+	}
+	err = run(
+		nil,
+		func(k string) string { return env[k] },
+		io.Discard,
+		logger,
+		sql.Open,
+		func(string, http.Handler) error { return nil },
+	)
+	require.NoError(t, err)
+
+	// Invalid bind address returns an error from both helper and run(...)
+	_, err = startMLLPServerIfConfigured(server.New(nil, logger), cliOptions{}, logger, func(k string) string {
+		if k == "FLINT_MLLP_ADDR" {
+			return "127.0.0.1:999999"
+		}
+		return ""
+	})
+	require.ErrorContains(t, err, "start hl7v2 mllp listener")
+
+	err = run(
+		[]string{"--store=sqlite", "--sqlite-dsn=:memory:", "--mllp-addr=127.0.0.1:999999"},
+		func(string) string { return "" },
+		io.Discard,
+		logger,
+		sql.Open,
+		func(string, http.Handler) error { return nil },
+	)
+	require.ErrorContains(t, err, "start hl7v2 mllp listener")
 }

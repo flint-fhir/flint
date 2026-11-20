@@ -305,6 +305,46 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			return
 		}
 
+		if strings.HasSuffix(path, "/$ingest-hl7v2") {
+			bodyBytes, _ := io.ReadAll(r.Body)
+			if strings.Contains(string(bodyBytes), "INVALID-NO-MSH") {
+				w.Header().Set("Content-Type", "x-application/hl7-v2+er7; charset=utf-8")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte("MSH|^~\\&|FLINT|FLINT|EHR|CLINIC|20261119120000Z||ACK|1|P|2.5.1\rMSA|AR|1|missing MSH\r"))
+				return
+			}
+			_, _ = w.Write([]byte(`{"resourceType":"Parameters","parameter":[{"name":"ack","valueString":"MSH|^~\\&|FLINT|FLINT|EHR|CLINIC|20261119120000Z||ACK|1|P|2.5.1\rMSA|AA|1\r"},{"name":"ackCode","valueCode":"AA"},{"name":"patient","valueReference":{"reference":"Patient/hl7v2-cert-pat-1"}}]}`))
+			return
+		}
+		if strings.HasSuffix(path, "/Patient/hl7v2-cert-pat-1") {
+			_, _ = w.Write([]byte(`{"resourceType":"Patient","id":"hl7v2-cert-pat-1","active":true}`))
+			return
+		}
+		if strings.HasSuffix(path, "/DiagnosticReport") && strings.Contains(q.Get("patient"), "hl7v2-cert-pat-1") {
+			_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","total":1,"entry":[{"resource":{"resourceType":"DiagnosticReport","id":"hl7v2-dr-1"}}]}`))
+			return
+		}
+		if strings.HasSuffix(path, "/Patient/cert-pat-1/$ccda") {
+			w.Header().Set("Content-Type", "application/cda+xml; charset=utf-8")
+			_, _ = w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><ClinicalDocument xmlns="urn:hl7-org:v3"><templateId root="2.16.840.1.113883.10.20.22.1.2" extension="2015-08-01"/></ClinicalDocument>`))
+			return
+		}
+		if strings.HasSuffix(path, "/$import-ccda") {
+			bodyBytes, _ := io.ReadAll(r.Body)
+			lowerBody := strings.ToLower(string(bodyBytes))
+			if strings.Contains(lowerBody, "<!doctype") || strings.Contains(lowerBody, "<!entity") {
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"resourceType":"OperationOutcome","issue":[{"severity":"error","code":"security","diagnostics":"doctype/entity forbidden"}]}`))
+				return
+			}
+			if q.Get("persist") == "false" {
+				_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"document","entry":[{"resource":{"resourceType":"Composition","id":"comp-1"}}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"transaction-response","entry":[{"response":{"status":"200 OK"}}]}`))
+			return
+		}
+
 		// MCP-01 & SHL-01 mock handlers
 		if strings.HasSuffix(path, "/$mcp") {
 			bodyBytes, _ := io.ReadAll(r.Body)
@@ -1532,8 +1572,8 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 142 {
-		t.Fatalf("expected all 142 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 144 {
+		t.Fatalf("expected all 144 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()
