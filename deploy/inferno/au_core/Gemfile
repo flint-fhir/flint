@@ -1,0 +1,10 @@
+# frozen_string_literal: true
+
+source 'https://rubygems.org'
+
+gem 'inferno_core', '~> 1.4', '>= 1.4.4'
+gem 'au_core_test_kit', '~> 1.4.7'
+gem 'inferno_suite_generator', github: 'hl7au/inferno_suite_generator', ref: 'ce03f930fff7e28eedfab8934da0f624266fc653'
+gem 'validation_test_kit', github: 'beda-software/validation-test-kit', ref: '3438159ae5860216d37c559725fbfdc316ad745c'
+gem 'sqlite3', '~> 1.4'
+gem 'webrick', '~> 1.8'

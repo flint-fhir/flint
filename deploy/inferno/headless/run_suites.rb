@@ -1124,6 +1124,48 @@ runs << execute_inferno_target(
   }
 )
 
+if Inferno::Repositories::TestSuites.new.find('smart_stu2_2') && ENV['INFERNO_SKIP_SMART_STU2_2'] != 'true'
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'smart_stu2_2',
+    suite_id: 'smart_stu2_2',
+    group_suffix: nil,
+    inputs: {
+      url: flint_fhir_url,
+      standalone_smart_auth_info: standalone_public_auth_json,
+      ehr_smart_auth_info: ehr_symmetric_auth_json,
+      backend_services_smart_auth_info: backend_auth_json,
+      custom_authorization_header: introspect_basic_header
+    }
+  )
+end
+
+if Inferno::Repositories::TestSuites.new.find('smart_access_brands') && ENV['INFERNO_SKIP_SMART_BRANDS'] != 'true'
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'smart_access_brands',
+    suite_id: 'smart_access_brands',
+    populate_defaults: true,
+    inputs: {
+      user_access_brands_publication_url: "#{flint_fhir_url}/.well-known/smart-brands.json",
+      endpoint_availability_success_rate: 'all'
+    }
+  )
+end
+
+if Inferno::Repositories::TestSuites.new.find('service_base_url') && ENV['INFERNO_SKIP_SERVICE_BASE_URL'] != 'true'
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'service_base_url',
+    suite_id: 'service_base_url',
+    populate_defaults: true,
+    inputs: {
+      service_base_url_publication_url: "#{flint_fhir_url}/.well-known/service-base-urls",
+      endpoint_availability_success_rate: 'all'
+    }
+  )
+end
+
 runs << execute_inferno_target(
   **common_ctx,
   label: 'bulk_data_v200',
@@ -1144,6 +1186,24 @@ runs << execute_inferno_target(
     backend_services_requested_scope: 'system/*.read'
   }
 )
+
+if Inferno::Repositories::TestSuites.new.find('us_core_v501') && ENV['INFERNO_SKIP_US_CORE_V501'] != 'true'
+  runs << execute_inferno_target(
+    **common_ctx,
+    label: 'us_core_v501',
+    suite_id: 'us_core_v501',
+    group_suffix: 'fhir_api',
+    suite_options: {
+      smart_app_launch_version: 'smart_app_launch_2'
+    },
+    inputs: {
+      url: flint_fhir_url,
+      patient_ids: patient_ids,
+      smart_auth_info: us_core_auth_json,
+      smart_credentials: access_token
+    }
+  )
+end
 
 runs << execute_inferno_target(
   **common_ctx,
@@ -1306,6 +1366,46 @@ if usdf_suite && ENV['INFERNO_SKIP_USDF'] != 'true'
       url: formulary_fhir_url,
       smart_auth_info: us_core_auth_json,
       input_ids: 'loc-usdf-001'
+    }
+  )
+end
+
+c4bb_v110_suite = Inferno::Repositories::TestSuites.new.find('c4bb_v110')
+if c4bb_v110_suite && ENV['INFERNO_SKIP_C4BB'] != 'true'
+  c4bb_tenant = ENV.fetch('FLINT_C4BB_TENANT', 'c4bb')
+  c4bb_fhir_url = "#{flint_base_url}/fhir/r4/#{c4bb_tenant}"
+  c4bb_v110_auth_json = JSON.generate({
+    auth_type: 'public',
+    use_discovery: 'true',
+    auth_request_method: 'GET',
+    pkce_support: 'enabled',
+    pkce_code_challenge_method: 'S256',
+    client_id: 'inferno-c4bb-v110-public',
+    requested_scopes: [
+      'openid fhirUser offline_access launch/patient',
+      'patient/ExplanationOfBenefit.read patient/Coverage.read patient/Patient.read',
+      'patient/Organization.read patient/Practitioner.read',
+      'user/ExplanationOfBenefit.read user/Coverage.read user/Patient.read',
+      'user/Organization.read user/Practitioner.read'
+    ].join(' ')
+  })
+
+  runs << execute_inferno_target(
+    **common_ctx,
+    flint_fhir_url: c4bb_fhir_url,
+    flint_tenant: c4bb_tenant,
+    label: 'c4bb_v110',
+    suite_id: 'c4bb_v110',
+    runnables: Array(c4bb_v110_suite.groups),
+    inputs: {
+      url: c4bb_fhir_url,
+      smart_auth_info: c4bb_v110_auth_json,
+      standalone_smart_auth_info: c4bb_v110_auth_json,
+      patient_ids: 'pat-alice-001',
+      additional_patient_ids: 'pat-alice-001',
+      additional_coverage_ids: 'cov-c4bb-001',
+      additional_organization_ids: 'org-c4bb-insurer,org-c4bb-hospital',
+      additional_practitioner_ids: 'prac-c4bb-001,prac-c4bb-002'
     }
   )
 end

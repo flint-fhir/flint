@@ -416,7 +416,7 @@ func (s *Server) RegisterIndexExtractor(resType string, fn store.IndexExtractorF
 
 // Handler returns the HTTP handler for the FHIR API.
 func (s *Server) Handler() http.Handler {
-	return s.telemetryMiddleware(s.metricsMiddleware(s.xmlNegotiationMiddleware(s.auditMiddleware(s.authMiddleware(s.fhirRouter())))))
+	return s.telemetryMiddleware(s.metricsMiddleware(corsMiddleware(s.xmlNegotiationMiddleware(s.auditMiddleware(s.authMiddleware(s.fhirRouter()))))))
 }
 
 func (s *Server) fhirRouter() http.Handler {
@@ -455,6 +455,8 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("GET /.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("GET /.well-known/openid-configuration", s.handleOIDCConfig)
 	mux.HandleFunc("GET /.well-known/udap", s.handleUDAPDiscoveryWave54)
+	mux.HandleFunc("GET /.well-known/service-base-urls", s.handleServiceBaseURLs)
+	mux.HandleFunc("GET /.well-known/smart-brands.json", s.handleSMARTBrands)
 
 	// HL7 SMART Health Links (SHLinks) public recipient manifest & A256GCM JWE content endpoints
 	mux.HandleFunc("POST /shlink/{id}/manifest", s.handleSHLinkManifest)
@@ -592,6 +594,8 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/openid-configuration", s.handleOIDCConfig)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/jwks.json", s.handleJWKS)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/udap", s.handleUDAPDiscoveryWave54)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/service-base-urls", s.handleServiceBaseURLs)
+	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/smart-brands.json", s.handleSMARTBrands)
 
 	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		isGetOrHead := r.Method == http.MethodGet || r.Method == http.MethodHead
@@ -6383,11 +6387,13 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-Patient",
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-beneficiary",
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-subscriber",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-patient",
 		}
 	case "Encounter":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-encounter",
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-encounter",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-encounter",
 		}
 	case "Condition":
 		return []string{
@@ -6399,6 +6405,7 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/Condition-uv-ips",
 			"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-primary-cancer-condition",
 			"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-secondary-cancer-condition",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-condition",
 		}
 	case "Observation":
 		return []string{
@@ -6456,6 +6463,16 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-pregnancy-status-uv-ips",
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-pregnancy-edd-uv-ips",
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/Observation-pregnancy-outcome-uv-ips",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-bodyweight",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-bloodpressure",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-bodyheight",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-bodytemp",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-heartrate",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-waistcircum",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-resprate",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-diagnosticresult",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-diagnosticresult-path",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-smokingstatus",
 		}
 	case "Practitioner":
 		return []string{
@@ -6465,6 +6482,7 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Practitioner",
 			"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-Practitioner",
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-practitioner",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-practitioner",
 		}
 	case "MedicationRequest":
 		return []string{
@@ -6473,6 +6491,7 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/MedicationRequest-uv-ips",
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-medicationrequest",
 			"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-cancer-related-medication-request",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-medicationrequest",
 		}
 	case "MedicationAdministration":
 		return []string{
@@ -6482,30 +6501,35 @@ func usCoreSupportedProfiles(rt string) []string {
 		return []string{
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-medicationstatement",
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/MedicationStatement-uv-ips",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-medicationstatement",
 		}
 	case "AllergyIntolerance":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-allergyintolerance",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-allergyintolerance",
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/AllergyIntolerance-uv-ips",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-allergyintolerance",
 		}
 	case "Procedure":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-procedure",
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/Procedure-uv-ips",
 			"http://hl7.org/fhir/us/mcode/StructureDefinition/mcode-radiotherapy-course-summary",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-procedure",
 		}
 	case "DiagnosticReport":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-lab",
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-note",
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/DiagnosticReport-uv-ips",
+			"http://hl7.org.au/fhir/StructureDefinition/au-diagnosticreport",
 		}
 	case "Immunization":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-immunization",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-immunization",
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/Immunization-uv-ips",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-immunization",
 		}
 	case "Organization":
 		return []string{
@@ -6516,6 +6540,8 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-Organization",
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-insurer",
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-requestor",
+			"http://hl7.org/fhir/smart-app-launch/StructureDefinition/user-access-brand",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-organization",
 		}
 	case "Specimen":
 		return []string{
@@ -6528,6 +6554,7 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Location",
 			"http://hl7.org/fhir/us/davinci-drug-formulary/StructureDefinition/usdf-InsurancePlanLocation",
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-location",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-location",
 		}
 	case "DocumentReference":
 		return []string{
@@ -6570,6 +6597,7 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-medication",
 			"http://hl7.org/fhir/uv/ipa/StructureDefinition/ipa-medication",
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/Medication-uv-ips",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-medication",
 		}
 	case "Device":
 		return []string{
@@ -6590,11 +6618,13 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/PractitionerRole-uv-ips",
 			"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-PractitionerRole",
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-practitionerrole",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-practitionerrole",
 		}
 	case "RelatedPerson":
 		return []string{
 			"http://hl7.org/fhir/us/core/StructureDefinition/us-core-relatedperson",
 			"http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-RelatedPerson",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-relatedperson",
 		}
 	case "Subscription":
 		return []string{
@@ -6602,9 +6632,15 @@ func usCoreSupportedProfiles(rt string) []string {
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-subscription",
 		}
 	case "Endpoint":
-		return []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Endpoint"}
+		return []string{
+			"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-Endpoint",
+			"http://hl7.org/fhir/smart-app-launch/StructureDefinition/user-access-endpoint",
+		}
 	case "HealthcareService":
-		return []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-HealthcareService"}
+		return []string{
+			"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-HealthcareService",
+			"http://hl7.org.au/fhir/core/StructureDefinition/au-core-healthcareservice",
+		}
 	case "OrganizationAffiliation":
 		return []string{"http://hl7.org/fhir/us/davinci-pdex-plan-net/StructureDefinition/plannet-OrganizationAffiliation"}
 	case "InsurancePlan":
@@ -6620,6 +6656,7 @@ func usCoreSupportedProfiles(rt string) []string {
 	case "Bundle":
 		return []string{
 			"http://hl7.org/fhir/uv/ips/StructureDefinition/Bundle-uv-ips",
+			"http://hl7.org/fhir/smart-app-launch/StructureDefinition/user-access-brands-bundle",
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-request-bundle",
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-response-bundle",
 			"http://hl7.org/fhir/us/davinci-pas/StructureDefinition/profile-pas-inquiry-request-bundle",

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Headless HL7 Inferno Conformance Runner (32 Official HL7 / ONC / CMS-0057-F / USCDI+ / UDAP Suites)
-# (ONC (g)(10) HTI-1 + US Core v6.1.0/v7.0.0/v8.0.0 + UDAP v1.0.0 + Da Vinci CRD v2.0.1/v2.2.1 +
-#  Da Vinci DTR v2.0.1/v2.2.0 + Da Vinci PAS v2.2.1 + Da Vinci PDex v2.0.0 + CARIN BB v2.0.0 +
-#  Plan-Net v1.1.0 + USDF v2.0.1 + IPS v1.1.0 + IPA v1.0.0 + Subscriptions R5 Backport + SMART STU2 + Bulk Data v2.0.0)
+# Headless HL7 Inferno Conformance Runner (37 Official HL7 / ONC / CMS-0057-F / USCDI+ / UDAP Suites
+# + 2 HL7 AU Core v1.0.0/v2.0.0 Suites in deploy/inferno/run-au-core.sh = 39 Total Suites)
+# (ONC (g)(10) HTI-1 + Service Base URL + US Core v5.0.1/v6.1.0/v7.0.0/v8.0.0 + UDAP v1.0.0 + Da Vinci CRD v2.0.1/v2.2.1 +
+#  Da Vinci DTR v2.0.1/v2.2.0 + Da Vinci PAS v2.2.1 + Da Vinci PDex v2.0.0 + CARIN BB v1.1.0/v2.0.0 + SMART Brands + SMART STU2/STU2.2 +
+#  Plan-Net v1.1.0 + USDF v2.0.1 + IPS v1.1.0 + IPA v1.0.0 + Subscriptions R5 Backport + Bulk Data v2.0.0)
 #
 # Runs official HL7 Inferno Ruby test suites directly against a live Flint server
 # without requiring Docker, Redis, Sidekiq, or a 2 GB Java validator container.

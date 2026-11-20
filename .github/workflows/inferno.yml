@@ -11,7 +11,7 @@ on:
 
 jobs:
   inferno:
-    name: HL7 Inferno 32-Suite Matrix (ONC g10 + US Core + USQC + UDAP + SMART-UDAP + SHC + SSL + UDS+ + CPDS + CCRR + At-Home + Da Vinci + C4BB + IPS + IPA + Subs + SMART + Bulk) [${{ matrix.store }}]
+    name: HL7 Inferno 37-Suite Matrix (ONC g10 + Service Base URL + US Core v5-v8 + USQC + UDAP + SMART-UDAP + SHC + SSL + UDS+ + CPDS + CCRR + At-Home + Da Vinci + C4BB v1.1/v2.0 + IPS + IPA + Subs + SMART v2/v2.2/Brands + Bulk) [${{ matrix.store }}]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -103,4 +103,97 @@ jobs:
         with:
           name: inferno-conformance-${{ matrix.store }}
           path: artifacts/inferno-${{ matrix.store }}/
+          retention-days: 14
+
+  inferno-au-core:
+    name: HL7 AU Core v1.0.0 & v2.0.0 Inferno Matrix [${{ matrix.store }}]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        store: [postgres, sqlite]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: flint
+          POSTGRES_USER: flint
+          POSTGRES_PASSWORD: flint
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SQLite development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libsqlite3-dev
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3.6'
+
+      - name: Cache HL7 AU Core Inferno Ruby gems
+        uses: actions/cache@v4
+        with:
+          path: deploy/inferno/au_core/vendor/bundle
+          key: ${{ runner.os }}-au-core-ruby336-gems-${{ hashFiles('deploy/inferno/au_core/Gemfile') }}
+          restore-keys: |
+            ${{ runner.os }}-au-core-ruby336-gems-
+
+      - name: Install HL7 AU Core Inferno Ruby gems
+        working-directory: deploy/inferno/au_core
+        run: |
+          bundle config set --local path 'vendor/bundle'
+          bundle install --jobs 4 --retry 3
+
+      - name: Build flintd and AU Core cohort seeder
+        run: |
+          mkdir -p bin
+          go build -o bin/flintd ./cmd/flintd
+          go build -o bin/seed ./cmd/seed
+
+      - name: Run HL7 AU Core Inferno Suites against flintd (${{ matrix.store }})
+        env:
+          FLINT_POSTGRES_DSN: "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
+          FLINT_ADDR: "127.0.0.1:18080"
+          FLINT_SMART_ENFORCE_DEV_AUTH: "true"
+          FLINT_BASE_URL: "http://127.0.0.1:18080"
+          FLINT_AU_TENANT: "aucore"
+          INFERNO_ARTIFACTS_DIR: "${{ github.workspace }}/artifacts/inferno-au-core-${{ matrix.store }}"
+        run: |
+          mkdir -p "${INFERNO_ARTIFACTS_DIR}"
+          if [ "${{ matrix.store }}" = "sqlite" ]; then
+            ./bin/flintd --store=sqlite --sqlite-dsn=/tmp/flint-au-core.db > "${INFERNO_ARTIFACTS_DIR}/flintd.log" 2>&1 &
+          else
+            ./bin/flintd --store=postgres > "${INFERNO_ARTIFACTS_DIR}/flintd.log" 2>&1 &
+          fi
+          FLINTD_PID=$!
+          trap 'kill "${FLINTD_PID}" 2>/dev/null || true' EXIT
+
+          for i in $(seq 1 40); do
+            if curl -fsS "http://127.0.0.1:18080/readyz" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.5
+          done
+          curl -fsS "http://127.0.0.1:18080/readyz"
+
+          bash deploy/inferno/run-au-core.sh
+
+      - name: Upload HL7 AU Core Inferno Conformance Reports (${{ matrix.store }})
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inferno-au-core-${{ matrix.store }}
+          path: artifacts/inferno-au-core-${{ matrix.store }}/
           retention-days: 14
