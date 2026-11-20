@@ -280,7 +280,8 @@ func TestProperty_TxClientCacheKeyDeterminismAndCollisionFreedom(t *testing.T) {
 		}
 
 		// 2. Collision freedom across distinct (op, url, code) for ValueSet/$validate-code vs CodeSystem/$validate-code:
-		if opA != "CodeSystem/$lookup" && opB != "CodeSystem/$lookup" {
+		if (opA == "ValueSet/$validate-code" || opA == "CodeSystem/$validate-code") &&
+			(opB == "ValueSet/$validate-code" || opB == "CodeSystem/$validate-code") {
 			pA := map[string]string{"url": baseURLA, "code": codeA}
 			pB := map[string]string{"url": baseURLB, "code": codeB}
 			gA, kA := computeKeys(opA, pA)

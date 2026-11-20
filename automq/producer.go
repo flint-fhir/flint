@@ -25,6 +25,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 
 	"github.com/flint-fhir/flint/pkg/cdc"
+	"github.com/flint-fhir/flint/pkg/telemetry"
 )
 
 // ResourceEnvelopeProtoSchema is the canonical Protobuf schema registered per
@@ -205,6 +206,7 @@ func (p *Producer) EnsureSchemaID(ctx context.Context, topic string) (uint32, er
 		return 0, fmt.Errorf("automq.EnsureSchemaID request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/vnd.schemaregistry.v1+json")
+	telemetry.InjectHTTP(ctx, req.Header)
 
 	httpClient := p.httpClient
 	if httpClient == nil {
@@ -251,6 +253,12 @@ func (p *Producer) cachedSchemaID(topic string) uint32 {
 // When a Confluent/Apicurio schema ID is configured for the topic, the record value is framed
 // using Confluent Protobuf wire format (by_schema_id) wrapping ResourceEnvelope.
 func (p *Producer) BuildRecord(msg Message) *kgo.Record {
+	return p.BuildRecordWithContext(context.Background(), msg)
+}
+
+// BuildRecordWithContext creates a kafka Record from a Message and attaches W3C Trace Context
+// ("traceparent" and optional "tracestate") record headers when ctx carries a valid SpanContext.
+func (p *Producer) BuildRecordWithContext(ctx context.Context, msg Message) *kgo.Record {
 	topic := p.TopicPrefix + msg.ResType
 	key := msg.ResID
 	if msg.TenantID != "" {
@@ -262,16 +270,33 @@ func (p *Producer) BuildRecord(msg Message) *kgo.Record {
 		val = WrapConfluentProtobuf(schemaID, EncodeResourceEnvelopeProto(msg))
 	}
 
+	headers := make([]kgo.RecordHeader, 0, 6)
+	headers = append(headers,
+		kgo.RecordHeader{Key: "tenant_id", Value: []byte(msg.TenantID)},
+		kgo.RecordHeader{Key: "res_type", Value: []byte(msg.ResType)},
+		kgo.RecordHeader{Key: "res_id", Value: []byte(msg.ResID)},
+		kgo.RecordHeader{Key: "op", Value: []byte(msg.Op)},
+	)
+	if ctx != nil {
+		if sc, ok := telemetry.FromContext(ctx); ok && sc.IsValid() {
+			headers = append(headers, kgo.RecordHeader{
+				Key:   "traceparent",
+				Value: []byte(telemetry.FormatTraceParent(sc)),
+			})
+			if sc.TraceState != "" {
+				headers = append(headers, kgo.RecordHeader{
+					Key:   "tracestate",
+					Value: []byte(sc.TraceState),
+				})
+			}
+		}
+	}
+
 	return &kgo.Record{
-		Topic: topic,
-		Key:   []byte(key),
-		Value: val,
-		Headers: []kgo.RecordHeader{
-			{Key: "tenant_id", Value: []byte(msg.TenantID)},
-			{Key: "res_type", Value: []byte(msg.ResType)},
-			{Key: "res_id", Value: []byte(msg.ResID)},
-			{Key: "op", Value: []byte(msg.Op)},
-		},
+		Topic:   topic,
+		Key:     []byte(key),
+		Value:   val,
+		Headers: headers,
 	}
 }
 
@@ -297,7 +322,7 @@ func (p *Producer) Publish(ctx context.Context, messages []Message) error {
 
 	records := make([]*kgo.Record, len(messages))
 	for i, msg := range messages {
-		records[i] = p.BuildRecord(msg)
+		records[i] = p.BuildRecordWithContext(ctx, msg)
 	}
 
 	results := p.client.ProduceSync(ctx, records...)

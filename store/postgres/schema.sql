@@ -142,6 +142,8 @@ CREATE TABLE IF NOT EXISTS fhir_audit_event (
     entity_type     TEXT        NOT NULL DEFAULT '',
     entity_id       TEXT        NOT NULL DEFAULT '',
     entity_version  TEXT        NOT NULL DEFAULT '',
+    trace_id        TEXT        NOT NULL DEFAULT '',
+    span_id         TEXT        NOT NULL DEFAULT '',
     PRIMARY KEY (tenant_id, audit_id)
 );
 
@@ -155,13 +157,19 @@ CREATE INDEX IF NOT EXISTS idx_fhir_audit_event_agent
     ON fhir_audit_event (tenant_id, agent_subject, recorded DESC);
 
 CREATE TABLE IF NOT EXISTS fhir_oauth_refresh_token (
-    token_hash   TEXT        PRIMARY KEY,
-    subject      TEXT        NOT NULL,
-    patient_id   TEXT        NOT NULL DEFAULT '',
-    encounter_id TEXT        NOT NULL DEFAULT '',
-    scope        TEXT        NOT NULL DEFAULT '',
-    expires_at   TIMESTAMPTZ NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    token_hash        TEXT        PRIMARY KEY,
+    subject           TEXT        NOT NULL,
+    grant_id          TEXT        NOT NULL DEFAULT '',
+    client_id         TEXT        NOT NULL DEFAULT '',
+    tenant_id         TEXT        NOT NULL DEFAULT '',
+    patient_id        TEXT        NOT NULL DEFAULT '',
+    encounter_id      TEXT        NOT NULL DEFAULT '',
+    scope             TEXT        NOT NULL DEFAULT '',
+    nonce             TEXT        NOT NULL DEFAULT '',
+    fhir_user         TEXT        NOT NULL DEFAULT '',
+    extra_claims_text TEXT        NOT NULL DEFAULT '',
+    expires_at        TIMESTAMPTZ NOT NULL,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_oauth_refresh_token_expires
@@ -187,6 +195,8 @@ CREATE TABLE IF NOT EXISTS fhir_oauth_auth_code (
     encounter_id          TEXT        NOT NULL DEFAULT '',
     tenant_id             TEXT        NOT NULL DEFAULT '',
     nonce                 TEXT        NOT NULL DEFAULT '',
+    fhir_user             TEXT        NOT NULL DEFAULT '',
+    extra_claims_text     TEXT        NOT NULL DEFAULT '',
     expires_at            TIMESTAMPTZ NOT NULL,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -195,19 +205,52 @@ CREATE INDEX IF NOT EXISTS idx_oauth_auth_code_expires
     ON fhir_oauth_auth_code (expires_at);
 
 CREATE TABLE IF NOT EXISTS fhir_export_job (
-    job_id       TEXT        PRIMARY KEY,
-    tenant_id    TEXT        NOT NULL,
-    patient_id   TEXT        NOT NULL DEFAULT '',
-    request_url  TEXT        NOT NULL DEFAULT '',
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    types_order  TEXT        NOT NULL DEFAULT '[]',
-    counts       TEXT        NOT NULL DEFAULT '{}',
-    files_json   TEXT        NOT NULL DEFAULT '{}',
-    combined     BYTEA       NOT NULL DEFAULT ''::bytea
+    job_id           TEXT        PRIMARY KEY,
+    tenant_id        TEXT        NOT NULL,
+    patient_id       TEXT        NOT NULL DEFAULT '',
+    status           TEXT        NOT NULL DEFAULT 'complete',
+    err_msg          TEXT        NOT NULL DEFAULT '',
+    output_format    TEXT        NOT NULL DEFAULT '',
+    cancel_requested BOOLEAN     NOT NULL DEFAULT FALSE,
+    request_url      TEXT        NOT NULL DEFAULT '',
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    types_order      TEXT        NOT NULL DEFAULT '[]',
+    counts           TEXT        NOT NULL DEFAULT '{}',
+    files_json       TEXT        NOT NULL DEFAULT '{}',
+    combined         BYTEA       NOT NULL DEFAULT ''::bytea
 );
 
 CREATE INDEX IF NOT EXISTS idx_export_job_tenant_created
     ON fhir_export_job (tenant_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS fhir_cluster_secret (
+    secret_key   TEXT        PRIMARY KEY,
+    secret_bytes BYTEA       NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS fhir_cluster_state (
+    namespace     TEXT        NOT NULL,
+    state_key     TEXT        NOT NULL,
+    tenant_id     TEXT        NOT NULL DEFAULT '',
+    secondary_key TEXT        NOT NULL DEFAULT '',
+    value_blob    BYTEA       NOT NULL DEFAULT ''::bytea,
+    version       BIGINT      NOT NULL DEFAULT 1,
+    expires_at    TIMESTAMPTZ NULL,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (namespace, state_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_state_secondary
+    ON fhir_cluster_state (namespace, secondary_key)
+    WHERE secondary_key <> '';
+
+CREATE INDEX IF NOT EXISTS idx_cluster_state_tenant
+    ON fhir_cluster_state (namespace, tenant_id);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_state_expires
+    ON fhir_cluster_state (expires_at)
+    WHERE expires_at IS NOT NULL;
 
 CREATE OR REPLACE FUNCTION provision_tenant(tenant_name TEXT)
 RETURNS TEXT AS $$

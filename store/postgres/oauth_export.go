@@ -26,9 +26,9 @@ func (s *Store) SaveAuthCode(ctx context.Context, rawCode string, rec OAuthAuthC
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO fhir_oauth_auth_code (
 			code_hash, client_id, redirect_uri, scope, code_challenge, code_challenge_method,
-			patient_id, encounter_id, tenant_id, nonce, expires_at, created_at
+			patient_id, encounter_id, tenant_id, nonce, fhir_user, extra_claims_text, expires_at, created_at
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, NOW())
 		ON CONFLICT (code_hash) DO UPDATE SET
 			client_id             = EXCLUDED.client_id,
 			redirect_uri          = EXCLUDED.redirect_uri,
@@ -39,9 +39,11 @@ func (s *Store) SaveAuthCode(ctx context.Context, rawCode string, rec OAuthAuthC
 			encounter_id          = EXCLUDED.encounter_id,
 			tenant_id             = EXCLUDED.tenant_id,
 			nonce                 = EXCLUDED.nonce,
+			fhir_user             = EXCLUDED.fhir_user,
+			extra_claims_text     = EXCLUDED.extra_claims_text,
 			expires_at            = EXCLUDED.expires_at
 	`, hashToken(rawCode), rec.ClientID, rec.RedirectURI, rec.Scope, rec.CodeChallenge, rec.CodeChallengeMethod,
-		rec.PatientID, rec.EncounterID, rec.TenantID, rec.Nonce, rec.ExpiresAt.UTC())
+		rec.PatientID, rec.EncounterID, rec.TenantID, rec.Nonce, rec.FhirUser, rec.ExtraClaimsJSON, rec.ExpiresAt.UTC())
 	return err
 }
 
@@ -55,10 +57,10 @@ func (s *Store) ConsumeAuthCode(ctx context.Context, rawCode string) (OAuthAuthC
 		DELETE FROM fhir_oauth_auth_code
 		WHERE code_hash = $1 AND expires_at > NOW()
 		RETURNING client_id, redirect_uri, scope, code_challenge, code_challenge_method,
-		          patient_id, encounter_id, tenant_id, nonce, expires_at
+		          patient_id, encounter_id, tenant_id, nonce, fhir_user, extra_claims_text, expires_at
 	`, hashToken(rawCode)).Scan(
 		&rec.ClientID, &rec.RedirectURI, &rec.Scope, &rec.CodeChallenge, &rec.CodeChallengeMethod,
-		&rec.PatientID, &rec.EncounterID, &rec.TenantID, &rec.Nonce, &rec.ExpiresAt,
+		&rec.PatientID, &rec.EncounterID, &rec.TenantID, &rec.Nonce, &rec.FhirUser, &rec.ExtraClaimsJSON, &rec.ExpiresAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return OAuthAuthCodeRecord{}, false, nil
@@ -76,16 +78,50 @@ func (s *Store) SaveRefreshToken(ctx context.Context, rawToken string, rec OAuth
 	}
 	_, _ = s.db.ExecContext(ctx, "DELETE FROM fhir_oauth_refresh_token WHERE expires_at <= NOW()")
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO fhir_oauth_refresh_token (token_hash, subject, patient_id, encounter_id, scope, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		INSERT INTO fhir_oauth_refresh_token (
+			token_hash, subject, grant_id, client_id, tenant_id, patient_id, encounter_id,
+			scope, nonce, fhir_user, extra_claims_text, expires_at, created_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
 		ON CONFLICT (token_hash) DO UPDATE SET
-			subject      = EXCLUDED.subject,
-			patient_id   = EXCLUDED.patient_id,
-			encounter_id = EXCLUDED.encounter_id,
-			scope        = EXCLUDED.scope,
-			expires_at   = EXCLUDED.expires_at
-	`, hashToken(rawToken), rec.Subject, rec.PatientID, rec.EncounterID, rec.Scope, rec.ExpiresAt.UTC())
+			subject           = EXCLUDED.subject,
+			grant_id          = EXCLUDED.grant_id,
+			client_id         = EXCLUDED.client_id,
+			tenant_id         = EXCLUDED.tenant_id,
+			patient_id        = EXCLUDED.patient_id,
+			encounter_id      = EXCLUDED.encounter_id,
+			scope             = EXCLUDED.scope,
+			nonce             = EXCLUDED.nonce,
+			fhir_user         = EXCLUDED.fhir_user,
+			extra_claims_text = EXCLUDED.extra_claims_text,
+			expires_at        = EXCLUDED.expires_at
+	`, hashToken(rawToken), rec.Subject, rec.GrantID, rec.ClientID, rec.TenantID,
+		rec.PatientID, rec.EncounterID, rec.Scope, rec.Nonce, rec.FhirUser, rec.ExtraClaimsJSON, rec.ExpiresAt.UTC())
 	return err
+}
+
+// PeekRefreshToken reads an unexpired OAuth2 refresh token record without consuming it.
+func (s *Store) PeekRefreshToken(ctx context.Context, rawToken string) (OAuthRefreshTokenRecord, bool, error) {
+	if s == nil || s.db == nil || rawToken == "" {
+		return OAuthRefreshTokenRecord{}, false, nil
+	}
+	var rec OAuthRefreshTokenRecord
+	err := s.db.QueryRowContext(ctx, `
+		SELECT subject, grant_id, client_id, tenant_id, patient_id, encounter_id,
+		       scope, nonce, fhir_user, extra_claims_text, expires_at
+		FROM fhir_oauth_refresh_token
+		WHERE token_hash = $1 AND expires_at > NOW()
+	`, hashToken(rawToken)).Scan(
+		&rec.Subject, &rec.GrantID, &rec.ClientID, &rec.TenantID, &rec.PatientID, &rec.EncounterID,
+		&rec.Scope, &rec.Nonce, &rec.FhirUser, &rec.ExtraClaimsJSON, &rec.ExpiresAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return OAuthRefreshTokenRecord{}, false, nil
+	}
+	if err != nil {
+		return OAuthRefreshTokenRecord{}, false, err
+	}
+	return rec, true, nil
 }
 
 // ConsumeRefreshToken atomically deletes and returns an unexpired OAuth2 refresh token record.
@@ -97,8 +133,12 @@ func (s *Store) ConsumeRefreshToken(ctx context.Context, rawToken string) (OAuth
 	err := s.db.QueryRowContext(ctx, `
 		DELETE FROM fhir_oauth_refresh_token
 		WHERE token_hash = $1 AND expires_at > NOW()
-		RETURNING subject, patient_id, encounter_id, scope, expires_at
-	`, hashToken(rawToken)).Scan(&rec.Subject, &rec.PatientID, &rec.EncounterID, &rec.Scope, &rec.ExpiresAt)
+		RETURNING subject, grant_id, client_id, tenant_id, patient_id, encounter_id,
+		          scope, nonce, fhir_user, extra_claims_text, expires_at
+	`, hashToken(rawToken)).Scan(
+		&rec.Subject, &rec.GrantID, &rec.ClientID, &rec.TenantID, &rec.PatientID, &rec.EncounterID,
+		&rec.Scope, &rec.Nonce, &rec.FhirUser, &rec.ExtraClaimsJSON, &rec.ExpiresAt,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return OAuthRefreshTokenRecord{}, false, nil
 	}
@@ -148,10 +188,296 @@ func (s *Store) IsTokenRevoked(ctx context.Context, rawToken string) (bool, erro
 	return true, nil
 }
 
+// ClaimNonce atomically claims a single-use cryptographic replay nonce in PostgreSQL.
+// Returns (true, nil) if freshly claimed, or (false, nil) if already claimed and unexpired.
+func (s *Store) ClaimNonce(ctx context.Context, nonceKey string, ttl time.Duration) (bool, error) {
+	if s == nil || s.db == nil || nonceKey == "" {
+		return false, nil
+	}
+	if ttl <= 0 {
+		ttl = 10 * time.Minute
+	}
+	h := hashToken("nonce:" + nonceKey)
+	_, _ = s.db.ExecContext(ctx, "DELETE FROM fhir_oauth_revoked_token WHERE token_hash = $1 AND expires_at <= NOW()", h)
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO fhir_oauth_revoked_token (token_hash, expires_at, revoked_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (token_hash) DO NOTHING
+	`, h, time.Now().UTC().Add(ttl))
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// GetOrCreateClusterSecret atomically retrieves or initializes a cluster-wide secret in PostgreSQL.
+func (s *Store) GetOrCreateClusterSecret(ctx context.Context, key string, generate func() ([]byte, error)) ([]byte, error) {
+	if s == nil || s.db == nil || key == "" {
+		if generate != nil {
+			return generate()
+		}
+		return nil, nil
+	}
+	var existing []byte
+	err := s.db.QueryRowContext(ctx, `
+		SELECT secret_bytes FROM fhir_cluster_secret WHERE secret_key = $1
+	`, key).Scan(&existing)
+	if err == nil && len(existing) > 0 {
+		return append([]byte(nil), existing...), nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if generate == nil {
+		return nil, sql.ErrNoRows
+	}
+	genBytes, err := generate()
+	if err != nil {
+		return nil, err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO fhir_cluster_secret (secret_key, secret_bytes, created_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (secret_key) DO NOTHING
+	`, key, genBytes)
+	if err != nil {
+		return nil, err
+	}
+	err = s.db.QueryRowContext(ctx, `
+		SELECT secret_bytes FROM fhir_cluster_secret WHERE secret_key = $1
+	`, key).Scan(&existing)
+	if err != nil {
+		return nil, err
+	}
+	return append([]byte(nil), existing...), nil
+}
+
+// PutClusterState upserts a versioned cluster state entry in PostgreSQL.
+func (s *Store) PutClusterState(ctx context.Context, rec ClusterStateRecord) (ClusterStateRecord, error) {
+	if s == nil || s.db == nil || rec.Namespace == "" || rec.Key == "" {
+		return rec, nil
+	}
+	valBlob := rec.Value
+	if valBlob == nil {
+		valBlob = []byte{}
+	}
+	var expArg any
+	if rec.ExpiresAt != nil && !rec.ExpiresAt.IsZero() {
+		expArg = rec.ExpiresAt.UTC()
+	}
+	out := rec
+	err := s.db.QueryRowContext(ctx, `
+		INSERT INTO fhir_cluster_state (
+			namespace, state_key, tenant_id, secondary_key, value_blob, version, expires_at, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, 1, $6, NOW())
+		ON CONFLICT (namespace, state_key) DO UPDATE SET
+			tenant_id     = EXCLUDED.tenant_id,
+			secondary_key = EXCLUDED.secondary_key,
+			value_blob    = EXCLUDED.value_blob,
+			version       = fhir_cluster_state.version + 1,
+			expires_at    = EXCLUDED.expires_at,
+			updated_at    = NOW()
+		RETURNING version, updated_at
+	`, rec.Namespace, rec.Key, rec.TenantID, rec.SecondaryKey, valBlob, expArg).Scan(&out.Version, &out.UpdatedAt)
+	if err != nil {
+		return ClusterStateRecord{}, err
+	}
+	return out, nil
+}
+
+func scanClusterStateRow(scanner interface{ Scan(...any) error }) (*ClusterStateRecord, error) {
+	var rec ClusterStateRecord
+	var exp sql.NullTime
+	if err := scanner.Scan(
+		&rec.Namespace, &rec.Key, &rec.TenantID, &rec.SecondaryKey,
+		&rec.Value, &rec.Version, &exp, &rec.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+	if exp.Valid {
+		t := exp.Time.UTC()
+		rec.ExpiresAt = &t
+	}
+	return &rec, nil
+}
+
+// GetClusterState retrieves an unexpired cluster state entry by (namespace, key).
+func (s *Store) GetClusterState(ctx context.Context, namespace, key string) (*ClusterStateRecord, bool, error) {
+	if s == nil || s.db == nil || namespace == "" || key == "" {
+		return nil, false, nil
+	}
+	rec, err := scanClusterStateRow(s.db.QueryRowContext(ctx, `
+		SELECT namespace, state_key, tenant_id, secondary_key, value_blob, version, expires_at, updated_at
+		FROM fhir_cluster_state
+		WHERE namespace = $1 AND state_key = $2 AND (expires_at IS NULL OR expires_at > NOW())
+	`, namespace, key))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return rec, true, nil
+}
+
+// GetClusterStateBySecondary retrieves the latest unexpired cluster state entry by (namespace, secondaryKey).
+func (s *Store) GetClusterStateBySecondary(ctx context.Context, namespace, secondaryKey string) (*ClusterStateRecord, bool, error) {
+	if s == nil || s.db == nil || namespace == "" || secondaryKey == "" {
+		return nil, false, nil
+	}
+	rec, err := scanClusterStateRow(s.db.QueryRowContext(ctx, `
+		SELECT namespace, state_key, tenant_id, secondary_key, value_blob, version, expires_at, updated_at
+		FROM fhir_cluster_state
+		WHERE namespace = $1 AND secondary_key = $2 AND (expires_at IS NULL OR expires_at > NOW())
+		ORDER BY updated_at DESC, state_key ASC
+		LIMIT 1
+	`, namespace, secondaryKey))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return rec, true, nil
+}
+
+// CompareAndSwapClusterState atomically inserts (when expectedVersion == 0) or updates
+// (when current version == expectedVersion) an unexpired cluster state entry.
+func (s *Store) CompareAndSwapClusterState(ctx context.Context, expectedVersion int64, rec ClusterStateRecord) (ClusterStateRecord, bool, error) {
+	if s == nil || s.db == nil || rec.Namespace == "" || rec.Key == "" {
+		return ClusterStateRecord{}, false, nil
+	}
+	valBlob := rec.Value
+	if valBlob == nil {
+		valBlob = []byte{}
+	}
+	var expArg any
+	if rec.ExpiresAt != nil && !rec.ExpiresAt.IsZero() {
+		expArg = rec.ExpiresAt.UTC()
+	}
+	_, _ = s.db.ExecContext(ctx, `
+		DELETE FROM fhir_cluster_state
+		WHERE namespace = $1 AND state_key = $2 AND expires_at IS NOT NULL AND expires_at <= NOW()
+	`, rec.Namespace, rec.Key)
+
+	out := rec
+	var err error
+	if expectedVersion == 0 {
+		err = s.db.QueryRowContext(ctx, `
+			INSERT INTO fhir_cluster_state (
+				namespace, state_key, tenant_id, secondary_key, value_blob, version, expires_at, updated_at
+			)
+			VALUES ($1, $2, $3, $4, $5, 1, $6, NOW())
+			ON CONFLICT (namespace, state_key) DO NOTHING
+			RETURNING version, updated_at
+		`, rec.Namespace, rec.Key, rec.TenantID, rec.SecondaryKey, valBlob, expArg).Scan(&out.Version, &out.UpdatedAt)
+	} else {
+		err = s.db.QueryRowContext(ctx, `
+			UPDATE fhir_cluster_state
+			SET tenant_id     = $3,
+			    secondary_key = $4,
+			    value_blob    = $5,
+			    version       = version + 1,
+			    expires_at    = $6,
+			    updated_at    = NOW()
+			WHERE namespace = $1 AND state_key = $2 AND version = $7
+			  AND (expires_at IS NULL OR expires_at > NOW())
+			RETURNING version, updated_at
+		`, rec.Namespace, rec.Key, rec.TenantID, rec.SecondaryKey, valBlob, expArg, expectedVersion).Scan(&out.Version, &out.UpdatedAt)
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return ClusterStateRecord{}, false, nil
+	}
+	if err != nil {
+		return ClusterStateRecord{}, false, err
+	}
+	return out, true, nil
+}
+
+// ConsumeClusterState atomically deletes and returns an unexpired cluster state entry.
+func (s *Store) ConsumeClusterState(ctx context.Context, namespace, key string) (*ClusterStateRecord, bool, error) {
+	if s == nil || s.db == nil || namespace == "" || key == "" {
+		return nil, false, nil
+	}
+	rec, err := scanClusterStateRow(s.db.QueryRowContext(ctx, `
+		DELETE FROM fhir_cluster_state
+		WHERE namespace = $1 AND state_key = $2 AND (expires_at IS NULL OR expires_at > NOW())
+		RETURNING namespace, state_key, tenant_id, secondary_key, value_blob, version, expires_at, updated_at
+	`, namespace, key))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return rec, true, nil
+}
+
+// DeleteClusterState deletes a cluster state entry by (namespace, key).
+func (s *Store) DeleteClusterState(ctx context.Context, namespace, key string) (bool, error) {
+	if s == nil || s.db == nil || namespace == "" || key == "" {
+		return false, nil
+	}
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM fhir_cluster_state WHERE namespace = $1 AND state_key = $2
+	`, namespace, key)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ListClusterStates lists unexpired cluster state entries in namespace (optionally filtered by tenantID).
+func (s *Store) ListClusterStates(ctx context.Context, namespace, tenantID string) ([]ClusterStateRecord, error) {
+	if s == nil || s.db == nil || namespace == "" {
+		return nil, nil
+	}
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if tenantID != "" {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT namespace, state_key, tenant_id, secondary_key, value_blob, version, expires_at, updated_at
+			FROM fhir_cluster_state
+			WHERE namespace = $1 AND tenant_id = $2 AND (expires_at IS NULL OR expires_at > NOW())
+			ORDER BY state_key ASC
+		`, namespace, tenantID)
+	} else {
+		rows, err = s.db.QueryContext(ctx, `
+			SELECT namespace, state_key, tenant_id, secondary_key, value_blob, version, expires_at, updated_at
+			FROM fhir_cluster_state
+			WHERE namespace = $1 AND (expires_at IS NULL OR expires_at > NOW())
+			ORDER BY state_key ASC
+		`, namespace)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ClusterStateRecord
+	for rows.Next() {
+		rec, err := scanClusterStateRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rec)
+	}
+	return out, rows.Err()
+}
+
 // SaveExportJob persists a Bulk Data ($export) job in PostgreSQL.
 func (s *Store) SaveExportJob(ctx context.Context, job ExportJobRecord) error {
 	if s == nil || s.db == nil || job.ID == "" {
 		return nil
+	}
+	status := job.Status
+	if status == "" {
+		status = "complete"
 	}
 	typesJSON, err := json.Marshal(job.TypesOrder)
 	if err != nil {
@@ -177,17 +503,25 @@ func (s *Store) SaveExportJob(ctx context.Context, job ExportJobRecord) error {
 
 	return s.withTenantTx(ctx, job.TenantID, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `
-			INSERT INTO fhir_export_job (job_id, tenant_id, patient_id, request_url, created_at, types_order, counts, files_json, combined)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+			INSERT INTO fhir_export_job (
+				job_id, tenant_id, patient_id, status, err_msg, output_format, cancel_requested,
+				request_url, created_at, types_order, counts, files_json, combined
+			)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			ON CONFLICT (job_id) DO UPDATE SET
-				tenant_id   = EXCLUDED.tenant_id,
-				patient_id  = EXCLUDED.patient_id,
-				request_url = EXCLUDED.request_url,
-				types_order = EXCLUDED.types_order,
-				counts      = EXCLUDED.counts,
-				files_json  = EXCLUDED.files_json,
-				combined    = EXCLUDED.combined
-		`, job.ID, job.TenantID, job.PatientID, job.RequestURL, job.CreatedAt.UTC(), string(typesJSON), string(countsJSON), string(filesJSON), combinedBytes)
+				tenant_id        = EXCLUDED.tenant_id,
+				patient_id       = EXCLUDED.patient_id,
+				status           = EXCLUDED.status,
+				err_msg          = EXCLUDED.err_msg,
+				output_format    = EXCLUDED.output_format,
+				cancel_requested = EXCLUDED.cancel_requested,
+				request_url      = EXCLUDED.request_url,
+				types_order      = EXCLUDED.types_order,
+				counts           = EXCLUDED.counts,
+				files_json       = EXCLUDED.files_json,
+				combined         = EXCLUDED.combined
+		`, job.ID, job.TenantID, job.PatientID, status, job.Err, job.OutputFormat, job.CancelRequested,
+			job.RequestURL, job.CreatedAt.UTC(), string(typesJSON), string(countsJSON), string(filesJSON), combinedBytes)
 		return err
 	})
 }
@@ -201,12 +535,13 @@ func (s *Store) GetExportJob(ctx context.Context, tenantID, jobID string) (*Expo
 	var typesRaw, countsRaw, filesRaw string
 	err := s.withTenantTx(ctx, tenantID, func(tx *sql.Tx) error {
 		return tx.QueryRowContext(ctx, `
-			SELECT job_id, tenant_id, patient_id, request_url, created_at, types_order, counts, files_json, combined
+			SELECT job_id, tenant_id, patient_id, status, err_msg, output_format, cancel_requested,
+			       request_url, created_at, types_order, counts, files_json, combined
 			FROM fhir_export_job
 			WHERE tenant_id = $1 AND job_id = $2
 		`, tenantID, jobID).Scan(
-			&rec.ID, &rec.TenantID, &rec.PatientID, &rec.RequestURL, &rec.CreatedAt,
-			&typesRaw, &countsRaw, &filesRaw, &rec.Combined,
+			&rec.ID, &rec.TenantID, &rec.PatientID, &rec.Status, &rec.Err, &rec.OutputFormat, &rec.CancelRequested,
+			&rec.RequestURL, &rec.CreatedAt, &typesRaw, &countsRaw, &filesRaw, &rec.Combined,
 		)
 	})
 	if err != nil {

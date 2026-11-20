@@ -102,7 +102,7 @@ func TestDorisDDLAndGroupCommit(t *testing.T) {
 	assert.False(t, ok)
 
 	stmts := doris.SchemaDDL()
-	assert.Len(t, stmts, 17)
+	assert.Len(t, stmts, 19)
 
 	require.NoError(t, doris.RunMigrations(context.Background(), nil))
 
@@ -962,4 +962,97 @@ func TestDorisStore_LoadFromDB_And_CompensatingRollback(t *testing.T) {
 	require.Len(t, stmts, 3, "expected 3 multi-row INSERT statements (fhir_resource, fhir_resource_history, fhir_patient)")
 	assert.Contains(t, stmts[0], "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?), (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 	assert.Contains(t, stmts[2], "INSERT INTO fhir_patient")
+}
+
+func TestDorisStore_ClusterStateSecretsAndNonces(t *testing.T) {
+	ctx := context.Background()
+	ds := doris.New(nil)
+
+	sec, err := ds.GetOrCreateClusterSecret(ctx, "jwt-rsa", func() ([]byte, error) {
+		return []byte("pem-doris"), nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []byte("pem-doris"), sec)
+	sec2, err := ds.GetOrCreateClusterSecret(ctx, "jwt-rsa", func() ([]byte, error) {
+		return []byte("ignored"), nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sec, sec2)
+
+	claimed, err := ds.ClaimNonce(ctx, "jti-d1", time.Minute)
+	require.NoError(t, err)
+	assert.True(t, claimed)
+	claimedDup, err := ds.ClaimNonce(ctx, "jti-d1", time.Minute)
+	require.NoError(t, err)
+	assert.False(t, claimedDup)
+
+	exp := time.Now().UTC().Add(time.Hour)
+	require.NoError(t, ds.SaveRefreshToken(ctx, "rt-d1", store.OAuthRefreshTokenRecord{
+		Subject:   "u1",
+		GrantID:   "gd1",
+		ExpiresAt: exp,
+	}))
+	peek, ok, err := ds.PeekRefreshToken(ctx, "rt-d1")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "gd1", peek.GrantID)
+
+	cs1, ok, err := ds.CompareAndSwapClusterState(ctx, 0, store.ClusterStateRecord{
+		Namespace:    "shlink",
+		Key:          "l1",
+		TenantID:     "t1",
+		SecondaryKey: "sec-d1",
+		Value:        []byte(`{"views":0}`),
+		ExpiresAt:    &exp,
+	})
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, int64(1), cs1.Version)
+
+	_, dupOK, err := ds.CompareAndSwapClusterState(ctx, 0, store.ClusterStateRecord{Namespace: "shlink", Key: "l1"})
+	require.NoError(t, err)
+	assert.False(t, dupOK)
+
+	_, casOK, err := ds.CompareAndSwapClusterState(ctx, 1, store.ClusterStateRecord{
+		Namespace:    "shlink",
+		Key:          "l1",
+		TenantID:     "t1",
+		SecondaryKey: "sec-d1",
+		Value:        []byte(`{"views":1}`),
+		ExpiresAt:    &exp,
+	})
+	require.NoError(t, err)
+	assert.True(t, casOK)
+
+	_, err = ds.PutClusterState(ctx, store.ClusterStateRecord{
+		Namespace: "shlink",
+		Key:       "l2",
+		TenantID:  "t1",
+		Value:     []byte(`{"views":0}`),
+		ExpiresAt: &exp,
+	})
+	require.NoError(t, err)
+
+	got, ok, err := ds.GetClusterState(ctx, "shlink", "l1")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, int64(2), got.Version)
+
+	gotSec, ok, err := ds.GetClusterStateBySecondary(ctx, "shlink", "sec-d1")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "l1", gotSec.Key)
+
+	list, err := ds.ListClusterStates(ctx, "shlink", "t1")
+	require.NoError(t, err)
+	assert.Len(t, list, 2)
+
+	cons, ok, err := ds.ConsumeClusterState(ctx, "shlink", "l2")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "l2", cons.Key)
+
+	delOK, err := ds.DeleteClusterState(ctx, "shlink", "l1")
+	require.NoError(t, err)
+	assert.True(t, delOK)
 }

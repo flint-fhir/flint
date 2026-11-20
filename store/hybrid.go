@@ -651,6 +651,11 @@ func (h *HybridStore) SaveRefreshToken(ctx context.Context, rawToken string, rec
 	return h.primary.SaveRefreshToken(ctx, rawToken, rec)
 }
 
+// PeekRefreshToken looks up an unexpired OAuth2 refresh token on the primary store without consuming it.
+func (h *HybridStore) PeekRefreshToken(ctx context.Context, rawToken string) (OAuthRefreshTokenRecord, bool, error) {
+	return h.primary.PeekRefreshToken(ctx, rawToken)
+}
+
 // ConsumeRefreshToken atomically consumes an OAuth2 refresh token on the primary store.
 func (h *HybridStore) ConsumeRefreshToken(ctx context.Context, rawToken string) (OAuthRefreshTokenRecord, bool, error) {
 	return h.primary.ConsumeRefreshToken(ctx, rawToken)
@@ -664,6 +669,51 @@ func (h *HybridStore) RevokeToken(ctx context.Context, rawToken string, ttl time
 // IsTokenRevoked checks whether an OAuth2 token is revoked on the primary store.
 func (h *HybridStore) IsTokenRevoked(ctx context.Context, rawToken string) (bool, error) {
 	return h.primary.IsTokenRevoked(ctx, rawToken)
+}
+
+// ClaimNonce atomically claims a replay-protection nonce on the primary store.
+func (h *HybridStore) ClaimNonce(ctx context.Context, nonceKey string, ttl time.Duration) (bool, error) {
+	return h.primary.ClaimNonce(ctx, nonceKey, ttl)
+}
+
+// GetOrCreateClusterSecret retrieves or initializes a cluster-wide secret on the primary store.
+func (h *HybridStore) GetOrCreateClusterSecret(ctx context.Context, key string, generate func() ([]byte, error)) ([]byte, error) {
+	return h.primary.GetOrCreateClusterSecret(ctx, key, generate)
+}
+
+// PutClusterState upserts a cluster state record on the primary store.
+func (h *HybridStore) PutClusterState(ctx context.Context, rec ClusterStateRecord) (ClusterStateRecord, error) {
+	return h.primary.PutClusterState(ctx, rec)
+}
+
+// GetClusterState reads an unexpired cluster state record from the primary store.
+func (h *HybridStore) GetClusterState(ctx context.Context, namespace, key string) (*ClusterStateRecord, bool, error) {
+	return h.primary.GetClusterState(ctx, namespace, key)
+}
+
+// GetClusterStateBySecondary reads an unexpired cluster state record by secondary key from the primary store.
+func (h *HybridStore) GetClusterStateBySecondary(ctx context.Context, namespace, secondaryKey string) (*ClusterStateRecord, bool, error) {
+	return h.primary.GetClusterStateBySecondary(ctx, namespace, secondaryKey)
+}
+
+// CompareAndSwapClusterState atomically updates a cluster state record at expectedVersion on the primary store.
+func (h *HybridStore) CompareAndSwapClusterState(ctx context.Context, expectedVersion int64, rec ClusterStateRecord) (ClusterStateRecord, bool, error) {
+	return h.primary.CompareAndSwapClusterState(ctx, expectedVersion, rec)
+}
+
+// ConsumeClusterState atomically deletes and returns an unexpired cluster state record on the primary store.
+func (h *HybridStore) ConsumeClusterState(ctx context.Context, namespace, key string) (*ClusterStateRecord, bool, error) {
+	return h.primary.ConsumeClusterState(ctx, namespace, key)
+}
+
+// DeleteClusterState deletes a cluster state record on the primary store.
+func (h *HybridStore) DeleteClusterState(ctx context.Context, namespace, key string) (bool, error) {
+	return h.primary.DeleteClusterState(ctx, namespace, key)
+}
+
+// ListClusterStates lists unexpired cluster state records from the primary store.
+func (h *HybridStore) ListClusterStates(ctx context.Context, namespace, tenantID string) ([]ClusterStateRecord, error) {
+	return h.primary.ListClusterStates(ctx, namespace, tenantID)
 }
 
 // BackendName returns the analytical backend identifier (e.g. "doris" or "sqlite").

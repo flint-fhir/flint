@@ -19,10 +19,61 @@ import (
 	"github.com/flint-fhir/flint/store"
 )
 
+type serverSHLinkStore struct {
+	srv *Server
+}
+
+func (st *serverSHLinkStore) CreateLink(id, tenant string, rawJSON []byte) error {
+	if st == nil || st.srv == nil || st.srv.store == nil {
+		return nil
+	}
+	_, ok, err := st.srv.store.CompareAndSwapClusterState(context.Background(), 0, store.ClusterStateRecord{
+		Namespace: "shlink",
+		Key:       id,
+		TenantID:  tenant,
+		Value:     rawJSON,
+	})
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("shlink: duplicate link ID")
+	}
+	return nil
+}
+
+func (st *serverSHLinkStore) GetLink(id string) ([]byte, int64, bool, error) {
+	if st == nil || st.srv == nil || st.srv.store == nil {
+		return nil, 0, false, nil
+	}
+	rec, ok, err := st.srv.store.GetClusterState(context.Background(), "shlink", id)
+	if err != nil || !ok || rec == nil {
+		return nil, 0, false, err
+	}
+	return rec.Value, rec.Version, true, nil
+}
+
+func (st *serverSHLinkStore) CompareAndSwapLink(id, tenant string, expectedVersion int64, rawJSON []byte) (bool, error) {
+	if st == nil || st.srv == nil || st.srv.store == nil {
+		return false, nil
+	}
+	_, ok, err := st.srv.store.CompareAndSwapClusterState(context.Background(), expectedVersion, store.ClusterStateRecord{
+		Namespace: "shlink",
+		Key:       id,
+		TenantID:  tenant,
+		Value:     rawJSON,
+	})
+	return ok, err
+}
+
 // SHLinkManager returns the server's SMART Health Links manager.
 func (s *Server) SHLinkManager() *shlink.Manager {
 	if s.shlinks == nil {
-		s.shlinks = shlink.NewManager()
+		m := shlink.NewManager()
+		if s.store != nil {
+			m.SetBackendStore(&serverSHLinkStore{srv: s})
+		}
+		s.shlinks = m
 	}
 	return s.shlinks
 }

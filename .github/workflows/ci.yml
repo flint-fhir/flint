@@ -39,7 +39,7 @@ jobs:
             /^ok[[:space:]]+github\.com\/flint-fhir\/flint\// && $2 !~ /\/gen\// {
               pkg = $2
               for (i = 1; i <= NF; i++) {
-                if ($i == "coverage:") {
+                if ($i == "coverage:" && $(i+1) != "[no") {
                   pct = $(i+1)
                   sub(/%/, "", pct)
                   printf "Package %-48s %6.1f%%\n", pkg, pct + 0
@@ -76,7 +76,7 @@ jobs:
           go test ./server -run '^$' -fuzz=FuzzValidationAndDynamicExtraction -fuzztime=2s
           go test ./server -run '^$' -fuzz=FuzzWebSocketFrames -fuzztime=2s
 
-      - name: Live Server Binary, US Core Seeder & 140-Check $certify E2E Gate (Postgres, SQLite WAL & Hybrid)
+      - name: Live Server Binary, US Core Seeder & 142-Check $certify E2E Gate (Postgres, SQLite WAL & Hybrid)
         env:
           FLINT_POSTGRES_DSN: "postgres://flint:flint@localhost:5432/flint?sslmode=disable"
         run: |
@@ -165,6 +165,38 @@ jobs:
 
       - name: SQLMesh Lakehouse Unit Tests (DuckDB)
         run: uv run --project analytics sqlmesh --paths analytics test
+
+  helm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+
+      - name: Lint & Validate OCI Helm Chart (Strict Schema Check)
+        run: |
+          helm lint --strict deploy/helm/flint
+          helm template flint-default deploy/helm/flint \
+            | kubeconform -strict -summary
+          helm template flint-ha deploy/helm/flint \
+            --set autoscaling.enabled=true \
+            --set telemetry.enabled=true \
+            --set ingress.enabled=true \
+            --set ingress.className=nginx \
+            --set worker.enabled=true \
+            --set seedJob.enabled=true \
+            --set existingSecret=flint-external-secret \
+            | kubeconform -strict -summary
+          helm template flint-sm deploy/helm/flint --set serviceMonitor.enabled=true \
+            | kubeconform -strict -ignore-missing-schemas -summary
+          mkdir -p /tmp/helm-dist
+          helm package deploy/helm/flint --destination /tmp/helm-dist
 
   docker:
     runs-on: ubuntu-latest

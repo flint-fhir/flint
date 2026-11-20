@@ -8,8 +8,10 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -678,4 +680,64 @@ func TestSignRS256WithX5CAndSignRS384(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, parsedNoKid.Header.Kid)
 	require.NoError(t, parsedNoKid.VerifySignature(&rsaKey.PublicKey))
+}
+
+func TestMockTokenValidator_ExportAndLoadKeysPEM(t *testing.T) {
+	nodeA, err := auth.NewMockTokenValidator("https://flint.cluster", "flint-aud")
+	require.NoError(t, err)
+	nodeB, err := auth.NewMockTokenValidator("https://flint.cluster", "flint-aud")
+	require.NoError(t, err)
+
+	rsaPEM, ecPEM, err := nodeA.ExportKeysPEM()
+	require.NoError(t, err)
+	require.NotEmpty(t, rsaPEM)
+	require.NotEmpty(t, ecPEM)
+
+	// Before LoadKeysPEM, a token minted on nodeA fails signature verification on nodeB
+	tokA, err := nodeA.IssueToken("practitioner-42", "user/Patient.rs", "pat-1", time.Hour, map[string]any{"tenant": "demo"})
+	require.NoError(t, err)
+	_, err = nodeB.ValidateToken(t.Context(), tokA)
+	require.Error(t, err)
+
+	// Load PKCS#8 PEMs onto nodeB and verify cross-replica RS256 + ES256 convergence
+	require.NoError(t, nodeB.LoadKeysPEM(rsaPEM, ecPEM))
+	secCtx, err := nodeB.ValidateToken(t.Context(), tokA)
+	require.NoError(t, err)
+	assert.Equal(t, "practitioner-42", secCtx.Subject)
+	assert.Equal(t, "demo", secCtx.TenantId)
+	assert.Equal(t, nodeA.ECKeyID(), nodeB.ECKeyID())
+
+	esSig, err := nodeA.SignRawES256("eyJhbGciOiJFUzI1NiJ9.eyJpc3MiOiJhIn0")
+	require.NoError(t, err)
+	require.NotEmpty(t, esSig)
+
+	// Also verify PKCS#1 RSA and SEC1 EC PEM formats + error branches
+	rsaK, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pkcs1PEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(rsaK)})
+	ecK, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	sec1DER, err := x509.MarshalECPrivateKey(ecK)
+	require.NoError(t, err)
+	sec1PEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: sec1DER})
+	require.NoError(t, nodeB.LoadKeysPEM(pkcs1PEM, sec1PEM))
+
+	ec384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+	ec384DER, err := x509.MarshalPKCS8PrivateKey(ec384)
+	require.NoError(t, err)
+	ec384PEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: ec384DER})
+
+	var nilMock *auth.MockTokenValidator
+	_, _, err = nilMock.ExportKeysPEM()
+	require.Error(t, err)
+	assert.Empty(t, nilMock.ECKeyID())
+	_, err = nilMock.SignRawES256("a.b")
+	require.Error(t, err)
+	require.Error(t, nilMock.LoadKeysPEM(rsaPEM, ecPEM))
+	require.Error(t, nodeB.LoadKeysPEM([]byte("not-pem"), nil))
+	require.Error(t, nodeB.LoadKeysPEM(ecPEM, nil)) // EC key in RSA slot
+	require.Error(t, nodeB.LoadKeysPEM(nil, []byte("not-pem")))
+	require.Error(t, nodeB.LoadKeysPEM(nil, rsaPEM))   // RSA key in EC slot
+	require.Error(t, nodeB.LoadKeysPEM(nil, ec384PEM)) // non-P256 curve rejected
 }

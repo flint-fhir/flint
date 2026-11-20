@@ -8,8 +8,11 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
 	"fmt"
 	"time"
 
@@ -235,4 +238,86 @@ func (m *MockTokenValidator) JWKS() *JWKSet {
 	}
 
 	return &JWKSet{Keys: keys}
+}
+
+// ExportKeysPEM exports the validator's RSA-2048 (RS256) and ECDSA P-256 (ES256) private keys as PKCS#8 PEM blocks
+// so stateless cluster replicas can share identical token and SMART Health Card signing keys.
+func (m *MockTokenValidator) ExportKeysPEM() (rsaPEM []byte, ecPEM []byte, err error) {
+	if m == nil || m.privateKey == nil || m.ecPrivateKey == nil {
+		return nil, nil, errors.New("mock validator keys not initialized")
+	}
+	rsaDER, err := x509.MarshalPKCS8PrivateKey(m.privateKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal rsa pkcs8: %w", err)
+	}
+	ecDER, err := x509.MarshalPKCS8PrivateKey(m.ecPrivateKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal ecdsa pkcs8: %w", err)
+	}
+	rsaPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: rsaDER})
+	ecPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: ecDER})
+	return rsaPEM, ecPEM, nil
+}
+
+// LoadKeysPEM replaces the validator's RSA (when len(rsaPEM) > 0) and/or ECDSA P-256 (when len(ecPEM) > 0)
+// signing keys from PEM-encoded PKCS#1 / PKCS#8 / SEC1 private keys, recomputing JWK thumbprints.
+func (m *MockTokenValidator) LoadKeysPEM(rsaPEM []byte, ecPEM []byte) error {
+	if m == nil {
+		return errors.New("nil mock validator")
+	}
+	if len(rsaPEM) > 0 {
+		blk, _ := pem.Decode(rsaPEM)
+		if blk == nil {
+			return errors.New("invalid RSA private key PEM")
+		}
+		var rsaPriv *rsa.PrivateKey
+		if k, err := x509.ParsePKCS8PrivateKey(blk.Bytes); err == nil {
+			var ok bool
+			rsaPriv, ok = k.(*rsa.PrivateKey)
+			if !ok {
+				return errors.New("PKCS#8 PEM block is not an RSA private key")
+			}
+		} else if k1, err1 := x509.ParsePKCS1PrivateKey(blk.Bytes); err1 == nil {
+			rsaPriv = k1
+		} else {
+			return fmt.Errorf("parse RSA private key: %w", err)
+		}
+		m.privateKey = rsaPriv
+		m.publicKey = &rsaPriv.PublicKey
+	}
+	if len(ecPEM) > 0 {
+		blk, _ := pem.Decode(ecPEM)
+		if blk == nil {
+			return errors.New("invalid ECDSA private key PEM")
+		}
+		var ecPriv *ecdsa.PrivateKey
+		if k, err := x509.ParsePKCS8PrivateKey(blk.Bytes); err == nil {
+			var ok bool
+			ecPriv, ok = k.(*ecdsa.PrivateKey)
+			if !ok {
+				return errors.New("PKCS#8 PEM block is not an ECDSA private key")
+			}
+		} else if k1, err1 := x509.ParseECPrivateKey(blk.Bytes); err1 == nil {
+			ecPriv = k1
+		} else {
+			return fmt.Errorf("parse ECDSA private key: %w", err)
+		}
+		if ecPriv.Curve != elliptic.P256() {
+			return errors.New("ECDSA signing key must use P-256 curve")
+		}
+		uncompressed, err := ecPriv.PublicKey.Bytes()
+		if err != nil {
+			return fmt.Errorf("encode ECDSA P-256 public key: %w", err)
+		}
+		ecX := base64.RawURLEncoding.EncodeToString(uncompressed[1:33])
+		ecY := base64.RawURLEncoding.EncodeToString(uncompressed[33:65])
+		thumbInput := fmt.Sprintf(`{"crv":"P-256","kty":"EC","x":%q,"y":%q}`, ecX, ecY)
+		thumbSum := sha256.Sum256([]byte(thumbInput))
+		m.ecPrivateKey = ecPriv
+		m.ecPublicKey = &ecPriv.PublicKey
+		m.ecKeyID = base64.RawURLEncoding.EncodeToString(thumbSum[:])
+		m.ecX = ecX
+		m.ecY = ecY
+	}
+	return nil
 }

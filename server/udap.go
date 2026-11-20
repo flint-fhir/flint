@@ -1,13 +1,16 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -16,11 +19,13 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/flint-fhir/flint/pkg/auth"
+	"github.com/flint-fhir/flint/store"
 	"github.com/google/uuid"
 )
 
@@ -46,33 +51,64 @@ func (c udapClientEntry) supportsGrant(gt string) bool {
 	return slices.Contains(c.GrantTypes, gt)
 }
 
-func (s *Server) ensureUDAPRootCA() (*x509.Certificate, *rsa.PrivateKey, []byte, error) {
-	s.udapMu.RLock()
-	if s.udapRootCert != nil && s.udapRootKey != nil {
-		cert, key, pemBytes := s.udapRootCert, s.udapRootKey, s.udapRootPEM
-		s.udapMu.RUnlock()
-		return cert, key, pemBytes, nil
+func parseUDAPCABundlePEM(bundle []byte) (*x509.Certificate, *rsa.PrivateKey, []byte, error) {
+	var cert *x509.Certificate
+	var certPEM []byte
+	var rsaKey *rsa.PrivateKey
+	rest := bundle
+	for len(rest) > 0 {
+		var blk *pem.Block
+		blk, rest = pem.Decode(rest)
+		if blk == nil {
+			break
+		}
+		switch blk.Type {
+		case "CERTIFICATE":
+			if cert == nil {
+				c, err := x509.ParseCertificate(blk.Bytes)
+				if err != nil {
+					return nil, nil, nil, err
+				}
+				cert = c
+				certPEM = pem.EncodeToMemory(blk)
+			}
+		case "PRIVATE KEY":
+			k, err := x509.ParsePKCS8PrivateKey(blk.Bytes)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			rk, ok := k.(*rsa.PrivateKey)
+			if !ok {
+				return nil, nil, nil, errors.New("UDAP CA private key must be RSA")
+			}
+			rsaKey = rk
+		case "RSA PRIVATE KEY":
+			rk, err := x509.ParsePKCS1PrivateKey(blk.Bytes)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			rsaKey = rk
+		}
 	}
-	s.udapMu.RUnlock()
-
-	s.udapMu.Lock()
-	defer s.udapMu.Unlock()
-	if s.udapRootCert != nil && s.udapRootKey != nil {
-		return s.udapRootCert, s.udapRootKey, s.udapRootPEM, nil
+	if cert == nil || rsaKey == nil {
+		return nil, nil, nil, errors.New("incomplete UDAP CA PEM bundle")
 	}
+	return cert, rsaKey, certPEM, nil
+}
 
+func generateUDAPRootCABundlePEM() ([]byte, error) {
 	priv, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	pubDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	ski := sha1.Sum(pubDER)
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	now := time.Now().UTC()
 	tmpl := &x509.Certificate{
@@ -92,13 +128,56 @@ func (s *Server) ensureUDAPRootCA() (*x509.Certificate, *rsa.PrivateKey, []byte,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	cert, err := x509.ParseCertificate(der)
+	pkcs8DER, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return nil, err
+	}
+	var out []byte
+	out = append(out, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})...)
+	out = append(out, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: pkcs8DER})...)
+	return out, nil
+}
+
+func (s *Server) ensureUDAPRootCA() (*x509.Certificate, *rsa.PrivateKey, []byte, error) {
+	s.udapMu.RLock()
+	if s.udapRootCert != nil && s.udapRootKey != nil {
+		cert, key, pemBytes := s.udapRootCert, s.udapRootKey, s.udapRootPEM
+		s.udapMu.RUnlock()
+		return cert, key, pemBytes, nil
+	}
+	s.udapMu.RUnlock()
+
+	s.udapMu.Lock()
+	defer s.udapMu.Unlock()
+	if s.udapRootCert != nil && s.udapRootKey != nil {
+		return s.udapRootCert, s.udapRootKey, s.udapRootPEM, nil
+	}
+
+	var bundlePEM []byte
+	envCert := strings.TrimSpace(os.Getenv("FLINT_UDAP_CA_CERT_PEM"))
+	envKey := strings.TrimSpace(os.Getenv("FLINT_UDAP_CA_KEY_PEM"))
+	if envCert != "" && envKey != "" {
+		bundlePEM = []byte(envCert + "\n" + envKey)
+	} else if s.primaryStore != nil {
+		b, err := s.primaryStore.GetOrCreateClusterSecret(context.Background(), clusterSecretUDAPCAPEM, generateUDAPRootCABundlePEM)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		bundlePEM = b
+	} else {
+		b, err := generateUDAPRootCABundlePEM()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		bundlePEM = b
+	}
+
+	cert, priv, pemBytes, err := parseUDAPCABundlePEM(bundlePEM)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	s.udapRootCert = cert
 	s.udapRootKey = priv
 	s.udapRootPEM = pemBytes
@@ -112,6 +191,14 @@ func (s *Server) RegisterUDAPTrustAnchor(cert *x509.Certificate) {
 		return
 	}
 	_, _, _, _ = s.ensureUDAPRootCA()
+	if s.store != nil && len(cert.Raw) > 0 {
+		sum := sha256.Sum256(cert.Raw)
+		_, _ = s.store.PutClusterState(context.Background(), store.ClusterStateRecord{
+			Namespace: "udap_anchor",
+			Key:       hex.EncodeToString(sum[:]),
+			Value:     cert.Raw,
+		})
+	}
 	s.udapMu.Lock()
 	defer s.udapMu.Unlock()
 	for _, existing := range s.udapTrustAnchors {
@@ -150,11 +237,20 @@ func (s *Server) RegisterUDAPTrustAnchorPEM(pemBytes []byte) error {
 
 func (s *Server) udapTrustCertPool() *x509.CertPool {
 	_, _, _, _ = s.ensureUDAPRootCA()
-	s.udapMu.RLock()
-	defer s.udapMu.RUnlock()
 	pool := x509.NewCertPool()
+	s.udapMu.RLock()
 	for _, c := range s.udapTrustAnchors {
 		pool.AddCert(c)
+	}
+	s.udapMu.RUnlock()
+	if s.store != nil {
+		if recs, err := s.store.ListClusterStates(context.Background(), "udap_anchor", ""); err == nil {
+			for _, rec := range recs {
+				if c, pErr := x509.ParseCertificate(rec.Value); pErr == nil {
+					pool.AddCert(c)
+				}
+			}
+		}
 	}
 	return pool
 }
@@ -472,6 +568,17 @@ func (s *Server) lookupUDAPClient(clientID string) (udapClientEntry, bool) {
 	if clientID == "" {
 		return udapClientEntry{}, false
 	}
+	if s.store != nil {
+		rec, found, err := s.store.GetClusterState(context.Background(), "udap_client", clientID)
+		if err != nil || !found || rec == nil {
+			return udapClientEntry{}, false
+		}
+		var entry udapClientEntry
+		if json.Unmarshal(rec.Value, &entry) != nil {
+			return udapClientEntry{}, false
+		}
+		return entry, true
+	}
 	s.udapMu.RLock()
 	defer s.udapMu.RUnlock()
 	c, ok := s.udapClients[clientID]
@@ -557,12 +664,10 @@ func (s *Server) handleUDAPClientRegistration(w http.ResponseWriter, r *http.Req
 		writeOAuthError(w, http.StatusBadRequest, "invalid_software_statement", "missing required jti claim in software_statement")
 		return
 	}
-	jtiKey := "udap-dcr-jti:" + iss + ":" + jti
-	if s.isTokenRevoked(jtiKey) {
+	if !s.claimReplayNonce(r.Context(), "udap-dcr-jti:"+iss+":"+jti, 10*time.Minute) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_software_statement", "replayed software_statement jti")
 		return
 	}
-	s.revokeTokenInternal(r.Context(), jtiKey, 10*time.Minute)
 
 	extra := parsed.Payload.Extra
 	grantTypes, hasGrantTypes := extractStringSliceClaim(extra, "grant_types")
@@ -573,13 +678,23 @@ func (s *Server) handleUDAPClientRegistration(w http.ResponseWriter, r *http.Req
 
 	// UDAP IG §3.4 registration cancellation: empty grant_types [] for an existing iss
 	if len(grantTypes) == 0 {
-		s.udapMu.Lock()
-		existingID, hadExisting := s.udapClientsByISS[iss]
-		if hadExisting {
-			delete(s.udapClientsByISS, iss)
-			delete(s.udapClients, existingID)
+		var existingID string
+		var hadExisting bool
+		if s.store != nil {
+			if rec, found, err := s.store.GetClusterStateBySecondary(r.Context(), "udap_client", iss); err == nil && found && rec != nil {
+				existingID = rec.Key
+				hadExisting = true
+				_, _ = s.store.DeleteClusterState(r.Context(), "udap_client", existingID)
+			}
+		} else {
+			s.udapMu.Lock()
+			existingID, hadExisting = s.udapClientsByISS[iss]
+			if hadExisting {
+				delete(s.udapClientsByISS, iss)
+				delete(s.udapClients, existingID)
+			}
+			s.udapMu.Unlock()
 		}
-		s.udapMu.Unlock()
 		if !hadExisting {
 			writeOAuthError(w, http.StatusBadRequest, "invalid_client_metadata", "grant_types must not be empty for new client registration")
 			return
@@ -653,32 +768,63 @@ func (s *Server) handleUDAPClientRegistration(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	s.udapMu.Lock()
-	if s.udapClients == nil {
-		s.udapClients = make(map[string]udapClientEntry)
+	var clientID string
+	var isUpdate bool
+	if s.store != nil {
+		if rec, found, err := s.store.GetClusterStateBySecondary(r.Context(), "udap_client", iss); err == nil && found && rec != nil {
+			clientID = rec.Key
+			isUpdate = true
+		} else {
+			clientID = "udap-client-" + uuid.NewString()
+		}
+		entry := udapClientEntry{
+			ClientID:                clientID,
+			CertISS:                 iss,
+			ClientName:              clientName,
+			GrantTypes:              grantTypes,
+			ResponseTypes:           responseTypes,
+			RedirectURIs:            redirectURIs,
+			TokenEndpointAuthMethod: authMethod,
+			Scope:                   scope,
+			Contacts:                contacts,
+			LogoURI:                 logoURI,
+		}
+		if rawEntry, mErr := json.Marshal(entry); mErr == nil {
+			_, _ = s.store.PutClusterState(r.Context(), store.ClusterStateRecord{
+				Namespace:    "udap_client",
+				Key:          clientID,
+				SecondaryKey: iss,
+				Value:        rawEntry,
+			})
+		}
+	} else {
+		s.udapMu.Lock()
+		if s.udapClients == nil {
+			s.udapClients = make(map[string]udapClientEntry)
+		}
+		if s.udapClientsByISS == nil {
+			s.udapClientsByISS = make(map[string]string)
+		}
+		clientID, isUpdate = s.udapClientsByISS[iss]
+		if !isUpdate || clientID == "" {
+			clientID = "udap-client-" + uuid.NewString()
+			s.udapClientsByISS[iss] = clientID
+		}
+		entry := udapClientEntry{
+			ClientID:                clientID,
+			CertISS:                 iss,
+			ClientName:              clientName,
+			GrantTypes:              grantTypes,
+			ResponseTypes:           responseTypes,
+			RedirectURIs:            redirectURIs,
+			TokenEndpointAuthMethod: authMethod,
+			Scope:                   scope,
+			Contacts:                contacts,
+			LogoURI:                 logoURI,
+		}
+		s.udapClients[clientID] = entry
+		s.udapMu.Unlock()
 	}
-	if s.udapClientsByISS == nil {
-		s.udapClientsByISS = make(map[string]string)
-	}
-	clientID, isUpdate := s.udapClientsByISS[iss]
-	if !isUpdate || clientID == "" {
-		clientID = "udap-client-" + uuid.NewString()
-		s.udapClientsByISS[iss] = clientID
-	}
-	entry := udapClientEntry{
-		ClientID:                clientID,
-		CertISS:                 iss,
-		ClientName:              clientName,
-		GrantTypes:              grantTypes,
-		ResponseTypes:           responseTypes,
-		RedirectURIs:            redirectURIs,
-		TokenEndpointAuthMethod: authMethod,
-		Scope:                   scope,
-		Contacts:                contacts,
-		LogoURI:                 logoURI,
-	}
-	s.udapClients[clientID] = entry
-	s.udapMu.Unlock()
 
 	resp := map[string]any{
 		"client_id":                  clientID,
@@ -759,11 +905,9 @@ func (s *Server) authenticateUDAPClientAssertion(w http.ResponseWriter, r *http.
 		}
 	}
 
-	jtiKey := "jti:" + jti
-	if s.isTokenRevoked(jtiKey) {
+	if !s.claimReplayNonce(r.Context(), "udap-auth-jti:"+iss+":"+jti, 10*time.Minute) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "client_assertion jti has already been used (replay detected)")
 		return "", false
 	}
-	s.revokeTokenInternal(r.Context(), jtiKey, 10*time.Minute)
 	return iss, true
 }

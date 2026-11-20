@@ -742,10 +742,7 @@ func (s *Server) handleSubscriptionBindWS(w http.ResponseWriter, r *http.Request
 		_ = subMap
 	}
 
-	if s.subWSHub == nil {
-		s.subWSHub = newSubscriptionWSHub()
-	}
-	tok := s.subWSHub.mintBindToken(tenant, subIDs, secCtx, now)
+	tok := s.mintClusterWSBindToken(r.Context(), tenant, subIDs, secCtx, now)
 
 	wsScheme := "ws"
 	if r.TLS != nil || strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https") {
@@ -923,7 +920,7 @@ func (s *Server) handleSubscriptionsWS(w http.ResponseWriter, r *http.Request) {
 			} else {
 				arg = strings.TrimSpace(cmd[len("bind "):])
 			}
-			if arg != "" && s.subWSHub.hasBindToken(arg) {
+			if arg != "" && (strings.HasPrefix(arg, "wsbt-") || s.subWSHub.hasBindToken(arg)) {
 				if err := s.bindWSWithToken(r, ws, arg); err != nil {
 					_ = ws.writeJSON(map[string]any{
 						"resourceType": "OperationOutcome",
@@ -999,9 +996,104 @@ func (s *Server) handleSubscriptionsWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type persistedWSBindToken struct {
+	Token           string            `json:"token"`
+	Tenant          string            `json:"tenant"`
+	SubscriptionIDs []string          `json:"subscriptionIds"`
+	ExpiresAt       time.Time         `json:"expiresAt"`
+	HasSecCtx       bool              `json:"hasSecCtx"`
+	Subject         string            `json:"subject,omitempty"`
+	TenantID        string            `json:"tenantId,omitempty"`
+	PatientID       string            `json:"patientId,omitempty"`
+	EncounterID     string            `json:"encounterId,omitempty"`
+	RawScopes       []string          `json:"rawScopes,omitempty"`
+	Claims          map[string]string `json:"claims,omitempty"`
+}
+
+func (s *Server) mintClusterWSBindToken(ctx context.Context, tenant string, subIDs []string, secCtx *auth.SecurityContext, now time.Time) wsBindToken {
+	if s.subWSHub == nil {
+		s.subWSHub = newSubscriptionWSHub()
+	}
+	tok := s.subWSHub.mintBindToken(tenant, subIDs, secCtx, now)
+	if s.store != nil {
+		s.subWSHub.mu.Lock()
+		delete(s.subWSHub.tokens, tok.token)
+		s.subWSHub.mu.Unlock()
+
+		pTok := persistedWSBindToken{
+			Token:           tok.token,
+			Tenant:          tok.tenant,
+			SubscriptionIDs: tok.subscriptionIDs,
+			ExpiresAt:       tok.expiresAt.UTC(),
+		}
+		if secCtx != nil {
+			pTok.HasSecCtx = true
+			pTok.Subject = secCtx.GetSubject()
+			pTok.TenantID = secCtx.GetTenantId()
+			pTok.PatientID = secCtx.GetPatientId()
+			pTok.EncounterID = secCtx.GetEncounterId()
+			pTok.Claims = secCtx.GetClaims()
+			for _, sc := range secCtx.GetScopes() {
+				if sc.GetRaw() != "" {
+					pTok.RawScopes = append(pTok.RawScopes, sc.GetRaw())
+				}
+			}
+		}
+		if rawJSON, err := json.Marshal(pTok); err == nil {
+			exp := tok.expiresAt.UTC()
+			_, _ = s.store.PutClusterState(ctx, store.ClusterStateRecord{
+				Namespace: "ws_bind_token",
+				Key:       tok.token,
+				TenantID:  tenant,
+				Value:     rawJSON,
+				ExpiresAt: &exp,
+			})
+		}
+	}
+	return tok
+}
+
+func (s *Server) consumeClusterWSBindToken(ctx context.Context, tenant, token string, now time.Time) (wsBindToken, error) {
+	if s.store != nil {
+		rec, found, err := s.store.ConsumeClusterState(ctx, "ws_bind_token", token)
+		if err != nil || !found || rec == nil {
+			return wsBindToken{}, fmt.Errorf("invalid or unknown WebSocket binding token")
+		}
+		var pTok persistedWSBindToken
+		if json.Unmarshal(rec.Value, &pTok) != nil {
+			return wsBindToken{}, fmt.Errorf("corrupted WebSocket binding token")
+		}
+		if !pTok.ExpiresAt.After(now) {
+			return wsBindToken{}, fmt.Errorf("WebSocket binding token has expired")
+		}
+		if pTok.Tenant != tenant {
+			return wsBindToken{}, fmt.Errorf("WebSocket binding token tenant %q cannot bind to tenant %q", pTok.Tenant, tenant)
+		}
+		var secCtx *auth.SecurityContext
+		if pTok.HasSecCtx {
+			secCtx = &auth.SecurityContext{
+				Subject:     pTok.Subject,
+				TenantId:    pTok.TenantID,
+				PatientId:   pTok.PatientID,
+				EncounterId: pTok.EncounterID,
+				Scopes:      auth.ParseScopes(strings.Join(pTok.RawScopes, " ")),
+				Claims:      pTok.Claims,
+			}
+		}
+		return wsBindToken{
+			token:           pTok.Token,
+			tenant:          pTok.Tenant,
+			subscriptionIDs: pTok.SubscriptionIDs,
+			secCtx:          secCtx,
+			expiresAt:       pTok.ExpiresAt,
+		}, nil
+	}
+	return s.subWSHub.consumeBindToken(tenant, token, now)
+}
+
 func (s *Server) bindWSWithToken(r *http.Request, ws *wsSubscriberConn, rawTok string) error {
 	now := time.Now().UTC()
-	tok, err := s.subWSHub.consumeBindToken(ws.tenant, rawTok, now)
+	tok, err := s.consumeClusterWSBindToken(context.WithoutCancel(r.Context()), ws.tenant, rawTok, now)
 	if err != nil {
 		return err
 	}

@@ -57,11 +57,17 @@ func (s *Server) cancelAllExportJobs() {
 }
 
 func (s *Server) storeExportJob(job *exportJob) {
-	if s.store != nil && job != nil && job.Status != "in-progress" {
+	if s.store != nil && job != nil {
+		status := job.Status
+		if status == "" {
+			status = "completed"
+		}
 		_ = s.store.SaveExportJob(context.Background(), store.ExportJobRecord{
 			ID:         job.ID,
 			TenantID:   job.TenantID,
 			PatientID:  job.PatientID,
+			Status:     status,
+			Err:        job.Err,
 			CreatedAt:  job.CreatedAt,
 			RequestURL: job.RequestURL,
 			TypesOrder: job.TypesOrder,
@@ -103,10 +109,16 @@ func (s *Server) getExportJob(tenant, jobID string) *exportJob {
 
 	if s.store != nil {
 		if rec, err := s.store.GetExportJob(context.Background(), tenant, jobID); err == nil && rec != nil {
+			status := rec.Status
+			if status == "" || status == "complete" {
+				status = "completed"
+			}
 			return &exportJob{
 				ID:         rec.ID,
 				TenantID:   rec.TenantID,
 				PatientID:  rec.PatientID,
+				Status:     status,
+				Err:        rec.Err,
 				CreatedAt:  rec.CreatedAt,
 				RequestURL: rec.RequestURL,
 				TypesOrder: rec.TypesOrder,
@@ -115,8 +127,49 @@ func (s *Server) getExportJob(tenant, jobID string) *exportJob {
 				Combined:   rec.Combined,
 			}
 		}
+		// When s.store != nil, the store is authoritative so a job deleted on another replica returns nil.
+		return nil
 	}
 	return nil
+}
+
+func (s *Server) getLocalOrStoreExportJob(tenant, jobID string) *exportJob {
+	if s.store != nil {
+		s.exportMu.RLock()
+		var local *exportJob
+		if s.exportJobs != nil {
+			if j, ok := s.exportJobs[jobID]; ok && j.TenantID == tenant {
+				local = j
+			}
+		}
+		s.exportMu.RUnlock()
+
+		rec, err := s.store.GetExportJob(context.Background(), tenant, jobID)
+		if err != nil || rec == nil {
+			return nil
+		}
+		if local != nil {
+			return local
+		}
+		status := rec.Status
+		if status == "" || status == "complete" {
+			status = "completed"
+		}
+		return &exportJob{
+			ID:         rec.ID,
+			TenantID:   rec.TenantID,
+			PatientID:  rec.PatientID,
+			Status:     status,
+			Err:        rec.Err,
+			CreatedAt:  rec.CreatedAt,
+			RequestURL: rec.RequestURL,
+			TypesOrder: rec.TypesOrder,
+			Files:      rec.Files,
+			Counts:     rec.Counts,
+			Combined:   rec.Combined,
+		}
+	}
+	return s.getExportJob(tenant, jobID)
 }
 
 func (s *Server) deleteExportJob(tenant, jobID string) bool {
@@ -1063,7 +1116,13 @@ func (s *Server) populateExportJob(
 	}
 	s.exportMu.Unlock()
 
-	if err == nil && ctx.Err() == nil {
+	if ctx.Err() == nil {
+		// If job was cancelled/deleted on another replica while running, do not resurrect it.
+		if s.store != nil {
+			if existing, gErr := s.store.GetExportJob(context.Background(), job.TenantID, job.ID); gErr != nil || existing == nil {
+				return
+			}
+		}
 		s.storeExportJob(job)
 	}
 }
@@ -1095,7 +1154,7 @@ func (s *Server) handleExportPoll(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	jobID := r.PathValue("jobId")
 
-	job := s.getExportJob(tenant, jobID)
+	job := s.getLocalOrStoreExportJob(tenant, jobID)
 	if job == nil {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found",
 			fmt.Sprintf("export job %s not found", jobID))
@@ -1122,6 +1181,33 @@ func (s *Server) handleExportPoll(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	} else if job.Status == "in-progress" {
+		if strings.EqualFold(r.URL.Query().Get("_nowait"), "true") {
+			w.Header().Set("X-Progress", "in-progress")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for job != nil && job.Status == "in-progress" && time.Now().Before(deadline) {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(15 * time.Millisecond):
+			}
+			job = s.getLocalOrStoreExportJob(tenant, jobID)
+		}
+		if job == nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found",
+				fmt.Sprintf("export job %s not found", jobID))
+			return
+		}
+		if job.Status == "in-progress" {
+			w.Header().Set("X-Progress", "in-progress")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 	}
 
 	if !s.authorizeExportJobAccess(w, r, job, "") {
@@ -1146,7 +1232,7 @@ func (s *Server) handleExportCancel(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	jobID := r.PathValue("jobId")
 
-	job := s.getExportJob(tenant, jobID)
+	job := s.getLocalOrStoreExportJob(tenant, jobID)
 	if job == nil {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found",
 			fmt.Sprintf("export job %s not found", jobID))
@@ -1180,7 +1266,7 @@ func (s *Server) handleExportFile(w http.ResponseWriter, r *http.Request) {
 	jobID := r.PathValue("jobId")
 	fileName := r.PathValue("fileName")
 
-	job := s.getExportJob(tenant, jobID)
+	job := s.getLocalOrStoreExportJob(tenant, jobID)
 	if job == nil {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found",
 			fmt.Sprintf("export job %s not found", jobID))
@@ -1190,6 +1276,33 @@ func (s *Server) handleExportFile(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-job.done:
 		case <-time.After(2 * time.Second):
+			w.Header().Set("X-Progress", "in-progress")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+	} else if job.Status == "in-progress" {
+		if strings.EqualFold(r.URL.Query().Get("_nowait"), "true") {
+			w.Header().Set("X-Progress", "in-progress")
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for job != nil && job.Status == "in-progress" && time.Now().Before(deadline) {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(15 * time.Millisecond):
+			}
+			job = s.getLocalOrStoreExportJob(tenant, jobID)
+		}
+		if job == nil {
+			writeOperationOutcome(w, http.StatusNotFound, "not-found",
+				fmt.Sprintf("export job %s not found", jobID))
+			return
+		}
+		if job.Status == "in-progress" {
 			w.Header().Set("X-Progress", "in-progress")
 			w.Header().Set("Retry-After", "1")
 			w.WriteHeader(http.StatusAccepted)

@@ -232,8 +232,33 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			}
 		}
 
+		// W3C traceparent correlation header for OTEL-01
+		if tp := r.Header.Get("traceparent"); tp != "" {
+			tpParts := strings.Split(tp, "-")
+			if len(tpParts) == 4 {
+				w.Header().Set("X-Trace-Id", tpParts[1])
+			}
+		}
+		if path == "/metrics" {
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+			_, _ = w.Write([]byte("flint_up 1\nflint_otlp_spans_exported_total 0\n"))
+			return
+		}
+		if strings.HasSuffix(path, "/AuditEvent") && q.Get("entity") == "Patient/cert-pat-1" {
+			_, _ = w.Write([]byte(`{"resourceType":"Bundle","type":"searchset","total":1,"entry":[{"resource":{"resourceType":"AuditEvent","id":"aud-trace-1","extension":[{"url":"http://flint-fhir.org/fhir/StructureDefinition/trace-context","extension":[{"url":"traceId","valueString":"4bf92f3577b34da6a3ce929d0e0e4736"}]}]}}]}`))
+			return
+		}
+
 		// OAuth2 endpoints
 		switch path {
+		case "/oauth2/register":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"client_id":"mock-cli-1","client_secret":"mock-sec-1"}`))
+			return
+		case "/oauth2/launch":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"launch":"mock-launch-1","patient":"cert-pat-1","encounter":"cert-enc-1"}`))
+			return
 		case "/oauth2/authorize":
 			redir := q.Get("redirect_uri")
 			state := q.Get("state")
@@ -251,13 +276,25 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 				}
 				seenJTI["es384"] = true
 			}
+			if strings.Contains(bodyStr, "grant_type=refresh_token") {
+				if seenJTI["rt-cluster-1"] {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+					return
+				}
+				seenJTI["rt-cluster-1"] = true
+				revokedTok = false
+				_, _ = w.Write([]byte(`{"access_token":"tok-cluster","refresh_token":"rt-cluster-2","patient":"cert-pat-1","id_token":"eyJ.id.tok","token_type":"Bearer"}`))
+				return
+			}
 			tok := "tok-pkce"
 			if strings.Contains(bodyStr, "vital-signs") {
 				tok = "tok-gran"
 			} else if strings.Contains(bodyStr, "client_credentials") {
 				tok = "tok-cc"
 			}
-			_, _ = fmt.Fprintf(w, `{"access_token":%q,"patient":"cert-pat-1","id_token":"eyJ.id.tok","token_type":"Bearer"}`, tok)
+			revokedTok = false
+			_, _ = fmt.Fprintf(w, `{"access_token":%q,"refresh_token":"rt-cluster-1","patient":"cert-pat-1","id_token":"eyJ.id.tok","token_type":"Bearer"}`, tok)
 			return
 		case "/oauth2/introspect":
 			_, _ = w.Write([]byte(`{"active":true,"scope":"system/*.rs"}`))
@@ -347,8 +384,14 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 			return
 		}
 
-		// Enforce SMART-01 & SMART-03 auth checks
+		// Enforce SMART-01, SMART-03 & CLUSTER-01 auth checks
 		authHdr := r.Header.Get("Authorization")
+		if authHdr == "Bearer tok-cluster" {
+			if revokedTok {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+		}
 		if authHdr == "Bearer tok-pkce" {
 			if strings.HasSuffix(path, "/Patient/other-patient-999") || r.Method == http.MethodDelete {
 				w.WriteHeader(http.StatusForbidden)
@@ -1489,8 +1532,8 @@ func TestRun_FullMockPassAll50Checks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run failed: %v", err)
 	}
-	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 140 {
-		t.Fatalf("expected all 140 checks to pass, got result=%s passed=%d failed=%d\n%s",
+	if rep.Result != "pass" || rep.Failed != 0 || rep.Passed != 142 {
+		t.Fatalf("expected all 142 checks to pass, got result=%s passed=%d failed=%d\n%s",
 			rep.Result, rep.Passed, rep.Failed, rep.FormatScorecard())
 	}
 	tr := rep.ToFHIRTestReport()

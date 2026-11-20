@@ -42,12 +42,13 @@ func DefaultOptions() Options {
 
 // Engine implements the Validator interface.
 type Engine struct {
-	schemas           map[string]ResourceSchema
-	opts              Options
-	customMu          sync.RWMutex
-	customProfiles    map[string]map[string]any
-	fhirPathEval      func(root map[string]any, expr string) []any
-	valueSetValidator func(vsCanonical, system, code string) (knownVS bool, valid bool)
+	schemas               map[string]ResourceSchema
+	opts                  Options
+	customMu              sync.RWMutex
+	customProfiles        map[string]map[string]any
+	fhirPathEval          func(root map[string]any, expr string) []any
+	valueSetValidator     func(vsCanonical, system, code string) (knownVS bool, valid bool)
+	customProfileResolver func(profile string) map[string]any
 }
 
 // NewEngine creates a new validation engine with default Big 5 schemas.
@@ -74,6 +75,14 @@ func (e *Engine) SetValueSetValidator(fn func(vsCanonical, system, code string) 
 	e.customMu.Lock()
 	defer e.customMu.Unlock()
 	e.valueSetValidator = fn
+}
+
+// SetCustomProfileResolver configures an optional cluster-aware fallback resolver
+// invoked when a custom StructureDefinition profile URL/ID is not yet cached locally.
+func (e *Engine) SetCustomProfileResolver(fn func(profile string) map[string]any) {
+	e.customMu.Lock()
+	defer e.customMu.Unlock()
+	e.customProfileResolver = fn
 }
 
 // RegisterStructureDefinition registers a custom HL7 FHIR R4 StructureDefinition
@@ -120,6 +129,25 @@ func (e *Engine) lookupCustomStructureDefinition(profile string) (map[string]any
 	if profile == "" {
 		return nil, false
 	}
+	if sd, ok := e.lookupCachedCustomStructureDefinition(profile); ok {
+		return sd, true
+	}
+	e.customMu.RLock()
+	resolver := e.customProfileResolver
+	e.customMu.RUnlock()
+	if resolver != nil {
+		if resolved := resolver(profile); resolved != nil {
+			e.RegisterStructureDefinition(resolved)
+			if sd, ok := e.lookupCachedCustomStructureDefinition(profile); ok {
+				return sd, true
+			}
+			return resolved, true
+		}
+	}
+	return nil, false
+}
+
+func (e *Engine) lookupCachedCustomStructureDefinition(profile string) (map[string]any, bool) {
 	e.customMu.RLock()
 	defer e.customMu.RUnlock()
 	if e.customProfiles == nil {

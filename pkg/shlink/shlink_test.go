@@ -491,3 +491,118 @@ func TestProperty_SHLinkJWEAndLifecycleInvariants(t *testing.T) {
 		}, hegel.WithTestCases(80))
 	})
 }
+
+type memBackendEntry struct {
+	raw []byte
+	ver int64
+}
+
+type memBackendStore struct {
+	mu      sync.Mutex
+	entries map[string]memBackendEntry
+}
+
+func newMemBackendStore() *memBackendStore {
+	return &memBackendStore{entries: make(map[string]memBackendEntry)}
+}
+
+func (s *memBackendStore) CreateLink(id, _ string, rawJSON []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entries[id] = memBackendEntry{raw: append([]byte(nil), rawJSON...), ver: 1}
+	return nil
+}
+
+func (s *memBackendStore) GetLink(id string) ([]byte, int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[id]
+	if !ok {
+		return nil, 0, false, nil
+	}
+	return append([]byte(nil), e.raw...), e.ver, true, nil
+}
+
+func (s *memBackendStore) CompareAndSwapLink(id, _ string, expectedVersion int64, rawJSON []byte) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.entries[id]
+	if !ok || e.ver != expectedVersion {
+		return false, nil
+	}
+	s.entries[id] = memBackendEntry{raw: append([]byte(nil), rawJSON...), ver: e.ver + 1}
+	return true, nil
+}
+
+func TestManager_BackendStoreCrossReplicaAndCAS(t *testing.T) {
+	shared := newMemBackendStore()
+	nodeA := shlink.NewManager()
+	nodeA.SetBackendStore(shared)
+	nodeB := shlink.NewManager()
+	nodeB.SetBackendStore(shared)
+
+	issued, err := nodeA.CreateLink(shlink.CreateRequest{
+		Tenant:              "demo",
+		PatientID:           "pat-cluster-1",
+		BaseOrigin:          "https://cluster.flint.org",
+		Passcode:            "918273",
+		MaxViews:            2,
+		MaxPasscodeFailures: 2,
+		Artifacts: []shlink.ArtifactInput{
+			{ContentType: "application/fhir+json", Plaintext: []byte(`{"resourceType":"Patient","id":"pat-cluster-1"}`), Deflate: true},
+		},
+	})
+	require.NoError(t, err)
+
+	ten, pat := nodeB.LinkOwner(issued.ID)
+	assert.Equal(t, "demo", ten)
+	assert.Equal(t, "pat-cluster-1", pat)
+
+	// Wrong passcode on nodeB increments shared failure counter
+	_, _, _, err = nodeB.ResolveManifest(issued.ID, "https://cluster.flint.org", shlink.ManifestRequest{
+		Recipient: "Dr. CrossNode",
+		Passcode:  "000000",
+	})
+	require.ErrorIs(t, err, shlink.ErrPasscodeRequired)
+
+	// Concurrent manifest fetches across nodeA and nodeB with MaxViews=2: exactly 2 succeed!
+	var wg sync.WaitGroup
+	var okCount int
+	var countMu sync.Mutex
+	for i := range 6 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			target := nodeA
+			if idx%2 == 1 {
+				target = nodeB
+			}
+			_, _, _, mErr := target.ResolveManifest(issued.ID, "https://cluster.flint.org", shlink.ManifestRequest{
+				Recipient: "Dr. CrossNode",
+				Passcode:  "918273",
+			})
+			if mErr == nil {
+				countMu.Lock()
+				okCount++
+				countMu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+	assert.Equal(t, 2, okCount, "optimistic CAS must enforce exact MaxViews=2 across replicas")
+
+	jwe, _, _, err := nodeB.ReadContent(issued.ID, "item-0")
+	require.NoError(t, err)
+	assert.NotEmpty(t, jwe)
+
+	// Wrong patient forbidden on Revoke, then valid Revoke on nodeA blocks ReadContent & ResolveManifest on nodeB
+	require.ErrorIs(t, nodeA.Revoke("demo", "wrong-pat", issued.ID), shlink.ErrForbiddenPatient)
+	require.NoError(t, nodeA.Revoke("demo", "pat-cluster-1", issued.ID))
+	_, _, _, err = nodeB.ReadContent(issued.ID, "item-0")
+	require.ErrorIs(t, err, shlink.ErrRevoked)
+	_, _, _, err = nodeB.ResolveManifest(issued.ID, "https://cluster.flint.org", shlink.ManifestRequest{
+		Recipient: "Dr. CrossNode",
+		Passcode:  "918273",
+	})
+	require.ErrorIs(t, err, shlink.ErrRevoked)
+}

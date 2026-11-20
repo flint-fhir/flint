@@ -42,17 +42,78 @@ func (s *Server) syncSearchParameterOnWrite(resType, resID string, rawJSON []byt
 		return
 	}
 	if strings.EqualFold(resType, "StructureDefinition") {
+		var m map[string]any
+		if err := json.Unmarshal(rawJSON, &m); err != nil {
+			return
+		}
 		if eng, ok := s.validator.(*validation.Engine); ok && eng != nil {
-			var m map[string]any
-			if err := json.Unmarshal(rawJSON, &m); err != nil {
-				return
-			}
 			eng.RegisterStructureDefinition(m)
+		}
+		if s.store != nil {
+			sdID, _ := m["id"].(string)
+			if strings.TrimSpace(sdID) == "" {
+				sdID = resID
+			}
+			canonURL, _ := m["url"].(string)
+			canonURL = strings.TrimSpace(canonURL)
+			stateKey := canonURL
+			if stateKey == "" && sdID != "" {
+				stateKey = "StructureDefinition/" + sdID
+			}
+			if stateKey != "" {
+				_, _ = s.store.PutClusterState(context.Background(), store.ClusterStateRecord{
+					Namespace:    "custom_sd",
+					Key:          stateKey,
+					SecondaryKey: sdID,
+					Value:        append([]byte(nil), rawJSON...),
+				})
+			}
 		}
 	}
 }
 
+func (s *Server) resolveClusterStructureDefinition(profile string) map[string]any {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	lookup := strings.TrimSpace(profile)
+	if lookup == "" {
+		return nil
+	}
+	baseProf := lookup
+	reqVer := ""
+	if pipeIdx := strings.IndexByte(lookup, '|'); pipeIdx != -1 {
+		baseProf = strings.TrimSpace(lookup[:pipeIdx])
+		reqVer = strings.TrimSpace(lookup[pipeIdx+1:])
+	}
+	ctx := context.Background()
+	rec, ok, err := s.store.GetClusterState(ctx, "custom_sd", baseProf)
+	if err != nil || !ok || rec == nil {
+		candID := strings.TrimPrefix(baseProf, "StructureDefinition/")
+		rec, ok, err = s.store.GetClusterStateBySecondary(ctx, "custom_sd", candID)
+		if err != nil || !ok || rec == nil {
+			return nil
+		}
+	}
+	var m map[string]any
+	if json.Unmarshal(rec.Value, &m) != nil || len(m) == 0 {
+		return nil
+	}
+	if reqVer != "" {
+		if sdVer, _ := m["version"].(string); sdVer != "" && sdVer != reqVer {
+			return nil
+		}
+	}
+	return m
+}
+
 func (s *Server) syncSearchParameterOnDelete(resType, resID string) {
+	if strings.EqualFold(resType, "StructureDefinition") && resID != "" && s.store != nil {
+		if rec, ok, err := s.store.GetClusterStateBySecondary(context.Background(), "custom_sd", resID); err == nil && ok && rec != nil {
+			_, _ = s.store.DeleteClusterState(context.Background(), "custom_sd", rec.Key)
+		}
+		return
+	}
 	if !strings.EqualFold(resType, "SearchParameter") || resID == "" {
 		return
 	}

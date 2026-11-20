@@ -1,0 +1,20 @@
+Flint HL7 FHIR R4 Server ({{ .Chart.AppVersion }}) has been deployed!
+
+Storage Backend:  {{ .Values.store.backend }}
+Analytics Store:  {{ .Values.store.analyticsBackend }}
+OpenTelemetry:    {{ if .Values.telemetry.enabled }}enabled ({{ .Values.telemetry.endpoint }}){{ else }}disabled{{ end }}
+
+1. Access the FHIR R4 CapabilityStatement:
+{{- if .Values.ingress.enabled }}
+{{- range $host := .Values.ingress.hosts }}
+  https://{{ $host.host }}/fhir/r4/default/metadata
+{{- end }}
+{{- else }}
+  kubectl --namespace {{ .Release.Namespace }} port-forward svc/{{ include "flint.fullname" . }} 8080:{{ .Values.service.port }}
+  curl -sS http://127.0.0.1:8080/fhir/r4/default/metadata
+{{- end }}
+
+2. Verify liveness, readiness & Prometheus metrics:
+  curl -sS http://127.0.0.1:8080/healthz
+  curl -sS http://127.0.0.1:8080/readyz
+  curl -sS http://127.0.0.1:8080/metrics

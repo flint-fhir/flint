@@ -74,6 +74,7 @@ type (
 	OAuthAuthCodeRecord         = store.OAuthAuthCodeRecord
 	OAuthRefreshTokenRecord     = store.OAuthRefreshTokenRecord
 	ExportJobRecord             = store.ExportJobRecord
+	ClusterStateRecord          = store.ClusterStateRecord
 )
 
 // Re-exported pure domain helpers, search parsers, and index extractors from package store.

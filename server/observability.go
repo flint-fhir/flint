@@ -18,7 +18,7 @@ func (s *Server) storageBackendLabel() string {
 	if s.store == nil {
 		return "none"
 	}
-	if hyb, ok := s.store.(*store.HybridStore); ok && hyb != nil {
+	if hyb := s.hybridStore(); hyb != nil {
 		return "hybrid(" + hyb.BackendName() + ")"
 	}
 	if as, ok := s.store.(store.AnalyticalStore); ok && !store.IsNil(as) {
@@ -32,7 +32,7 @@ func (s *Server) attachStorageTopology(payload map[string]any) {
 	if s.analyticalStore != nil && !store.IsNil(s.analyticalStore) {
 		payload["analyticalBackend"] = s.analyticalStore.BackendName()
 	}
-	if hyb, ok := s.store.(*store.HybridStore); ok && hyb != nil {
+	if hyb := s.hybridStore(); hyb != nil {
 		repMap := map[string]any{
 			"replicatedWrites":     hyb.ReplicatedWrites(),
 			"replicatedDeletes":    hyb.ReplicatedDeletes(),
@@ -208,7 +208,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprintf(&b, "flint_subscription_delivery_errors_total %d\n", subDeliveryErr)
 
 	var hybWrites, hybDeletes, hybErrors, hybSynced uint64
-	if hyb, ok := s.store.(*store.HybridStore); ok && hyb != nil {
+	if hyb := s.hybridStore(); hyb != nil {
 		hybWrites = hyb.ReplicatedWrites()
 		hybDeletes = hyb.ReplicatedDeletes()
 		hybErrors = hyb.ReplicationErrors()
@@ -245,6 +245,24 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	b.WriteString("# HELP flint_sqlonfhir_runs_total Total number of HL7 SQL-on-FHIR v2 ViewDefinition executions.\n")
 	b.WriteString("# TYPE flint_sqlonfhir_runs_total counter\n")
 	fmt.Fprintf(&b, "flint_sqlonfhir_runs_total %d\n", sqlRuns)
+
+	var otlpExported, otlpErrors, otlpDropped uint64
+	if s.tracer != nil {
+		otlpExported = s.tracer.ExportedSpans()
+		otlpErrors = s.tracer.ExportErrors()
+		otlpDropped = s.tracer.DroppedSpans()
+	}
+	b.WriteString("# HELP flint_otlp_spans_exported_total Total number of OpenTelemetry spans exported via OTLP/HTTP.\n")
+	b.WriteString("# TYPE flint_otlp_spans_exported_total counter\n")
+	fmt.Fprintf(&b, "flint_otlp_spans_exported_total %d\n", otlpExported)
+
+	b.WriteString("# HELP flint_otlp_export_errors_total Total number of OpenTelemetry OTLP/HTTP export errors.\n")
+	b.WriteString("# TYPE flint_otlp_export_errors_total counter\n")
+	fmt.Fprintf(&b, "flint_otlp_export_errors_total %d\n", otlpErrors)
+
+	b.WriteString("# HELP flint_otlp_spans_dropped_total Total number of OpenTelemetry spans dropped due to full queue.\n")
+	b.WriteString("# TYPE flint_otlp_spans_dropped_total counter\n")
+	fmt.Fprintf(&b, "flint_otlp_spans_dropped_total %d\n", otlpDropped)
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

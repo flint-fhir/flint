@@ -325,6 +325,8 @@ type AuditRecord struct {
 	EntityID      string
 	EntityVersion string
 	PurposeOfUse  string
+	TraceID       string
+	SpanID        string
 }
 
 // AuditQueryParams specifies search filters for querying FHIR AuditEvent records.
@@ -352,29 +354,56 @@ type OAuthAuthCodeRecord struct {
 	EncounterID         string
 	TenantID            string
 	Nonce               string
+	FhirUser            string
+	ExtraClaimsJSON     string
 	ExpiresAt           time.Time
 }
 
 // OAuthRefreshTokenRecord represents a persisted OAuth2 refresh token grant.
 type OAuthRefreshTokenRecord struct {
-	Subject     string
-	PatientID   string
-	EncounterID string
-	Scope       string
-	ExpiresAt   time.Time
+	Subject         string
+	GrantID         string
+	ClientID        string
+	TenantID        string
+	PatientID       string
+	EncounterID     string
+	Scope           string
+	Nonce           string
+	FhirUser        string
+	ExtraClaimsJSON string
+	ExpiresAt       time.Time
 }
 
 // ExportJobRecord represents a persisted FHIR Bulk Data ($export) job.
 type ExportJobRecord struct {
-	ID         string
-	TenantID   string
-	PatientID  string
-	CreatedAt  time.Time
-	RequestURL string
-	TypesOrder []string
-	Files      map[string][]byte
-	Counts     map[string]int
-	Combined   []byte
+	ID              string
+	TenantID        string
+	PatientID       string
+	Status          string
+	Err             string
+	OutputFormat    string
+	CancelRequested bool
+	CreatedAt       time.Time
+	RequestURL      string
+	TypesOrder      []string
+	Files           map[string][]byte
+	Counts          map[string]int
+	Combined        []byte
+}
+
+// ClusterStateRecord represents a versioned, optionally expiring cluster-wide state entry
+// shared across stateless Flint replicas (e.g. OAuth launch contexts, dynamic OAuth2/UDAP
+// clients, UDAP trust anchors, Bulk $import jobs, $shlink links, $mcp sessions, $bind-ws
+// tokens, and SQL-on-FHIR ViewDefinitions).
+type ClusterStateRecord struct {
+	Namespace    string
+	Key          string
+	TenantID     string
+	SecondaryKey string
+	Value        []byte
+	Version      int64
+	ExpiresAt    *time.Time
+	UpdatedAt    time.Time
 }
 
 // FormatETag formats a positive integer resource version as a weak HTTP ETag per FHIR R4 (e.g., W/"1").

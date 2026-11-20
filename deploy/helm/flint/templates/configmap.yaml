@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "flint.fullname" . }}
+  labels:
+    {{- include "flint.labels" . | nindent 4 }}
+data:
+  FLINT_ADDR: {{ printf ":%v" .Values.service.port | quote }}
+  FLINT_STORE_BACKEND: {{ .Values.store.backend | quote }}
+  FLINT_ANALYTICS_BACKEND: {{ .Values.store.analyticsBackend | quote }}
+  FLINT_TENANT_ISOLATION: {{ .Values.store.tenantIsolation | quote }}
+  FLINT_REFERENTIAL_INTEGRITY: {{ .Values.store.referentialIntegrity | quote }}
+  FLINT_DORIS_DATABASE: {{ .Values.store.dorisDatabase | quote }}
+  FLINT_DORIS_GROUP_COMMIT: {{ .Values.store.dorisGroupCommit | quote }}
+  FLINT_SQLITE_DSN: {{ .Values.store.sqliteDSN | quote }}
+  FLINT_SMART_ENFORCE_DEV_AUTH: {{ .Values.auth.enforceDevAuth | quote }}
+  FLINT_SMART_REQUIRE_CLIENT_JWK: {{ .Values.auth.requireClientJWK | quote }}
+  {{- if .Values.auth.oidcIssuer }}
+  FLINT_OIDC_ISSUER: {{ .Values.auth.oidcIssuer | quote }}
+  {{- end }}
+  {{- if .Values.auth.oidcAudience }}
+  FLINT_OIDC_AUDIENCE: {{ .Values.auth.oidcAudience | quote }}
+  {{- end }}
+  {{- if .Values.auth.provider }}
+  FLINT_AUTH_PROVIDER: {{ .Values.auth.provider | quote }}
+  {{- end }}
+  {{- if .Values.terminology.serverURL }}
+  FLINT_TX_SERVER_URL: {{ .Values.terminology.serverURL | quote }}
+  FLINT_TX_TIMEOUT: {{ .Values.terminology.timeout | quote }}
+  FLINT_TX_CACHE_TTL: {{ .Values.terminology.cacheTTL | quote }}
+  FLINT_TX_FAIL_OPEN: {{ .Values.terminology.failOpen | quote }}
+  {{- end }}
+  {{- if .Values.telemetry.enabled }}
+  FLINT_OTLP_ENDPOINT: {{ .Values.telemetry.endpoint | quote }}
+  FLINT_OTLP_PROTOCOL: {{ .Values.telemetry.protocol | quote }}
+  FLINT_OTLP_SERVICE_NAME: {{ default (include "flint.fullname" .) .Values.telemetry.serviceName | quote }}
+  FLINT_OTLP_SAMPLE_RATIO: {{ .Values.telemetry.sampleRatio | quote }}
+  {{- end }}

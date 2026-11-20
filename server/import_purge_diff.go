@@ -133,12 +133,25 @@ func (s *Server) handleBulkImport(w http.ResponseWriter, r *http.Request) {
 			CountsByType:    countsByType,
 			Errors:          importErrs,
 		}
-		s.importMu.Lock()
-		if s.importJobs == nil {
-			s.importJobs = make(map[string]*importJob)
+		if s.store != nil {
+			if rawJob, mErr := json.Marshal(job); mErr == nil {
+				exp := time.Now().UTC().Add(24 * time.Hour)
+				_, _ = s.store.PutClusterState(r.Context(), store.ClusterStateRecord{
+					Namespace: "import_job",
+					Key:       jobID,
+					TenantID:  tenant,
+					Value:     rawJob,
+					ExpiresAt: &exp,
+				})
+			}
+		} else {
+			s.importMu.Lock()
+			if s.importJobs == nil {
+				s.importJobs = make(map[string]*importJob)
+			}
+			s.importJobs[jobID] = job
+			s.importMu.Unlock()
 		}
-		s.importJobs[jobID] = job
-		s.importMu.Unlock()
 
 		pollURL := fmt.Sprintf("%s/fhir/r4/%s/$import-poll/%s", baseURL, tenant, jobID)
 		w.Header().Set("Content-Location", pollURL)
@@ -455,12 +468,21 @@ func (s *Server) handleImportPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.importMu.RLock()
 	var job *importJob
-	if s.importJobs != nil {
-		job = s.importJobs[jobID]
+	if s.store != nil {
+		if rec, found, err := s.store.GetClusterState(r.Context(), "import_job", jobID); err == nil && found && rec != nil {
+			var parsed importJob
+			if json.Unmarshal(rec.Value, &parsed) == nil {
+				job = &parsed
+			}
+		}
+	} else {
+		s.importMu.RLock()
+		if s.importJobs != nil {
+			job = s.importJobs[jobID]
+		}
+		s.importMu.RUnlock()
 	}
-	s.importMu.RUnlock()
 
 	if job == nil || job.Tenant != tenant {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("import job %q not found", jobID))
@@ -507,15 +529,21 @@ func (s *Server) handleImportCancel(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
 	jobID := r.PathValue("jobId")
 
-	s.importMu.Lock()
 	var found bool
-	if s.importJobs != nil {
-		if job, ok := s.importJobs[jobID]; ok && job.Tenant == tenant {
-			delete(s.importJobs, jobID)
-			found = true
+	if s.store != nil {
+		if rec, ok, err := s.store.GetClusterState(r.Context(), "import_job", jobID); err == nil && ok && rec != nil && rec.TenantID == tenant {
+			found, _ = s.store.DeleteClusterState(r.Context(), "import_job", jobID)
 		}
+	} else {
+		s.importMu.Lock()
+		if s.importJobs != nil {
+			if job, ok := s.importJobs[jobID]; ok && job.Tenant == tenant {
+				delete(s.importJobs, jobID)
+				found = true
+			}
+		}
+		s.importMu.Unlock()
 	}
-	s.importMu.Unlock()
 
 	if !found {
 		writeOperationOutcome(w, http.StatusNotFound, "not-found", fmt.Sprintf("import job %q not found", jobID))

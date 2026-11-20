@@ -26,6 +26,8 @@
             go-task
             k3d
             kubectl
+            kubernetes-helm
+            kubeconform
             uv
             duckdb
             atlas

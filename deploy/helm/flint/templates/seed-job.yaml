@@ -1,0 +1,58 @@
+{{- if .Values.seedJob.enabled -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "flint.fullname" . }}-seed
+  labels:
+    {{- include "flint.baseLabels" . | nindent 4 }}
+    app.kubernetes.io/name: {{ include "flint.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: seed
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.seedJob.backoffLimit }}
+  ttlSecondsAfterFinished: {{ .Values.seedJob.ttlSecondsAfterFinished }}
+  template:
+    metadata:
+      labels:
+        {{- include "flint.baseLabels" . | nindent 8 }}
+        app.kubernetes.io/name: {{ include "flint.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: seed
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "flint.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automount }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      restartPolicy: OnFailure
+      containers:
+        - name: seed
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /usr/local/bin/seed
+            - -url
+            - {{ printf "http://%s:%v" (include "flint.fullname" .) .Values.service.port | quote }}
+            - -tenant
+            - {{ .Values.seedJob.tenant | quote }}
+            - -suite
+            - {{ .Values.seedJob.suite | quote }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}
