@@ -29,6 +29,42 @@ require 'inferno'
 Inferno::Application.finalize!
 require 'flint_inferno_au_core' if Inferno::Repositories::TestSuites.new.all.empty?
 
+# Upstream bug workaround (hl7au/au-fhir-core-inferno#305):
+# InfernoSuiteGenerator::ChainedSearchTest#run_chain_search_test hardcodes
+# scratch[:patient_resources] even when the chained target resource is not
+# Patient (specifically practitioner:Practitioner.identifier in PractitionerRole),
+# issuing zero HTTP requests before failing. For non-Patient chain targets,
+# resolve candidate target resources from scratch[:<target>_resources][:all]
+# so Inferno actually issues and validates the live chained search against flintd.
+if defined?(InfernoSuiteGenerator::ChainedSearchTest) &&
+   !InfernoSuiteGenerator::ChainedSearchTest.method_defined?(:flint_orig_run_chain_search_test)
+  InfernoSuiteGenerator::ChainedSearchTest.module_eval do
+    alias_method :flint_orig_run_chain_search_test, :run_chain_search_test
+
+    def run_chain_search_test
+      search_param = search_param_names[0]
+      chain_target = extract_target_resource_from_chained_search_parameter(search_param)
+      return flint_orig_run_chain_search_test if chain_target == 'Patient'
+
+      scratch_key = :"#{chain_target.gsub(/([a-z\d])([A-Z])/, '\1_\2').downcase}_resources"
+      target_bucket = scratch[scratch_key] || scratch[scratch_key.to_s] || {}
+      target_resources = Array(target_bucket[:all] || target_bucket['all'] || target_bucket.values.flatten).select do |r|
+        r.respond_to?(:resourceType) && r.resourceType == chain_target && r.respond_to?(:id) && r.id
+      end
+      target_id_list = target_resources.map(&:id).uniq
+      resources_by_id = target_resources.group_by(&:id)
+
+      run_chain_search_test_clean(
+        search_param,
+        target_id_list,
+        resources_by_id,
+        attr_paths,
+        target_identifier
+      )
+    end
+  end
+end
+
 flint_base_url = ENV.fetch('FLINT_BASE_URL', 'http://127.0.0.1:18080').chomp('/')
 au_tenant      = ENV.fetch('FLINT_AU_TENANT', 'aucore')
 au_fhir_url    = ENV.fetch('FLINT_AU_FHIR_URL', "#{flint_base_url}/fhir/r4/#{au_tenant}").chomp('/')
