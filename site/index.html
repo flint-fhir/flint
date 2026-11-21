@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Flint v0.6.0 — Decoupled FHIR R4 API &amp; Pluggable Storage Engine in Go</title>
-  <meta name="description" content="Open-source HL7 FHIR R4 API &amp; Interoperability engine in Go. Strictly decoupled clinical API layer (JSON + XML + Binary Proto3 wire, SMART v2, UDAP v1.0, ONC g10, US Core v6/v7/v8, WebSocket &amp; CloudEvents Subscriptions, Tx Federation, SQL-on-FHIR v2, 35+ HL7 IGs, 20 HL7 Inferno suites &amp; 138/138 $certify) over pluggable PostgreSQL, embedded SQLite WAL, Apache Doris MPP, and HybridStore backends." />
+  <title>Flint v0.7.0 — Decoupled FHIR R4 API &amp; Pluggable Storage Engine in Go</title>
+  <meta name="description" content="Open-source HL7 FHIR R4 API &amp; Interoperability engine in Go. Strictly decoupled clinical API layer (JSON + XML + Binary Proto3 wire, SMART v2, UDAP v1.0, ONC g10, US Core v6/v7/v8, AU Core, MCP, SMART Health Links, HL7 v2.x MLLP &amp; C-CDA R2.1, OpenTelemetry &amp; OCI Helm Chart, Multi-Issuer Auth, WebSocket &amp; CloudEvents Subscriptions, Tx Federation, SQL-on-FHIR v2, 35+ HL7 IGs, 39 HL7 Inferno suites &amp; 144/144 $certify) over pluggable PostgreSQL, embedded SQLite WAL, Apache Doris Direct SQL, and HybridStore backends." />
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
@@ -12,7 +12,7 @@
     <div class="nav-inner">
       <a class="brand" href="#">
         <span>🔥 Flint</span>
-        <span class="brand-pill">v0.6.0 · FHIR R4.0.1</span>
+        <span class="brand-pill">v0.7.0 · FHIR R4.0.1</span>
       </a>
       <nav class="nav-links" aria-label="Primary Navigation">
         <a href="#quickstart">Quickstart</a>
@@ -30,7 +30,7 @@
     <section class="hero" style="border-block-start: none;">
       <div class="hero-badges">
         <span class="badge badge-accent">Decoupled API + Pluggable Storage</span>
-        <span class="badge badge-green">138/138 Automated Conformance ($certify)</span>
+        <span class="badge badge-green">144/144 Automated Conformance ($certify)</span>
         <span class="badge">PostgreSQL · SQLite WAL · Apache Doris · Hybrid</span>
         <span class="badge">SQL-on-FHIR v2 &amp; Binary Proto3 Wire</span>
       </div>
@@ -59,7 +59,7 @@
           <div class="metric-sub">PostgreSQL · 0-dep SQLite WAL · Apache Doris Hybrid OLAP</div>
         </div>
         <div class="metric-card">
-          <div class="metric-value">138 / 138</div>
+          <div class="metric-value">144 / 144</div>
           <div class="metric-label">Automated $certify Suite</div>
           <div class="metric-sub">10 conformance suites verified identically across every store</div>
         </div>
@@ -186,16 +186,16 @@
     <!-- Full Conformance Matrix Table (Responsive Table) -->
     <section id="conformance" class="catalog-section">
       <div class="section-header">
-        <div class="section-eyebrow">Verified by 138 Automated Conformance Checks ($certify)</div>
+        <div class="section-eyebrow">Verified by 144 Automated Conformance Checks ($certify)</div>
         <h2 class="section-title">FHIR R4, US Core, SQL-on-FHIR v2 &amp; National IG Conformance Matrix</h2>
         <p class="section-desc">
-          Every Flint instance exposes <code>GET /fhir/r4/{tenant}/$certify</code> to execute a 138-check conformance harness across 10 suites in an isolated tenant sandbox and return an HL7 <code>TestReport</code>—verified identically on PostgreSQL, SQLite, Apache Doris, and HybridStore.
+          Every Flint instance exposes <code>GET /fhir/r4/{tenant}/$certify</code> to execute a 144-check conformance harness across 10 suites in an isolated tenant sandbox and return an HL7 <code>TestReport</code>—verified identically on PostgreSQL, SQLite, Apache Doris, and HybridStore.
         </p>
       </div>
 
       <div tabindex="0" role="region" aria-labelledby="conformance-table-caption" class="table-wrapper">
         <table style="--label-2: 'Capabilities &amp; Operations'; --label-3: 'Specifications'; --label-4: 'Primary Endpoint'; --label-5: 'Status';">
-          <caption id="conformance-table-caption">Flint v0.6.0 FHIR R4 Conformance Matrix (20 HL7 Inferno Suites &amp; 138/138 $certify Checks)</caption>
+          <caption id="conformance-table-caption">Flint v0.7.0 FHIR R4 Conformance Matrix (39 HL7 Inferno Suites &amp; 144/144 $certify Checks)</caption>
           <thead>
             <tr>
               <th>Category</th>
@@ -337,7 +337,7 @@
   <footer class="site-footer">
     <div class="container footer-inner">
       <div>
-        <strong>🔥 Flint FHIR R4 Server (v0.6.0)</strong> — Open-Source Decoupled FHIR R4 API &amp; Pluggable Storage Engine (Apache 2.0 License)
+        <strong>🔥 Flint FHIR R4 Server (v0.7.0)</strong> — Open-Source Decoupled FHIR R4 API &amp; Pluggable Storage Engine (Apache 2.0 License)
       </div>
       <div>
         <a href="https://github.com/flint-fhir/flint" target="_blank" rel="noopener">GitHub</a> ·

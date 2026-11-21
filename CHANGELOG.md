@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-20
+
 ### Added
 
 - **Apache Doris Production Readiness — Pure-Go MySQL Driver, Stateless Direct SQL, `tenant_<slug>` Database Isolation, `SET_VAR` Governance & Multi-Replica `RowLocker` ([#206](https://github.com/flint-fhir/flint/issues/206)) (`store/doris/`, `cmd/flintd/`, `cmd/flint-mcp/`, `cmd/loadtest/`)**:
@@ -50,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - **`cancer_registry_reporting_test_kit` (`ccrr_ehr` & `ccrr_v100_report_generation`)**: Added mCODE v3.0.0 EHR data access (`-suite ccrr`, `Primary`/`Secondary` cancer conditions, TNM staging, cancer `MedicationRequest`/`MedicationAdministration`, radiotherapy course summary) and upgraded `Patient/{id}/$cancer-registry-report` (`ccrr-content-bundle` across all 15 `Composition` sections including ODH `odh-UsualWork`).
     - **`at_home_in_vitro_test_kit` (`at_home_test_kit`)**: Added `GET/POST /Patient/{id}/$home-lab-report` generating HL7 At-Home In-Vitro Test Report (`Bundle-at-home-in-vitro-test`) `R01` message Bundles.
   - Expanded the vendored declarative HL7 R4 `TestScript` conformance corpus (`server/testdata/testscripts-r4/ts-05..ts-08`, `8` suites total) covering **Da Vinci CDex** (`$cdex-submit-attachment`, `$cdex-request`, `$cdex-poll`, `$cdex-sign`, `$cdex-verify-signature`), **Da Vinci ATR** (`$member-add`, `$member-remove`, `$confirm-attribution-list`, `$atr-summary`, `$davinci-data-export`), **Da Vinci DEQM & PCT** (`$submit-data`, `$collect-data`, `$care-gaps`, `$gfe-submit`, `$pct-aeob-summary`), and **IHE MHD, PACIO & CodeX mCODE** (`$iti-65`, `$iti-67`, `$ihe-iti-68`, `$pacio-pfe-record`, `$pacio-cognitive-assess`, `$adi-document`, `$stage-cancer`, `$mcode-genomics-report`, `$mcode-summary`) across JSON and XML wire formats on SQLite and PostgreSQL.
+
+### Changed
+
+- Synchronized runtime, container, OCI Helm chart (`deploy/helm/flint/Chart.yaml`), installer, analytics (`analytics/pyproject.toml` & `analytics/uv.lock`), OpenAPI 3.1.0, `CapabilityStatement.software.version`, and public website version reporting to `0.7.0`.
 
 ## [0.6.0] - 2026-11-17
 

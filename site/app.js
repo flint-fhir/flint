@@ -2,32 +2,32 @@ const quickstartSnippets = {
   sqlite: `# Install via Homebrew, POSIX installer, or pure-Go single binary (zero Docker/DB required!)
 brew install flint-fhir/tap/flint
 # or: curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/install.sh | sh
-# or: CGO_ENABLED=0 go install github.com/flint-fhir/flint/cmd/flintd@v0.6.0
+# or: CGO_ENABLED=0 go install github.com/flint-fhir/flint/cmd/flintd@v0.7.0
 
 # Boot complete FHIR R4 API server over embedded SQLite WAL (or use :memory:)
 flintd --store=sqlite --sqlite-dsn=flint.db
 
-# Verify 138/138 automated conformance checks across 10 suites:
+# Verify 144/144 automated conformance checks across 10 suites:
 curl -s http://localhost:8080/fhir/r4/demo/$certify | jq .result`,
 
   compose: `# Start Flint FHIR R4 API + PostgreSQL 16 + seeded 62-resource US Core v6/v7 & IPA cohort
 curl -fsSL https://raw.githubusercontent.com/flint-fhir/flint/main/docker-compose.yml -o docker-compose.yml
 docker compose --profile seed up -d
 
-# Explore the live SMART v2 Sandbox & 138-Check Conformance Suite:
+# Explore the live SMART v2 Sandbox & 144-Check Conformance Suite:
 open http://localhost:8080/fhir/r4/demo/$docs
 curl -s http://localhost:8080/fhir/r4/demo/$certify | jq .result`,
 
   container: `# Option A: PostgreSQL OLTP container (auto-migrates on boot)
 docker run --rm -p 8080:8080 \\
   -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \\
-  ghcr.io/flint-fhir/flint:0.6.0
+  ghcr.io/flint-fhir/flint:0.7.0
 
 # Option B: Hybrid PostgreSQL OLTP + Real-Time Apache Doris MPP Analytics
 docker run --rm -p 8080:8080 \\
   -e FLINT_POSTGRES_DSN="postgres://flint:flint@host.docker.internal:5432/flint?sslmode=disable" \\
   -e FLINT_DORIS_DSN="root:@tcp(host.docker.internal:9030)/flint" \\
-  ghcr.io/flint-fhir/flint:0.6.0 --store=postgres --analytics-store=doris`
+  ghcr.io/flint-fhir/flint:0.7.0 --store=postgres --analytics-store=doris`
 };
 
 const igCatalog = [
