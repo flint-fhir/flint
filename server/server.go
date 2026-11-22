@@ -66,7 +66,7 @@ import (
 )
 
 // Version is the semantic version of the Flint FHIR R4 API & Interoperability engine.
-const Version = "0.6.0"
+const Version = "0.7.0"
 
 var idSeq atomic.Uint64
 
