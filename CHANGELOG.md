@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-24
+
+### Added
+
+- **Configurable Workload Identity Claim & Per-Issuer CA Pinning (`pkg/auth/validator_trustdoc.go`)**:
+  - **`TrustClaims.subjectClaim`**: Optional claim name on any `TrustClaims` shape (e.g. `"workload"` for OpenBao workload OIDC JWTs where `sub` is a per-entity UUID) used to match `principals` allowlists and populate `SecurityContext.principal_id` while preserving cryptographic `sub` for `AuditEvent` provenance. Missing, blank, or non-string configured `subjectClaim` values fail closed with `ErrClaimsShape`.
+  - **`TrustIssuer.caCertFile`**: Optional PEM CA certificate file path per trusted issuer, building an isolated `*x509.CertPool` on that issuer's JWKS HTTP client (`https://` `jwksUrl` only, rejecting whitespace-only paths, missing/invalid PEMs, inline `jwks`, and `http://` URLs with `ErrTrustDocInvalid`) while keeping system roots untouched for other issuers.
+  - Added unit and end-to-end hardening coverage (`TestTrustDocValidatorSubjectClaimAndCACertFile` in `pkg/auth/validator_trustdoc_test.go`, `TestSecurityHardening_OpenBaoWorkloadSubjectClaimAndTenantHeader` in `server/security_hardening_test.go`).
+
+### Changed
+
+- Synchronized runtime, container, OCI Helm chart (`deploy/helm/flint/Chart.yaml`), installer, analytics (`analytics/pyproject.toml` & `analytics/uv.lock`), OpenAPI 3.1.0, `CapabilityStatement.software.version`, and public website version reporting to `0.7.1`.
+
 ## [0.7.0] - 2026-11-20
 
 ### Added
