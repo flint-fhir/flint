@@ -3,6 +3,8 @@ package auth
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,6 +52,7 @@ type TrustIssuer struct {
 	Issuer            string            `json:"issuer"`
 	Audiences         []string          `json:"audiences"`
 	JWKSURL           string            `json:"jwksUrl"`
+	CACertFile        string            `json:"caCertFile,omitempty"`
 	JWKS              json.RawMessage   `json:"jwks"`
 	SigningAlgorithms []string          `json:"signingAlgorithms"`
 	Claims            TrustClaims       `json:"claims"`
@@ -60,6 +63,7 @@ type TrustIssuer struct {
 // TrustClaims defines how tenant memberships, roles, and delegated actor identity are read from JWT claims.
 type TrustClaims struct {
 	Shape                 string `json:"shape"`
+	SubjectClaim          string `json:"subjectClaim,omitempty"`
 	GrantsClaim           string `json:"grantsClaim"`
 	HomeTenantClaim       string `json:"homeTenantClaim"`
 	TenantsClaim          string `json:"tenantsClaim"`
@@ -182,12 +186,34 @@ func NewTrustDocValidator(cfg TrustDocConfig) (*TrustDocValidator, error) {
 			}
 		}
 
+		issuerHTTPClient := cfg.HTTPClient
+		if iss.CACertFile != "" {
+			caCertFile := strings.TrimSpace(iss.CACertFile)
+			if caCertFile == "" {
+				return nil, fmt.Errorf("%w: issuer %q caCertFile must not be whitespace-only", ErrTrustDocInvalid, iss.Issuer)
+			}
+			if hasInlineJWKS {
+				return nil, fmt.Errorf("%w: issuer %q caCertFile requires jwksUrl and cannot be combined with inline jwks", ErrTrustDocInvalid, iss.Issuer)
+			}
+			if strings.HasPrefix(iss.JWKSURL, "http://") {
+				return nil, fmt.Errorf("%w: issuer %q caCertFile requires an https jwksUrl", ErrTrustDocInvalid, iss.Issuer)
+			}
+			roots, err := loadIssuerCACertPool(caCertFile)
+			if err != nil {
+				return nil, err
+			}
+			issuerHTTPClient, err = httpClientWithRootCAs(cfg.HTTPClient, roots)
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		oidcVal, err := NewOIDCValidator(OIDCConfig{
 			Issuer:             iss.Issuer,
 			Audiences:          iss.Audiences,
 			JWKSURL:            iss.JWKSURL,
 			StaticJWKS:         staticJWKS,
-			HTTPClient:         cfg.HTTPClient,
+			HTTPClient:         issuerHTTPClient,
 			CacheTTL:           cfg.CacheTTL,
 			MinRefreshInterval: cfg.MinRefreshInterval,
 			SigningAlgorithms:  iss.SigningAlgorithms,
@@ -287,20 +313,35 @@ func (v *TrustDocValidator) ValidateToken(ctx context.Context, bearerToken strin
 		secCtx.ActorIssuer = actorIss
 	}
 
+	principalSubject := token.Payload.Subject
+	if subjectClaim := strings.TrimSpace(rt.cfg.Claims.SubjectClaim); subjectClaim != "" && subjectClaim != "sub" {
+		raw, ok := token.Payload.Extra[subjectClaim]
+		if !ok {
+			return nil, fmt.Errorf("%w: %s claim is required", ErrClaimsShape, subjectClaim)
+		}
+		strVal, ok := raw.(string)
+		trimmed := strings.TrimSpace(strVal)
+		if !ok || trimmed == "" {
+			return nil, fmt.Errorf("%w: %s claim is required", ErrClaimsShape, subjectClaim)
+		}
+		principalSubject = trimmed
+		secCtx.PrincipalId = principalSubject
+	}
+
 	baseScopes := cloneScopes(secCtx.Scopes)
 	var principalRule TrustPrincipal
 	hasPrincipalRule := false
 	if rt.enforcePrincipals {
-		matched, allowed := rt.principalsBySub[token.Payload.Subject]
+		matched, allowed := rt.principalsBySub[principalSubject]
 		if !allowed {
-			return nil, fmt.Errorf("%w: %s (%s)", ErrPrincipalNotAllowed, token.Payload.Subject, token.Payload.Issuer)
+			return nil, fmt.Errorf("%w: %s (%s)", ErrPrincipalNotAllowed, principalSubject, token.Payload.Issuer)
 		}
 		principalRule = matched
 		hasPrincipalRule = true
 		if matched.ID != "" {
 			secCtx.PrincipalId = matched.ID
 		} else {
-			secCtx.PrincipalId = token.Payload.Subject
+			secCtx.PrincipalId = principalSubject
 		}
 		if matched.AllowCrossTenant {
 			secCtx.OperatorCrossTenant = true
@@ -360,7 +401,65 @@ func (c TrustClaims) validate() error {
 	default:
 		return fmt.Errorf("unsupported claim shape %q", c.Shape)
 	}
+	if c.SubjectClaim != "" && strings.TrimSpace(c.SubjectClaim) == "" {
+		return errors.New("subjectClaim must not be whitespace-only")
+	}
 	return nil
+}
+
+func loadIssuerCACertPool(path string) (*x509.CertPool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: stat caCertFile %q: %w", ErrTrustDocInvalid, path, err)
+	}
+	if info.Size() > maxTrustDocBytes {
+		return nil, fmt.Errorf("%w: caCertFile %q exceeds %d bytes", ErrTrustDocInvalid, path, maxTrustDocBytes)
+	}
+	pemBytes, err := os.ReadFile(path) // #nosec G304 -- trusted CA certificate path supplied by operator in identity trust document
+	if err != nil {
+		return nil, fmt.Errorf("%w: read caCertFile %q: %w", ErrTrustDocInvalid, path, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		return nil, fmt.Errorf("%w: caCertFile %q contains no valid PEM certificates", ErrTrustDocInvalid, path)
+	}
+	return pool, nil
+}
+
+func httpClientWithRootCAs(base *http.Client, roots *x509.CertPool) (*http.Client, error) {
+	var client http.Client
+	if base != nil {
+		client = *base
+	} else {
+		client = http.Client{Timeout: 10 * time.Second}
+	}
+	var tr *http.Transport
+	if client.Transport != nil {
+		orig, ok := client.Transport.(*http.Transport)
+		if !ok {
+			return nil, fmt.Errorf("%w: caCertFile requires *http.Transport", ErrTrustDocInvalid)
+		}
+		tr = orig.Clone()
+	} else {
+		def, ok := http.DefaultTransport.(*http.Transport)
+		if !ok {
+			return nil, fmt.Errorf("%w: caCertFile requires *http.Transport", ErrTrustDocInvalid)
+		}
+		tr = def.Clone()
+	}
+	var tlsCfg *tls.Config
+	if tr.TLSClientConfig != nil {
+		tlsCfg = tr.TLSClientConfig.Clone()
+	} else {
+		tlsCfg = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	if tlsCfg.MinVersion < tls.VersionTLS12 {
+		tlsCfg.MinVersion = tls.VersionTLS12
+	}
+	tlsCfg.RootCAs = roots
+	tr.TLSClientConfig = tlsCfg
+	client.Transport = tr
+	return &client, nil
 }
 
 func parseValidatedPublicJWKS(raw json.RawMessage) (*JWKSet, error) {

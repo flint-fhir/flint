@@ -11,10 +11,13 @@ import (
 	"crypto/sha512"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -604,5 +607,258 @@ func TestTrustDocValidationSecurityControls(t *testing.T) {
 	}
 	if m["clinician"] != "user/Patient.rs user/Observation.rs" || m["admin"] != "system/*.*" {
 		t.Fatalf("unexpected parsed map: %+v", m)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestTrustDocValidatorSubjectClaimAndCACertFile(t *testing.T) {
+	workloadKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("workload rsa key: %v", err)
+	}
+	jwksCalls := 0
+	tlsSrv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		jwksCalls++
+		_ = json.NewEncoder(w).Encode(JWKSet{Keys: []JWK{rsaPublicJWK("w-1", &workloadKey.PublicKey)}})
+	}))
+	defer tlsSrv.Close()
+
+	tmpDir := t.TempDir()
+	caPath := filepath.Join(tmpDir, "openbao-ca.crt")
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsSrv.Certificate().Raw})
+	if err := os.WriteFile(caPath, certPEM, 0o600); err != nil {
+		t.Fatalf("write ca cert: %v", err)
+	}
+
+	openbaoIssuer := "https://openbao.openbao-system:8200/v1/identity/oidc"
+	val, err := NewTrustDocValidator(TrustDocConfig{
+		Document: TrustDocument{
+			Issuers: []TrustIssuer{
+				{
+					Issuer:            openbaoIssuer,
+					Audiences:         []string{"azra-fhir"},
+					JWKSURL:           tlsSrv.URL,
+					CACertFile:        caPath,
+					SigningAlgorithms: []string{"RS256"},
+					Claims: TrustClaims{
+						Shape:        TrustClaimShapeNone,
+						SubjectClaim: "workload",
+					},
+					Principals: []TrustPrincipal{
+						{
+							ID:               "fhir-ingest-worker",
+							Subject:          "fhir-ingest-worker",
+							Scopes:           "system/*.*",
+							AllowCrossTenant: true,
+						},
+						{
+							Subject:          "first-fhir-worker",
+							Scopes:           "system/*.*",
+							AllowCrossTenant: true,
+						},
+					},
+				},
+			},
+		},
+		MinRefreshInterval: -1,
+	})
+	if err != nil {
+		t.Fatalf("NewTrustDocValidator: %v", err)
+	}
+
+	now := time.Now()
+	entityUUID := "00000000-1111-2222-3333-444444444444"
+	validTok := signRSAJWT(t, "RS256", "w-1", workloadKey, map[string]any{
+		"iss":         openbaoIssuer,
+		"sub":         entityUUID,
+		"workload":    "fhir-ingest-worker",
+		"permissions": []string{"automation:write"},
+		"aud":         "azra-fhir",
+		"exp":         now.Add(5 * time.Minute).Unix(),
+	})
+	sc, err := val.ValidateToken(context.Background(), validTok)
+	if err != nil {
+		t.Fatalf("ValidateToken(valid OpenBao workload): %v", err)
+	}
+	if jwksCalls == 0 {
+		t.Fatalf("expected TLS JWKS server to be queried using caCertFile")
+	}
+	if sc.GetSubject() != entityUUID {
+		t.Fatalf("expected Subject %q, got %q", entityUUID, sc.GetSubject())
+	}
+	if sc.GetPrincipalId() != "fhir-ingest-worker" || !sc.GetOperatorCrossTenant() || sc.GetTenantId() != "" {
+		t.Fatalf("unexpected SecurityContext: %+v", sc)
+	}
+	if !Allows(sc, "Patient", ActionCreate) {
+		t.Fatalf("expected system/*.* scopes to permit Patient.create")
+	}
+
+	// Principal without explicit ID falls back to extracted subjectClaim value
+	fallbackIDTok := signRSAJWT(t, "RS256", "w-1", workloadKey, map[string]any{
+		"iss":      openbaoIssuer,
+		"sub":      entityUUID,
+		"workload": "first-fhir-worker",
+		"aud":      "azra-fhir",
+		"exp":      now.Add(5 * time.Minute).Unix(),
+	})
+	scFallback, err := val.ValidateToken(context.Background(), fallbackIDTok)
+	if err != nil {
+		t.Fatalf("ValidateToken(first-fhir-worker): %v", err)
+	}
+	if scFallback.GetPrincipalId() != "first-fhir-worker" {
+		t.Fatalf("expected PrincipalId first-fhir-worker, got %q", scFallback.GetPrincipalId())
+	}
+
+	// Missing, non-string, or blank subjectClaim must fail closed with ErrClaimsShape
+	for _, tc := range []struct {
+		name   string
+		claims map[string]any
+	}{
+		{
+			name: "missing",
+			claims: map[string]any{
+				"iss": openbaoIssuer,
+				"sub": entityUUID,
+				"aud": "azra-fhir",
+				"exp": now.Add(5 * time.Minute).Unix(),
+			},
+		},
+		{
+			name: "non-string",
+			claims: map[string]any{
+				"iss":      openbaoIssuer,
+				"sub":      entityUUID,
+				"workload": 42,
+				"aud":      "azra-fhir",
+				"exp":      now.Add(5 * time.Minute).Unix(),
+			},
+		},
+		{
+			name: "blank",
+			claims: map[string]any{
+				"iss":      openbaoIssuer,
+				"sub":      entityUUID,
+				"workload": "   ",
+				"aud":      "azra-fhir",
+				"exp":      now.Add(5 * time.Minute).Unix(),
+			},
+		},
+	} {
+		tok := signRSAJWT(t, "RS256", "w-1", workloadKey, tc.claims)
+		if _, err := val.ValidateToken(context.Background(), tok); !errors.Is(err, ErrClaimsShape) {
+			t.Fatalf("%s workload claim: expected ErrClaimsShape, got %v", tc.name, err)
+		}
+	}
+
+	// Unlisted workload caller must be rejected even with valid signature and audience
+	unlistedTok := signRSAJWT(t, "RS256", "w-1", workloadKey, map[string]any{
+		"iss":      openbaoIssuer,
+		"sub":      entityUUID,
+		"workload": "other-worker",
+		"aud":      "azra-fhir",
+		"exp":      now.Add(5 * time.Minute).Unix(),
+	})
+	if _, err := val.ValidateToken(context.Background(), unlistedTok); !errors.Is(err, ErrPrincipalNotAllowed) {
+		t.Fatalf("expected ErrPrincipalNotAllowed for unlisted workload, got %v", err)
+	}
+
+	// Without caCertFile, the same self-signed TLS JWKS server fails certificate verification
+	noCAVal, err := NewTrustDocValidator(TrustDocConfig{
+		Document: TrustDocument{
+			Issuers: []TrustIssuer{{
+				Issuer:            openbaoIssuer,
+				Audiences:         []string{"azra-fhir"},
+				JWKSURL:           tlsSrv.URL,
+				SigningAlgorithms: []string{"RS256"},
+				Claims:            TrustClaims{Shape: TrustClaimShapeNone, SubjectClaim: "workload"},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewTrustDocValidator(no CA): %v", err)
+	}
+	if _, err := noCAVal.ValidateToken(context.Background(), validTok); err == nil {
+		t.Fatalf("expected TLS verification failure when caCertFile is omitted for private CA")
+	}
+
+	// Configuration errors fail closed with ErrTrustDocInvalid
+	badPEMPath := filepath.Join(tmpDir, "invalid.pem")
+	if err := os.WriteFile(badPEMPath, []byte("not a pem cert"), 0o600); err != nil {
+		t.Fatalf("write invalid pem: %v", err)
+	}
+	inlineJWKS, _ := json.Marshal(JWKSet{Keys: []JWK{rsaPublicJWK("w-1", &workloadKey.PublicKey)}})
+	invalidConfigs := []struct {
+		name string
+		cfg  TrustDocConfig
+	}{
+		{
+			name: "missing caCertFile",
+			cfg: TrustDocConfig{Document: TrustDocument{Issuers: []TrustIssuer{{
+				Issuer: openbaoIssuer, Audiences: []string{"azra-fhir"}, JWKSURL: tlsSrv.URL,
+				CACertFile: filepath.Join(tmpDir, "missing.crt"),
+				Claims:     TrustClaims{Shape: TrustClaimShapeNone},
+			}}}},
+		},
+		{
+			name: "invalid PEM caCertFile",
+			cfg: TrustDocConfig{Document: TrustDocument{Issuers: []TrustIssuer{{
+				Issuer: openbaoIssuer, Audiences: []string{"azra-fhir"}, JWKSURL: tlsSrv.URL,
+				CACertFile: badPEMPath,
+				Claims:     TrustClaims{Shape: TrustClaimShapeNone},
+			}}}},
+		},
+		{
+			name: "whitespace caCertFile",
+			cfg: TrustDocConfig{Document: TrustDocument{Issuers: []TrustIssuer{{
+				Issuer: openbaoIssuer, Audiences: []string{"azra-fhir"}, JWKSURL: tlsSrv.URL,
+				CACertFile: "   ",
+				Claims:     TrustClaims{Shape: TrustClaimShapeNone},
+			}}}},
+		},
+		{
+			name: "caCertFile with inline jwks",
+			cfg: TrustDocConfig{Document: TrustDocument{Issuers: []TrustIssuer{{
+				Issuer: openbaoIssuer, Audiences: []string{"azra-fhir"}, JWKS: inlineJWKS,
+				CACertFile: caPath,
+				Claims:     TrustClaims{Shape: TrustClaimShapeNone},
+			}}}},
+		},
+		{
+			name: "caCertFile with http jwksUrl",
+			cfg: TrustDocConfig{
+				AllowPlaintextHTTPJWKS: true,
+				Document: TrustDocument{Issuers: []TrustIssuer{{
+					Issuer: openbaoIssuer, Audiences: []string{"azra-fhir"}, JWKSURL: "http://openbao.local/keys",
+					CACertFile: caPath,
+					Claims:     TrustClaims{Shape: TrustClaimShapeNone},
+				}}},
+			},
+		},
+		{
+			name: "whitespace subjectClaim",
+			cfg: TrustDocConfig{Document: TrustDocument{Issuers: []TrustIssuer{{
+				Issuer: openbaoIssuer, Audiences: []string{"azra-fhir"}, JWKS: inlineJWKS,
+				Claims: TrustClaims{Shape: TrustClaimShapeNone, SubjectClaim: "   "},
+			}}}},
+		},
+		{
+			name: "non-*http.Transport with caCertFile",
+			cfg: TrustDocConfig{
+				HTTPClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) { return nil, nil })},
+				Document: TrustDocument{Issuers: []TrustIssuer{{
+					Issuer: openbaoIssuer, Audiences: []string{"azra-fhir"}, JWKSURL: tlsSrv.URL,
+					CACertFile: caPath,
+					Claims:     TrustClaims{Shape: TrustClaimShapeNone},
+				}}},
+			},
+		},
+	}
+	for _, tc := range invalidConfigs {
+		if _, err := NewTrustDocValidator(tc.cfg); !errors.Is(err, ErrTrustDocInvalid) {
+			t.Fatalf("%s: expected ErrTrustDocInvalid, got %v", tc.name, err)
+		}
 	}
 }

@@ -10,11 +10,13 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -611,4 +613,111 @@ func TestSecurityHardening_RefLockLocalRefsLimitsDeniedAndRateLimit(t *testing.T
 	assert.Equal(t, http.StatusTooManyRequests, r3.StatusCode)
 	assert.NotEmpty(t, r3.Header.Get("Retry-After"))
 	assert.Equal(t, http.StatusOK, rOther.StatusCode)
+}
+
+func TestSecurityHardening_OpenBaoWorkloadSubjectClaimAndTenantHeader(t *testing.T) {
+	workKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	tlsJWKS := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(auth.JWKSet{Keys: []auth.JWK{testRSAPublicJWK("bao-1", &workKey.PublicKey)}})
+	}))
+	defer tlsJWKS.Close()
+
+	caPath := filepath.Join(t.TempDir(), "openbao-ca.crt")
+	caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsJWKS.Certificate().Raw})
+	require.NoError(t, os.WriteFile(caPath, caPEM, 0o600))
+
+	openbaoIssuer := "https://openbao.openbao-system:8200/v1/identity/oidc"
+	val, err := auth.NewTrustDocValidator(auth.TrustDocConfig{
+		Document: auth.TrustDocument{
+			Issuers: []auth.TrustIssuer{{
+				Issuer:            openbaoIssuer,
+				Audiences:         []string{"azra-fhir"},
+				JWKSURL:           tlsJWKS.URL,
+				CACertFile:        caPath,
+				SigningAlgorithms: []string{"RS256"},
+				Claims: auth.TrustClaims{
+					Shape:        auth.TrustClaimShapeNone,
+					SubjectClaim: "workload",
+				},
+				Principals: []auth.TrustPrincipal{{
+					ID:               "fhir-ingest-worker",
+					Subject:          "fhir-ingest-worker",
+					Scopes:           "system/*.*",
+					AllowCrossTenant: true,
+				}},
+			}},
+		},
+	})
+	require.NoError(t, err)
+
+	_, st, ts := newHardeningSQLiteServer(t, "", server.SecurityPolicy{
+		RequireAuth:                     true,
+		RequireTenantClaim:              true,
+		RequireTenantHeader:             true,
+		TenantHeaderName:                server.DefaultTenantHeaderName,
+		DisableUnauthenticatedEndpoints: true,
+	}, val)
+
+	now := time.Now()
+	entityUUID := "a1b2c3d4-0000-4000-8000-000000000001"
+	workerTok := signTestRS256(t, "bao-1", workKey, map[string]any{
+		"iss":         openbaoIssuer,
+		"sub":         entityUUID,
+		"workload":    "fhir-ingest-worker",
+		"permissions": []string{"automation:write"},
+		"aud":         "azra-fhir",
+		"exp":         now.Add(5 * time.Minute).Unix(),
+	})
+
+	// Missing X-Azra-Tenant-Id is rejected even with valid cross-tenant workload token
+	rNoTenant, _ := doHardeningReq(t, http.MethodGet, ts.URL+"/fhir/r4/Patient", map[string]string{
+		"Authorization": "Bearer " + workerTok,
+	}, nil)
+	assert.Equal(t, http.StatusBadRequest, rNoTenant.StatusCode)
+
+	// Unlisted workload caller is rejected with 401
+	rogueTok := signTestRS256(t, "bao-1", workKey, map[string]any{
+		"iss":      openbaoIssuer,
+		"sub":      entityUUID,
+		"workload": "rogue-worker",
+		"aud":      "azra-fhir",
+		"exp":      now.Add(5 * time.Minute).Unix(),
+	})
+	rRogue, _ := doHardeningReq(t, http.MethodGet, ts.URL+"/fhir/r4/Patient", map[string]string{
+		"Authorization":                "Bearer " + rogueTok,
+		server.DefaultTenantHeaderName: "acme-clinic",
+	}, nil)
+	assert.Equal(t, http.StatusUnauthorized, rRogue.StatusCode)
+
+	// Authorized worker creates and reads a Patient in X-Azra-Tenant-Id: acme-clinic
+	rCreate, createdBody := doHardeningReq(t, http.MethodPost, ts.URL+"/fhir/r4/Patient", map[string]string{
+		"Authorization":                "Bearer " + workerTok,
+		server.DefaultTenantHeaderName: "acme-clinic",
+	}, map[string]any{
+		"resourceType": "Patient",
+		"name":         []map[string]any{{"family": "OpenBaoWorker"}},
+	})
+	require.Equal(t, http.StatusCreated, rCreate.StatusCode)
+
+	var createdPat map[string]any
+	require.NoError(t, json.Unmarshal(createdBody, &createdPat))
+	patID, _ := createdPat["id"].(string)
+	require.NotEmpty(t, patID)
+
+	rGet, _ := doHardeningReq(t, http.MethodGet, ts.URL+"/fhir/r4/Patient/"+patID, map[string]string{
+		"Authorization":                "Bearer " + workerTok,
+		server.DefaultTenantHeaderName: "acme-clinic",
+	}, nil)
+	require.Equal(t, http.StatusOK, rGet.StatusCode)
+
+	auds, _, err := st.QueryAuditEvents(context.Background(), store.AuditQueryParams{
+		TenantID:     "acme-clinic",
+		AgentSubject: entityUUID,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, auds)
+	assert.True(t, auds[0].OperatorCrossTenant)
+	assert.Equal(t, openbaoIssuer, auds[0].AgentIssuer)
 }
