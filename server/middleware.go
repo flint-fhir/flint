@@ -105,7 +105,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Allow public endpoints (discovery, metadata, OAuth2 authorize/token/introspect, JWKS)
-		if isPublicEndpoint(parts) {
+		if isPublicEndpoint(r.Method, parts) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -1008,11 +1008,17 @@ func (s *Server) enforceSearchScopeAndCompartment(w http.ResponseWriter, r *http
 	return true
 }
 
-func isPublicEndpoint(parts []string) bool {
+func isPublicEndpoint(method string, parts []string) bool {
 	if len(parts) == 0 {
 		return false
 	}
-	if parts[0] == "oauth2" || parts[0] == "shlink" || parts[0] == "healthz" || parts[0] == "readyz" || parts[0] == "metrics" {
+	if parts[0] == "oauth2" || parts[0] == "shlink" {
+		return true
+	}
+	if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
+		return false
+	}
+	if parts[0] == "healthz" || parts[0] == "readyz" || parts[0] == "metrics" {
 		return true
 	}
 	if len(parts) == 1 && parts[0] == "cds-services" {
@@ -1026,7 +1032,7 @@ func isPublicEndpoint(parts []string) bool {
 	if len(parts) < 3 {
 		return false
 	}
-	if len(parts) == 3 && (parts[2] == "openapi.json" || parts[2] == "$docs" || parts[2] == "cds-services" || parts[2] == "healthz" || parts[2] == "readyz" || parts[2] == "metrics") {
+	if len(parts) == 3 && (parts[2] == "metadata" || parts[2] == "openapi.json" || parts[2] == "$docs" || parts[2] == "cds-services" || parts[2] == "healthz" || parts[2] == "readyz" || parts[2] == "metrics") {
 		return true
 	}
 	if len(parts) == 4 && parts[3] == "cds-services" {
@@ -1247,7 +1253,7 @@ func (s *Server) auditMiddleware(next http.Handler) http.Handler {
 		parts := strings.Split(path, "/")
 
 		// Only audit FHIR tenant endpoints, skipping public discovery endpoints
-		if len(parts) < 3 || parts[0] != "fhir" || parts[1] != "r4" || isPublicEndpoint(parts) {
+		if len(parts) < 3 || parts[0] != "fhir" || parts[1] != "r4" || isPublicEndpoint(r.Method, parts) {
 			next.ServeHTTP(w, r)
 			return
 		}

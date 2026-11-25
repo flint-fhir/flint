@@ -120,7 +120,7 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 
 		path := strings.Trim(r.URL.Path, "/")
 		parts := strings.Split(path, "/")
-		if isPublicEndpoint(parts) || isOperationalHealthPath(path, parts) {
+		if isPublicEndpoint(r.Method, parts) || isOperationalHealthPath(path, parts) {
 			next.ServeHTTP(w, r)
 			return
 		}
