@@ -51,6 +51,11 @@ type bundleEntryRequest struct {
 // handleBundle handles POST /{tenant} — process a FHIR transaction/batch Bundle.
 func (s *Server) handleBundle(w http.ResponseWriter, r *http.Request) {
 	tenant := r.PathValue("tenant")
+	if isReservedFHIRTenantSegment(tenant) {
+		writeOperationOutcome(w, http.StatusMethodNotAllowed, "not-supported",
+			fmt.Sprintf("POST is not allowed on reserved discovery/operational path /fhir/r4/%s", tenant))
+		return
+	}
 	secCtx, hasSecCtx := auth.FromContext(r.Context())
 
 	maxBundleBytes := s.effectiveMaxBundleBytes()

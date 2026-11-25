@@ -274,7 +274,7 @@ func (s *Server) handleCDSHooksAuthMiddleware(w http.ResponseWriter, r *http.Req
 			s.recordCDSHooksAuthFailure(w, r, parts, "anonymous", "missing required CDS Hooks 2.0 Authorization Bearer JWT")
 			return true
 		}
-		if isPublicEndpoint(parts) {
+		if isPublicEndpoint(r.Method, parts) {
 			next.ServeHTTP(w, r)
 			return true
 		}
@@ -307,7 +307,7 @@ func (s *Server) handleCDSHooksAuthMiddleware(w http.ResponseWriter, r *http.Req
 
 	// Non-CDS token on a public discovery route (e.g. GET /cds-services): validate SMART token if supplied,
 	// rather than silently ignoring an invalid Authorization header.
-	if isPublicEndpoint(parts) {
+	if isPublicEndpoint(r.Method, parts) {
 		validator := s.tokenValidator
 		if validator == nil {
 			validator = s.devAuth

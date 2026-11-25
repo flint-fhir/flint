@@ -652,13 +652,16 @@ func TestSecurityHardening_OpenBaoWorkloadSubjectClaimAndTenantHeader(t *testing
 	})
 	require.NoError(t, err)
 
-	_, st, ts := newHardeningSQLiteServer(t, "", server.SecurityPolicy{
+	srv, st, ts := newHardeningSQLiteServer(t, "", server.SecurityPolicy{
 		RequireAuth:                     true,
 		RequireTenantClaim:              true,
 		RequireTenantHeader:             true,
 		TenantHeaderName:                server.DefaultTenantHeaderName,
 		DisableUnauthenticatedEndpoints: true,
+		LockReferentialIntegrity:        true,
+		EnforceLocalReferencesOnly:      true,
 	}, val)
+	srv.SetReferentialIntegrity(server.ReferentialIntegrityStrict)
 
 	now := time.Now()
 	entityUUID := "a1b2c3d4-0000-4000-8000-000000000001"
@@ -670,6 +673,49 @@ func TestSecurityHardening_OpenBaoWorkloadSubjectClaimAndTenantHeader(t *testing
 		"aud":         "azra-fhir",
 		"exp":         now.Add(5 * time.Minute).Unix(),
 	})
+
+	// Unscoped GET /fhir/r4/metadata (unauth and with worker Bearer token, no X-Azra-Tenant-Id) returns CapabilityStatement
+	for _, hdrs := range []map[string]string{nil, {"Authorization": "Bearer " + workerTok}} {
+		rMeta, metaBody := doHardeningReq(t, http.MethodGet, ts.URL+"/fhir/r4/metadata", hdrs, nil)
+		require.Equal(t, http.StatusOK, rMeta.StatusCode)
+		var capStmt map[string]any
+		require.NoError(t, json.Unmarshal(metaBody, &capStmt))
+		assert.Equal(t, "CapabilityStatement", capStmt["resourceType"])
+		assert.Equal(t, "4.0.1", capStmt["fhirVersion"])
+		restList, _ := capStmt["rest"].([]any)
+		require.NotEmpty(t, restList)
+		rest0, _ := restList[0].(map[string]any)
+		interactions, _ := rest0["interaction"].([]any)
+		var hasTransaction bool
+		for _, item := range interactions {
+			if m, ok := item.(map[string]any); ok && m["code"] == "transaction" {
+				hasTransaction = true
+			}
+		}
+		assert.True(t, hasTransaction, "CapabilityStatement must advertise transaction interaction")
+	}
+
+	// Unscoped GET /fhir/r4/.well-known/smart-configuration succeeds without X-Azra-Tenant-Id
+	rSMART, _ := doHardeningReq(t, http.MethodGet, ts.URL+"/fhir/r4/.well-known/smart-configuration", nil, nil)
+	assert.Equal(t, http.StatusOK, rSMART.StatusCode)
+
+	// Reserved discovery & operational segments reject POST both unauthenticated and authenticated (even with tenant header)
+	dummyBundle := map[string]any{"resourceType": "Bundle", "type": "transaction", "entry": []any{}}
+	for _, reservedPath := range []string{"/fhir/r4/metadata", "/fhir/r4/healthz"} {
+		rUnauthPost, _ := doHardeningReq(t, http.MethodPost, ts.URL+reservedPath, nil, dummyBundle)
+		assert.Contains(t, []int{http.StatusBadRequest, http.StatusUnauthorized}, rUnauthPost.StatusCode, "unauth POST %s", reservedPath)
+
+		rAuthPostNoHdr, _ := doHardeningReq(t, http.MethodPost, ts.URL+reservedPath, map[string]string{
+			"Authorization": "Bearer " + workerTok,
+		}, dummyBundle)
+		assert.Contains(t, []int{http.StatusBadRequest, http.StatusMethodNotAllowed}, rAuthPostNoHdr.StatusCode, "auth POST %s without header", reservedPath)
+
+		rAuthPostWithHdr, _ := doHardeningReq(t, http.MethodPost, ts.URL+reservedPath, map[string]string{
+			"Authorization":                "Bearer " + workerTok,
+			server.DefaultTenantHeaderName: "acme-clinic",
+		}, dummyBundle)
+		assert.Contains(t, []int{http.StatusBadRequest, http.StatusMethodNotAllowed}, rAuthPostWithHdr.StatusCode, "auth POST %s with tenant header", reservedPath)
+	}
 
 	// Missing X-Azra-Tenant-Id is rejected even with valid cross-tenant workload token
 	rNoTenant, _ := doHardeningReq(t, http.MethodGet, ts.URL+"/fhir/r4/Patient", map[string]string{
@@ -711,6 +757,46 @@ func TestSecurityHardening_OpenBaoWorkloadSubjectClaimAndTenantHeader(t *testing
 		server.DefaultTenantHeaderName: "acme-clinic",
 	}, nil)
 	require.Equal(t, http.StatusOK, rGet.StatusCode)
+
+	// Flat transaction Bundle with urn:uuid: references under strict RI + local-ref + Idempotency-Key replay
+	txBundle := map[string]any{
+		"resourceType": "Bundle",
+		"type":         "transaction",
+		"entry": []map[string]any{
+			{
+				"fullUrl": "urn:uuid:11111111-1111-1111-1111-111111111111",
+				"resource": map[string]any{
+					"resourceType": "Patient",
+					"name":         []map[string]any{{"family": "OpenBaoBundle"}},
+				},
+				"request": map[string]any{"method": "POST", "url": "Patient"},
+			},
+			{
+				"resource": map[string]any{
+					"resourceType": "Observation",
+					"status":       "final",
+					"code":         map[string]any{"text": "Heart rate"},
+					"subject":      map[string]any{"reference": "urn:uuid:11111111-1111-1111-1111-111111111111"},
+				},
+				"request": map[string]any{"method": "POST", "url": "Observation"},
+			},
+		},
+	}
+	txHeaders := map[string]string{
+		"Authorization":                "Bearer " + workerTok,
+		server.DefaultTenantHeaderName: "acme-clinic",
+		"Idempotency-Key":              "tx-openbao-1",
+	}
+	rTx1, txBody1 := doHardeningReq(t, http.MethodPost, ts.URL+"/fhir/r4", txHeaders, txBundle)
+	require.Equal(t, http.StatusOK, rTx1.StatusCode, "tx response: %s", string(txBody1))
+	var txResp1 map[string]any
+	require.NoError(t, json.Unmarshal(txBody1, &txResp1))
+	assert.Equal(t, "Bundle", txResp1["resourceType"])
+	assert.Equal(t, "transaction-response", txResp1["type"])
+
+	rTx2, txBody2 := doHardeningReq(t, http.MethodPost, ts.URL+"/fhir/r4", txHeaders, txBundle)
+	require.Equal(t, http.StatusOK, rTx2.StatusCode)
+	assert.Equal(t, string(txBody1), string(txBody2))
 
 	auds, _, err := st.QueryAuditEvents(context.Background(), store.AuditQueryParams{
 		TenantID:     "acme-clinic",

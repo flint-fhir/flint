@@ -66,7 +66,7 @@ import (
 )
 
 // Version is the semantic version of the Flint FHIR R4 API & Interoperability engine.
-const Version = "0.7.1"
+const Version = "0.7.2"
 
 var idSeq atomic.Uint64
 
@@ -619,6 +619,13 @@ func (s *Server) buildFHIRRouter() http.Handler {
 	mux.HandleFunc("POST /fhir/r4/{tenant}/$validate", s.handleValidate)
 	mux.HandleFunc("POST /fhir/r4/{tenant}/{resourceType}", s.handleCreate)
 	mux.HandleFunc("POST /fhir/r4/{tenant}", s.handleBundle)
+	mux.HandleFunc("GET /fhir/r4/metadata", s.handleMetadata)
+	mux.HandleFunc("GET /fhir/r4/.well-known/smart-configuration", s.handleSMARTConfig)
+	mux.HandleFunc("GET /fhir/r4/.well-known/openid-configuration", s.handleOIDCConfig)
+	mux.HandleFunc("GET /fhir/r4/.well-known/jwks.json", s.handleJWKS)
+	mux.HandleFunc("GET /fhir/r4/.well-known/udap", s.handleUDAPDiscoveryWave54)
+	mux.HandleFunc("GET /fhir/r4/.well-known/service-base-urls", s.handleServiceBaseURLs)
+	mux.HandleFunc("GET /fhir/r4/.well-known/smart-brands.json", s.handleSMARTBrands)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/metadata", s.handleMetadata)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/smart-configuration", s.handleSMARTConfig)
 	mux.HandleFunc("GET /fhir/r4/{tenant}/.well-known/openid-configuration", s.handleOIDCConfig)

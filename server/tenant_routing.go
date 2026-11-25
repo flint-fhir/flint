@@ -69,6 +69,10 @@ func isGlobalOperationalFHIRSegment(seg string) bool {
 	}
 }
 
+func isReservedFHIRTenantSegment(seg string) bool {
+	return isGlobalOperationalFHIRSegment(seg) || seg == "metadata" || strings.HasPrefix(seg, ".well-known")
+}
+
 func (s *Server) isFlatFHIRSegment(seg string) bool {
 	if seg == "" {
 		return false
@@ -83,7 +87,10 @@ func (s *Server) isFlatFHIRSegment(seg string) bool {
 	return isRegisteredType
 }
 
-func isDiscoveryFHIRPath(parts []string) bool {
+func isDiscoveryFHIRPath(method string, parts []string) bool {
+	if method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions {
+		return false
+	}
 	if len(parts) < 3 || parts[0] != "fhir" || parts[1] != "r4" {
 		return false
 	}
@@ -133,7 +140,7 @@ func (s *Server) tenantRoutingMiddleware(next http.Handler) http.Handler {
 		}
 
 		if rawHeaderTenant == "" {
-			if cp.policy.RequireTenantHeader && !isDiscoveryFHIRPath(parts) && !isPublicEndpoint(parts) {
+			if cp.policy.RequireTenantHeader && !isDiscoveryFHIRPath(r.Method, parts) && !isPublicEndpoint(r.Method, parts) {
 				writeOperationOutcome(w, http.StatusBadRequest, "required",
 					fmt.Sprintf("missing required %s header", headerName))
 				return

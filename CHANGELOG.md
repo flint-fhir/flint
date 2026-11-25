@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-24
+
+### Fixed
+
+- **Unscoped Flat FHIR Discovery Routes & HTTP Method Guards (`server/server.go`, `server/middleware.go`, `server/tenant_routing.go`, `server/bundle.go`, `server/ratelimit.go`, `server/cdshooks_jwt.go`)**:
+  - Registered flat `/fhir/r4/metadata` and `/fhir/r4/.well-known/*` discovery endpoints (`smart-configuration`, `openid-configuration`, `jwks.json`, `udap`, `service-base-urls`, `smart-brands.json`) and exempted `GET`/`HEAD`/`OPTIONS /fhir/r4/metadata` from authentication and `X-Azra-Tenant-Id` requirements when `FLINT_REQUIRE_AUTH=true` and `FLINT_REQUIRE_TENANT_HEADER=true`, fixing unscoped `CapabilityStatement` checks such as `CheckCapabilities()` / worker preflight probes.
+  - Restricted `isPublicEndpoint` and `isDiscoveryFHIRPath` bypasses to `GET`, `HEAD`, and `OPTIONS` (except `oauth2` and `shlink`) and rejected `POST /fhir/r4/{tenant}` targeting reserved discovery/operational segments (`metadata`, `.well-known*`, `healthz`, `readyz`, `metrics`, `openapi.json`, `$docs`, `cds-services`, `$install-ig`, `$load-ig`, `$igs`, `$subscriptions-ws`) with HTTP `405 Method Not Allowed`.
+  - Extended `server/security_hardening_test.go` (`TestSecurityHardening_OpenBaoWorkloadSubjectClaimAndTenantHeader`) to verify unscoped `GET /fhir/r4/metadata`, flat `.well-known/smart-configuration`, reserved `POST` rejections, strict `urn:uuid:` transaction bundles, and `Idempotency-Key` replay.
+
+### Changed
+
+- Synchronized runtime, container, OCI Helm chart (`deploy/helm/flint/Chart.yaml`), installer, analytics (`analytics/pyproject.toml` & `analytics/uv.lock`), OpenAPI 3.1.0, `CapabilityStatement.software.version`, and public website version reporting to `0.7.2`.
+
 ## [0.7.1] - 2026-11-24
 
 ### Added
